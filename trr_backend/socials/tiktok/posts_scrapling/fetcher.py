@@ -40,6 +40,13 @@ from trr_backend.socials._scrapling_http_utils import (
 from trr_backend.socials._scrapling_http_utils import (
     status_code as _status_code,
 )
+from trr_backend.socials.scrapling_transport import (
+    build_stealthy_fetcher,
+    cookies_to_scrapling,
+    merge_response_cookies,
+    safe_cookie_metadata,
+    scrapling_runtime_metadata,
+)
 from trr_backend.socials.tiktok.posts_scrapling.proxy import TikTokPostsProxyConfig
 
 logger = logging.getLogger("socials.tiktok.posts_scrapling.fetcher")
@@ -73,7 +80,49 @@ def _build_tiktok_headers(referer: str) -> dict[str, str]:
 
 def _is_challenge_response(text: str) -> bool:
     body = str(text or "").strip().lower()[:512]
-    return any(token in body for token in ("<html", "captcha", "verify", "challenge"))
+    return _classify_challenge_response(text) is not None
+
+
+def _classify_challenge_response(text: str) -> str | None:
+    body = str(text or "").strip().lower()[:1024]
+    if not body:
+        return None
+    if any(token in body for token in ("x-bogus", "_signature", "invalid signature", "signature verification")):
+        return "js_generated_params_required"
+    if any(token in body for token in ("captcha", "verify", "challenge")):
+        return "captcha_or_challenge"
+    if any(token in body for token in ("login", "sign in", "signin")):
+        return "login_required"
+    if "<html" in body:
+        return "html_response"
+    return None
+
+
+def _captured_xhr_paths(response: Any) -> list[str]:
+    candidates: list[Any] = []
+    for attr_name in ("captured_xhr", "xhr", "xhr_requests", "requests"):
+        value = getattr(response, attr_name, None)
+        if isinstance(value, list):
+            candidates.extend(value)
+    paths: list[str] = []
+    for item in candidates:
+        raw_url = ""
+        if isinstance(item, dict):
+            raw_url = str(item.get("url") or item.get("request_url") or "")
+        else:
+            raw_url = str(getattr(item, "url", "") or getattr(item, "request_url", "") or "")
+        if not raw_url:
+            continue
+        try:
+            from urllib.parse import urlparse
+
+            parsed = urlparse(raw_url)
+            path = parsed.path or raw_url
+        except Exception:  # noqa: BLE001
+            path = raw_url
+        if path:
+            paths.append(path)
+    return sorted(set(paths))
 
 
 def tiktok_posts_scrapling_page_size() -> int:
@@ -139,29 +188,41 @@ class TikTokPostsScraplingFetcher:
         self._proxy_rotator = proxy_config.proxy_rotator if proxy_config else None
         self._api_proxy_url = proxy_config.api_proxy_url if proxy_config else None
         self._headless = headless if headless is not None else _env_truthy("SOCIAL_TIKTOK_POSTS_HEADLESS", True)
+        self._capture_xhr = _env_truthy("SOCIAL_TIKTOK_POSTS_CAPTURE_XHR", False)
         self._timeout_ms = max(5_000, int(timeout_ms))
         self._request_count = 0
+        self._seed_raw_cookies = dict(self._raw_cookies)
         self._warmup_cookie_delta: dict[str, str] = {}
         self._selected_proxy_fingerprint = proxy_config.fingerprint if proxy_config else "none"
         self._sec_uid: str | None = None
         self._sec_uid_source: str | None = None
         self._warmup_sec_uid: str | None = None
-
-        try:
-            from scrapling.fetchers import StealthyFetcher
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError("Scrapling StealthyFetcher is unavailable. Install scrapling[fetchers].") from exc
-        self._fetcher = StealthyFetcher()
+        self._warmup_status_code: int | None = None
+        self._warmup_challenge_classification: str | None = None
+        self._last_challenge_classification: str | None = None
+        self._captured_xhr_paths: list[str] = []
+        self._scrapling_runtime_metadata = scrapling_runtime_metadata()
+        self._fetcher = build_stealthy_fetcher()
         self._http_client: httpx.AsyncClient | None = None
 
     @property
     def runtime_metadata(self) -> dict[str, Any]:
+        cookie_metadata = safe_cookie_metadata(self._seed_raw_cookies, self._warmup_cookie_delta, prefix="")
         return {
-            "warmup_cookie_names": sorted(self._warmup_cookie_delta.keys()),
-            "warmup_cookie_count": len(self._warmup_cookie_delta),
+            **cookie_metadata,
+            "scrapling_runtime": dict(self._scrapling_runtime_metadata),
+            "cookie_sync_count": len(self._warmup_cookie_delta),
             "selected_proxy_fingerprint": self._selected_proxy_fingerprint,
             "sec_uid_resolved": bool(self._sec_uid),
             "sec_uid_source": self._sec_uid_source,
+            "warmup_sec_uid_resolved": bool(self._warmup_sec_uid),
+            "warmup_status_code": self._warmup_status_code,
+            "warmup_challenge_classification": self._warmup_challenge_classification,
+            "last_challenge_classification": self._last_challenge_classification,
+            "capture_xhr_enabled": self._capture_xhr,
+            "captured_xhr_count": len(self._captured_xhr_paths),
+            "captured_xhr_paths": list(self._captured_xhr_paths),
+            "api_signature_limitation": "tiktok_api_may_require_js_generated_params",
             "request_count": self._request_count,
             "transport": "httpx_after_browser_warmup",
         }
@@ -172,7 +233,12 @@ class TikTokPostsScraplingFetcher:
         response = await self._fetch_page(profile_url, referer="https://www.tiktok.com/")
         text = _response_text(response)
         status = _status_code(response)
-        if (status in {401, 403}) or (_is_challenge_response(text) and status not in range(200, 300)):
+        self._warmup_status_code = status
+        self._captured_xhr_paths = _captured_xhr_paths(response)
+        self._warmup_challenge_classification = _classify_challenge_response(text)
+        if (status in {401, 403}) or (
+            self._warmup_challenge_classification is not None and status not in range(200, 300)
+        ):
             raise RuntimeError("TikTok warmup hit challenge page or auth failure; cookies may be invalid.")
         self._warmup_sec_uid = _extract_sec_uid_from_text(text)
         self._merge_warmup_cookies(response)
@@ -183,7 +249,10 @@ class TikTokPostsScraplingFetcher:
                 "event": "warmup_success",
                 "account": username,
                 "cookie_count": len(self._warmup_cookie_delta),
+                "cookie_sync_count": len(self._warmup_cookie_delta),
                 "proxy_fingerprint": self._selected_proxy_fingerprint,
+                "warmup_status_code": self._warmup_status_code,
+                "captured_xhr_count": len(self._captured_xhr_paths),
             },
         )
 
@@ -272,8 +341,20 @@ class TikTokPostsScraplingFetcher:
     def _merge_warmup_cookies(self, response: Any) -> None:
         new_cookies = _extract_response_cookies(response)
         self._warmup_cookie_delta = dict(new_cookies)
-        for name, value in new_cookies.items():
-            self._raw_cookies[name] = value
+        self._raw_cookies = merge_response_cookies(self._raw_cookies, response)
+        self._sync_browser_cookies(new_cookies)
+
+    def _sync_browser_cookies(self, new_cookies: dict[str, str]) -> None:
+        if not new_cookies:
+            return
+        by_name = {
+            str(cookie.get("name") or "").strip(): dict(cookie)
+            for cookie in self._cookies
+            if isinstance(cookie, dict) and str(cookie.get("name") or "").strip()
+        }
+        for cookie in cookies_to_scrapling(new_cookies, domain=".tiktok.com"):
+            by_name[str(cookie.get("name") or "").strip()] = cookie
+        self._cookies = list(by_name.values())
 
     def _rebuild_http_client(self) -> None:
         if self._http_client is not None:
@@ -292,18 +373,20 @@ class TikTokPostsScraplingFetcher:
 
     async def _fetch_page(self, url: str, *, referer: str) -> Any:
         self._request_count += 1
-        return await self._fetcher.async_fetch(
-            url,
-            headless=self._headless,
-            network_idle=False,
-            load_dom=False,
-            cookies=self._cookies,
-            proxy_rotator=self._proxy_rotator,
-            extra_headers=_build_tiktok_headers(referer),
-            timeout=self._timeout_ms,
-            retries=1,
-            retry_delay=1.0,
-        )
+        fetch_kwargs = {
+            "headless": self._headless,
+            "network_idle": False,
+            "load_dom": False,
+            "cookies": self._cookies,
+            "proxy_rotator": self._proxy_rotator,
+            "extra_headers": _build_tiktok_headers(referer),
+            "timeout": self._timeout_ms,
+            "retries": 1,
+            "retry_delay": 1.0,
+        }
+        if self._capture_xhr:
+            fetch_kwargs["capture_xhr"] = True
+        return await self._fetcher.async_fetch(url, **fetch_kwargs)
 
     # -------------------------------------------------------------------
     # Transport: httpx (API calls)
@@ -373,6 +456,14 @@ class TikTokPostsScraplingFetcher:
             # 3xx redirect -> classify
             if 300 <= status < 400:
                 location = _safe_location(response)
+                challenge_classification = (
+                    "login_required"
+                    if "/login" in location
+                    else "captcha_or_challenge"
+                    if ("/challenge" in location or "/captcha" in location)
+                    else None
+                )
+                self._last_challenge_classification = challenge_classification
                 reason = (
                     "redirect_to_login"
                     if "/login" in location
@@ -385,6 +476,7 @@ class TikTokPostsScraplingFetcher:
                     "auth_failed": any(t in location for t in ("login", "challenge", "captcha")),
                     "reason": reason,
                     "retryable": False,
+                    "challenge_classification": challenge_classification,
                     "payload": None,
                 }
 
@@ -417,12 +509,15 @@ class TikTokPostsScraplingFetcher:
                 }
 
             # HTML/challenge detection
-            if _is_challenge_response(text):
+            challenge_classification = _classify_challenge_response(text)
+            if challenge_classification is not None:
+                self._last_challenge_classification = challenge_classification
                 return {
                     "failed": True,
                     "auth_failed": True,
                     "reason": "challenge_or_blocked",
                     "retryable": False,
+                    "challenge_classification": challenge_classification,
                     "payload": None,
                 }
 
@@ -446,6 +541,9 @@ class TikTokPostsScraplingFetcher:
                 status_code_value = payload.get("statusCode")
                 if status_code_value is not None and int(status_code_value) != 0:
                     status_msg = str(payload.get("statusMsg") or "").strip().lower()
+                    challenge_classification = _classify_challenge_response(status_msg)
+                    if challenge_classification is not None:
+                        self._last_challenge_classification = challenge_classification
                     return {
                         "failed": True,
                         "auth_failed": any(
@@ -453,7 +551,15 @@ class TikTokPostsScraplingFetcher:
                         ),
                         "reason": f"tiktok_status_{status_code_value}",
                         "retryable": False,
+                        "challenge_classification": challenge_classification,
                         "payload": payload,
                     }
 
-            return {"failed": False, "auth_failed": False, "reason": None, "retryable": False, "payload": payload}
+            return {
+                "failed": False,
+                "auth_failed": False,
+                "reason": None,
+                "retryable": False,
+                "challenge_classification": None,
+                "payload": payload,
+            }

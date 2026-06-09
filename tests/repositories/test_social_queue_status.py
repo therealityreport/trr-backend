@@ -66,7 +66,10 @@ def test_get_queue_status_uses_cache_ttl_and_skips_recent_failures_when_disabled
 
     def _fake_fetch_all_with_cursor(_cur: object, sql: str, params: list[object] | None = None):
         del params
-        query_calls.append(" ".join(sql.split()).lower())
+        normalized = " ".join(sql.split()).lower()
+        query_calls.append(normalized)
+        if "post_persist_truthfulness" in normalized:
+            return []
         return [
             {"platform": "instagram", "job_type": "posts", "status": "running", "total": 2},
             {"platform": "instagram", "job_type": "posts", "status": "queued", "total": 1},
@@ -91,7 +94,9 @@ def test_get_queue_status_uses_cache_ttl_and_skips_recent_failures_when_disabled
 
     assert payload["queue"]["by_status"]["running"] == 2
     assert payload["queue"]["recent_failures"] == []
-    assert len(query_calls) == 1
+    assert payload["queue"]["silent_drop_warnings"] == []
+    assert len(query_calls) == 2
+    assert "post_persist_truthfulness" in query_calls[1]
     assert social_repo.SOCIAL_QUEUE_STATUS_CACHE_TTL_SECONDS_DEFAULT == 20
 
 
@@ -103,8 +108,10 @@ def test_get_queue_status_fresh_true_bypasses_cache(monkeypatch: pytest.MonkeyPa
     query_counter = {"count": 0}
 
     def _fake_fetch_all_with_cursor(_cur: object, sql: str, params: list[object] | None = None):
-        del sql, params
+        del params
         query_counter["count"] += 1
+        if "post_persist_truthfulness" in " ".join(sql.split()).lower():
+            return []
         return [{"platform": "instagram", "job_type": "posts", "status": "running", "total": 1}]
 
     monkeypatch.setenv("SOCIAL_QUEUE_STATUS_CACHE_TTL_SECONDS", "30")
@@ -179,7 +186,7 @@ def test_get_queue_status_fresh_true_bypasses_cache(monkeypatch: pytest.MonkeyPa
 
     assert cached["queue"]["by_status"]["running"] == 9
     assert count_after_cached == 0
-    assert query_counter["count"] == 1
+    assert query_counter["count"] == 2
     assert fresh["queue"]["by_status"]["running"] == 1
 
 
@@ -196,6 +203,8 @@ def test_get_queue_status_summary_only_skips_expensive_side_effects(
         del params
         normalized_sql = " ".join(sql.split()).lower()
         query_calls.append(normalized_sql)
+        if "post_persist_truthfulness" in normalized_sql:
+            return []
         if "from social.scrape_jobs" in normalized_sql and "error_message" in normalized_sql:
             return [
                 {
@@ -242,9 +251,10 @@ def test_get_queue_status_summary_only_skips_expensive_side_effects(
 
     assert payload["queue"]["by_status"]["running"] == 1
     assert payload["queue"]["recent_failures"][0]["last_error_code"] == "ytdlp_zero_posts"
+    assert payload["queue"]["silent_drop_warnings"] == []
     assert payload["queue"]["stuck_jobs"] == []
     assert payload["queue"]["running_jobs"] == []
-    assert len(query_calls) == 2
+    assert len(query_calls) == 3
 
 
 def test_get_queue_status_returns_stale_last_good_on_query_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -292,7 +302,9 @@ def test_get_queue_status_includes_stuck_jobs_payload(monkeypatch: pytest.Monkey
             return None
 
     def _fake_fetch_all_with_cursor(_cur: object, sql: str, params: list[object] | None = None):
-        del sql, params
+        del params
+        if "post_persist_truthfulness" in " ".join(sql.split()).lower():
+            return []
         return [
             {"platform": "twitter", "job_type": "comments", "status": "running", "total": 2},
             {"platform": "youtube", "job_type": "posts", "status": "queued", "total": 1},
@@ -368,6 +380,8 @@ def test_get_queue_status_includes_dispatch_blocked_payload(monkeypatch: pytest.
 
     def _fake_fetch_all_with_cursor(_cur: object, sql: str, _params: list[object] | None = None):
         normalized = " ".join(sql.split()).lower()
+        if "post_persist_truthfulness" in normalized:
+            return []
         if "from social.scrape_jobs" in normalized:
             return [
                 {
@@ -457,6 +471,8 @@ def test_get_queue_status_includes_runs_summary(monkeypatch: pytest.MonkeyPatch)
 
     def _fake_fetch_all_with_cursor(_cur: object, sql: str, _params: list[object] | None = None):
         normalized = " ".join(sql.split()).lower()
+        if "post_persist_truthfulness" in normalized:
+            return []
         if "from social.scrape_jobs" in normalized:
             return [{"platform": "instagram", "job_type": "posts", "status": "queued", "total": 2}]
         if "from social.scrape_runs" in normalized:
@@ -721,6 +737,64 @@ def test_get_queue_status_includes_tiktok_single_path_alerts_from_recent_failure
     assert degraded["recent_failure_codes"] == ["tiktok_ytdlp_transport_failed"]
 
 
+def test_get_queue_status_promotes_silent_drop_warnings_to_alerts(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Cursor:
+        def execute(self, _sql: str, _params: list[object] | None = None) -> None:
+            return None
+
+    def _fake_fetch_all_with_cursor(_cur: object, sql: str, _params: list[object] | None = None):
+        normalized = " ".join(sql.split()).lower()
+        if "post_persist_truthfulness" in normalized:
+            return [
+                {
+                    "id": "11111111-1111-1111-1111-111111111111",
+                    "run_id": "22222222-2222-2222-2222-222222222222",
+                    "platform": "instagram",
+                    "account_handle": "bravotv",
+                    "stage": "shared_account_posts",
+                    "job_type": "shared_account_posts",
+                    "status": "completed",
+                    "posts_checked": "12",
+                    "posts_upserted": "0",
+                    "media_assets_persisted": "0",
+                    "observed_at": datetime(2026, 3, 2, 10, 5, tzinfo=UTC),
+                }
+            ]
+        if "group by 1, 2, 3, 4" in normalized:
+            return [
+                {
+                    "platform": "instagram",
+                    "job_type": "shared_account_posts",
+                    "status": "completed",
+                    "stage": "shared_account_posts",
+                    "total": 1,
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name, **_kwargs: True)
+    monkeypatch.setattr(social_repo, "get_worker_health", lambda: {"healthy": True, "healthy_workers": 1})
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None, **_kwargs: nullcontext(_Cursor()))
+    monkeypatch.setattr(social_repo.pg, "fetch_all_with_cursor", _fake_fetch_all_with_cursor)
+    monkeypatch.setattr(social_repo.pg, "fetch_all", lambda *_args, **_kwargs: [])
+
+    payload = social_repo.get_queue_status(
+        include_recent_failures=False,
+        include_stuck_jobs=False,
+        include_runs_summary=False,
+        summary_only=True,
+    )
+
+    assert payload["queue"]["silent_drop_warnings_total"] == 1
+    assert payload["queue"]["silent_drop_warnings"][0]["account_handle"] == "bravotv"
+    assert payload["queue"]["silent_drop_warnings"][0]["posts_checked"] == 12
+    alert = next(alert for alert in payload["alerts"] if str(alert["code"]) == "silent_data_loss_watch")
+    assert alert["severity"] == "critical"
+    assert alert["count"] == 1
+    assert alert["recent_jobs"][0]["id"] == "11111111-1111-1111-1111-111111111111"
+
+
 def test_get_queue_status_includes_running_jobs_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     class _Cursor:
         def execute(self, _sql: str, _params: list[object] | None = None) -> None:
@@ -728,6 +802,8 @@ def test_get_queue_status_includes_running_jobs_payload(monkeypatch: pytest.Monk
 
     def _fake_fetch_all_with_cursor(_cur: object, sql: str, _params: list[object] | None = None):
         normalized = " ".join(sql.split()).lower()
+        if "post_persist_truthfulness" in normalized:
+            return []
         if "where j.status = 'running'" in normalized:
             return [
                 {

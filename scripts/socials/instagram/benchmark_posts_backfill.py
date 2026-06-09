@@ -32,6 +32,7 @@ class BenchmarkRequest:
     max_pages: int
     source_scope: str = "bravo"
     run_id: str | None = None
+    job_id: str | None = None
 
 
 def _env_truthy(name: str) -> bool:
@@ -62,7 +63,22 @@ def build_benchmark_payload(request: BenchmarkRequest, *, now: datetime | None =
         "mode": normalized_mode,
         "max_pages": safe_max_pages,
         "run_id": str(request.run_id or "").strip() or None,
+        "job_id": str(request.job_id or "").strip() or None,
         "started_at": (now or datetime.now(UTC)).isoformat(),
+        "operator_output_contract": {
+            "account_scoped": True,
+            "bounded": True,
+            "dry_run": True,
+            "live_scrape_executed": False,
+        },
+        "run_metrics": {
+            "pages_fetched": 0,
+            "posts_fetched": 0,
+            "posts_upserted": 0,
+            "stop_reason": "benchmark_payload_only",
+            "cooldown_state": "not_checked",
+            "decodo_mode": str(os.getenv("SOCIAL_INSTAGRAM_POSTS_PROXY_PROVIDER") or "").strip() or "direct_or_env_default",
+        },
         "metrics": {
             "pages_per_second": None,
             "posts_per_second": None,
@@ -103,6 +119,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-pages", type=int, default=3)
     parser.add_argument("--source-scope", default="bravo")
     parser.add_argument("--run-id")
+    parser.add_argument("--job-id")
     return parser.parse_args(argv)
 
 
@@ -115,6 +132,7 @@ def main(argv: list[str] | None = None) -> int:
             max_pages=args.max_pages,
             source_scope=args.source_scope,
             run_id=args.run_id,
+            job_id=args.job_id,
         )
     )
     print(json.dumps(payload, indent=2, sort_keys=True))

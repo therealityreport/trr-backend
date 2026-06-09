@@ -1,0 +1,54 @@
+[
+  {
+    "id": "bridge-00001",
+    "sources": ["getty", "nbcumv"],
+    "caption": "Pictured: Jane Doe",
+    "show_name": "Watch What Happens Live",
+    "season_number": 15,
+    "persons_pictured": ["Jane Doe"],
+    "per_source": {
+      "getty": {
+        "source": "getty",
+        "source_id": "928663262",
+        "bridge_key": "NUP_181952_5",
+        "source_url": "https://media.gettyimages.com/id/928663262/photo/example.jpg",
+        "width": 2048,
+        "height": 1365
+      },
+      "nbcumv": {
+        "source": "nbcumv",
+        "source_id": "70761487",
+        "bridge_key": "NUP_181952_5",
+        "source_url": "https://nbcumv.example/NUP_181952_5.JPG",
+        "width": 3000,
+        "height": 2000
+      }
+    },
+    "acquisition": {
+      "status": "uploaded",
+      "source": "nbcumv_hires",
+      "hosted_url": "https://cdn.example.com/NUP_181952_5.JPG"
+    }
+  },
+  {
+    "id": "bridge-00002",
+    "sources": ["getty"],
+    "caption": "Pictured: Other Person",
+    "show_name": "Watch What Happens Live",
+    "persons_pictured": ["Other Person"],
+    "per_source": {
+      "getty": {
+        "source": "getty",
+        "source_id": "928663263",
+        "source_url": "https://media.gettyimages.com/id/928663263/photo/example.jpg",
+        "width": 612,
+        "height": 408
+      }
+    },
+    "acquisition": {
+      "status": "referenced_only",
+      "source": "getty_preview",
+      "source_url": "https://media.gettyimages.com/id/928663263/photo/example.jpg"
+    }
+  }
+]

@@ -2,8 +2,8 @@
 requested endpoint, falling through on `RuntimeUnsupported`.
 
 Order is read from `INSTAGRAM_RUNTIME_ORDER` (comma-separated), defaulting
-to `"crawlee,scrapling,crawl4ai,browser_use,apify"`. Disabled runtimes
-listed in `INSTAGRAM_RUNTIME_DISABLED` are skipped.
+to `"crawlee,scrapling,crawl4ai,browser_use"`. Disabled runtimes listed in
+`INSTAGRAM_RUNTIME_DISABLED` are skipped.
 
 Other failures (network errors, rate limits) propagate up - retry and
 identity rotation live in the runtimes themselves.

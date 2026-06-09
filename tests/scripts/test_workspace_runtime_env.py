@@ -36,7 +36,7 @@ def test_apply_workspace_runtime_env_maps_remote_social_caps(tmp_path) -> None:
         "WORKSPACE_TRR_REMOTE_SOCIAL_DISPATCH_LIMIT=4\n"
         "WORKSPACE_TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT=4\n"
         "WORKSPACE_TRR_REMOTE_SOCIAL_POSTS=1\n"
-        "WORKSPACE_TRR_REMOTE_SOCIAL_COMMENTS=3\n"
+        "WORKSPACE_TRR_REMOTE_SOCIAL_COMMENTS=8\n"
         "WORKSPACE_TRR_REMOTE_SOCIAL_MEDIA_MIRROR=1\n"
         "WORKSPACE_TRR_REMOTE_SOCIAL_COMMENT_MEDIA_MIRROR=1\n",
         encoding="utf-8",
@@ -49,10 +49,10 @@ def test_apply_workspace_runtime_env_maps_remote_social_caps(tmp_path) -> None:
     assert env["SOCIAL_MODAL_DISPATCH_LIMIT"] == "4"
     assert env["TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT"] == "4"
     assert env["SOCIAL_WORKER_POOL_POSTS"] == "1"
-    assert env["SOCIAL_WORKER_POOL_COMMENTS"] == "3"
+    assert env["SOCIAL_WORKER_POOL_COMMENTS"] == "8"
     assert env["SOCIAL_WORKER_POOL_MEDIA_MIRROR"] == "1"
     assert env["SOCIAL_WORKER_POOL_COMMENT_MEDIA_MIRROR"] == "1"
-    assert env["SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM"] == "3"
+    assert env["SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM"] == "8"
 
 
 def test_apply_workspace_runtime_env_preserves_explicit_shell_overrides(tmp_path) -> None:

@@ -23,6 +23,7 @@ TARGET_ENV = {
     "TRR_MODAL_SOCIAL_JOB_FUNCTION": "run_social_job",
     "TRR_MODAL_SOCIAL_RECOVERY_FUNCTION": "sweep_social_dispatch_queue",
     "TRR_MODAL_VISION_FUNCTION": "run_admin_vision",
+    "TRR_MODAL_CAST_SCREENTIME_FUNCTION": "run_cast_screentime_analysis",
     "TRR_MODAL_RUNTIME_SECRET_NAME": "trr-backend-runtime",
     "TRR_MODAL_SOCIAL_SECRET_NAME": "trr-social-auth",
     "TRR_ADMIN_IMAGE_EXECUTION_BACKEND": "modal",

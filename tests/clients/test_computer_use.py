@@ -16,10 +16,11 @@ def _build_router_app() -> FastAPI:
 
 def test_run_computer_task_returns_bounded_summary(monkeypatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    captured: dict[str, object] = {}
 
     class DummyClient:
-        def __init__(self, **_: object) -> None:
-            pass
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
 
     async def fake_sampling_loop(*, client, prompt: str, max_iterations: int):  # noqa: ARG001
         assert prompt == "Take a screenshot"
@@ -40,6 +41,13 @@ def test_run_computer_task_returns_bounded_summary(monkeypatch) -> None:
     assert response.final_text == "Captured the screenshot."
     assert response.iterations == 2
     assert "messages" not in response.model_dump()
+    assert captured["model"] == "claude-opus-4-8"
+
+
+def test_computer_use_request_defaults_to_current_model() -> None:
+    request = computer_use.ComputerUseRequest(prompt="Take a screenshot")
+
+    assert request.model == "claude-opus-4-8"
 
 
 def test_router_rejects_unauthenticated_requests(monkeypatch) -> None:

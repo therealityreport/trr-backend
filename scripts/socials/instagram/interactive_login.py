@@ -21,6 +21,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 
+INSTAGRAM_REFRESH_CONFIRMATION = "I UNDERSTAND INSTAGRAM AUTH RISK"
+INSTAGRAM_REFRESH_WARNING = (
+    "Instagram interactive login can trigger login challenges or account locks. "
+    "Only run it after manually confirming the account is safe."
+)
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -61,7 +67,17 @@ def main() -> int:
         action="store_true",
         help="Push cookies to Modal secrets after login.",
     )
+    parser.add_argument(
+        "--confirm-instagram-refresh",
+        default="",
+        help=f"Required to open Instagram login. Exact value: {INSTAGRAM_REFRESH_CONFIRMATION!r}",
+    )
     args = parser.parse_args()
+
+    if str(args.confirm_instagram_refresh or "").strip() != INSTAGRAM_REFRESH_CONFIRMATION:
+        print(INSTAGRAM_REFRESH_WARNING, file=sys.stderr)
+        print(f"Rerun with --confirm-instagram-refresh {INSTAGRAM_REFRESH_CONFIRMATION!r}", file=sys.stderr)
+        return 2
 
     from trr_backend.socials.instagram.cookie_refresh import interactive_chrome_login
 

@@ -1628,6 +1628,8 @@ def _start_sync_pass(
         pass_history=history,
         follow_up_reason=follow_up_reason,
         next_pass_available_at=None,
+        completed_at=None,
+        cancelled_at=None,
         started_at=session.get("started_at") or _now_utc(),
     )
     if not social_repo.is_queue_enabled():
@@ -1833,13 +1835,23 @@ def create_sync_session(
     )
     if not row:
         raise RuntimeError("Failed to create sync session")
-    kickoff = _start_sync_pass(
-        sync_session_id,
-        pass_kind="posts_and_comments",
-        pass_attempt=1,
-        pass_sequence=1,
-        follow_up_reason="initial_start",
-    )
+    try:
+        kickoff = _start_sync_pass(
+            sync_session_id,
+            pass_kind="posts_and_comments",
+            pass_attempt=1,
+            pass_sequence=1,
+            follow_up_reason="initial_start",
+        )
+    except Exception:
+        _update_sync_session(
+            sync_session_id,
+            status="failed",
+            current_run_id=None,
+            completed_at=_now_utc(),
+            follow_up_reason="initial_start_failed",
+        )
+        raise
     session = get_sync_session(sync_session_id)
     payload = dict(session)
     payload["status"] = "created"
@@ -1887,6 +1899,15 @@ def _load_sync_session_evaluation_state(
                 status="cancelled",
                 cancelled_at=_now_utc(),
                 follow_up_reason="cancelled",
+            )
+        else:
+            row = _update_sync_session(
+                sync_session_id,
+                conn=conn,
+                status="failed",
+                current_run_id=None,
+                completed_at=_now_utc(),
+                follow_up_reason="missing_current_run",
             )
         return row, None
     run_status = str(current_run.get("status") or "").strip().lower()

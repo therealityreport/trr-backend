@@ -35,23 +35,16 @@ anyio==4.13.0
     #   sse-starlette
     #   starlette
     #   watchfiles
-apify-client==2.5.0
-    # via
-    #   -c requirements.lock.txt
-    #   -r requirements.modal.browser.in
-apify-fingerprint-datapoints==0.12.0
+apify-fingerprint-datapoints==0.13.0
     # via
     #   -c requirements.lock.txt
     #   browserforge
     #   scrapling
-apify-shared==2.2.0
-    # via
-    #   -c requirements.lock.txt
-    #   apify-client
 async-timeout==5.0.1
     # via
     #   -c requirements.lock.txt
     #   crawlee
+    #   redis
 attrs==26.1.0
     # via
     #   -c requirements.lock.txt
@@ -102,6 +95,7 @@ certifi==2026.2.25
     #   httpx
     #   modal
     #   requests
+    #   sentry-sdk
 cffi==2.0.0
     # via
     #   -c requirements.lock.txt
@@ -125,13 +119,12 @@ click==8.3.1
 colorama==0.4.6
     # via
     #   -c requirements.lock.txt
-    #   apify-client
     #   crawlee
 crawlee==1.6.0
     # via
     #   -c requirements.lock.txt
     #   -r requirements.modal.browser.in
-cryptography==46.0.6
+cryptography==43.0.3
     # via
     #   -c requirements.lock.txt
     #   google-auth
@@ -171,6 +164,7 @@ fastapi==0.135.2
     # via
     #   -c requirements.lock.txt
     #   -r requirements.modal.lean.in
+    #   sentry-sdk
 filelock==3.25.2
     # via
     #   -c requirements.lock.txt
@@ -318,7 +312,6 @@ idna==3.11
 impit==0.12.0
     # via
     #   -c requirements.lock.txt
-    #   apify-client
     #   crawlee
 jiter==0.13.0
     # via
@@ -329,7 +322,7 @@ jmespath==1.1.0
     #   -c requirements.lock.txt
     #   boto3
     #   botocore
-lxml==6.0.4
+lxml==6.1.1
     # via
     #   -c requirements.lock.txt
     #   scrapling
@@ -352,7 +345,6 @@ modal==1.4.0
 more-itertools==10.8.0
     # via
     #   -c requirements.lock.txt
-    #   apify-client
     #   crawlee
 msgpack==1.1.2
     # via
@@ -381,7 +373,7 @@ packaging==26.0
     #   -c requirements.lock.txt
     #   deprecation
     #   gunicorn
-patchright==1.58.2
+patchright==1.60.1
     # via
     #   -c requirements.lock.txt
     #   scrapling
@@ -391,7 +383,7 @@ pillow==12.1.1
     #   -r requirements.modal.lean.in
     #   cairosvg
     #   reportlab
-playwright==1.58.0
+playwright==1.60.0
     # via
     #   -c requirements.lock.txt
     #   -r requirements.modal.browser.in
@@ -518,6 +510,10 @@ realtime==2.28.3
     # via
     #   -c requirements.lock.txt
     #   supabase
+redis==8.0.0
+    # via
+    #   -c requirements.lock.txt
+    #   -r requirements.modal.lean.in
 reportlab==4.4.10
     # via
     #   -c requirements.lock.txt
@@ -554,10 +550,14 @@ s3transfer==0.16.0
     # via
     #   -c requirements.lock.txt
     #   boto3
-scrapling==0.4.7
+scrapling==0.4.9
     # via
     #   -c requirements.lock.txt
     #   -r requirements.modal.browser.in
+sentry-sdk==2.62.0
+    # via
+    #   -c requirements.lock.txt
+    #   -r requirements.modal.lean.in
 shellingham==1.5.4
     # via
     #   -c requirements.lock.txt
@@ -679,6 +679,7 @@ urllib3==2.6.3
     #   -c requirements.lock.txt
     #   botocore
     #   requests
+    #   sentry-sdk
 uvicorn==0.42.0
     # via
     #   -c requirements.lock.txt

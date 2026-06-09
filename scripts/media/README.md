@@ -7,6 +7,8 @@ store hosted URLs back into Supabase.
 Scripts live in this directory:
 - `scripts/media/mirror_cast_photos_to_s3.py`
 - `scripts/media/mirror_media_assets_to_s3.py`
+- `scripts/media/bravotv_get_images.py`
+- `scripts/media/sync_bravotv_galleries.py`
 - `scripts/media/rebuild_hosted_urls.py`
 - `scripts/media/backfill_media_asset_variants.py`
 - `scripts/media/restore_person_gallery_base_previews.py` (person-scoped preview metadata rollback only)
@@ -84,6 +86,21 @@ Generate `thumb/card/detail` variants (and optional crop variants) for existing 
 ```
 PYTHONPATH=. python scripts/media/backfill_media_asset_variants.py --batch-size 50 --with-crops
 ```
+
+BRAVOTV media runs
+------------------
+
+Run the BRAVOTV multi-source image pipeline from the media script namespace:
+
+```
+PYTHONPATH=. python scripts/media/bravotv_get_images.py --person "Lisa Barlow" --output /tmp/bravotv-lisa
+PYTHONPATH=. python scripts/media/bravotv_get_images.py --show "The Real Housewives of Salt Lake City" --season 5 --output /tmp/bravotv-rhoslc-s5
+```
+
+The legacy `scripts/bravotv_get_images.py` entrypoint remains as a deprecation wrapper.
+
+The legacy `scripts/sync/sync_bravotv_galleries.py` entrypoint remains as a deprecation wrapper around
+`scripts/media/sync_bravotv_galleries.py`.
 
 Original Integrity Audit/Repair
 -------------------------------

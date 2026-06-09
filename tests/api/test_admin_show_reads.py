@@ -564,11 +564,11 @@ def test_season_episodes_returns_contract(monkeypatch: pytest.MonkeyPatch) -> No
     )
 
     client = TestClient(app)
-    response = client.get("/api/v1/admin/trr-api/seasons/season-1/episodes?limit=250&offset=0")
+    response = client.get("/api/v1/admin/trr-api/seasons/season-1/episodes?limit=500&offset=0")
 
     assert response.status_code == 200
     assert response.json()["episodes"][0]["title"] == "Pilot"
-    assert response.json()["pagination"]["limit"] == 250
+    assert response.json()["pagination"]["limit"] == 500
 
 
 def test_show_cast_returns_contract(monkeypatch: pytest.MonkeyPatch) -> None:

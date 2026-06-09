@@ -32,6 +32,24 @@ def _allow_service_role_admin_in_router_tests(monkeypatch: pytest.MonkeyPatch) -
 
 
 @pytest.fixture(autouse=True)
+def _default_router_tests_to_local_admin_operations(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep router stream tests local even after Modal test modules are collected.
+
+    `trr_backend.modal_jobs` intentionally injects remote Modal defaults at import
+    time. Full-suite collection imports that module before these router tests run,
+    so operation-backed SSE routes can otherwise dispatch to Modal and wait
+    forever with no local worker in the test process.
+    """
+
+    monkeypatch.setenv("TRR_JOB_PLANE_MODE", "local")
+    monkeypatch.setenv("TRR_MODAL_ENABLED", "0")
+    monkeypatch.delenv("TRR_LONG_JOB_ENFORCE_REMOTE", raising=False)
+    monkeypatch.delenv("TRR_REMOTE_EXECUTOR", raising=False)
+    monkeypatch.delenv("TRR_ALLOW_LOCAL_ADMIN_OPERATION_OVERRIDE", raising=False)
+    monkeypatch.delenv("SOCIAL_ALLOW_INLINE_DEV_FALLBACK", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _disable_getty_prefetch_gate_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """Default the admin-person-images Getty prefetch gate to off for router tests.
 

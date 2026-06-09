@@ -119,6 +119,46 @@ def test_start_instagram_posts_asserts_worker_available_when_queue_enabled(monke
     assert calls[0]["platform"] == "instagram"
 
 
+def test_start_instagram_posts_conflicts_when_auth_cooldown_active(monkeypatch) -> None:
+    create_run_called = False
+    create_job_called = False
+
+    def fake_create_run(*args, **kwargs):
+        nonlocal create_run_called
+        create_run_called = True
+        return "should-not-create-run"
+
+    def fake_create_job(*args, **kwargs):
+        nonlocal create_job_called
+        create_job_called = True
+        return "should-not-create-job"
+
+    monkeypatch.setattr(repo, "_create_run", fake_create_run)
+    monkeypatch.setattr(repo, "_create_job", fake_create_job)
+    monkeypatch.setattr(repo, "_assert_social_account_profile_exists", lambda *a, **k: None)
+    monkeypatch.setattr(
+        repo,
+        "_active_posts_auth_cooldown",
+        lambda *_args, **_kwargs: {
+            "platform": "instagram",
+            "account_handle": "bravotv",
+            "blocker_kind": "auth",
+            "cooldown_until": "2026-06-08T12:30:00+00:00",
+        },
+    )
+
+    with pytest.raises(repo.SocialIngestConflictError) as exc_info:
+        repo.start_instagram_posts_scrapling_scrape(
+            account_handle="bravotv",
+            initiated_by="test",
+        )
+
+    assert getattr(exc_info.value, "code", None) == "SOCIAL_POSTS_SCRAPLING_AUTH_COOLDOWN_ACTIVE"
+    assert getattr(exc_info.value, "detail", {}).get("auth_cooldown", {}).get("blocker_kind") == "auth"
+    assert create_run_called is False
+    assert create_job_called is False
+
+
 def test_start_instagram_posts_raises_conflict_when_lock_already_held(monkeypatch) -> None:
     """If pg_try_advisory_lock returns False (another scrape is in flight for
     this account), the helper must raise SocialIngestConflictError without

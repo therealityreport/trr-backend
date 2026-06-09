@@ -13,15 +13,15 @@ Provides endpoints to:
 from __future__ import annotations
 
 import asyncio
-import copy
 import json
 import logging
 import os
 from collections.abc import Callable, Mapping
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
-from threading import Lock, Thread
-from time import monotonic, perf_counter
+from threading import Thread
+from time import monotonic as monotonic
+from time import perf_counter
 from typing import Any, Literal
 from uuid import UUID
 
@@ -65,11 +65,82 @@ from trr_backend.socials.inline_ingest import (
 )
 from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
 
+from ._analytics_cache import (
+    _ANALYTICS_CACHE,
+    _ANALYTICS_CACHE_LOCK,
+    _ANALYTICS_CACHE_MAX_ENTRIES,
+    _ANALYTICS_CACHE_TTL_SECONDS,
+    _COMMENTS_COVERAGE_CACHE,
+    _COMMENTS_COVERAGE_CACHE_LOCK,
+    _COVERAGE_CACHE_MAX_ENTRIES,
+    _COVERAGE_CACHE_TTL_SECONDS,
+    _MIRROR_COVERAGE_CACHE,
+    _MIRROR_COVERAGE_CACHE_LOCK,
+    _WEEK_LIVE_HEALTH_CACHE,
+    _WEEK_LIVE_HEALTH_CACHE_LOCK,
+    _WEEK_LIVE_HEALTH_CACHE_MAX_ENTRIES,
+    _WEEK_LIVE_HEALTH_CACHE_TTL_SECONDS,
+    WeekDetailSortDir,
+    WeekDetailSortField,
+    WeekSummaryInclude,
+    _analytics_cache_key,
+    _coverage_cache_window_key,
+    _get_ttl_cached_payload,
+    _get_week_detail_cached_payload,
+    _get_week_summary_cached_payload,
+    _set_ttl_cached_payload,
+    _set_week_detail_cached_payload,
+    _set_week_summary_cached_payload,
+    _week_detail_cache_key,
+    _week_live_health_cache_key,
+    _week_summary_cache_key,
+    invalidate_week_detail_cache,
+)
+from ._analytics_cache import (
+    _clear_ttl_cache as _clear_ttl_cache,
+)
+from ._analytics_cache import (
+    invalidate_week_summary_cache as invalidate_week_summary_cache,
+)
+from ._profile_cache import (
+    _ACCOUNT_PROFILE_CACHE_MAX_ENTRIES,
+    _ACCOUNT_PROFILE_CACHE_TTL_SECONDS,
+    _ACCOUNT_PROFILE_COLLABORATORS_CACHE,
+    _ACCOUNT_PROFILE_COLLABORATORS_CACHE_LOCK,
+    _ACCOUNT_PROFILE_DASHBOARD_CACHE,
+    _ACCOUNT_PROFILE_DASHBOARD_CACHE_LOCK,
+    _ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE,
+    _ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE_LOCK,
+    _ACCOUNT_PROFILE_HASHTAGS_CACHE,
+    _ACCOUNT_PROFILE_HASHTAGS_CACHE_LOCK,
+    _ACCOUNT_PROFILE_POSTS_CACHE,
+    _ACCOUNT_PROFILE_POSTS_CACHE_LOCK,
+    _ACCOUNT_PROFILE_PROGRESS_CACHE_TTL_SECONDS,
+    _ACCOUNT_PROFILE_SUMMARY_CACHE,
+    _ACCOUNT_PROFILE_SUMMARY_CACHE_LOCK,
+    _account_profile_cache_key,
+    _clear_account_profile_caches,
+    _resolve_account_profile_catalog_freshness,
+    _resolve_account_profile_catalog_run_progress,
+    _resolve_account_profile_singleflight,
+)
+from ._profile_cache import (
+    _ACCOUNT_PROFILE_CATALOG_FRESHNESS_CACHE as _ACCOUNT_PROFILE_CATALOG_FRESHNESS_CACHE,
+)
+from ._profile_cache import (
+    _ACCOUNT_PROFILE_CATALOG_FRESHNESS_CACHE_LOCK as _ACCOUNT_PROFILE_CATALOG_FRESHNESS_CACHE_LOCK,
+)
 from .analytics_read import (
     analytics_read_path_extra,
     page_week_detail_payload,
     parse_analytics_include,
     week_detail_cached_post_counts,
+)
+from .reddit import (
+    serialize_reddit_backfill_payload as _serialize_reddit_backfill_payload,
+)
+from .reddit import (
+    serialize_reddit_refresh_payload as _serialize_reddit_refresh_payload,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,6 +149,11 @@ router = APIRouter(prefix="/admin/socials", tags=["admin-socials"])
 
 SourceScopeParam = Literal["bravo", "network", "creator", "community", "news"]
 TWITTER_CATALOG_BACKFILL_LOOKBACK_DAYS = 365
+INSTAGRAM_AUTH_REFRESH_CONFIRMATION = "I UNDERSTAND INSTAGRAM AUTH RISK"
+INSTAGRAM_AUTH_REFRESH_WARNING = (
+    "Manual Instagram auth can surface CAPTCHA, verification code, checkpoint, or account-lock prompts. "
+    "Complete those steps yourself before confirming a validated-cookie sync."
+)
 
 
 def normalize_source_scope_param(value: str | None, *, default: str = "network") -> str:
@@ -366,51 +442,6 @@ def _raise_if_modal_social_dispatch_unresolvable(platform: str | None = None) ->
     )
 
 
-_WEEK_DETAIL_CACHE_TTL_SECONDS = int(os.getenv("WEEK_DETAIL_CACHE_TTL_SECONDS", "90"))
-_WEEK_DETAIL_CACHE_MAX_ENTRIES = int(os.getenv("WEEK_DETAIL_CACHE_MAX_ENTRIES", "256"))
-_WEEK_DETAIL_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
-_WEEK_DETAIL_CACHE_LOCK = Lock()
-_WEEK_SUMMARY_CACHE_TTL_SECONDS = int(os.getenv("WEEK_SUMMARY_CACHE_TTL_SECONDS", str(_WEEK_DETAIL_CACHE_TTL_SECONDS)))
-_WEEK_SUMMARY_CACHE_MAX_ENTRIES = int(os.getenv("WEEK_SUMMARY_CACHE_MAX_ENTRIES", "256"))
-_WEEK_SUMMARY_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
-_WEEK_SUMMARY_CACHE_LOCK = Lock()
-_ANALYTICS_CACHE_TTL_SECONDS = int(os.getenv("SOCIAL_ANALYTICS_CACHE_TTL_SECONDS", "20"))
-_ANALYTICS_CACHE_MAX_ENTRIES = int(os.getenv("SOCIAL_ANALYTICS_CACHE_MAX_ENTRIES", "128"))
-_ANALYTICS_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
-_ANALYTICS_CACHE_LOCK = Lock()
-_WEEK_LIVE_HEALTH_CACHE_TTL_SECONDS = int(os.getenv("SOCIAL_WEEK_LIVE_HEALTH_CACHE_TTL_SECONDS", "8"))
-_WEEK_LIVE_HEALTH_CACHE_MAX_ENTRIES = int(os.getenv("SOCIAL_WEEK_LIVE_HEALTH_CACHE_MAX_ENTRIES", "128"))
-_WEEK_LIVE_HEALTH_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
-_WEEK_LIVE_HEALTH_CACHE_LOCK = Lock()
-_COVERAGE_CACHE_TTL_SECONDS = int(os.getenv("SOCIAL_COVERAGE_CACHE_TTL_SECONDS", "20"))
-_COVERAGE_CACHE_MAX_ENTRIES = int(os.getenv("SOCIAL_COVERAGE_CACHE_MAX_ENTRIES", "128"))
-_COMMENTS_COVERAGE_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
-_COMMENTS_COVERAGE_CACHE_LOCK = Lock()
-_MIRROR_COVERAGE_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
-_MIRROR_COVERAGE_CACHE_LOCK = Lock()
-_ACCOUNT_PROFILE_CACHE_TTL_SECONDS = int(os.getenv("SOCIAL_ACCOUNT_PROFILE_CACHE_TTL_SECONDS", "600"))
-_ACCOUNT_PROFILE_CACHE_MAX_ENTRIES = int(os.getenv("SOCIAL_ACCOUNT_PROFILE_CACHE_MAX_ENTRIES", "256"))
-_ACCOUNT_PROFILE_PROGRESS_CACHE_TTL_SECONDS = int(
-    os.getenv("SOCIAL_ACCOUNT_PROFILE_RUN_PROGRESS_CACHE_TTL_SECONDS", "3")
-)
-_ACCOUNT_PROFILE_SUMMARY_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
-_ACCOUNT_PROFILE_SUMMARY_CACHE_LOCK = Lock()
-_ACCOUNT_PROFILE_DASHBOARD_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
-_ACCOUNT_PROFILE_DASHBOARD_CACHE_LOCK = Lock()
-_ACCOUNT_PROFILE_PROGRESS_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
-_ACCOUNT_PROFILE_PROGRESS_CACHE_LOCK = Lock()
-_ACCOUNT_PROFILE_POSTS_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
-_ACCOUNT_PROFILE_POSTS_CACHE_LOCK = Lock()
-_ACCOUNT_PROFILE_HASHTAGS_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
-_ACCOUNT_PROFILE_HASHTAGS_CACHE_LOCK = Lock()
-_ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
-_ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE_LOCK = Lock()
-_ACCOUNT_PROFILE_COLLABORATORS_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
-_ACCOUNT_PROFILE_COLLABORATORS_CACHE_LOCK = Lock()
-_ACCOUNT_PROFILE_CATALOG_FRESHNESS_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
-_ACCOUNT_PROFILE_CATALOG_FRESHNESS_CACHE_LOCK = Lock()
-_ACCOUNT_PROFILE_SINGLEFLIGHT: dict[tuple[Any, ...], Future[dict[str, Any]]] = {}
-_ACCOUNT_PROFILE_SINGLEFLIGHT_LOCK = Lock()
 _WEEK_DETAIL_DEFAULT_MAX_COMMENTS_PER_POST = 0
 _WEEK_DETAIL_DEFAULT_POST_LIMIT = 20
 _WEEK_DETAIL_DEFAULT_POST_OFFSET = 0
@@ -418,9 +449,6 @@ _INGEST_JOBS_DEFAULT_LIMIT = 50
 _INGEST_JOBS_MAX_LIMIT = 250
 _INGEST_JOBS_DEFAULT_OFFSET = 0
 _INGEST_JOBS_MAX_OFFSET = 5000
-WeekDetailSortField = Literal["engagement", "likes", "views", "comments_count", "shares", "retweets", "posted_at"]
-WeekDetailSortDir = Literal["asc", "desc"]
-WeekSummaryInclude = Literal["totals_only", "full"]
 
 
 def _env_truthy(name: str) -> bool:
@@ -565,6 +593,9 @@ def _finalize_catalog_backfill_launch_task(
     allow_local_dev_inline_bypass: bool,
     execution_preference: str,
     selected_tasks: list[str] | None,
+    details_refresh_worker_count: int | None,
+    comments_worker_count: int | None,
+    comments_enable_media_followups: bool | None,
     launch_group_id: str | None,
 ) -> None:
     from trr_backend.repositories.social_season_analytics import (
@@ -607,6 +638,9 @@ def _finalize_catalog_backfill_launch_task(
             allow_local_dev_inline_bypass=allow_local_dev_inline_bypass,
             execution_preference=execution_preference,
             selected_tasks=selected_tasks,
+            details_refresh_worker_count=details_refresh_worker_count,
+            comments_worker_count=comments_worker_count,
+            comments_enable_media_followups=comments_enable_media_followups,
             launch_group_id=normalized_launch_group_id,
         )
         if allow_local_dev_inline_bypass or not is_queue_enabled():
@@ -664,6 +698,8 @@ def _finalize_catalog_backfill_launch_task(
                     merge_catalog_run_config=_merge_catalog_run_config,
                     metadata_dict=_metadata_dict,
                     build_attached_comments_followup=_build_attached_comments_followup,
+                    comments_worker_count=comments_worker_count,
+                    comments_enable_media_followups=comments_enable_media_followups,
                 )
             if comments_run_id:
                 if not comments_worker_threads:
@@ -793,6 +829,8 @@ def _start_deferred_comments_inline_followup(
     merge_catalog_run_config: Callable[..., Any],
     metadata_dict: Callable[[Any], dict[str, Any]],
     build_attached_comments_followup: Callable[..., dict[str, Any]],
+    comments_worker_count: int | None = None,
+    comments_enable_media_followups: bool | None = None,
 ) -> str:
     effective_tasks = {
         str(task or "").strip().lower()
@@ -811,9 +849,14 @@ def _start_deferred_comments_inline_followup(
             refresh_policy="stale_or_missing",
             initiated_by=initiated_by or "catalog_completion_followup",
             allow_local_dev_inline_bypass=allow_local_dev_inline_bypass,
-            comments_enable_media_followups="media" in effective_tasks,
+            comments_enable_media_followups=(
+                bool(comments_enable_media_followups)
+                if comments_enable_media_followups is not None
+                else "media" in effective_tasks
+            ),
             launch_group_id=launch_group_id,
             skip_launch_auth_probe=True,
+            comments_worker_count=comments_worker_count,
         )
     except social_ingest_conflict_error as exc:
         if getattr(exc, "code", "") != "SOCIAL_ACCOUNT_COMMENTS_RUN_ALREADY_ACTIVE":
@@ -864,25 +907,36 @@ def _queue_catalog_backfill_finalize_task(
     allow_local_dev_inline_bypass: bool,
     execution_preference: str,
     selected_tasks: list[str] | None,
+    details_refresh_worker_count: int | None,
+    comments_worker_count: int | None,
+    comments_enable_media_followups: bool | None,
     launch_group_id: str | None,
 ) -> None:
     if not str(run_id or "").strip():
         return
 
-    background_tasks.add_task(
-        _finalize_catalog_backfill_launch_task,
-        platform=platform,
-        account_handle=account_handle,
-        run_id=run_id,
-        source_scope=source_scope,
-        date_start=date_start,
-        date_end=date_end,
-        initiated_by=initiated_by,
-        allow_local_dev_inline_bypass=allow_local_dev_inline_bypass,
-        execution_preference=execution_preference,
-        selected_tasks=selected_tasks,
-        launch_group_id=launch_group_id,
+    thread = Thread(
+        target=_finalize_catalog_backfill_launch_task,
+        kwargs={
+            "platform": platform,
+            "account_handle": account_handle,
+            "run_id": run_id,
+            "source_scope": source_scope,
+            "date_start": date_start,
+            "date_end": date_end,
+            "initiated_by": initiated_by,
+            "allow_local_dev_inline_bypass": allow_local_dev_inline_bypass,
+            "execution_preference": execution_preference,
+            "selected_tasks": selected_tasks,
+            "details_refresh_worker_count": details_refresh_worker_count,
+            "comments_worker_count": comments_worker_count,
+            "comments_enable_media_followups": comments_enable_media_followups,
+            "launch_group_id": launch_group_id,
+        },
+        name=f"catalog-backfill-finalize:{platform}:{account_handle}:{run_id}",
+        daemon=True,
     )
+    thread.start()
 
 
 def _cancel_catalog_run_in_background(
@@ -1000,13 +1054,6 @@ def _parse_utc_iso_datetime(value: str | None) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
-def _cache_datetime_key(value: datetime | None) -> str | None:
-    if not isinstance(value, datetime):
-        return None
-    normalized = value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
-    return normalized.isoformat().replace("+00:00", "Z")
-
-
 def _resolve_ingest_window(
     *,
     season_id: str,
@@ -1053,259 +1100,6 @@ def _build_ingest_scope_payload(
         "date_start": date_start.isoformat().replace("+00:00", "Z") if isinstance(date_start, datetime) else None,
         "date_end": date_end.isoformat().replace("+00:00", "Z") if isinstance(date_end, datetime) else None,
     }
-
-
-def _week_detail_cache_key(
-    *,
-    season_id: str,
-    week_index: int,
-    source_scope: str,
-    platforms: list[str] | None,
-    timezone: str,
-    max_comments_per_post: int,
-    sort_field: WeekDetailSortField,
-    sort_dir: WeekDetailSortDir,
-    include_status: bool = True,
-) -> tuple[Any, ...]:
-    platform_key = ",".join(sorted(_normalize_target_platforms(platforms)))
-    return (
-        season_id,
-        week_index,
-        source_scope.strip().lower(),
-        platform_key,
-        timezone,
-        int(max_comments_per_post),
-        sort_field,
-        sort_dir,
-        bool(include_status),
-    )
-
-
-def _week_summary_cache_key(
-    *,
-    season_id: str,
-    week_index: int,
-    source_scope: str,
-    platforms: list[str] | None,
-    timezone: str,
-    include: WeekSummaryInclude,
-    max_comments_per_post: int,
-    sort_field: WeekDetailSortField,
-    sort_dir: WeekDetailSortDir,
-) -> tuple[Any, ...]:
-    platform_key = ",".join(sorted(_normalize_target_platforms(platforms)))
-    return (
-        season_id,
-        week_index,
-        source_scope.strip().lower(),
-        platform_key,
-        timezone,
-        include,
-        int(max_comments_per_post),
-        sort_field,
-        sort_dir,
-    )
-
-
-def _analytics_cache_key(
-    *,
-    season_id: str,
-    source_scope: str,
-    platforms: list[str] | None,
-    timezone: str,
-    week: int | None,
-    include_rows: bool,
-    include_flags: bool,
-    include_schedule: bool,
-    include_benchmark: bool,
-) -> tuple[Any, ...]:
-    platform_key = ",".join(sorted(_normalize_target_platforms(platforms)))
-    return (
-        season_id,
-        source_scope.strip().lower(),
-        platform_key,
-        timezone,
-        int(week) if week is not None else None,
-        bool(include_rows),
-        bool(include_flags),
-        bool(include_schedule),
-        bool(include_benchmark),
-    )
-
-
-def _week_live_health_cache_key(
-    *,
-    season_id: str,
-    week_index: int,
-    source_scope: str,
-    platforms: list[str] | None,
-    timezone: str,
-) -> tuple[Any, ...]:
-    platform_key = ",".join(sorted(_normalize_target_platforms(platforms)))
-    return (
-        season_id,
-        int(week_index),
-        source_scope.strip().lower(),
-        platform_key,
-        timezone,
-    )
-
-
-def _coverage_cache_window_key(
-    *,
-    season_id: str,
-    source_scope: str,
-    platforms: list[str] | None,
-    timezone: str,
-    date_start: datetime | None,
-    date_end: datetime | None,
-) -> tuple[Any, ...]:
-    platform_key = ",".join(sorted(_normalize_target_platforms(platforms)))
-    return (
-        season_id,
-        source_scope.strip().lower(),
-        platform_key,
-        timezone,
-        _cache_datetime_key(date_start),
-        _cache_datetime_key(date_end),
-    )
-
-
-def _get_week_detail_cached_payload(cache_key: tuple[Any, ...]) -> dict[str, Any] | None:
-    now = monotonic()
-    with _WEEK_DETAIL_CACHE_LOCK:
-        cached = _WEEK_DETAIL_CACHE.get(cache_key)
-        if not cached:
-            return None
-        expires_at, payload = cached
-        if expires_at <= now:
-            _WEEK_DETAIL_CACHE.pop(cache_key, None)
-            return None
-        return copy.deepcopy(payload)
-
-
-def _set_week_detail_cached_payload(cache_key: tuple[Any, ...], payload: dict[str, Any]) -> None:
-    with _WEEK_DETAIL_CACHE_LOCK:
-        _WEEK_DETAIL_CACHE[cache_key] = (monotonic() + _WEEK_DETAIL_CACHE_TTL_SECONDS, copy.deepcopy(payload))
-        if len(_WEEK_DETAIL_CACHE) <= _WEEK_DETAIL_CACHE_MAX_ENTRIES:
-            return
-        items_by_expiry = sorted(
-            _WEEK_DETAIL_CACHE.items(),
-            key=lambda item: item[1][0],
-        )
-        for key, _ in items_by_expiry[:-_WEEK_DETAIL_CACHE_MAX_ENTRIES]:
-            _WEEK_DETAIL_CACHE.pop(key, None)
-
-
-def _get_week_summary_cached_payload(cache_key: tuple[Any, ...]) -> dict[str, Any] | None:
-    now = monotonic()
-    with _WEEK_SUMMARY_CACHE_LOCK:
-        cached = _WEEK_SUMMARY_CACHE.get(cache_key)
-        if not cached:
-            return None
-        expires_at, payload = cached
-        if expires_at <= now:
-            _WEEK_SUMMARY_CACHE.pop(cache_key, None)
-            return None
-        return copy.deepcopy(payload)
-
-
-def _set_week_summary_cached_payload(cache_key: tuple[Any, ...], payload: dict[str, Any]) -> None:
-    with _WEEK_SUMMARY_CACHE_LOCK:
-        _WEEK_SUMMARY_CACHE[cache_key] = (monotonic() + _WEEK_SUMMARY_CACHE_TTL_SECONDS, copy.deepcopy(payload))
-        if len(_WEEK_SUMMARY_CACHE) <= _WEEK_SUMMARY_CACHE_MAX_ENTRIES:
-            return
-        items_by_expiry = sorted(
-            _WEEK_SUMMARY_CACHE.items(),
-            key=lambda item: item[1][0],
-        )
-        for key, _ in items_by_expiry[:-_WEEK_SUMMARY_CACHE_MAX_ENTRIES]:
-            _WEEK_SUMMARY_CACHE.pop(key, None)
-
-
-def _get_ttl_cached_payload(
-    cache: dict[Any, tuple[float, dict[str, Any]]],
-    lock: Lock,
-    cache_key: tuple[Any, ...],
-) -> dict[str, Any] | None:
-    now = monotonic()
-    with lock:
-        cached = cache.get(cache_key)
-        if not cached:
-            return None
-        expires_at, payload = cached
-        if expires_at <= now:
-            return None
-        return copy.deepcopy(payload)
-
-
-def _get_ttl_stale_payload(
-    cache: dict[Any, tuple[float, dict[str, Any]]],
-    lock: Lock,
-    cache_key: tuple[Any, ...],
-) -> dict[str, Any] | None:
-    with lock:
-        cached = cache.get(cache_key)
-        if not cached:
-            return None
-        _expires_at, payload = cached
-        return copy.deepcopy(payload)
-
-
-def _set_ttl_cached_payload(
-    cache: dict[Any, tuple[float, dict[str, Any]]],
-    lock: Lock,
-    cache_key: tuple[Any, ...],
-    payload: dict[str, Any],
-    *,
-    ttl_seconds: int,
-    max_entries: int,
-) -> None:
-    if ttl_seconds <= 0:
-        return
-    with lock:
-        cache[cache_key] = (monotonic() + ttl_seconds, copy.deepcopy(payload))
-        if len(cache) <= max_entries:
-            return
-        items_by_expiry = sorted(
-            cache.items(),
-            key=lambda item: item[1][0],
-        )
-        for key, _ in items_by_expiry[:-max_entries]:
-            cache.pop(key, None)
-
-
-def _clear_ttl_cache(cache: dict[Any, tuple[float, dict[str, Any]]], lock: Lock) -> None:
-    with lock:
-        cache.clear()
-
-
-def invalidate_week_summary_cache() -> None:
-    with _WEEK_SUMMARY_CACHE_LOCK:
-        _WEEK_SUMMARY_CACHE.clear()
-
-
-def invalidate_week_detail_cache() -> None:
-    """Clear in-memory week-detail and week-summary caches after ingest mutations."""
-    with _WEEK_DETAIL_CACHE_LOCK:
-        _WEEK_DETAIL_CACHE.clear()
-    invalidate_week_summary_cache()
-    _clear_ttl_cache(_ANALYTICS_CACHE, _ANALYTICS_CACHE_LOCK)
-    _clear_ttl_cache(_WEEK_LIVE_HEALTH_CACHE, _WEEK_LIVE_HEALTH_CACHE_LOCK)
-    _clear_ttl_cache(_COMMENTS_COVERAGE_CACHE, _COMMENTS_COVERAGE_CACHE_LOCK)
-    _clear_ttl_cache(_MIRROR_COVERAGE_CACHE, _MIRROR_COVERAGE_CACHE_LOCK)
-
-
-def _register_week_detail_cache_invalidator() -> None:
-    try:
-        from trr_backend.repositories.social_season_analytics import register_week_detail_cache_invalidator
-
-        register_week_detail_cache_invalidator(invalidate_week_detail_cache)
-    except Exception:  # noqa: BLE001
-        logger.debug("Failed to register week-detail cache invalidator hook", exc_info=True)
-
-
-_register_week_detail_cache_invalidator()
 
 
 def _parse_platform_query(platforms: str | None) -> list[str] | None:
@@ -1376,101 +1170,6 @@ def _remote_worker_unavailable_message(
     return f"Social ingest remote-worker ownership is enforced. {exc_message.removesuffix('.')}."
 
 
-def _account_profile_cache_key(
-    *,
-    surface: str,
-    platform: str,
-    account_handle: str,
-    page: int | None = None,
-    page_size: int | None = None,
-    search: str | None = None,
-    window: str | None = None,
-    comments_only: bool | None = None,
-    comment_filter: str | None = None,
-    sort_by: str | None = None,
-    sort_dir: str | None = None,
-    post_source_id: str | None = None,
-    extra: tuple[Any, ...] | None = None,
-) -> tuple[Any, ...]:
-    return (
-        surface,
-        str(platform or "").strip().lower(),
-        str(account_handle or "").strip().lower().lstrip("@"),
-        page,
-        page_size,
-        str(search or "").strip().lower() or None,
-        str(window or "").strip().lower() or None,
-        None if comments_only is None else bool(comments_only),
-        str(comment_filter or "").strip().lower() or None,
-        str(sort_by or "").strip().lower() or None,
-        str(sort_dir or "").strip().lower() or None,
-        str(post_source_id or "").strip() or None,
-        *(extra or ()),
-    )
-
-
-def _clear_account_profile_caches() -> None:
-    _clear_ttl_cache(_ACCOUNT_PROFILE_SUMMARY_CACHE, _ACCOUNT_PROFILE_SUMMARY_CACHE_LOCK)
-    _clear_ttl_cache(_ACCOUNT_PROFILE_DASHBOARD_CACHE, _ACCOUNT_PROFILE_DASHBOARD_CACHE_LOCK)
-    _clear_ttl_cache(_ACCOUNT_PROFILE_PROGRESS_CACHE, _ACCOUNT_PROFILE_PROGRESS_CACHE_LOCK)
-    _clear_ttl_cache(_ACCOUNT_PROFILE_POSTS_CACHE, _ACCOUNT_PROFILE_POSTS_CACHE_LOCK)
-    _clear_ttl_cache(_ACCOUNT_PROFILE_HASHTAGS_CACHE, _ACCOUNT_PROFILE_HASHTAGS_CACHE_LOCK)
-    _clear_ttl_cache(_ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE, _ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE_LOCK)
-    _clear_ttl_cache(_ACCOUNT_PROFILE_COLLABORATORS_CACHE, _ACCOUNT_PROFILE_COLLABORATORS_CACHE_LOCK)
-    _clear_ttl_cache(_ACCOUNT_PROFILE_CATALOG_FRESHNESS_CACHE, _ACCOUNT_PROFILE_CATALOG_FRESHNESS_CACHE_LOCK)
-    with _ACCOUNT_PROFILE_SINGLEFLIGHT_LOCK:
-        _ACCOUNT_PROFILE_SINGLEFLIGHT.clear()
-
-
-def _resolve_account_profile_singleflight(
-    cache_key: tuple[Any, ...],
-    loader: Callable[[], dict[str, Any]],
-    *,
-    cache: dict[Any, tuple[float, dict[str, Any]]] | None = None,
-    cache_lock: Lock | None = None,
-    ttl_seconds: int | None = None,
-    max_entries: int | None = None,
-) -> dict[str, Any]:
-    if cache is not None and cache_lock is not None:
-        cached_payload = _get_ttl_cached_payload(cache, cache_lock, cache_key)
-        if cached_payload is not None:
-            return cached_payload
-
-    with _ACCOUNT_PROFILE_SINGLEFLIGHT_LOCK:
-        in_flight = _ACCOUNT_PROFILE_SINGLEFLIGHT.get(cache_key)
-        if in_flight is None:
-            in_flight = Future()
-            _ACCOUNT_PROFILE_SINGLEFLIGHT[cache_key] = in_flight
-            owns_loader = True
-        else:
-            owns_loader = False
-
-    if not owns_loader:
-        return copy.deepcopy(in_flight.result())
-
-    try:
-        payload = loader()
-        resolved_payload = copy.deepcopy(payload)
-        if cache is not None and cache_lock is not None and ttl_seconds is not None and max_entries is not None:
-            _set_ttl_cached_payload(
-                cache,
-                cache_lock,
-                cache_key,
-                resolved_payload,
-                ttl_seconds=ttl_seconds,
-                max_entries=max_entries,
-            )
-        in_flight.set_result(copy.deepcopy(resolved_payload))
-        return resolved_payload
-    except Exception as exc:
-        in_flight.set_exception(exc)
-        raise
-    finally:
-        with _ACCOUNT_PROFILE_SINGLEFLIGHT_LOCK:
-            if _ACCOUNT_PROFILE_SINGLEFLIGHT.get(cache_key) is in_flight:
-                _ACCOUNT_PROFILE_SINGLEFLIGHT.pop(cache_key, None)
-
-
 def _is_local_or_dev_runtime() -> bool:
     runtime_markers = [
         os.getenv("APP_ENV"),
@@ -1496,8 +1195,12 @@ def _can_use_local_catalog_inline_fallback(
     *,
     allow_inline_dev_fallback: bool,
     remote_plane_enforced: bool,
+    requires_modal_executor: bool = False,
+    explicit_local_preference: bool = False,
 ) -> bool:
     if not _is_local_or_dev_runtime():
+        return False
+    if requires_modal_executor and not explicit_local_preference:
         return False
     if _env_truthy("TRR_ALLOW_LOCAL_ADMIN_OPERATION_OVERRIDE"):
         return True
@@ -1530,6 +1233,8 @@ def _resolve_social_account_catalog_route_execution(
     can_use_local_inline_fallback = _can_use_local_catalog_inline_fallback(
         allow_inline_dev_fallback=(allow_inline_dev_fallback or prefer_local_inline),
         remote_plane_enforced=remote_plane_enforced,
+        requires_modal_executor=requires_modal_executor,
+        explicit_local_preference=prefer_local_inline,
     )
     if prefer_local_inline:
         if not can_use_local_inline_fallback:
@@ -1568,13 +1273,19 @@ def _resolve_social_account_catalog_route_execution(
                     status_code=503,
                     detail={
                         "code": (
-                            "SOCIAL_REMOTE_JOB_PLANE_ENFORCED"
-                            if remote_plane_enforced
-                            else "SOCIAL_MODAL_EXECUTOR_REQUIRED"
+                            "SOCIAL_MODAL_EXECUTOR_REQUIRED"
                             if requires_modal_executor
+                            else "SOCIAL_REMOTE_JOB_PLANE_ENFORCED"
+                            if remote_plane_enforced
                             else "SOCIAL_WORKER_UNAVAILABLE"
                         ),
-                        "message": (_remote_worker_unavailable_message(exc) if remote_plane_enforced else str(exc)),
+                        "message": (
+                            "Shared-account catalog operations for this platform require the Modal remote executor."
+                            if requires_modal_executor
+                            else _remote_worker_unavailable_message(exc)
+                            if remote_plane_enforced
+                            else str(exc)
+                        ),
                         "execution_mode": canonical_execution_mode(),
                         "execution_owner": execution_owner_label(),
                         "worker_health": _worker_health_detail(exc.worker_health),
@@ -1627,6 +1338,7 @@ def _resolve_social_account_comments_route_execution(
     can_use_local_inline_fallback = _can_use_local_catalog_inline_fallback(
         allow_inline_dev_fallback=allow_inline_dev_fallback,
         remote_plane_enforced=remote_plane_enforced,
+        requires_modal_executor=requires_modal_executor,
     )
 
     if queue_enabled:
@@ -3013,6 +2725,9 @@ class CatalogBackfillRequest(SourceScopedRequest):
     allow_inline_dev_fallback: bool = Field(default=False)
     execution_preference: Literal["auto", "prefer_local_inline"] = Field(default="auto")
     selected_tasks: list[Literal["post_details", "comments", "media"]] | None = Field(default=None)
+    detail_worker_count: int | None = Field(default=None, ge=1, le=12)
+    comments_worker_count: int | None = Field(default=None, ge=1, le=24)
+    comments_enable_media_followups: bool | None = Field(default=None)
 
     @model_validator(mode="after")
     def validate_selected_tasks(self) -> CatalogBackfillRequest:
@@ -3056,15 +2771,10 @@ class CatalogRemediateDriftRequest(BaseModel):
         return self
 
 
-class ApifyBackfillRequest(BaseModel):
-    results_limit: int = Field(default=100, ge=1, le=5000)
-    date_start: datetime | None = None
-    data_detail_level: Literal["basicData", "detailedData"] = Field(default="detailedData")
-    skip_pinned_posts: bool = Field(default=False)
-
-
 class CatalogRepairAuthRequest(BaseModel):
     allow_inline_dev_fallback: bool = Field(default=False)
+    operator_confirmation: str | None = Field(default=None)
+    allow_cookie_refresh: bool = Field(default=False)
 
 
 class CatalogReviewResolveRequest(BaseModel):
@@ -3173,40 +2883,6 @@ class RedditCacheBulkRequest(BaseModel):
     season_id: UUID
     period_keys: list[str] = Field(default_factory=list, max_length=25)
     container_keys: list[str] = Field(default_factory=list, max_length=25)
-
-
-def _serialize_reddit_refresh_payload(payload: RedditRefreshRunRequest) -> dict[str, Any]:
-    data = payload.model_dump()
-    if isinstance(payload.period_stable_key, str):
-        normalized_stable_key = payload.period_stable_key.strip()
-        data["period_stable_key"] = normalized_stable_key or None
-    if isinstance(payload.period_label, str):
-        normalized_period_label = payload.period_label.strip()
-        data["period_label"] = normalized_period_label or None
-    if isinstance(payload.run_config_hash, str):
-        normalized_hash = payload.run_config_hash.strip().lower()
-        data["run_config_hash"] = normalized_hash or None
-    if isinstance(payload.period_start, datetime):
-        data["period_start"] = payload.period_start.astimezone(UTC).isoformat().replace("+00:00", "Z")
-    if isinstance(payload.period_end, datetime):
-        data["period_end"] = payload.period_end.astimezone(UTC).isoformat().replace("+00:00", "Z")
-    data["community_id"] = str(payload.community_id)
-    data["season_id"] = str(payload.season_id)
-    return data
-
-
-def _normalize_reddit_backfill_container_keys(values: list[str]) -> list[str]:
-    return [item.strip() for item in values if isinstance(item, str) and item.strip()]
-
-
-def _serialize_reddit_backfill_payload(payload: RedditRefreshBackfillRequest) -> dict[str, Any]:
-    return {
-        "community_id": str(payload.community_id),
-        "season_id": str(payload.season_id),
-        "container_keys": _normalize_reddit_backfill_container_keys(payload.container_keys),
-        "mode": payload.mode,
-        "detail_refresh": bool(payload.detail_refresh),
-    }
 
 
 def _start_reddit_refresh_run_from_serialized_payload(
@@ -4721,8 +4397,83 @@ def get_social_account_comments_scrape_progress_route(
                 platform=platform,
                 account_handle=account_handle,
                 run_id=str(run_id),
+                auto_rebalance_slow_shards=False,
             ),
         )
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+
+
+@router.post("/profiles/{platform}/{account_handle}/comments/runs/{run_id}/rebalance")
+def post_social_account_comments_run_rebalance_route(
+    platform: str,
+    account_handle: str,
+    run_id: UUID,
+    _: InternalAdminUser,
+) -> dict[str, Any]:
+    from trr_backend.socials.pipelines.comments.instagram import rebalance_slow_instagram_comments_shards
+
+    if platform.strip().lower() != "instagram":
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "UNSUPPORTED_PLATFORM", "message": "Comments shard rebalance is only supported for Instagram."},
+        )
+    if not account_handle.strip():
+        raise HTTPException(status_code=400, detail={"code": "ACCOUNT_HANDLE_REQUIRED", "message": "account_handle is required."})
+    try:
+        result = rebalance_slow_instagram_comments_shards(run_id=str(run_id))
+        _clear_account_profile_caches()
+        return result
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+
+
+@router.post("/profiles/{platform}/{account_handle}/comments/runs/{run_id}/resume")
+def post_social_account_comments_run_resume_route(
+    platform: str,
+    account_handle: str,
+    run_id: UUID,
+    user: InternalAdminUser,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import (
+        SocialIngestConflictError,
+        SocialIngestValidationError,
+        SocialWorkerUnavailableError,
+    )
+    from trr_backend.socials.pipelines.comments.instagram import resume_social_account_comments_run
+
+    try:
+        result = resume_social_account_comments_run(
+            platform=platform,
+            account_handle=account_handle,
+            run_id=str(run_id),
+            initiated_by=(user or {}).get("email"),
+        )
+        _clear_account_profile_caches()
+        return result
+    except SocialIngestConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": exc.code, "message": str(exc), **jsonable_encoder(exc.detail)},
+        ) from exc
+    except SocialIngestValidationError as exc:
+        status_code = 503 if exc.code == "SOCIAL_INSTAGRAM_COMMENTS_AUTH_REPAIR_FAILED" else 400
+        raise HTTPException(status_code=status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+    except SocialWorkerUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "SOCIAL_WORKER_UNAVAILABLE",
+                "message": str(exc),
+                "execution_mode": canonical_execution_mode(),
+                "execution_owner": execution_owner_label(),
+                "worker_health": _worker_health_detail(exc.worker_health),
+            },
+        ) from exc
     except ValueError as exc:
         raise _value_error_to_bad_request(exc) from exc
     except LookupError as exc:
@@ -4743,6 +4494,32 @@ def post_social_account_comments_run_cancel_route(
             platform=platform,
             account_handle=account_handle,
             run_id=str(run_id),
+            cancelled_by=(user or {}).get("email"),
+        )
+        _clear_account_profile_caches()
+        return result
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+
+
+@router.post("/profiles/{platform}/{account_handle}/comments/runs/{run_id}/jobs/{job_id}/cancel")
+def post_social_account_comments_job_cancel_route(
+    platform: str,
+    account_handle: str,
+    run_id: UUID,
+    job_id: UUID,
+    user: InternalAdminUser,
+) -> dict[str, Any]:
+    from trr_backend.socials.pipelines.comments.instagram import cancel_social_account_comments_job
+
+    try:
+        result = cancel_social_account_comments_job(
+            platform=platform,
+            account_handle=account_handle,
+            run_id=str(run_id),
+            job_id=str(job_id),
             cancelled_by=(user or {}).get("email"),
         )
         _clear_account_profile_caches()
@@ -4954,30 +4731,14 @@ def get_social_account_catalog_run_progress_route(
     fast: bool = Query(default=False),
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
-    cache_key = _account_profile_cache_key(
-        surface="catalog-run-progress",
-        platform=platform,
-        account_handle=account_handle,
-        extra=(str(run_id), recent_log_limit, "fast" if fast else "full"),
-    )
-
-    def loader() -> dict[str, Any]:
-        return social_profile_reads.get_catalog_run_progress(
+    try:
+        return _resolve_account_profile_catalog_run_progress(
             platform=platform,
             account_handle=account_handle,
             run_id=str(run_id),
             recent_log_limit=recent_log_limit,
             fast=fast,
-        )
-
-    try:
-        return _resolve_account_profile_singleflight(
-            cache_key,
-            loader,
-            cache=_ACCOUNT_PROFILE_PROGRESS_CACHE,
-            cache_lock=_ACCOUNT_PROFILE_PROGRESS_CACHE_LOCK,
-            ttl_seconds=_ACCOUNT_PROFILE_PROGRESS_CACHE_TTL_SECONDS,
-            max_entries=_ACCOUNT_PROFILE_CACHE_MAX_ENTRIES,
+            loader=social_profile_reads.get_catalog_run_progress,
         )
     except ValueError as exc:
         raise _value_error_to_bad_request(exc) from exc
@@ -5225,59 +4986,19 @@ def post_social_account_catalog_freshness_route(
     statement_timeout_ms: int = Query(default=3000, ge=1000, le=30000),
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
-    from trr_backend.repositories.social_season_analytics import get_social_account_catalog_freshness
-
-    use_deep_probe = bool(force)
-    cache_key = _account_profile_cache_key(
-        surface="catalog-freshness",
-        platform=platform,
-        account_handle=account_handle,
-        extra=(statement_timeout_ms,),
-    )
     try:
-        if use_deep_probe:
-            return _resolve_account_profile_singleflight(
-                (*cache_key, "force"),
-                lambda: get_social_account_catalog_freshness(
-                    platform=platform,
-                    account_handle=account_handle,
-                    statement_timeout_ms=statement_timeout_ms,
-                ),
-            )
-        return _resolve_account_profile_singleflight(
-            cache_key,
-            lambda: get_social_account_catalog_freshness(
-                platform=platform,
-                account_handle=account_handle,
-                use_cached_live_total_only=True,
-                statement_timeout_ms=statement_timeout_ms,
-            ),
-            cache=_ACCOUNT_PROFILE_CATALOG_FRESHNESS_CACHE,
-            cache_lock=_ACCOUNT_PROFILE_CATALOG_FRESHNESS_CACHE_LOCK,
-            ttl_seconds=_ACCOUNT_PROFILE_CACHE_TTL_SECONDS,
-            max_entries=_ACCOUNT_PROFILE_CACHE_MAX_ENTRIES,
+        return _resolve_account_profile_catalog_freshness(
+            platform=platform,
+            account_handle=account_handle,
+            force=bool(force),
+            statement_timeout_ms=statement_timeout_ms,
+            loader=social_profile_reads.get_catalog_freshness,
         )
     except ValueError as exc:
         raise _value_error_to_bad_request(exc) from exc
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
     except Exception as exc:  # noqa: BLE001
-        if not use_deep_probe:
-            stale_payload = _get_ttl_stale_payload(
-                _ACCOUNT_PROFILE_CATALOG_FRESHNESS_CACHE,
-                _ACCOUNT_PROFILE_CATALOG_FRESHNESS_CACHE_LOCK,
-                cache_key,
-            )
-            if stale_payload is not None:
-                degraded_payload = copy.deepcopy(stale_payload)
-                degraded_payload["stale"] = True
-                degraded_payload["degraded"] = True
-                degraded_payload["freshness_error"] = {
-                    "code": "CATALOG_FRESHNESS_REFRESH_FAILED",
-                    "message": str(exc) or "Failed to refresh catalog freshness",
-                    "retryable": True,
-                }
-                return degraded_payload
         logger.exception(
             "Failed to fetch social account catalog freshness: platform=%s account=%s",
             platform,
@@ -5383,6 +5104,9 @@ async def post_social_account_catalog_backfill_route(
                 allow_local_dev_inline_bypass=used_inline_fallback,
                 execution_preference=payload.execution_preference,
                 selected_tasks=normalized_selected_tasks,
+                details_refresh_worker_count=payload.detail_worker_count,
+                comments_worker_count=payload.comments_worker_count,
+                comments_enable_media_followups=payload.comments_enable_media_followups,
             )
             _queue_catalog_backfill_finalize_task(
                 background_tasks=background_tasks,
@@ -5396,6 +5120,9 @@ async def post_social_account_catalog_backfill_route(
                 allow_local_dev_inline_bypass=used_inline_fallback,
                 execution_preference=payload.execution_preference,
                 selected_tasks=normalized_selected_tasks,
+                details_refresh_worker_count=payload.detail_worker_count,
+                comments_worker_count=payload.comments_worker_count,
+                comments_enable_media_followups=payload.comments_enable_media_followups,
                 launch_group_id=str(result.get("launch_group_id") or ""),
             )
         else:
@@ -5411,6 +5138,9 @@ async def post_social_account_catalog_backfill_route(
                 allow_local_dev_inline_bypass=used_inline_fallback,
                 execution_preference=payload.execution_preference,
                 selected_tasks=normalized_selected_tasks,
+                details_refresh_worker_count=payload.detail_worker_count,
+                comments_worker_count=payload.comments_worker_count,
+                comments_enable_media_followups=payload.comments_enable_media_followups,
             )
         _clear_account_profile_caches()
     except SocialIngestConflictError as exc:
@@ -5475,55 +5205,6 @@ async def post_social_account_catalog_remediate_drift_route(
         raise _value_error_to_bad_request(exc) from exc
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
-
-
-@router.post("/profiles/{platform}/{account_handle}/catalog/apify-backfill")
-async def post_social_account_apify_backfill_route(
-    platform: str,
-    account_handle: str,
-    payload: ApifyBackfillRequest,
-    user: InternalAdminUser,
-) -> dict[str, Any]:
-    """Run an Instagram backfill via Apify's managed scraper infrastructure."""
-    if platform != "instagram":
-        raise HTTPException(
-            status_code=400,
-            detail={"code": "APIFY_INSTAGRAM_ONLY", "message": "Apify backfill is only supported for Instagram."},
-        )
-
-    from trr_backend.socials.instagram.apify_scraper import run_and_normalize
-
-    try:
-        result = run_and_normalize(
-            username=account_handle,
-            results_limit=payload.results_limit,
-            date_start=payload.date_start,
-            data_detail_level=payload.data_detail_level,
-            skip_pinned_posts=payload.skip_pinned_posts,
-        )
-    except RuntimeError as exc:
-        raise HTTPException(
-            status_code=500,
-            detail={"code": "APIFY_CONFIG_ERROR", "message": str(exc)},
-        ) from exc
-    except Exception as exc:
-        logger.exception("Apify backfill failed for %s/@%s", platform, account_handle)
-        raise HTTPException(
-            status_code=500,
-            detail={"code": "APIFY_RUN_FAILED", "message": f"Apify scraper run failed: {exc}"},
-        ) from exc
-
-    _clear_account_profile_caches()
-
-    return {
-        "status": "completed",
-        "run_id": result["run_id"],
-        "dataset_id": result["dataset_id"],
-        "post_count": result["post_count"],
-        "actor": result["actor"],
-        "posts": result["posts"],
-        "initiated_by": (user or {}).get("email"),
-    }
 
 
 @router.post("/profiles/{platform}/{account_handle}/catalog/sync-recent")
@@ -5734,6 +5415,7 @@ async def post_social_account_catalog_resume_tail_route(
     }
 
 
+@router.post("/profiles/{platform}/{account_handle}/catalog/runs/{run_id}/manual-auth")
 @router.post("/profiles/{platform}/{account_handle}/catalog/runs/{run_id}/repair-auth")
 async def post_social_account_catalog_run_repair_auth_route(
     platform: str,
@@ -5743,7 +5425,6 @@ async def post_social_account_catalog_run_repair_auth_route(
     background_tasks: BackgroundTasks,
     user: InternalAdminUser,
 ) -> dict[str, Any]:
-    del payload
     from trr_backend.repositories.social_season_analytics import (
         SocialIngestValidationError,
         execute_social_account_catalog_run_auth_repair,
@@ -5751,6 +5432,7 @@ async def post_social_account_catalog_run_repair_auth_route(
     )
 
     try:
+        _require_instagram_auth_refresh_confirmation(platform, payload.operator_confirmation)
         result = request_social_account_catalog_run_auth_repair(
             platform=platform,
             account_handle=account_handle,
@@ -5763,6 +5445,7 @@ async def post_social_account_catalog_run_repair_auth_route(
             account_handle=account_handle,
             run_id=str(run_id),
             initiated_by=(user or {}).get("email"),
+            allow_cookie_refresh=bool(payload.allow_cookie_refresh),
         )
         _clear_account_profile_caches()
         return result
@@ -5780,6 +5463,24 @@ class CookieRefreshRequest(BaseModel):
         description="Run browser in headless mode (default: headed for interactive login)",
     )
     timeout_seconds: int = Field(default=180, ge=30, le=600)
+    operator_confirmation: str | None = Field(default=None)
+    allow_cookie_refresh: bool = Field(default=True)
+
+
+def _require_instagram_auth_refresh_confirmation(platform: str, confirmation: str | None) -> None:
+    normalized = str(platform or "").strip().lower()
+    if normalized != "instagram":
+        return
+    if str(confirmation or "").strip() == INSTAGRAM_AUTH_REFRESH_CONFIRMATION:
+        return
+    raise HTTPException(
+        status_code=400,
+        detail={
+            "code": "INSTAGRAM_AUTH_REFRESH_CONFIRMATION_REQUIRED",
+            "message": INSTAGRAM_AUTH_REFRESH_WARNING,
+            "required_confirmation": INSTAGRAM_AUTH_REFRESH_CONFIRMATION,
+        },
+    )
 
 
 def _env_truthy_default(name: str, *, default: bool) -> bool:
@@ -5966,12 +5667,14 @@ def post_cookie_refresh_route(
                 ),
             },
         )
+    _require_instagram_auth_refresh_confirmation(platform, payload.operator_confirmation)
 
     result = refresh_platform_cookies_interactive(
         platform,
         headless=payload.headless,
         timeout_seconds=payload.timeout_seconds,
         account_handle=account_handle,
+        allow_cookie_refresh=bool(payload.allow_cookie_refresh),
     )
     if not result.get("success") and result.get("reason") == "refresh_already_in_progress":
         raise HTTPException(
@@ -6229,6 +5932,46 @@ def get_social_ingest_worker_health(_: InternalAdminUser = None) -> dict:
         return payload
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch social ingest worker health")
+        raise _to_social_read_http_exception(exc) from exc
+
+
+@router.get("/ingest/backfill-health")
+def get_social_ingest_backfill_health(
+    run_limit: int = Query(
+        default=40,
+        ge=1,
+        le=200,
+        description="Max number of recent catalog-backfill runs to enumerate.",
+    ),
+    recent_log_limit: int = Query(
+        default=20,
+        ge=1,
+        le=100,
+        description="Per-run recent-log rows scanned for 401/403/checkpoint classification.",
+    ),
+    include_terminal_runs: bool = Query(
+        default=True,
+        description="Include terminal (completed/failed) runs alongside active ones.",
+    ),
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.socials.control_plane.backfill_health import get_backfill_health
+
+    started_at = perf_counter()
+    try:
+        payload = get_backfill_health(
+            run_limit=run_limit,
+            recent_log_limit=recent_log_limit,
+            include_terminal_runs=include_terminal_runs,
+        )
+        log_read_path(
+            "season-social-backfill-health",
+            latency_ms=(perf_counter() - started_at) * 1000,
+            payload=payload,
+        )
+        return payload
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to fetch social ingest backfill health")
         raise _to_social_read_http_exception(exc) from exc
 
 

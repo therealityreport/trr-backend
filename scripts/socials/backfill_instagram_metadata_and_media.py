@@ -196,6 +196,7 @@ def main() -> int:
     stale_before = now_utc - timedelta(hours=max(1, int(args.metadata_stale_hours)))
     rows = _load_candidate_rows(weeks=args.weeks, limit=args.limit)
     commit_batch_size = max(1, int(getattr(args, "commit_batch_size", 100)))
+    source_scope = social_repo.normalize_source_scope(args.source_scope)
 
     counters = BackfillCounters()
     context_cache: dict[str, social_repo.SeasonContext] = {}
@@ -213,25 +214,25 @@ def main() -> int:
         for row in rows:
             counters.scanned += 1
             season_id = str(row.get("season_id") or "").strip()
-            if not season_id:
-                continue
-            context = context_cache.get(season_id)
-            if context is None:
-                try:
-                    context = social_repo.get_season_context(season_id)
-                except Exception:
-                    continue
-                context_cache[season_id] = context
-                try:
-                    season_windows, _ = social_repo._resolve_week_windows(  # noqa: SLF001
-                        context,
-                        timezone="America/New_York",
-                        source_scope=args.source_scope,
-                        now_utc=now_utc,
-                    )
-                except Exception:
-                    season_windows = []
-                windows_cache[season_id] = season_windows
+            context = None
+            if season_id:
+                context = context_cache.get(season_id)
+                if context is None:
+                    try:
+                        context = social_repo.get_season_context(season_id)
+                    except Exception:
+                        continue
+                    context_cache[season_id] = context
+                    try:
+                        season_windows, _ = social_repo._resolve_week_windows(  # noqa: SLF001
+                            context,
+                            timezone="America/New_York",
+                            source_scope=source_scope,
+                            now_utc=now_utc,
+                        )
+                    except Exception:
+                        season_windows = []
+                    windows_cache[season_id] = season_windows
 
             needs_metadata = _metadata_is_missing_or_stale(row, stale_before=stale_before)
             needs_mirror = _mirror_is_missing(row)
@@ -279,7 +280,7 @@ def main() -> int:
                             context,
                             platform="instagram",
                             run_id=None,
-                            source_scope=args.source_scope,
+                            source_scope=source_scope,
                             account=str(row.get("source_account") or row.get("username") or ""),
                             post_row=upserted_row,
                             week_index=week_index,
@@ -318,6 +319,8 @@ def main() -> int:
         json.dumps(
             {
                 "scanned": counters.scanned,
+                "source_scope": args.source_scope,
+                "effective_source_scope": source_scope,
                 "enriched": counters.enriched,
                 "mirrored": counters.mirrored,
                 "partial": counters.partial,

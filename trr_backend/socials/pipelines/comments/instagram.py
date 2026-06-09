@@ -1000,12 +1000,9 @@ def _instagram_social_account_incomplete_comment_target_shortcodes(
           or ({reply_depth_expr}) > 0
         )
     """
-    reported_comments_expr = _instagram_fetchable_comments_sql("p")
+    reported_comments_expr = _instagram_reported_comments_sql("p")
     facebook_comments_expr = _instagram_external_facebook_comments_sql("p")
-    catalog_reported_comments_expr = _instagram_fetchable_comments_sql(
-        "p",
-        fb_comment_count_expr="null::text",
-    )
+    catalog_reported_comments_expr = _instagram_reported_comments_sql("p")
     catalog_facebook_comments_expr = "0"
     accounted_comments_sql = (
         "coalesce(saved_comment_counts.saved_parent_comments, 0) + "
@@ -1082,7 +1079,7 @@ def _instagram_social_account_incomplete_comment_target_shortcodes(
           from social.instagram_posts p
           where {owner_match_clause}
             and nullif(p.shortcode, '') is not null
-            and coalesce(p.comments_count, 0) > 0
+            and {reported_comments_expr} > 0
         ),
         {collaborator_rows_sql}
         {deduped_rows_sql}
@@ -1294,6 +1291,14 @@ def _instagram_comments_profile_shard_count(target_count: int) -> int:
     return min(requested, target_count)
 
 
+def _normalize_instagram_comments_worker_count(value: Any, *, target_count: int | None = None) -> int | None:
+    requested = _normalize_non_negative_int(value)
+    if requested <= 0:
+        return None
+    effective_target_count = max(1, int(target_count or requested))
+    return min(max(1, requested), min(24, effective_target_count))
+
+
 def _instagram_comments_job_max_attempts(config: Mapping[str, Any] | None = None) -> int:
     raw_value = None
     if config is not None:
@@ -1320,6 +1325,8 @@ def _instagram_comments_recommended_shard_count(
         return 1
     if db_pressure_high or modal_pending_jobs >= 25:
         return min(2, target_count)
+    if target_count >= 1000:
+        return min(8, target_count)
     if target_count >= 300:
         return min(4, target_count)
     if target_count >= 100:
@@ -1540,6 +1547,7 @@ def start_social_account_comments_scrape(
     dispatch_immediately: bool = True,
     skip_launch_auth_probe: bool = False,
     target_source_ids: Sequence[Any] | None = None,
+    comments_worker_count: int | None = None,
 ) -> dict[str, Any]:
     _sync_core_overrides()
     normalized_platform = _normalize_social_account_profile_platform(platform)
@@ -1723,8 +1731,13 @@ def start_social_account_comments_scrape(
             recommended_comments_shard_count = _instagram_comments_recommended_shard_count(
                 target_count=target_source_ids_count
             )
+            requested_comments_worker_count = _normalize_instagram_comments_worker_count(
+                comments_worker_count,
+                target_count=target_source_ids_count,
+            )
             default_comments_shard_count = (
-                _instagram_comments_profile_shard_count(target_source_ids_count) if normalized_mode == "profile" else 1
+                requested_comments_worker_count
+                or (_instagram_comments_profile_shard_count(target_source_ids_count) if normalized_mode == "profile" else 1)
             )
             comments_shard_count = (
                 1
@@ -1778,6 +1791,7 @@ def start_social_account_comments_scrape(
                     else normalized_max_comments_per_post
                 ),
                 "comments_enable_media_followups": bool(comments_enable_media_followups),
+                "comments_worker_count": requested_comments_worker_count,
                 "launch_group_id": str(launch_group_id or "").strip() or None,
                 "required_worker_lane": required_worker_lane,
                 "required_execution_backend": required_execution_backend,
@@ -1895,6 +1909,7 @@ def start_social_account_comments_scrape(
                     "target_source_ids_count": target_source_ids_count,
                 },
                 "comments_enable_media_followups": bool(comments_enable_media_followups),
+                "comments_worker_count": requested_comments_worker_count,
                 "launch_group_id": str(launch_group_id or "").strip() or None,
                 "required_worker_lane": required_worker_lane,
                 "required_execution_backend": required_execution_backend,
@@ -2085,18 +2100,12 @@ def rebalance_failed_instagram_comments_shard(
         if str(item or "").strip()
     ]
     if not remaining_targets:
-        original_targets = [
-            str(item or "").strip()
-            for item in (config.get("target_source_ids") or metadata.get("target_source_ids") or [])
-            if str(item or "").strip()
-        ]
-        processed_posts = max(
-            _normalize_non_negative_int(_metadata_dict(metadata.get("stage_counters")).get("posts")),
-            _normalize_non_negative_int(_metadata_dict(metadata.get("activity")).get("posts_checked")),
+        remaining_targets = _comments_job_remaining_target_source_ids(
+            row=row,
+            config=config,
+            metadata=metadata,
+            require_items_found_for_progress=True,
         )
-        if _normalize_non_negative_int(row.get("items_found")) <= 0:
-            processed_posts = 0
-        remaining_targets = original_targets[processed_posts:]
     if not remaining_targets:
         return {"created_job_ids": [], "reason": "no_remaining_targets"}
     safe_max_retry_shard_size = max(1, int(max_retry_shard_size or 10))
@@ -2131,6 +2140,63 @@ def rebalance_failed_instagram_comments_shard(
             )
         )
     return {"created_job_ids": created_job_ids, "retry_group_id": retry_group_id}
+
+
+def _comments_job_target_source_ids(
+    *,
+    config: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+) -> list[str]:
+    return [
+        str(item or "").strip()
+        for item in (config.get("target_source_ids") or metadata.get("target_source_ids") or [])
+        if str(item or "").strip()
+    ]
+
+
+def _comments_job_processed_post_count(
+    *,
+    row: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+    require_items_found_for_progress: bool = False,
+) -> int:
+    stage_counters = _metadata_dict(metadata.get("stage_counters"))
+    cumulative_counters = _metadata_dict(metadata.get("cumulative_counters"))
+    activity = _metadata_dict(metadata.get("activity"))
+    processed_posts = max(
+        _normalize_non_negative_int(stage_counters.get("posts"))
+        + _normalize_non_negative_int(cumulative_counters.get("posts")),
+        _normalize_non_negative_int(activity.get("posts_checked")),
+        _normalize_non_negative_int(activity.get("matched_posts")),
+        _normalize_non_negative_int(activity.get("saved_posts")),
+    )
+    if require_items_found_for_progress and _normalize_non_negative_int(row.get("items_found")) <= 0:
+        return 0
+    return processed_posts
+
+
+def _comments_job_remaining_target_source_ids(
+    *,
+    row: Mapping[str, Any],
+    config: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+    require_items_found_for_progress: bool = False,
+) -> list[str]:
+    retry_rebalance = _metadata_dict(metadata.get("retry_rebalance"))
+    retry_targets = [
+        str(item or "").strip()
+        for item in retry_rebalance.get("remaining_target_source_ids") or []
+        if str(item or "").strip()
+    ]
+    if retry_targets:
+        return retry_targets
+    original_targets = _comments_job_target_source_ids(config=config, metadata=metadata)
+    processed_posts = _comments_job_processed_post_count(
+        row=row,
+        metadata=metadata,
+        require_items_found_for_progress=require_items_found_for_progress,
+    )
+    return original_targets[min(processed_posts, len(original_targets)) :]
 
 
 def repair_instagram_comments_scrape_run_target_gaps(
@@ -2241,6 +2307,185 @@ def repair_instagram_comments_scrape_run_target_gaps(
     }
 
 
+def _comments_slow_shard_rebalance_enabled() -> bool:
+    return str(os.getenv("SOCIAL_INSTAGRAM_COMMENTS_SLOW_SHARD_REBALANCE_ENABLED", "1")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def rebalance_slow_instagram_comments_shards(
+    *,
+    run_id: str,
+    max_retry_shard_size: int = 75,
+    slow_elapsed_seconds: int | None = None,
+    slow_posts_per_minute: float | None = None,
+    min_remaining_targets: int | None = None,
+    max_rebalanced_shards: int | None = None,
+    dispatch_immediately: bool = True,
+) -> dict[str, Any]:
+    _sync_core_overrides()
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id:
+        return {"created_job_ids": [], "reason": "run_id_required"}
+    if not _comments_slow_shard_rebalance_enabled():
+        return {"created_job_ids": [], "reason": "disabled"}
+
+    safe_elapsed_seconds = max(
+        60,
+        int(slow_elapsed_seconds or os.getenv("SOCIAL_INSTAGRAM_COMMENTS_SLOW_SHARD_REBALANCE_SECONDS") or 900),
+    )
+    safe_posts_per_minute = float(
+        slow_posts_per_minute
+        if slow_posts_per_minute is not None
+        else os.getenv("SOCIAL_INSTAGRAM_COMMENTS_SLOW_SHARD_POSTS_PER_MINUTE") or 0.25
+    )
+    safe_min_remaining_targets = max(
+        1,
+        int(min_remaining_targets or os.getenv("SOCIAL_INSTAGRAM_COMMENTS_SLOW_SHARD_MIN_REMAINING_TARGETS") or 100),
+    )
+    safe_max_rebalanced_shards = max(
+        1,
+        int(max_rebalanced_shards or os.getenv("SOCIAL_INSTAGRAM_COMMENTS_SLOW_SHARD_MAX_REBALANCES_PER_RUN") or 2),
+    )
+    safe_max_retry_shard_size = max(1, int(max_retry_shard_size or 75))
+
+    rows = pg.fetch_all(
+        """
+        select
+          r.id::text as run_id,
+          r.source_scope,
+          r.initiated_by,
+          r.config as run_config,
+          j.id::text as job_id,
+          j.status,
+          j.config,
+          j.metadata,
+          j.items_found,
+          j.started_at,
+          j.created_at
+        from social.scrape_runs r
+        join social.scrape_jobs j on j.run_id = r.id
+        where r.id = %s::uuid
+          and r.status in ('queued', 'pending', 'retrying', 'running')
+          and j.status = 'running'
+          and coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type) = %s
+        order by j.started_at asc nulls last, j.created_at asc
+        """,
+        [normalized_run_id, INSTAGRAM_COMMENTS_SCRAPLING_STAGE],
+    )
+    created_job_ids: list[str] = []
+    rebalanced_sources: list[str] = []
+    rebalance_group_id = str(uuid4())
+    for row in rows:
+        if len(rebalanced_sources) >= safe_max_rebalanced_shards:
+            break
+        config = _metadata_dict(row.get("config"))
+        metadata = _metadata_dict(row.get("metadata"))
+        if config.get("comments_slow_rebalance") or metadata.get("comments_slow_rebalanced_at"):
+            continue
+        target_source_ids = [
+            str(item or "").strip() for item in config.get("target_source_ids") or [] if str(item or "").strip()
+        ]
+        if not target_source_ids:
+            continue
+        started_at = _coerce_dt(row.get("started_at") or row.get("created_at"))
+        if not isinstance(started_at, datetime):
+            continue
+        elapsed_seconds = max(1, int((_now_utc() - started_at).total_seconds()))
+        if elapsed_seconds < safe_elapsed_seconds:
+            continue
+        stage_counters = _metadata_dict(metadata.get("stage_counters"))
+        cumulative_counters = _metadata_dict(metadata.get("cumulative_counters"))
+        activity = _metadata_dict(metadata.get("activity"))
+        processed_posts = max(
+            _normalize_non_negative_int(stage_counters.get("posts"))
+            + _normalize_non_negative_int(cumulative_counters.get("posts")),
+            _normalize_non_negative_int(activity.get("posts_checked")),
+        )
+        posts_per_minute = (processed_posts * 60.0) / elapsed_seconds
+        if processed_posts > 0 and posts_per_minute > safe_posts_per_minute:
+            continue
+        remaining_targets = target_source_ids[min(processed_posts, len(target_source_ids)) :]
+        if len(remaining_targets) < safe_min_remaining_targets:
+            continue
+        retry_shard_count = max(1, (len(remaining_targets) + safe_max_retry_shard_size - 1) // safe_max_retry_shard_size)
+        chunks = _chunk_instagram_comment_targets(remaining_targets, retry_shard_count)
+        if not chunks:
+            continue
+
+        source_job_id = str(row.get("job_id") or "").strip()
+        original_shard_count = _normalize_non_negative_int(config.get("comments_shard_count")) or len(rows) or 1
+        effective_shard_count = original_shard_count + len(chunks)
+        pg.fetch_one(
+            """
+            update social.scrape_jobs
+            set
+              status = 'cancelled',
+              completed_at = now(),
+              error_message = coalesce(error_message, 'Automatically rebalanced slow comments shard'),
+              metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object(
+                'comments_slow_rebalanced_at', %s,
+                'comments_slow_rebalance_group_id', %s,
+                'comments_slow_rebalance_remaining_targets', %s,
+                'comments_slow_rebalance_elapsed_seconds', %s,
+                'comments_slow_rebalance_posts_per_minute', %s
+              )
+            where id = %s::uuid
+              and status = 'running'
+            returning id::text
+            """,
+            [
+                _iso(_now_utc()),
+                rebalance_group_id,
+                len(remaining_targets),
+                elapsed_seconds,
+                round(posts_per_minute, 4),
+                source_job_id,
+            ],
+        )
+        for index, chunk in enumerate(chunks, start=1):
+            retry_config = {
+                **config,
+                "target_source_ids": chunk,
+                "comments_slow_rebalance": True,
+                "comments_slow_rebalance_source_job_id": source_job_id,
+                "comments_slow_rebalance_group_id": rebalance_group_id,
+                "comments_slow_rebalance_index": index,
+                "comments_slow_rebalance_count": len(chunks),
+                "comments_shard_index": original_shard_count + index,
+                "comments_shard_count": effective_shard_count,
+                "comments_shard_target_count": len(chunk),
+            }
+            created_job_ids.append(
+                _create_job(
+                    None,
+                    run_id=normalized_run_id,
+                    platform="instagram",
+                    source_scope=str(row.get("source_scope") or config.get("source_scope") or "network"),
+                    job_type="comments",
+                    stage=INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+                    config=retry_config,
+                    initiated_by=str(row.get("initiated_by") or "") or None,
+                    status="queued",
+                    priority=109,
+                    max_attempts=_instagram_comments_job_max_attempts(retry_config),
+                )
+            )
+        rebalanced_sources.append(source_job_id)
+
+    if dispatch_immediately and created_job_ids:
+        dispatch_due_social_jobs(run_id=normalized_run_id)
+    return {
+        "created_job_ids": created_job_ids,
+        "created_job_count": len(created_job_ids),
+        "rebalanced_source_job_ids": rebalanced_sources,
+        "rebalance_group_id": rebalance_group_id if created_job_ids else None,
+    }
+
+
 def _comments_progress_count_map(value: Any) -> dict[str, int]:
     if not isinstance(value, Mapping):
         return {}
@@ -2321,6 +2566,7 @@ def _build_comments_scrape_run_progress_payload(
     total_jobs = len(rows)
     active_jobs = 0
     queued_jobs = 0
+    retrying_jobs = 0
     completed_jobs = 0
     failed_jobs = 0
     cancelled_jobs = 0
@@ -2379,12 +2625,13 @@ def _build_comments_scrape_run_progress_payload(
             completed_jobs += 1
         elif status == "cancelled":
             cancelled_jobs += 1
-            failed_jobs += 1
         elif status == "failed":
             failed_jobs += 1
         elif status in {"queued", "pending", "retrying", "cancelling", "running"}:
-            if status in {"queued", "pending", "retrying"}:
+            if status in {"queued", "pending"}:
                 queued_jobs += 1
+            if status == "retrying":
+                retrying_jobs += 1
             if status == "running":
                 active_jobs += 1
 
@@ -2603,6 +2850,8 @@ def _build_comments_scrape_run_progress_payload(
     if raw_run_status != "cancelled":
         if active_jobs > 0:
             effective_run_status = "running"
+        elif retrying_jobs > 0:
+            effective_run_status = "retrying"
         elif queued_jobs > 0:
             effective_run_status = "queued"
         elif total_jobs > 0 and (failed_jobs > 0 or failed_remaining_targets > 0):
@@ -2631,7 +2880,11 @@ def _build_comments_scrape_run_progress_payload(
         "total_jobs": total_jobs,
         "completed_jobs": completed_jobs,
         "failed_jobs": failed_jobs,
-        "active_jobs": active_jobs + queued_jobs,
+        "cancelled_jobs": cancelled_jobs,
+        "active_jobs": active_jobs + queued_jobs + retrying_jobs,
+        "running_jobs": active_jobs,
+        "queued_jobs": queued_jobs,
+        "retrying_jobs": retrying_jobs,
         "items_found_total": items_found_total,
         "comments_processed_total": comments_processed_total,
         "comments_upserted_total": comments_upserted_total,
@@ -2676,7 +2929,7 @@ def _build_comments_scrape_run_progress_payload(
     probe_advisory_continue = _metadata_truthy(latest_comments_endpoint_probe.get("advisory_continue"))
     run_has_active_progress = (
         effective_run_status in {"queued", "pending", "retrying", "running"}
-        and active_jobs + queued_jobs > 0
+        and active_jobs + queued_jobs + retrying_jobs > 0
         and (
             items_found_total > 0 or comments_processed_total > 0 or comments_upserted_total > 0 or completed_posts > 0
         )
@@ -2750,7 +3003,9 @@ def _build_comments_scrape_run_progress_payload(
         or _instagram_comments_recommended_shard_count(target_count=target_source_ids_count),
         "active_comment_jobs": active_jobs,
         "queued_comment_jobs": queued_jobs,
+        "retrying_comment_jobs": retrying_jobs,
         "completed_comment_jobs": completed_jobs,
+        "cancelled_comment_jobs": cancelled_jobs,
         "failed_comment_jobs": failed_jobs,
         "post_progress": post_progress,
         "throughput": {
@@ -2782,9 +3037,22 @@ def get_social_account_comments_scrape_run_progress(
     platform: str,
     account_handle: str,
     run_id: str,
+    auto_rebalance_slow_shards: bool = False,
 ) -> dict[str, Any]:
     normalized_platform = _normalize_social_account_profile_platform(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
+    auto_rebalance_payload: dict[str, Any] | None = None
+    if auto_rebalance_slow_shards:
+        try:
+            auto_rebalance_payload = rebalance_slow_instagram_comments_shards(run_id=run_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Instagram comments slow-shard rebalance check failed: run_id=%s error=%s",
+                run_id,
+                exc,
+                exc_info=True,
+            )
+            auto_rebalance_payload = {"created_job_ids": [], "error": str(exc)}
     rows = pg.fetch_all(
         """
         select
@@ -2838,11 +3106,135 @@ def get_social_account_comments_scrape_run_progress(
     )
     if not rows:
         raise LookupError("Comments scrape run not found.")
-    return _build_comments_scrape_run_progress_payload(
+    payload = _build_comments_scrape_run_progress_payload(
         rows=rows,
         platform=normalized_platform,
         account_handle=normalized_account,
     )
+    if auto_rebalance_payload:
+        payload["auto_rebalance"] = auto_rebalance_payload
+    return payload
+
+
+def resume_social_account_comments_run(
+    *,
+    platform: str,
+    account_handle: str,
+    run_id: str,
+    initiated_by: str | None = None,
+) -> dict[str, Any]:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    normalized_run_id = str(run_id or "").strip()
+    if normalized_platform != "instagram":
+        raise SocialIngestValidationError(
+            "SOCIAL_ACCOUNT_COMMENTS_UNSUPPORTED_PLATFORM",
+            "Standalone comments scraping is currently only supported for Instagram.",
+        )
+    if not normalized_run_id:
+        raise LookupError("Comments scrape run not found.")
+    rows = pg.fetch_all(
+        """
+        select
+          r.id::text as run_id,
+          r.status as run_status,
+          r.source_scope,
+          r.initiated_by,
+          r.config as run_config,
+          j.id::text as job_id,
+          j.status as job_status,
+          j.items_found,
+          j.config,
+          j.metadata,
+          j.created_at as job_created_at
+        from social.scrape_runs r
+        join social.scrape_jobs j on j.run_id = r.id
+        where r.id = %s::uuid
+          and j.platform = %s
+          and coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type) = %s
+          and ltrim(lower(coalesce(j.config->>'account', j.metadata->>'account', '')), '@') = %s
+        order by j.created_at asc, j.id asc
+        """,
+        [normalized_run_id, normalized_platform, INSTAGRAM_COMMENTS_SCRAPLING_STAGE, normalized_account],
+    )
+    if not rows:
+        raise LookupError("Comments scrape run not found.")
+    run_status = str(rows[0].get("run_status") or "").strip().lower()
+    if _status_is_active(run_status):
+        raise SocialIngestConflictError(
+            "SOCIAL_ACCOUNT_COMMENTS_RUN_ALREADY_ACTIVE",
+            f"Comments scrape run {normalized_run_id} is still active for @{normalized_account}.",
+            detail={
+                "run_id": normalized_run_id,
+                "platform": normalized_platform,
+                "account_handle": normalized_account,
+                "status": run_status,
+            },
+        )
+
+    remaining_target_source_ids: list[str] = []
+    original_target_count = 0
+    processed_target_count = 0
+    for row in rows:
+        config = _metadata_dict(row.get("config"))
+        metadata = _metadata_dict(row.get("metadata"))
+        original_targets = _comments_job_target_source_ids(config=config, metadata=metadata)
+        processed_posts = min(
+            _comments_job_processed_post_count(row=row, metadata=metadata),
+            len(original_targets),
+        )
+        original_target_count += len(original_targets)
+        processed_target_count += processed_posts
+        remaining_target_source_ids.extend(
+            _comments_job_remaining_target_source_ids(
+                row=row,
+                config=config,
+                metadata=metadata,
+            )
+        )
+    remaining_target_source_ids = list(dict.fromkeys(remaining_target_source_ids))
+    if not remaining_target_source_ids:
+        return {
+            "run_id": None,
+            "resumed_from_run_id": normalized_run_id,
+            "status": "no_work",
+            "accepted": False,
+            "remaining_target_source_ids_count": 0,
+            "processed_target_source_ids_count": processed_target_count,
+            "original_target_source_ids_count": original_target_count,
+        }
+
+    run_config = _metadata_dict(rows[0].get("run_config"))
+    normalized_mode = str(run_config.get("mode") or "profile").strip().lower() or "profile"
+    source_scope = str(rows[0].get("source_scope") or run_config.get("source_scope") or "network").strip() or "network"
+    payload = start_social_account_comments_scrape(
+        normalized_platform,
+        normalized_account,
+        mode=normalized_mode,
+        source_scope=source_scope,
+        source_id=remaining_target_source_ids[0] if normalized_mode == "single_post" else None,
+        max_posts=None,
+        max_comments_per_post=_normalize_non_negative_int(run_config.get("max_comments_per_post")) or None,
+        refresh_policy=str(run_config.get("refresh_policy") or "stale_or_missing"),
+        target_filter=run_config.get("target_filter"),
+        comments_load_strategy=str(run_config.get("comments_load_strategy") or "cursor_api"),
+        initiated_by=initiated_by or str(rows[0].get("initiated_by") or "").strip() or "resume_comments_run",
+        allow_local_dev_inline_bypass=bool(run_config.get("allow_local_dev_inline_bypass")),
+        comments_enable_media_followups=bool(run_config.get("comments_enable_media_followups")),
+        launch_group_id=str(run_config.get("launch_group_id") or "").strip() or None,
+        target_source_ids=remaining_target_source_ids,
+        comments_worker_count=_normalize_non_negative_int(run_config.get("comments_worker_count")) or None,
+    )
+    payload.update(
+        {
+            "resumed_from_run_id": normalized_run_id,
+            "remaining_target_source_ids_count": len(remaining_target_source_ids),
+            "processed_target_source_ids_count": processed_target_count,
+            "original_target_source_ids_count": original_target_count,
+            "accepted": True,
+        }
+    )
+    return payload
 
 
 def cancel_social_account_comments_run(
@@ -2919,6 +3311,77 @@ def cancel_social_account_comments_run(
     }
 
 
+def cancel_social_account_comments_job(
+    *,
+    platform: str,
+    account_handle: str,
+    run_id: str,
+    job_id: str,
+    cancelled_by: str | None = None,
+    conn: Any | None = None,
+) -> dict[str, Any]:
+    run_row = _load_social_account_comments_run_row(
+        platform=platform,
+        account_handle=account_handle,
+        run_id=run_id,
+        conn=conn,
+    )
+    normalized_run_id = str(run_row.get("id") or "").strip()
+    normalized_job_id = str(job_id or "").strip()
+    if not normalized_run_id or not normalized_job_id:
+        raise LookupError("Comments job not found.")
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    cancel_requested_at = _now_utc()
+    cancelled_job = pg.fetch_one(
+        """
+        update social.scrape_jobs
+        set
+          status = 'cancelled',
+          completed_at = now(),
+          error_message = coalesce(error_message, 'Cancelled by user request'),
+          metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object(
+            'cancel_reason', 'comments_shard_cancelled_by_admin',
+            'cancelled_by', %s,
+            'cancelled_at', %s
+          )
+        where id = %s::uuid
+          and run_id = %s::uuid
+          and platform = %s
+          and coalesce(config->>'stage', metadata->>'stage', job_type) = %s
+          and ltrim(lower(coalesce(config->>'account', metadata->>'account', '')), '@') = %s
+          and status in ('queued', 'pending', 'retrying', 'running', 'cancelling')
+        returning id::text as id, status
+        """,
+        [
+            cancelled_by,
+            _iso(cancel_requested_at),
+            normalized_job_id,
+            normalized_run_id,
+            normalized_platform,
+            INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+            normalized_account,
+        ],
+        conn=conn,
+    )
+    if not cancelled_job:
+        raise LookupError("Active comments job not found.")
+    _clear_worker_heartbeat_for_job(
+        job_id=normalized_job_id,
+        status="idle",
+        metadata={"source": "cancel_social_account_comments_job", "job_status": "cancelled"},
+    )
+    _update_run_summary(normalized_run_id, force_recompute=True, conn=conn)
+    _invalidate_queue_status_cache()
+    return {
+        "run_id": normalized_run_id,
+        "job_id": str(cancelled_job.get("id") or normalized_job_id),
+        "status": "cancelled",
+        "accepted": True,
+        "cancel_requested_at": _iso(cancel_requested_at),
+    }
+
+
 _LOCAL_ROOM_NAMES = {
     "_instagram_comments_stale_after_hours",
     "_instagram_comments_target_count_expr",
@@ -2947,11 +3410,14 @@ _LOCAL_ROOM_NAMES = {
     "_ensure_instagram_comments_auth_ready_for_launch",
     "start_social_account_comments_scrape",
     "preview_social_account_comments_scrape",
+    "rebalance_slow_instagram_comments_shards",
     "rebalance_failed_instagram_comments_shard",
     "repair_instagram_comments_scrape_run_target_gaps",
     "_build_comments_scrape_run_progress_payload",
     "get_social_account_comments_scrape_run_progress",
+    "resume_social_account_comments_run",
     "cancel_social_account_comments_run",
+    "cancel_social_account_comments_job",
 }
 _LOCAL_ROOM_FUNCTIONS = {_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES}
 _CORE_ROOM_WRAPPERS = {_name: getattr(_core, _name, None) for _name in _LOCAL_ROOM_NAMES}
@@ -2983,9 +3449,12 @@ __all__ = [
     "_ensure_instagram_comments_auth_ready_for_launch",
     "start_social_account_comments_scrape",
     "preview_social_account_comments_scrape",
+    "rebalance_slow_instagram_comments_shards",
     "rebalance_failed_instagram_comments_shard",
     "repair_instagram_comments_scrape_run_target_gaps",
     "_build_comments_scrape_run_progress_payload",
     "get_social_account_comments_scrape_run_progress",
+    "resume_social_account_comments_run",
     "cancel_social_account_comments_run",
+    "cancel_social_account_comments_job",
 ]

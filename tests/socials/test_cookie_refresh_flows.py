@@ -403,6 +403,7 @@ def test_instagram_cookie_refresh_rejects_unvalidated_graphql_session(monkeypatc
     writes: list[Path] = []
     imported_sessions: list[object] = []
     monkeypatch.setenv("SOCIAL_AUTH_CHROME_PROFILE", "missing-test-profile")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_CHROME_PROFILE", "missing-test-profile")
     monkeypatch.setenv("SOCIAL_COOKIE_REFRESH_REQUIRE_CHROME_PROFILE", "false")
 
     class _FakePlaywrightTimeoutError(Exception):
@@ -506,6 +507,7 @@ def test_instagram_cookie_refresh_preserves_challenge_error_when_browser_close_f
     monkeypatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("SOCIAL_AUTH_CHROME_PROFILE", "missing-test-profile")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_CHROME_PROFILE", "missing-test-profile")
     monkeypatch.setenv("SOCIAL_COOKIE_REFRESH_REQUIRE_CHROME_PROFILE", "false")
 
     class _FakePlaywrightTimeoutError(Exception):
@@ -591,6 +593,7 @@ def test_instagram_cookie_refresh_schema_only_skips_graphql_validator(monkeypatc
     writes: list[tuple[Path, dict[str, str]]] = []
     imported_sessions: list[object] = []
     monkeypatch.setenv("SOCIAL_AUTH_CHROME_PROFILE", "missing-test-profile")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_CHROME_PROFILE", "missing-test-profile")
     monkeypatch.setenv("SOCIAL_COOKIE_REFRESH_REQUIRE_CHROME_PROFILE", "false")
 
     class _FakePlaywrightTimeoutError(Exception):
@@ -868,6 +871,45 @@ def test_interactive_instagram_login_rejects_saved_session_when_graphql_fails(
         )
 
     assert writes == []
+
+
+def test_instagram_saved_cookie_validation_uses_profile_posts_graphql(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeScraper:
+        last_retrieval_meta: dict[str, object] = {}
+
+        def __init__(self, *, cookies: dict[str, str], browser_account_id: str | None = None) -> None:
+            captured["cookies"] = dict(cookies)
+            captured["browser_account_id"] = browser_account_id
+
+        def fetch_posts_graphql(self, username: str, **kwargs: object) -> dict[str, object]:
+            captured["username"] = username
+            captured["kwargs"] = dict(kwargs)
+            return {
+                "data": {
+                    "xdt_api__v1__feed__user_timeline_graphql_connection": {
+                        "edges": [{"node": {"id": "1"}}],
+                    },
+                },
+            }
+
+    monkeypatch.setattr("trr_backend.socials.instagram.scraper.InstagramScraper", _FakeScraper)
+
+    valid, reason = instagram_cookie_refresh._validate_saved_cookies_via_graphql(  # noqa: SLF001
+        {"sessionid": "session", "csrftoken": "csrf", "ds_user_id": "123"},
+        validation_username="bravotv",
+        timeout_seconds=120,
+    )
+
+    assert valid is True
+    assert reason is None
+    assert captured["browser_account_id"] == "bravotv"
+    assert captured["username"] == "bravotv"
+    assert captured["kwargs"]["allow_browser_fallback"] is False
+    assert captured["kwargs"]["allow_recovery"] is False
 
 
 def test_interactive_instagram_login_launches_real_profile_directory(

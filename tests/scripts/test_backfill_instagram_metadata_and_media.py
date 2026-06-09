@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -167,6 +168,101 @@ def test_main_upserts_before_enqueuing_mirror_job(monkeypatch: pytest.MonkeyPatc
     assert mod.main() == 0
     assert upsert_calls == ["upsert"]
     assert enqueue_rows == [persisted_row]
+
+
+def test_main_enqueues_mirror_job_without_season_id(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    monkeypatch.setattr(mod, "load_env", lambda: None)
+    monkeypatch.setattr(
+        mod,
+        "_parse_args",
+        lambda: SimpleNamespace(
+            weeks=8,
+            limit=None,
+            source_scope="bravo",
+            metadata_stale_hours=168,
+            dry_run=False,
+        ),
+    )
+    monkeypatch.setattr(mod.social_repo, "ensure_media_mirror_s3_ready", lambda: None)
+    monkeypatch.setattr(
+        mod,
+        "_load_candidate_rows",
+        lambda **_: [
+            {
+                "id": "db-row-1",
+                "shortcode": "DZNIQIgEoNd",
+                "media_id": "mid-1",
+                "username": "bravotv",
+                "caption": "",
+                "media_type": "carousel",
+                "media_urls": ["https://src/media-1.jpg"],
+                "thumbnail_url": "https://src/thumb.jpg",
+                "likes": 0,
+                "comments_count": 0,
+                "views": 0,
+                "posted_at": datetime(2026, 6, 5, tzinfo=UTC),
+                "raw_data": {},
+                "source_account": "bravotv",
+                "show_id": None,
+                "season_id": None,
+                "post_format": "carousel",
+                "profile_tags": [],
+                "collaborators": [],
+                "hashtags": ["TheMcBeeDynasty"],
+                "mentions": [],
+                "duration_seconds": None,
+                "metadata_source": "api_permalink",
+                "metadata_scraped_at": datetime(2026, 6, 5, tzinfo=UTC),
+                "metadata_error": None,
+                "metadata_last_attempted_at": None,
+                "metadata_last_failed_at": None,
+                "metadata_consecutive_failures": 0,
+                "hosted_thumbnail_url": "",
+                "hosted_media_urls": [],
+                "media_mirror_status": "",
+                "media_mirror_error": None,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        mod.social_repo,
+        "get_season_context",
+        lambda *_args, **_kwargs: pytest.fail("season context should not be required"),
+    )
+    monkeypatch.setattr(
+        mod.social_repo,
+        "_resolve_week_windows",
+        lambda *_args, **_kwargs: pytest.fail("season windows should not be resolved without a season"),
+    )
+    monkeypatch.setattr(mod.social_repo, "_load_instagram_cookies", lambda: {"sessionid": "cookie"})
+    monkeypatch.setattr(mod.social_repo, "_enrich_instagram_post_from_permalink", lambda **_kwargs: None)
+    monkeypatch.setattr(mod.pg, "db_connection", lambda **_kwargs: _ConnContext())
+
+    persisted_row = {"id": "persisted-row-1", "shortcode": "DZNIQIgEoNd"}
+    upsert_contexts: list[object] = []
+    enqueue_calls: list[dict[str, object]] = []
+
+    def _fake_upsert(*args, **kwargs):
+        upsert_contexts.append(args[0])
+        return persisted_row
+
+    def _fake_enqueue(*args, **kwargs):
+        enqueue_calls.append({"context": args[0], **kwargs})
+        return "mirror-job-1"
+
+    monkeypatch.setattr(mod.social_repo, "_upsert_instagram_post", _fake_upsert)
+    monkeypatch.setattr(mod.social_repo, "_enqueue_platform_media_mirror_job", _fake_enqueue)
+
+    assert mod.main() == 0
+
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["source_scope"] == "bravo"
+    assert payload["effective_source_scope"] == "network"
+    assert payload["mirror_jobs_enqueued"] == 1
+    assert upsert_contexts == [None]
+    assert enqueue_calls[0]["context"] is None
+    assert enqueue_calls[0]["source_scope"] == "network"
+    assert enqueue_calls[0]["week_index"] is None
 
 
 def test_main_preserves_existing_reel_classification_on_weak_refresh(

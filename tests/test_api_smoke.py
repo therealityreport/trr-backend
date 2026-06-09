@@ -7,12 +7,14 @@ For integration tests against Supabase, see test_api_integration.py.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
 
 from api import deps
+from api import main as api_main
 from api.main import app
 from api.routers import shows as shows_router
 from api.routers import surveys as surveys_router
@@ -92,12 +94,62 @@ class TestHealthEndpoints:
         assert data["status"] == "ok"
         assert data["service"] == "trr-backend"
 
-    def test_health_returns_healthy(self, client: TestClient):
-        """Health endpoint returns healthy status."""
+    def test_health_live_returns_alive_without_database(self, client: TestClient):
+        """Liveness does not require database readiness."""
+        response = client.get("/health/live")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "alive"
+        assert data["service"] == "trr-backend"
+
+    def test_health_readiness_returns_healthy_when_database_reachable(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Readiness returns healthy status when the database can be reached."""
+
+        @contextmanager
+        def _healthy_read_connection(**_kwargs):
+            conn = MagicMock()
+            yield conn
+
+        monkeypatch.setattr(api_main.pg, "db_read_connection", _healthy_read_connection)
+
         response = client.get("/health")
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "healthy"
+        assert data["service"] == "trr-backend"
+        assert data["database"] == "connected"
+
+    def test_health_readiness_degrades_when_database_is_unavailable(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Readiness returns a safe degraded response when DB config is missing."""
+
+        def _unavailable_read_connection(**_kwargs):
+            raise api_main.DatabaseServiceUnavailableError(
+                "Database pool initialization failed: no database URL candidates available",
+                reason="database_configuration",
+            )
+
+        monkeypatch.setattr(api_main.pg, "db_read_connection", _unavailable_read_connection)
+
+        response = client.get("/health")
+        assert response.status_code == 503
+        data = response.json()
+        assert data["status"] == "degraded"
+        assert data["service"] == "trr-backend"
+        assert data["database"] == "unreachable"
+        assert data["reason"] == "database_configuration"
+        assert data["retryable"] is True
+        assert data["retry_after_ms"] == 1000
+        assert "TRR_DB_URL" in data["message"]
+        assert "postgres://" not in str(data)
+        assert "postgresql://" not in str(data)
 
 
 class TestShowsEndpoints:

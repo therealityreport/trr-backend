@@ -147,6 +147,7 @@ def test_modal_dispatch_config_exposes_comments_lane_contract(monkeypatch: pytes
     monkeypatch.setattr(modal_dispatch, "modal_social_posts_job_function_name", lambda: "run_social_posts_job")
     monkeypatch.setattr(modal_dispatch, "modal_social_media_job_function_name", lambda: "run_social_media_job")
     monkeypatch.setattr(modal_dispatch, "modal_social_comments_job_function_name", lambda: "run_social_comments_job")
+    monkeypatch.setattr(modal_dispatch, "modal_cast_screentime_function_name", lambda: "run_cast_screentime_analysis")
 
     config = modal_dispatch.modal_dispatch_config()
 
@@ -158,6 +159,7 @@ def test_modal_dispatch_config_exposes_comments_lane_contract(monkeypatch: pytes
         "run_social_media_job",
         "run_social_comments_job",
     ]
+    assert config["cast_screentime_function"] == "run_cast_screentime_analysis"
     assert config["social_job_function_names"] == [
         "run_social_job",
         "run_social_posts_job",
@@ -179,6 +181,24 @@ def test_dispatch_social_job_uses_stage_specific_function(monkeypatch: pytest.Mo
 
     assert captured["function_name"] == "run_social_comments_job"
     assert captured["kwargs"] == {"job_id": "job-1"}
+
+
+def test_dispatch_cast_screentime_run_uses_cast_function(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_spawn_named_modal_function(**kwargs):
+        captured.update(kwargs)
+        return {"dispatched": True, "call_id": "fc-123"}
+
+    monkeypatch.setattr(modal_dispatch, "_spawn_named_modal_function", _fake_spawn_named_modal_function)
+
+    result = modal_dispatch.dispatch_cast_screentime_run(run_id="run-123")
+
+    assert result == {"dispatched": True, "call_id": "fc-123"}
+    assert captured["function_name"] == "run_cast_screentime_analysis"
+    assert captured["log_label"] == "cast screentime"
+    assert captured["dispatcher_name"] == "cast-screentime"
+    assert captured["kwargs"] == {"run_id": "run-123"}
 
 
 def test_dispatch_socialblade_scrape_passes_platform_and_following_sidecar(
@@ -335,7 +355,7 @@ def test_resolve_modal_function_classifies_missing_function(monkeypatch: pytest.
     assert payload["app_name"] == "trr-backend-jobs"
 
 
-def test_resolve_modal_function_hydrates_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_modal_function_skips_hydrate_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     hydrated = {"called": False}
 
     class _FakeHandle:
@@ -356,6 +376,33 @@ def test_resolve_modal_function_hydrates_when_available(monkeypatch: pytest.Monk
 
     assert payload["resolved"] is True
     assert payload["reason"] is None
+    assert payload["hydrated"] is False
+    assert hydrated["called"] is False
+
+
+def test_resolve_modal_function_hydrates_when_opted_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    hydrated = {"called": False}
+
+    class _FakeHandle:
+        def hydrate(self) -> None:
+            hydrated["called"] = True
+
+    fake_modal = types.SimpleNamespace(
+        Function=types.SimpleNamespace(
+            from_name=lambda _app_name, _function_name: _FakeHandle(),
+        )
+    )
+
+    monkeypatch.setenv("TRR_MODAL_RESOLVE_HYDRATE", "1")
+    monkeypatch.setattr(modal_dispatch, "modal_dispatch_ready", lambda *, function_name: (True, None))
+    monkeypatch.setattr(modal_dispatch, "modal_app_name", lambda: "trr-backend-jobs")
+    monkeypatch.setitem(sys.modules, "modal", fake_modal)
+
+    payload = modal_dispatch.resolve_modal_function("run_social_job")
+
+    assert payload["resolved"] is True
+    assert payload["reason"] is None
+    assert payload["hydrated"] is True
     assert hydrated["called"] is True
 
 

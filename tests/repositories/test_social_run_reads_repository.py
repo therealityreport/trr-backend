@@ -124,7 +124,7 @@ def test_list_runs_applies_filters_and_order(monkeypatch: pytest.MonkeyPatch) ->
     assert "and source_scope = %s" in sql
     assert "and id = %s::uuid" in sql
     assert "order by created_at desc limit %s" in sql
-    assert params == ["season-1", "completed", "bravo", "123e4567-e89b-12d3-a456-426614174000", 25]
+    assert params == ["season-1", "completed", "network", "123e4567-e89b-12d3-a456-426614174000", 25]
 
 
 def test_list_runs_filters_by_scope_config_fields(monkeypatch: pytest.MonkeyPatch) -> None:

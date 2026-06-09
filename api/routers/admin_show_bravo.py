@@ -60,6 +60,7 @@ _BRAVO_PREVIEW_SIGNATURE_VERSION = "v1"
 _BRAVO_VIDEO_THUMBNAIL_CONTEXT_SECTION = "bravo_video"
 _BRAVO_VIDEO_THUMBNAIL_CONTEXT_TYPE = "thumbnail"
 _BRAVO_VIDEO_THUMBNAIL_ASSET_NAME = "Bravo video thumbnail"
+_BRAVO_PROFILE_SOCIAL_SOURCE = "bravo_profile_social_links"
 _NBCUMV_SHOW_IMPORT_LIMIT = 500
 _CAST_ANNOUNCEMENT_RE = re.compile(
     r"\b(cast|friend\s*[- ]?of|full\s*[- ]?time|housewife|joins|joined|returning|returns)\b",
@@ -1620,6 +1621,14 @@ def _merge_source_value(field: Any, source: str, value: str | None) -> dict[str,
 
 
 _SOCIAL_PLATFORMS = {"instagram", "twitter", "facebook", "tiktok", "youtube"}
+_GENERIC_BRAVO_SOCIAL_HANDLES = {
+    "bravo",
+    "bravotv",
+    "bravowwhl",
+    "summerhouse",
+    "summerhousebravo",
+    "user",
+}
 
 
 def _normalize_social_handle(platform: str, value: str) -> str | None:
@@ -1742,6 +1751,149 @@ def _merge_external_ids_fill_missing(existing: Any, incoming: dict[str, str]) ->
     return out
 
 
+def _canonical_social_handle_for_source(platform: str, handle: str) -> str:
+    cleaned = handle.strip().lstrip("@")
+    if platform == "youtube" and handle.strip().startswith("@"):
+        return f"@{cleaned}"
+    return cleaned
+
+
+def _is_generic_bravo_social_handle(handle: str) -> bool:
+    normalized = handle.strip().lstrip("@").strip("/").lower()
+    return not normalized or normalized in _GENERIC_BRAVO_SOCIAL_HANDLES
+
+
+def _fetch_active_person_external_id(
+    db: SupabaseAdminClient,
+    *,
+    person_id: str | None = None,
+    source_id: str | None = None,
+    external_id: str | None = None,
+) -> dict[str, Any] | None:
+    query = db.schema("core").table("person_external_ids").select("id, person_id, source_id, external_id, valid_to")
+    if person_id:
+        query = query.eq("person_id", person_id)
+    if source_id:
+        query = query.eq("source_id", source_id)
+    if external_id:
+        query = query.eq("external_id", external_id)
+    response = query.is_("valid_to", "null").limit(1).execute()
+    if getattr(response, "error", None):
+        message = getattr(response.error, "message", str(response.error))
+        raise HTTPException(status_code=502, detail=f"Failed to read person external IDs: {message}")
+    rows = response.data or []
+    return rows[0] if rows else None
+
+
+def _persist_bravo_profile_social_sources(
+    db: SupabaseAdminClient,
+    *,
+    show_id: str,
+    person_id: str,
+    person_name: str | None,
+    social_links: dict[str, str],
+    actor: str,
+    season_number: int = 0,
+) -> dict[str, int]:
+    from api.routers import admin_show_links
+
+    stats = {
+        "canonical_inserted": 0,
+        "canonical_existing": 0,
+        "canonical_skipped_conflict": 0,
+        "canonical_skipped_existing_source": 0,
+        "entity_links_upserted": 0,
+        "skipped_generic": 0,
+    }
+    normalized = _normalize_social_external_ids(social_links)
+    for platform in sorted(_SOCIAL_PLATFORMS):
+        raw_handle = normalized.get(platform) or normalized.get(f"{platform}_id")
+        if not isinstance(raw_handle, str) or not raw_handle.strip():
+            continue
+        handle = _canonical_social_handle_for_source(platform, raw_handle)
+        if _is_generic_bravo_social_handle(handle):
+            stats["skipped_generic"] += 1
+            continue
+        social_url = _build_social_url(platform, handle)
+        if not social_url:
+            continue
+
+        existing_owner = _fetch_active_person_external_id(
+            db,
+            source_id=platform,
+            external_id=handle,
+        )
+        if existing_owner:
+            if str(existing_owner.get("person_id") or "") == person_id:
+                stats["canonical_existing"] += 1
+            else:
+                stats["canonical_skipped_conflict"] += 1
+                continue
+        else:
+            existing_for_person_source = _fetch_active_person_external_id(
+                db,
+                person_id=person_id,
+                source_id=platform,
+            )
+            if existing_for_person_source:
+                stats["canonical_skipped_existing_source"] += 1
+            else:
+                insert_response = (
+                    db.schema("core")
+                    .table("person_external_ids")
+                    .insert(
+                        {
+                            "person_id": person_id,
+                            "source_id": platform,
+                            "external_id": handle,
+                            "is_primary": True,
+                        }
+                    )
+                    .execute()
+                )
+                if getattr(insert_response, "error", None):
+                    message = getattr(insert_response.error, "message", str(insert_response.error))
+                    duplicate = "duplicate key value" in message.lower() or "already exists" in message.lower()
+                    if duplicate:
+                        stats["canonical_skipped_conflict"] += 1
+                        continue
+                    else:
+                        raise HTTPException(
+                            status_code=502,
+                            detail=f"Failed to persist {platform} external ID for person {person_id}: {message}",
+                        )
+                else:
+                    stats["canonical_inserted"] += 1
+
+        admin_show_links._upsert_link(
+            db,
+            show_id=show_id,
+            entity_type="person",
+            entity_id=person_id,
+            link_group="social",
+            link_kind=platform,
+            url=social_url,
+            label=(
+                f"{person_name} {platform.title()}"
+                if isinstance(person_name, str) and person_name.strip()
+                else f"Bravo profile {platform.title()}"
+            ),
+            season_number=max(0, int(season_number or 0)),
+            status="approved",
+            confidence=0.95,
+            source=_BRAVO_PROFILE_SOCIAL_SOURCE,
+            discovered_by=_BRAVO_PROFILE_SOCIAL_SOURCE,
+            metadata={
+                "source_url": "bravo_profile",
+                "source_platform": platform,
+                "source_handle": handle,
+            },
+            actor=actor,
+        )
+        stats["entity_links_upserted"] += 1
+    return stats
+
+
 def _persist_show_description(db: SupabaseAdminClient, show_id: str, description: str | None) -> None:
     if not isinstance(description, str) or not description.strip():
         return
@@ -1775,11 +1927,15 @@ def _persist_person_profile(
     db: SupabaseAdminClient,
     *,
     person_id: str,
+    show_id: str | None = None,
     person_url: str,
     bio: str | None,
     hero_image_url: str | None,
     social_links: dict[str, str],
     source: str = "bravo",
+    actor: str = "admin",
+    person_name: str | None = None,
+    season_number: int = 0,
 ) -> None:
     response = (
         db.schema("core")
@@ -1805,6 +1961,16 @@ def _persist_person_profile(
     update_resp = db.schema("core").table("people").update(payload).eq("id", person_id).execute()
     if getattr(update_resp, "error", None):
         raise HTTPException(status_code=502, detail=f"Failed to update person {person_id}")
+    if show_id and source == _BRAVO_SOURCE_ID and social_links:
+        _persist_bravo_profile_social_sources(
+            db,
+            show_id=show_id,
+            person_id=person_id,
+            person_name=person_name,
+            social_links=social_links,
+            actor=actor,
+            season_number=season_number,
+        )
 
 
 def _import_person_profile_image(
@@ -3892,10 +4058,14 @@ def commit_bravo_import(
         _persist_person_profile(
             db,
             person_id=person_id,
+            show_id=show_id_str,
             person_url=person_url,
             bio=person.get("bio") if isinstance(person.get("bio"), str) else None,
             hero_image_url=(person.get("hero_image_url") if isinstance(person.get("hero_image_url"), str) else None),
             social_links={str(k): str(v) for k, v in social_links.items() if isinstance(v, str)},
+            actor=actor,
+            person_name=person.get("name") if isinstance(person.get("name"), str) else None,
+            season_number=payload.season_number or 0,
         )
 
         hero_image_url = person.get("hero_image_url") if isinstance(person.get("hero_image_url"), str) else None
@@ -3928,10 +4098,14 @@ def commit_bravo_import(
                     _persist_person_profile(
                         db,
                         person_id=person_id,
+                        show_id=show_id_str,
                         person_url=person_url,
                         bio=person.get("bio") if isinstance(person.get("bio"), str) else None,
                         hero_image_url=hosted_profile_url.strip(),
                         social_links={str(k): str(v) for k, v in social_links.items() if isinstance(v, str)},
+                        actor=actor,
+                        person_name=person.get("name") if isinstance(person.get("name"), str) else None,
+                        season_number=payload.season_number or 0,
                     )
                     profile_image_promoted_by_person_id[person_id] = True
                 imported_person_images += int(person_import_result.get("imported") or 0)

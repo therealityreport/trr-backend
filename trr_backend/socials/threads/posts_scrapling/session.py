@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from trr_backend.socials.scrapling_transport import cookies_to_scrapling
+
 
 @dataclass(slots=True)
 class ThreadsPostsScraplingSession:
@@ -17,21 +19,7 @@ class ThreadsPostsScraplingSession:
 
 
 def _cookies_to_scrapling(cookies: dict[str, str]) -> list[dict[str, Any]]:
-    payload: list[dict[str, Any]] = []
-    for name, value in (cookies or {}).items():
-        cookie_name = str(name or "").strip()
-        cookie_value = str(value or "").strip()
-        if not (cookie_name and cookie_value):
-            continue
-        payload.append(
-            {
-                "name": cookie_name,
-                "value": cookie_value,
-                "domain": ".threads.com",
-                "path": "/",
-            }
-        )
-    return payload
+    return cookies_to_scrapling(cookies, ".threads.com")
 
 
 def _load_threads_cookies() -> dict[str, str]:

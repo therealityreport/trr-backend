@@ -7,13 +7,16 @@ Tests the broker abstraction, event types, and WebSocket endpoints.
 from __future__ import annotations
 
 import asyncio
+import sys
+from types import ModuleType
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
-from api.realtime.broker import InMemoryBroker
+from api.realtime import broker as broker_module
+from api.realtime.broker import InMemoryBroker, RedisBroker
 from api.realtime.events import (
     Event,
     EventType,
@@ -209,6 +212,151 @@ class TestInMemoryBrokerEphemeral:
             await broker.disconnect()
 
         _run_async(_test())
+
+
+class _FakePubSub:
+    def __init__(self) -> None:
+        self.subscribed: list[str] = []
+        self.unsubscribed: list[str] = []
+        self.closed = False
+
+    async def subscribe(self, room: str) -> None:
+        self.subscribed.append(room)
+
+    async def unsubscribe(self, room: str) -> None:
+        self.unsubscribed.append(room)
+
+    async def listen(self):
+        await asyncio.Event().wait()
+        if False:
+            yield {}
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class _FakeRedis:
+    def __init__(self, *, scan_keys: list[str] | None = None, ping_error: BaseException | None = None) -> None:
+        self.pubsub_instance = _FakePubSub()
+        self.scan_keys = scan_keys or []
+        self.scan_patterns: list[str] = []
+        self.ping_error = ping_error
+        self.closed = False
+        self.decode_responses: bool | None = None
+
+    async def ping(self) -> None:
+        if self.ping_error:
+            raise self.ping_error
+
+    def pubsub(self) -> _FakePubSub:
+        return self.pubsub_instance
+
+    async def publish(self, _room: str, _message: str) -> None:
+        return None
+
+    async def setex(self, _key: str, _ttl_seconds: int, _value: str) -> None:
+        return None
+
+    async def get(self, _key: str) -> str | None:
+        return None
+
+    async def delete(self, _key: str) -> None:
+        return None
+
+    async def scan_iter(self, *, match: str):
+        self.scan_patterns.append(match)
+        for key in self.scan_keys:
+            yield key
+
+    async def keys(self, _pattern: str):
+        raise AssertionError("RedisBroker must use scan_iter instead of keys")
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+def _install_fake_redis(monkeypatch: pytest.MonkeyPatch, fake: _FakeRedis) -> None:
+    redis_module = ModuleType("redis")
+    redis_asyncio_module = ModuleType("redis.asyncio")
+
+    def _from_url(_url: str, *, decode_responses: bool):
+        fake.decode_responses = decode_responses
+        return fake
+
+    redis_asyncio_module.from_url = _from_url  # type: ignore[attr-defined]
+    redis_module.asyncio = redis_asyncio_module  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "redis", redis_module)
+    monkeypatch.setitem(sys.modules, "redis.asyncio", redis_asyncio_module)
+
+
+class TestRedisBroker:
+    """Tests for Redis-backed broker behavior without a live Redis server."""
+
+    def test_connect_disconnect_and_pattern_lookup_uses_scan_iter(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = _FakeRedis(scan_keys=["typing:conv1:user1", "typing:conv1:user2"])
+        _install_fake_redis(monkeypatch, fake)
+
+        async def _test():
+            broker = RedisBroker("redis://user:secret@cache.example.com:6379/0")
+            await broker.connect()
+
+            status = broker.status()
+            assert status["connected"] is True
+            assert status["mode"] == "redis"
+            assert status["redis"] == {
+                "configured": True,
+                "scheme": "redis",
+                "host_class": "remote",
+                "port": 6379,
+            }
+            assert fake.decode_responses is True
+
+            keys = await broker.get_keys_by_pattern("typing:conv1:*")
+            assert keys == ["typing:conv1:user1", "typing:conv1:user2"]
+            assert fake.scan_patterns == ["typing:conv1:*"]
+
+            await broker.disconnect()
+            assert fake.closed is True
+            assert fake.pubsub_instance.closed is True
+            assert broker.status()["connected"] is False
+
+        _run_async(_test())
+
+    def test_connect_error_is_redacted_in_status(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = _FakeRedis(ping_error=OSError("cannot reach cache.example.com with password secret"))
+        _install_fake_redis(monkeypatch, fake)
+
+        async def _test():
+            broker = RedisBroker("redis://user:secret@cache.example.com:6379/0")
+            with pytest.raises(OSError):
+                await broker.connect()
+
+            status = broker.status()
+            assert status["connected"] is False
+            assert status["last_error"]["type"] == "OSError"
+            assert "cache.example.com" not in status["last_error"]["message"]
+            assert "secret" not in status["last_error"]["message"]
+            assert "<redis-host>" in status["last_error"]["message"]
+
+        _run_async(_test())
+
+    def test_broker_runtime_status_reports_multi_worker_policy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(broker_module, "_broker", None)
+        monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+        monkeypatch.setenv("TRR_BACKEND_WORKERS", "3")
+        monkeypatch.setenv("TRR_BACKEND_REQUIRE_REDIS_FOR_MULTI_WORKER", "1")
+
+        status = broker_module.broker_runtime_status()
+
+        assert status["initialized"] is False
+        assert status["mode"] == "redis"
+        assert status["redis"]["host_class"] == "local"
+        assert status["multi_worker_policy"] == {
+            "workers_requested": 3,
+            "require_redis_for_multi_worker": True,
+            "redis_url_configured": True,
+            "safe_for_multi_worker": True,
+        }
 
 
 # --- Event Tests ---

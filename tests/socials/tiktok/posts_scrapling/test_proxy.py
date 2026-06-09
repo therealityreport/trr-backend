@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 
 def test_select_tiktok_proxy_returns_none_when_no_env(monkeypatch):
     monkeypatch.delenv("SOCIAL_TIKTOK_POSTS_PROXY_URLS", raising=False)
@@ -11,25 +13,80 @@ def test_select_tiktok_proxy_returns_none_when_no_env(monkeypatch):
 
 
 def test_select_tiktok_proxy_explicit_url(monkeypatch):
-    monkeypatch.setenv("SOCIAL_TIKTOK_POSTS_PROXY_URLS", "http://user:pass@proxy:9090")
-    from trr_backend.socials.tiktok.posts_scrapling.proxy import select_tiktok_posts_proxy
+    from trr_backend.socials.tiktok.posts_scrapling import proxy
 
-    result = select_tiktok_posts_proxy()
+    calls: list[Any] = []
+
+    def fake_build_proxy_rotator(selected: Any) -> object:
+        calls.append(selected)
+        return {"rotator": selected}
+
+    monkeypatch.setenv("SOCIAL_TIKTOK_POSTS_PROXY_URLS", "http://user:pass@proxy:9090")
+    monkeypatch.setattr(proxy, "build_proxy_rotator", fake_build_proxy_rotator)
+
+    result = proxy.select_tiktok_posts_proxy()
     assert result is not None
+    assert result.browser_proxy == "http://user:pass@proxy:9090"
     assert result.api_proxy_url == "http://user:pass@proxy:9090"
+    assert result.proxy_rotator == {"rotator": "http://user:pass@proxy:9090"}
+    assert result.fingerprint == "proxy:9090:explicit"
+    assert calls == ["http://user:pass@proxy:9090"]
 
 
 def test_select_tiktok_proxy_decodo(monkeypatch):
+    from trr_backend.socials.tiktok.posts_scrapling import proxy
+
+    calls: list[Any] = []
+
+    def fake_build_proxy_rotator(selected: Any) -> object:
+        calls.append(selected)
+        return {"rotator": selected}
+
     monkeypatch.delenv("SOCIAL_TIKTOK_POSTS_PROXY_URLS", raising=False)
+    monkeypatch.setenv("SOCIAL_TIKTOK_POSTS_PROXY_PROVIDER", "decodo")
     monkeypatch.setenv("DECODO_USERNAME", "user1")
     monkeypatch.setenv("DECODO_PASSWORD", "secret")
     monkeypatch.setenv("DECODO_GATEWAY", "gate.decodo.com:7000")
-    from trr_backend.socials.tiktok.posts_scrapling.proxy import select_tiktok_posts_proxy
+    monkeypatch.delenv("SOCIAL_TIKTOK_POSTS_USE_STICKY_PROXY", raising=False)
+    monkeypatch.setattr(proxy, "build_proxy_rotator", fake_build_proxy_rotator)
 
-    result = select_tiktok_posts_proxy()
+    result = proxy.select_tiktok_posts_proxy()
     assert result is not None
     assert isinstance(result.browser_proxy, dict)
+    assert result.browser_proxy == {
+        "server": "http://gate.decodo.com:7000",
+        "username": "user1",
+        "password": "secret",
+    }
+    assert result.api_proxy_url == "http://user1:secret@gate.decodo.com:7000"
+    assert result.proxy_rotator == {"rotator": result.browser_proxy}
     assert result.fingerprint == "gate.decodo.com:7000:decodo"
+    assert result.session_mode == "rotating"
+    assert "-session-" not in result.browser_proxy["username"]
+    assert "sessionduration" not in result.api_proxy_url
+    assert calls == [result.browser_proxy]
+
+
+def test_select_tiktok_proxy_decodo_sticky_opt_in(monkeypatch):
+    from trr_backend.socials.tiktok.posts_scrapling import proxy
+
+    monkeypatch.delenv("SOCIAL_TIKTOK_POSTS_PROXY_URLS", raising=False)
+    monkeypatch.setenv("SOCIAL_TIKTOK_POSTS_PROXY_PROVIDER", "decodo")
+    monkeypatch.setenv("SOCIAL_TIKTOK_POSTS_USE_STICKY_PROXY", "true")
+    monkeypatch.setenv("SOCIAL_TIKTOK_POSTS_PROXY_SESSION_TTL_SECONDS", "600")
+    monkeypatch.setenv("DECODO_USERNAME", "user1")
+    monkeypatch.setenv("DECODO_PASSWORD", "secret")
+    monkeypatch.setenv("DECODO_GATEWAY", "gate.decodo.com:7000")
+    monkeypatch.setattr(proxy, "build_proxy_rotator", lambda selected: {"rotator": selected})
+
+    result = proxy.select_tiktok_posts_proxy(session_key="tiktok:posts:bravotv")
+
+    assert result is not None
+    assert isinstance(result.browser_proxy, dict)
+    assert result.session_mode == "sticky"
+    assert result.browser_proxy["username"].startswith("user1-session-")
+    assert "-sessionduration-10" in result.browser_proxy["username"]
+    assert "sessionduration-10" in result.api_proxy_url
 
 
 def test_resolve_tiktok_session_uses_canonical_loader(monkeypatch):

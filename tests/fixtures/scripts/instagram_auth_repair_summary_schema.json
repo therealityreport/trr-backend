@@ -1,0 +1,49 @@
+{
+  "type": "object",
+  "required": [
+    "ok",
+    "failure_reason",
+    "next_action",
+    "automated_cookie_refresh_allowed",
+    "safety_stop",
+    "warning_message",
+    "cooldown",
+    "modal_secret_apply_reached",
+    "modal_deploy_reached",
+    "remote_verify_reached",
+    "safe_advisory_state",
+    "steps",
+    "remote_auth_probe",
+    "instagram_posts_auth_probe",
+    "instagram_comments_auth_probe"
+  ],
+  "properties": {
+    "ok": {"type": "boolean"},
+    "failure_reason": {"type": ["string", "null"]},
+    "next_action": {"type": ["string", "null"]},
+    "automated_cookie_refresh_allowed": {"type": "boolean"},
+    "safety_stop": {"type": "boolean"},
+    "warning_message": {"type": ["string", "null"]},
+    "cooldown": {"type": ["object", "null"]},
+    "modal_secret_apply_reached": {"type": "boolean"},
+    "modal_deploy_reached": {"type": "boolean"},
+    "remote_verify_reached": {"type": "boolean"},
+    "safe_advisory_state": {
+      "type": "object",
+      "required": [
+        "platform",
+        "active",
+        "reason",
+        "next_action",
+        "clear_requires_validation",
+        "clear_command",
+        "validation_mode",
+        "cleared"
+      ]
+    },
+    "steps": {"type": "array"},
+    "remote_auth_probe": {"type": ["object", "null"]},
+    "instagram_posts_auth_probe": {"type": ["object", "null"]},
+    "instagram_comments_auth_probe": {"type": ["object", "null"]}
+  }
+}

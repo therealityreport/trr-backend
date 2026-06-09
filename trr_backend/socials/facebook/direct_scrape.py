@@ -66,7 +66,9 @@ def post_to_payload(post: Any) -> dict[str, Any]:
                 "posted_at": _timestamp_to_iso(posted_at),
                 "privacy_label": str(_get_value(share, "privacy_label", "") or "") or None,
                 "media_preview_urls": [
-                    str(url) for url in (_get_value(share, "media_preview_urls", []) or []) if str(url).strip()
+                    str(url).strip()
+                    for url in (_get_value(share, "media_preview_urls", []) or [])
+                    if str(url or "").strip()
                 ],
             }
         )
@@ -82,7 +84,7 @@ def post_to_payload(post: Any) -> dict[str, Any]:
         "views": int(_get_value(post, "views", 0) or 0),
         "url": str(_get_value(post, "url", "") or ""),
         "thumbnail_url": str(_get_value(post, "thumbnail_url", "") or "") or None,
-        "media_urls": [str(url) for url in (_get_value(post, "media_urls", []) or []) if str(url)],
+        "media_urls": [str(url).strip() for url in (_get_value(post, "media_urls", []) or []) if str(url or "").strip()],
         "posted_at": _timestamp_to_iso(_get_value(post, "posted_at")),
         "reactions": dict(_get_value(post, "reactions", {}) or {}),
         "share_details": share_details,

@@ -4,11 +4,12 @@ import html
 import json
 import re
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+from scrapling import Selector
 
 BRAVO_BASE_URL = "https://www.bravotv.com"
 JSONAPI_BASE_URL = f"{BRAVO_BASE_URL}/jsonapi"
@@ -26,6 +27,12 @@ _GALLERY_ITEM_ID_RE = re.compile(
 )
 _GALLERY_IMAGE_ATTR_RE = re.compile(
     r'(?:src|data-src|data-lazy-src)=["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
+_BRAVO_IMAGE_URL_RE = re.compile(r"/sites/(?:bravo|nbcuniversal)/files/", re.IGNORECASE)
+_GALLERY_ORIGINAL_IMAGE_RE = re.compile(
+    r"/sites/(?:bravo|nbcuniversal)/files/(?:styles/media_gallery_computer/public/)?"
+    r'((?:field_media_items|legacy/(?:photos|images/photo)|\d{4}/\d{2})/[^\s"\'?]+\.(?:jpg|jpeg|png))',
     re.IGNORECASE,
 )
 
@@ -64,8 +71,17 @@ def _absolute_url(value: str | None) -> str | None:
     return cleaned
 
 
+def _normalize_gallery_file_url(value: str | None) -> str | None:
+    absolute = _absolute_url(value)
+    if not absolute:
+        return None
+    parsed = urlparse(absolute)
+    path = parsed.path.replace("/styles/media_gallery_computer/public/", "/")
+    return f"{parsed.scheme}://{parsed.netloc}{path}"
+
+
 def _parse_file_name(value: str | None) -> str | None:
-    url = _absolute_url(value)
+    url = _normalize_gallery_file_url(value)
     if not url:
         return None
     parsed = urlparse(url)
@@ -144,6 +160,190 @@ def _extract_gallery_item_id_lookup(
         else:
             continue
     return lookup
+
+
+def _selector_first_text(selector: Any, *css_queries: str) -> str | None:
+    for query in css_queries:
+        try:
+            text = selector.css(query).get()
+        except Exception:
+            text = None
+        cleaned = _strip_html_text(text)
+        if cleaned:
+            return cleaned
+    return None
+
+
+def _selector_first_attr(selector: Any, css_query: str) -> str | None:
+    try:
+        value = selector.css(css_query).get()
+    except Exception:
+        return None
+    return str(value or "").strip() or None
+
+
+def _extract_original_gallery_image_urls(page_html: str) -> list[str]:
+    seen: set[str] = set()
+    urls: list[str] = []
+    for match in _GALLERY_ORIGINAL_IMAGE_RE.finditer(page_html):
+        relative_path = str(match.group(1) or "").strip()
+        if not relative_path:
+            continue
+        url = f"{BRAVO_BASE_URL}/sites/bravo/files/{relative_path}"
+        if url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+    return urls
+
+
+def _extract_gallery_item_id_from_selector(selector: Any) -> str | None:
+    attributes = getattr(selector, "attrib", None)
+    if isinstance(attributes, Mapping) or hasattr(attributes, "get"):
+        for key in (
+            "data-gallery-item-id",
+            "data-gallery-id",
+            "data-media-id",
+            "data-id",
+            "id",
+        ):
+            value = _coerce_gallery_item_id(attributes.get(key))
+            if value:
+                match = re.search(r"(\d+)$", value)
+                return match.group(1) if match else value
+    return _selector_first_text(selector, ".js-gallery-item-id::text", "[class*='gallery-item-id']::text")
+
+
+def extract_gallery_assets_from_html(
+    page_html: str,
+    *,
+    gallery: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Fallback parser for Bravo gallery pages when JSONAPI media includes are incomplete."""
+    if not str(page_html or "").strip():
+        return []
+
+    page = Selector(page_html)
+    settings = extract_drupal_settings(page_html)
+    metadata = extract_gallery_metadata(settings)
+    season_number = resolve_season_number(metadata)
+    gallery_uuid = str(gallery.get("uuid") or "").strip()
+    gallery_path = str(gallery.get("path") or "").strip()
+    candidate_selectors = (
+        "[data-gallery-item-id]",
+        "[data-media-id]",
+        ".gallery-item",
+        ".media-gallery__item",
+        ".field--name-field-media-items .field__item",
+        "figure",
+    )
+
+    rows: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    candidates: list[Any] = []
+    for query in candidate_selectors:
+        try:
+            for candidate in page.css(query):
+                candidates.append(candidate)
+        except Exception:
+            continue
+    if not candidates:
+        candidates = list(page.css("img"))
+
+    for candidate in candidates:
+        image_scope = candidate
+        try:
+            image = candidate.css("img").first
+            if image is not None:
+                image_scope = image
+        except Exception:
+            image_scope = candidate
+        raw_file_url = (
+            _selector_first_attr(image_scope, "::attr(data-src)")
+            or _selector_first_attr(image_scope, "::attr(data-lazy-src)")
+            or _selector_first_attr(image_scope, "::attr(src)")
+            or _selector_first_attr(image_scope, "::attr(srcset)")
+        )
+        file_url = _normalize_gallery_file_url(raw_file_url)
+        if file_url and "," in file_url:
+            file_url = _normalize_gallery_file_url(file_url.split(",", 1)[0].strip().split(" ", 1)[0])
+        if not file_url or not _BRAVO_IMAGE_URL_RE.search(file_url):
+            continue
+        if file_url in seen_urls:
+            continue
+        seen_urls.add(file_url)
+        file_name = _parse_file_name(file_url)
+        image_alt = _selector_first_attr(image_scope, "::attr(alt)")
+        gallery_item_id = _extract_gallery_item_id_from_selector(candidate)
+        row = _build_gallery_row(
+            gallery=gallery,
+            metadata=metadata,
+            gallery_uuid=gallery_uuid,
+            gallery_path=gallery_path,
+            season_number=season_number,
+            position=len(rows),
+            media_id=_selector_first_attr(candidate, "::attr(data-media-uuid)") or "",
+            media_attributes={
+                "field_caption": _selector_first_text(
+                    candidate,
+                    ".field--name-field-caption::text",
+                    ".caption::text",
+                    "figcaption::text",
+                ),
+                "field_credit": _selector_first_text(
+                    candidate,
+                    ".field--name-field-credit::text",
+                    ".credit::text",
+                ),
+                "field_image_description": _selector_first_text(
+                    candidate,
+                    ".field--name-field-image-description::text",
+                    ".description::text",
+                ),
+                "field_media_image_alt": image_alt,
+            },
+            media_internal_id=_coerce_gallery_item_id(_selector_first_attr(candidate, "::attr(data-media-id)")),
+            file_id=_selector_first_attr(image_scope, "::attr(data-file-uuid)") or "",
+            file_url=file_url,
+            file_name=file_name,
+            file_attributes={
+                "filename": file_name,
+            },
+            image_alt=image_alt,
+            gallery_item_id=gallery_item_id,
+        )
+        if raw_file_url and _GALLERY_ORIGINAL_IMAGE_RE.search(raw_file_url):
+            row["bravotv_html_original_url"] = True
+        rows.append(row)
+    for row in rows:
+        row["bravotv_html_fallback"] = True
+    existing_urls = {str(row.get("file_url") or "").strip() for row in rows if str(row.get("file_url") or "").strip()}
+    for file_url in _extract_original_gallery_image_urls(page_html):
+        if file_url in existing_urls:
+            continue
+        existing_urls.add(file_url)
+        file_name = _parse_file_name(file_url)
+        rows.append(
+            _build_gallery_row(
+                gallery=gallery,
+                metadata=metadata,
+                gallery_uuid=gallery_uuid,
+                gallery_path=gallery_path,
+                season_number=season_number,
+                position=len(rows),
+                media_id="",
+                media_attributes={},
+                media_internal_id=None,
+                file_id="",
+                file_url=file_url,
+                file_name=file_name,
+                file_attributes={"filename": file_name},
+                image_alt=None,
+                gallery_item_id=None,
+            )
+            | {"bravotv_html_fallback": True, "bravotv_html_original_url": True}
+        )
+    return rows
 
 
 def _coerce_gallery_item_id(value: Any) -> str | None:
@@ -272,16 +472,92 @@ def find_person_uuid(name: str, *, client: httpx.Client | None = None) -> str | 
     if not clean_name:
         return None
     api_client = _client(client)
-    payload = _get_json(
-        api_client,
-        f"{JSONAPI_BASE_URL}/node/person",
-        params={"filter[title]": clean_name, "page[limit]": "1"},
-    )
-    entries = payload.get("data") or []
-    if not isinstance(entries, list) or not entries:
+    person_url = f"{JSONAPI_BASE_URL}/node/person"
+
+    def _entries(payload: dict[str, Any]) -> list[dict[str, Any]]:
+        rows = payload.get("data") or []
+        return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+    def _entry_title(entry: dict[str, Any]) -> str:
+        attributes = entry.get("attributes") if isinstance(entry.get("attributes"), dict) else {}
+        return str(attributes.get("title") or "").strip()
+
+    def _entry_path(entry: dict[str, Any]) -> str:
+        attributes = entry.get("attributes") if isinstance(entry.get("attributes"), dict) else {}
+        path = attributes.get("path")
+        return str(path.get("alias") or "").strip() if isinstance(path, dict) else ""
+
+    def _entry_uuid(entry: dict[str, Any]) -> str | None:
+        return str(entry.get("id") or "").strip() or None
+
+    exact_payload = _get_json(api_client, person_url, params={"filter[title]": clean_name, "page[limit]": "1"})
+    exact_entries = _entries(exact_payload)
+    if exact_entries:
+        exact_match = next(
+            (entry for entry in exact_entries if _entry_title(entry).casefold() == clean_name.casefold()),
+            exact_entries[0],
+        )
+        return _entry_uuid(exact_match)
+
+    # Newer Bravo profiles are sometimes only discoverable through broader title filters.
+    # Keep the old exact lookup first, then rank partial matches by title/path similarity.
+    name_tokens = [part for part in re.split(r"[^a-z0-9]+", clean_name.casefold()) if part]
+    fallback_payloads: list[dict[str, Any]] = []
+    if name_tokens:
+        first_last_phrase = " ".join(name_tokens)
+        contains_queries = [
+            first_last_phrase,
+            name_tokens[0],
+            name_tokens[-1] if len(name_tokens) > 1 else name_tokens[0],
+        ]
+        for phrase in dict.fromkeys(contains_queries):
+            try:
+                fallback_payloads.append(
+                    _get_json(
+                        api_client,
+                        person_url,
+                        params={
+                            "filter[title-contains][condition][path]": "title",
+                            "filter[title-contains][condition][operator]": "CONTAINS",
+                            "filter[title-contains][condition][value]": phrase,
+                            "page[limit]": "25",
+                        },
+                    )
+                )
+            except Exception:
+                continue
+
+    candidates: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for payload in fallback_payloads:
+        for entry in _entries(payload):
+            entry_id = _entry_uuid(entry)
+            if not entry_id or entry_id in seen_ids:
+                continue
+            seen_ids.add(entry_id)
+            candidates.append(entry)
+    if not candidates:
         return None
-    first = entries[0]
-    return str(first.get("id") or "").strip() or None
+
+    expected_slug = re.sub(r"[^a-z0-9]+", "-", clean_name.casefold()).strip("-")
+
+    def _score(entry: dict[str, Any]) -> tuple[int, str]:
+        title = _entry_title(entry).casefold()
+        path = _entry_path(entry).casefold()
+        haystack = f"{title} {path}"
+        score = 0
+        if title == clean_name.casefold():
+            score += 100
+        if expected_slug and expected_slug in path:
+            score += 50
+        score += sum(10 for token in name_tokens if re.search(rf"\b{re.escape(token)}\b", haystack))
+        if clean_name.casefold() in haystack:
+            score += 20
+        return score, title
+
+    best = max(candidates, key=_score)
+    best_score, _ = _score(best)
+    return _entry_uuid(best) if best_score > 0 else None
 
 
 def find_show_node(show_name: str, *, client: httpx.Client | None = None) -> dict[str, Any] | None:
@@ -305,6 +581,128 @@ def find_show_node(show_name: str, *, client: httpx.Client | None = None) -> dic
         "title": attributes.get("title"),
         "path": attributes.get("path", {}).get("alias") if isinstance(attributes.get("path"), dict) else None,
     }
+
+
+def fetch_person_image_assets(
+    person_uuid: str,
+    *,
+    client: httpx.Client | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch person-level Bravo JSONAPI image relationships such as cover photos."""
+    clean_uuid = str(person_uuid or "").strip()
+    if not clean_uuid:
+        return []
+    api_client = _client(client)
+    detail = _get_json(
+        api_client,
+        f"{JSONAPI_BASE_URL}/node/person/{clean_uuid}",
+        params={
+            "include": ",".join(
+                (
+                    "field_person_cover_photo",
+                    "field_person_cover_photo.field_media_image",
+                    "field_person_full_photo",
+                    "field_person_full_photo.field_media_image",
+                )
+            )
+        },
+    )
+    data = detail.get("data") if isinstance(detail.get("data"), dict) else {}
+    attributes = data.get("attributes") if isinstance(data.get("attributes"), dict) else {}
+    relationships = data.get("relationships") if isinstance(data.get("relationships"), dict) else {}
+    included = detail.get("included") or []
+    included_items = included if isinstance(included, list) else []
+
+    media_by_id: dict[str, dict[str, Any]] = {}
+    file_by_id: dict[str, dict[str, Any]] = {}
+    for entry in included_items:
+        if not isinstance(entry, dict):
+            continue
+        entry_id = str(entry.get("id") or "").strip()
+        entry_type = str(entry.get("type") or "").strip()
+        if not entry_id or not entry_type:
+            continue
+        if entry_type == "media--image":
+            media_by_id[entry_id] = entry
+        elif entry_type == "file--file":
+            file_by_id[entry_id] = entry
+
+    person_name = str(attributes.get("title") or "").strip()
+    path_obj = attributes.get("path")
+    person_path = path_obj.get("alias") if isinstance(path_obj, dict) else None
+    gallery = {
+        "uuid": clean_uuid,
+        "title": f"{person_name} profile images".strip() or "Bravo profile images",
+        "nid": attributes.get("drupal_internal__nid"),
+        "path": person_path,
+        "created": attributes.get("created"),
+        "published": attributes.get("publish_on") or attributes.get("changed"),
+    }
+    metadata = {
+        "people_names": [person_name] if person_name else [],
+        "page_title": person_name or None,
+    }
+
+    rows: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    for field_name in ("field_person_cover_photo", "field_person_full_photo"):
+        field_rel = relationships.get(field_name) if isinstance(relationships.get(field_name), dict) else {}
+        media_ref = field_rel.get("data") if isinstance(field_rel, dict) else None
+        media_refs = media_ref if isinstance(media_ref, list) else [media_ref]
+        for media_ref_item in media_refs:
+            if not isinstance(media_ref_item, dict):
+                continue
+            media_id = str(media_ref_item.get("id") or "").strip()
+            media_entry = media_by_id.get(media_id) or {}
+            media_attributes = media_entry.get("attributes") if isinstance(media_entry.get("attributes"), dict) else {}
+            media_relationships = (
+                media_entry.get("relationships") if isinstance(media_entry.get("relationships"), dict) else {}
+            )
+            media_image_rel = (
+                media_relationships.get("field_media_image")
+                if isinstance(media_relationships.get("field_media_image"), dict)
+                else {}
+            )
+            file_ref = media_image_rel.get("data") if isinstance(media_image_rel, dict) else {}
+            file_id = str(file_ref.get("id") or "").strip() if isinstance(file_ref, dict) else ""
+            file_entry = file_by_id.get(file_id) or {}
+            file_attributes = file_entry.get("attributes") if isinstance(file_entry.get("attributes"), dict) else {}
+            file_url = _extract_file_url(file_attributes)
+            file_name = (
+                str(file_attributes.get("filename") or "").strip()
+                or _parse_file_name(file_url)
+                or _parse_file_name(
+                    file_attributes.get("uri", {}).get("url") if isinstance(file_attributes.get("uri"), dict) else None
+                )
+            )
+            if not file_url:
+                continue
+            seen_key = media_id or file_id or file_url
+            if seen_key in seen_keys:
+                continue
+            seen_keys.add(seen_key)
+            image_meta = file_ref.get("meta") if isinstance(file_ref, dict) else {}
+            image_alt = image_meta.get("alt") if isinstance(image_meta, dict) else None
+            row = _build_gallery_row(
+                gallery=gallery,
+                metadata=metadata,
+                gallery_uuid=clean_uuid,
+                gallery_path=str(person_path or "").strip(),
+                season_number=None,
+                position=len(rows),
+                media_id=media_id,
+                media_attributes=media_attributes,
+                media_internal_id=_coerce_gallery_item_id(media_attributes.get("drupal_internal__mid")),
+                file_id=file_id,
+                file_url=file_url,
+                file_name=file_name,
+                file_attributes=file_attributes,
+                image_alt=image_alt,
+                gallery_item_id=None,
+            )
+            row["bravotv_person_image_field"] = field_name
+            rows.append(row)
+    return rows
 
 
 def _paged_gallery_listing(
@@ -426,6 +824,7 @@ def fetch_gallery_assets(
     gallery_path = str(gallery.get("path") or "").strip()
     metadata: dict[str, Any] = {}
     gallery_item_id_lookup: dict[str, str] = {}
+    gallery_html = ""
     if gallery_path:
         try:
             gallery_html = _get_html(api_client, f"{BRAVO_BASE_URL}{gallery_path}")
@@ -494,4 +893,20 @@ def fetch_gallery_assets(
                 gallery_item_id=gallery_item_id,
             )
         )
+    if not rows and gallery_html:
+        return extract_gallery_assets_from_html(gallery_html, gallery=gallery)
+    if gallery_html:
+        seen_urls = {str(row.get("file_url") or "").strip() for row in rows if str(row.get("file_url") or "").strip()}
+        html_rows = [
+            row
+            for row in extract_gallery_assets_from_html(gallery_html, gallery=gallery)
+            if row.get("bravotv_html_original_url")
+        ]
+        for html_row in html_rows:
+            file_url = str(html_row.get("file_url") or "").strip()
+            if not file_url or file_url in seen_urls:
+                continue
+            seen_urls.add(file_url)
+            html_row["bravotv_html_enriched"] = True
+            rows.append(html_row)
     return rows

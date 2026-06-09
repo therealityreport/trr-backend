@@ -258,12 +258,10 @@ def test_resolve_comments_scrapling_session_reuses_instagram_auth_session(monkey
 
 def test_comments_fetcher_runtime_metadata_never_exposes_cookie_values(monkeypatch) -> None:
     mock_fetcher_cls = MagicMock()
-    mock_module = MagicMock()
-    mock_module.StealthyFetcher = mock_fetcher_cls
-    mock_module.ProxyRotator = MagicMock()
-    monkeypatch.setitem(__import__("sys").modules, "scrapling.fetchers", mock_module)
-
-    from trr_backend.socials.instagram.comments_scrapling.fetcher import InstagramCommentsScraplingFetcher
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.comments_scrapling.fetcher.build_stealthy_fetcher",
+        mock_fetcher_cls,
+    )
 
     fetcher = InstagramCommentsScraplingFetcher(
         cookies=[],
@@ -283,10 +281,10 @@ def test_comments_fetcher_runtime_metadata_never_exposes_cookie_values(monkeypat
 
 def test_comments_fetcher_runtime_metadata_never_exposes_sticky_username(monkeypatch) -> None:
     mock_fetcher_cls = MagicMock()
-    mock_module = MagicMock()
-    mock_module.StealthyFetcher = mock_fetcher_cls
-    mock_module.ProxyRotator = MagicMock()
-    monkeypatch.setitem(__import__("sys").modules, "scrapling.fetchers", mock_module)
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.comments_scrapling.fetcher.build_stealthy_fetcher",
+        mock_fetcher_cls,
+    )
 
     fetcher = InstagramCommentsScraplingFetcher(
         cookies=[],

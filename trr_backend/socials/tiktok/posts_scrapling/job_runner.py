@@ -16,6 +16,7 @@ from datetime import timedelta
 from typing import Any
 
 from trr_backend.db import pg
+from trr_backend.socials.post_persist_truthfulness import apply_post_persist_truthfulness_metadata
 from trr_backend.socials.tiktok.posts_scrapling.fetcher import (
     TikTokPostsScraplingFetcher,
     tiktok_posts_scrapling_page_size,
@@ -533,6 +534,16 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
             },
             "fetcher_runtime": fetcher_metadata,
         }
+        metadata = apply_post_persist_truthfulness_metadata(
+            metadata,
+            platform="tiktok",
+            account=account_handle,
+            status="completed",
+            posts_checked=posts_fetched,
+            posts_upserted=posts_upserted,
+            posts_skipped=posts_skipped,
+            posts_skipped_by_reason=posts_skipped_by_reason,
+        )
         lifecycle.finish_job(
             job_id,
             status="completed",

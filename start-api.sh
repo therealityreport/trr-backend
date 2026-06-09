@@ -49,12 +49,44 @@ fi
 
 BACKEND_RELOAD_MODE="${TRR_BACKEND_RELOAD:-1}"
 
+is_local_or_dev_runtime() {
+  if [[ -n "${CI:-}" || -n "${GITHUB_ACTIONS:-}" ]]; then
+    return 0
+  fi
+
+  local value normalized_value
+  for value in "${APP_ENV:-}" "${ENVIRONMENT:-}" "${TRR_ENV:-}" "${TRR_ENVIRONMENT:-}" "${PYTHON_ENV:-}"; do
+    normalized_value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
+    case "$normalized_value" in
+      local|dev|development|test)
+        return 0
+        ;;
+    esac
+  done
+
+  local local_dev="${TRR_LOCAL_DEV:-}"
+  local_dev="$(printf '%s' "$local_dev" | tr '[:upper:]' '[:lower:]')"
+  case "$local_dev" in
+    1|true|yes|on)
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
 EFFECTIVE_TRR_BACKEND_WORKERS="$TRR_BACKEND_WORKERS"
 if [[ "$TRR_BACKEND_WORKERS" -gt 1 && "$TRR_BACKEND_REQUIRE_REDIS_FOR_MULTI_WORKER" == "1" ]]; then
   if [[ -z "${REDIS_URL:-}" ]]; then
-    echo "[trr-backend] WARNING: TRR_BACKEND_WORKERS=${TRR_BACKEND_WORKERS} requested, but REDIS_URL is not set."
-    echo "[trr-backend] WARNING: forcing single-worker mode (TRR_BACKEND_WORKERS=1) to preserve realtime safety."
-    EFFECTIVE_TRR_BACKEND_WORKERS="1"
+    if is_local_or_dev_runtime; then
+      echo "[trr-backend] WARNING: TRR_BACKEND_WORKERS=${TRR_BACKEND_WORKERS} requested, but REDIS_URL is not set."
+      echo "[trr-backend] WARNING: forcing single-worker mode (TRR_BACKEND_WORKERS=1) to preserve realtime safety."
+      EFFECTIVE_TRR_BACKEND_WORKERS="1"
+    else
+      echo "[trr-backend] ERROR: TRR_BACKEND_WORKERS=${TRR_BACKEND_WORKERS} requires REDIS_URL for deployed multi-worker realtime." >&2
+      echo "[trr-backend] ERROR: set REDIS_URL or lower TRR_BACKEND_WORKERS to 1." >&2
+      exit 1
+    fi
   fi
 fi
 if [[ "$BACKEND_RELOAD_MODE" != "0" && "$EFFECTIVE_TRR_BACKEND_WORKERS" -gt 1 ]]; then

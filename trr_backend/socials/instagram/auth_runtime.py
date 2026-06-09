@@ -33,6 +33,8 @@ for _name, _value in _core.__dict__.items():
     _IMPORTED_CORE_NAMES.add(_name)
 _LOCAL_ROOM_NAMES: set[str] = set()
 _LOCAL_ROOM_FUNCTIONS: dict[str, Any] = {}
+INSTAGRAM_AUTH_REPAIR_CONFIRMATION = "I UNDERSTAND INSTAGRAM AUTH RISK"
+INSTAGRAM_AUTH_REPAIR_CONFIRMATION_ENV = "SOCIAL_INSTAGRAM_AUTH_REPAIR_CONFIRMATION"
 _CORE_ROOM_WRAPPERS: dict[str, Any] = {}
 SOCIAL_INSTAGRAM_COOKIE_VALIDATION_USERNAME_DEFAULT = "instagram"
 
@@ -111,10 +113,8 @@ def _instagram_auth_credentials() -> tuple[str | None, str | None]:
 
 def _instagram_cookie_auto_refresh_enabled() -> bool:
     raw = (os.getenv("SOCIAL_INSTAGRAM_COOKIE_AUTO_REFRESH") or "").strip().lower()
-    if raw:
-        return raw not in {"0", "false", "off", "no"}
-    username, password = _instagram_auth_credentials()
-    return bool(username and password)
+    confirmation = (os.getenv(INSTAGRAM_AUTH_REPAIR_CONFIRMATION_ENV) or "").strip()
+    return raw in {"1", "true", "yes", "on"} and confirmation == INSTAGRAM_AUTH_REPAIR_CONFIRMATION
 
 
 def _instagram_cookie_validation_username() -> str:
@@ -285,7 +285,12 @@ def _inspect_instagram_cookie_health(cookies: dict[str, str]) -> dict[str, Any]:
                 request_timeout=(10, 20),
                 allow_browser_fallback=False,
             )
-        connection = (payload or {}).get("data", {}).get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
+        payload_data = (payload or {}).get("data") if isinstance(payload, dict) else {}
+        connection = (
+            payload_data.get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
+            if isinstance(payload_data, dict)
+            else {}
+        )
         if connection.get("edges"):
             result = {
                 "valid": True,
@@ -592,11 +597,11 @@ def get_instagram_auth_repair_signal(*, failure_lookback_hours: int = 24) -> dic
                   j.run_id::text as run_id,
                   j.worker_id,
                   j.last_error_code,
-                  coalesce(j.updated_at, j.completed_at, j.started_at, j.created_at) as updated_at
+                  coalesce(j.completed_at, j.started_at, j.created_at) as updated_at
                 from social.scrape_jobs as j
                 where lower(coalesce(j.last_error_code, '')) = any(%s)
-                  and coalesce(j.updated_at, j.completed_at, j.started_at, j.created_at) >= %s
-                order by coalesce(j.updated_at, j.completed_at, j.started_at, j.created_at) desc
+                  and coalesce(j.completed_at, j.started_at, j.created_at) >= %s
+                order by coalesce(j.completed_at, j.started_at, j.created_at) desc
                 limit 1
                 """,
                 [list(error_reason_codes.keys()), cutoff],

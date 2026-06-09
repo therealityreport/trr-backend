@@ -19,17 +19,13 @@ import requests
 
 from trr_backend.db.pg import db_cursor
 from trr_backend.services.face_reference_contract import FACE_REFERENCE_EMBEDDING_CONTRACT_KEY
+from trr_backend.vision import cast_reference_face_matching
 
 logger = logging.getLogger(__name__)
 
 DetectorMode = str
 
-_retinaface_detector: object | None = None
 _yolo_detector: object | None = None
-_retinaface_profile_attempts: list[str] = []
-_retinaface_profile_selected: str | None = None
-_retinaface_provider_selected: str | None = None
-_retinaface_last_error: str | None = None
 _yolo_last_error: str | None = None
 _FACE_MATCH_CACHE_LOCK = Lock()
 _FACE_MATCH_CACHE: dict[str, object] = {"expires_at": 0.0, "entries": []}
@@ -69,17 +65,6 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    raw = (os.getenv(name) or "").strip().lower()
-    if not raw:
-        return default
-    if raw in {"1", "true", "yes", "on"}:
-        return True
-    if raw in {"0", "false", "no", "off"}:
-        return False
-    return default
-
-
 def _vision_unavailable_retry_after_seconds() -> int:
     return max(_env_int("VISION_UNAVAILABLE_RETRY_AFTER_SECONDS", 30), 1)
 
@@ -104,61 +89,6 @@ def _lazy_cv2():
             retry_after_s=_vision_unavailable_retry_after_seconds(),
         ) from exc
     return cv2
-
-
-def _retinaface_profile_candidates() -> list[str]:
-    configured = (os.getenv("INSIGHTFACE_PROFILE") or "").strip()
-    candidates: list[str] = []
-    for profile in [configured, "antelopev2", "buffalo_l", "buffalo_s"]:
-        normalized = str(profile or "").strip()
-        if normalized and normalized not in candidates:
-            candidates.append(normalized)
-    return candidates
-
-
-def _get_retinaface_detector() -> object | None:
-    global _retinaface_detector, _retinaface_last_error, _retinaface_profile_attempts
-    global _retinaface_profile_selected, _retinaface_provider_selected
-
-    if _retinaface_detector is not None:
-        return _retinaface_detector
-
-    if os.getenv("SCREENALYTICS_VISION_SIM") == "1":
-        _retinaface_last_error = "SCREENALYTICS_VISION_SIM=1 (forced simulated mode)"
-        _retinaface_profile_attempts = []
-        _retinaface_profile_selected = None
-        _retinaface_provider_selected = None
-        return None
-
-    try:
-        from insightface.app import FaceAnalysis
-    except Exception as exc:  # noqa: BLE001
-        _retinaface_last_error = str(exc)
-        return None
-
-    det_size = (640, 640)
-    candidate_profiles = _retinaface_profile_candidates()
-    _retinaface_profile_attempts = list(candidate_profiles)
-    _retinaface_profile_selected = None
-    _retinaface_provider_selected = None
-    _retinaface_last_error = None
-
-    for profile in candidate_profiles:
-        try:
-            model = FaceAnalysis(name=profile)
-            model.prepare(ctx_id=-1, det_size=det_size)
-            _retinaface_detector = model
-            _retinaface_profile_selected = profile
-            providers = getattr(model, "providers", None)
-            if isinstance(providers, (list, tuple)) and providers:
-                provider = str(providers[0]).strip()
-                _retinaface_provider_selected = provider or None
-            return _retinaface_detector
-        except Exception as exc:  # noqa: BLE001
-            _retinaface_last_error = str(exc)
-            logger.warning("RetinaFace profile failed profile=%s error=%s", profile, exc)
-
-    return None
 
 
 def _get_yolo_detector() -> object | None:
@@ -191,9 +121,10 @@ def _get_yolo_detector() -> object | None:
 def _ensure_detectors_available(mode: DetectorMode) -> None:
     if os.getenv("SCREENALYTICS_VISION_SIM") == "1":
         return
-    if mode in {"faces", "faces_then_yolo"} and _get_retinaface_detector() is None:
+    if mode in {"faces", "faces_then_yolo"} and cast_reference_face_matching.get_face_analysis_model() is None:
+        last_error = cast_reference_face_matching.last_error() or "unknown error"
         raise VisionEngineUnavailableError(
-            f"RetinaFace detector unavailable: {_retinaface_last_error or 'unknown error'}",
+            f"InsightFace reference detector unavailable: {last_error}",
             retry_after_s=_vision_unavailable_retry_after_seconds(),
         )
     if mode in {"yolo", "faces_then_yolo"} and _get_yolo_detector() is None:
@@ -215,15 +146,7 @@ def _l2_normalize(vec: Any):
 
 
 def _extract_face_embedding(face: object):
-    np = _lazy_numpy()
-    for key in ("normed_embedding", "embedding"):
-        candidate = getattr(face, key, None)
-        if candidate is None:
-            continue
-        normalized = _l2_normalize(np.asarray(candidate, dtype=np.float32))
-        if normalized is not None:
-            return normalized
-    return None
+    return cast_reference_face_matching.extract_face_embedding(face)
 
 
 def _coerce_embedding_vector(value: Any):
@@ -548,13 +471,8 @@ def _download_image(url: str, timeout: float = 10.0):
 
 
 def _detect_faces_retinaface(image: Any) -> tuple[int, str | None, list]:
-    detector = _get_retinaface_detector()
-    if detector is None:
-        return 0, None, []
     try:
-        faces = detector.get(image)
-        profile = _retinaface_profile_selected or "retinaface"
-        return len(faces), f"retinaface_{profile}", list(faces)
+        return cast_reference_face_matching.detect_faces(image)
     except Exception as exc:  # noqa: BLE001
         logger.warning("RetinaFace detection failed: %s", exc)
         return 0, None, []
@@ -840,15 +758,22 @@ def _match_faces_to_people(
     owner_person_id: str | None = None,
     owner_reference_centroid: Any = None,
     runtime_reference_centroids: dict[str, dict[str, object]] | None = None,
+    threshold_prefix: str = "VISION_FACE_MATCH",
 ) -> list[dict[str, object]]:
     np = _lazy_numpy()
     if not faces:
         return []
 
-    min_similarity = _env_float("VISION_FACE_MATCH_SIMILARITY_MIN", 0.65)
-    min_margin = _env_float("VISION_FACE_MATCH_MARGIN_MIN", 0.03)
+    min_similarity = _env_float(
+        f"{threshold_prefix}_SIMILARITY_MIN",
+        _env_float("VISION_FACE_MATCH_SIMILARITY_MIN", 0.65),
+    )
+    min_margin = _env_float(
+        f"{threshold_prefix}_MARGIN_MIN",
+        _env_float("VISION_FACE_MATCH_MARGIN_MIN", 0.03),
+    )
     single_candidate_min_similarity = _env_float(
-        "VISION_FACE_MATCH_SINGLE_CANDIDATE_MIN_SIMILARITY",
+        f"{threshold_prefix}_SINGLE_CANDIDATE_MIN_SIMILARITY",
         min_similarity,
     )
     crop_padding = max(_env_float("VISION_FACE_CROP_PADDING", 0.35), 0.0)

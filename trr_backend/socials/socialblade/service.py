@@ -24,7 +24,7 @@ SocialBladeScraper = Callable[[str], dict[str, Any]]
 _DEFAULT_FRESHNESS_HOURS = 24
 _DEFAULT_MIN_REUSABLE_CHART_POINTS = 30
 _DEFAULT_MIN_REUSABLE_PAGE_CAPTURE_POINTS = 60
-_AUTHENTICATED_HISTORY_SOURCES = frozenset({"authenticated_api", "page_trpc_capture"})
+_AUTHENTICATED_HISTORY_SOURCES = frozenset({"authenticated_api", "page_trpc_capture", "page_trpc_capture_short"})
 SUPPORTED_SOCIALBLADE_PLATFORMS = SOCIALBLADE_SUPPORTED_PLATFORMS
 INSTAGRAM_FOLLOWING_SCRAPE_ENABLED_ENV = "SOCIALBLADE_INSTAGRAM_FOLLOWING_SCRAPE_ENABLED"
 INSTAGRAM_FOLLOWING_PAGE_SIZE_ENV = "SOCIALBLADE_INSTAGRAM_FOLLOWING_PAGE_SIZE"
@@ -345,7 +345,9 @@ def is_growth_data_fresh(
     history_source = str((data or {}).get("history_source") or "").strip().lower()
     if history_source and history_source not in _AUTHENTICATED_HISTORY_SOURCES:
         return False
-    if history_source == "page_trpc_capture" and max(_chart_point_count(data), _metrics_row_count(data)) < (
+    if history_source in {"page_trpc_capture", "page_trpc_capture_short"} and max(
+        _chart_point_count(data), _metrics_row_count(data)
+    ) < (
         _DEFAULT_MIN_REUSABLE_PAGE_CAPTURE_POINTS
     ):
         return False

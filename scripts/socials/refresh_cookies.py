@@ -14,6 +14,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from trr_backend.socials.ops.cookie_refresh import PLATFORM_HANDLERS, PlatformHandlers, run_platform  # noqa: F401
 from trr_backend.utils.env import load_env
 
+INSTAGRAM_REFRESH_CONFIRMATION = "I UNDERSTAND INSTAGRAM AUTH RISK"
+INSTAGRAM_REFRESH_WARNING = (
+    "Instagram cookie refresh can trigger login challenges or account locks. "
+    "Only run it after manually confirming the account is safe."
+)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -46,6 +52,11 @@ def parse_args() -> argparse.Namespace:
         default="graphql_profile",
         help="Instagram validation mode for forced/headed refreshes (default: graphql_profile)",
     )
+    parser.add_argument(
+        "--confirm-instagram-refresh",
+        default="",
+        help=f"Required for Instagram --force refresh. Exact value: {INSTAGRAM_REFRESH_CONFIRMATION!r}",
+    )
     return parser.parse_args()
 
 
@@ -54,6 +65,26 @@ def main() -> int:
     load_env()
 
     platform_names = list(PLATFORM_HANDLERS) if args.platform == "all" else [args.platform]
+    if (
+        bool(args.force)
+        and not bool(args.validate_only)
+        and "instagram" in platform_names
+        and str(args.confirm_instagram_refresh or "").strip() != INSTAGRAM_REFRESH_CONFIRMATION
+    ):
+        print(
+            json.dumps(
+                {
+                    "platform": "instagram",
+                    "action": "blocked",
+                    "validated": False,
+                    "reason": "instagram_refresh_confirmation_required",
+                    "warning_message": INSTAGRAM_REFRESH_WARNING,
+                    "required_confirmation": INSTAGRAM_REFRESH_CONFIRMATION,
+                },
+                sort_keys=True,
+            )
+        )
+        return 2
     exit_code = 0
     for platform_name in platform_names:
         handlers = PLATFORM_HANDLERS[platform_name]

@@ -73,6 +73,7 @@ _INSTAGRAM_THIN_PRESERVE_OPTIONAL_KEYS = {
     "has_audio",
     "video_play_count",
 }
+_INSTAGRAM_POST_BATCH_SIZE = 100
 
 
 def _sync_core_overrides() -> None:
@@ -153,7 +154,7 @@ def _shared_instagram_catalog_delay_seconds(
     return round(base_delay * 3, 4)
 
 
-def _upsert_instagram_post(
+def _instagram_post_payload(
     context: SeasonContext | None,
     *,
     job_id: str | None,
@@ -161,6 +162,7 @@ def _upsert_instagram_post(
     post: Any,
     conn: Any | None = None,
 ) -> dict[str, Any] | None:
+    """Build the legacy social.instagram_posts payload for one post."""
     _sync_core_overrides()
     shortcode = str(getattr(post, "shortcode", "") or "").strip()
     posted_at = _parse_instagram_time(getattr(post, "taken_at", None))
@@ -508,9 +510,80 @@ def _upsert_instagram_post(
     if _instagram_posts_has_column("profile_pic_mirror_error", conn=conn):
         payload["profile_pic_mirror_error"] = getattr(post, "profile_pic_mirror_error", None)
 
+    return payload
+
+
+def _upsert_instagram_post(
+    context: SeasonContext | None,
+    *,
+    job_id: str | None,
+    account: str,
+    post: Any,
+    conn: Any | None = None,
+) -> dict[str, Any] | None:
+    payload = _instagram_post_payload(
+        context,
+        job_id=job_id,
+        account=account,
+        post=post,
+        conn=conn,
+    )
+    if payload is None:
+        return None
     row = _pg_upsert("instagram_posts", payload, conflict_col="shortcode", conn=conn)
     _sync_instagram_canonical_post(legacy_row=row, payload=payload, post=post, conn=conn)
     return row
+
+
+def _batch_upsert_instagram_posts(
+    context: SeasonContext | None,
+    *,
+    job_id: str | None,
+    account: str,
+    posts: list[Any],
+    conn: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Batch upsert legacy social.instagram_posts rows and sync canonical rows."""
+    _sync_core_overrides()
+    payload_builder = _room_callable(
+        "_instagram_post_payload",
+        _instagram_post_payload,
+    )
+    records: list[tuple[dict[str, Any], Any]] = []
+    for post in posts:
+        payload = payload_builder(
+            context,
+            job_id=job_id,
+            account=account,
+            post=post,
+            conn=conn,
+        )
+        if payload is not None:
+            records.append((payload, post))
+    if not records:
+        return []
+
+    rows: list[dict[str, Any]] = []
+    for index in range(0, len(records), _INSTAGRAM_POST_BATCH_SIZE):
+        chunk = records[index : index + _INSTAGRAM_POST_BATCH_SIZE]
+        records_by_columns: dict[tuple[str, ...], list[tuple[dict[str, Any], Any]]] = {}
+        for payload, post in chunk:
+            records_by_columns.setdefault(tuple(payload.keys()), []).append((payload, post))
+
+        for grouped_records in records_by_columns.values():
+            payloads = [payload for payload, _post in grouped_records]
+            grouped_rows = _pg_upsert_many("instagram_posts", payloads, conflict_col="shortcode", conn=conn)
+            records_by_shortcode = {
+                str(payload.get("shortcode") or "").strip(): (payload, post) for payload, post in grouped_records
+            }
+            for row in grouped_rows:
+                shortcode = str((row or {}).get("shortcode") or "").strip()
+                record = records_by_shortcode.get(shortcode)
+                if record is not None:
+                    payload, post = record
+                    _sync_instagram_canonical_post(legacy_row=row, payload=payload, post=post, conn=conn)
+                rows.append(row)
+    return rows
 
 
 def _upsert_shared_catalog_instagram_post(
@@ -806,7 +879,7 @@ def _shared_instagram_frontier_auth_validation(config: Mapping[str, Any] | None 
         return False, str(metadata.get("frontier_auth_reason") or "").strip().lower() or None
 
     # Frontier bootstrap/resume jobs run on remote workers. They need a quick
-    # auth capability check, not the heavier auto-refresh path that can block
+    # auth capability check, not the heavier confirmed repair path that can block
     # long enough to trip stale-heartbeat recovery before the resume handoff.
     cookies = _load_instagram_cookies_from_sources()
     if not cookies.get("sessionid"):
@@ -945,15 +1018,18 @@ def _shared_instagram_account_execution(
     account_handle: str,
     *,
     heartbeat_cb: Callable[[dict[str, Any]], None] | None = None,
+    lock_scope: str | None = None,
 ):
     from trr_backend.socials.account_browser_sessions import AccountBrowserSessionManager
 
     browser_sessions = AccountBrowserSessionManager(platform="instagram", cookie_domains=(".instagram.com",))
     resolved_account = browser_sessions.resolve_account_id(account_handle, fallback_account_id="instagram")
-    lock_key = _shared_instagram_account_lock_key(resolved_account)
-    lock_label = f"instagram-account-lock:{resolved_account[:48]}"
+    normalized_lock_scope = str(lock_scope or "").strip().lower()
+    scoped_lock_account = f"{resolved_account}:{normalized_lock_scope}" if normalized_lock_scope else resolved_account
+    lock_key = _shared_instagram_account_lock_key(scoped_lock_account)
+    lock_label = f"instagram-account-lock:{scoped_lock_account[:48]}"
 
-    with browser_sessions.execution_lock(resolved_account):
+    with browser_sessions.execution_lock(scoped_lock_account):
         logger.info("[instagram-account-lock] waiting for account=%s lock=%s", resolved_account, lock_key)
         # Hold the session-level advisory lock on an autocommit connection so
         # long-running scrapes do not trip idle_in_transaction_session_timeout.
@@ -983,6 +1059,7 @@ def _shared_instagram_account_execution(
                                 {
                                     "phase": "account_lock_wait",
                                     "account": resolved_account,
+                                    "lock_scope": normalized_lock_scope or None,
                                     "lock_key": lock_key,
                                     "lock_attempt": attempt + 1,
                                     "lock_max_attempts": max_lock_attempts,
@@ -1022,6 +1099,7 @@ def _shared_instagram_account_execution(
                         {
                             "phase": "account_lock_acquired",
                             "account": resolved_account,
+                            "lock_scope": normalized_lock_scope or None,
                             "lock_key": lock_key,
                         }
                     )
@@ -1718,10 +1796,18 @@ def _scrape_shared_instagram_post_details_refresh(
     stale_metadata_age = _instagram_detail_refresh_stale_metadata_age(config)
     write_batch_size = _instagram_detail_refresh_write_batch_size(config)
     media_followups_enabled = not dry_run and not bool(config.get("details_refresh_skip_media_followups"))
+    detail_shard_count = max(1, _normalize_non_negative_int(config.get("details_refresh_shard_count")) or 1)
+    detail_shard_index = _normalize_non_negative_int(config.get("details_refresh_shard_index"))
+    if detail_shard_count > 1:
+        detail_shard_index = min(detail_shard_index, detail_shard_count - 1)
+    detail_refresh_lock_scope = (
+        f"details-refresh:{detail_shard_index}:of:{detail_shard_count}" if detail_shard_count > 1 else None
+    )
     with _context_manager_from_callable(
         account_execution,
         account_handle,
         heartbeat_cb=_shared_instagram_account_lock_heartbeat(progress_cb),
+        lock_scope=detail_refresh_lock_scope,
     ):
         auth_allowed, _auth_reason = auth_validation(config)
         scraper = (
@@ -1742,10 +1828,7 @@ def _scrape_shared_instagram_post_details_refresh(
             _coerce_dt(config.get("date_end")),
         )
         all_existing_posts_count = len(existing_posts)
-        detail_shard_count = max(1, _normalize_non_negative_int(config.get("details_refresh_shard_count")) or 1)
-        detail_shard_index = _normalize_non_negative_int(config.get("details_refresh_shard_index"))
         if detail_shard_count > 1:
-            detail_shard_index = min(detail_shard_index, detail_shard_count - 1)
             existing_posts = [
                 post for index, post in enumerate(existing_posts) if index % detail_shard_count == detail_shard_index
             ]
@@ -2141,11 +2224,15 @@ def _scrape_shared_instagram_post_details_refresh(
 
     _flush_pending_writes(force=True)
 
+    details_refresh_completion_target_posts = (
+        len(existing_posts) if detail_shard_count > 1 else all_existing_posts_count
+    )
     retrieval_meta: dict[str, Any] = {
         "source": "db_metrics_refresh",
         "expected_total_posts": expected_total_posts or None,
         "total_posts": progress_total_posts or None,
-        "completion_target_posts": all_existing_posts_count or None,
+        "completion_target_posts": details_refresh_completion_target_posts or None,
+        "details_refresh_account_rows_seen": all_existing_posts_count,
         "details_refreshed_posts": details_refreshed_posts,
         "details_refresh_views_updated": details_refresh_views_updated,
         "details_refresh_views_preserved_missing": details_refresh_views_preserved_missing,
@@ -2331,7 +2418,9 @@ def _scrape_shared_instagram_posts(
 _LOCAL_ROOM_NAMES = {
     "_shared_instagram_catalog_graphql_page_size",
     "_shared_instagram_catalog_delay_seconds",
+    "_instagram_post_payload",
     "_upsert_instagram_post",
+    "_batch_upsert_instagram_posts",
     "_upsert_shared_catalog_instagram_post",
     "_shared_catalog_instagram_post_payload",
     "_batch_upsert_shared_catalog_instagram_posts",
@@ -2363,7 +2452,9 @@ _CORE_ROOM_WRAPPERS = {_name: getattr(_core, _name, None) for _name in _LOCAL_RO
 __all__ = [
     "_shared_instagram_catalog_graphql_page_size",
     "_shared_instagram_catalog_delay_seconds",
+    "_instagram_post_payload",
     "_upsert_instagram_post",
+    "_batch_upsert_instagram_posts",
     "_upsert_shared_catalog_instagram_post",
     "_shared_catalog_instagram_post_payload",
     "_batch_upsert_shared_catalog_instagram_posts",

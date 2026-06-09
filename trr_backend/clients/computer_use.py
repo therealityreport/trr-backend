@@ -45,7 +45,7 @@ COMPUTER_USE_EXECUTION_ERROR = "Computer use task failed."
 
 class ComputerUseRequest(BaseModel):
     prompt: str = Field(..., min_length=1, description="Task for Claude to perform via computer use")
-    model: str = Field(default="claude-opus-4-6")
+    model: str = Field(default="claude-opus-4-8")
     max_iterations: int = Field(default=10, ge=1, le=50)
 
 
@@ -91,7 +91,7 @@ async def run_task(req: ComputerUseRequest, _: InternalAdminUser = None):
 
 async def run_computer_task(
     prompt: str,
-    model: str = "claude-opus-4-6",
+    model: str = "claude-opus-4-8",
     max_iterations: int = 10,
     api_key: str | None = None,
 ) -> ComputerUseResponse:

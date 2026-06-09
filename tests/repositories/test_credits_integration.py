@@ -18,9 +18,6 @@ from typing import Any
 import pytest
 from dotenv import load_dotenv
 
-# Load .env file for integration tests
-load_dotenv()
-
 # Skip entire module if DB tests not enabled
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_DB_TESTS", "").lower() not in ("1", "true", "yes"),
@@ -31,6 +28,8 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(scope="module")
 def db_client():
     """Create Supabase client for tests."""
+    load_dotenv()
+
     from trr_backend.db import create_supabase_admin_client
 
     return create_supabase_admin_client()

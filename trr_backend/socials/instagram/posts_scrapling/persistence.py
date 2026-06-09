@@ -40,6 +40,8 @@ from trr_backend.socials.instagram.post_normalizer import _extract_repost_count,
 
 logger = logging.getLogger("socials.instagram.posts_scrapling.persistence")
 
+_PERSIST_DIAGNOSTICS_KEY = "posts_scrapling_persist_diagnostics"
+
 # Legacy typename → media_type (Graph* / XDTGraph* variants)
 _TYPENAME_TO_MEDIA_TYPE = {
     "GraphImage": "image",
@@ -145,6 +147,95 @@ class _ScraplingPostDTO:
 
     def to_dict(self) -> dict[str, Any]:
         return dict(self._raw_node)
+
+
+def _counter_value(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _reason_counts(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(reason).strip(): _counter_value(count)
+        for reason, count in value.items()
+        if str(reason).strip()
+    }
+
+
+def _merge_persist_diagnostics(
+    existing_summary: Any,
+    *,
+    posts_upserted: int,
+    posts_skipped: int,
+    posts_skipped_by_reason: dict[str, int],
+    inline_comments_upserted: int,
+    inline_comments_skipped: int,
+) -> dict[str, Any]:
+    existing = existing_summary if isinstance(existing_summary, dict) else {}
+    existing_reasons = _reason_counts(existing.get("posts_skipped_by_reason"))
+    current_reasons = _reason_counts(posts_skipped_by_reason)
+    merged_reasons = {
+        reason: _counter_value(existing_reasons.get(reason)) + _counter_value(current_reasons.get(reason))
+        for reason in sorted(set(existing_reasons) | set(current_reasons))
+    }
+    return {
+        "posts_upserted": _counter_value(existing.get("posts_upserted")) + _counter_value(posts_upserted),
+        "posts_skipped": _counter_value(existing.get("posts_skipped")) + _counter_value(posts_skipped),
+        "posts_skipped_by_reason": merged_reasons,
+        "inline_comments_upserted": _counter_value(existing.get("inline_comments_upserted"))
+        + _counter_value(inline_comments_upserted),
+        "inline_comments_skipped": _counter_value(existing.get("inline_comments_skipped"))
+        + _counter_value(inline_comments_skipped),
+    }
+
+
+def _update_job_persist_diagnostics(
+    *,
+    pg: Any,
+    conn: Any,
+    job_id: str,
+    posts_upserted: int,
+    posts_skipped: int,
+    posts_skipped_by_reason: dict[str, int],
+    inline_comments_upserted: int,
+    inline_comments_skipped: int,
+) -> None:
+    existing_row = (
+        pg.fetch_one(
+            """
+            select metadata
+            from social.scrape_jobs
+            where id = %s
+            for update
+            """,
+            [job_id],
+            conn=conn,
+        )
+        or {}
+    )
+    metadata = dict(existing_row.get("metadata") or {})
+    metadata[_PERSIST_DIAGNOSTICS_KEY] = _merge_persist_diagnostics(
+        metadata.get(_PERSIST_DIAGNOSTICS_KEY),
+        posts_upserted=posts_upserted,
+        posts_skipped=posts_skipped,
+        posts_skipped_by_reason=posts_skipped_by_reason,
+        inline_comments_upserted=inline_comments_upserted,
+        inline_comments_skipped=inline_comments_skipped,
+    )
+    pg.fetch_one(
+        """
+        update social.scrape_jobs
+        set metadata = %s::jsonb
+        where id = %s
+        returning id::text
+        """,
+        [json.dumps(metadata), job_id],
+        conn=conn,
+    )
 
 
 def _extract_shortcode(node: dict[str, Any]) -> str:
@@ -472,6 +563,7 @@ def persist_instagram_posts(
     """Adapt raw GraphQL nodes and persist through the canonical repo helper."""
     from trr_backend.db import pg
     from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.instagram import catalog_ingest
 
     context = repo.get_season_context(season_id) if season_id else None
     posts_upserted = 0
@@ -486,6 +578,7 @@ def persist_instagram_posts(
         posts_skipped_by_reason[reason] = int(posts_skipped_by_reason.get(reason) or 0) + 1
 
     with pg.db_connection() as conn:
+        pending_posts: list[_ScraplingPostDTO] = []
         for node in post_nodes:
             if not isinstance(node, dict):
                 _record_skip("invalid_node_type")
@@ -501,21 +594,35 @@ def persist_instagram_posts(
                 _record_skip("dto_adaptation_exception")
                 continue
 
+            pending_posts.append(dto)
+
+        upserted_rows: list[dict[str, Any]] = []
+        if pending_posts:
             try:
-                upserted = repo._upsert_instagram_post(
+                upserted_rows = catalog_ingest._batch_upsert_instagram_posts(
                     context,
                     job_id=job_id,
                     account=account_handle,
-                    post=dto,
+                    posts=pending_posts,
                     conn=conn,
                 )
             except Exception:  # noqa: BLE001
-                logger.exception("Failed to upsert post %s via canonical helper", shortcode)
-                _record_skip("canonical_upsert_exception")
-                continue
+                logger.exception("Failed to batch upsert %s posts via canonical helper", len(pending_posts))
+                for _dto in pending_posts:
+                    _record_skip("canonical_upsert_exception")
+                pending_posts = []
 
+        rows_by_shortcode: dict[str, dict[str, Any]] = {}
+        for row in upserted_rows:
+            shortcode = str((row or {}).get("shortcode") or "").strip()
+            if shortcode:
+                rows_by_shortcode[shortcode] = row
+
+        for dto in pending_posts:
+            shortcode = str(getattr(dto, "shortcode", "") or "").strip()
+            upserted = rows_by_shortcode.pop(shortcode, None)
             if not upserted:
-                logger.warning("Canonical Instagram post upsert returned no row for shortcode=%s", shortcode)
+                logger.warning("Canonical Instagram post batch upsert returned no row for shortcode=%s", shortcode)
                 _record_skip("canonical_upsert_returned_none")
                 continue
 
@@ -544,44 +651,20 @@ def persist_instagram_posts(
                     except Exception:  # noqa: BLE001
                         logger.exception("Failed to persist inline comment samples for shortcode=%s", shortcode)
                         inline_comments_skipped += len(inline_samples)
-                else:
-                    inline_comments_skipped += len(inline_samples)
+            else:
+                inline_comments_skipped += len(inline_samples)
 
-    if job_id:
-        existing_row = (
-            pg.fetch_one(
-                "select metadata from social.scrape_jobs where id = %s",
-                [job_id],
+        if job_id:
+            _update_job_persist_diagnostics(
+                pg=pg,
+                conn=conn,
+                job_id=job_id,
+                posts_upserted=posts_upserted,
+                posts_skipped=posts_skipped,
+                posts_skipped_by_reason=posts_skipped_by_reason,
+                inline_comments_upserted=inline_comments_upserted,
+                inline_comments_skipped=inline_comments_skipped,
             )
-            or {}
-        )
-        metadata = dict(existing_row.get("metadata") or {})
-        existing_summary = metadata.get("posts_scrapling_persist_diagnostics")
-        existing_reasons = (
-            dict(existing_summary.get("posts_skipped_by_reason") or {}) if isinstance(existing_summary, dict) else {}
-        )
-        merged_reasons = {
-            reason: int(existing_reasons.get(reason) or 0) + int(posts_skipped_by_reason.get(reason) or 0)
-            for reason in sorted(set(existing_reasons) | set(posts_skipped_by_reason))
-        }
-        metadata["posts_scrapling_persist_diagnostics"] = {
-            "posts_upserted": int((existing_summary or {}).get("posts_upserted") or 0) + posts_upserted,
-            "posts_skipped": int((existing_summary or {}).get("posts_skipped") or 0) + posts_skipped,
-            "posts_skipped_by_reason": merged_reasons,
-            "inline_comments_upserted": int((existing_summary or {}).get("inline_comments_upserted") or 0)
-            + inline_comments_upserted,
-            "inline_comments_skipped": int((existing_summary or {}).get("inline_comments_skipped") or 0)
-            + inline_comments_skipped,
-        }
-        pg.fetch_one(
-            """
-            update social.scrape_jobs
-            set metadata = %s::jsonb
-            where id = %s
-            returning id::text
-            """,
-            [json.dumps(metadata), job_id],
-        )
 
     return PersistedInstagramPosts(
         posts_upserted=posts_upserted,

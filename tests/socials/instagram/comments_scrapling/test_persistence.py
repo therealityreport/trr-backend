@@ -461,3 +461,54 @@ def test_partial_persistence_does_not_mark_missing_or_reconcile(monkeypatch: pyt
 
     assert result.comments_marked_missing == 0
     assert result.stored_total_comments == 4
+
+
+def test_materialize_instagram_post_for_comments_preserves_catalog_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_upsert_instagram_post(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        captured["upsert"] = kwargs
+        return {"id": "post-1"}
+
+    fake_repo = SimpleNamespace(
+        _fetch_shared_catalog_rows=lambda *_args, **_kwargs: [
+            {
+                "id": "catalog-1",
+                "source_id": "SHORT1",
+                "season_id": None,
+                "source_account": "peacock",
+                "owner_username": "peacock",
+                "username": "peacock",
+                "collaborators": ["thetraitorsus"],
+                "media_urls": [],
+                "hosted_media_urls": [],
+            }
+        ],
+        get_season_context=lambda *_args, **_kwargs: None,
+        _upsert_instagram_post=_fake_upsert_instagram_post,
+    )
+
+    find_calls = {"count": 0}
+
+    def _fake_find_post(**_kwargs: Any) -> dict[str, Any] | None:
+        find_calls["count"] += 1
+        if find_calls["count"] > 1:
+            return {"id": "post-1", "season_id": None}
+        return None
+
+    monkeypatch.setattr(persistence, "find_instagram_post_for_comments", _fake_find_post)
+
+    result = persistence._materialize_instagram_post_for_comments(  # noqa: SLF001
+        repo=fake_repo,
+        account_handle="thetraitorsus",
+        shortcode="SHORT1",
+        conn=object(),
+    )
+
+    assert result["id"] == "post-1"
+    assert captured["upsert"]["account"] == "peacock"
+    assert captured["upsert"]["post"].username == "peacock"
+    assert captured["upsert"]["post"].owner_username == "peacock"
+    assert captured["upsert"]["post"].source_account == "peacock"

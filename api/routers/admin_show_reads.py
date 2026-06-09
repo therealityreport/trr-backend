@@ -473,7 +473,7 @@ def get_admin_show_season_assets(
 @router.get("/seasons/{season_id}/episodes")
 def list_admin_season_episodes(
     season_id: str,
-    limit: int = Query(20, ge=1, le=250),
+    limit: int = Query(20, ge=1, le=500),
     offset: int = Query(0, ge=0),
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:

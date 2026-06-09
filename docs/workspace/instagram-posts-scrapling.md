@@ -1,6 +1,6 @@
 # Instagram Posts Scrapling Runbook
 
-**Status:** Experimental / additive. Old `scraper.py` handles production traffic. This lane is opt-in via stage-based dispatch. Last reviewed: 2026-04-16.
+**Status:** Active Backfill Posts post-discovery lane. Last reviewed: 2026-06-08.
 
 ## What this lane does
 
@@ -8,6 +8,7 @@
 - Bridges the browser cookies into an `httpx.AsyncClient` and calls `https://www.instagram.com/graphql/query` with the profile timeline `doc_id`, paginating via `after` + `end_cursor`.
 - Handles both the legacy `Graph*` response shape and the newer `XDTMediaDict` shape returned by the current profile timeline connection.
 - Persists each raw GraphQL edge node through the canonical `_upsert_instagram_post()` repo helper, preserving view monotonicity, optional columns, and mirror metadata.
+- Does not use Apify, managed scraper actors, the Meta API, or `apify-client`.
 
 ## Scrapling lane architecture
 
@@ -34,7 +35,7 @@ The posts Scrapling lane and comments Scrapling lane are concrete worker paths. 
 
 | Term | Meaning |
 |---|---|
-| Legacy scraper | Existing Instagram scraper path that still owns normal production posts traffic unless a job explicitly opts into a Scrapling stage. |
+| Legacy scraper | Existing compatibility path for non-stage-specific Instagram scraping. Backfill Posts post discovery should use the posts Scrapling lane. |
 | Posts Scrapling lane | The opt-in `posts_scrapling` worker path for profile timeline posts. |
 | Comments Scrapling lane | The opt-in `comments_scrapling` worker path for post comments. |
 | ScraplingRuntime | Future shared runtime abstraction; not the same thing as either production lane today. |
@@ -62,8 +63,8 @@ The posts Scrapling lane and comments Scrapling lane are concrete worker paths. 
 | `SOCIAL_INSTAGRAM_DELAY_SEC` | Delay between direct GraphQL requests after warmup | Default: `0.15` |
 | `TRR_DB_URL` | Postgres URL | Required. `TRR_DB_FALLBACK_URL` remains an optional explicit fallback only. |
 
-Scrapling version check: `scripts/setup_scrapling.sh` installs the repo-pinned package from `requirements.lock.txt`. The current verified lock/venv version is Scrapling 0.4.7. Before local validation, confirm `.venv/bin/python -m pip show scrapling` reports the current locked Scrapling version.
-`StealthyFetcher.async_fetch` remains signature-compatible on Scrapling 0.4.7 for this lane's current call sites.
+Scrapling version check: `scripts/setup_scrapling.sh` installs the repo-pinned package from `requirements.lock.txt` and refreshes browser assets with `scrapling install --force`. The current lock targets Scrapling 0.4.9. Before local validation, confirm `.venv/bin/python -m pip show scrapling` and `scrapling --version` report the current locked Scrapling version.
+`StealthyFetcher.async_fetch` remains signature-compatible on Scrapling 0.4.9 for this lane's current call sites.
 
 ## Invocation
 
@@ -106,11 +107,11 @@ The helper acquires a per-account advisory lock so only one posts_scrapling run 
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| `instagram_posts_auth_failed` in scrape_jobs.error_message | Cookies invalid/expired or challenge required | Refresh cookies via `SOCIAL_INSTAGRAM_COOKIE_AUTO_REFRESH=1` or re-save from browser |
-| `instagram_posts_warmup_no_cookies` | Warmup returned no cookies and no prior `sessionid` was available | Refresh cookies, verify browser storage state, then rerun after the worker has restarted |
+| `instagram_posts_auth_failed` in scrape_jobs.error_message | Cookies invalid/expired or challenge required | Resolve checkpoints manually first, then run the staged Manual Instagram Auth validation/sync flow from `docs/runbooks/social_worker_queue_ops.md` |
+| `instagram_posts_warmup_no_cookies` | Warmup returned no cookies and no prior `sessionid` was available | Validate Chrome auth first, sync local cookies only after confirmation, verify browser storage state, then rerun after the worker has restarted |
 | `http_429` with `retryable: true` | Rate limiting | Decrease concurrency; wait for backoff retry |
 | `transport_error` or `transport_timeout` with `retryable: true` | Proxy, DNS, socket, or timeout failure after bounded retries | Check proxy health and network path; queue retry can proceed if the upstream recovers |
-| `html_challenge_or_auth_required` | Session triggered Instagram challenge | Refresh cookies and re-run |
+| `html_challenge_or_auth_required` | Session triggered Instagram challenge | Stop retries, clear the challenge manually, then run the staged Manual Instagram Auth validation flow before any cookie sync or Modal action |
 | `graphql_empty_connection` on all doc_ids | Instagram rotated doc_ids | Update `PROFILE_POSTS_DOC_IDS` in `constants.py` — check a fresh profile page manually |
 | No posts upserted but `items_found > 0` | Response shape changed again | Inspect `raw_node` — check if fields match XDTMediaDict or a newer shape; add a new branch to `_graph_node_to_post_dto` |
 | `SOCIAL_POSTS_SCRAPLING_RUN_ALREADY_ACTIVE` from `start_instagram_posts_scrapling_scrape` | Another run is already queued/running for this account | Wait for the existing run to complete, or cancel it |
@@ -138,7 +139,7 @@ The helper acquires a per-account advisory lock so only one posts_scrapling run 
 ## Known limitations
 
 - No identity pool — DECODO handles rotation at provider level. If a specific IP gets blocked, rotate DECODO session ID.
-- Not yet plumbed into the shared-account dispatcher. For bulk scrapes, use the existing `shared_account_posts` stage on the legacy lane.
+- Backfill Posts uses the shared-account catalog pipeline and posts Scrapling lane for post discovery; do not add managed scraper actors as a shortcut.
 - Shadow comparison framework not built — compare ad-hoc via SQL:
   ```sql
   SELECT shortcode, username, likes, comments_count, views, metadata_source, scraped_at

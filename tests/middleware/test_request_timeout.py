@@ -103,6 +103,20 @@ class TestRequestTimeoutMiddleware:
         assert response.status_code == 200
         assert response.json() == {"success": True}
 
+    def test_social_week_detail_endpoint_uses_extended_backend_timeout(self):
+        """Week detail reads get a longer but still bounded backend wall clock."""
+        app = _make_app(timeout_seconds=0.1)
+
+        @app.get("/api/v1/admin/socials/seasons/00000000-0000-0000-0000-000000000001/analytics/week/3")
+        async def week_detail_endpoint():
+            await asyncio.sleep(1)  # Would timeout at the generic 0.1s cap
+            return {"week_index": 3}
+
+        client = TestClient(app)
+        response = client.get("/api/v1/admin/socials/seasons/00000000-0000-0000-0000-000000000001/analytics/week/3")
+        assert response.status_code == 200
+        assert response.json() == {"week_index": 3}
+
     def test_social_catalog_repair_auth_endpoint_exempt(self):
         """Catalog auth repair schedules long-running browser/deploy work after request acceptance."""
         app = _make_app(timeout_seconds=0.1)

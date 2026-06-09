@@ -17,8 +17,6 @@ if str(REPO_ROOT) not in sys.path:
 
 from dotenv import load_dotenv  # noqa: E402
 
-load_dotenv(REPO_ROOT / ".env", override=False)
-
 from trr_backend.db import pg  # noqa: E402
 from trr_backend.modal_dispatch import dispatch_socialblade_scrape  # noqa: E402
 from trr_backend.socials.socialblade.service import sanitize_socialblade_handle  # noqa: E402
@@ -175,6 +173,8 @@ def dispatch_backfill(
 
 
 def main() -> int:
+    load_dotenv(REPO_ROOT / ".env", override=False)
+
     args = _parse_args()
     accounts = load_saved_instagram_accounts(include_inactive=args.include_inactive)
     if args.limit is not None:

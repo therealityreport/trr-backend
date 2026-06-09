@@ -17,6 +17,8 @@ _SERVICE_NAME = os.getenv("TRR_METRICS_SERVICE_NAME", "trr_backend_api")
 _LOGGING_LOCK = Lock()
 _STREAM_HANDLER_NAME = "trr-stream"
 _BETTER_STACK_HANDLER_NAME = "trr-better-stack"
+_SENTRY_LOCK = Lock()
+_sentry_initialized = False
 
 try:  # pragma: no cover - optional dependency in local/test envs
     from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
@@ -67,6 +69,11 @@ if Counter is not None:
         # Buckets span instant-acquire (sub-ms) through multi-second queueing.
         buckets=(0.001, 0.005, 0.025, 0.1, 0.25, 1, 5, 15),
     )
+    _SOCIAL_PROXY_BYTES = Counter(
+        "trr_social_proxy_bytes_total",
+        "Total response bytes downloaded through social proxies, attributed by destination host",
+        ("service", "provider", "account", "host"),
+    )
 else:  # pragma: no cover - metrics disabled path
     _REQUEST_TOTAL = None
     _REQUEST_LATENCY = None
@@ -75,6 +82,7 @@ else:  # pragma: no cover - metrics disabled path
     _POSTGRES_POOL_AVAILABLE = None
     _POSTGRES_POOL_EXHAUSTED = None
     _POSTGRES_POOL_ACQUIRE_DURATION = None
+    _SOCIAL_PROXY_BYTES = None
 
 
 def _env_bool(name: str, *, default: bool = False) -> bool:
@@ -109,6 +117,13 @@ def _resolve_runtime_name(service_name: str | None) -> str:
     return _SERVICE_NAME
 
 
+def _resolve_environment_name() -> str:
+    """Resolve the deployment environment name from the standard TRR env var chain."""
+    return str(
+        os.getenv("TRR_ENV") or os.getenv("TRR_ENVIRONMENT") or os.getenv("APP_ENV") or os.getenv("ENV") or ""
+    ).strip()
+
+
 def _resolve_better_stack_source_token() -> str:
     for key in ("BETTER_STACK_SOURCE_TOKEN", "LOGTAIL_SOURCE_TOKEN"):
         value = str(os.getenv(key) or "").strip()
@@ -141,9 +156,7 @@ def _build_better_stack_event(record: logging.LogRecord, *, service_name: str) -
         "process": record.process,
         "thread_name": record.threadName,
     }
-    environment = str(
-        os.getenv("TRR_ENV") or os.getenv("TRR_ENVIRONMENT") or os.getenv("APP_ENV") or os.getenv("ENV") or ""
-    ).strip()
+    environment = _resolve_environment_name()
     if environment:
         event["environment"] = environment
     if trace_id:
@@ -208,11 +221,86 @@ class BetterStackHTTPHandler(logging.Handler):
             pass
 
 
+def configure_sentry(*, service_name: str | None = None) -> None:
+    """Initialize Sentry once per process, fully gated on ``SENTRY_DSN``.
+
+    No-op when ``sentry_sdk`` is not installed, when ``SENTRY_DSN`` is empty, or when
+    ``TRR_DISABLE_SENTRY`` is truthy. Mirrors the env-gated Better Stack pattern so behavior
+    is unchanged unless a DSN is explicitly configured. Safe to call from both the FastAPI
+    and Modal entrypoints.
+    """
+    global _sentry_initialized
+
+    dsn = str(os.getenv("SENTRY_DSN") or "").strip()
+    if not dsn or _env_bool("TRR_DISABLE_SENTRY", default=False):
+        return
+
+    try:  # pragma: no cover - optional dependency in local/test envs
+        import sentry_sdk
+    except ImportError:  # pragma: no cover - dependency may be absent
+        sys.stderr.write("[observability] SENTRY_DSN is set but sentry-sdk is not installed; skipping Sentry init\n")
+        return
+
+    with _SENTRY_LOCK:
+        if _sentry_initialized:
+            return
+
+        runtime_name = _resolve_runtime_name(service_name)
+        integrations: list[Any] = []
+        # Enable the FastAPI/Starlette + logging integrations when available; tolerate any
+        # sentry-sdk version that ships a different integration surface.
+        try:  # pragma: no cover - integration availability varies by sentry-sdk version
+            from sentry_sdk.integrations.starlette import StarletteIntegration
+
+            integrations.append(StarletteIntegration())
+        except Exception:  # noqa: BLE001 - integration optional
+            pass
+        try:  # pragma: no cover - integration availability varies by sentry-sdk version
+            from sentry_sdk.integrations.fastapi import FastApiIntegration
+
+            integrations.append(FastApiIntegration())
+        except Exception:  # noqa: BLE001 - integration optional
+            pass
+        try:  # pragma: no cover - integration availability varies by sentry-sdk version
+            from sentry_sdk.integrations.logging import LoggingIntegration
+
+            integrations.append(LoggingIntegration(level=logging.INFO, event_level=logging.ERROR))
+        except Exception:  # noqa: BLE001 - integration optional
+            pass
+
+        init_kwargs: dict[str, Any] = {
+            "dsn": dsn,
+            "traces_sample_rate": _env_float("SENTRY_TRACES_SAMPLE_RATE", default=0.0),
+        }
+        environment = _resolve_environment_name()
+        if environment:
+            init_kwargs["environment"] = environment
+        if integrations:
+            init_kwargs["integrations"] = integrations
+
+        try:
+            sentry_sdk.init(**init_kwargs)
+        except Exception as exc:  # noqa: BLE001 - never let observability setup break startup
+            sys.stderr.write(f"[observability] Sentry init failed: {exc}\n")
+            return
+
+        try:  # pragma: no cover - tag is best-effort metadata
+            sentry_sdk.set_tag("service", runtime_name)
+        except Exception:  # noqa: BLE001 - tagging is non-fatal
+            pass
+
+        _sentry_initialized = True
+
+
 def configure_runtime_observability(*, service_name: str | None = None) -> None:
-    """Configure local stdout logging and optional Better Stack log shipping once per process."""
+    """Configure local stdout logging, optional Better Stack log shipping, and optional Sentry once per process."""
     level = _resolve_log_level()
     runtime_name = _resolve_runtime_name(service_name)
     root_logger = logging.getLogger()
+
+    # Initialize Sentry first so any failure during the rest of setup is captured. Fully no-op
+    # unless SENTRY_DSN is configured, so this does not change behavior in the default case.
+    configure_sentry(service_name=service_name)
 
     with _LOGGING_LOCK:
         root_logger.setLevel(level)
@@ -258,6 +346,28 @@ def record_http_request(method: str, route: str, status_code: int, duration_seco
     status = str(int(status_code))
     _REQUEST_TOTAL.labels(_SERVICE_NAME, method.upper(), route, status).inc()
     _REQUEST_LATENCY.labels(_SERVICE_NAME, method.upper(), route, status).observe(max(0.0, float(duration_seconds)))
+
+
+def record_proxy_bytes(provider: str, account: str, host: str, n: int) -> None:
+    """Increment the social-proxy byte counter, labelled by provider/account/host.
+
+    No-op when prometheus_client is absent or when ``n`` is non-positive. Mirrors the
+    fail-open style of ``record_http_request``: never raise from the metering path.
+    """
+    if _SOCIAL_PROXY_BYTES is None:
+        return
+    try:
+        count = int(n)
+    except (TypeError, ValueError):
+        return
+    if count <= 0:
+        return
+    _SOCIAL_PROXY_BYTES.labels(
+        _SERVICE_NAME,
+        (provider or "unknown").strip() or "unknown",
+        (account or "unknown").strip() or "unknown",
+        (host or "unknown").strip() or "unknown",
+    ).inc(count)
 
 
 def inc_suppressed_path_conversion(component: str, reason: str) -> None:

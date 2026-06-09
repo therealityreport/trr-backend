@@ -10,6 +10,8 @@ from datetime import timedelta
 from typing import Any
 
 from trr_backend.db import pg
+from trr_backend.socials.post_persist_truthfulness import apply_post_persist_truthfulness_metadata
+from trr_backend.socials.rollout_flags import resolve_rollout_flag
 
 from .fetcher import ThreadsPostsFetchResult, ThreadsPostsScraplingFetcher
 from .persistence import persist_threads_posts
@@ -56,6 +58,7 @@ ThreadsPostsScraplingCancelled = ThreadsPostsScraplingCancelledError
 
 _OPERATION_TIMEOUT_SECONDS_DEFAULT = 240.0
 _OPERATION_HEARTBEAT_INTERVAL_SECONDS_DEFAULT = 30.0
+_THREADS_POSTS_SCRAPLING_ENABLED_ENV = "SOCIAL_THREADS_POSTS_SCRAPLING_ENABLED"
 _TRANSIENT_ERROR_SNIPPETS = (
     "too many 429",
     "too many 500",
@@ -158,6 +161,10 @@ def _resolve_operation_heartbeat_interval_seconds() -> float:
     return min(max(parsed, 1.0), 120.0)
 
 
+def _resolve_threads_posts_scrapling_rollout_flag() -> dict[str, Any]:
+    return resolve_rollout_flag(_THREADS_POSTS_SCRAPLING_ENABLED_ENV, default_enabled=True)
+
+
 def _transient_exception_error_code(exc: BaseException) -> str | None:
     normalized = f"{exc.__class__.__name__}: {exc}".strip().lower()
     if any(snippet in normalized for snippet in _TRANSIENT_ERROR_SNIPPETS):
@@ -235,6 +242,8 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
     max_pages: int | None = int(max_pages_raw) if max_pages_raw not in (None, 0, "") else None
     fast_mode = bool(config.get("fast_mode", False))
     season_id = str(config.get("season_id") or "").strip() or None
+    rollout_flag = _resolve_threads_posts_scrapling_rollout_flag()
+    threads_posts_scrapling_enabled = bool(rollout_flag["enabled"])
 
     if not account_handle:
         raise ThreadsPostsScraplingRuntimeError(
@@ -324,6 +333,10 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
             "platform": "threads",
             "account": account_handle,
             "fast_mode": fast_mode,
+            "threads_posts_scrapling_enabled": threads_posts_scrapling_enabled,
+            "rollout_flags": {
+                "threads_posts_scrapling": dict(rollout_flag),
+            },
             "progress": {
                 "scraped_posts": posts_fetched,
                 "scraped_comments": 0,
@@ -525,11 +538,35 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
             await fetcher.aclose()
 
     try:
+        if not threads_posts_scrapling_enabled:
+            stop_reason = "threads_posts_scrapling_disabled"
+            raise ThreadsPostsScraplingRuntimeError(
+                f"Threads posts Scrapling job is disabled by {_THREADS_POSTS_SCRAPLING_ENABLED_ENV}.",
+                error_code="threads_posts_scrapling_disabled",
+                retryable=False,
+                runtime_metadata={
+                    "disabled_reason": "disabled_by_env",
+                    "threads_posts_scrapling_enabled": False,
+                    "rollout_flag": dict(rollout_flag),
+                },
+            )
+
         fetcher_metadata = asyncio.run(_run_job())
         _raise_if_cancelled(job_id=job_id, run_id=run_id, runtime_metadata=fetcher_metadata)
         metadata = _terminal_metadata(
             "threads_posts_scrapling_end",
             partial=stop_reason not in {None, "completed"},
+        )
+        metadata = apply_post_persist_truthfulness_metadata(
+            metadata,
+            platform="threads",
+            account=account_handle,
+            status="completed",
+            posts_checked=posts_fetched,
+            posts_upserted=posts_upserted,
+            posts_skipped=posts_skipped,
+            posts_skipped_by_reason=posts_skipped_by_reason,
+            alias_keys=("threads_posts_scrapling_persist_diagnostics",),
         )
         lifecycle.finish_job(
             job_id,
@@ -664,6 +701,10 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
                 "stage": stage,
                 "platform": "threads",
                 "account": account_handle,
+                "threads_posts_scrapling_enabled": threads_posts_scrapling_enabled,
+                "rollout_flags": {
+                    "threads_posts_scrapling": dict(rollout_flag),
+                },
                 "stage_counters": _stage_counters(),
                 "persist_counters": _persist_counters(),
                 "listing_progress": _listing_progress(partial=terminal_status != "completed"),

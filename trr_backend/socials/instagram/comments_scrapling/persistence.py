@@ -448,6 +448,22 @@ def _materialize_instagram_post_for_comments(
     failure_metadata["catalog_row_id"] = str(catalog_row.get("id") or "").strip() or None
     season_id = str(catalog_row.get("season_id") or "").strip() or None
     context = repo.get_season_context(season_id, conn=conn) if season_id else None
+    owner_account = (
+        str(catalog_row.get("owner_username") or catalog_row.get("username") or catalog_row.get("source_account") or "")
+        .strip()
+        .lower()
+        .lstrip("@")
+    )
+    source_account = (
+        str(catalog_row.get("source_account") or owner_account or normalized_account or "")
+        .strip()
+        .lower()
+        .lstrip("@")
+    )
+    if not owner_account:
+        owner_account = source_account or normalized_account
+    failure_metadata["materialized_owner_username"] = owner_account
+    failure_metadata["materialized_source_account"] = source_account
     post = _MaterializedInstagramPost(
         shortcode=str(catalog_row.get("source_id") or shortcode or "").strip(),
         taken_at=catalog_row.get("posted_at"),
@@ -471,13 +487,14 @@ def _materialize_instagram_post_for_comments(
         metadata_scraped_at=catalog_row.get("metadata_scraped_at"),
         duration_seconds=catalog_row.get("duration_seconds"),
         raw_data=dict(catalog_row),
-        username=normalized_account,
-        source_account=normalized_account,
+        username=owner_account,
+        owner_username=owner_account,
+        source_account=source_account,
     )
     upserted = repo._upsert_instagram_post(
         context,
         job_id=None,
-        account=normalized_account,
+        account=source_account,
         post=post,
         conn=conn,
     )

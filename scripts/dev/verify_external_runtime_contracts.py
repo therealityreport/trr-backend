@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RENDER_BLUEPRINT_PATH = REPO_ROOT / "render.yaml"
 RENDER_DOC_PATH = REPO_ROOT / "docs" / "deploy" / "render.md"
 SOURCE_ENV_PATH = REPO_ROOT / ".env"
+DECODO_TOKEN_KEYS = ("SCRAPER_API_TOKEN", "DECODO_AUTH_TOKEN", "DECODO_API_TOKEN")
 
 
 def default_component(*, verify_only: bool) -> dict[str, Any]:
@@ -37,6 +39,29 @@ def _resolve_env_value(key: str) -> str:
     return ""
 
 
+def _launchctl_has_env_value(key: str) -> bool:
+    try:
+        completed = subprocess.run(
+            ["launchctl", "getenv", key],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return False
+    return completed.returncode == 0 and bool(completed.stdout.strip())
+
+
+def _configured_decodo_token_sources() -> list[str]:
+    sources: list[str] = []
+    for key in DECODO_TOKEN_KEYS:
+        if _resolve_env_value(key):
+            sources.append(f"env:{key}")
+        elif _launchctl_has_env_value(key):
+            sources.append(f"launchctl:{key}")
+    return sources
+
+
 def verify_render_contract() -> dict[str, Any]:
     component = default_component(verify_only=True)
     blueprint_text = RENDER_BLUEPRINT_PATH.read_text(encoding="utf-8")
@@ -57,11 +82,20 @@ def verify_decodo_contract() -> dict[str, Any]:
     username = _resolve_env_value("DECODO_USERNAME")
     password = _resolve_env_value("DECODO_PASSWORD")
     gateway = _resolve_env_value("DECODO_GATEWAY") or "gate.decodo.com:7000"
-    if not username or not password:
+    token_sources = _configured_decodo_token_sources()
+    proxy_configured = bool(username and password)
+    mcp_configured = bool(token_sources)
+    if not proxy_configured and not mcp_configured:
         component["state"] = "advisory"
         component["reason"] = "decodo_unconfigured"
-        component["remediation"] = "Configure DECODO_USERNAME and DECODO_PASSWORD for proxy-backed hosted lanes."
+        component["remediation"] = (
+            "Configure SCRAPER_API_TOKEN for Decodo MCP/API lanes or DECODO_USERNAME and DECODO_PASSWORD "
+            "for proxy-backed hosted lanes."
+        )
     component["gateway"] = gateway
+    component["proxy_configured"] = proxy_configured
+    component["mcp_token_configured"] = mcp_configured
+    component["token_sources"] = token_sources
     return component
 
 

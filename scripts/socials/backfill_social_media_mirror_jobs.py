@@ -320,6 +320,7 @@ def main() -> int:
     post_ids = _normalize_text_filters(args.post_id)
     source_ids = _normalize_text_filters(args.source_id)
     repair_reasons = _parse_repair_reasons(args.repair_reasons)
+    source_scope = social_repo.normalize_source_scope(args.source_scope)
     commit_batch_size = max(1, int(getattr(args, "commit_batch_size", 100)))
 
     context_cache: dict[str, social_repo.SeasonContext] = {}
@@ -370,43 +371,42 @@ def main() -> int:
                 if args.dry_run:
                     continue
 
-                season_id = str(row.get("season_id") or "").strip()
-                if not season_id:
-                    counters[platform].failed += 1
-                    continue
-
-                context = context_cache.get(season_id)
-                if context is None:
-                    context = social_repo.get_season_context(season_id)
-                    context_cache[season_id] = context
-                    try:
-                        season_windows, _ = social_repo._resolve_week_windows(  # noqa: SLF001
-                            context,
-                            timezone="America/New_York",
-                            source_scope=args.source_scope,
-                            now_utc=now_utc,
-                        )
-                    except Exception:
-                        season_windows = []
-                    windows_cache[season_id] = season_windows
-
                 week_index: int | None = None
                 posted_at = social_repo._coerce_dt(row.get("posted_at"))  # noqa: SLF001
-                season_windows = windows_cache.get(season_id) or []
-                if posted_at and season_windows:
-                    week_window = social_repo._week_for_timestamp(  # noqa: SLF001
-                        posted_at,
-                        windows=season_windows,
-                        timezone="America/New_York",
-                    )
-                    week_index = week_window.week_index if week_window else None
+                season_id = str(row.get("season_id") or "").strip()
+                if season_id:
+                    context = context_cache.get(season_id)
+                    if context is None:
+                        context = social_repo.get_season_context(season_id)
+                        context_cache[season_id] = context
+                        try:
+                            season_windows, _ = social_repo._resolve_week_windows(  # noqa: SLF001
+                            context,
+                            timezone="America/New_York",
+                            source_scope=source_scope,
+                            now_utc=now_utc,
+                        )
+                        except Exception:
+                            season_windows = []
+                        windows_cache[season_id] = season_windows
+
+                    season_windows = windows_cache.get(season_id) or []
+                    if posted_at and season_windows:
+                        week_window = social_repo._week_for_timestamp(  # noqa: SLF001
+                            posted_at,
+                            windows=season_windows,
+                            timezone="America/New_York",
+                        )
+                        week_index = week_window.week_index if week_window else None
+                else:
+                    context = None
 
                 try:
                     job_id = social_repo._enqueue_platform_media_mirror_job(  # noqa: SLF001
                         context,
                         platform=platform,
                         run_id=None,
-                        source_scope=args.source_scope,
+                        source_scope=source_scope,
                         account=str(row.get("account") or ""),
                         post_row=row,
                         week_index=week_index,
@@ -450,6 +450,7 @@ def main() -> int:
         json.dumps(
             {
                 "source_scope": args.source_scope,
+                "effective_source_scope": source_scope,
                 "weeks": max(1, int(args.weeks)),
                 "all_history": bool(args.all_history),
                 "cutoff": social_repo._iso(cutoff) if cutoff else None,  # noqa: SLF001

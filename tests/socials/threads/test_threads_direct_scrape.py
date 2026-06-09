@@ -60,7 +60,7 @@ def test_post_to_payload_preserves_threads_route_shape() -> None:
         "views": 500,
         "url": "https://www.threads.com/@bravotv/post/post-1",
         "thumbnail_url": "https://images.test/thumb.jpg",
-        "media_urls": ["https://images.test/a.jpg", "None"],
+        "media_urls": ["https://images.test/a.jpg"],
         "posted_at": "2026-01-01T00:00:00+00:00",
     }
 

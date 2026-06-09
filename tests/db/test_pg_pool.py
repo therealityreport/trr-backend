@@ -178,7 +178,33 @@ def _detail(url: str) -> dict[str, object]:
 
 
 @pytest.fixture(autouse=True)
-def _reset_pool_state() -> None:
+def _reset_pool_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "APP_ENV",
+        "ENV",
+        "ENVIRONMENT",
+        "TRR_ENV",
+        "TRR_ENVIRONMENT",
+        "TRR_LOCAL_DEV",
+        "MODAL_TASK_ID",
+        "MODAL_ENVIRONMENT",
+        "TRR_DB_APPLICATION_NAME",
+        "TRR_DB_POOL_MINCONN",
+        "TRR_DB_POOL_MAXCONN",
+        "TRR_SOCIAL_PROFILE_DB_POOL_MINCONN",
+        "TRR_SOCIAL_PROFILE_DB_POOL_MAXCONN",
+        "TRR_SOCIAL_CONTROL_DB_POOL_MINCONN",
+        "TRR_SOCIAL_CONTROL_DB_POOL_MAXCONN",
+        "TRR_SOCIAL_PROGRESS_DB_POOL_MINCONN",
+        "TRR_SOCIAL_PROGRESS_DB_POOL_MAXCONN",
+        "TRR_HEALTH_DB_POOL_MINCONN",
+        "TRR_HEALTH_DB_POOL_MAXCONN",
+        "TRR_DB_POOL_ACQUIRE_ATTEMPTS",
+        "TRR_DB_POOL_ACQUIRE_SLEEP_MS",
+        "TRR_DB_POOL_CLOSE_AFTER_RETURN",
+        "TRR_DB_CONNECT_TIMEOUT_SECONDS",
+    ):
+        monkeypatch.delenv(name, raising=False)
     pg.close_pool()
     yield
     pg.close_pool()

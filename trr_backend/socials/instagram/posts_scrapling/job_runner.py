@@ -5,11 +5,12 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from trr_backend.db import pg
 from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsScraplingFetcher
+from trr_backend.socials.post_persist_truthfulness import apply_post_persist_truthfulness_metadata
 
 try:
     from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsWarmupError
@@ -20,9 +21,20 @@ except ImportError:  # pragma: no cover - removed once the fetcher worker lands.
         retryable = False
 
 
+from trr_backend.socials.instagram import auth_cooldown
 from trr_backend.socials.instagram.posts_scrapling.persistence import persist_instagram_posts
 from trr_backend.socials.instagram.posts_scrapling.proxy import posts_proxy_feature_flags, select_posts_proxy
-from trr_backend.socials.instagram.posts_scrapling.session import resolve_posts_scrapling_session
+from trr_backend.socials.instagram.posts_scrapling.session import (
+    build_posts_identity_provider,
+    resolve_posts_scrapling_session,
+)
+
+_POSTS_PLATFORM = "instagram"
+# Bounded rotate-on-block budget (A2): authenticated sessions default to no
+# rotation so reputation is preserved; anonymous canary mode may rotate a proxy
+# identity without writing account auth cooldown rows.
+_POSTS_AUTHENTICATED_ROTATE_ON_BLOCK_MAX_RETRIES_DEFAULT = 0
+_POSTS_ANONYMOUS_ROTATE_ON_BLOCK_MAX_RETRIES_DEFAULT = 2
 
 logger = logging.getLogger("socials.instagram.posts_scrapling.job_runner")
 
@@ -61,6 +73,50 @@ class ScraplingJobCancelledError(Exception):
 
 
 ScraplingJobCancelled = ScraplingJobCancelledError
+
+
+@dataclass(slots=True)
+class PostsAuthCooldownActive(Exception):
+    """Soft-stop signal: an account-scoped auth cooldown is active.
+
+    Raised when ``auth_cooldown.get_active_cooldown`` reports a future deadline at
+    job start or before a page request. The job runner catches this and requeues
+    the job with ``available_at = cooldown_until`` (mirroring the frontier
+    cooldown pattern) rather than burning attempts against a blocked account.
+    """
+
+    message: str
+    cooldown_until: Any
+    error_code: str
+    blocker_kind: str
+    runtime_metadata: dict[str, Any] | None = None
+
+    def __str__(self) -> str:
+        return self.message
+
+
+def _posts_anonymous_enabled(config: dict[str, Any]) -> bool:
+    raw = config.get("anonymous_enabled")
+    if raw in (None, ""):
+        raw = os.getenv("SOCIAL_INSTAGRAM_POSTS_ANONYMOUS_ENABLED")
+    return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _rotate_on_block_max_retries(*, anonymous: bool) -> int:
+    if anonymous:
+        env_name = "SOCIAL_INSTAGRAM_POSTS_ANONYMOUS_ROTATE_ON_BLOCK_MAX_RETRIES"
+        default = _POSTS_ANONYMOUS_ROTATE_ON_BLOCK_MAX_RETRIES_DEFAULT
+    else:
+        env_name = "SOCIAL_INSTAGRAM_POSTS_ROTATE_ON_BLOCK_MAX_RETRIES"
+        default = _POSTS_AUTHENTICATED_ROTATE_ON_BLOCK_MAX_RETRIES_DEFAULT
+    raw = (os.getenv(env_name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(0, min(5, value))
 
 
 def _normalize_proxy_session_part(value: Any) -> str | None:
@@ -169,6 +225,24 @@ def _raise_if_pagination_state_persist_failed(
     )
 
 
+def _apply_proxy_session_generation(base_key: str, *, rotation_generation: int) -> str:
+    """Suffix a rotation generation onto a proxy session key.
+
+    Rotating the session_key re-hashes into a new Decodo sticky session id, i.e.
+    a new residential IP (see _proxy_sessions.apply_decodo_session_affinity).
+    Generation 0 is the unsuffixed base key so steady-state behaviour and any
+    persisted proxy_session_key values are unchanged; only an explicit
+    rotate-on-block bumps the generation.
+    """
+    try:
+        generation = int(rotation_generation)
+    except (TypeError, ValueError):
+        generation = 0
+    if generation <= 0:
+        return base_key
+    return f"{base_key}:gen{generation}"
+
+
 def _posts_proxy_session_key(
     *,
     account_handle: str,
@@ -176,6 +250,7 @@ def _posts_proxy_session_key(
     config: dict[str, Any],
     job_metadata: dict[str, Any],
     browser_account_id: str | None,
+    rotation_generation: int = 0,
 ) -> str:
     account = (
         _normalize_proxy_session_part(account_handle) or _normalize_proxy_session_part(browser_account_id) or "unknown"
@@ -185,20 +260,24 @@ def _posts_proxy_session_key(
     detail_shard_count = max(1, _coerce_proxy_session_int(config.get("details_refresh_shard_count"), 1))
     detail_shard_index = config.get("details_refresh_shard_index")
     if detail_shard_count > 1 and detail_shard_index not in (None, ""):
-        return f"{account}:{normalized_stage}:details:{_coerce_proxy_session_int(detail_shard_index)}"
+        base_key = f"{account}:{normalized_stage}:details:{_coerce_proxy_session_int(detail_shard_index)}"
+        return _apply_proxy_session_generation(base_key, rotation_generation=rotation_generation)
 
     shard_count = max(1, _coerce_proxy_session_int(config.get("shard_count") or config.get("posts_shard_count"), 1))
     shard_index = config.get("shard_index", config.get("posts_shard_index"))
     if shard_count > 1 and shard_index not in (None, ""):
-        return f"{account}:{normalized_stage}:posts:{_coerce_proxy_session_int(shard_index)}"
+        base_key = f"{account}:{normalized_stage}:posts:{_coerce_proxy_session_int(shard_index)}"
+        return _apply_proxy_session_generation(base_key, rotation_generation=rotation_generation)
 
     worker_lane = _normalize_proxy_session_part(
         config.get("runner_lane") or config.get("worker_lane") or job_metadata.get("worker_lane")
     )
     if worker_lane:
-        return f"{account}:{normalized_stage}:lane:{worker_lane}"
+        base_key = f"{account}:{normalized_stage}:lane:{worker_lane}"
+        return _apply_proxy_session_generation(base_key, rotation_generation=rotation_generation)
 
-    return str(browser_account_id or account).strip().lower().lstrip("@") or account
+    base_key = str(browser_account_id or account).strip().lower().lstrip("@") or account
+    return _apply_proxy_session_generation(base_key, rotation_generation=rotation_generation)
 
 
 def _raise_if_cancelled(
@@ -261,6 +340,121 @@ def _raise_if_cancelled(
     )
 
 
+def _raise_if_auth_cooldown_active(
+    *,
+    account_handle: str,
+    phase: str,
+    runtime_metadata: dict[str, Any] | None = None,
+) -> None:
+    """A4 READ: soft-stop the job when an account-scoped auth cooldown is active.
+
+    Reads the cross-process cooldown (Postgres-backed, social_control pool). When
+    a future deadline is set, raise PostsAuthCooldownActive so the outer handler
+    requeues with available_at = cooldown_until instead of issuing more
+    authenticated requests. Fails open: any read error means "no cooldown".
+    """
+    cooldown = auth_cooldown.get_active_cooldown(_POSTS_PLATFORM, account_handle)
+    if cooldown is None:
+        return
+    metadata = dict(runtime_metadata or {})
+    metadata["auth_cooldown"] = cooldown.to_metadata()
+    logger.warning(
+        "instagram_posts_scrapling auth_cooldown_active",
+        extra={
+            "event": "auth_cooldown_active",
+            "phase": phase,
+            "account": account_handle,
+            "blocker_kind": cooldown.blocker_kind,
+            "consecutive_auth_failures": cooldown.consecutive_auth_failures,
+            "cooldown_until": cooldown.cooldown_until.isoformat(),
+            "last_error_code": cooldown.last_error_code,
+        },
+    )
+    raise PostsAuthCooldownActive(
+        f"Instagram posts auth cooldown active for @{account_handle} until {cooldown.cooldown_until.isoformat()}.",
+        cooldown_until=cooldown.cooldown_until,
+        error_code=cooldown.last_error_code or "instagram_posts_auth_cooldown_active",
+        blocker_kind=cooldown.blocker_kind,
+        runtime_metadata=metadata,
+    )
+
+
+def _posts_per_identity_session_rotation_budget() -> int:
+    """How many sticky-session rotations (A2) to try before advancing identity (A3).
+
+    With a single identity the pool yields one entry, so advancing is a no-op and
+    this budget only governs the labelling/telemetry of which rotation tier we are
+    in. Defaults to 1: rotate the sticky session once, then (if a real second
+    identity exists) advance to it on the next block.
+    """
+    raw = (os.getenv("SOCIAL_INSTAGRAM_POSTS_PER_IDENTITY_SESSION_ROTATION_BUDGET") or "").strip()
+    if not raw:
+        return 1
+    try:
+        value = int(raw)
+    except ValueError:
+        return 1
+    return max(1, min(5, value))
+
+
+async def _rotate_after_auth_block(
+    *,
+    fetcher: InstagramPostsScraplingFetcher,
+    account_handle: str,
+    stage: str,
+    config: dict[str, Any],
+    job_metadata: dict[str, Any],
+    browser_account_id: str | None,
+    rotation_generation: int,
+    block_error_code: str,
+) -> dict[str, Any]:
+    """A2 + A3: rotate the proxy/identity after a classified hard 401/403.
+
+    Always selects a fresh Decodo sticky session via a bumped generation suffix on
+    the proxy session key (A2 — new residential IP). When the per-identity
+    session-rotation budget is exhausted and the identity pool is enabled, also
+    advances to the next pool identity via ``fetcher.rotate_session`` (A3 —
+    mirrors scraper._maybe_rotate_identity_after_failure). Returns the new proxy
+    session key and whether an identity rotation occurred.
+    """
+    new_proxy_session_key = _posts_proxy_session_key(
+        account_handle=account_handle,
+        stage=stage,
+        config=config,
+        job_metadata=job_metadata,
+        browser_account_id=browser_account_id,
+        rotation_generation=rotation_generation,
+    )
+    new_proxy_config = select_posts_proxy(session_key=new_proxy_session_key or account_handle)
+
+    identity_rotated = False
+    advance_identity = rotation_generation > _posts_per_identity_session_rotation_budget()
+    if advance_identity and hasattr(fetcher, "rotate_session"):
+        try:
+            identity_rotated = bool(
+                await fetcher.rotate_session(
+                    proxy_config=new_proxy_config,
+                    reason=f"rotate_on_block:{block_error_code}",
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - rotation is best-effort
+            logger.warning(
+                "instagram_posts_scrapling rotate_session_failed account=%s error=%s",
+                account_handle,
+                exc,
+                exc_info=True,
+            )
+            identity_rotated = False
+    if not identity_rotated:
+        # A2 only: swap the direct GraphQL proxy route (fresh sticky session)
+        # without rerunning browser warmup or re-resolving the identity.
+        await fetcher.set_api_proxy_config(new_proxy_config, reason="rotate_on_block")
+    return {
+        "proxy_session_key": new_proxy_session_key,
+        "identity_rotated": identity_rotated,
+    }
+
+
 def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None = None) -> dict[str, Any]:
     from trr_backend.repositories import social_season_analytics as repo
 
@@ -275,6 +469,7 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
     fast_mode = bool(config.get("fast_mode", False))
     source_scope = str(config.get("source_scope") or "network").strip().lower() or "network"
     season_id = str(config.get("season_id") or "").strip() or None
+    anonymous_enabled = _posts_anonymous_enabled(config)
 
     if not account_handle:
         raise PostsScraplingRuntimeError(
@@ -308,24 +503,49 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
         nonlocal reverse_posts_fetched, reverse_posts_upserted, reverse_pages_fetched, reverse_stop_reason
         nonlocal bidirectional_reverse_started, bidirectional_reverse_error
 
-        session = resolve_posts_scrapling_session(
-            browser_account_id=account_handle,
-            caller_context=f"posts_scrapling:{account_handle}",
+        # A4 READ (job start): authenticated runs honor account cooldowns before
+        # warmup. Anonymous canaries have no account session to burn, so they do
+        # not read or write account auth cooldown state.
+        if not anonymous_enabled:
+            _raise_if_auth_cooldown_active(
+                account_handle=account_handle,
+                phase="job_start",
+                runtime_metadata={"proxy_session_key": None},
+            )
+
+        session = (
+            None
+            if anonymous_enabled
+            else resolve_posts_scrapling_session(
+                browser_account_id=account_handle,
+                caller_context=f"posts_scrapling:{account_handle}",
+            )
         )
+        # A2: rotation generation suffixed onto the proxy session key. Bumped only
+        # on a classified hard 401/403 so a fresh Decodo sticky session (new
+        # residential IP) is selected for the bounded same-cursor retry.
+        rotation_generation = 0
         proxy_session_key = _posts_proxy_session_key(
             account_handle=account_handle,
             stage=stage,
             config=config,
             job_metadata=job_metadata,
-            browser_account_id=session.browser_account_id,
+            browser_account_id=session.browser_account_id if session is not None else None,
+            rotation_generation=rotation_generation,
         )
         proxy_config = select_posts_proxy(session_key=proxy_session_key or account_handle)
+        # A3: identity-pool seam. None when SOCIAL_INSTAGRAM_IDENTITY_POOL_ENABLED
+        # is off (or only one identity exists), in which case rotate_session only
+        # swaps the proxy sticky session. Acquired at session-resolve.
+        identity_provider = build_posts_identity_provider(session) if session is not None else None
         fetcher = InstagramPostsScraplingFetcher(
-            cookies=session.cookies,
-            raw_cookies=session.auth_session.cookies,
-            browser_account_id=session.browser_account_id,
+            cookies=[] if anonymous_enabled else session.cookies,
+            raw_cookies={} if anonymous_enabled else session.auth_session.cookies,
+            browser_account_id=None if anonymous_enabled else session.browser_account_id,
             proxy_config=proxy_config,
             fast_mode=fast_mode,
+            identity_provider=identity_provider,
+            auth_state="anonymous" if anonymous_enabled else "authenticated",
         )
         proxy_flags = posts_proxy_feature_flags()
         forward_seen_post_ids: set[str] = set()
@@ -342,11 +562,12 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
             reverse_proxy_session_key = f"{proxy_session_key}:reverse"
             reverse_proxy_config = select_posts_proxy(session_key=reverse_proxy_session_key)
             reverse_fetcher = InstagramPostsScraplingFetcher(
-                cookies=session.cookies,
-                raw_cookies=session.auth_session.cookies,
-                browser_account_id=session.browser_account_id,
+                cookies=[] if anonymous_enabled else session.cookies,
+                raw_cookies={} if anonymous_enabled else session.auth_session.cookies,
+                browser_account_id=None if anonymous_enabled else session.browser_account_id,
                 proxy_config=reverse_proxy_config,
                 fast_mode=fast_mode,
+                auth_state="anonymous" if anonymous_enabled else "authenticated",
             )
             try:
                 await reverse_fetcher.apply_warmup_snapshot(snapshot)
@@ -459,7 +680,7 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                     retryable=bool(getattr(exc, "retryable", False)),
                     runtime_metadata=_fetcher_runtime_metadata(),
                 ) from exc
-            auth_metadata = dict(session.auth_session.metadata or {})
+            auth_metadata = {} if session is None else dict(session.auth_session.metadata or {})
             fetcher_metadata = _fetcher_runtime_metadata()
 
             lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id)
@@ -523,6 +744,15 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                     run_id=run_id,
                     runtime_metadata=_fetcher_runtime_metadata(),
                 )
+                # A4 READ (per-page): another container may have parked the
+                # account on a cooldown since this job started. Soft-stop and
+                # requeue at cooldown_until rather than issuing the next page.
+                if not anonymous_enabled:
+                    _raise_if_auth_cooldown_active(
+                        account_handle=account_handle,
+                        phase="pre_page",
+                        runtime_metadata=_fetcher_runtime_metadata(),
+                    )
                 if proxy_flags["page_proxy_rotation_enabled"]:
                     page_proxy_config = select_posts_proxy(
                         session_key=proxy_session_key or account_handle,
@@ -537,11 +767,81 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                 fetcher_metadata = _fetcher_runtime_metadata()
 
                 if result.auth_failed:
+                    # Converged auth-block handler (A2 + A3 + A4). Classify the
+                    # block: a checkpoint/challenge is non-clearing and must NOT
+                    # auto-rotate-retry; a plain 401/403 gets a bounded
+                    # rotate-on-block retry (fresh sticky session => new IP, and
+                    # the next pool identity when the per-identity budget is
+                    # exhausted) before we record a cooldown and fail.
+                    block_error_code = str(result.fetch_reason or "instagram_posts_auth_failed").strip()
+                    is_checkpoint = auth_cooldown.is_checkpoint_error_code(block_error_code)
+                    if not is_checkpoint and rotation_generation < _rotate_on_block_max_retries(
+                        anonymous=anonymous_enabled
+                    ):
+                        rotation_generation += 1
+                        rotated = await _rotate_after_auth_block(
+                            fetcher=fetcher,
+                            account_handle=account_handle,
+                            stage=stage,
+                            config=config,
+                            job_metadata=job_metadata,
+                            browser_account_id=session.browser_account_id if session is not None else None,
+                            rotation_generation=rotation_generation,
+                            block_error_code=block_error_code,
+                        )
+                        proxy_session_key = rotated["proxy_session_key"]
+                        fetcher_metadata = _fetcher_runtime_metadata()
+                        logger.warning(
+                            "instagram_posts_scrapling rotate_on_block",
+                            extra={
+                                "event": "rotate_on_block",
+                                "account": account_handle,
+                                "rotation_generation": rotation_generation,
+                                "block_error_code": block_error_code,
+                                "identity_rotated": rotated["identity_rotated"],
+                                "proxy_session_key": proxy_session_key,
+                            },
+                        )
+                        # Retry the SAME cursor on the fresh session/identity.
+                        continue
+                    if anonymous_enabled:
+                        raise PostsScraplingRuntimeError(
+                            f"Anonymous Instagram posts retry budget exhausted for @{account_handle}.",
+                            error_code="anonymous_retry_exhausted",
+                            retryable=True,
+                            runtime_metadata={
+                                **_fetcher_runtime_metadata(),
+                                "fetch_reason": result.fetch_reason,
+                                "auth_block_kind": "anonymous",
+                                "rotation_generation": rotation_generation,
+                            },
+                        )
+                    # Either a checkpoint (no rotate) or rotation budget exhausted:
+                    # record the cross-process cooldown and fail this attempt.
+                    cooldown = auth_cooldown.record_auth_block(
+                        _POSTS_PLATFORM,
+                        account_handle,
+                        block_error_code,
+                    )
                     raise PostsScraplingRuntimeError(
-                        f"Instagram auth failed while fetching posts for @{account_handle}.",
-                        error_code="instagram_posts_auth_failed",
+                        (
+                            f"Instagram posts checkpoint required for @{account_handle}."
+                            if is_checkpoint
+                            else f"Instagram auth failed while fetching posts for @{account_handle}."
+                        ),
+                        error_code=(
+                            "instagram_posts_checkpoint_required"
+                            if is_checkpoint
+                            else "instagram_posts_auth_failed"
+                        ),
                         retryable=False,
-                        runtime_metadata={**_fetcher_runtime_metadata(), "fetch_reason": result.fetch_reason},
+                        runtime_metadata={
+                            **_fetcher_runtime_metadata(),
+                            "fetch_reason": result.fetch_reason,
+                            "auth_block_kind": "checkpoint" if is_checkpoint else "auth",
+                            "rotation_generation": rotation_generation,
+                            "auth_cooldown": cooldown.to_metadata() if cooldown is not None else None,
+                        },
                     )
                 if result.fetch_failed and not result.posts:
                     stop_reason = _posts_pagination_stop_reason(result)
@@ -585,6 +885,13 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                         retryable=bool(result.retryable),
                         runtime_metadata={**_fetcher_runtime_metadata(), "fetch_reason": result.fetch_reason},
                     )
+
+                # A4 reset: a clean page fetch (no auth failure, no fetch failure)
+                # proves the account is healthy again. Clear the cross-process
+                # cooldown so sibling containers stop deferring. Checkpoint
+                # blockers are non-clearing inside clear_cooldown.
+                if not anonymous_enabled:
+                    auth_cooldown.clear_cooldown(_POSTS_PLATFORM, account_handle)
 
                 if result.posts:
                     if not bidirectional_probe_done and _posts_bidirectional_walk_enabled():
@@ -778,6 +1085,16 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
             },
             "fetcher_runtime": fetcher_metadata,
         }
+        metadata = apply_post_persist_truthfulness_metadata(
+            metadata,
+            platform="instagram",
+            account=account_handle,
+            status="completed",
+            posts_checked=posts_fetched + reverse_posts_fetched,
+            posts_upserted=posts_upserted + reverse_posts_upserted,
+            posts_skipped=posts_skipped,
+            posts_skipped_by_reason=posts_skipped_by_reason,
+        )
         lifecycle.finish_job(
             job_id,
             status="completed",
@@ -846,6 +1163,60 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
             last_error_class=exc.__class__.__name__,
         )
         terminal_status = "cancelled"
+        terminal_error_message = str(exc)
+    except PostsAuthCooldownActive as exc:
+        # A4 soft-stop: an account-scoped auth cooldown is active. Requeue the job
+        # with available_at = cooldown_until (mirrors the frontier cooldown
+        # pattern) so a sibling container picks it up after the cooldown rather
+        # than burning attempts now. This is NOT a hard failure.
+        cooldown_available_at = exc.cooldown_until if isinstance(exc.cooldown_until, datetime) else None
+        lifecycle.finish_job(
+            job_id,
+            status="retrying",
+            items_found=posts_fetched + reverse_posts_fetched,
+            error_message=str(exc),
+            metadata={
+                "stage": stage,
+                "platform": "instagram",
+                "account": account_handle,
+                "fast_mode": fast_mode,
+                "source_scope": source_scope,
+                "error_code": exc.error_code,
+                "auth_cooldown_active": True,
+                "auth_block_kind": exc.blocker_kind,
+                "available_at": cooldown_available_at.isoformat() if cooldown_available_at else None,
+                "activity": {
+                    "phase": "auth_cooldown_deferred",
+                    "last_progress_at": lifecycle.format_time(lifecycle.now_utc()),
+                },
+                "persist_counters": {
+                    "posts_upserted": posts_upserted,
+                    "posts_skipped": posts_skipped,
+                    "posts_skipped_by_reason": posts_skipped_by_reason,
+                },
+                "posts_scrapling_persist_diagnostics": {
+                    "posts_upserted": posts_upserted,
+                    "posts_skipped": posts_skipped,
+                    "posts_skipped_by_reason": posts_skipped_by_reason,
+                },
+                "pagination_state": pagination_state,
+                "listing_progress": {
+                    "page_index": pages_fetched,
+                    "posts_seen": posts_fetched,
+                    "posts_upserted": posts_upserted,
+                    "stop_reason": "auth_cooldown_active",
+                    "partial": True,
+                },
+                "resume_cursor_saved": bool((pagination_state or {}).get("end_cursor")),
+                "posts_acceleration_flags": repo.instagram_posts_acceleration_flags(),
+                "runtime_metadata": exc.runtime_metadata,
+                "fetcher_runtime": fetcher_metadata,
+            },
+            last_error_code=exc.error_code,
+            last_error_class=exc.__class__.__name__,
+            next_available_at=cooldown_available_at,
+        )
+        terminal_status = "retrying"
         terminal_error_message = str(exc)
     except Exception as exc:  # noqa: BLE001
         runtime_error_code = str(getattr(exc, "error_code", "") or "").strip().lower()

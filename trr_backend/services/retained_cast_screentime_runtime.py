@@ -16,7 +16,7 @@ from typing import Any
 from trr_backend.media.s3_mirror import get_s3_bucket, get_s3_client
 from trr_backend.repositories import cast_screentime
 from trr_backend.services import cast_screentime_artifacts, face_reference_embeddings
-from trr_backend.vision import people_count_engine
+from trr_backend.vision import screen_time_face_matching
 
 LOGGER = logging.getLogger(__name__)
 
@@ -207,6 +207,8 @@ def analyze_run_contract(run_contract: dict[str, Any]) -> dict[str, Any]:
         usable_fps = fps if fps > 0.001 else 24.0
         frame_duration_ms = max(int(round(1000.0 / usable_fps)), 1)
         sample_stride_frames = max(int(round(usable_fps * stride_seconds)), 1)
+        sample_window_ms = max(int(round((sample_stride_frames / usable_fps) * 1000.0)), frame_duration_ms)
+        video_duration_ms = _capture_video_duration_ms(capture, cv2, usable_fps, run_contract)
         candidate_person_ids = {
             str(item.get("person_id") or "").strip()
             for item in list(run_contract.get("candidate_cast_snapshot_json") or [])
@@ -230,16 +232,22 @@ def analyze_run_contract(run_contract: dict[str, Any]) -> dict[str, Any]:
                     continue
 
                 timestamp_ms = int(round((frame_idx / usable_fps) * 1000))
-                raw_face_count, _model_id, raw_faces = people_count_engine._detect_faces_retinaface(frame)
-                filtered_faces, face_filter_decisions = people_count_engine._adaptive_filter_faces(
+                sample_end_ms = timestamp_ms + sample_window_ms
+                if video_duration_ms > 0:
+                    sample_end_ms = min(sample_end_ms, video_duration_ms)
+                if sample_end_ms <= timestamp_ms:
+                    sample_end_ms = timestamp_ms + frame_duration_ms
+                sample_duration_ms = sample_end_ms - timestamp_ms
+                raw_face_count, _model_id, raw_faces = screen_time_face_matching.detect_faces(frame)
+                filtered_faces, face_filter_decisions = screen_time_face_matching.filter_faces_for_screen_time(
                     raw_faces, image=frame
                 )
-                identity_matches = people_count_engine._match_faces_to_people(
+                identity_matches = screen_time_face_matching.match_faces_to_cast(
                     filtered_faces,
                     frame,
                     candidate_person_ids=candidate_person_ids or None,
                 )
-                detections = people_count_engine._normalize_face_detections(
+                detections = screen_time_face_matching.normalize_screen_time_detections(
                     filtered_faces,
                     frame,
                     identity_matches=identity_matches,
@@ -249,8 +257,8 @@ def analyze_run_contract(run_contract: dict[str, Any]) -> dict[str, Any]:
                     {
                         "shot_key": f"shot-{sample_index:04d}-{timestamp_ms:08d}",
                         "start_ms": timestamp_ms,
-                        "end_ms": timestamp_ms + frame_duration_ms,
-                        "duration_ms": frame_duration_ms,
+                        "end_ms": sample_end_ms,
+                        "duration_ms": sample_duration_ms,
                         "frame_count": 1,
                         "observation_count": len(detections),
                         "raw_face_count": raw_face_count,
@@ -265,8 +273,8 @@ def analyze_run_contract(run_contract: dict[str, Any]) -> dict[str, Any]:
                         "segment_key": segment_key,
                         "person_id": detection.get("person_id"),
                         "start_ms": timestamp_ms,
-                        "end_ms": timestamp_ms + frame_duration_ms,
-                        "duration_ms": frame_duration_ms,
+                        "end_ms": sample_end_ms,
+                        "duration_ms": sample_duration_ms,
                         "frame_count": 1,
                         "confidence_score": detection.get("confidence"),
                         "similarity_score": detection.get("match_similarity"),
@@ -283,6 +291,7 @@ def analyze_run_contract(run_contract: dict[str, Any]) -> dict[str, Any]:
                             "display_name": detection.get("person_name"),
                             "sample_index": sample_index,
                             "frame_idx": frame_idx,
+                            "sample_window_ms": sample_window_ms,
                         },
                     }
                     segments.append(segment)
@@ -314,7 +323,6 @@ def analyze_run_contract(run_contract: dict[str, Any]) -> dict[str, Any]:
             capture.release()
 
     metrics = _aggregate_metrics(segments)
-    video_duration_ms = int(round(float(run_contract.get("duration_seconds") or 0.0) * 1000))
     scenes = _build_scenes_from_segments(segments, total_duration_ms=video_duration_ms)
     artifact_lists = {
         "shots": sample_shots,
@@ -480,6 +488,20 @@ def _sampling_stride_seconds(run_contract: dict[str, Any]) -> float:
         if processing_mode == "fast":
             return 2.0
     return _DEFAULT_SAMPLE_STRIDE_SECONDS
+
+
+def _capture_video_duration_ms(capture: Any, cv2: Any, usable_fps: float, run_contract: dict[str, Any]) -> int:
+    configured_duration_ms = int(round(float(run_contract.get("duration_seconds") or 0.0) * 1000))
+    if configured_duration_ms > 0:
+        return configured_duration_ms
+
+    frame_count_prop = getattr(cv2, "CAP_PROP_FRAME_COUNT", None)
+    if frame_count_prop is None or usable_fps <= 0.001:
+        return 0
+    frame_count = float(capture.get(frame_count_prop) or 0.0)
+    if frame_count <= 0:
+        return 0
+    return int(round((frame_count / usable_fps) * 1000))
 
 
 def _localize_source_video(run_contract: dict[str, Any], work_dir: Path) -> Path:

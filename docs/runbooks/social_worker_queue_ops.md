@@ -52,8 +52,8 @@ job plane:
 - `SOCIAL_WORKER_POOL_POST_CLASSIFY` (optional, default `10`; internal classification concurrency target)
 - `SOCIAL_WORKER_POOL_SEASON_MATERIALIZE` (optional, default `10`; internal materialization concurrency target)
 - `SOCIAL_WORKER_POOL_ANALYTICS_REFRESH` (optional, default `4`; internal analytics refresh concurrency target)
-- `SOCIAL_MODAL_DISPATCH_LIMIT` (optional, default `25`; maximum jobs dispatched per Modal sweep)
-- `TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT` (optional, default `64`; Modal `run_social_job` container cap)
+- `SOCIAL_MODAL_DISPATCH_LIMIT` (optional, default `8`; maximum jobs dispatched per Modal sweep)
+- `TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT` (optional, default `8`; Modal `run_social_job` container cap)
 - `SOCIAL_WORKER_POOL_INTERVAL_SEC` (optional, default `2`; worker idle sleep interval)
 - `SOCIAL_STALE_RECOVERY_INTERVAL_SEC` (optional, default `30`; stale job recovery cadence)
 - `SOCIAL_RUN_SUMMARY_RECONCILE_INTERVAL_SEC` (optional, default `60`; run-summary reconciliation cadence)
@@ -69,6 +69,32 @@ job plane:
 - `SOCIAL_CRAWLEE_PLATFORMS` (optional, default `instagram,tiktok,twitter,youtube`)
 - `SOCIAL_CRAWLEE_FORCE_LEGACY_PLATFORMS` (optional emergency bypass)
 - `SOCIAL_CRAWLEE_MAX_CONCURRENCY_*` and `SOCIAL_CRAWLEE_MAX_RETRIES_*` (optional per-platform limits)
+
+## Modal Maintenance Ownership
+
+Modal maintenance must have exactly one active owner for recovery, heartbeat,
+and cleanup:
+
+- Default owner: Modal worker-plane singleton maintenance functions, enabled by
+  `TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED=1`.
+- API fallback owner: backend runtime scheduler, enabled only when
+  `TRR_MODAL_RUNTIME_SCHEDULER_ENABLED=1`.
+- Default API behavior: `TRR_MODAL_RUNTIME_SCHEDULER_ENABLED` unset or `0`;
+  the API must not independently schedule heartbeat, social recovery, or stale
+  worker cleanup.
+- Deployed Modal runtime secrets set `TRR_MODAL_MAINTENANCE_OWNER_REQUIRED=1`;
+  startup fails when neither owner is enabled or when both owners are enabled.
+- Do not enable the API fallback while the Modal singleton owner is healthy.
+  Use it only for a bounded recovery window, then set it back to `0`.
+- The API fallback uses `TRR_MODAL_RUNTIME_HEARTBEAT_INTERVAL_SECONDS`,
+  `TRR_MODAL_RUNTIME_SOCIAL_RECOVERY_INTERVAL_SECONDS`, and
+  `TRR_MODAL_RUNTIME_STALE_WORKER_CLEANUP_INTERVAL_SECONDS` only after the
+  opt-in flag is enabled.
+- Always-on Modal cron schedules and warm containers are billing-sensitive.
+  `scripts/modal-billing-guardrail.sh` blocks them from the same
+  `TRR_MODAL_SOURCE_ENV` file used by named-secret rendering and from the
+  process environment unless `WORKSPACE_ALLOW_MODAL_ALWAYS_ON_BILLING=1` is set
+  for a short, intentional operator window.
 
 When Crawlee runtime is enabled for a platform, auth preflight checks run before execution:
 
@@ -106,14 +132,14 @@ plus the API web URL before rollout:
 
 ```bash
 cd /Users/thomashulihan/Projects/TRR/TRR-Backend
-python3.11 scripts/modal/verify_modal_readiness.py
+.venv/bin/python scripts/modal/verify_modal_readiness.py
 ```
 
 Verify the deployed worker image can actually read and validate the remote Instagram cookie bundle:
 
 ```bash
 cd /Users/thomashulihan/Projects/TRR/TRR-Backend
-python3.11 scripts/modal/verify_modal_readiness.py --probe-remote-auth instagram --json
+.venv/bin/python scripts/modal/verify_modal_readiness.py --probe-remote-auth instagram --json
 ```
 
 Deploy the Modal app after named secrets are provisioned:
@@ -123,12 +149,73 @@ cd /Users/thomashulihan/Projects/TRR/TRR-Backend
 ./.venv/bin/python -m modal deploy -m trr_backend.modal_jobs
 ```
 
-Run the full operator repair flow when `remote_auth_capabilities.instagram.reason` is not ready and the worker plane needs a fresh shared-account session:
+Use the staged manual Instagram auth pipeline when `remote_auth_capabilities.instagram.reason` is not ready or local and browser auth disagree.
+
+First, complete the manual handoff in Chrome Profile 13:
+
+- open Chrome Profile 13 for `codex@thereality.report`
+- open Instagram and Gmail in that same profile
+- let the operator complete password entry, reCAPTCHA, checkpoints, and verification codes
+- stop Codex at any CAPTCHA, security prompt, checkpoint, or verification-code prompt
+
+Validate the browser session without writing cookie files or touching Modal:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+python3.11 scripts/modal/refresh_instagram_cookies_from_chrome.py --validate-chrome-only --json
+```
+
+Expected safe validation output includes `ok: true`, `wrote_cookie_files: false`,
+`pushed_to_modal: false`, `deployed_modal: false`, and `verified_remote: false`.
+
+Sync validated Chrome cookies into local cookie files only after explicit
+operator approval:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+python3.11 scripts/modal/refresh_instagram_cookies_from_chrome.py --sync-local --json --confirm-instagram-refresh "I UNDERSTAND INSTAGRAM AUTH RISK"
+```
+
+Validate local cookies without refresh, Modal secret apply, deploy, remote
+verification, or cooldown writes:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+python3.11 scripts/modal/repair_instagram_auth.py --validate-local-only --json
+```
+
+Push Modal secrets and deploy are separate operator-approved stages. Do not run
+either during validation:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+python3.11 scripts/modal/refresh_instagram_cookies_from_chrome.py --push-to-modal --json --confirm-instagram-refresh "I UNDERSTAND INSTAGRAM AUTH RISK"
+python3.11 scripts/modal/refresh_instagram_cookies_from_chrome.py --deploy --json --confirm-instagram-refresh "I UNDERSTAND INSTAGRAM AUTH RISK"
+python3.11 scripts/modal/refresh_instagram_cookies_from_chrome.py --verify-remote --json --confirm-instagram-refresh "I UNDERSTAND INSTAGRAM AUTH RISK"
+```
+
+Legacy full repair remains available for compatibility, but it is not the first
+validation step:
 
 ```bash
 cd /Users/thomashulihan/Projects/TRR/TRR-Backend
 python3.11 scripts/modal/repair_instagram_auth.py --json
 ```
+
+Repeated failed approved repair attempts can create a local cooldown lock.
+Validation-only checks must not create the cooldown. Clear the lock only after
+the manual checkpoint has been resolved and you are ready to validate again:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+python3.11 scripts/modal/repair_instagram_auth.py --json --clear-auth-repair-cooldown
+```
+
+Legacy lower-level auth flags such as `SOCIAL_INSTAGRAM_COOKIE_AUTO_REFRESH` and
+`SOCIAL_INSTAGRAM_INTERACTIVE_LOGIN` are also blocked unless
+`SOCIAL_INSTAGRAM_AUTH_REPAIR_CONFIRMATION` exactly matches
+`I UNDERSTAND INSTAGRAM AUTH RISK`. Do not set that confirmation globally; use
+the explicit staged commands above for one operator-controlled run.
 
 Run the proactive local-only Instagram repair worker when you want a single command that checks cookie age, recent auth failures, and then invokes the full repair pipeline only when needed:
 
@@ -146,9 +233,9 @@ Schedule the worker on a trusted local workstation only. Do not schedule it on M
 Worker trigger policy:
 
 - skip when the local Instagram cookie bundle validates and `_cookie_refreshed_at` is still inside the max-age threshold
-- run the full repair flow when the cookie age threshold is exceeded
-- run the full repair flow when recent `instagram_graphql_cursor_unauthorized`, `instagram_graphql_checkpoint_required`, or `instagram_local_executor_blocked` failures are detected
-- fail loudly when refresh, secret apply, deploy, or remote auth probe fails; do not silently loop on checkpoint/2FA failures
+- run the validation and Modal-secret/deploy flow when the cookie age threshold is exceeded and validation is still safe
+- stop for manual action when recent checkpoint, login prompt, browser-session-invalidated, or verification failures are detected
+- fail loudly when validation, secret apply, deploy, or remote auth probe fails; do not silently loop on auth or verification failures
 
 Do not treat local cookie files as proof that remote Instagram backfills are
 ready. Full shared-account Instagram backfill is only considered ready when all
@@ -190,6 +277,43 @@ Preferred shared Instagram canary order:
    older frontier automatically before continuing full-history fetches
 
 Use `Sync Newer` as the same-pipeline bounded head-gap repair when diagnostics show the newest stored post lags the live profile. It is not a separate worker path.
+
+## Instagram Account Health Repair
+
+Use the account-health repair command when a shared Instagram account has a
+catalog gap, a post-classification backlog, or media mirror work that should be
+drained after a missing-post repair. The command is report-only by default.
+
+Preview the current gap without launching jobs:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+./.venv/bin/python scripts/socials/repair_instagram_account_health.py --account thetraitorsus --pretty
+```
+
+Apply the recommended missing-post repair and drain the follow-up
+`media_mirror` and `post_classify` stages:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+./.venv/bin/python scripts/socials/repair_instagram_account_health.py --account thetraitorsus --apply --pretty
+```
+
+If the preview reports `recommended_action: wait_for_active_run`, do not launch
+a second repair. Pass the active run id back to the same command so it drains
+the follow-up stages for the run that already exists:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+./.venv/bin/python scripts/socials/repair_instagram_account_health.py --account thetraitorsus --run-id <run-id> --apply --pretty
+```
+
+Result fields:
+
+- `gap_before` and `gap_after`: account catalog health before and after repair.
+- `steps`: executed or planned actions, including `fill_missing_posts`,
+  `drain_media_mirror`, and `drain_post_classify`.
+- `repaired`: true only when the final gap report recommends no further action.
 
 ## Social Media Mirror Covers And Display Variants
 

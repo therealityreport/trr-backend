@@ -210,18 +210,28 @@ def test_inject_modal_runtime_defaults_sets_canonical_modal_flags(
     assert os.environ["TRR_DB_POOL_CLOSE_AFTER_RETURN"] == "1"
     assert os.environ["TRR_DB_POOL_ACQUIRE_ATTEMPTS"] == "30"
     assert os.environ["TRR_DB_POOL_ACQUIRE_SLEEP_MS"] == "200"
-    assert os.environ["TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT"] == "5"
+    assert os.environ["TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT"] == "8"
     assert os.environ["TRR_MODAL_SOCIAL_MEDIA_JOB_CONCURRENCY_LIMIT"] == "10"
-    assert os.environ["SOCIAL_MODAL_DISPATCH_LIMIT"] == "16"
-    assert os.environ["SOCIAL_WORKER_POOL_COMMENTS"] == "2"
+    assert os.environ["TRR_MODAL_CAST_SCREENTIME_FUNCTION"] == "run_cast_screentime_analysis"
+    assert os.environ["TRR_MODAL_CAST_SCREENTIME_CONCURRENCY_LIMIT"] == "2"
+    assert os.environ["SOCIAL_MODAL_DISPATCH_LIMIT"] == "8"
+    assert os.environ["SOCIAL_INSTAGRAM_POSTS_USE_STICKY_PROXY"] == "true"
+    assert os.environ["SOCIAL_INSTAGRAM_POSTS_ANONYMOUS_ENABLED"] == "false"
+    assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER"] == "decodo"
+    assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY"] == "true"
+    assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY"] == "false"
+    assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS"] == "600"
+    assert os.environ["SOCIAL_WORKER_POOL_COMMENTS"] == "8"
     assert os.environ["SOCIAL_WORKER_POOL_SHARED_ACCOUNT_DISCOVERY"] == "3"
-    assert os.environ["SOCIAL_SHARED_ACCOUNT_POSTS_PLATFORM_CAP_INSTAGRAM"] == "3"
+    assert os.environ["SOCIAL_WORKER_POOL_SHARED_ACCOUNT_POSTS"] == "8"
+    assert os.environ["SOCIAL_SHARED_ACCOUNT_POSTS_PLATFORM_CAP_INSTAGRAM"] == "2"
     assert os.environ["SOCIAL_WORKER_POOL_MEDIA_MIRROR"] == "10"
     assert os.environ["SOCIAL_MIRROR_PLATFORM_CAP"] == "10"
-    assert os.environ["SOCIAL_CATALOG_RUN_IN_FLIGHT_CAP"] == "6"
-    assert os.environ["SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM"] == "2"
-    assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT"] == "2"
+    assert os.environ["SOCIAL_CATALOG_RUN_IN_FLIGHT_CAP"] == "8"
+    assert os.environ["SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM"] == "8"
+    assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT"] == "8"
     assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_GLOBAL_RATE_LIMIT_MODE"] == "file_lock"
+    assert os.environ["SOCIAL_THREADS_POSTS_SCRAPLING_ENABLED"] == "true"
     assert os.environ["SOCIAL_THREADS_POSTS_PROXY_PROVIDER"] == "decodo"
     assert "SOCIALBLADE_PROXY_PROVIDER" not in os.environ
     assert "SOCIALBLADE_USE_STICKY_PROXY" not in os.environ
@@ -415,6 +425,78 @@ def test_sweep_social_dispatch_queue_closes_db_pool_after_success(monkeypatch: p
     assert close_calls == ["closed"]
 
 
+def test_modal_deploy_schedules_are_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    partial_modal = types.ModuleType("modal")
+    monkeypatch.setitem(sys.modules, "modal", partial_modal)
+    monkeypatch.delenv("TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED", raising=False)
+    monkeypatch.delenv("TRR_MODAL_API_MIN_CONTAINERS", raising=False)
+    monkeypatch.delenv("TRR_MODAL_ADMIN_KEEP_WARM", raising=False)
+
+    reloaded = importlib.reload(modal_jobs)
+    try:
+        assert "schedule" not in reloaded.sweep_social_dispatch_queue._modal_function_options
+        assert "schedule" not in reloaded.heartbeat_remote_executors._modal_function_options
+        assert "schedule" not in reloaded.purge_stale_social_worker_heartbeats._modal_function_options
+        assert reloaded.serve_backend_api._modal_function_options["min_containers"] == 0
+        assert reloaded.run_admin_operation_v2._modal_function_options["min_containers"] == 0
+    finally:
+        monkeypatch.delitem(sys.modules, "modal", raising=False)
+        importlib.reload(modal_jobs)
+
+
+def test_modal_deploy_schedules_can_be_enabled_explicitly(monkeypatch: pytest.MonkeyPatch) -> None:
+    partial_modal = types.ModuleType("modal")
+    monkeypatch.setitem(sys.modules, "modal", partial_modal)
+    monkeypatch.setenv("TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED", "1")
+
+    reloaded = importlib.reload(modal_jobs)
+    try:
+        heartbeat_schedule = reloaded.heartbeat_remote_executors._modal_function_options["schedule"]
+        social_recovery_schedule = reloaded.sweep_social_dispatch_queue._modal_function_options["schedule"]
+        cleanup_schedule = reloaded.purge_stale_social_worker_heartbeats._modal_function_options["schedule"]
+        assert heartbeat_schedule.expression == "* * * * *"
+        assert social_recovery_schedule.expression == "*/2 * * * *"
+        assert cleanup_schedule.expression == "17 4 * * *"
+    finally:
+        monkeypatch.delitem(sys.modules, "modal", raising=False)
+        importlib.reload(modal_jobs)
+
+
+def test_modal_maintenance_owner_required_rejects_no_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRR_MODAL_MAINTENANCE_OWNER_REQUIRED", "1")
+    monkeypatch.delenv("TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED", raising=False)
+    monkeypatch.delenv("TRR_MODAL_RUNTIME_SCHEDULER_ENABLED", raising=False)
+
+    with pytest.raises(RuntimeError, match="no active owner") as excinfo:
+        modal_jobs._validate_modal_maintenance_owner_config()
+    message = str(excinfo.value)
+    assert "TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED=1" in message
+    assert "TRR_MODAL_RUNTIME_SCHEDULER_ENABLED=1" in message
+    assert "TRR_MODAL_MAINTENANCE_OWNER_REQUIRED=1" in message
+    assert "scripts/modal/prepare_named_secrets.py --apply" in message
+
+
+def test_modal_maintenance_owner_required_rejects_duplicate_owners(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRR_MODAL_MAINTENANCE_OWNER_REQUIRED", "1")
+    monkeypatch.setenv("TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED", "1")
+    monkeypatch.setenv("TRR_MODAL_RUNTIME_SCHEDULER_ENABLED", "1")
+
+    with pytest.raises(RuntimeError, match="duplicate active owners") as excinfo:
+        modal_jobs._validate_modal_maintenance_owner_config()
+    message = str(excinfo.value)
+    assert "TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED='1'" in message
+    assert "TRR_MODAL_RUNTIME_SCHEDULER_ENABLED='1'" in message
+    assert "scripts/modal/prepare_named_secrets.py --apply" in message
+
+
+def test_modal_maintenance_owner_required_accepts_modal_singleton_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRR_MODAL_MAINTENANCE_OWNER_REQUIRED", "1")
+    monkeypatch.setenv("TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED", "1")
+    monkeypatch.delenv("TRR_MODAL_RUNTIME_SCHEDULER_ENABLED", raising=False)
+
+    assert modal_jobs._validate_modal_maintenance_owner_config() == "modal_singleton_cron"
+
+
 def test_build_social_image_base_includes_shared_script_payloads() -> None:
     image = modal_jobs._build_social_image_base(image_factory=_FakeImage)
 
@@ -444,12 +526,19 @@ def test_build_social_image_base_adds_browser_runtime_when_requested() -> None:
 def test_build_lean_image_base_omits_social_browser_payloads() -> None:
     image = modal_jobs._build_lean_image_base(image_factory=_FakeImage)
 
+    added_files = {
+        args[0]: kwargs["remote_path"] for op_name, args, kwargs in image.operations if op_name == "add_local_file"
+    }
+    added_dirs = {
+        args[0]: kwargs["remote_path"] for op_name, args, kwargs in image.operations if op_name == "add_local_dir"
+    }
+
     assert _ops_for(image, "add_local_python_source") == [("api", "trr_backend")]
     assert _ops_for(image, "pip_install_from_requirements") == [(str(modal_jobs._MODAL_LEAN_REQUIREMENTS),)]
     assert _ops_for(image, "pip_install") == []
     assert _ops_for(image, "apt_install") == []
-    assert _ops_for(image, "add_local_file") == []
-    assert _ops_for(image, "add_local_dir") == []
+    assert added_files == dict(modal_jobs._LEAN_IMAGE_LOCAL_FILES)
+    assert added_dirs == dict(modal_jobs._LEAN_IMAGE_LOCAL_DIRS)
 
 
 def test_run_social_job_uses_browser_capable_image_binding() -> None:
@@ -620,6 +709,77 @@ def test_heartbeat_remote_executors_reports_social_auth_capabilities(
     }
     assert social_call["supported_platforms"] == list(modal_jobs.SOCIAL_SUPPORTED_PLATFORMS)
     assert close_calls == ["closed"]
+
+
+def test_modal_completion_evidence_contract_is_explicit() -> None:
+    contract = modal_jobs.modal_completion_evidence_contract()
+
+    assert contract["modal_update_status_required"] is True
+    assert contract["blocker_required_when_not_updated"] is True
+    assert "modal_update_status" in contract["required_completion_fields"]
+    assert "blocker" in contract["required_completion_fields"]
+    assert "verify_modal_readiness.py" in contract["readiness_command"]
+    assert any(
+        "tests/api/test_health.py tests/test_modal_jobs.py" in command for command in contract["local_verification"]
+    )
+
+
+def test_cast_screentime_modal_function_uses_vision_image() -> None:
+    assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_cast_screentime_analysis"] is modal_jobs._vision_image
+
+
+def test_run_cast_screentime_analysis_delegates_to_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.services import retained_cast_screentime_runtime
+
+    worker_events: list[tuple[str, dict[str, object]]] = []
+    close_calls: list[tuple[str, dict[str, object]]] = []
+
+    monkeypatch.setattr(
+        retained_cast_screentime_runtime,
+        "run_screentime_analysis",
+        lambda run_id: {"run_id": run_id, "status": "success"},
+    )
+    monkeypatch.setattr(
+        modal_jobs,
+        "_worker_started",
+        lambda worker_family, **kwargs: worker_events.append(("started", {"worker_family": worker_family, **kwargs}))
+        or "started-at",
+    )
+    monkeypatch.setattr(
+        modal_jobs,
+        "_worker_finished",
+        lambda worker_family, _started_at, **kwargs: worker_events.append(
+            ("finished", {"worker_family": worker_family, **kwargs})
+        ),
+    )
+    monkeypatch.setattr(
+        modal_jobs,
+        "_close_db_pools_after_worker",
+        lambda worker_family, **kwargs: close_calls.append((worker_family, kwargs)),
+    )
+
+    result = modal_jobs.run_cast_screentime_analysis.local("run-123")
+
+    assert result == {"run_id": "run-123", "status": "success"}
+    assert worker_events == [
+        (
+            "started",
+            {
+                "worker_family": "cast_screentime",
+                "function_name": "run_cast_screentime_analysis",
+                "run_id": "run-123",
+            },
+        ),
+        (
+            "finished",
+            {
+                "worker_family": "cast_screentime",
+                "result_status": "success",
+                "run_id": "run-123",
+            },
+        ),
+    ]
+    assert close_calls == [("cast_screentime", {"run_id": "run-123"})]
 
 
 def test_purge_stale_social_worker_heartbeats_uses_seven_day_policy(

@@ -1472,11 +1472,11 @@ def _import_bravotv_person_media(
     progress_cb: Callable[[int, int, str], None] | None = None,
     cancel_requested_cb: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
-    from trr_backend.bravotv.get_images_pipeline import (
+    from trr_backend.media.bravotv.get_images_pipeline import (
         _collect_bravo_person,
         _extract_bravo_image_people_names,
     )
-    from trr_backend.bravotv.run_service import _import_supplemental_catalog
+    from trr_backend.media.bravotv.run_service import _import_supplemental_catalog
 
     clean_person_name = str(person_name or "").strip()
     if not clean_person_name:
@@ -1573,7 +1573,7 @@ def _import_bravotv_person_media(
                 skipped += 1
                 errors.append(f"BravoTV: skipped {file_name} ({skip_reason}).")
                 continue
-            from trr_backend.bravotv.get_images_pipeline import _upload_bytes
+            from trr_backend.media.bravotv.get_images_pipeline import _upload_bytes
 
             uploaded = _upload_bytes(
                 cast(bytes, downloaded.get("data")),

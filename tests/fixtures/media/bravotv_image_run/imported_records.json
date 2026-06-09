@@ -1,0 +1,23 @@
+[
+  {
+    "group_id": "bridge-00001",
+    "media_asset_id": "asset-1",
+    "source": "nbcumv",
+    "caption": "Pictured: Jane Doe",
+    "show_name": "Watch What Happens Live",
+    "season_number": 15,
+    "persons_pictured": ["Jane Doe"],
+    "link_targets": ["show:show-1", "season:season-15", "person:person-1"],
+    "replacement_pending": false
+  },
+  {
+    "group_id": "bridge-00002",
+    "media_asset_id": "asset-2",
+    "source": "getty",
+    "caption": "Pictured: Other Person",
+    "show_name": "Watch What Happens Live",
+    "persons_pictured": ["Other Person"],
+    "link_targets": [],
+    "replacement_pending": true
+  }
+]

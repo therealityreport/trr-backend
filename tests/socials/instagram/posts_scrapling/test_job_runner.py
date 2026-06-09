@@ -40,6 +40,83 @@ def test_select_posts_proxy_distributes_explicit_urls_by_session_key(monkeypatch
     assert "pass" not in first.fingerprint
 
 
+def test_job_runner_rollout_flags_default_to_authenticated_protection(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.socials.instagram.posts_scrapling import job_runner as jr
+
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_POSTS_ANONYMOUS_ENABLED", raising=False)
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_POSTS_ROTATE_ON_BLOCK_MAX_RETRIES", raising=False)
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_POSTS_ANONYMOUS_ROTATE_ON_BLOCK_MAX_RETRIES", raising=False)
+
+    assert jr._posts_anonymous_enabled({}) is False
+    assert jr._posts_anonymous_enabled({"anonymous_enabled": True}) is True
+    assert jr._rotate_on_block_max_retries(anonymous=False) == 0
+    assert jr._rotate_on_block_max_retries(anonymous=True) == 2
+
+
+def test_anonymous_job_skips_auth_session_and_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.instagram.posts_scrapling import job_runner as jr
+
+    fetcher_kwargs: dict[str, Any] = {}
+    finish_calls: list[dict[str, Any]] = []
+
+    class _FakeFetcher:
+        def __init__(self, **kwargs: Any) -> None:
+            fetcher_kwargs.update(kwargs)
+            self.runtime_metadata = {
+                "auth_state": kwargs.get("auth_state"),
+                "request_count": 1,
+            }
+
+        async def warmup(self, _account_handle: str) -> None:
+            return None
+
+        async def fetch_posts_page(self, _account_handle: str, cursor=None):  # noqa: ANN001
+            del cursor
+            return SimpleNamespace(
+                auth_failed=False,
+                fetch_failed=False,
+                retryable=False,
+                fetch_reason=None,
+                posts=[],
+                has_next_page=False,
+                end_cursor=None,
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(jr, "resolve_posts_scrapling_session", lambda **_kwargs: pytest.fail("auth session resolved"))
+    monkeypatch.setattr(jr, "_raise_if_auth_cooldown_active", lambda **_kwargs: pytest.fail("cooldown read"))
+    monkeypatch.setattr(jr.auth_cooldown, "clear_cooldown", lambda *_args, **_kwargs: pytest.fail("cooldown clear"))
+    monkeypatch.setattr(jr, "InstagramPostsScraplingFetcher", _FakeFetcher)
+    monkeypatch.setattr(jr, "select_posts_proxy", lambda **_kwargs: None)
+    monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: True)
+    monkeypatch.setattr(repo, "_iso", lambda _value: "2026-04-21T00:00:00+00:00")
+    monkeypatch.setattr(repo, "_now_utc", lambda: datetime(2026, 4, 28, tzinfo=UTC))
+    monkeypatch.setattr(repo, "_finalize_run_status", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(repo, "latest_instagram_profile_pagination_state", lambda **_kwargs: {})
+    monkeypatch.setattr(repo, "persist_instagram_profile_pagination_state", lambda **_kwargs: {})
+    monkeypatch.setattr(jr.pg, "fetch_one", lambda *_args, **_kwargs: {})
+
+    jr.run_instagram_posts_scrapling_job(
+        {
+            "id": "job-1",
+            "run_id": "run-1",
+            "config": {"account": "bravotv", "stage": "posts_scrapling", "anonymous_enabled": True},
+        },
+        worker_id="worker-1",
+    )
+
+    assert fetcher_kwargs["auth_state"] == "anonymous"
+    assert fetcher_kwargs["cookies"] == []
+    assert fetcher_kwargs["raw_cookies"] == {}
+    assert finish_calls[-1]["status"] == "completed"
+
+
 def test_job_runner_emits_post_skip_truthfulness_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
     from trr_backend.repositories import social_season_analytics as repo
     from trr_backend.socials.instagram.posts_scrapling.job_runner import run_instagram_posts_scrapling_job

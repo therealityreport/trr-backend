@@ -47,6 +47,37 @@ def command_timeout_seconds() -> int:
     return max(30, parsed)
 
 
+def readiness_timeout_seconds() -> int:
+    raw = str(
+        os.getenv("WORKSPACE_RUNTIME_MODAL_VERIFY_TIMEOUT_SECONDS")
+        or os.getenv("WORKSPACE_RUNTIME_MODAL_COMMAND_TIMEOUT_SECONDS")
+        or "120"
+    ).strip()
+    try:
+        parsed = int(raw)
+    except ValueError:
+        return 120
+    return max(10, parsed)
+
+
+def readiness_remote_probe_timeout_seconds() -> int:
+    raw = str(
+        os.getenv("WORKSPACE_RUNTIME_MODAL_REMOTE_PROBE_TIMEOUT_SECONDS")
+        or os.getenv("TRR_MODAL_REMOTE_PROBE_TIMEOUT_SECONDS")
+        or "10"
+    ).strip()
+    try:
+        parsed = int(raw)
+    except ValueError:
+        return 10
+    return max(1, parsed)
+
+
+def startup_core_worker_probes_enabled() -> bool:
+    raw = str(os.getenv("WORKSPACE_RUNTIME_MODAL_PROBE_CORE_WORKERS") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def post_deploy_verify_attempts() -> int:
     raw = str(os.getenv("WORKSPACE_RUNTIME_MODAL_POST_DEPLOY_VERIFY_ATTEMPTS") or "3").strip()
     try:
@@ -131,6 +162,7 @@ def modal_fingerprint_files(repo_root: Path = REPO_ROOT) -> list[Path]:
         repo_root / "trr_backend" / "repositories" / "socialblade_growth.py",
         repo_root / "trr_backend" / "scraping" / "url_image_scraper.py",
         repo_root / "trr_backend" / "socials" / "social_season_analytics_impl.py",
+        repo_root / "trr_backend" / "socials" / "instagram" / "auth_runtime.py",
         repo_root / "trr_backend" / "socials" / "socialblade" / "auth.py",
         repo_root / "trr_backend" / "socials" / "socialblade" / "fetcher.py",
         repo_root / "trr_backend" / "socials" / "socialblade" / "proxy.py",
@@ -202,20 +234,105 @@ def save_fingerprint(fingerprint: str, repo_root: Path = REPO_ROOT) -> None:
 def verify_readiness(repo_root: Path = REPO_ROOT) -> dict[str, Any]:
     runtime_secret_name = str(os.getenv("TRR_MODAL_RUNTIME_SECRET_NAME") or "trr-backend-runtime").strip()
     social_secret_name = str(os.getenv("TRR_MODAL_SOCIAL_SECRET_NAME") or "trr-social-auth").strip()
-    return verify_modal_readiness.verify_modal_readiness(
-        app_name=str(os.getenv("TRR_MODAL_APP_NAME") or "trr-backend-jobs").strip() or "trr-backend-jobs",
-        runtime_secret_name=runtime_secret_name or "trr-backend-runtime",
-        social_secret_name=social_secret_name or "trr-social-auth",
-        function_names=verify_modal_readiness.expected_function_names(),
-        modal_environment=str(os.getenv("MODAL_ENVIRONMENT") or "").strip(),
-        probe_remote_auth_platform="instagram",
-        # Getty transport remains advisory within verify_modal_readiness. Keep
-        # probing it so runtime reconcile/status output preserves the nested
-        # transport diagnostics without turning challenge-page noise into a
-        # startup outage.
-        probe_getty_remote_access=True,
-        probe_core_workers=True,
-    )
+    getty_remote_enabled = str(os.getenv("TRR_GETTY_REMOTE_TRANSPORT_ENABLED") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    app_name = str(os.getenv("TRR_MODAL_APP_NAME") or "trr-backend-jobs").strip() or "trr-backend-jobs"
+    modal_environment = str(os.getenv("MODAL_ENVIRONMENT") or "").strip()
+    command = [
+        prepare_named_secrets._python_command(),
+        "scripts/modal/verify_modal_readiness.py",
+        "--json",
+        "--app-name",
+        app_name,
+        "--runtime-secret-name",
+        runtime_secret_name or "trr-backend-runtime",
+        "--social-secret-name",
+        social_secret_name or "trr-social-auth",
+        "--probe-remote-auth",
+        "instagram",
+        "--remote-probe-timeout-seconds",
+        str(readiness_remote_probe_timeout_seconds()),
+        "--modal-lookup-timeout-seconds",
+        str(
+            int(
+                os.getenv("TRR_MODAL_LOOKUP_TIMEOUT_SECONDS")
+                or verify_modal_readiness.DEFAULT_MODAL_LOOKUP_TIMEOUT_SECONDS
+            )
+        ),
+    ]
+    if modal_environment:
+        command.extend(["--env", modal_environment])
+    if getty_remote_enabled:
+        # Getty remote Decodo transport is optional unless explicitly enabled.
+        # Do not surface stale proxy credentials as a startup readiness advisory
+        # while the runtime is configured to fall back to local browser transport.
+        command.append("--probe-getty-remote-access")
+    if startup_core_worker_probes_enabled():
+        command.append("--probe-core-workers")
+
+    timeout_seconds = readiness_timeout_seconds()
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        expected_functions = list(verify_modal_readiness.expected_function_names())
+        return {
+            "ok": False,
+            "core_ok": False,
+            "app_name": app_name,
+            "app_found": False,
+            "app_lookup_error": f"Modal readiness verification timed out after {timeout_seconds} seconds.",
+            "runtime_secret_name": runtime_secret_name or "trr-backend-runtime",
+            "social_secret_name": social_secret_name or "trr-social-auth",
+            "missing_secrets": [],
+            "function_results": [
+                {"name": function_name, "resolved": False, "error": "modal_readiness_timeout"}
+                for function_name in expected_functions
+            ],
+            "missing_functions": expected_functions,
+            "missing_required_social_functions": list(verify_modal_readiness.required_social_function_names()),
+            "missing_web_endpoints": [],
+            "remote_auth_probe": {
+                "platform": "instagram",
+                "ready": False,
+                "reason": "modal_readiness_timeout",
+            },
+            "runtime_probes": [],
+            "blocking_probe_failures": ["modal_readiness_timeout"],
+            "readiness_timeout": True,
+        }
+    try:
+        payload = json.loads((completed.stdout or "").strip() or "{}")
+    except json.JSONDecodeError:
+        payload = {
+            "ok": False,
+            "core_ok": False,
+            "app_found": False,
+            "app_lookup_error": (completed.stderr or completed.stdout or "Modal readiness output was invalid.").strip(),
+            "blocking_probe_failures": ["modal_readiness_output_invalid"],
+        }
+    if not isinstance(payload, dict):
+        payload = {
+            "ok": False,
+            "core_ok": False,
+            "app_found": False,
+            "app_lookup_error": "Modal readiness returned a non-object payload.",
+            "blocking_probe_failures": ["modal_readiness_output_invalid"],
+        }
+    if completed.returncode != 0 and bool(payload.get("ok")):
+        payload["ok"] = False
+        payload["core_ok"] = False
+    return payload
 
 
 def verify_readiness_after_deploy(repo_root: Path = REPO_ROOT) -> dict[str, Any]:
@@ -278,6 +395,19 @@ def reconcile_modal_runtime(repo_root: Path = REPO_ROOT) -> dict[str, Any]:
     fingerprint_file_count = sum(1 for path in modal_fingerprint_files(repo_root) if path.is_file())
     startup_resources_ready = _modal_resources_ready_for_startup(readiness)
     startup_auth_advisory = _modal_auth_advisory(readiness)
+
+    if bool(readiness.get("readiness_timeout")):
+        payload = default_result()
+        payload["state"] = "blocked"
+        payload["reason"] = "modal_verify_timeout"
+        payload["fingerprint_changed"] = fingerprint_changed
+        payload["readiness"] = readiness
+        payload["fingerprint_file_count"] = fingerprint_file_count
+        payload["remediation"] = str(
+            readiness.get("app_lookup_error")
+            or f"Modal readiness verification timed out after {readiness_timeout_seconds()} seconds."
+        )
+        return payload
 
     if startup_resources_ready and not fingerprint_changed:
         payload = default_result()

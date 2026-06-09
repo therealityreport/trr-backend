@@ -168,20 +168,18 @@ def select_comments_proxy(*, session_key: str | None = None) -> CommentsProxyCon
     # stale residential proxy can make healthy auth cookies look blocked. The
     # sticky comments flag remains an explicit comments-lane opt-in for Decodo.
     provider = str(os.getenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER") or "").strip().lower()
-    force_rotating_proxy = env_truthy("SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY", True)
-    sticky_proxy_requested = (not force_rotating_proxy) and env_truthy(
+    force_rotating_proxy = env_truthy("SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY", False)
+    sticky_proxy_requested = env_truthy(
         "SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY",
         False,
     )
-    if provider in {"decodo", "smartproxy"} or (not provider and sticky_proxy_requested):
+    if provider in {"decodo", "smartproxy"} or (not provider and sticky_proxy_requested and not force_rotating_proxy):
         creds = _decodo_env()
         if creds:
             username, password, gateway = creds
             sticky_username, session_mode = apply_decodo_session_affinity(
                 username,
-                use_sticky_proxy=(
-                    False if force_rotating_proxy else env_truthy("SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY", False)
-                ),
+                use_sticky_proxy=sticky_proxy_requested and not force_rotating_proxy,
                 session_ttl_seconds=resolve_positive_int_env(
                     "SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS",
                     600,

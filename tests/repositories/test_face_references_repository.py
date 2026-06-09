@@ -163,12 +163,12 @@ def test_upsert_face_reference_embedding_serializes_vector(monkeypatch) -> None:
 
     result = face_references.upsert_face_reference_embedding(
         reference_image_id="ref-1",
-        provider="deepface",
-        model_name="ArcFace",
-        model_version=None,
+        provider="insightface",
+        model_name="antelopev2",
+        model_version="faceanalysis-v1",
         embedding_status="ready",
         embedding=[1.0, 0.0, 0.0],
-        metadata={"contract_key": "deepface:arcface:retinaface:base:512d:l2_unit"},
+        metadata={"contract_key": "insightface:antelopev2:faceanalysis:normed_embedding:512d:l2_unit"},
         error_message=None,
     )
 

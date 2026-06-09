@@ -119,6 +119,7 @@ def test_enqueue_platform_comment_media_mirror_job_uses_post_scoped_lookup_for_i
     monkeypatch.setattr(social_repo.pg, "fetch_one_with_cursor", _fake_fetch_one_with_cursor)
     monkeypatch.setattr(social_repo, "_column_exists", lambda _schema, _table, column: column == "media_urls")
     monkeypatch.setattr(social_repo, "_platform_comment_media_needs_mirror", lambda _platform, _row: True)
+    monkeypatch.setattr(social_repo, "_run_allows_followup_job_enqueue", lambda *_args, **_kwargs: True)
 
     context = social_repo.SeasonContext(  # noqa: SLF001
         season_id="season-1",

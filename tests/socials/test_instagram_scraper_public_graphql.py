@@ -250,6 +250,30 @@ def test_fetch_posts_graphql_records_checkpoint_required_failure_metadata(monkey
     assert scraper.last_retrieval_meta["error_message"] == "checkpoint_required"
 
 
+def test_fetch_posts_graphql_handles_empty_request_client_payload(monkeypatch) -> None:
+    scraper = InstagramScraper(cookies={"sessionid": "sessionid", "ds_user_id": "123"})
+
+    monkeypatch.setattr(
+        scraper,
+        "_warm_profile_request_context",
+        lambda *_args, **_kwargs: {
+            "lsd": "lsd-1",
+            "bloks_version": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        },
+    )
+    monkeypatch.setattr(scraper._request_client, "post_form_json", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scraper, "_playwright_graphql_fallback_enabled", lambda: False)
+    monkeypatch.setattr(scraper, "_resolve_graphql_cursor_retry_attempts", lambda _cursor: 1)
+    monkeypatch.setattr(scraper, "_resolve_graphql_retry_backoff_seconds", lambda *_args: 0.0)
+
+    payload = scraper.fetch_posts_graphql("bravotv", None, 0.0, allow_recovery=False)
+
+    assert payload is None
+    assert scraper.last_retrieval_meta["error_code"] == "instagram_graphql_empty_response"
+    assert scraper.last_retrieval_meta["error_class"] == "NoneType"
+    assert scraper.last_retrieval_meta["retryable"] is True
+
+
 def test_fetch_posts_graphql_uses_browser_fallback_after_requests_fail(monkeypatch) -> None:
     scraper = InstagramScraper(cookies={})
 
@@ -963,6 +987,7 @@ def test_interactive_login_runs_sync_playwright_outside_active_async_loop(
 ) -> None:
     scraper = InstagramScraper(cookies={"sessionid": "seed"}, browser_account_id="bravotv")
     monkeypatch.setenv("SOCIAL_INSTAGRAM_INTERACTIVE_LOGIN", "1")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_AUTH_REPAIR_CONFIRMATION", "I UNDERSTAND INSTAGRAM AUTH RISK")
     monkeypatch.setenv("SOCIAL_INSTAGRAM_BROWSER_MODE", "headless")
     monkeypatch.setattr(scraper, "_is_local_environment", lambda: True)
     caller_thread_id = threading.get_ident()
@@ -988,6 +1013,35 @@ def test_interactive_login_runs_sync_playwright_outside_active_async_loop(
     assert captured["kwargs"]["validation_username"] == "bravotv"
     assert scraper.cookies["sessionid"] == "fresh-session"
     assert scraper.session.cookies.get("csrftoken", domain=".instagram.com") == "fresh-csrf"
+
+
+def test_interactive_login_is_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = InstagramScraper(cookies={"sessionid": "seed"}, browser_account_id="bravotv")
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_INTERACTIVE_LOGIN", raising=False)
+    monkeypatch.setattr(
+        scraper,
+        "_is_local_environment",
+        lambda: pytest.fail("default-disabled interactive login should stop before runtime checks"),
+    )
+
+    result = scraper._try_interactive_login()
+
+    assert result == {"refreshed": False, "reason": "interactive_login_disabled"}
+
+
+def test_interactive_login_requires_operator_confirmation(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = InstagramScraper(cookies={"sessionid": "seed"}, browser_account_id="bravotv")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_INTERACTIVE_LOGIN", "1")
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_AUTH_REPAIR_CONFIRMATION", raising=False)
+    monkeypatch.setattr(
+        scraper,
+        "_is_local_environment",
+        lambda: pytest.fail("unconfirmed interactive login should stop before runtime checks"),
+    )
+
+    result = scraper._try_interactive_login()
+
+    assert result == {"refreshed": False, "reason": "instagram_auth_repair_confirmation_required"}
 
 
 def test_fetch_profile_info_tolerates_duplicate_csrftoken_session_cookies(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -24,9 +24,6 @@ import httpx
 from bs4 import BeautifulSoup
 
 from trr_backend.socials._scrapling_http_utils import (
-    extract_response_cookies as _extract_response_cookies,
-)
-from trr_backend.socials._scrapling_http_utils import (
     response_text as _response_text,
 )
 from trr_backend.socials._scrapling_http_utils import (
@@ -34,6 +31,12 @@ from trr_backend.socials._scrapling_http_utils import (
 )
 from trr_backend.socials._scrapling_http_utils import (
     status_code as _status_code,
+)
+from trr_backend.socials.scrapling_transport import (
+    build_stealthy_fetcher,
+    merge_response_cookies,
+    safe_cookie_metadata,
+    scrapling_runtime_metadata,
 )
 
 from .auth import SOCIALBLADE_STEALTH_USER_AGENT
@@ -77,11 +80,6 @@ class SocialBladeScraplingFetcher:
         headless: bool = True,
         timeout_ms: int = 45_000,
     ) -> None:
-        try:
-            from scrapling.fetchers import StealthyFetcher
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError("Scrapling StealthyFetcher is unavailable. Install scrapling[fetchers].") from exc
-
         self._cookies = list(cookies or [])
         self._raw_cookies = dict(raw_cookies or {})
         self._seed_cookie_names = sorted(self._raw_cookies.keys())
@@ -93,28 +91,39 @@ class SocialBladeScraplingFetcher:
         self._proxy_session_mode = proxy_config.session_mode if proxy_config else "none"
         self._headless = bool(headless)
         self._timeout_ms = max(5_000, int(timeout_ms))
-        self._fetcher = StealthyFetcher()
+        self._scrapling_runtime_metadata = scrapling_runtime_metadata()
+        self._fetcher = build_stealthy_fetcher()
         self._http_client: httpx.AsyncClient | None = None
         self._request_count = 0
         self._warmup_cookie_delta: dict[str, str] = {}
         self._fallback_chain: list[str] = []
         self._last_transport = "scrapling_warmup"
         self._capture_source = "none"
+        self._history_source_detail = "none"
+        self._profile_source = "none"
         self._capture_control_updates: dict[str, str] = {}
         self._captured_xhr_count = 0
         self._captured_xhr_paths: list[str] = []
 
     @property
     def runtime_metadata(self) -> dict[str, Any]:
+        cookie_metadata = safe_cookie_metadata(
+            {name: "" for name in self._seed_cookie_names},
+            self._warmup_cookie_delta,
+            prefix="",
+        )
         return {
-            "warmup_cookie_names": sorted(self._warmup_cookie_delta.keys()),
-            "warmup_cookie_count": len(self._warmup_cookie_delta),
-            "seed_cookie_names": list(self._seed_cookie_names),
-            "seed_cookie_count": len(self._seed_cookie_names),
+            "scrapling_runtime": dict(self._scrapling_runtime_metadata),
+            "warmup_cookie_names": cookie_metadata["warmup_cookie_names"],
+            "warmup_cookie_count": cookie_metadata["warmup_cookie_count"],
+            "seed_cookie_names": cookie_metadata["seed_cookie_names"],
+            "seed_cookie_count": cookie_metadata["seed_cookie_count"],
             "seed_has_socialblade_session": "session" in self._seed_cookie_names,
             "selected_proxy_fingerprint": self._selected_proxy_fingerprint,
             "proxy_session_mode": self._proxy_session_mode,
             "capture_source": self._capture_source,
+            "history_source_detail": self._history_source_detail,
+            "profile_source": self._profile_source,
             "captured_xhr_count": self._captured_xhr_count,
             "captured_xhr_paths": list(self._captured_xhr_paths),
             "request_count": self._request_count,
@@ -224,6 +233,9 @@ class SocialBladeScraplingFetcher:
                 else:
                     chart_data = table_chart
                 history_source = captured_history_source
+                capture_source = self._capture_source if self._capture_source != "none" else "html_script"
+                self._history_source_detail = capture_source
+                self._profile_source = capture_source
                 self._last_transport = f"scrapling_{captured_history_source}"
                 if captured_fallback_step not in self._fallback_chain:
                     self._fallback_chain.append(captured_fallback_step)
@@ -236,6 +248,8 @@ class SocialBladeScraplingFetcher:
                 try:
                     stats, rankings, metrics, chart_data = await self._scrape_authenticated_api(safe_handle, sb_url)
                     history_source = "authenticated_api"
+                    self._history_source_detail = "authenticated_api"
+                    self._profile_source = "authenticated_api"
                     self._last_transport = "httpx_after_scrapling_warmup"
                     self._fallback_chain.append(f"{self._platform}_trpc_http")
                 except Exception as exc:  # noqa: BLE001
@@ -250,6 +264,8 @@ class SocialBladeScraplingFetcher:
 
         if not stats or not rankings:
             stats, rankings, profile_labels = _extract_profile_stats_from_body_text(body_text, self._platform)
+            if stats or rankings:
+                self._profile_source = "html_body_fallback"
         if not profile_labels:
             profile_labels = _default_profile_stat_labels(self._platform)
 
@@ -259,6 +275,7 @@ class SocialBladeScraplingFetcher:
             if metrics.get("row_count"):
                 if history_source == "unavailable":
                     history_source = "table_fallback"
+                self._history_source_detail = "html_table_fallback"
                 self._fallback_chain.append("html_table_fallback")
                 self._last_transport = "html_table_fallback"
 
@@ -269,6 +286,8 @@ class SocialBladeScraplingFetcher:
             )
             if chart_data:
                 history_source = "table_fallback"
+                if self._history_source_detail == "none":
+                    self._history_source_detail = "html_table_fallback"
 
         stats_refreshed = bool(stats.get("followers", 0) > 0 and int(metrics.get("row_count") or 0) > 0)
         if not stats_refreshed:
@@ -306,10 +325,11 @@ class SocialBladeScraplingFetcher:
             self._http_client = None
 
     def _merge_warmup_cookies(self, response: Any) -> None:
-        new_cookies = _extract_response_cookies(response)
-        self._warmup_cookie_delta = dict(new_cookies)
-        for name, value in new_cookies.items():
-            self._raw_cookies[name] = value
+        merged_cookies = merge_response_cookies(self._raw_cookies, response)
+        self._warmup_cookie_delta = {
+            name: value for name, value in merged_cookies.items() if self._raw_cookies.get(name) != value
+        }
+        self._raw_cookies = merged_cookies
 
     def _rebuild_http_client(self) -> None:
         self._http_client = httpx.AsyncClient(

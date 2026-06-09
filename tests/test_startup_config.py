@@ -18,6 +18,9 @@ def _clear_runtime_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "PYTHON_ENV",
         "TRR_INTERNAL_ADMIN_SHARED_SECRET",
         "SUPABASE_JWT_SECRET",
+        "TRR_MODAL_MAINTENANCE_OWNER_REQUIRED",
+        "TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED",
+        "TRR_MODAL_RUNTIME_SCHEDULER_ENABLED",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -70,6 +73,73 @@ def test_validate_startup_config_does_not_require_retired_screenalytics_envs_for
     )
 
     api_main._validate_startup_config()
+
+
+def test_modal_runtime_scheduler_is_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TRR_MODAL_RUNTIME_SCHEDULER_ENABLED", raising=False)
+    monkeypatch.setattr(
+        "trr_backend.modal_dispatch.modal_dispatch_enabled",
+        lambda: True,
+    )
+
+    assert api_main._modal_runtime_scheduler_enabled() is False
+
+
+def test_modal_runtime_scheduler_follows_modal_dispatch_readiness(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRR_MODAL_RUNTIME_SCHEDULER_ENABLED", "1")
+    monkeypatch.setattr(
+        "trr_backend.modal_dispatch.modal_dispatch_enabled",
+        lambda: True,
+    )
+
+    assert api_main._modal_runtime_scheduler_enabled() is True
+
+
+def test_modal_runtime_scheduler_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRR_MODAL_RUNTIME_SCHEDULER_ENABLED", "0")
+    monkeypatch.setattr(
+        "trr_backend.modal_dispatch.modal_dispatch_enabled",
+        lambda: True,
+    )
+
+    assert api_main._modal_runtime_scheduler_enabled() is False
+
+
+def test_modal_runtime_scheduler_startup_rejects_no_maintenance_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_runtime_env(monkeypatch)
+    monkeypatch.setenv("TRR_MODAL_MAINTENANCE_OWNER_REQUIRED", "1")
+
+    with pytest.raises(RuntimeError, match="no active owner") as excinfo:
+        api_main._validate_modal_maintenance_owner_config()
+    message = str(excinfo.value)
+    assert "TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED=1" in message
+    assert "TRR_MODAL_RUNTIME_SCHEDULER_ENABLED=1" in message
+    assert "TRR_MODAL_MAINTENANCE_OWNER_REQUIRED=1" in message
+    assert "scripts/modal/prepare_named_secrets.py --apply" in message
+
+
+def test_modal_runtime_scheduler_startup_rejects_duplicate_maintenance_owners(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_runtime_env(monkeypatch)
+    monkeypatch.setenv("TRR_MODAL_MAINTENANCE_OWNER_REQUIRED", "1")
+    monkeypatch.setenv("TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED", "1")
+    monkeypatch.setenv("TRR_MODAL_RUNTIME_SCHEDULER_ENABLED", "1")
+
+    with pytest.raises(RuntimeError, match="duplicate active owners") as excinfo:
+        api_main._validate_modal_maintenance_owner_config()
+    message = str(excinfo.value)
+    assert "TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED='1'" in message
+    assert "TRR_MODAL_RUNTIME_SCHEDULER_ENABLED='1'" in message
+    assert "scripts/modal/prepare_named_secrets.py --apply" in message
+
+
+def test_modal_runtime_scheduler_startup_accepts_api_fallback_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_runtime_env(monkeypatch)
+    monkeypatch.setenv("TRR_MODAL_MAINTENANCE_OWNER_REQUIRED", "1")
+    monkeypatch.setenv("TRR_MODAL_RUNTIME_SCHEDULER_ENABLED", "1")
+
+    assert api_main._validate_modal_maintenance_owner_config() == "api_runtime_scheduler"
 
 
 def test_workspace_shared_env_manifest_matches_backend_contract() -> None:

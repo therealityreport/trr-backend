@@ -1,4 +1,4 @@
-"""Regression tests for Instagram scraper bug fixes (bugs #5-#10).
+"""Regression tests for Instagram scraper bug fixes.
 
 Each test locks in a specific fix from .claude/plans/fancy-beaming-dijkstra.md.
 No network; all IO is mocked or structural.
@@ -6,13 +6,11 @@ No network; all IO is mocked or structural.
 
 from __future__ import annotations
 
-import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
-from trr_backend.socials.instagram.apify_scraper import normalize_apify_post
 from trr_backend.socials.instagram.identity_pool import (
     InstagramIdentityPool,
     InstagramScraperIdentity,
@@ -168,25 +166,6 @@ def test_bug9_fetch_profile_page_context_merges_response_cookies() -> None:
 
     # The merged csrftoken should now live on the session cookie jar.
     assert scraper.session.cookies.get("csrftoken") == "new-csrf-value"
-
-
-# ---------- Bug #10: apify timestamp parse logs on failure ----------
-
-
-def test_bug10_apify_timestamp_failure_emits_debug_log(caplog: pytest.LogCaptureFixture) -> None:
-    raw = {
-        "type": "Image",
-        "timestamp": "not-a-real-iso-timestamp",
-        "caption": "hello",
-    }
-    with caplog.at_level(logging.DEBUG, logger="trr_backend.socials.instagram.apify_scraper"):
-        post = normalize_apify_post(raw)
-    # normalize_apify_post returns a dict; verify posted_at entry is None.
-    assert post.get("posted_at") is None
-    # At least one log record mentions the offending value.
-    assert any("not-a-real-iso-timestamp" in rec.getMessage() for rec in caplog.records), (
-        "Bug #10: apify timestamp parse failures must be logged for drift diagnosis"
-    )
 
 
 if __name__ == "__main__":

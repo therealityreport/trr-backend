@@ -560,6 +560,84 @@ def test_create_sync_session_preserves_created_status(monkeypatch) -> None:
     assert result["current_run_id"] == "run-2"
 
 
+def test_create_sync_session_marks_session_failed_when_kickoff_fails(monkeypatch) -> None:
+    updates: list[dict[str, object]] = []
+
+    monkeypatch.setattr(orchestrator, "_sync_sessions_ready", lambda: True)
+    monkeypatch.setattr(orchestrator, "_coerce_dt", lambda value: value)
+    monkeypatch.setattr(orchestrator, "build_sync_profile", lambda **kwargs: kwargs["base_config"])
+    monkeypatch.setattr(orchestrator, "_build_dedup_key", lambda **_kwargs: "dedup-key")
+    monkeypatch.setattr(orchestrator, "_build_completeness_snapshot", lambda **_kwargs: {"up_to_date": False})
+    monkeypatch.setattr(
+        orchestrator,
+        "_social_repo",
+        lambda: SimpleNamespace(get_season_context=lambda _season_id: SimpleNamespace(show_id="show-1")),
+    )
+    monkeypatch.setattr(
+        orchestrator.pg,
+        "fetch_one",
+        lambda query, _params=None: {"id": "sync-2"} if "insert into social.sync_sessions" in query else None,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_start_sync_pass",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("kickoff failed")),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_update_sync_session",
+        lambda _sync_session_id, **fields: updates.append(fields) or {"id": "sync-2", **fields},
+    )
+
+    try:
+        orchestrator.create_sync_session(
+            "season-1",
+            source_scope="bravo",
+            platforms=["instagram"],
+            date_start=datetime(2026, 1, 1, tzinfo=UTC),
+            date_end=datetime(2026, 1, 2, tzinfo=UTC),
+            config={"platforms": ["instagram"]},
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "kickoff failed"
+    else:  # pragma: no cover - defensive
+        raise AssertionError("kickoff failure should propagate")
+
+    assert updates[-1]["status"] == "failed"
+    assert updates[-1]["current_run_id"] is None
+    assert updates[-1]["follow_up_reason"] == "initial_start_failed"
+
+
+def test_load_sync_session_evaluation_state_fails_missing_current_run(monkeypatch) -> None:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    row = {
+        "id": "sync-1",
+        "season_id": "season-1",
+        "source_scope": "bravo",
+        "platforms": ["instagram"],
+        "status": "pass_running",
+        "current_run_id": "missing-run",
+        "date_start": now,
+        "date_end": now,
+    }
+    updates: list[dict[str, object]] = []
+
+    monkeypatch.setattr(orchestrator, "_fetch_sync_session_row", lambda *_args, **_kwargs: row)
+    monkeypatch.setattr(orchestrator, "_current_run_payload", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(orchestrator, "_now_utc", lambda: now)
+    monkeypatch.setattr(
+        orchestrator,
+        "_update_sync_session",
+        lambda _sync_session_id, **fields: updates.append(fields) or {**row, **fields},
+    )
+
+    updated_row, state = orchestrator._load_sync_session_evaluation_state("sync-1", conn=object())  # noqa: SLF001
+
+    assert state is None
+    assert updated_row["status"] == "failed"
+    assert updates[-1]["follow_up_reason"] == "missing_current_run"
+
+
 def test_build_sync_profile_uses_platform_specific_defaults() -> None:
     profile = orchestrator.build_sync_profile(
         season_id="season-1",

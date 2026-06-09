@@ -49,10 +49,11 @@ def test_tiktok_extracts_sec_uid_from_warmup_html():
 
 
 def test_tiktok_challenge_detection():
-    from trr_backend.socials.tiktok.posts_scrapling.fetcher import _is_challenge_response
+    from trr_backend.socials.tiktok.posts_scrapling.fetcher import _classify_challenge_response, _is_challenge_response
 
     assert _is_challenge_response("<html><body>captcha verify</body></html>") is True
     assert _is_challenge_response('{"statusCode": 0}') is False
+    assert _classify_challenge_response("X-Bogus or _signature is required") == "js_generated_params_required"
 
 
 def test_tiktok_posts_scrapling_page_size_defaults_to_30(monkeypatch):
@@ -149,6 +150,23 @@ def test_tiktok_runtime_metadata_never_exposes_cookie_values(_mock_scrapling):
     assert "cookies" not in meta
 
 
+def test_tiktok_runtime_metadata_includes_seed_cookie_and_limitation(_mock_scrapling):
+    from trr_backend.socials.tiktok.posts_scrapling.fetcher import TikTokPostsScraplingFetcher
+
+    fetcher = TikTokPostsScraplingFetcher(
+        cookies=[],
+        raw_cookies={"sessionid": "existing-session-secret", "ttwid": "browser-id"},
+    )
+
+    meta = fetcher.runtime_metadata
+    serialized = repr(meta)
+    assert "existing-session-secret" not in serialized
+    assert "browser-id" not in serialized
+    assert meta["seed_cookie_names"] == ["sessionid", "ttwid"]
+    assert meta["seed_cookie_count"] == 2
+    assert meta["api_signature_limitation"] == "tiktok_api_may_require_js_generated_params"
+
+
 def test_tiktok_runtime_metadata_exposes_proxy_fingerprint_only(_mock_scrapling):
     from trr_backend.socials.tiktok.posts_scrapling.fetcher import TikTokPostsScraplingFetcher
     from trr_backend.socials.tiktok.posts_scrapling.proxy import TikTokPostsProxyConfig
@@ -176,6 +194,27 @@ def test_tiktok_runtime_metadata_exposes_proxy_fingerprint_only(_mock_scrapling)
     assert "browser_proxy" not in meta
 
 
+def test_tiktok_merge_warmup_cookies_syncs_browser_cookie_payload(_mock_scrapling):
+    from unittest.mock import MagicMock
+
+    from trr_backend.socials.tiktok.posts_scrapling.fetcher import TikTokPostsScraplingFetcher
+
+    fetcher = TikTokPostsScraplingFetcher(
+        cookies=[{"name": "sessionid", "value": "old", "domain": ".tiktok.com", "path": "/"}],
+        raw_cookies={"sessionid": "old"},
+    )
+    fake_resp = MagicMock()
+    fake_resp.cookies = {"sessionid": "new", "msToken": "token"}
+
+    fetcher._merge_warmup_cookies(fake_resp)
+
+    assert fetcher._raw_cookies == {"sessionid": "new", "msToken": "token"}
+    browser_cookies = {cookie["name"]: cookie for cookie in fetcher._cookies}
+    assert browser_cookies["sessionid"]["value"] == "new"
+    assert browser_cookies["msToken"]["domain"] == ".tiktok.com"
+    assert fetcher.runtime_metadata["cookie_sync_count"] == 2
+
+
 def test_tiktok_warmup_emits_structured_log_success(_mock_scrapling, caplog):
     import asyncio
     from unittest.mock import AsyncMock, MagicMock
@@ -196,3 +235,32 @@ def test_tiktok_warmup_emits_structured_log_success(_mock_scrapling, caplog):
     events = [r for r in caplog.records if getattr(r, "event", None) == "warmup_success"]
     assert len(events) == 1
     assert events[0].account == "someone"
+
+
+def test_tiktok_warmup_optional_xhr_capture_metadata(_mock_scrapling, monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from trr_backend.socials.tiktok.posts_scrapling.fetcher import TikTokPostsScraplingFetcher
+
+    monkeypatch.setenv("SOCIAL_TIKTOK_POSTS_CAPTURE_XHR", "true")
+    fetcher = TikTokPostsScraplingFetcher(cookies=[], raw_cookies={})
+
+    fake_resp = MagicMock()
+    fake_resp.status_code = 200
+    fake_resp.text = "<html>not challenge</html>"
+    fake_resp.cookies = {}
+    fake_resp.captured_xhr = [
+        {"url": "https://www.tiktok.com/api/user/detail/?uniqueId=someone"},
+        {"url": "https://www.tiktok.com/api/post/item_list/?count=30"},
+    ]
+    fetcher._fetcher.async_fetch = AsyncMock(return_value=fake_resp)
+
+    asyncio.run(fetcher.warmup("someone"))
+
+    call_kwargs = fetcher._fetcher.async_fetch.await_args.kwargs
+    assert call_kwargs["capture_xhr"] is True
+    meta = fetcher.runtime_metadata
+    assert meta["capture_xhr_enabled"] is True
+    assert meta["captured_xhr_count"] == 2
+    assert meta["captured_xhr_paths"] == ["/api/post/item_list/", "/api/user/detail/"]

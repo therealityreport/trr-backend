@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from api import main as api_main
 from api.auth import require_internal_admin
 from api.main import admin_health_db_pressure, health, health_db_pressure, health_live, health_runtime
 from trr_backend.db import pg as _real_pg
@@ -86,6 +87,38 @@ def test_health_uses_health_read_pool() -> None:
     assert calls == [("health-probe", "health")]
 
 
+def test_health_reports_operator_database_lane() -> None:
+    with (
+        patch.object(_real_pg, "db_read_connection", _fake_db_read_connection_ok),
+        patch.object(
+            api_main,
+            "resolve_database_url_candidate_details",
+            lambda: (
+                {
+                    "source": "TRR_DB_DIRECT_URL",
+                    "host_class": "direct",
+                    "connection_class": "direct",
+                    "host": "db.example.supabase.co",
+                    "port": 5432,
+                    "database": "postgres",
+                },
+            ),
+        ),
+    ):
+        resp = client.get("/health")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["database_lane"] == {
+        "url_lane": "direct_url",
+        "url_source": "TRR_DB_DIRECT_URL",
+        "connection_class": "direct",
+        "host_class": "direct",
+        "pool_name": "health",
+        "pool_lane": "health_pool",
+    }
+
+
 def test_health_live():
     resp = client.get("/health/live")
     assert resp.status_code == 200
@@ -134,6 +167,10 @@ def test_admin_health_db_pressure_returns_protected_pool_details() -> None:
     body = resp.json()
     assert body["pools"][0]["pool_name"] == "default"
     assert body["pools"][0]["application_name"] == "trr-backend:default"
+    assert body["operator_failure_lanes"]["health"]["pool_lane"] == "health_pool"
+    assert body["operator_failure_lanes"]["social_profile"]["pool_lane"] == "social_profile_pool"
+    assert body["operator_failure_lanes"]["auth"]["lane"] == "auth"
+    assert body["operator_failure_lanes"]["modal"]["lane"] == "modal_deployment_state"
 
 
 def test_admin_health_db_pressure_includes_grouped_holder_activity() -> None:
@@ -222,3 +259,30 @@ def test_health_runtime_ignores_database_failure():
     assert body["status"] == "alive"
     assert body["service"] == "trr-backend"
     assert "background_tasks" in body
+    assert "realtime" in body
+
+
+def test_health_runtime_includes_realtime_snapshot_without_database():
+    with (
+        patch.object(_real_pg, "db_connection", _fake_db_connection_fail),
+        patch.object(
+            api_main,
+            "broker_runtime_status",
+            lambda: {
+                "mode": "redis",
+                "connected": True,
+                "multi_worker_policy": {
+                    "workers_requested": 2,
+                    "require_redis_for_multi_worker": True,
+                    "redis_url_configured": True,
+                    "safe_for_multi_worker": True,
+                },
+            },
+        ),
+    ):
+        resp = client.get("/health/runtime")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["realtime"]["mode"] == "redis"
+    assert body["realtime"]["multi_worker_policy"]["safe_for_multi_worker"] is True

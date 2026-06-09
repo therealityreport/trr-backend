@@ -20,6 +20,7 @@ from api.routers.admin_show_bravo import (
     _build_preview_signature,
     _dedupe_items,
     _merge_external_ids_fill_missing,
+    _persist_bravo_profile_social_sources,
     _persist_discovered_links_from_bravo_sync,
     _stable_show_image_candidate_id,
     _validate_cast_only_preview_reuse_or_raise,
@@ -2119,6 +2120,123 @@ def test_external_ids_merge_skips_generic_youtube_placeholders() -> None:
     assert "youtube" not in merged
     assert "youtube_id" not in merged
     assert "youtube_url" not in merged
+
+
+class _InsertOnlyTable:
+    def __init__(self, inserts: list[dict[str, object]]) -> None:
+        self.inserts = inserts
+        self.payload: dict[str, object] | None = None
+
+    def insert(self, payload: dict[str, object]) -> _InsertOnlyTable:
+        self.payload = payload
+        return self
+
+    def execute(self) -> SimpleNamespace:
+        if self.payload is not None:
+            self.inserts.append(self.payload)
+        return SimpleNamespace(data=[self.payload], error=None)
+
+
+class _InsertOnlyDb:
+    def __init__(self) -> None:
+        self.inserts: list[dict[str, object]] = []
+
+    def schema(self, _schema: str) -> _InsertOnlyDb:
+        return self
+
+    def table(self, _table: str) -> _InsertOnlyTable:
+        return _InsertOnlyTable(self.inserts)
+
+
+def test_bravo_profile_social_sources_persist_canonical_ids_and_entity_links(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.routers import admin_show_bravo, admin_show_links
+
+    db = _InsertOnlyDb()
+    links: list[dict[str, object]] = []
+    monkeypatch.setattr(admin_show_bravo, "_fetch_active_person_external_id", lambda *args, **kwargs: None)
+    monkeypatch.setattr(admin_show_links, "_upsert_link", lambda _db, **kwargs: links.append(kwargs) or kwargs)
+
+    stats = _persist_bravo_profile_social_sources(
+        db,
+        show_id="show-1",
+        person_id="person-1",
+        person_name="Janet Caperna",
+        social_links={"instagram": "https://www.instagram.com/janetcaperna/"},
+        actor="admin@test.local",
+    )
+
+    assert stats["canonical_inserted"] == 1
+    assert stats["entity_links_upserted"] == 1
+    assert db.inserts == [
+        {
+            "person_id": "person-1",
+            "source_id": "instagram",
+            "external_id": "janetcaperna",
+            "is_primary": True,
+        }
+    ]
+    assert links[0]["link_group"] == "social"
+    assert links[0]["link_kind"] == "instagram"
+    assert links[0]["url"] == "https://www.instagram.com/janetcaperna"
+    assert links[0]["source"] == "bravo_profile_social_links"
+
+
+def test_bravo_profile_social_sources_skip_generic_bravo_handles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.routers import admin_show_bravo, admin_show_links
+
+    db = _InsertOnlyDb()
+    links: list[dict[str, object]] = []
+    monkeypatch.setattr(admin_show_bravo, "_fetch_active_person_external_id", lambda *args, **kwargs: None)
+    monkeypatch.setattr(admin_show_links, "_upsert_link", lambda _db, **kwargs: links.append(kwargs) or kwargs)
+
+    stats = _persist_bravo_profile_social_sources(
+        db,
+        show_id="show-1",
+        person_id="person-1",
+        person_name="Cast Member",
+        social_links={"youtube": "https://www.youtube.com/@Bravo"},
+        actor="admin@test.local",
+    )
+
+    assert stats["skipped_generic"] == 1
+    assert db.inserts == []
+    assert links == []
+
+
+def test_bravo_profile_social_sources_skip_approved_link_on_canonical_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.routers import admin_show_bravo, admin_show_links
+
+    db = _InsertOnlyDb()
+    links: list[dict[str, object]] = []
+
+    def _existing_owner(*_args: object, **kwargs: object) -> dict[str, str] | None:
+        if kwargs.get("source_id") == "instagram" and kwargs.get("external_id") == "janetcaperna":
+            return {"person_id": "person-2"}
+        return None
+
+    monkeypatch.setattr(admin_show_bravo, "_fetch_active_person_external_id", _existing_owner)
+    monkeypatch.setattr(admin_show_links, "_upsert_link", lambda _db, **kwargs: links.append(kwargs) or kwargs)
+
+    stats = _persist_bravo_profile_social_sources(
+        db,
+        show_id="show-1",
+        person_id="person-1",
+        person_name="Janet Caperna",
+        social_links={"instagram": "https://www.instagram.com/janetcaperna/"},
+        actor="admin@test.local",
+    )
+
+    assert stats["canonical_skipped_conflict"] == 1
+    assert stats["canonical_inserted"] == 0
+    assert stats["entity_links_upserted"] == 0
+    assert db.inserts == []
+    assert links == []
 
 
 def test_commit_bravo_import_runs_video_thumbnail_sync_and_persists_summary(

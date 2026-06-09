@@ -151,12 +151,24 @@ def modal_social_recovery_function_name() -> str:
     return str(os.getenv("TRR_MODAL_SOCIAL_RECOVERY_FUNCTION") or "sweep_social_dispatch_queue").strip()
 
 
+def modal_heartbeat_function_name() -> str:
+    return str(os.getenv("TRR_MODAL_HEARTBEAT_FUNCTION") or "heartbeat_remote_executors").strip()
+
+
+def modal_stale_worker_cleanup_function_name() -> str:
+    return str(os.getenv("TRR_MODAL_STALE_WORKER_CLEANUP_FUNCTION") or "purge_stale_social_worker_heartbeats").strip()
+
+
 def modal_socialblade_function_name() -> str:
     return str(os.getenv("TRR_MODAL_SOCIALBLADE_FUNCTION") or "run_socialblade_scrape").strip()
 
 
 def modal_vision_function_name() -> str:
     return str(os.getenv("TRR_MODAL_VISION_FUNCTION") or "run_admin_vision").strip()
+
+
+def modal_cast_screentime_function_name() -> str:
+    return str(os.getenv("TRR_MODAL_CAST_SCREENTIME_FUNCTION") or "run_cast_screentime_analysis").strip()
 
 
 def modal_app_name() -> str:
@@ -200,7 +212,10 @@ def modal_dispatch_config() -> dict[str, Any]:
             modal_social_comments_job_function_name(),
         ],
         "social_recovery_function": modal_social_recovery_function_name(),
+        "heartbeat_function": modal_heartbeat_function_name(),
+        "stale_worker_cleanup_function": modal_stale_worker_cleanup_function_name(),
         "vision_function": modal_vision_function_name(),
+        "cast_screentime_function": modal_cast_screentime_function_name(),
         "socialblade_function": modal_socialblade_function_name(),
     }
 
@@ -249,6 +264,7 @@ def resolve_modal_function(function_name: str) -> dict[str, Any]:
         "resolved": False,
         "reason": reason,
         "error": None,
+        "hydrated": False,
         "app_name": app_name,
         "function_name": normalized_function,
         "modal_environment": environment_name,
@@ -263,8 +279,9 @@ def resolve_modal_function(function_name: str) -> dict[str, Any]:
 
         fn = modal.Function.from_name(app_name, normalized_function)
         hydrate = getattr(fn, "hydrate", None)
-        if callable(hydrate):
+        if _env_flag("TRR_MODAL_RESOLVE_HYDRATE", default=False) and callable(hydrate):
             hydrate()
+            payload["hydrated"] = True
     except Exception as exc:  # noqa: BLE001
         payload["reason"] = _classify_modal_resolution_error(str(exc))
         payload["error"] = str(exc)
@@ -632,6 +649,25 @@ def _spawn_named_modal_function(
         }
 
 
+def spawn_modal_maintenance_function(
+    *,
+    function_name: str,
+    log_label: str,
+    dispatcher_name: str,
+    kwargs: dict[str, Any] | None = None,
+    supported_platforms: list[str] | None = None,
+) -> dict[str, Any]:
+    """Invoke a Modal maintenance function while the API runtime is alive."""
+
+    return _spawn_named_modal_function(
+        function_name=function_name,
+        log_label=log_label,
+        kwargs=dict(kwargs or {}),
+        dispatcher_name=dispatcher_name,
+        supported_platforms=supported_platforms,
+    )
+
+
 def dispatch_admin_operation(*, operation_id: str, operation_type: str) -> bool:
     normalized_type = str(operation_type or "").strip().lower()
     if not modal_dispatch_enabled():
@@ -665,6 +701,15 @@ def dispatch_reddit_refresh(*, run_id: str) -> bool:
         dispatcher_name="reddit",
     )
     return bool(result.get("dispatched"))
+
+
+def dispatch_cast_screentime_run(*, run_id: str) -> dict[str, Any]:
+    return _spawn_named_modal_function(
+        function_name=modal_cast_screentime_function_name(),
+        log_label="cast screentime",
+        kwargs={"run_id": run_id},
+        dispatcher_name="cast-screentime",
+    )
 
 
 def dispatch_social_job(*, job_id: str, stage: str | None = None) -> dict[str, Any]:

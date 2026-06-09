@@ -46,7 +46,7 @@ def profile_preview_to_route_response(
         "is_private": user_data.get("privateAccount", False),
         "followers": stats.get("followerCount", 0),
         "following": stats.get("followingCount", 0),
-        "likes": stats.get("heart", 0),
+        "likes": stats.get("heartCount", stats.get("heart", 0)),
         "video_count": stats.get("videoCount", 0),
         "profile_pic_url": user_data.get("avatarLarger") or user_data.get("avatarMedium"),
     }

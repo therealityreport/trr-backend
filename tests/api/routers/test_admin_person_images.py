@@ -260,7 +260,7 @@ def test_should_run_imdb_metadata_repair_for_sources_is_source_aware() -> None:
 
 
 def test_import_bravotv_person_media_skips_low_quality_rows(monkeypatch: pytest.MonkeyPatch) -> None:
-    from trr_backend.bravotv import get_images_pipeline, run_service
+    from trr_backend.media.bravotv import get_images_pipeline, run_service
 
     good_row = {
         "file_url": "https://cdn.example.com/good.jpg",
@@ -353,7 +353,7 @@ def test_import_bravotv_person_media_skips_low_quality_rows(monkeypatch: pytest.
 
 
 def test_import_bravotv_person_media_skips_castmate_caption_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
-    from trr_backend.bravotv import get_images_pipeline, run_service
+    from trr_backend.media.bravotv import get_images_pipeline, run_service
 
     castmate_row = {
         "file_url": "https://cdn.example.com/kyle.jpg",
@@ -422,7 +422,7 @@ def test_import_bravotv_person_media_skips_castmate_caption_mismatch(monkeypatch
 def test_import_bravotv_person_media_routes_episode_gallery_without_person_link(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from trr_backend.bravotv import get_images_pipeline, run_service
+    from trr_backend.media.bravotv import get_images_pipeline, run_service
 
     episode_row = {
         "file_url": "https://cdn.example.com/portia.jpg",
@@ -506,7 +506,7 @@ def test_import_bravotv_person_media_routes_episode_gallery_without_person_link(
 
 
 def test_import_bravotv_person_media_skips_denylisted_gallery(monkeypatch: pytest.MonkeyPatch) -> None:
-    from trr_backend.bravotv import get_images_pipeline, run_service
+    from trr_backend.media.bravotv import get_images_pipeline, run_service
 
     skipped_row = {
         "file_url": "https://cdn.example.com/home.jpg",

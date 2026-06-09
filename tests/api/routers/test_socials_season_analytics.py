@@ -520,6 +520,34 @@ def test_get_social_account_profile_summary_returns_503_on_session_pool_saturati
     assert response.json()["detail"]["reason"] == "session_pool_capacity"
 
 
+def test_get_social_account_profile_summary_saturation_does_not_fan_out_secondary_reads(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.routers import socials as socials_router
+
+    socials_router._clear_account_profile_caches()
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch(
+        "api.routers.socials.social_profile_reads.get_profile_summary",
+        side_effect=DatabaseServiceUnavailableError("session pool saturated", reason="session_pool_capacity"),
+    ) as summary_mock:
+        with patch("api.routers.socials.social_profile_reads.get_catalog_freshness") as freshness_mock:
+            with patch("api.routers.socials.social_profile_reads.get_catalog_gap_analysis_status") as gap_analysis_mock:
+                response = client.get(
+                    "/api/v1/admin/socials/profiles/instagram/bravotv/summary?detail=lite",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["reason"] == "session_pool_capacity"
+    summary_mock.assert_called_once_with(platform="instagram", account_handle="bravotv", detail="lite")
+    freshness_mock.assert_not_called()
+    gap_analysis_mock.assert_not_called()
+
+
 def test_get_social_account_live_profile_total(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -989,6 +1017,22 @@ def test_post_social_account_catalog_backfill(client: TestClient, monkeypatch: p
     assert mocked_finalize.call_args.kwargs["selected_tasks"] == ["post_details"]
 
 
+def test_post_social_account_catalog_apify_backfill_route_is_retired(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    response = client.post(
+        "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/apify-backfill",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"results_limit": 10},
+    )
+
+    assert response.status_code == 404
+
+
 def test_post_social_account_catalog_backfill_forwards_selected_tasks(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -1023,6 +1067,8 @@ def test_post_social_account_catalog_backfill_forwards_selected_tasks(
                         json={
                             "backfill_scope": "full_history",
                             "selected_tasks": ["comments", "media", "post_details"],
+                            "comments_worker_count": 8,
+                            "comments_enable_media_followups": True,
                         },
                     )
 
@@ -1033,7 +1079,11 @@ def test_post_social_account_catalog_backfill_forwards_selected_tasks(
     assert body["launch_state"] == "pending"
     assert body["launch_task_resolution_pending"] is True
     assert mocked_begin.call_args.kwargs["selected_tasks"] == ["post_details", "comments", "media"]
+    assert mocked_begin.call_args.kwargs["comments_worker_count"] == 8
+    assert mocked_begin.call_args.kwargs["comments_enable_media_followups"] is True
     assert mocked_finalize.call_args.kwargs["selected_tasks"] == ["post_details", "comments", "media"]
+    assert mocked_finalize.call_args.kwargs["comments_worker_count"] == 8
+    assert mocked_finalize.call_args.kwargs["comments_enable_media_followups"] is True
 
 
 def test_post_social_account_catalog_backfill_without_comments_uses_async_kickoff(
@@ -1070,13 +1120,19 @@ def test_post_social_account_catalog_backfill_without_comments_uses_async_kickof
                         response = client.post(
                             "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/backfill",
                             headers={"Authorization": f"Bearer {token}"},
-                            json={"backfill_scope": "full_history", "selected_tasks": ["post_details"]},
+                            json={
+                                "backfill_scope": "full_history",
+                                "selected_tasks": ["post_details"],
+                                "detail_worker_count": 8,
+                            },
                         )
 
     assert response.status_code == 200
     assert response.json()["run_id"] == "catalog-run-post-details"
     assert mocked_begin.call_args.kwargs["selected_tasks"] == ["post_details"]
+    assert mocked_begin.call_args.kwargs["details_refresh_worker_count"] == 8
     assert mocked_finalize.call_args.kwargs["run_id"] == "catalog-run-post-details"
+    assert mocked_finalize.call_args.kwargs["details_refresh_worker_count"] == 8
 
 
 def test_queue_catalog_backfill_finalize_task_runs_finalize_and_clears_caches(
@@ -1100,6 +1156,14 @@ def test_queue_catalog_backfill_finalize_task_runs_finalize_and_clears_caches(
     )
     monkeypatch.setattr("trr_backend.repositories.social_season_analytics.is_queue_enabled", lambda: True)
     monkeypatch.setattr(socials_router, "_clear_account_profile_caches", lambda: cleared.append("cleared"))
+    monkeypatch.setattr(
+        socials_router,
+        "Thread",
+        lambda *args, **kwargs: SimpleNamespace(
+            start=lambda: kwargs["target"](**kwargs["kwargs"]),
+            join=lambda: None,
+        ),
+    )
 
     socials_router._queue_catalog_backfill_finalize_task(
         background_tasks=background_tasks,
@@ -1113,12 +1177,13 @@ def test_queue_catalog_backfill_finalize_task_runs_finalize_and_clears_caches(
         allow_local_dev_inline_bypass=False,
         execution_preference="auto",
         selected_tasks=["post_details", "comments", "media"],
+        details_refresh_worker_count=6,
+        comments_worker_count=4,
+        comments_enable_media_followups=True,
         launch_group_id="launch-group-1",
     )
 
-    assert len(background_tasks.tasks) == 1
-    for task in background_tasks.tasks:
-        task.func(*task.args, **task.kwargs)
+    assert len(background_tasks.tasks) == 0
     assert done.wait(1)
 
     assert finalized == [
@@ -1133,6 +1198,9 @@ def test_queue_catalog_backfill_finalize_task_runs_finalize_and_clears_caches(
             "allow_local_dev_inline_bypass": False,
             "execution_preference": "auto",
             "selected_tasks": ["post_details", "comments", "media"],
+            "details_refresh_worker_count": 6,
+            "comments_worker_count": 4,
+            "comments_enable_media_followups": True,
             "launch_group_id": "launch-group-1",
         }
     ]
@@ -1171,6 +1239,14 @@ def test_queue_catalog_backfill_finalize_task_starts_inline_fallback_runs(
         ),
     )
     monkeypatch.setattr(socials_router, "_clear_account_profile_caches", lambda: None)
+    monkeypatch.setattr(
+        socials_router,
+        "Thread",
+        lambda *args, **kwargs: SimpleNamespace(
+            start=lambda: kwargs["target"](**kwargs["kwargs"]),
+            join=lambda: None,
+        ),
+    )
 
     socials_router._queue_catalog_backfill_finalize_task(
         background_tasks=background_tasks,
@@ -1184,12 +1260,13 @@ def test_queue_catalog_backfill_finalize_task_starts_inline_fallback_runs(
         allow_local_dev_inline_bypass=True,
         execution_preference="auto",
         selected_tasks=["post_details", "comments", "media"],
+        details_refresh_worker_count=None,
+        comments_worker_count=4,
+        comments_enable_media_followups=True,
         launch_group_id="launch-group-1",
     )
 
-    assert len(background_tasks.tasks) == 1
-    for task in background_tasks.tasks:
-        task.func(*task.args, **task.kwargs)
+    assert len(background_tasks.tasks) == 0
     assert done.wait(1)
 
     catalog_calls = [call for call in executed if call["run_id"] == "catalog-run-1"]
@@ -1605,11 +1682,13 @@ def test_post_social_account_catalog_backfill_surfaces_auth_preflight_failure_wh
 
     assert response.status_code == 503
     body = response.json()
-    assert body["detail"]["code"] == "SOCIAL_REMOTE_JOB_PLANE_ENFORCED"
-    assert "auth preflight is not ready for instagram" in body["detail"]["message"].lower()
+    assert body["detail"]["code"] == "SOCIAL_MODAL_EXECUTOR_REQUIRED"
+    assert body["detail"]["required_execution_backend"] == "modal"
+    assert "modal remote executor" in body["detail"]["message"].lower()
     assert "reporting heartbeats" not in body["detail"]["message"].lower()
     readiness = body["detail"]["worker_health"]["shared_account_backfill_readiness"]
     assert readiness["reason"] == "validation_exception:Error"
+    assert readiness["platform_remote_auth_ready"] is False
 
 
 def test_post_social_account_catalog_backfill_prefers_modal_when_available_even_if_inline_fallback_allowed(
@@ -1739,7 +1818,7 @@ def test_post_social_account_catalog_backfill_prefer_local_inline_returns_valida
     mocked_start.assert_not_called()
 
 
-def test_post_social_account_catalog_backfill_allows_local_inline_fallback_when_modal_unavailable(
+def test_post_social_account_catalog_backfill_blocks_inline_fallback_when_modal_required(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1785,25 +1864,18 @@ def test_post_social_account_catalog_backfill_allows_local_inline_fallback_when_
             json={"backfill_scope": "full_history", "allow_inline_dev_fallback": True},
         )
 
-    assert response.status_code == 200
+    assert response.status_code == 503
     body = response.json()
-    assert body["run_id"] == "catalog-run-inline-1"
-    assert body["status"] == "started"
-    assert body["execution_mode"] == "inline"
-    assert body["execution_mode_canonical"] == "inline_fallback"
-    assert body["execution_mode_legacy"] == "inline_fallback"
-    assert body["queue_enabled"] is False
-    assert body["used_inline_fallback"] is True
-    assert body["requires_modal_executor"] is True
+    assert body["detail"]["code"] == "SOCIAL_MODAL_EXECUTOR_REQUIRED"
+    assert body["detail"]["required_execution_backend"] == "modal"
     worker_guard.assert_called_once()
     mocked_background.assert_not_called()
-    assert mocked_begin.call_args.kwargs["allow_local_dev_inline_bypass"] is True
+    mocked_begin.assert_not_called()
     mocked_start.assert_not_called()
-    mocked_finalize.assert_called_once()
-    assert mocked_finalize.call_args.kwargs["run_id"] == "catalog-run-inline-1"
+    mocked_finalize.assert_not_called()
 
 
-def test_post_social_account_catalog_backfill_uses_local_admin_override_for_instagram_in_dev(
+def test_post_social_account_catalog_backfill_blocks_local_admin_override_when_modal_required(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1852,19 +1924,15 @@ def test_post_social_account_catalog_backfill_uses_local_admin_override_for_inst
             json={"backfill_scope": "full_history"},
         )
 
-    assert response.status_code == 200
+    assert response.status_code == 503
     body = response.json()
-    assert body["run_id"] == "catalog-run-inline-override-1"
-    assert body["status"] == "started"
-    assert body["execution_mode"] == "inline"
-    assert body["execution_mode_canonical"] == "inline_fallback"
-    assert body["execution_mode_legacy"] == "inline_fallback"
+    assert body["detail"]["code"] == "SOCIAL_MODAL_EXECUTOR_REQUIRED"
+    assert body["detail"]["required_execution_backend"] == "modal"
     worker_guard.assert_called_once()
     mocked_background.assert_not_called()
-    assert mocked_begin.call_args.kwargs["allow_local_dev_inline_bypass"] is True
+    mocked_begin.assert_not_called()
     mocked_start.assert_not_called()
-    mocked_finalize.assert_called_once()
-    assert mocked_finalize.call_args.kwargs["run_id"] == "catalog-run-inline-override-1"
+    mocked_finalize.assert_not_called()
 
 
 def test_post_social_account_catalog_backfill_returns_modal_dispatch_unavailable_when_target_unresolvable(
@@ -2175,9 +2243,11 @@ def test_post_social_account_catalog_resume_tail_returns_validation_error(
     assert response.json()["detail"]["code"] == "SOCIAL_REMOTE_WORKER_REQUIRED"
 
 
+@pytest.mark.parametrize("route_suffix", ["repair-auth", "manual-auth"])
 def test_post_social_account_catalog_repair_auth_route(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
+    route_suffix: str,
 ) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -2202,9 +2272,9 @@ def test_post_social_account_catalog_repair_auth_route(
         ) as mocked_execute,
     ):
         response = client.post(
-            f"/api/v1/admin/socials/profiles/instagram/bravotv/catalog/runs/{run_id}/repair-auth",
+            f"/api/v1/admin/socials/profiles/instagram/bravotv/catalog/runs/{run_id}/{route_suffix}",
             headers={"Authorization": f"Bearer {token}"},
-            json={},
+            json={"operator_confirmation": "I UNDERSTAND INSTAGRAM AUTH RISK"},
         )
 
     assert response.status_code == 200
@@ -2263,6 +2333,34 @@ def test_post_social_account_catalog_repair_auth_route_for_tiktok_cookie_refresh
     assert mocked_execute.called
 
 
+def test_post_social_account_catalog_repair_auth_route_requires_instagram_confirmation(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    run_id = "12345678-1234-1234-1234-123456789012"
+
+    with (
+        patch(
+            "trr_backend.repositories.social_season_analytics.request_social_account_catalog_run_auth_repair",
+        ) as mocked_request,
+        patch(
+            "trr_backend.repositories.social_season_analytics.execute_social_account_catalog_run_auth_repair",
+        ) as mocked_execute,
+    ):
+        response = client.post(
+            f"/api/v1/admin/socials/profiles/instagram/bravotv/catalog/runs/{run_id}/repair-auth",
+            headers={"Authorization": f"Bearer {token}"},
+            json={},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "INSTAGRAM_AUTH_REFRESH_CONFIRMATION_REQUIRED"
+    mocked_request.assert_not_called()
+    mocked_execute.assert_not_called()
+
+
 def test_get_social_account_cookie_health_marks_comments_auth_blocked_unhealthy(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -2281,7 +2379,7 @@ def test_get_social_account_cookie_health_marks_comments_auth_blocked_unhealthy(
                 "refresh_supported": True,
                 "refresh_available": True,
                 "refresh_action": "instagram_auth_repair",
-                "refresh_label": "Repair Instagram Auth",
+                "refresh_label": "Manual Instagram Auth",
                 "source_kind": "default_file",
                 "source_path": "/tmp/instagram_cookies.json",
             },
@@ -2351,7 +2449,7 @@ def test_get_social_account_cookie_health_marks_comments_auth_blocked_unhealthy(
     assert body["comments_auth_probe"]["repair_available"] is False
 
 
-def test_post_social_account_cookie_refresh_route_returns_instagram_auth_repair_summary(
+def test_post_social_account_cookie_refresh_route_defaults_allow_cookie_refresh_and_returns_instagram_auth_repair_summary(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2369,7 +2467,7 @@ def test_post_social_account_cookie_refresh_route_returns_instagram_auth_repair_
                 "refresh_supported": True,
                 "refresh_available": True,
                 "refresh_action": "instagram_auth_repair",
-                "refresh_label": "Repair Instagram Auth",
+                "refresh_label": "Manual Instagram Auth",
                 "source_kind": "default_file",
             },
         ),
@@ -2383,7 +2481,7 @@ def test_post_social_account_cookie_refresh_route_returns_instagram_auth_repair_
                 "refresh_supported": True,
                 "refresh_available": True,
                 "refresh_action": "instagram_auth_repair",
-                "refresh_label": "Repair Instagram Auth",
+                "refresh_label": "Manual Instagram Auth",
                 "source_kind": "default_file",
                 "success": True,
                 "steps": [{"name": "refresh", "status": "ok"}],
@@ -2394,7 +2492,11 @@ def test_post_social_account_cookie_refresh_route_returns_instagram_auth_repair_
         response = client.post(
             "/api/v1/admin/socials/profiles/instagram/bravotv/cookies/refresh",
             headers={"Authorization": f"Bearer {token}"},
-            json={"headless": False, "timeout_seconds": 180},
+            json={
+                "headless": False,
+                "timeout_seconds": 180,
+                "operator_confirmation": "I UNDERSTAND INSTAGRAM AUTH RISK",
+            },
         )
 
     assert response.status_code == 200
@@ -2404,6 +2506,94 @@ def test_post_social_account_cookie_refresh_route_returns_instagram_auth_repair_
     assert body["steps"] == [{"name": "refresh", "status": "ok"}]
     assert body["remote_auth_probe"] == {"platform": "instagram", "ready": True}
     mocked_refresh.assert_called_once()
+    assert mocked_refresh.call_args.kwargs["allow_cookie_refresh"] is True
+
+
+def test_get_social_account_comments_run_progress_route_is_read_only(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.routers import socials as socials_router
+
+    socials_router._clear_account_profile_caches()
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    run_id = uuid4()
+    expected = {
+        "run_id": str(run_id),
+        "run_status": "running",
+        "post_progress": {"completed_posts": 1, "matched_posts": 1, "total_posts": 2},
+        "comment_shards": [],
+        "shards": [],
+        "shard_progress": [],
+    }
+
+    with patch(
+        "trr_backend.socials.pipelines.comments.instagram.get_social_account_comments_scrape_run_progress",
+        return_value=expected,
+    ) as progress_mock:
+        response = client.get(
+            f"/api/v1/admin/socials/profiles/instagram/bravotv/comments/runs/{run_id}/progress",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    progress_mock.assert_called_once_with(
+        platform="instagram",
+        account_handle="bravotv",
+        run_id=str(run_id),
+        auto_rebalance_slow_shards=False,
+    )
+
+
+def test_post_social_account_comments_run_rebalance_route_is_explicit_mutation(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.routers import socials as socials_router
+
+    socials_router._clear_account_profile_caches()
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    run_id = uuid4()
+    expected = {
+        "created_job_ids": ["job-1", "job-2"],
+        "rebalanced_source_job_ids": ["slow-job-1"],
+        "reason": None,
+    }
+
+    with patch(
+        "trr_backend.socials.pipelines.comments.instagram.rebalance_slow_instagram_comments_shards",
+        return_value=expected,
+    ) as rebalance_mock:
+        response = client.post(
+            f"/api/v1/admin/socials/profiles/instagram/bravotv/comments/runs/{run_id}/rebalance",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    rebalance_mock.assert_called_once_with(run_id=str(run_id))
+
+
+def test_post_social_account_comments_run_rebalance_rejects_non_instagram(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    run_id = uuid4()
+
+    with patch("trr_backend.socials.pipelines.comments.instagram.rebalance_slow_instagram_comments_shards") as rebalance_mock:
+        response = client.post(
+            f"/api/v1/admin/socials/profiles/tiktok/bravotv/comments/runs/{run_id}/rebalance",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "UNSUPPORTED_PLATFORM"
+    rebalance_mock.assert_not_called()
 
 
 def test_post_social_account_cookie_refresh_route_blocks_instagram_auth_repair_on_remote_runtime(
@@ -2424,7 +2614,7 @@ def test_post_social_account_cookie_refresh_route_blocks_instagram_auth_repair_o
                 "refresh_supported": True,
                 "refresh_available": False,
                 "refresh_action": "instagram_auth_repair",
-                "refresh_label": "Repair Instagram Auth",
+                "refresh_label": "Manual Instagram Auth",
                 "source_kind": "default_file",
             },
         ),
@@ -2440,6 +2630,43 @@ def test_post_social_account_cookie_refresh_route_blocks_instagram_auth_repair_o
 
     assert response.status_code == 403
     assert response.json()["detail"]["code"] == "COOKIE_REFRESH_REQUIRES_LOCAL"
+    mocked_refresh.assert_not_called()
+
+
+def test_post_social_account_cookie_refresh_route_requires_instagram_confirmation(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with (
+        patch(
+            "trr_backend.repositories.social_season_analytics.check_platform_cookie_health",
+            return_value={
+                "platform": "instagram",
+                "required": True,
+                "healthy": False,
+                "reason": "expired",
+                "refresh_supported": True,
+                "refresh_available": True,
+                "refresh_action": "instagram_auth_repair",
+                "refresh_label": "Manual Instagram Auth",
+                "source_kind": "default_file",
+            },
+        ),
+        patch(
+            "trr_backend.repositories.social_season_analytics.refresh_platform_cookies_interactive",
+        ) as mocked_refresh,
+    ):
+        response = client.post(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/cookies/refresh",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"headless": False, "timeout_seconds": 180},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "INSTAGRAM_AUTH_REFRESH_CONFIRMATION_REQUIRED"
     mocked_refresh.assert_not_called()
 
 
@@ -2461,7 +2688,7 @@ def test_post_social_account_cookie_refresh_route_returns_instagram_auth_repair_
                 "refresh_supported": True,
                 "refresh_available": True,
                 "refresh_action": "instagram_auth_repair",
-                "refresh_label": "Repair Instagram Auth",
+                "refresh_label": "Manual Instagram Auth",
                 "source_kind": "default_file",
             },
         ),
@@ -2475,7 +2702,7 @@ def test_post_social_account_cookie_refresh_route_returns_instagram_auth_repair_
                 "refresh_supported": True,
                 "refresh_available": True,
                 "refresh_action": "instagram_auth_repair",
-                "refresh_label": "Repair Instagram Auth",
+                "refresh_label": "Manual Instagram Auth",
                 "source_kind": "default_file",
                 "success": False,
                 "steps": [{"name": "verify_remote_auth", "status": "failed"}],
@@ -2490,7 +2717,11 @@ def test_post_social_account_cookie_refresh_route_returns_instagram_auth_repair_
         response = client.post(
             "/api/v1/admin/socials/profiles/instagram/bravotv/cookies/refresh",
             headers={"Authorization": f"Bearer {token}"},
-            json={"headless": False, "timeout_seconds": 180},
+            json={
+                "headless": False,
+                "timeout_seconds": 180,
+                "operator_confirmation": "I UNDERSTAND INSTAGRAM AUTH RISK",
+            },
         )
 
     assert response.status_code == 200
@@ -2691,6 +2922,36 @@ def test_post_social_account_comments_run_cancel(client: TestClient, monkeypatch
     assert mocked.call_args.kwargs["cancelled_by"] == "admin@example.com"
 
 
+def test_post_social_account_comments_job_cancel(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    run_id = str(uuid4())
+    job_id = str(uuid4())
+    expected = {
+        "run_id": run_id,
+        "job_id": job_id,
+        "status": "cancelled",
+        "accepted": True,
+    }
+
+    with patch(
+        "trr_backend.socials.pipelines.comments.instagram.cancel_social_account_comments_job",
+        return_value=expected,
+    ) as mocked:
+        response = client.post(
+            f"/api/v1/admin/socials/profiles/instagram/bravotv/comments/runs/{run_id}/jobs/{job_id}/cancel",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+    assert mocked.call_args.kwargs["platform"] == "instagram"
+    assert mocked.call_args.kwargs["account_handle"] == "bravotv"
+    assert mocked.call_args.kwargs["run_id"] == run_id
+    assert mocked.call_args.kwargs["job_id"] == job_id
+    assert mocked.call_args.kwargs["cancelled_by"] == "admin@example.com"
+
+
 def test_post_social_account_catalog_run_dismiss(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -2829,7 +3090,7 @@ def test_post_social_account_catalog_freshness(client: TestClient, monkeypatch: 
     }
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.get_social_account_catalog_freshness",
+        "api.routers.socials.social_profile_reads.get_catalog_freshness",
         return_value=expected,
     ) as mocked:
         response = client.post(
@@ -2853,7 +3114,7 @@ def test_post_social_account_catalog_freshness_force_uses_deep_probe(
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.get_social_account_catalog_freshness",
+        "api.routers.socials.social_profile_reads.get_catalog_freshness",
         return_value={"platform": "instagram", "account_handle": "bravotv", "delta_posts": 4},
     ) as mocked:
         response = client.post(
@@ -2898,7 +3159,7 @@ def test_post_social_account_catalog_freshness_returns_stale_on_default_refresh_
     )
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.get_social_account_catalog_freshness",
+        "api.routers.socials.social_profile_reads.get_catalog_freshness",
         side_effect=DatabaseServiceUnavailableError("pool exhausted", reason="pool_capacity"),
     ):
         response = client.post(
@@ -2957,15 +3218,18 @@ def test_post_social_account_catalog_freshness_returns_degraded_recent_runs_payl
     assert payload["freshness_error"]["reason"] == "pool_capacity"
 
 
-def test_post_social_account_catalog_freshness_returns_503_on_session_pool_saturation(
+def test_post_social_account_catalog_freshness_returns_degraded_on_session_pool_saturation(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from api.routers import socials as socials_router
+
+    socials_router._clear_account_profile_caches()
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.get_social_account_catalog_freshness",
+        "api.routers.socials.social_profile_reads.get_catalog_freshness",
         side_effect=DatabaseServiceUnavailableError(
             'Database pool initialization failed: connection to server at "aws-1-us-east-1.pooler.supabase.com" '
             "(18.214.78.123), port 5432 failed: FATAL: MaxClientsInSessionMode: max clients reached",
@@ -2977,9 +3241,14 @@ def test_post_social_account_catalog_freshness_returns_503_on_session_pool_satur
             headers={"Authorization": f"Bearer {token}"},
         )
 
-    assert response.status_code == 503
-    assert response.json()["detail"]["code"] == "DATABASE_SERVICE_UNAVAILABLE"
-    assert response.json()["detail"]["reason"] == "session_pool_capacity"
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["degraded"] is True
+    assert payload["stale"] is False
+    assert payload["eligible"] is False
+    assert payload["reason"] == "catalog_freshness_unavailable"
+    assert payload["freshness_error"]["code"] == "CATALOG_FRESHNESS_UNAVAILABLE"
+    assert payload["freshness_error"]["reason"] == "session_pool_capacity"
 
 
 def test_get_social_account_profile_collaborators_tags(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -5477,7 +5746,7 @@ def test_post_social_account_comments_scrape_returns_503_when_auth_repair_fails(
             "trr_backend.socials.pipelines.comments.instagram.start_social_account_comments_scrape",
             side_effect=SocialIngestValidationError(
                 "SOCIAL_INSTAGRAM_COMMENTS_AUTH_REPAIR_FAILED",
-                "Instagram comments auth repair failed before launch: operator cancelled.",
+                "Instagram comments manual auth sync failed before launch: operator cancelled.",
             ),
         ),
     ):

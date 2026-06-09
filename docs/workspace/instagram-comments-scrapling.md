@@ -83,15 +83,15 @@ cd TRR-Backend
 ```
 
 That script does three things, in order:
-1. `pip install -r requirements.lock.txt` — pulls in the repo-pinned Scrapling v0.4 package. The current verified lock/venv version is Scrapling 0.4.7; confirm `.venv/bin/python -m pip show scrapling` reports the current locked Scrapling version before validation.
-2. `scrapling install` — downloads the Patchright/Playwright browser
+1. `pip install -r requirements.lock.txt` — pulls in the repo-pinned Scrapling v0.4 package. The current lock targets Scrapling 0.4.9; confirm `.venv/bin/python -m pip show scrapling` and `scrapling --version` report the locked Scrapling version before validation.
+2. `scrapling install --force` — downloads or refreshes the Patchright/Playwright browser
    binaries that `StealthyFetcher` needs. Skipping this is the classic
    reason the lane crashes on first run with "browser binary not found".
 3. Smoke import — proves `from scrapling.fetchers import StealthyFetcher`
    works in the venv.
 
 `StealthyFetcher.async_fetch` remains signature-compatible on Scrapling
-0.4.7 for the comments lane's current call sites.
+0.4.9 for the comments lane's current call sites.
 
 Idempotent — safe to re-run after pulling upgrades.
 
@@ -172,7 +172,7 @@ Current Modal defaults come from `trr_backend/modal_jobs.py`, including
 `TRR_REMOTE_EXECUTOR=modal` and `TRR_MODAL_ENABLED=1`. The social browser
 image already installs Scrapling + browser binaries (see the
 `_SOCIAL_BROWSER_SETUP_COMMANDS` constant which includes both
-`playwright install chromium` and `scrapling install`). Deploy via the
+`playwright install chromium` and `scrapling install --force`). Deploy via the
 standard Modal pipeline; no dedicated comments worker lane is required in
 this path because the queued job is dispatched against the Modal executor.
 The comments-specific env vars above still need to be present in the Modal
@@ -249,12 +249,12 @@ saved, the next queued job auto-uses it.
 **Symptom.** Worker logs include something like
 `Executable doesn't exist at /root/.cache/ms-playwright/chromium-*`.
 
-**Cause.** `scrapling install` / `playwright install chromium` wasn't run
+**Cause.** `scrapling install --force` / `playwright install chromium` wasn't run
 in the image.
 
 **Fix.** For local: rerun `./scripts/setup_scrapling.sh`. For Modal:
 confirm `_SOCIAL_BROWSER_SETUP_COMMANDS` in `trr_backend/modal_jobs.py`
-still contains `"scrapling install"`, and redeploy the browser image.
+still contains `"scrapling install --force"`, and redeploy the browser image.
 
 ### 4. IG rotates the GraphQL `doc_id` / HTML structure
 

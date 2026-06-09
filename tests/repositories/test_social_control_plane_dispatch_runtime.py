@@ -92,6 +92,68 @@ def test_dispatch_runtime_skips_same_active_shared_account(monkeypatch: pytest.M
     assert dispatched_job_ids == ["job-tv-queued"]
 
 
+def test_dispatch_runtime_allows_modal_detail_shards_with_required_lanes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy = dispatch_runtime.legacy
+    monkeypatch.setenv("SOCIAL_SHARED_ACCOUNT_POSTS_PLATFORM_CAP_INSTAGRAM", "1")
+
+    candidates = [
+        {
+            "id": f"job-shard-{index}",
+            "run_id": "run-catalog",
+            "platform": "instagram",
+            "job_type": legacy.SHARED_ACCOUNT_POSTS_JOB_TYPE,
+            "status": "queued",
+            "config": {
+                "stage": legacy.SHARED_ACCOUNT_POSTS_STAGE,
+                "account": "bravotv",
+                "pipeline_ingest_mode": legacy.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+                "runner_strategy": "parallel_detail_refresh",
+                "details_refresh_shard_count": 3,
+                "required_worker_lane": chr(ord("a") + index),
+                "allow_local_dev_inline_bypass": True,
+                "required_runtime_version": {
+                    "execution_backend": "modal",
+                    "modal_function": "run_social_posts_job",
+                },
+            },
+            "metadata": {},
+        }
+        for index in range(3)
+    ]
+    dispatched_job_ids: list[str] = []
+
+    monkeypatch.setattr(legacy, "is_queue_enabled", lambda: True)
+    monkeypatch.setattr(legacy, "is_modal_remote_executor_enabled", lambda: True)
+    monkeypatch.setattr(legacy, "_run_pause_after_current_requested", lambda _run_id: False)
+    monkeypatch.setattr(legacy, "recover_failed_instagram_comments_capacity_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(legacy, "recover_dispatch_blocked_no_progress_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(legacy, "recover_stale_unclaimed_dispatched_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        legacy,
+        "_modal_social_dispatch_resolution",
+        lambda: {"resolved": True, "reason": None},
+    )
+    monkeypatch.setattr(legacy, "_list_candidate_jobs_for_modal_dispatch", lambda **_kwargs: list(candidates))
+    monkeypatch.setattr(legacy, "_current_modal_dispatch_running_counts", lambda: ({}, {}, {}, {}, {}))
+    monkeypatch.setattr(legacy, "_resolve_catalog_run_in_flight_cap", lambda: 3)
+    monkeypatch.setattr(legacy, "_touch_job_dispatch_metadata", lambda job_id, **kwargs: None)
+    monkeypatch.setattr(legacy, "_touch_modal_social_dispatcher_heartbeat", lambda **kwargs: {})
+    monkeypatch.setattr(
+        legacy,
+        "dispatch_social_job",
+        lambda *, job_id, stage=None: (
+            dispatched_job_ids.append(job_id) or {"dispatched": True, "reason": None, "call_id": f"call-{job_id}"}
+        ),
+    )
+
+    result = dispatch_runtime.dispatch_due_social_jobs(run_id="run-catalog", limit=3)
+
+    assert result["dispatched_job_ids"] == ["job-shard-0", "job-shard-1", "job-shard-2"]
+    assert dispatched_job_ids == ["job-shard-0", "job-shard-1", "job-shard-2"]
+
+
 def test_dispatch_runtime_honors_pause_after_current(monkeypatch: pytest.MonkeyPatch) -> None:
     legacy = dispatch_runtime.legacy
     heartbeat_updates: list[dict[str, object]] = []
@@ -142,6 +204,27 @@ def test_dispatch_runtime_recovers_comments_capacity_jobs(monkeypatch: pytest.Mo
 
     assert result["recovered_capacity_job_ids"] == ["job-capacity"]
     assert result["dispatched_job_ids"] == []
+
+
+def test_global_recover_and_dispatch_recovers_comments_capacity_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    legacy = dispatch_runtime.legacy
+
+    monkeypatch.setattr(legacy, "recover_stale_running_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(dispatch_runtime, "recover_stale_unclaimed_dispatched_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        legacy,
+        "recover_failed_instagram_comments_capacity_jobs",
+        lambda **_kwargs: [{"id": "job-capacity"}],
+    )
+    monkeypatch.setattr(
+        dispatch_runtime,
+        "dispatch_due_social_jobs",
+        lambda **_kwargs: {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": None},
+    )
+
+    result = dispatch_runtime.recover_and_dispatch_due_social_jobs(limit=1)
+
+    assert result["recovered_capacity_jobs"] == ["job-capacity"]
 
 
 def test_dispatch_runtime_uses_capacity_stage_and_job_config_cap(

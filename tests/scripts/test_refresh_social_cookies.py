@@ -71,7 +71,18 @@ def test_main_prints_json_for_each_platform(
     monkeypatch.setattr(
         cli,
         "parse_args",
-        lambda: type("Args", (), {"platform": "all", "force": False, "validate_only": False, "headed": False})(),
+        lambda: type(
+            "Args",
+            (),
+            {
+                "platform": "all",
+                "force": False,
+                "validate_only": False,
+                "headed": False,
+                "validation_mode": "graphql_profile",
+                "confirm_instagram_refresh": "",
+            },
+        )(),
     )
 
     rc = cli.main()
@@ -81,6 +92,41 @@ def test_main_prints_json_for_each_platform(
     payloads = [json.loads(line) for line in captured]
     assert [payload["platform"] for payload in payloads] == ["instagram", "facebook"]
     assert payloads[1]["validated"] is True
+
+
+def test_main_blocks_forced_instagram_refresh_without_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cli, "load_env", lambda: None)
+    monkeypatch.setattr(
+        cli,
+        "PLATFORM_HANDLERS",
+        {"instagram": _handlers(platform="instagram", refresh=lambda _reason=None: pytest.fail("unsafe refresh"))},
+    )
+    monkeypatch.setattr(
+        cli,
+        "parse_args",
+        lambda: type(
+            "Args",
+            (),
+            {
+                "platform": "instagram",
+                "force": True,
+                "validate_only": False,
+                "headed": False,
+                "validation_mode": "comments_endpoint",
+                "confirm_instagram_refresh": "",
+            },
+        )(),
+    )
+
+    rc = cli.main()
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 2
+    assert payload["reason"] == "instagram_refresh_confirmation_required"
+    assert payload["required_confirmation"] == cli.INSTAGRAM_REFRESH_CONFIRMATION
 
 
 def test_instagram_cli_uses_canonical_cookie_loader(

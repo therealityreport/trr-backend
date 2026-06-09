@@ -193,56 +193,42 @@ def _validate_saved_cookies_via_graphql(
     if not normalized:
         return True, None
     try:
-        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-        from playwright.sync_api import sync_playwright
+        from trr_backend.socials.instagram.scraper import InstagramScraper
     except Exception as exc:  # noqa: BLE001
-        return False, f"playwright_unavailable:{type(exc).__name__}"
+        return False, f"graphql_validation_unavailable:{type(exc).__name__}"
 
-    deadline = time.monotonic() + min(max(20, int(timeout_seconds)), 45)
-    with sync_playwright() as playwright:
-        launch_kwargs: dict[str, Any] = {
-            "headless": True,
-            "args": ["--disable-blink-features=AutomationControlled"],
-        }
-        try:
-            browser = playwright.chromium.launch(channel="chrome", **launch_kwargs)
-        except Exception:
-            browser = playwright.chromium.launch(**launch_kwargs)
-        try:
-            context = browser.new_context(viewport={"width": 1_280, "height": 1_400})
-            context.add_cookies(
-                [
-                    {
-                        "name": name,
-                        "value": value,
-                        "domain": ".instagram.com",
-                        "path": "/",
-                        "secure": True,
-                    }
-                    for name, value in cookies.items()
-                    if value
-                ]
-            )
-            page = context.new_page()
-            try:
-                page.goto(
-                    f"https://www.instagram.com/{normalized}/",
-                    wait_until="domcontentloaded",
-                    timeout=_remaining_timeout_ms(deadline, floor_ms=5_000),
-                )
-                page.wait_for_timeout(1_500)
-            except PlaywrightTimeoutError:
-                return False, "graphql_validation_timeout"
-            current_url = str(page.url or "").lower()
-            if "accounts/login" in current_url:
-                return False, "graphql_validation_redirected_to_login"
-            if any(marker in current_url for marker in CHALLENGE_URL_MARKERS):
-                return False, "graphql_validation_challenge"
-            if not _validate_session_via_graphql(page, normalized, deadline):
-                return False, "graphql_validation_failed"
-            return True, None
-        finally:
-            browser.close()
+    scraper = InstagramScraper(cookies=dict(cookies), browser_account_id=normalized)
+    payload = scraper.fetch_posts_graphql(
+        normalized,
+        delay=0.0,
+        request_timeout=(10, min(max(20, int(timeout_seconds)), 45)),
+        allow_browser_fallback=False,
+        allow_recovery=False,
+    )
+    payload_data = (payload or {}).get("data") if isinstance(payload, dict) else {}
+    connection = (
+        payload_data.get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
+        if isinstance(payload_data, dict)
+        else {}
+    )
+    if connection.get("edges"):
+        return True, None
+
+    retrieval_meta = dict(scraper.last_retrieval_meta or {})
+    error_code = str(retrieval_meta.get("error_code") or "").strip().lower()
+    error_message = str(retrieval_meta.get("error_message") or "").strip().lower()
+    status_code = int(retrieval_meta.get("error_status_code") or 0)
+    if error_code == "instagram_graphql_checkpoint_required" or error_message == "checkpoint_required":
+        return False, "checkpoint_required"
+    if error_code == "redirect_login":
+        return False, "redirect_login"
+    if error_code in {"instagram_graphql_cursor_unauthorized", "unauthorized"} or status_code == 401:
+        return False, "unauthorized"
+    if error_code in {"instagram_graphql_cursor_forbidden", "forbidden"} or status_code == 403:
+        return False, "forbidden"
+    if status_code == 429 and "wait" in error_message:
+        return True, "rate_limited_soft_pass"
+    return False, error_code or "graphql_validation_failed"
 
 
 _INSTAGRAM_COOKIE_VALIDATION_MODES = {"comments_endpoint", "schema_only", "graphql_profile"}
@@ -310,12 +296,21 @@ def refresh_instagram_cookies(
             if cookies.get("sessionid"):
                 if normalized_validation_username:
                     _raise_if_login_failed(page)
-                    if normalized_validation_mode == "graphql_profile" and not _validate_session_via_graphql(
-                        page,
-                        normalized_validation_username,
-                        deadline,
-                    ):
-                        cookies = {}
+                    if normalized_validation_mode == "graphql_profile":
+                        if validator is not None:
+                            graphql_valid, graphql_reason = validator(cookies)
+                        else:
+                            graphql_valid, graphql_reason = _validate_saved_cookies_via_graphql(
+                                cookies,
+                                validation_username=normalized_validation_username,
+                                timeout_seconds=timeout_seconds,
+                            )
+                        if not graphql_valid:
+                            logger.info(
+                                "Chrome profile Instagram cookies failed profile-posts GraphQL validation (%s)",
+                                graphql_reason,
+                            )
+                            cookies = {}
                 if cookies.get("sessionid"):
                     storage_state = context.storage_state()
                     session.close()
@@ -394,8 +389,15 @@ def refresh_instagram_cookies(
             except Exception as close_exc:  # noqa: BLE001
                 logger.debug("Ignoring Instagram refresh browser close failure: %s", close_exc)
 
-    if validator is not None and normalized_validation_mode == "graphql_profile":
-        is_valid, validation_reason = validator(cookies)
+    if normalized_validation_mode == "graphql_profile":
+        if validator is not None:
+            is_valid, validation_reason = validator(cookies)
+        else:
+            is_valid, validation_reason = _validate_saved_cookies_via_graphql(
+                cookies,
+                validation_username=normalized_validation_username,
+                timeout_seconds=timeout_seconds,
+            )
         if not is_valid:
             normalized_reason = str(validation_reason or "").strip() or "graphql_validation_failed"
             raise RuntimeError(f"Instagram login produced cookies that failed GraphQL validation ({normalized_reason})")
@@ -623,12 +625,20 @@ def interactive_chrome_login(
                                 page.wait_for_timeout(2_000)
                                 continue
                             if normalized_validation_mode == "graphql_profile":
-                                # Validate via a lightweight GraphQL probe
-                                graphql_ok = _validate_session_via_graphql(page, normalized, deadline)
+                                graphql_ok, graphql_reason = _validate_saved_cookies_via_graphql(
+                                    cookies,
+                                    validation_username=normalized,
+                                    timeout_seconds=timeout_seconds,
+                                )
                                 if not graphql_ok:
-                                    logger.info("[instagram] session cookies failed GraphQL validation")
+                                    logger.info(
+                                        "[instagram] session cookies failed profile-posts GraphQL validation (%s)",
+                                        graphql_reason,
+                                    )
                                     if not headless:
-                                        _wait_for_manual_instagram_auth("GraphQL validation failed")
+                                        _wait_for_manual_instagram_auth(
+                                            f"profile-posts GraphQL validation failed ({graphql_reason})"
+                                        )
                                         deadline = time.monotonic() + max(60, int(timeout_seconds))
                                         continue
                                     print(

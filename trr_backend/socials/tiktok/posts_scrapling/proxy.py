@@ -12,6 +12,9 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urlparse
 
+from trr_backend.socials._scrapling_http_utils import env_truthy, resolve_positive_int_env
+from trr_backend.socials.scrapling_transport import apply_decodo_session_affinity, build_proxy_rotator
+
 
 @dataclass(slots=True)
 class TikTokPostsProxyConfig:
@@ -28,16 +31,7 @@ class TikTokPostsProxyConfig:
     api_proxy_url: str | None
     proxy_rotator: Any | None
     fingerprint: str
-
-
-def _build_proxy_rotator(browser_proxy: str | dict[str, str] | None) -> Any | None:
-    if browser_proxy is None:
-        return None
-    try:
-        from scrapling.fetchers import ProxyRotator
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError("Scrapling proxy rotation is unavailable. Install scrapling[fetchers].") from exc
-    return ProxyRotator([browser_proxy])
+    session_mode: str = "rotating"
 
 
 def _decodo_env() -> tuple[str, str, str] | None:
@@ -49,7 +43,7 @@ def _decodo_env() -> tuple[str, str, str] | None:
     return username, password, gateway
 
 
-def select_tiktok_posts_proxy() -> TikTokPostsProxyConfig | None:
+def select_tiktok_posts_proxy(*, session_key: str | None = None) -> TikTokPostsProxyConfig | None:
     """Single entry point. Returns None when no proxy is configured."""
     # 1. Explicit proxy URLs take precedence.
     raw = str(os.getenv("SOCIAL_TIKTOK_POSTS_PROXY_URLS") or "").strip()
@@ -60,8 +54,9 @@ def select_tiktok_posts_proxy() -> TikTokPostsProxyConfig | None:
         return TikTokPostsProxyConfig(
             browser_proxy=first_url,
             api_proxy_url=first_url,
-            proxy_rotator=_build_proxy_rotator(first_url),
+            proxy_rotator=build_proxy_rotator(first_url),
             fingerprint=f"{parsed.hostname or 'unknown'}:{parsed.port or 0}:explicit",
+            session_mode="explicit",
         )
 
     # 2. DECODO credentials.
@@ -70,17 +65,29 @@ def select_tiktok_posts_proxy() -> TikTokPostsProxyConfig | None:
         creds = _decodo_env()
         if creds:
             username, password, gateway = creds
+            sticky_username, session_mode = apply_decodo_session_affinity(
+                username,
+                use_sticky_proxy=env_truthy("SOCIAL_TIKTOK_POSTS_USE_STICKY_PROXY", False),
+                session_ttl_seconds=resolve_positive_int_env(
+                    "SOCIAL_TIKTOK_POSTS_PROXY_SESSION_TTL_SECONDS",
+                    600,
+                    minimum=60,
+                    maximum=86_400,
+                ),
+                session_id=session_key or os.getenv("SOCIAL_TIKTOK_POSTS_PROXY_SESSION_ID"),
+            )
             browser_dict = {
                 "server": f"http://{gateway}",
-                "username": username,
+                "username": sticky_username,
                 "password": password,
             }
-            api_url = f"http://{quote(username, safe='')}:{quote(password, safe='')}@{gateway}"
+            api_url = f"http://{quote(sticky_username, safe='')}:{quote(password, safe='')}@{gateway}"
             return TikTokPostsProxyConfig(
                 browser_proxy=browser_dict,
                 api_proxy_url=api_url,
-                proxy_rotator=_build_proxy_rotator(browser_dict),
+                proxy_rotator=build_proxy_rotator(browser_dict),
                 fingerprint=f"{gateway}:decodo",
+                session_mode=session_mode,
             )
 
     # 3. No proxy — local dev mode.
