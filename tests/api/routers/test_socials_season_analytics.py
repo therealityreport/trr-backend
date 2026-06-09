@@ -1682,11 +1682,13 @@ def test_post_social_account_catalog_backfill_surfaces_auth_preflight_failure_wh
 
     assert response.status_code == 503
     body = response.json()
-    assert body["detail"]["code"] == "SOCIAL_REMOTE_JOB_PLANE_ENFORCED"
-    assert "auth preflight is not ready for instagram" in body["detail"]["message"].lower()
+    assert body["detail"]["code"] == "SOCIAL_MODAL_EXECUTOR_REQUIRED"
+    assert body["detail"]["required_execution_backend"] == "modal"
+    assert "modal remote executor" in body["detail"]["message"].lower()
     assert "reporting heartbeats" not in body["detail"]["message"].lower()
     readiness = body["detail"]["worker_health"]["shared_account_backfill_readiness"]
     assert readiness["reason"] == "validation_exception:Error"
+    assert readiness["platform_remote_auth_ready"] is False
 
 
 def test_post_social_account_catalog_backfill_prefers_modal_when_available_even_if_inline_fallback_allowed(
