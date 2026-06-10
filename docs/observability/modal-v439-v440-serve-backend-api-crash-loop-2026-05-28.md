@@ -56,7 +56,7 @@ ModuleNotFoundError("No module named 'scripts'")
   `https://modal.com/apps/admin-56995/main/deployed/trr-backend-jobs`
 - Readiness:
   - `ok = true`
-  - `modal_workspace.workspace = admin-56995`
+  - `api_web_url` resolved for `serve_backend_api`
   - `missing_functions = []`
   - `missing_web_endpoints = []`
 - `/health` returned HTTP 200 three times after `v440`.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -14,6 +15,9 @@ def health_url(api_web_url: str) -> str:
     base = str(api_web_url or "").strip().rstrip("/")
     if not base:
         raise RuntimeError("Modal readiness did not return api_web_url for cold-start canary.")
+    parsed = urllib.parse.urlparse(base)
+    if parsed.scheme not in {"http", "https"}:
+        raise RuntimeError(f"Invalid URL scheme for cold-start canary: {base}")
     return f"{base}/health"
 
 

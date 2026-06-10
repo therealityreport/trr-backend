@@ -78,9 +78,6 @@ def test_build_readiness_command_passes_modal_environment(monkeypatch: pytest.Mo
         "python",
         str(cli.REPO_ROOT / "scripts" / "modal" / "verify_modal_readiness.py"),
         "--json",
-        "--probe-api-canary",
-        "--api-canary-timeout-seconds",
-        "20",
         "--env",
         "main",
     ]
@@ -106,6 +103,11 @@ def test_health_url_targets_health_endpoint() -> None:
     assert api_canary.health_url("https://admin-56995--trr-backend-api.modal.run/") == (
         "https://admin-56995--trr-backend-api.modal.run/health"
     )
+
+
+def test_health_url_rejects_missing_scheme() -> None:
+    with pytest.raises(RuntimeError, match="Invalid URL scheme"):
+        api_canary.health_url("admin-56995--trr-backend-api.modal.run")
 
 
 def test_run_api_cold_start_canary_returns_success(monkeypatch: pytest.MonkeyPatch) -> None:
