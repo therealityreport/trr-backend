@@ -291,7 +291,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(
         "Modal API cold-start canary passed: "
-        f"url={canary['url']} status={canary['status']} attempt={canary['attempt']}",
+        f"url={canary.get('url', '<unknown>')} "
+        f"status={canary.get('status', '<unknown>')} "
+        f"attempt={canary.get('attempt', '<unknown>')}",
         flush=True,
     )
     if not args.skip_incident_stamp:
