@@ -140,6 +140,16 @@ _BROWSER_SESSION_INVALIDATED_ERROR_CODE = "instagram_comments_browser_session_in
 _COMMENTS_PER_POST_CONCURRENCY_ENV = "SOCIAL_INSTAGRAM_COMMENTS_PER_POST_CONCURRENCY"
 _COMMENTS_PER_POST_CONCURRENCY_DEFAULT = 1
 _COMMENTS_PER_POST_CONCURRENCY_MAX = 8
+_AUDIT_CURSOR_REPLY_CHECKPOINT_MAX_ITEMS = 200
+_AUDIT_CURSOR_RETRYABLE_STOP_REASONS = {
+    *_INCOMPLETE_RETRY_STALL_REASONS,
+    *_REPLY_ONLY_RETRY_REASONS,
+    "pagination_page_cap_reached",
+}
+_AUDIT_CURSOR_TERMINAL_STOP_REASONS = {
+    "pagination_repeated_cursor",
+    _TERMINAL_MISSING_CLASSIFIED_REASON,
+}
 
 
 @dataclass(slots=True)
@@ -1767,6 +1777,384 @@ def _reply_resume_cursor_params_from_job(job: dict[str, Any]) -> dict[str, str]:
     return params
 
 
+def _normalized_uuid_text(value: Any) -> str | None:
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return None
+    try:
+        return str(uuid.UUID(raw_value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return dict(decoded) if isinstance(decoded, dict) else {}
+    return {}
+
+
+def _audit_cursor_stop_reason_is_retryable(value: Any) -> bool:
+    stop_reason = str(value or "").strip()
+    if stop_reason in _AUDIT_CURSOR_TERMINAL_STOP_REASONS:
+        return False
+    return stop_reason in _AUDIT_CURSOR_RETRYABLE_STOP_REASONS
+
+
+def _cursor_param_value(value: Any) -> str | None:
+    cursor_param = str(value or "").strip()
+    return cursor_param if cursor_param in {"min_id", "max_id"} else None
+
+
+def _audit_row_stop_reason(row: Mapping[str, Any], payload: Mapping[str, Any], checkpoint: Mapping[str, Any]) -> str:
+    return str(
+        checkpoint.get("stop_reason")
+        or checkpoint.get("last_error_code")
+        or payload.get("stop_reason")
+        or row.get("cursor_stop_reason")
+        or ""
+    ).strip()
+
+
+def _normalize_audit_top_level_checkpoint(row: Mapping[str, Any]) -> dict[str, Any] | None:
+    payload = _json_object(row.get("cursor_payload"))
+    shortcode = str(row.get("shortcode") or "").strip()
+    checkpoint_candidates: list[Mapping[str, Any]] = []
+    top_level_checkpoint = payload.get("top_level_checkpoint")
+    if isinstance(top_level_checkpoint, Mapping):
+        checkpoint_candidates.append(top_level_checkpoint)
+    if any(
+        str(payload.get(key) or "").strip()
+        for key in (
+            "next_top_level_cursor",
+            "last_top_level_cursor",
+            "chosen_cursor",
+            "request_cursor",
+        )
+    ):
+        checkpoint_candidates.append(payload)
+    for checkpoint in checkpoint_candidates:
+        stop_reason = _audit_row_stop_reason(row, payload, checkpoint)
+        if not _audit_cursor_stop_reason_is_retryable(stop_reason):
+            continue
+        target_shortcode = str(
+            checkpoint.get("target_shortcode") or checkpoint.get("source_id") or checkpoint.get("shortcode") or shortcode
+        ).strip()
+        next_cursor = str(
+            checkpoint.get("next_top_level_cursor")
+            or checkpoint.get("chosen_cursor")
+            or row.get("cursor_min_id")
+            or ""
+        ).strip()
+        last_cursor = str(checkpoint.get("last_top_level_cursor") or checkpoint.get("request_cursor") or "").strip()
+        cursor = next_cursor or last_cursor
+        if not target_shortcode or not cursor:
+            continue
+        next_cursor_param = _cursor_param_value(
+            checkpoint.get("next_top_level_cursor_param") or checkpoint.get("chosen_cursor_param") or row.get("cursor_param")
+        )
+        last_cursor_param = _cursor_param_value(
+            checkpoint.get("last_top_level_cursor_param") or checkpoint.get("request_cursor_param")
+        )
+        normalized = {
+            "platform": "instagram",
+            "target_shortcode": target_shortcode,
+            "source_id": target_shortcode,
+            "stop_reason": stop_reason,
+            "retryable": True,
+        }
+        if next_cursor:
+            normalized["next_top_level_cursor"] = next_cursor
+        if next_cursor_param:
+            normalized["next_top_level_cursor_param"] = next_cursor_param
+        if last_cursor:
+            normalized["last_top_level_cursor"] = last_cursor
+        if last_cursor_param:
+            normalized["last_top_level_cursor_param"] = last_cursor_param
+        for key in ("media_id", "pages_seen", "observed_comment_count", "expected_comment_count", "updated_at"):
+            if checkpoint.get(key) is not None:
+                normalized[key] = checkpoint.get(key)
+        return normalized
+    return None
+
+
+def _audit_reply_checkpoint_candidates(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    candidates: list[Mapping[str, Any]] = []
+    for key in ("reply_checkpoints",):
+        value = payload.get(key)
+        if isinstance(value, list):
+            candidates.extend(item for item in value if isinstance(item, Mapping))
+    for key in ("reply_checkpoint_summary", "reply_checkpoint_metadata"):
+        value = payload.get(key)
+        if not isinstance(value, Mapping):
+            continue
+        latest = value.get("latest")
+        if isinstance(latest, Mapping):
+            candidates.append(latest)
+        items = value.get("items")
+        if isinstance(items, list):
+            candidates.extend(item for item in items if isinstance(item, Mapping))
+    runtime = payload.get("fetcher_runtime")
+    if isinstance(runtime, Mapping):
+        checkpoint_metadata = runtime.get("reply_checkpoint_metadata")
+        if isinstance(checkpoint_metadata, Mapping) and isinstance(checkpoint_metadata.get("items"), list):
+            candidates.extend(item for item in checkpoint_metadata.get("items") or [] if isinstance(item, Mapping))
+    return candidates
+
+
+def _normalize_audit_reply_checkpoints(row: Mapping[str, Any]) -> list[dict[str, Any]]:
+    payload = _json_object(row.get("cursor_payload"))
+    shortcode = str(row.get("shortcode") or "").strip() or None
+    by_parent: dict[str, dict[str, Any]] = {}
+    for checkpoint in _audit_reply_checkpoint_candidates(payload):
+        stop_reason = _audit_row_stop_reason(row, payload, checkpoint)
+        if not _audit_cursor_stop_reason_is_retryable(stop_reason):
+            continue
+        parent_comment_id = str(checkpoint.get("parent_comment_id") or "").strip()
+        cursor = str(checkpoint.get("next_reply_cursor") or checkpoint.get("last_reply_cursor") or "").strip()
+        if not parent_comment_id or not cursor:
+            continue
+        next_cursor_param = _cursor_param_value(checkpoint.get("next_reply_cursor_param"))
+        last_cursor_param = _cursor_param_value(checkpoint.get("last_reply_cursor_param"))
+        normalized = {
+            "platform": "instagram",
+            "target_shortcode": str(checkpoint.get("target_shortcode") or checkpoint.get("source_id") or shortcode or "")
+            or None,
+            "source_id": str(checkpoint.get("source_id") or checkpoint.get("target_shortcode") or shortcode or "")
+            or None,
+            "parent_comment_id": parent_comment_id,
+            "stop_reason": stop_reason,
+            "retryable": True,
+        }
+        if checkpoint.get("next_reply_cursor"):
+            normalized["next_reply_cursor"] = cursor
+        else:
+            normalized["last_reply_cursor"] = cursor
+        if next_cursor_param:
+            normalized["next_reply_cursor_param"] = next_cursor_param
+        if last_cursor_param:
+            normalized["last_reply_cursor_param"] = last_cursor_param
+        for key in (
+            "attempt_count",
+            "expected_reply_count",
+            "saved_reply_count_observed",
+            "pages_seen",
+            "updated_at",
+        ):
+            if checkpoint.get(key) is not None:
+                normalized[key] = checkpoint.get(key)
+        by_parent[parent_comment_id] = {key: value for key, value in normalized.items() if value is not None}
+    items = list(by_parent.values())
+    return items[-_AUDIT_CURSOR_REPLY_CHECKPOINT_MAX_ITEMS:]
+
+
+def _checkpoint_summary(items: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "items": list(items),
+        "total_count": len(items),
+        "retained_count": len(items),
+        "dropped_count": 0,
+        "truncated": False,
+        "stop_reasons": dict(Counter(str(item.get("stop_reason") or "unknown") for item in items)),
+        "latest": items[-1] if items else None,
+    }
+
+
+def _append_checkpoint_items(
+    *,
+    metadata: dict[str, Any],
+    summary_key: str,
+    runtime_key: str,
+    items: list[dict[str, Any]],
+) -> None:
+    if not items:
+        return
+    summary = dict(metadata.get(summary_key) if isinstance(metadata.get(summary_key), dict) else {})
+    existing_summary_items = [item for item in (summary.get("items") or []) if isinstance(item, dict)]
+    summary_items = [*existing_summary_items, *items]
+    metadata[summary_key] = {**summary, **_checkpoint_summary(summary_items)}
+
+    runtime = dict(metadata.get("fetcher_runtime") if isinstance(metadata.get("fetcher_runtime"), dict) else {})
+    checkpoint_metadata = dict(runtime.get(runtime_key) if isinstance(runtime.get(runtime_key), dict) else {})
+    existing_runtime_items = [item for item in (checkpoint_metadata.get("items") or []) if isinstance(item, dict)]
+    runtime_items = [*existing_runtime_items, *items]
+    runtime[runtime_key] = {**checkpoint_metadata, **_checkpoint_summary(runtime_items)}
+    metadata["fetcher_runtime"] = runtime
+
+
+def _audit_cursor_resume_metadata_from_rows(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    existing_top_level_cursors: Mapping[str, str] | None = None,
+    existing_reply_cursors: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    existing_top_level_cursors = existing_top_level_cursors or {}
+    existing_reply_cursors = existing_reply_cursors or {}
+    top_level_by_shortcode: dict[str, dict[str, Any]] = {}
+    reply_by_parent: dict[str, dict[str, Any]] = {}
+    source_shortcodes: set[str] = set()
+    for row in rows:
+        shortcode = str(row.get("shortcode") or "").strip()
+        if shortcode:
+            source_shortcodes.add(shortcode)
+        top_level_checkpoint = _normalize_audit_top_level_checkpoint(row)
+        if top_level_checkpoint:
+            target_shortcode = str(
+                top_level_checkpoint.get("target_shortcode") or top_level_checkpoint.get("source_id") or ""
+            ).strip()
+            if target_shortcode and target_shortcode not in existing_top_level_cursors:
+                top_level_by_shortcode[target_shortcode] = top_level_checkpoint
+        for reply_checkpoint in _normalize_audit_reply_checkpoints(row):
+            parent_comment_id = str(reply_checkpoint.get("parent_comment_id") or "").strip()
+            if parent_comment_id and parent_comment_id not in existing_reply_cursors:
+                reply_by_parent[parent_comment_id] = reply_checkpoint
+    top_level_items = list(top_level_by_shortcode.values())
+    reply_items = list(reply_by_parent.values())[-_AUDIT_CURSOR_REPLY_CHECKPOINT_MAX_ITEMS:]
+    if not top_level_items and not reply_items:
+        return {}
+    metadata: dict[str, Any] = {
+        "audit_cursor_resume": {
+            "source_count": len(rows),
+            "source_target_source_ids": sorted(source_shortcodes),
+            "top_level_resume_count": len(top_level_items),
+            "reply_resume_count": len(reply_items),
+        }
+    }
+    _append_checkpoint_items(
+        metadata=metadata,
+        summary_key="top_level_checkpoint_summary",
+        runtime_key="top_level_checkpoint_metadata",
+        items=top_level_items,
+    )
+    _append_checkpoint_items(
+        metadata=metadata,
+        summary_key="reply_checkpoint_summary",
+        runtime_key="reply_checkpoint_metadata",
+        items=reply_items,
+    )
+    return metadata
+
+
+def _merge_audit_cursor_resume_metadata(job: dict[str, Any], audit_metadata: Mapping[str, Any]) -> dict[str, Any]:
+    if not audit_metadata:
+        return job
+    metadata = dict(job.get("metadata") if isinstance(job.get("metadata"), dict) else {})
+    top_items = [
+        item
+        for item in ((audit_metadata.get("top_level_checkpoint_summary") or {}).get("items") or [])
+        if isinstance(item, dict)
+    ]
+    reply_items = [
+        item
+        for item in ((audit_metadata.get("reply_checkpoint_summary") or {}).get("items") or [])
+        if isinstance(item, dict)
+    ]
+    _append_checkpoint_items(
+        metadata=metadata,
+        summary_key="top_level_checkpoint_summary",
+        runtime_key="top_level_checkpoint_metadata",
+        items=top_items,
+    )
+    _append_checkpoint_items(
+        metadata=metadata,
+        summary_key="reply_checkpoint_summary",
+        runtime_key="reply_checkpoint_metadata",
+        items=reply_items,
+    )
+    audit_summary = dict(audit_metadata.get("audit_cursor_resume") or {})
+    if audit_summary:
+        metadata["audit_cursor_resume"] = audit_summary
+    merged_job = dict(job)
+    merged_job["metadata"] = metadata
+    return merged_job
+
+
+def _load_instagram_comments_audit_cursor_resume_metadata(
+    *,
+    target_source_ids: Sequence[str],
+    target_metadata_by_shortcode: Mapping[str, Mapping[str, Any]],
+    existing_top_level_cursors: Mapping[str, str],
+    existing_reply_cursors: Mapping[str, str],
+) -> dict[str, Any]:
+    post_ids = list(
+        dict.fromkeys(
+            item
+            for item in (
+                _normalized_uuid_text((target_metadata_by_shortcode.get(shortcode) or {}).get("materialized_post_id"))
+                for shortcode in target_source_ids
+            )
+            if item
+        )
+    )
+    shortcodes = list(dict.fromkeys(str(item or "").strip() for item in target_source_ids if str(item or "").strip()))
+    if not post_ids and not shortcodes:
+        return {}
+    rows: list[dict[str, Any]] = []
+    try:
+        with pg.db_connection(label="instagram-comments-audit-cursor-resume") as conn:
+            if not _post_comments_audit_table_available(conn):
+                return {}
+            if post_ids:
+                rows.extend(
+                    pg.fetch_all(
+                        """
+                        select distinct on (post_id)
+                          post_id::text,
+                          shortcode,
+                          cursor_stop_reason,
+                          cursor_min_id,
+                          cursor_param,
+                          cursor_payload,
+                          created_at
+                        from social.instagram_post_comments_audit
+                        where post_id = any(%s::uuid[])
+                          and cursor_payload is not null
+                          and cursor_payload <> '{}'::jsonb
+                        order by post_id, created_at desc
+                        """,
+                        [post_ids],
+                        conn=conn,
+                    )
+                )
+            found_shortcodes = {str(row.get("shortcode") or "").strip() for row in rows if row.get("shortcode")}
+            fallback_shortcodes = [shortcode for shortcode in shortcodes if shortcode not in found_shortcodes]
+            if fallback_shortcodes:
+                rows.extend(
+                    pg.fetch_all(
+                        """
+                        select distinct on (shortcode)
+                          post_id::text,
+                          shortcode,
+                          cursor_stop_reason,
+                          cursor_min_id,
+                          cursor_param,
+                          cursor_payload,
+                          created_at
+                        from social.instagram_post_comments_audit
+                        where shortcode = any(%s::text[])
+                          and cursor_payload is not null
+                          and cursor_payload <> '{}'::jsonb
+                        order by shortcode, created_at desc
+                        """,
+                        [fallback_shortcodes],
+                        conn=conn,
+                    )
+                )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Continuing comments job without audit cursor resume metadata: error=%s", exc)
+        return {}
+    return _audit_cursor_resume_metadata_from_rows(
+        rows,
+        existing_top_level_cursors=existing_top_level_cursors,
+        existing_reply_cursors=existing_reply_cursors,
+    )
+
+
 def _metadata_string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -2005,6 +2393,11 @@ def _insert_instagram_post_comments_audit(
             inactive_count += 1
     checkpoint = getattr(result, "top_level_checkpoint", None)
     checkpoint = checkpoint if isinstance(checkpoint, dict) else {}
+    reply_checkpoints = [
+        dict(item)
+        for item in (getattr(result, "reply_checkpoints", None) or [])
+        if isinstance(item, dict)
+    ][-_AUDIT_CURSOR_REPLY_CHECKPOINT_MAX_ITEMS:]
     cursor_payload = _first_comment_cursor_payload(list(getattr(result, "comments", []) or []))
     cursor_payload.update(
         {
@@ -2012,6 +2405,7 @@ def _insert_instagram_post_comments_audit(
             for key, value in {
                 "stop_reason": getattr(result, "fetch_reason", None),
                 "top_level_checkpoint": checkpoint or None,
+                "reply_checkpoint_summary": _checkpoint_summary(reply_checkpoints) if reply_checkpoints else None,
             }.items()
             if value
         }
@@ -2408,10 +2802,6 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
     )
     comments_per_post_concurrency = _resolve_comments_per_post_concurrency()
     skipped_complete_target_source_ids: list[str] = []
-    top_level_resume_cursors_by_shortcode = _top_level_resume_cursors_from_job(job)
-    top_level_resume_cursor_params_by_shortcode = _top_level_resume_cursor_params_from_job(job)
-    reply_resume_cursors_by_parent = _reply_resume_cursors_from_job(job)
-    reply_resume_cursor_params_by_parent = _reply_resume_cursor_params_from_job(job)
     incomplete_fill_enabled = str(config.get("target_filter") or "").strip().lower() == "incomplete" or _config_truthy(
         config.get("incomplete_fill")
     )
@@ -2490,6 +2880,20 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
             exc,
             exc_info=True,
         )
+    existing_top_level_resume_cursors = _top_level_resume_cursors_from_job(job)
+    existing_reply_resume_cursors = _reply_resume_cursors_from_job(job)
+    audit_cursor_resume_metadata = _load_instagram_comments_audit_cursor_resume_metadata(
+        target_source_ids=target_source_ids,
+        target_metadata_by_shortcode=target_metadata_by_shortcode,
+        existing_top_level_cursors=existing_top_level_resume_cursors,
+        existing_reply_cursors=existing_reply_resume_cursors,
+    )
+    resume_job = _merge_audit_cursor_resume_metadata(job, audit_cursor_resume_metadata)
+    audit_cursor_resume_summary = dict(audit_cursor_resume_metadata.get("audit_cursor_resume") or {})
+    top_level_resume_cursors_by_shortcode = _top_level_resume_cursors_from_job(resume_job)
+    top_level_resume_cursor_params_by_shortcode = _top_level_resume_cursor_params_from_job(resume_job)
+    reply_resume_cursors_by_parent = _reply_resume_cursors_from_job(resume_job)
+    reply_resume_cursor_params_by_parent = _reply_resume_cursor_params_from_job(resume_job)
 
     progress_state = lifecycle.new_job_progress_state()
     processed_posts = 0
@@ -2651,6 +3055,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                 "samples": list(comment_capture_samples),
             },
             "incomplete_retry_stalled": incomplete_retry_stall_metadata,
+            "audit_cursor_resume": audit_cursor_resume_summary or None,
         }
 
     def terminal_metadata_common() -> dict[str, Any]:

@@ -6370,6 +6370,281 @@ def test_job_runner_passes_reply_resume_cursors_from_prior_metadata(
     ]
 
 
+def test_job_runner_passes_top_level_resume_cursor_from_audit_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+    from trr_backend.socials.instagram.comments_scrapling.persistence import PersistedInstagramComments
+
+    fetch_kwargs: list[dict[str, Any]] = []
+
+    class _FakeFetcher:
+        @property
+        def runtime_metadata(self) -> dict[str, Any]:
+            return {"transport": "test", "request_count": 1}
+
+        async def warmup(self) -> None:
+            return None
+
+        async def fetch_comments_for_shortcode(self, _shortcode: str, **kwargs: Any) -> InstagramCommentsFetchResult:
+            fetch_kwargs.append(dict(kwargs))
+            return InstagramCommentsFetchResult(comments=[object()], fetch_failed=False, auth_failed=False)
+
+        async def aclose(self) -> None:
+            return None
+
+    audit_checkpoint = {
+        "target_shortcode": "SHORT1",
+        "stop_reason": "pagination_deadline_exceeded",
+        "next_top_level_cursor": "audit-cursor-2",
+        "next_top_level_cursor_param": "max_id",
+    }
+    audit_metadata = {
+        "audit_cursor_resume": {
+            "source_count": 1,
+            "source_target_source_ids": ["SHORT1"],
+            "top_level_resume_count": 1,
+            "reply_resume_count": 0,
+        },
+        "top_level_checkpoint_summary": jr._checkpoint_summary([audit_checkpoint]),
+    }
+
+    monkeypatch.setattr(
+        jr,
+        "persist_instagram_comments_for_post",
+        lambda **_kwargs: PersistedInstagramComments(
+            post_id="post-id",
+            stored_total_comments=1,
+            comments_upserted=1,
+            comments_marked_missing=0,
+            comment_media_mirror_jobs_enqueued=0,
+            comment_media_mirror_job_enqueue_errors=0,
+        ),
+    )
+    monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
+    monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: _fake_comments_session())
+    monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
+    monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        jr,
+        "_load_comment_target_metadata",
+        lambda **_kwargs: {
+            "SHORT1": {
+                "source_id": "SHORT1",
+                "materialized_post_id": "00000000-0000-0000-0000-000000000001",
+            }
+        },
+    )
+    monkeypatch.setattr(jr, "_load_instagram_comments_audit_cursor_resume_metadata", lambda **_kwargs: audit_metadata)
+    monkeypatch.setattr(jr, "_insert_instagram_post_comments_audit", lambda **_kwargs: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: None)
+    monkeypatch.setattr(repo, "_finish_job", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
+
+    job = {
+        "id": "job-1",
+        "run_id": "run-1",
+        "status": "retrying",
+        "config": {
+            "mode": "profile",
+            "account": "bravotv",
+            "target_source_ids": ["SHORT1"],
+            "max_comments_per_post": 0,
+            "fetch_replies": False,
+        },
+        "metadata": {},
+        "attempt_count": 2,
+        "max_attempts": 3,
+    }
+
+    with patch(
+        "trr_backend.socials.instagram.comments_scrapling.job_runner.pg.fetch_one",
+        side_effect=_active_comments_job_fetch_one("completed"),
+    ):
+        jr.run_instagram_comments_scrapling_job(job, worker_id="test-worker")
+
+    assert fetch_kwargs == [
+        {
+            "max_comments": 0,
+            "fetch_replies": False,
+            "expected_comment_count": None,
+            "load_strategy": "cursor_api",
+            "target_metadata": {
+                "source_id": "SHORT1",
+                "materialized_post_id": "00000000-0000-0000-0000-000000000001",
+            },
+            "top_level_cursor": "audit-cursor-2",
+            "top_level_cursor_param": "max_id",
+        }
+    ]
+
+
+def test_job_runner_passes_reply_resume_cursor_from_audit_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+    from trr_backend.socials.instagram.comments_scrapling.persistence import PersistedInstagramComments
+
+    fetch_kwargs: list[dict[str, Any]] = []
+
+    class _FakeFetcher:
+        @property
+        def runtime_metadata(self) -> dict[str, Any]:
+            return {"transport": "test", "request_count": 1}
+
+        async def warmup(self) -> None:
+            return None
+
+        async def fetch_comments_for_shortcode(self, _shortcode: str, **kwargs: Any) -> InstagramCommentsFetchResult:
+            fetch_kwargs.append(dict(kwargs))
+            return InstagramCommentsFetchResult(comments=[object()], fetch_failed=False, auth_failed=False)
+
+        async def aclose(self) -> None:
+            return None
+
+    audit_checkpoint = {
+        "target_shortcode": "SHORT1",
+        "parent_comment_id": "parent-1",
+        "stop_reason": "pagination_deadline_exceeded",
+        "next_reply_cursor": "audit-reply-cursor-2",
+        "next_reply_cursor_param": "max_id",
+    }
+    audit_metadata = {
+        "audit_cursor_resume": {
+            "source_count": 1,
+            "source_target_source_ids": ["SHORT1"],
+            "top_level_resume_count": 0,
+            "reply_resume_count": 1,
+        },
+        "reply_checkpoint_summary": jr._checkpoint_summary([audit_checkpoint]),
+    }
+
+    monkeypatch.setattr(
+        jr,
+        "persist_instagram_comments_for_post",
+        lambda **_kwargs: PersistedInstagramComments(
+            post_id="post-id",
+            stored_total_comments=1,
+            comments_upserted=1,
+            comments_marked_missing=0,
+            comment_media_mirror_jobs_enqueued=0,
+            comment_media_mirror_job_enqueue_errors=0,
+        ),
+    )
+    monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
+    monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: _fake_comments_session())
+    monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
+    monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {})
+    monkeypatch.setattr(jr, "_load_comment_target_metadata", lambda **_kwargs: {})
+    monkeypatch.setattr(jr, "_load_persisted_replies_by_parent", lambda **_kwargs: {})
+    monkeypatch.setattr(jr, "_load_instagram_comments_audit_cursor_resume_metadata", lambda **_kwargs: audit_metadata)
+    monkeypatch.setattr(jr, "_insert_instagram_post_comments_audit", lambda **_kwargs: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: None)
+    monkeypatch.setattr(repo, "_finish_job", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
+
+    job = {
+        "id": "job-1",
+        "run_id": "run-1",
+        "status": "retrying",
+        "config": {
+            "mode": "profile",
+            "account": "bravotv",
+            "target_source_ids": ["SHORT1"],
+            "max_comments_per_post": 0,
+            "fetch_replies": True,
+        },
+        "metadata": {},
+        "attempt_count": 2,
+        "max_attempts": 3,
+    }
+
+    with patch(
+        "trr_backend.socials.instagram.comments_scrapling.job_runner.pg.fetch_one",
+        side_effect=_active_comments_job_fetch_one("completed"),
+    ):
+        jr.run_instagram_comments_scrapling_job(job, worker_id="test-worker")
+
+    assert fetch_kwargs == [
+        {
+            "max_comments": 0,
+            "fetch_replies": True,
+            "expected_comment_count": None,
+            "load_strategy": "cursor_api",
+            "reply_resume_cursors": {"parent-1": "audit-reply-cursor-2"},
+            "reply_resume_cursor_params": {"parent-1": "max_id"},
+        }
+    ]
+
+
+def test_audit_cursor_resume_ignores_terminal_repeated_cursor() -> None:
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+
+    metadata = jr._audit_cursor_resume_metadata_from_rows(
+        [
+            {
+                "shortcode": "SHORT1",
+                "cursor_stop_reason": "pagination_repeated_cursor",
+                "cursor_payload": {
+                    "top_level_checkpoint": {
+                        "target_shortcode": "SHORT1",
+                        "stop_reason": "pagination_repeated_cursor",
+                        "last_top_level_cursor": "stuck-cursor",
+                        "last_top_level_cursor_param": "max_id",
+                    }
+                },
+            }
+        ],
+        existing_top_level_cursors={},
+        existing_reply_cursors={},
+    )
+
+    assert metadata == {}
+
+
+def test_audit_cursor_resume_preserves_existing_job_metadata_precedence() -> None:
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+
+    metadata = jr._audit_cursor_resume_metadata_from_rows(
+        [
+            {
+                "shortcode": "SHORT1",
+                "cursor_stop_reason": "pagination_deadline_exceeded",
+                "cursor_payload": {
+                    "top_level_checkpoint": {
+                        "target_shortcode": "SHORT1",
+                        "stop_reason": "pagination_deadline_exceeded",
+                        "next_top_level_cursor": "older-audit-cursor",
+                        "next_top_level_cursor_param": "max_id",
+                    },
+                    "reply_checkpoint_summary": {
+                        "items": [
+                            {
+                                "parent_comment_id": "parent-1",
+                                "stop_reason": "pagination_deadline_exceeded",
+                                "next_reply_cursor": "older-reply-cursor",
+                                "next_reply_cursor_param": "max_id",
+                            }
+                        ]
+                    },
+                },
+            }
+        ],
+        existing_top_level_cursors={"SHORT1": "current-job-cursor"},
+        existing_reply_cursors={"parent-1": "current-job-reply-cursor"},
+    )
+
+    assert metadata == {}
+
+
 def test_job_runner_uses_reply_only_retry_for_persisted_missing_reply_parents(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1,6 +1,6 @@
 # Instagram Comments Scrapling Lane — Operator Runbook
 
-Last reviewed: 2026-04-22
+Last reviewed: 2026-06-12
 
 This document covers the standalone Instagram comments scraper built on
 [Scrapling](https://github.com/D4Vinci/Scrapling) v0.4+. It uses the
@@ -146,6 +146,20 @@ Proxy behavior:
 - Sticky-session support in this change is intentionally comments-lane-only; posts-lane parity is a separate decision.
 - `SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_LOAD_ALL_ENABLED=true` enables the opt-in `single_session_load_all` request strategy. It preserves API cursor pagination internally, falls back to bounded rendered post hydration only when needed, and forces profile comments runs to one shard by default.
 - The `SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_RENDERED_*` and `SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_MAX_IN_MEMORY_ROWS` values bound rendered hydration so a large post stops as retryable/incomplete instead of running unbounded.
+
+### Durable cursor resume for mega-posts
+
+When a large post stops because the per-post pagination deadline or page boundary is reached, the runner stores the latest top-level and reply checkpoints in `social.instagram_post_comments_audit.cursor_payload`. A later retry or incomplete-target job loads the latest eligible audit row for each target post and merges those checkpoints into the existing job metadata resume path before the fetcher starts.
+
+Operator impact:
+
+- retry jobs continue from the saved top-level cursor instead of restarting at page one;
+- reply checkpoints continue from the latest saved parent-comment cursor when available;
+- current job metadata wins over older audit rows;
+- terminal repeated-cursor states are ignored rather than replayed;
+- raw cursor values are not logged in progress metadata, but job metadata can contain checkpoint records for continuation.
+
+This resume behavior is separate from worker-pool scaling. Restore `SOCIAL_WORKER_POOL_MEDIA_MIRROR=6` only after the active Bravo posts lane completes.
 
 ---
 
