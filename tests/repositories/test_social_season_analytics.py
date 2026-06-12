@@ -8339,6 +8339,56 @@ def test_start_social_account_comments_scrape_preserves_large_profile_post_limit
     assert created_jobs[0]["max_comments_per_post"] == 0
 
 
+def test_start_social_account_comments_scrape_batches_explicit_audit_cursor_targets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created_runs: list[dict[str, Any]] = []
+    created_jobs: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(
+        social_repo.pg,
+        "db_cursor",
+        lambda conn=None, **_kwargs: nullcontext(SimpleNamespace(execute=lambda *_args, **_kwargs: None)),
+    )
+    monkeypatch.setattr(social_repo.pg, "fetch_one_with_cursor", lambda *_args, **_kwargs: {"locked": True})
+    monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: [{}])
+    monkeypatch.setattr(social_repo, "get_active_social_account_comments_run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(social_repo, "is_queue_enabled", lambda: True)
+    monkeypatch.setattr(social_repo, "is_modal_remote_executor_enabled", lambda: True)
+    monkeypatch.setattr(social_repo, "assert_worker_available_when_queue_enabled", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_create_run",
+        lambda *_args, **kwargs: created_runs.append(dict(kwargs.get("config") or {})) or "comments-run-1",
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_create_job",
+        lambda *_args, **kwargs: created_jobs.append(dict(kwargs.get("config") or {})) or f"comments-job-{len(created_jobs) + 1}",
+    )
+    monkeypatch.setattr(social_repo, "_run_counter_columns_ready", lambda: False)
+    monkeypatch.setattr(social_repo, "dispatch_due_social_jobs", lambda **_kwargs: None)
+
+    payload = social_repo.start_social_account_comments_scrape(
+        "instagram",
+        "bravotv",
+        mode="profile",
+        refresh_policy="all_saved_posts",
+        target_source_ids=["SHORT1", "SHORT2", "SHORT3"],
+        max_comments_per_post=0,
+        comments_target_batch_size=1,
+        initiated_by="audit-cursor-cli",
+    )
+
+    assert payload["run_id"] == "comments-run-1"
+    assert created_runs[0]["comments_target_batch_size"] == 1
+    assert created_runs[0]["comments_shard_count"] == 3
+    assert [job["target_source_ids"] for job in created_jobs] == [["SHORT1"], ["SHORT2"], ["SHORT3"]]
+    assert {job["comments_target_batch_size"] for job in created_jobs} == {1}
+    assert {job["required_execution_backend"] for job in created_jobs} == {"modal"}
+
+
 def test_start_social_account_comments_scrape_incomplete_fill_uses_incomplete_targets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

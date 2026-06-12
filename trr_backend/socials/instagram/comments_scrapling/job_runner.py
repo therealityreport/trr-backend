@@ -2894,6 +2894,13 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
     top_level_resume_cursor_params_by_shortcode = _top_level_resume_cursor_params_from_job(resume_job)
     reply_resume_cursors_by_parent = _reply_resume_cursors_from_job(resume_job)
     reply_resume_cursor_params_by_parent = _reply_resume_cursor_params_from_job(resume_job)
+    if audit_cursor_resume_summary or top_level_resume_cursors_by_shortcode or reply_resume_cursors_by_parent:
+        audit_cursor_resume_summary = {
+            **audit_cursor_resume_summary,
+            "fetch_plan_top_level_resume_count": len(top_level_resume_cursors_by_shortcode),
+            "fetch_plan_reply_resume_count": len(reply_resume_cursors_by_parent),
+            "fetch_plan_top_level_resume_target_source_ids": sorted(top_level_resume_cursors_by_shortcode),
+        }
 
     progress_state = lifecycle.new_job_progress_state()
     processed_posts = 0

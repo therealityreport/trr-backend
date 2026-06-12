@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import time as time_module
 from collections import Counter
@@ -1349,6 +1350,15 @@ def _chunk_instagram_comment_targets(target_source_ids: Sequence[str], shard_cou
     return chunks
 
 
+def _comments_shard_count_for_batch_size(*, target_count: int, batch_size: int | None) -> int | None:
+    if target_count <= 0 or batch_size is None:
+        return None
+    requested_batch_size = max(0, int(batch_size or 0))
+    if requested_batch_size <= 0:
+        return None
+    return min(24, target_count, max(1, math.ceil(target_count / requested_batch_size)))
+
+
 def _instagram_comments_launch_auth_check_enabled() -> bool:
     raw = str(os.getenv("SOCIAL_INSTAGRAM_COMMENTS_LAUNCH_AUTH_CHECK") or "").strip().lower()
     if raw:
@@ -1582,6 +1592,7 @@ def start_social_account_comments_scrape(
     skip_launch_auth_probe: bool = False,
     target_source_ids: Sequence[Any] | None = None,
     comments_worker_count: int | None = None,
+    comments_target_batch_size: int | None = None,
 ) -> dict[str, Any]:
     _sync_core_overrides()
     normalized_platform = _normalize_social_account_profile_platform(platform)
@@ -1776,9 +1787,17 @@ def start_social_account_comments_scrape(
                 comments_worker_count,
                 target_count=target_source_ids_count,
             )
+            requested_comments_batch_shard_count = _comments_shard_count_for_batch_size(
+                target_count=target_source_ids_count,
+                batch_size=comments_target_batch_size,
+            )
             default_comments_shard_count = (
-                requested_comments_worker_count
+                requested_comments_batch_shard_count
+                or requested_comments_worker_count
                 or (_instagram_comments_profile_shard_count(target_source_ids_count) if normalized_mode == "profile" else 1)
+            )
+            effective_comments_target_batch_size = (
+                max(1, int(comments_target_batch_size or 0)) if requested_comments_batch_shard_count else None
             )
             comments_shard_count = (
                 1
@@ -1831,6 +1850,7 @@ def start_social_account_comments_scrape(
                 ),
                 "comments_enable_media_followups": bool(comments_enable_media_followups),
                 "comments_worker_count": requested_comments_worker_count,
+                "comments_target_batch_size": effective_comments_target_batch_size,
                 "launch_group_id": str(launch_group_id or "").strip() or None,
                 "required_worker_lane": required_worker_lane,
                 "required_execution_backend": required_execution_backend,
@@ -3657,6 +3677,7 @@ def resume_social_account_comments_run(
         launch_group_id=str(run_config.get("launch_group_id") or "").strip() or None,
         target_source_ids=remaining_target_source_ids,
         comments_worker_count=_normalize_non_negative_int(run_config.get("comments_worker_count")) or None,
+        comments_target_batch_size=_normalize_non_negative_int(run_config.get("comments_target_batch_size")) or None,
     )
     payload.update(
         {

@@ -161,6 +161,32 @@ Operator impact:
 
 This resume behavior is separate from worker-pool scaling. Restore `SOCIAL_WORKER_POOL_MEDIA_MIRROR=6` only after the active Bravo posts lane completes.
 
+To build a focused retry from saved audit cursors without writing a new job:
+
+```bash
+cd TRR-Backend
+.venv/bin/python scripts/socials/instagram/enqueue_comments_audit_cursor_retries.py \
+  --account bravotv \
+  --limit 50 \
+  --batch-size 1 \
+  --json
+```
+
+To enqueue the retry after reviewing the dry-run target list:
+
+```bash
+cd TRR-Backend
+.venv/bin/python scripts/socials/instagram/enqueue_comments_audit_cursor_retries.py \
+  --account bravotv \
+  --limit 50 \
+  --batch-size 1 \
+  --enqueue \
+  --confirm-enqueue "ENQUEUE AUDIT CURSOR RETRIES" \
+  --json
+```
+
+`--batch-size` controls how many target posts are placed in each comments job. Use `--batch-size 1` for mega-post recovery so each job has a small resumable unit while the runner still resumes from `instagram_post_comments_audit.cursor_payload`.
+
 ---
 
 ## Starting workers
