@@ -5200,6 +5200,7 @@ class InstagramScraper:
                 ) as browser_session:
                     context = browser_session.context
                     page = context.new_page()
+                    network_policy_recorder = getattr(browser_session, "network_policy_recorder", None)
 
                     # Navigate to profile
                     page.goto(
@@ -5330,6 +5331,8 @@ class InstagramScraper:
                     "posts_checked": len(seen_pks),
                     "pages_scanned": scroll_count,
                 }
+                if "network_policy_recorder" in locals() and network_policy_recorder is not None:
+                    self.last_retrieval_meta["network_policy"] = network_policy_recorder.to_metadata()
                 if total_posts:
                     self.last_retrieval_meta["total_posts"] = total_posts
                 return posts
@@ -5367,6 +5370,8 @@ class InstagramScraper:
             "pages_scanned": scroll_count,
             "stop_reason": stop_reason,
         }
+        if "network_policy_recorder" in locals() and network_policy_recorder is not None:
+            self.last_retrieval_meta["network_policy"] = network_policy_recorder.to_metadata()
         if total_posts:
             self.last_retrieval_meta["total_posts"] = total_posts
         return posts

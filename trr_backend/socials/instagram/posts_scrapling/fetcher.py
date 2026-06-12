@@ -62,6 +62,10 @@ from trr_backend.socials.instagram.constants import (
     PROFILE_POSTS_ROOT_FIELD_NAME,
     WEB_X_ASBD_ID,
 )
+from trr_backend.socials.instagram.network_policy import (
+    default_instagram_network_policy,
+    instagram_scrapling_network_kwargs,
+)
 from trr_backend.socials.instagram.posts_scrapling.proxy import (
     PostsProxyConfig,
     build_posts_proxy_identity,
@@ -826,6 +830,8 @@ class InstagramPostsScraplingFetcher:
         # fail-open; never break a fetch over metering.
         self._bytes_total: int = 0
         self._bytes_by_host: dict[str, int] = {}
+        self._request_count_by_host: dict[str, int] = {}
+        self._network_policy = default_instagram_network_policy()
         # Phase 4.2: doc-ID rotation observability — record which doc IDs were
         # tried this run and which one ultimately succeeded. Operators can
         # cross-reference http_400 / non_json_response spikes with rotation
@@ -930,6 +936,8 @@ class InstagramPostsScraplingFetcher:
             # breaks it down by destination host.
             "bytes_total": self._bytes_total,
             "bytes_by_host": dict(sorted(self._bytes_by_host.items())),
+            "request_count_by_host": dict(sorted(self._request_count_by_host.items())),
+            "network_policy": self._network_policy.to_metadata(),
             "transport": "httpx_after_browser_warmup",
             "requests_fallback": {
                 "active": bool(self._requests_fallback_active),
@@ -1701,7 +1709,7 @@ class InstagramPostsScraplingFetcher:
         profile HTML comes back with the runtime tokens intact.
         """
         self._request_count += 1
-        return await self._fetcher.async_fetch(
+        response = await self._fetcher.async_fetch(
             url,
             headless=self._headless,
             network_idle=False,
@@ -1712,7 +1720,10 @@ class InstagramPostsScraplingFetcher:
             timeout=self._timeout_ms,
             retries=1,
             retry_delay=1.0,
+            **instagram_scrapling_network_kwargs(policy=self._network_policy),
         )
+        self._record_response_bytes(response)
+        return response
 
     # -------------------------------------------------------------------
     # Transport: httpx (GraphQL POSTs)
@@ -1818,9 +1829,10 @@ class InstagramPostsScraplingFetcher:
         """
         try:
             size = _response_byte_size(response)
+            host = _response_url_host(response)
+            self._request_count_by_host[host] = self._request_count_by_host.get(host, 0) + 1
             if size <= 0:
                 return
-            host = _response_url_host(response)
             self._bytes_total += size
             self._bytes_by_host[host] = self._bytes_by_host.get(host, 0) + size
             try:
