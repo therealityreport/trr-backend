@@ -153,6 +153,12 @@ def _posts_bidirectional_walk_enabled() -> bool:
     }
 
 
+def _posts_rate_per_second(count: int, elapsed_ms: int) -> float | None:
+    if count <= 0 or elapsed_ms <= 0:
+        return None
+    return round(count / (elapsed_ms / 1000.0), 3)
+
+
 def _posts_pagination_doc_ids_attempted(metadata: dict[str, Any]) -> list[str]:
     for key in ("doc_ids_attempted", "profile_posts_doc_ids_attempted", "profile_posts_doc_ids"):
         value = metadata.get(key)
@@ -496,12 +502,16 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
     bidirectional_reverse_error: str | None = None
     timeout_guard_seconds = _posts_pagination_timeout_guard_seconds(config)
     started_monotonic = time.monotonic()
+    warmup_duration_ms = 0
+    listing_duration_ms = 0
+    persistence_duration_ms = 0
 
     async def _run_job() -> tuple[dict[str, Any], dict[str, Any]]:
         nonlocal posts_fetched, posts_upserted, posts_skipped, posts_skipped_by_reason
         nonlocal pages_fetched, fetcher_metadata, bidirectional_probe_done
         nonlocal reverse_posts_fetched, reverse_posts_upserted, reverse_pages_fetched, reverse_stop_reason
         nonlocal bidirectional_reverse_started, bidirectional_reverse_error
+        nonlocal warmup_duration_ms, listing_duration_ms, persistence_duration_ms
 
         # A4 READ (job start): authenticated runs honor account cooldowns before
         # warmup. Anonymous canaries have no account session to burn, so they do
@@ -558,6 +568,7 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
         async def _run_reverse_listing(snapshot: dict[str, Any]) -> None:
             nonlocal reverse_posts_fetched, reverse_posts_upserted, reverse_pages_fetched, reverse_stop_reason
             nonlocal bidirectional_reverse_error
+            nonlocal listing_duration_ms, persistence_duration_ms
 
             reverse_proxy_session_key = f"{proxy_session_key}:reverse"
             reverse_proxy_config = select_posts_proxy(session_key=reverse_proxy_session_key)
@@ -582,11 +593,13 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                             page_proxy_config,
                             reason=f"reverse_page_{reverse_pages_fetched}",
                         )
+                    phase_started = time.monotonic()
                     result = await reverse_fetcher.fetch_posts_page(
                         account_handle,
                         cursor=reverse_cursor,
                         direction="reverse",
                     )
+                    listing_duration_ms += int((time.monotonic() - phase_started) * 1000)
                     if result.auth_failed or (result.fetch_failed and not result.posts):
                         reverse_stop_reason = str(result.fetch_reason or "reverse_fetch_failed").strip()
                         bidirectional_reverse_error = reverse_stop_reason
@@ -595,6 +608,7 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                     page_ids = {identity for post in result.posts if (identity := _posts_node_identity(post))}
                     overlap = bool(page_ids & forward_seen_post_ids)
                     if result.posts:
+                        phase_started = time.monotonic()
                         persisted = persist_instagram_posts(
                             account_handle=account_handle,
                             post_nodes=result.posts,
@@ -603,6 +617,7 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                             season_id=season_id,
                             source_scope=source_scope,
                         )
+                        persistence_duration_ms += int((time.monotonic() - phase_started) * 1000)
                         reverse_posts_fetched += len(result.posts)
                         reverse_posts_upserted += persisted.posts_upserted
                         reverse_seen_post_ids.update(page_ids)
@@ -672,8 +687,11 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
 
         try:
             try:
+                phase_started = time.monotonic()
                 await fetcher.warmup(account_handle)
+                warmup_duration_ms += int((time.monotonic() - phase_started) * 1000)
             except InstagramPostsWarmupError as exc:
+                warmup_duration_ms += int((time.monotonic() - phase_started) * 1000)
                 raise PostsScraplingRuntimeError(
                     str(exc),
                     error_code=str(getattr(exc, "error_code", "") or "instagram_posts_warmup_failed"),
@@ -763,7 +781,9 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                         reason=f"page_{pages_fetched}",
                     )
                     fetcher_metadata = _fetcher_runtime_metadata()
+                phase_started = time.monotonic()
                 result = await fetcher.fetch_posts_page(account_handle, cursor=cursor)
+                listing_duration_ms += int((time.monotonic() - phase_started) * 1000)
                 fetcher_metadata = _fetcher_runtime_metadata()
 
                 if result.auth_failed:
@@ -904,6 +924,7 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                             bidirectional_reverse_started = True
                             reverse_task = asyncio.create_task(_run_reverse_listing(fetcher.warmup_snapshot()))
                         fetcher_metadata = _fetcher_runtime_metadata()
+                    phase_started = time.monotonic()
                     persisted = persist_instagram_posts(
                         account_handle=account_handle,
                         post_nodes=result.posts,
@@ -912,6 +933,7 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                         season_id=season_id,
                         source_scope=source_scope,
                     )
+                    persistence_duration_ms += int((time.monotonic() - phase_started) * 1000)
                     posts_fetched += len(result.posts)
                     posts_upserted += persisted.posts_upserted
                     posts_skipped += persisted.posts_skipped
@@ -1031,6 +1053,29 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
 
     try:
         auth_metadata, fetcher_metadata = asyncio.run(_run_job())
+        total_posts_fetched = posts_fetched + reverse_posts_fetched
+        total_pages_fetched = pages_fetched + reverse_pages_fetched
+        elapsed_ms = int((time.monotonic() - started_monotonic) * 1000)
+        doc_ids_attempted = _posts_pagination_doc_ids_attempted(fetcher_metadata)
+        proxy_pacing = (
+            fetcher_metadata.get("proxy_pacing") if isinstance(fetcher_metadata.get("proxy_pacing"), dict) else {}
+        )
+        performance_metadata = {
+            "elapsed_ms": elapsed_ms,
+            "warmup_duration_ms": warmup_duration_ms,
+            "listing_duration_ms": listing_duration_ms,
+            "persistence_duration_ms": persistence_duration_ms,
+            "pages_per_second": _posts_rate_per_second(total_pages_fetched, listing_duration_ms),
+            "posts_per_second": _posts_rate_per_second(
+                total_posts_fetched,
+                listing_duration_ms + persistence_duration_ms,
+            ),
+            "doc_id_attempts": len(doc_ids_attempted),
+            "doc_ids_attempted": doc_ids_attempted,
+            "warmup_pool": fetcher_metadata.get("warmup_pool") if isinstance(fetcher_metadata, dict) else {},
+            "bytes_total": int(fetcher_metadata.get("bytes_total") or proxy_pacing.get("bytes_total") or 0),
+            "bytes_by_host": fetcher_metadata.get("bytes_by_host") or proxy_pacing.get("bytes_by_host") or {},
+        }
         metadata = {
             "stage": stage,
             "platform": "instagram",
@@ -1055,6 +1100,7 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                 "posts_skipped": posts_skipped,
                 "posts_skipped_by_reason": posts_skipped_by_reason,
             },
+            "performance": performance_metadata,
             "pagination_state": pagination_state,
             "listing_progress": {
                 "page_index": pages_fetched,

@@ -1057,3 +1057,72 @@ def test_refresh_twitter_cookies_does_not_retry_headed_by_default(
         )
 
     assert attempts == [True]
+
+
+def test_threads_validate_session_tokens_requires_graphql_tokens(monkeypatch) -> None:
+    from trr_backend.socials.threads.scraper import ThreadsScraper
+
+    scraper = ThreadsScraper(cookies={"sessionid": "s", "csrftoken": "c"})
+
+    token_html = '{"DTSGInitialData":{"token":"dtsg-1"},"LSD":{"token":"lsd-1"},"jazoest":"26474"}'
+    monkeypatch.setattr(scraper, "_fetch_html", lambda *a, **k: token_html)
+    assert scraper.validate_session_tokens() == (True, None)
+
+    monkeypatch.setattr(scraper, "_fetch_html", lambda *a, **k: "<html>Log in with your Instagram account</html>")
+    assert scraper.validate_session_tokens() == (False, "login_prompt_detected")
+
+    monkeypatch.setattr(scraper, "_fetch_html", lambda *a, **k: "<html>anonymous shell without tokens</html>")
+    assert scraper.validate_session_tokens() == (False, "graphql_tokens_missing")
+
+    def _boom(*a: object, **k: object) -> str:
+        raise TimeoutError("slow")
+
+    monkeypatch.setattr(scraper, "_fetch_html", _boom)
+    valid, reason = scraper.validate_session_tokens()
+    assert valid is False
+    assert reason.startswith("probe_fetch_failed:")
+
+
+def test_facebook_in_protocol_validator(monkeypatch) -> None:
+    from trr_backend.socials.facebook import cookie_refresh as facebook_cookie_refresh
+
+    validate = facebook_cookie_refresh._validate_facebook_cookies_in_protocol
+
+    assert validate({"c_user": "1"}) == (False, "missing_required_cookies")
+
+    class _Resp:
+        def __init__(self, url: str, text: str) -> None:
+            self.url = url
+            self.text = text
+
+    monkeypatch.setattr(
+        facebook_cookie_refresh.requests,
+        "get",
+        lambda *a, **k: _Resp("https://www.facebook.com/login/?next=me", "Log into Facebook"),
+    )
+    valid, reason = validate({"c_user": "1", "xs": "2"})
+    assert valid is False
+    assert reason.startswith("login_redirect:")
+
+    monkeypatch.setattr(
+        facebook_cookie_refresh.requests,
+        "get",
+        lambda *a, **k: _Resp("https://www.facebook.com/bravo", "<html>profile timeline</html>"),
+    )
+    assert validate({"c_user": "1", "xs": "2"}) == (True, None)
+
+
+def test_threads_refresh_passes_in_protocol_validator(monkeypatch, tmp_path) -> None:
+    from trr_backend.socials.threads import cookie_refresh as threads_cookie_refresh_mod
+
+    captured: dict[str, object] = {}
+
+    def _fake_refresh(*, spec: object, validator: object = None, **_: object) -> dict[str, str]:
+        captured["validator"] = validator
+        return {"sessionid": "s", "csrftoken": "c"}
+
+    monkeypatch.setattr(threads_cookie_refresh_mod, "refresh_simple_login_cookies", _fake_refresh)
+    threads_cookie_refresh_mod.refresh_threads_cookies(
+        username="u", password="p", cookie_file=str(tmp_path / "t.json")
+    )
+    assert captured["validator"] is threads_cookie_refresh_mod._validate_threads_cookies_in_protocol

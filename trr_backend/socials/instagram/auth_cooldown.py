@@ -63,6 +63,14 @@ CHECKPOINT_ERROR_CODES: frozenset[str] = frozenset(
         "login_required",
         "redirect_to_login",
         "feedback_required",
+        "facebook_checkpoint_required",
+        "facebook_two_step_verification",
+        "facebook_redirect_to_login",
+        "facebook_login_required",
+        "threads_login_prompt",
+        "threads_redirect_to_login",
+        "threads_posts_auth_failed",
+        "threads_posts_auth_cooldown_active",
     }
 )
 

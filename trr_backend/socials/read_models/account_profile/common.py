@@ -104,6 +104,56 @@ def _comment_search_sql_parts(search: str | None) -> tuple[str, list[Any]]:
     return f"and {condition_sql}", params
 
 
+def _instagram_profile_posts_page_search_where_sql(search: str | None, *, alias: str = "d") -> tuple[str, list[Any]]:
+    normalized_search = str(search or "").strip().lower()
+    if not normalized_search:
+        return "", []
+
+    normalized_handle_sql = (
+        "nullif("
+        "regexp_replace("
+        "lower(regexp_replace(coalesce(__TERM_VALUE__, ''), '^@+', '')), "
+        "'[^a-z0-9._-]+', '', 'g'"
+        "), '')"
+    )
+    normalized_hashtag_sql = (
+        "nullif("
+        "regexp_replace("
+        "lower(regexp_replace(coalesce(__TERM_VALUE__, ''), '^#+', '')), "
+        "'[^a-z0-9]+', '', 'g'"
+        "), '')"
+    )
+    handle_exprs = (f"{alias}.mentions", f"{alias}.collaborators", f"{alias}.profile_tags")
+    hashtag_exprs = (f"{alias}.hashtags",)
+
+    if normalized_search.startswith("@"):
+        exact_handle = _normalize_social_account_profile_handle_term(normalized_search).lstrip("@").lower()
+        if not exact_handle:
+            return "and false", []
+        clause = _social_account_profile_exact_jsonb_term_sql(handle_exprs, term_sql=normalized_handle_sql)
+        return f"and ({clause})", [exact_handle] * len(handle_exprs)
+
+    if normalized_search.startswith("#"):
+        exact_hashtag = _normalize_social_account_profile_hashtag_term(normalized_search).lower()
+        if not exact_hashtag:
+            return "and false", []
+        clause = _social_account_profile_exact_jsonb_term_sql(hashtag_exprs, term_sql=normalized_hashtag_sql)
+        return f"and ({clause})", [exact_hashtag] * len(hashtag_exprs)
+
+    text_expr = (
+        f"lower(concat_ws(' ', coalesce({alias}.source_id, ''), coalesce({alias}.shortcode, ''), "
+        f"coalesce({alias}.title, ''), coalesce({alias}.caption, ''), coalesce({alias}.description, ''), "
+        f"coalesce({alias}.text, ''), coalesce({alias}.show_name, ''), coalesce({alias}.permalink, '')))"
+    )
+    hashtag_clause = _social_account_profile_exact_jsonb_term_sql(hashtag_exprs, term_sql=normalized_hashtag_sql)
+    handle_clause = _social_account_profile_exact_jsonb_term_sql(handle_exprs, term_sql=normalized_handle_sql)
+    clauses = [f"{text_expr} like %s", hashtag_clause, handle_clause]
+    params: list[Any] = [f"%{normalized_search}%"]
+    params.extend([normalized_search] * len(hashtag_exprs))
+    params.extend([normalized_search] * len(handle_exprs))
+    return f"and ({' or '.join(clauses)})", params
+
+
 def _comments_order_by_sql(sort_by: str | None, sort_dir: str | None) -> str:
     normalized_sort_by = _normalize_social_account_profile_comment_sort_by(sort_by)
     normalized_sort_dir = _normalize_social_account_profile_comment_sort_dir(sort_dir)
@@ -119,6 +169,1055 @@ def _comments_order_by_sql(sort_by: str | None, sort_dir: str | None) -> str:
     if normalized_sort_by == "created":
         return f"{primary} {direction} nulls last, c.id {'asc' if direction == 'asc' else 'desc'}"
     return f"{primary} {direction} nulls last, c.created_at desc nulls last, c.id desc"
+
+
+def _instagram_post_comment_rollups_available(*, conn: Any | None = None) -> bool:
+    return _relation_exists("social.instagram_post_comment_rollups", conn=conn)
+
+
+def _instagram_saved_comment_counts_cte_sql(*, source_cte: str, active_condition: str, use_rollup: bool) -> str:
+    if use_rollup:
+        return f"""
+        saved_comment_counts as materialized (
+          select
+            r.post_id::text as profile_row_id,
+            r.active_comment_count::int as saved_comments
+          from social.instagram_post_comment_rollups r
+          join {source_cte} d
+            on d.profile_row_id is not null
+           and r.post_id = d.profile_row_id::uuid
+        )
+        """
+    return f"""
+        saved_comment_counts as materialized (
+          select
+            c.post_id::text as profile_row_id,
+            count(*) filter (where {active_condition})::int as saved_comments
+          from social.instagram_comments c
+          join {source_cte} d
+            on d.profile_row_id is not null
+           and c.post_id = d.profile_row_id::uuid
+          group by c.post_id
+        )
+        """
+
+
+def rebuild_instagram_post_comment_rollups(
+    *,
+    account_handle: str | None = None,
+    post_ids: list[str] | tuple[str, ...] | None = None,
+    limit: int | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Refresh persisted Instagram comment-count rollups for selected posts."""
+    _sync_core_overrides()
+    normalized_post_ids = [str(post_id).strip() for post_id in (post_ids or []) if str(post_id).strip()]
+    normalized_account = _normalize_social_account_profile_handle(account_handle) if account_handle else None
+    safe_limit = int(limit) if limit is not None else None
+    if safe_limit is not None and safe_limit <= 0:
+        raise ValueError("limit must be greater than 0")
+
+    where_sql = "p.id in (select distinct c.post_id from social.instagram_comments c where c.post_id is not null)"
+    params: list[Any] = []
+    if normalized_post_ids:
+        where_sql = "p.id = any(%s::uuid[])"
+        params.append(normalized_post_ids)
+    elif normalized_account:
+        where_sql = _social_account_profile_owner_match_sql("instagram", alias="p")
+        params.append(normalized_account)
+
+    limit_sql = ""
+    if safe_limit is not None:
+        limit_sql = "limit %s"
+        params.append(safe_limit)
+
+    target_sql = f"""
+        select p.id
+        from social.instagram_posts p
+        where {where_sql}
+        order by p.id
+        {limit_sql}
+    """
+    with pg.db_connection(label="instagram-comment-rollup-rebuild") as conn:
+        if not _instagram_post_comment_rollups_available(conn=conn):
+            raise RuntimeError("social.instagram_post_comment_rollups is missing; run the migration first")
+        with pg.db_cursor(conn=conn, label="instagram_comment_rollup_rebuild_targets") as cur:
+            cur.execute(f"select count(*)::int as target_count from ({target_sql}) targets", params)
+            count_row = cur.fetchone() or {}
+            target_count = int(count_row.get("target_count") or 0)
+        if dry_run or target_count == 0:
+            return {
+                "ok": True,
+                "dry_run": bool(dry_run),
+                "target_count": target_count,
+                "refreshed_count": 0,
+                "account_handle": normalized_account,
+                "post_ids": normalized_post_ids,
+                "limit": safe_limit,
+            }
+        with pg.db_cursor(conn=conn, label="instagram_comment_rollup_rebuild") as cur:
+            cur.execute(
+                f"""
+                with target_posts as materialized (
+                  {target_sql}
+                )
+                select social.refresh_instagram_post_comment_rollup(id) as refreshed
+                from target_posts
+                """,
+                params,
+            )
+            refreshed_count = len(cur.fetchall())
+    return {
+        "ok": True,
+        "dry_run": False,
+        "target_count": target_count,
+        "refreshed_count": refreshed_count,
+        "account_handle": normalized_account,
+        "post_ids": normalized_post_ids,
+        "limit": safe_limit,
+    }
+
+
+def instagram_comment_rollup_health(*, sample_limit: int = 25) -> dict[str, Any]:
+    """Return exact rollup/count mismatch status for operator health checks."""
+    _sync_core_overrides()
+    safe_sample_limit = max(1, min(int(sample_limit), 100))
+    with pg.db_read_connection(label="instagram-comment-rollup-health", pool_name="health") as conn:
+        if not _instagram_post_comment_rollups_available(conn=conn):
+            return {
+                "status": "unavailable",
+                "reason": "rollup_table_missing",
+                "rollup_table": "social.instagram_post_comment_rollups",
+                "sample_limit": safe_sample_limit,
+            }
+        with pg.db_cursor(conn=conn, label="instagram_comment_rollup_health") as cur:
+            cur.execute(
+                """
+                with comment_counts as materialized (
+                  select
+                    c.post_id,
+                    count(*) filter (where coalesce(c.is_missing, false) = false)::int as active_comment_count,
+                    count(*) filter (where coalesce(c.is_missing, false) = true)::int as missing_comment_count,
+                    count(*)::int as total_comment_count
+                  from social.instagram_comments c
+                  where c.post_id is not null
+                  group by c.post_id
+                ),
+                compared as materialized (
+                  select
+                    coalesce(r.post_id, cc.post_id) as post_id,
+                    coalesce(cc.active_comment_count, 0)::int as expected_active_comment_count,
+                    coalesce(r.active_comment_count, 0)::int as rollup_active_comment_count,
+                    coalesce(cc.missing_comment_count, 0)::int as expected_missing_comment_count,
+                    coalesce(r.missing_comment_count, 0)::int as rollup_missing_comment_count,
+                    coalesce(cc.total_comment_count, 0)::int as expected_total_comment_count,
+                    coalesce(r.total_comment_count, 0)::int as rollup_total_comment_count,
+                    r.updated_at as rollup_updated_at,
+                    (r.post_id is null) as missing_rollup,
+                    (cc.post_id is null) as rollup_without_comments
+                  from comment_counts cc
+                  full join social.instagram_post_comment_rollups r
+                    on r.post_id = cc.post_id
+                ),
+                mismatches as materialized (
+                  select *
+                  from compared
+                  where
+                    missing_rollup
+                    or expected_active_comment_count <> rollup_active_comment_count
+                    or expected_missing_comment_count <> rollup_missing_comment_count
+                    or expected_total_comment_count <> rollup_total_comment_count
+                    or (rollup_without_comments and (
+                      rollup_active_comment_count <> 0
+                      or rollup_missing_comment_count <> 0
+                      or rollup_total_comment_count <> 0
+                    ))
+                ),
+                mismatch_sample as (
+                  select *
+                  from mismatches
+                  order by post_id
+                  limit %s
+                )
+                select
+                  (select count(*)::int from social.instagram_post_comment_rollups) as rollup_rows,
+                  (select count(*)::int from comment_counts) as comment_post_rows,
+                  (select coalesce(sum(total_comment_count), 0)::int from comment_counts) as comment_rows,
+                  (select count(*)::int from mismatches) as mismatch_count,
+                  coalesce((select jsonb_agg(to_jsonb(mismatch_sample)) from mismatch_sample), '[]'::jsonb) as mismatch_sample
+                """,
+                [safe_sample_limit],
+            )
+            row = dict(cur.fetchone() or {})
+    mismatch_count = int(row.get("mismatch_count") or 0)
+    return {
+        "status": "healthy" if mismatch_count == 0 else "stale",
+        "reason": "ok" if mismatch_count == 0 else "rollup_count_mismatch",
+        "rollup_table": "social.instagram_post_comment_rollups",
+        "rollup_rows": int(row.get("rollup_rows") or 0),
+        "comment_post_rows": int(row.get("comment_post_rows") or 0),
+        "comment_rows": int(row.get("comment_rows") or 0),
+        "mismatch_count": mismatch_count,
+        "sample_limit": safe_sample_limit,
+        "mismatch_sample": row.get("mismatch_sample") or [],
+    }
+
+
+def _fetch_instagram_profile_rows_page(
+    account_handle: str,
+    *,
+    page: int,
+    page_size: int,
+    search: str | None = None,
+    sort_by: str | None = None,
+    sort_dir: str | None = None,
+    conn: Any | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    safe_page = max(1, int(page))
+    safe_page_size = max(1, min(int(page_size), _SOCIAL_ACCOUNT_PROFILE_MAX_PAGE_SIZE))
+    safe_offset = (safe_page - 1) * safe_page_size
+    owner_match_clause = _social_account_profile_owner_match_sql("instagram", alias="p")
+    reported_comments_expr = _instagram_reported_comments_sql("p")
+    catalog_reported_comments_expr = _instagram_reported_comments_sql("p")
+    search_where_sql, search_params = _instagram_profile_posts_page_search_where_sql(search, alias="filtered_rows")
+    order_by_sql = _comments_only_profile_order_by_sql(
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        missing_comments_sql="greatest(coalesce(filtered_rows.missing_comments, 0), 0)",
+    )
+    lifecycle_supported = _comment_lifecycle_supported("instagram_comments", conn=conn)
+    active_condition = "c.is_missing is not true" if lifecycle_supported else "true"
+    use_comment_rollups = _instagram_post_comment_rollups_available(conn=conn)
+    collaborator_rows_available = _instagram_catalog_collaborator_membership_available(conn=conn)
+    collaborator_rows_sql = (
+        f"""
+        collaborator_rows as materialized (
+          select
+            p.id::text as id,
+            materialized_post.id::text as profile_row_id,
+            p.assigned_show_id::text as show_id,
+            p.assigned_season_id::text as season_id,
+            p.source_account,
+            p.source_id as source_id,
+            p.source_id as shortcode,
+            p.posted_at,
+            s.season_number,
+            sh.name as show_name,
+            sh.slug as show_slug,
+            p.title,
+            p.caption,
+            p.description,
+            p.text,
+            p.media_type,
+            coalesce(p.media_urls, '[]'::jsonb) as media_urls,
+            nullif(p.thumbnail_url, '') as thumbnail_url,
+            coalesce(p.media_urls, '[]'::jsonb) as source_media_urls,
+            coalesce(to_jsonb(p) -> 'hosted_media_urls', '[]'::jsonb) as hosted_media_urls,
+            nullif(p.thumbnail_url, '') as source_thumbnail_url,
+            nullif(coalesce(to_jsonb(p) ->> 'hosted_thumbnail_url', ''), '') as hosted_thumbnail_url,
+            nullif(coalesce(to_jsonb(p) ->> 'post_format', ''), '') as post_format,
+            coalesce(p.hashtags, '[]'::jsonb) as hashtags,
+            coalesce(p.mentions, '[]'::jsonb) as mentions,
+            coalesce(p.collaborators, '[]'::jsonb) as collaborators,
+            coalesce(to_jsonb(p) -> 'collaborators_detail', p.raw_data -> 'collaborators_detail', '[]'::jsonb)
+              as collaborators_detail,
+            coalesce(p.profile_tags, '[]'::jsonb) as profile_tags,
+            coalesce(p.likes, 0)::bigint as likes,
+            {catalog_reported_comments_expr}::bigint as comments_count,
+            null::integer as fb_comment_count,
+            null::timestamptz as facebook_crosspost_observed_at,
+            null::text as facebook_crosspost_source,
+            null::text as facebook_post_id,
+            null::text as facebook_post_url,
+            coalesce(p.views, 0)::bigint as views,
+            null::bigint as media_repost_count,
+            coalesce(p.shares, 0)::bigint as shares,
+            coalesce(p.retweets, 0)::bigint as retweets,
+            coalesce(p.replies_count, 0)::bigint as replies_count,
+            coalesce(p.quotes, 0)::bigint as quotes,
+            coalesce(p.raw_data, '{{}}'::jsonb) as raw_data,
+            p.permalink,
+            'catalog'::text as _profile_source_surface,
+            'collaborator'::text as _profile_match_mode,
+            1::int as _profile_dataset_priority
+          from social.instagram_account_catalog_post_collaborators m
+          join social.instagram_account_catalog_posts p
+            on p.id = m.catalog_post_id
+          left join social.instagram_posts materialized_post
+            on materialized_post.shortcode = p.source_id
+          left join core.seasons s on s.id = p.assigned_season_id
+          left join core.shows sh on sh.id = coalesce(p.assigned_show_id, s.show_id)
+          where m.collaborator_handle = %s
+            and lower(p.source_account) <> %s
+            and nullif(p.source_id, '') is not null
+        )
+        """
+        if collaborator_rows_available
+        else """
+        collaborator_rows as materialized (
+          select *
+          from owner_rows
+          where false
+        )
+        """
+    )
+    candidate_rows_sql = f"""
+        with owner_rows as materialized (
+          select
+            p.id::text as id,
+            p.id::text as profile_row_id,
+            p.show_id::text as show_id,
+            p.season_id::text as season_id,
+            p.source_account,
+            p.shortcode as source_id,
+            p.shortcode as shortcode,
+            p.posted_at,
+            s.season_number,
+            sh.name as show_name,
+            sh.slug as show_slug,
+            null::text as title,
+            p.caption,
+            null::text as description,
+            null::text as text,
+            p.media_type,
+            coalesce(p.media_urls, '[]'::jsonb) as media_urls,
+            nullif(p.thumbnail_url, '') as thumbnail_url,
+            coalesce(p.media_urls, '[]'::jsonb) as source_media_urls,
+            coalesce(to_jsonb(p) -> 'hosted_media_urls', '[]'::jsonb) as hosted_media_urls,
+            nullif(p.thumbnail_url, '') as source_thumbnail_url,
+            nullif(coalesce(to_jsonb(p) ->> 'hosted_thumbnail_url', ''), '') as hosted_thumbnail_url,
+            nullif(coalesce(to_jsonb(p) ->> 'post_format', ''), '') as post_format,
+            coalesce(p.hashtags, '[]'::jsonb) as hashtags,
+            coalesce(p.mentions, '[]'::jsonb) as mentions,
+            coalesce(p.collaborators, '[]'::jsonb) as collaborators,
+            coalesce(to_jsonb(p) -> 'collaborators_detail', '[]'::jsonb) as collaborators_detail,
+            coalesce(p.profile_tags, '[]'::jsonb) as profile_tags,
+            coalesce(p.likes, 0)::bigint as likes,
+            {reported_comments_expr}::bigint as comments_count,
+            p.fb_comment_count,
+            p.facebook_crosspost_observed_at,
+            p.facebook_crosspost_source,
+            p.facebook_post_id,
+            p.facebook_post_url,
+            coalesce(p.views, 0)::bigint as views,
+            p.media_repost_count::bigint as media_repost_count,
+            coalesce(p.media_repost_count, 0)::bigint as shares,
+            0::bigint as retweets,
+            0::bigint as replies_count,
+            0::bigint as quotes,
+            coalesce(p.raw_data, '{{}}'::jsonb) as raw_data,
+            null::text as permalink,
+            'materialized'::text as _profile_source_surface,
+            'owner'::text as _profile_match_mode,
+            3::int as _profile_dataset_priority
+          from social.instagram_posts p
+          left join core.seasons s on s.id = p.season_id
+          left join core.shows sh on sh.id = coalesce(p.show_id, s.show_id)
+          where {owner_match_clause}
+            and nullif(p.shortcode, '') is not null
+          union all
+          select
+            p.id::text as id,
+            materialized_post.id::text as profile_row_id,
+            p.assigned_show_id::text as show_id,
+            p.assigned_season_id::text as season_id,
+            p.source_account,
+            p.source_id as source_id,
+            p.source_id as shortcode,
+            p.posted_at,
+            s.season_number,
+            sh.name as show_name,
+            sh.slug as show_slug,
+            p.title,
+            p.caption,
+            p.description,
+            p.text,
+            p.media_type,
+            coalesce(p.media_urls, '[]'::jsonb) as media_urls,
+            nullif(p.thumbnail_url, '') as thumbnail_url,
+            coalesce(p.media_urls, '[]'::jsonb) as source_media_urls,
+            coalesce(to_jsonb(p) -> 'hosted_media_urls', '[]'::jsonb) as hosted_media_urls,
+            nullif(p.thumbnail_url, '') as source_thumbnail_url,
+            nullif(coalesce(to_jsonb(p) ->> 'hosted_thumbnail_url', ''), '') as hosted_thumbnail_url,
+            nullif(coalesce(to_jsonb(p) ->> 'post_format', ''), '') as post_format,
+            coalesce(p.hashtags, '[]'::jsonb) as hashtags,
+            coalesce(p.mentions, '[]'::jsonb) as mentions,
+            coalesce(p.collaborators, '[]'::jsonb) as collaborators,
+            coalesce(to_jsonb(p) -> 'collaborators_detail', p.raw_data -> 'collaborators_detail', '[]'::jsonb)
+              as collaborators_detail,
+            coalesce(p.profile_tags, '[]'::jsonb) as profile_tags,
+            coalesce(p.likes, 0)::bigint as likes,
+            {catalog_reported_comments_expr}::bigint as comments_count,
+            null::integer as fb_comment_count,
+            null::timestamptz as facebook_crosspost_observed_at,
+            null::text as facebook_crosspost_source,
+            null::text as facebook_post_id,
+            null::text as facebook_post_url,
+            coalesce(p.views, 0)::bigint as views,
+            null::bigint as media_repost_count,
+            coalesce(p.shares, 0)::bigint as shares,
+            coalesce(p.retweets, 0)::bigint as retweets,
+            coalesce(p.replies_count, 0)::bigint as replies_count,
+            coalesce(p.quotes, 0)::bigint as quotes,
+            coalesce(p.raw_data, '{{}}'::jsonb) as raw_data,
+            p.permalink,
+            'catalog'::text as _profile_source_surface,
+            'owner'::text as _profile_match_mode,
+            2::int as _profile_dataset_priority
+          from social.instagram_account_catalog_posts p
+          left join social.instagram_posts materialized_post
+            on materialized_post.shortcode = p.source_id
+          left join core.seasons s on s.id = p.assigned_season_id
+          left join core.shows sh on sh.id = coalesce(p.assigned_show_id, s.show_id)
+          where lower(p.source_account) = %s
+            and nullif(p.source_id, '') is not null
+        ),
+        {collaborator_rows_sql},
+        deduped_rows as materialized (
+          select distinct on (source_id)
+            *
+          from (
+            select * from owner_rows
+            union all
+            select * from collaborator_rows
+          ) candidate_rows
+          order by
+            source_id,
+            _profile_dataset_priority desc,
+            posted_at desc nulls last,
+            id desc
+        ),
+        {_instagram_saved_comment_counts_cte_sql(
+            source_cte="deduped_rows",
+            active_condition=active_condition,
+            use_rollup=use_comment_rollups,
+        )},
+        filtered_rows as materialized (
+          select
+            d.*,
+            coalesce(saved_comment_counts.saved_comments, 0)::int as saved_comments,
+            greatest(
+              coalesce(d.comments_count, 0) - coalesce(saved_comment_counts.saved_comments, 0),
+              0
+            )::int as missing_comments
+          from deduped_rows d
+          left join saved_comment_counts
+            on saved_comment_counts.profile_row_id = d.profile_row_id
+          where 1 = 1
+            {search_where_sql}
+        )
+    """
+    params: list[Any] = [normalized_account, normalized_account]
+    if collaborator_rows_available:
+        params.extend([normalized_account, normalized_account])
+    params.extend(search_params)
+    page_sql = f"""
+        {candidate_rows_sql}
+        select *, count(*) over()::int as _total_count
+        from filtered_rows
+        order by {order_by_sql}
+        limit %s offset %s
+    """
+    if conn is None:
+        rows = pg.fetch_all(page_sql, [*params, safe_page_size, safe_offset])
+        total_row = {"total": rows[0].get("_total_count")} if rows and rows[0].get("_total_count") is not None else {}
+        if not total_row:
+            total_sql = f"""
+                {candidate_rows_sql}
+                select count(*)::int as total
+                from filtered_rows
+            """
+            total_row = pg.fetch_one(total_sql, params) or {}
+    else:
+        with pg.db_cursor(conn=conn, label="instagram_profile_posts_rows") as cur:
+            rows = pg.fetch_all_with_cursor(cur, page_sql, [*params, safe_page_size, safe_offset])
+        total_row = {"total": rows[0].get("_total_count")} if rows and rows[0].get("_total_count") is not None else {}
+        if not total_row:
+            total_sql = f"""
+                {candidate_rows_sql}
+                select count(*)::int as total
+                from filtered_rows
+            """
+            with pg.db_cursor(conn=conn, label="instagram_profile_posts_total") as cur:
+                total_row = pg.fetch_one_with_cursor(cur, total_sql, params) or {}
+    return rows, _normalize_non_negative_int(total_row.get("total"))
+
+
+def _fetch_instagram_profile_rows_page_no_search(
+    account_handle: str,
+    *,
+    page: int,
+    page_size: int,
+    sort_by: str | None = None,
+    sort_dir: str | None = None,
+    conn: Any | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    safe_page = max(1, int(page))
+    safe_page_size = max(1, min(int(page_size), _SOCIAL_ACCOUNT_PROFILE_MAX_PAGE_SIZE))
+    safe_offset = (safe_page - 1) * safe_page_size
+    normalized_sort_by = _normalize_social_account_profile_post_sort_by(sort_by)
+    normalized_sort_dir = _normalize_social_account_profile_post_sort_dir(sort_dir)
+    owner_match_clause = _social_account_profile_owner_match_sql("instagram", alias="p")
+    reported_comments_expr = _instagram_reported_comments_sql("p")
+    order_by_sql = _comments_only_profile_order_by_sql(
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        missing_comments_sql="greatest(coalesce(filtered_rows.missing_comments, 0), 0)",
+    )
+    lifecycle_supported = _comment_lifecycle_supported("instagram_comments", conn=conn)
+    active_condition = "c.is_missing is not true" if lifecycle_supported else "true"
+    use_comment_rollups = _instagram_post_comment_rollups_available(conn=conn)
+    limit_missing_score_window = (
+        normalized_sort_by == "missing_comments" and normalized_sort_dir == "desc" and not use_comment_rollups
+    )
+    score_candidate_limit = safe_offset + safe_page_size
+    collaborator_rows_available = _instagram_catalog_collaborator_membership_available(conn=conn)
+    collaborator_rows_sql = (
+        """
+        collaborator_rows as materialized (
+          select
+            'catalog'::text as _row_kind,
+            p.id::text as _row_id,
+            p.id::text as id,
+            materialized_post.id::text as profile_row_id,
+            p.source_id as source_id,
+            p.posted_at,
+            p.title,
+            p.caption,
+            p.description,
+            p.text,
+            coalesce(p.likes, 0)::bigint as likes,
+            greatest(coalesce(p.comments_count, 0), 0)::bigint as comments_count,
+            'catalog'::text as _profile_source_surface,
+            'collaborator'::text as _profile_match_mode,
+            1::int as _profile_dataset_priority
+          from social.instagram_account_catalog_post_collaborators m
+          join social.instagram_account_catalog_posts p
+            on p.id = m.catalog_post_id
+          left join social.instagram_posts materialized_post
+            on materialized_post.shortcode = p.source_id
+          where m.collaborator_handle = %s
+            and lower(p.source_account) <> %s
+            and nullif(p.source_id, '') is not null
+        )
+        """
+        if collaborator_rows_available
+        else """
+        collaborator_rows as materialized (
+          select *
+          from owner_rows
+          where false
+        )
+        """
+    )
+    score_source_rows_sql = (
+        """
+        score_source_rows as materialized (
+          select *
+          from deduped_rows
+          order by
+            comments_count desc nulls last,
+            posted_at desc nulls last,
+            _row_id desc
+          limit %s
+        )
+        """
+        if limit_missing_score_window
+        else """
+        score_source_rows as materialized (
+          select *
+          from deduped_rows
+        )
+        """
+    )
+    scored_rows_sql = f"""
+        with owner_rows as materialized (
+          select
+            'materialized'::text as _row_kind,
+            p.id::text as _row_id,
+            p.id::text as id,
+            p.id::text as profile_row_id,
+            p.shortcode as source_id,
+            p.posted_at,
+            null::text as title,
+            p.caption,
+            null::text as description,
+            null::text as text,
+            coalesce(p.likes, 0)::bigint as likes,
+            {reported_comments_expr}::bigint as comments_count,
+            'materialized'::text as _profile_source_surface,
+            'owner'::text as _profile_match_mode,
+            3::int as _profile_dataset_priority
+          from social.instagram_posts p
+          where {owner_match_clause}
+            and nullif(p.shortcode, '') is not null
+          union all
+          select
+            'catalog'::text as _row_kind,
+            p.id::text as _row_id,
+            p.id::text as id,
+            materialized_post.id::text as profile_row_id,
+            p.source_id as source_id,
+            p.posted_at,
+            p.title,
+            p.caption,
+            p.description,
+            p.text,
+            coalesce(p.likes, 0)::bigint as likes,
+            greatest(coalesce(p.comments_count, 0), 0)::bigint as comments_count,
+            'catalog'::text as _profile_source_surface,
+            'owner'::text as _profile_match_mode,
+            2::int as _profile_dataset_priority
+          from social.instagram_account_catalog_posts p
+          left join social.instagram_posts materialized_post
+            on materialized_post.shortcode = p.source_id
+          where lower(p.source_account) = %s
+            and nullif(p.source_id, '') is not null
+        ),
+        {collaborator_rows_sql},
+        deduped_rows as materialized (
+          select distinct on (source_id)
+            *
+          from (
+            select * from owner_rows
+            union all
+            select * from collaborator_rows
+          ) candidate_rows
+          order by
+            source_id,
+            _profile_dataset_priority desc,
+            posted_at desc nulls last,
+            _row_id desc
+        ),
+        total_count as materialized (
+          select count(*)::int as total
+          from deduped_rows
+        ),
+        {score_source_rows_sql},
+        {_instagram_saved_comment_counts_cte_sql(
+            source_cte="score_source_rows",
+            active_condition=active_condition,
+            use_rollup=use_comment_rollups,
+        )},
+        filtered_rows as materialized (
+          select
+            d.*,
+            coalesce(saved_comment_counts.saved_comments, 0)::int as saved_comments,
+            greatest(
+              coalesce(d.comments_count, 0) - coalesce(saved_comment_counts.saved_comments, 0),
+              0
+            )::int as missing_comments
+          from score_source_rows d
+          left join saved_comment_counts
+            on saved_comment_counts.profile_row_id = d.profile_row_id
+        )
+    """
+    params: list[Any] = [normalized_account, normalized_account]
+    if collaborator_rows_available:
+        params.extend([normalized_account, normalized_account])
+    if limit_missing_score_window:
+        params.append(score_candidate_limit)
+    page_keys_sql = f"""
+        {scored_rows_sql},
+        page_keys as materialized (
+          select
+            row_number() over ()::int as _page_rank,
+            filtered_rows.*,
+            (select total from total_count) as _total_count
+          from filtered_rows
+          order by {order_by_sql}
+          limit %s offset %s
+        )
+        select
+          page_keys._page_rank,
+          p.id::text as id,
+          p.id::text as profile_row_id,
+          p.show_id::text as show_id,
+          p.season_id::text as season_id,
+          p.source_account,
+          p.shortcode as source_id,
+          p.shortcode as shortcode,
+          p.posted_at,
+          s.season_number,
+          sh.name as show_name,
+          sh.slug as show_slug,
+          null::text as title,
+          p.caption,
+          null::text as description,
+          null::text as text,
+          p.media_type,
+          coalesce(p.media_urls, '[]'::jsonb) as media_urls,
+          nullif(p.thumbnail_url, '') as thumbnail_url,
+          coalesce(p.media_urls, '[]'::jsonb) as source_media_urls,
+          coalesce(to_jsonb(p) -> 'hosted_media_urls', '[]'::jsonb) as hosted_media_urls,
+          nullif(p.thumbnail_url, '') as source_thumbnail_url,
+          nullif(coalesce(to_jsonb(p) ->> 'hosted_thumbnail_url', ''), '') as hosted_thumbnail_url,
+          nullif(coalesce(to_jsonb(p) ->> 'post_format', ''), '') as post_format,
+          coalesce(p.hashtags, '[]'::jsonb) as hashtags,
+          coalesce(p.mentions, '[]'::jsonb) as mentions,
+          coalesce(p.collaborators, '[]'::jsonb) as collaborators,
+          coalesce(to_jsonb(p) -> 'collaborators_detail', '[]'::jsonb) as collaborators_detail,
+          coalesce(p.profile_tags, '[]'::jsonb) as profile_tags,
+          coalesce(p.likes, 0)::bigint as likes,
+          {reported_comments_expr}::bigint as comments_count,
+          p.fb_comment_count,
+          p.facebook_crosspost_observed_at,
+          p.facebook_crosspost_source,
+          p.facebook_post_id,
+          p.facebook_post_url,
+          coalesce(p.views, 0)::bigint as views,
+          p.media_repost_count::bigint as media_repost_count,
+          coalesce(p.media_repost_count, 0)::bigint as shares,
+          0::bigint as retweets,
+          0::bigint as replies_count,
+          0::bigint as quotes,
+          coalesce(p.raw_data, '{{}}'::jsonb) as raw_data,
+          null::text as permalink,
+          page_keys.saved_comments,
+          page_keys.missing_comments,
+          page_keys._profile_source_surface,
+          page_keys._profile_match_mode,
+          page_keys._profile_dataset_priority,
+          page_keys._total_count
+        from page_keys
+        join social.instagram_posts p
+          on page_keys._row_kind = 'materialized'
+         and p.id::text = page_keys._row_id
+        left join core.seasons s on s.id = p.season_id
+        left join core.shows sh on sh.id = coalesce(p.show_id, s.show_id)
+        union all
+        select
+          page_keys._page_rank,
+          p.id::text as id,
+          materialized_post.id::text as profile_row_id,
+          p.assigned_show_id::text as show_id,
+          p.assigned_season_id::text as season_id,
+          p.source_account,
+          p.source_id as source_id,
+          p.source_id as shortcode,
+          p.posted_at,
+          s.season_number,
+          sh.name as show_name,
+          sh.slug as show_slug,
+          p.title,
+          p.caption,
+          p.description,
+          p.text,
+          p.media_type,
+          coalesce(p.media_urls, '[]'::jsonb) as media_urls,
+          nullif(p.thumbnail_url, '') as thumbnail_url,
+          coalesce(p.media_urls, '[]'::jsonb) as source_media_urls,
+          coalesce(to_jsonb(p) -> 'hosted_media_urls', '[]'::jsonb) as hosted_media_urls,
+          nullif(p.thumbnail_url, '') as source_thumbnail_url,
+          nullif(coalesce(to_jsonb(p) ->> 'hosted_thumbnail_url', ''), '') as hosted_thumbnail_url,
+          nullif(coalesce(to_jsonb(p) ->> 'post_format', ''), '') as post_format,
+          coalesce(p.hashtags, '[]'::jsonb) as hashtags,
+          coalesce(p.mentions, '[]'::jsonb) as mentions,
+          coalesce(p.collaborators, '[]'::jsonb) as collaborators,
+          coalesce(to_jsonb(p) -> 'collaborators_detail', p.raw_data -> 'collaborators_detail', '[]'::jsonb)
+            as collaborators_detail,
+          coalesce(p.profile_tags, '[]'::jsonb) as profile_tags,
+          coalesce(p.likes, 0)::bigint as likes,
+          greatest(coalesce(p.comments_count, 0), 0)::bigint as comments_count,
+          null::integer as fb_comment_count,
+          null::timestamptz as facebook_crosspost_observed_at,
+          null::text as facebook_crosspost_source,
+          null::text as facebook_post_id,
+          null::text as facebook_post_url,
+          coalesce(p.views, 0)::bigint as views,
+          null::bigint as media_repost_count,
+          coalesce(p.shares, 0)::bigint as shares,
+          coalesce(p.retweets, 0)::bigint as retweets,
+          coalesce(p.replies_count, 0)::bigint as replies_count,
+          coalesce(p.quotes, 0)::bigint as quotes,
+          coalesce(p.raw_data, '{{}}'::jsonb) as raw_data,
+          p.permalink,
+          page_keys.saved_comments,
+          page_keys.missing_comments,
+          page_keys._profile_source_surface,
+          page_keys._profile_match_mode,
+          page_keys._profile_dataset_priority,
+          page_keys._total_count
+        from page_keys
+        join social.instagram_account_catalog_posts p
+          on page_keys._row_kind = 'catalog'
+         and p.id::text = page_keys._row_id
+        left join social.instagram_posts materialized_post
+          on materialized_post.shortcode = p.source_id
+        left join core.seasons s on s.id = p.assigned_season_id
+        left join core.shows sh on sh.id = coalesce(p.assigned_show_id, s.show_id)
+        order by _page_rank asc
+    """
+    if conn is None:
+        rows = pg.fetch_all(page_keys_sql, [*params, safe_page_size, safe_offset])
+        total_row = {"total": rows[0].get("_total_count")} if rows and rows[0].get("_total_count") is not None else {}
+        if not total_row:
+            total_sql = f"""
+                {scored_rows_sql}
+                select total
+                from total_count
+            """
+            total_row = pg.fetch_one(total_sql, params) or {}
+    else:
+        with pg.db_cursor(conn=conn, label="instagram_profile_posts_rows") as cur:
+            rows = pg.fetch_all_with_cursor(cur, page_keys_sql, [*params, safe_page_size, safe_offset])
+        total_row = {"total": rows[0].get("_total_count")} if rows and rows[0].get("_total_count") is not None else {}
+        if not total_row:
+            total_sql = f"""
+                {scored_rows_sql}
+                select total
+                from total_count
+            """
+            with pg.db_cursor(conn=conn, label="instagram_profile_posts_total") as cur:
+                total_row = pg.fetch_one_with_cursor(cur, total_sql, params) or {}
+    return rows, _normalize_non_negative_int(total_row.get("total"))
+
+
+def _fetch_instagram_profile_rows_page_no_search_created(
+    account_handle: str,
+    *,
+    page: int,
+    page_size: int,
+    conn: Any | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    safe_page = max(1, int(page))
+    safe_page_size = max(1, min(int(page_size), _SOCIAL_ACCOUNT_PROFILE_MAX_PAGE_SIZE))
+    safe_offset = (safe_page - 1) * safe_page_size
+    owner_match_clause = _social_account_profile_owner_match_sql("instagram", alias="p")
+    reported_comments_expr = _instagram_reported_comments_sql("p")
+    lifecycle_supported = _comment_lifecycle_supported("instagram_comments", conn=conn)
+    active_condition = "c.is_missing is not true" if lifecycle_supported else "true"
+    use_comment_rollups = _instagram_post_comment_rollups_available(conn=conn)
+    collaborator_rows_available = _instagram_catalog_collaborator_membership_available(conn=conn)
+    collaborator_rows_sql = (
+        """
+        collaborator_rows as materialized (
+          select
+            'catalog'::text as _row_kind,
+            p.id::text as _row_id,
+            materialized_post.id::text as profile_row_id,
+            p.source_id,
+            p.posted_at,
+            'catalog'::text as _profile_source_surface,
+            'collaborator'::text as _profile_match_mode,
+            1::int as _profile_dataset_priority
+          from social.instagram_account_catalog_post_collaborators m
+          join social.instagram_account_catalog_posts p
+            on p.id = m.catalog_post_id
+          left join social.instagram_posts materialized_post
+            on materialized_post.shortcode = p.source_id
+          where m.collaborator_handle = %s
+            and lower(p.source_account) <> %s
+            and nullif(p.source_id, '') is not null
+        )
+        """
+        if collaborator_rows_available
+        else """
+        collaborator_rows as materialized (
+          select *
+          from owner_rows
+          where false
+        )
+        """
+    )
+    page_sql = f"""
+        with owner_rows as materialized (
+          select
+            'materialized'::text as _row_kind,
+            p.id::text as _row_id,
+            p.id::text as profile_row_id,
+            p.shortcode as source_id,
+            p.posted_at,
+            'materialized'::text as _profile_source_surface,
+            'owner'::text as _profile_match_mode,
+            3::int as _profile_dataset_priority
+          from social.instagram_posts p
+          where {owner_match_clause}
+            and nullif(p.shortcode, '') is not null
+          union all
+          select
+            'catalog'::text as _row_kind,
+            p.id::text as _row_id,
+            materialized_post.id::text as profile_row_id,
+            p.source_id,
+            p.posted_at,
+            'catalog'::text as _profile_source_surface,
+            'owner'::text as _profile_match_mode,
+            2::int as _profile_dataset_priority
+          from social.instagram_account_catalog_posts p
+          left join social.instagram_posts materialized_post
+            on materialized_post.shortcode = p.source_id
+          where lower(p.source_account) = %s
+            and nullif(p.source_id, '') is not null
+        ),
+        {collaborator_rows_sql},
+        deduped_rows as materialized (
+          select distinct on (source_id)
+            *
+          from (
+            select * from owner_rows
+            union all
+            select * from collaborator_rows
+          ) candidate_rows
+          order by
+            source_id,
+            _profile_dataset_priority desc,
+            posted_at desc nulls last,
+            _row_id desc
+        ),
+        page_keys as materialized (
+          select
+            row_number() over ()::int as _page_rank,
+            deduped_rows.*,
+            count(*) over()::int as _total_count
+          from deduped_rows
+          order by posted_at desc nulls last, _row_id desc
+          limit %s offset %s
+        ),
+        {_instagram_saved_comment_counts_cte_sql(
+            source_cte="page_keys",
+            active_condition=active_condition,
+            use_rollup=use_comment_rollups,
+        )}
+        select
+          page_keys._page_rank,
+          p.id::text as id,
+          p.id::text as profile_row_id,
+          p.show_id::text as show_id,
+          p.season_id::text as season_id,
+          p.source_account,
+          p.shortcode as source_id,
+          p.shortcode as shortcode,
+          p.posted_at,
+          s.season_number,
+          sh.name as show_name,
+          sh.slug as show_slug,
+          null::text as title,
+          p.caption,
+          null::text as description,
+          null::text as text,
+          p.media_type,
+          coalesce(p.media_urls, '[]'::jsonb) as media_urls,
+          nullif(p.thumbnail_url, '') as thumbnail_url,
+          coalesce(p.media_urls, '[]'::jsonb) as source_media_urls,
+          coalesce(to_jsonb(p) -> 'hosted_media_urls', '[]'::jsonb) as hosted_media_urls,
+          nullif(p.thumbnail_url, '') as source_thumbnail_url,
+          nullif(coalesce(to_jsonb(p) ->> 'hosted_thumbnail_url', ''), '') as hosted_thumbnail_url,
+          nullif(coalesce(to_jsonb(p) ->> 'post_format', ''), '') as post_format,
+          coalesce(p.hashtags, '[]'::jsonb) as hashtags,
+          coalesce(p.mentions, '[]'::jsonb) as mentions,
+          coalesce(p.collaborators, '[]'::jsonb) as collaborators,
+          coalesce(to_jsonb(p) -> 'collaborators_detail', '[]'::jsonb) as collaborators_detail,
+          coalesce(p.profile_tags, '[]'::jsonb) as profile_tags,
+          coalesce(p.likes, 0)::bigint as likes,
+          {reported_comments_expr}::bigint as comments_count,
+          p.fb_comment_count,
+          p.facebook_crosspost_observed_at,
+          p.facebook_crosspost_source,
+          p.facebook_post_id,
+          p.facebook_post_url,
+          coalesce(p.views, 0)::bigint as views,
+          p.media_repost_count::bigint as media_repost_count,
+          coalesce(p.media_repost_count, 0)::bigint as shares,
+          0::bigint as retweets,
+          0::bigint as replies_count,
+          0::bigint as quotes,
+          coalesce(p.raw_data, '{{}}'::jsonb) as raw_data,
+          null::text as permalink,
+          coalesce(saved_comment_counts.saved_comments, 0)::int as saved_comments,
+          greatest(({reported_comments_expr})::bigint - coalesce(saved_comment_counts.saved_comments, 0), 0)::int
+            as missing_comments,
+          page_keys._profile_source_surface,
+          page_keys._profile_match_mode,
+          page_keys._profile_dataset_priority,
+          page_keys._total_count
+        from page_keys
+        join social.instagram_posts p
+          on page_keys._row_kind = 'materialized'
+         and p.id::text = page_keys._row_id
+        left join saved_comment_counts
+          on saved_comment_counts.profile_row_id = p.id::text
+        left join core.seasons s on s.id = p.season_id
+        left join core.shows sh on sh.id = coalesce(p.show_id, s.show_id)
+        union all
+        select
+          page_keys._page_rank,
+          p.id::text as id,
+          materialized_post.id::text as profile_row_id,
+          p.assigned_show_id::text as show_id,
+          p.assigned_season_id::text as season_id,
+          p.source_account,
+          p.source_id as source_id,
+          p.source_id as shortcode,
+          p.posted_at,
+          s.season_number,
+          sh.name as show_name,
+          sh.slug as show_slug,
+          p.title,
+          p.caption,
+          p.description,
+          p.text,
+          p.media_type,
+          coalesce(p.media_urls, '[]'::jsonb) as media_urls,
+          nullif(p.thumbnail_url, '') as thumbnail_url,
+          coalesce(p.media_urls, '[]'::jsonb) as source_media_urls,
+          coalesce(to_jsonb(p) -> 'hosted_media_urls', '[]'::jsonb) as hosted_media_urls,
+          nullif(p.thumbnail_url, '') as source_thumbnail_url,
+          nullif(coalesce(to_jsonb(p) ->> 'hosted_thumbnail_url', ''), '') as hosted_thumbnail_url,
+          nullif(coalesce(to_jsonb(p) ->> 'post_format', ''), '') as post_format,
+          coalesce(p.hashtags, '[]'::jsonb) as hashtags,
+          coalesce(p.mentions, '[]'::jsonb) as mentions,
+          coalesce(p.collaborators, '[]'::jsonb) as collaborators,
+          coalesce(to_jsonb(p) -> 'collaborators_detail', p.raw_data -> 'collaborators_detail', '[]'::jsonb)
+            as collaborators_detail,
+          coalesce(p.profile_tags, '[]'::jsonb) as profile_tags,
+          coalesce(p.likes, 0)::bigint as likes,
+          greatest(coalesce(p.comments_count, 0), 0)::bigint as comments_count,
+          null::integer as fb_comment_count,
+          null::timestamptz as facebook_crosspost_observed_at,
+          null::text as facebook_crosspost_source,
+          null::text as facebook_post_id,
+          null::text as facebook_post_url,
+          coalesce(p.views, 0)::bigint as views,
+          null::bigint as media_repost_count,
+          coalesce(p.shares, 0)::bigint as shares,
+          coalesce(p.retweets, 0)::bigint as retweets,
+          coalesce(p.replies_count, 0)::bigint as replies_count,
+          coalesce(p.quotes, 0)::bigint as quotes,
+          coalesce(p.raw_data, '{{}}'::jsonb) as raw_data,
+          p.permalink,
+          coalesce(saved_comment_counts.saved_comments, 0)::int as saved_comments,
+          greatest(coalesce(p.comments_count, 0)::bigint - coalesce(saved_comment_counts.saved_comments, 0), 0)::int
+            as missing_comments,
+          page_keys._profile_source_surface,
+          page_keys._profile_match_mode,
+          page_keys._profile_dataset_priority,
+          page_keys._total_count
+        from page_keys
+        join social.instagram_account_catalog_posts p
+          on page_keys._row_kind = 'catalog'
+         and p.id::text = page_keys._row_id
+        left join social.instagram_posts materialized_post
+          on materialized_post.shortcode = p.source_id
+        left join saved_comment_counts
+          on saved_comment_counts.profile_row_id = materialized_post.id::text
+        left join core.seasons s on s.id = p.assigned_season_id
+        left join core.shows sh on sh.id = coalesce(p.assigned_show_id, s.show_id)
+        order by _page_rank asc
+    """
+    params: list[Any] = [normalized_account, normalized_account]
+    if collaborator_rows_available:
+        params.extend([normalized_account, normalized_account])
+    if conn is None:
+        rows = pg.fetch_all(page_sql, [*params, safe_page_size, safe_offset])
+    else:
+        with pg.db_cursor(conn=conn, label="instagram_profile_posts_created_rows") as cur:
+            rows = pg.fetch_all_with_cursor(cur, page_sql, [*params, safe_page_size, safe_offset])
+    total = _normalize_non_negative_int(rows[0].get("_total_count")) if rows else 0
+    return rows, total
 
 
 def _social_account_profile_post_item(
@@ -823,86 +1922,176 @@ def get_social_account_profile_posts(
     _sync_core_overrides()
     normalized_platform = _normalize_social_account_profile_platform(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
-    safe_page = max(1, int(page))
-    safe_page_size = max(1, min(int(page_size), _SOCIAL_ACCOUNT_PROFILE_MAX_PAGE_SIZE))
-    normalized_search = str(search or "").strip() or None
-    normalized_comment_filter = _normalize_social_account_profile_comment_filter(comment_filter)
-    normalized_sort_by = _normalize_social_account_profile_post_sort_by(sort_by)
-    normalized_sort_dir = _normalize_social_account_profile_post_sort_dir(sort_dir)
-    if normalized_platform == "instagram" and comments_only and normalized_search is None:
-        with _social_account_profile_summary_connection("social-profile-posts-instagram-comments-only") as read_conn:
-            _assert_social_account_profile_exists(normalized_platform, normalized_account, conn=read_conn)
-            rows, total = _fetch_instagram_comments_only_profile_rows_page(
-                normalized_account,
-                page=safe_page,
-                page_size=safe_page_size,
-                search=normalized_search,
-                comment_filter=normalized_comment_filter,
-                sort_by=normalized_sort_by,
-                sort_dir=normalized_sort_dir,
-                conn=read_conn,
-            )
-    elif normalized_platform in {"tiktok", "twitter", "youtube"} and comments_only and normalized_search is None:
-        with _social_account_profile_summary_connection(
-            f"social-profile-posts-{normalized_platform}-comments-only"
-        ) as read_conn:
-            _assert_social_account_profile_exists(normalized_platform, normalized_account, conn=read_conn)
-            rows, total = _fetch_materialized_comments_only_profile_rows_page(
+    breakdown: dict[str, float] = {}
+    sort_metadata: dict[str, Any] | None = None
+    try:
+        with _social_profile_perf_span(breakdown, "normalize"):
+            safe_page = max(1, int(page))
+            safe_page_size = max(1, min(int(page_size), _SOCIAL_ACCOUNT_PROFILE_MAX_PAGE_SIZE))
+            normalized_search = str(search or "").strip() or None
+            requested_sort_by = str(sort_by or "").strip().lower() or None
+            normalized_comment_filter = _normalize_social_account_profile_comment_filter(comment_filter)
+            normalized_sort_by = _normalize_social_account_profile_post_sort_by(sort_by)
+            normalized_sort_dir = _normalize_social_account_profile_post_sort_dir(sort_dir)
+        if normalized_platform == "instagram" and comments_only and normalized_search is None:
+            with _social_account_profile_summary_connection(
+                "social-profile-posts-instagram-comments-only"
+            ) as read_conn:
+                with _social_profile_perf_span(breakdown, "assert_profile"):
+                    _assert_social_account_profile_exists(normalized_platform, normalized_account, conn=read_conn)
+                with _social_profile_perf_span(breakdown, "fetch_rows"):
+                    rows, total = _fetch_instagram_comments_only_profile_rows_page(
+                        normalized_account,
+                        page=safe_page,
+                        page_size=safe_page_size,
+                        search=normalized_search,
+                        comment_filter=normalized_comment_filter,
+                        sort_by=normalized_sort_by,
+                        sort_dir=normalized_sort_dir,
+                        conn=read_conn,
+                    )
+        elif normalized_platform in {"tiktok", "twitter", "youtube"} and comments_only and normalized_search is None:
+            with _social_account_profile_summary_connection(
+                f"social-profile-posts-{normalized_platform}-comments-only"
+            ) as read_conn:
+                with _social_profile_perf_span(breakdown, "assert_profile"):
+                    _assert_social_account_profile_exists(normalized_platform, normalized_account, conn=read_conn)
+                with _social_profile_perf_span(breakdown, "fetch_rows"):
+                    rows, total = _fetch_materialized_comments_only_profile_rows_page(
+                        normalized_platform,
+                        normalized_account,
+                        page=safe_page,
+                        page_size=safe_page_size,
+                        sort_by=normalized_sort_by,
+                        sort_dir=normalized_sort_dir,
+                        conn=read_conn,
+                    )
+        elif normalized_platform == "instagram" and not comments_only:
+            with _social_account_profile_summary_connection("social-profile-posts-instagram") as read_conn:
+                with _social_profile_perf_span(breakdown, "assert_profile"):
+                    _assert_social_account_profile_exists(normalized_platform, normalized_account, conn=read_conn)
+                instagram_rollups_available = _instagram_post_comment_rollups_available(conn=read_conn)
+                if requested_sort_by == "missing_comments":
+                    sort_metadata = {
+                        "sort_by": "missing_comments",
+                        "sort_dir": normalized_sort_dir,
+                        "rollup_table": "social.instagram_post_comment_rollups",
+                        "rollup_available": instagram_rollups_available,
+                        "mode": "persisted_rollup"
+                        if instagram_rollups_available
+                        else ("bounded_page_score" if normalized_search is None else "live_comment_count"),
+                        "exact": instagram_rollups_available or normalized_search is not None,
+                        "candidate_limit": None
+                        if instagram_rollups_available or normalized_search is not None
+                        else (safe_page - 1) * safe_page_size + safe_page_size,
+                    }
+                try:
+                    with _social_profile_perf_span(breakdown, "fetch_rows"):
+                        if normalized_search is None and requested_sort_by is None:
+                            rows, total = _fetch_instagram_profile_rows_page_no_search_created(
+                                normalized_account,
+                                page=safe_page,
+                                page_size=safe_page_size,
+                                conn=read_conn,
+                            )
+                        elif normalized_search is None:
+                            rows, total = _fetch_instagram_profile_rows_page_no_search(
+                                normalized_account,
+                                page=safe_page,
+                                page_size=safe_page_size,
+                                sort_by=normalized_sort_by,
+                                sort_dir=normalized_sort_dir,
+                                conn=read_conn,
+                            )
+                        else:
+                            rows, total = _fetch_instagram_profile_rows_page(
+                                normalized_account,
+                                page=safe_page,
+                                page_size=safe_page_size,
+                                search=normalized_search,
+                                sort_by=normalized_sort_by,
+                                sort_dir=normalized_sort_dir,
+                                conn=read_conn,
+                            )
+                except psycopg_errors.UndefinedTable:
+                    with _social_profile_perf_span(breakdown, "fetch_rows_fallback"):
+                        matching_rows = _instagram_social_account_profile_dataset_rows(
+                            normalized_account,
+                            search=normalized_search,
+                            comments_only=comments_only,
+                            sort_by=normalized_sort_by,
+                            sort_dir=normalized_sort_dir,
+                            conn=read_conn,
+                        )
+                    total = len(matching_rows)
+                    rows = matching_rows[(safe_page - 1) * safe_page_size : safe_page * safe_page_size]
+        elif normalized_platform == "instagram":
+            with _social_profile_perf_span(breakdown, "assert_profile"):
+                _assert_social_account_profile_exists(normalized_platform, normalized_account)
+            with _social_profile_perf_span(breakdown, "fetch_rows"):
+                matching_rows = _instagram_social_account_profile_dataset_rows(
+                    normalized_account,
+                    search=normalized_search,
+                    comments_only=comments_only,
+                    sort_by=normalized_sort_by,
+                    sort_dir=normalized_sort_dir,
+                )
+            total = len(matching_rows)
+            rows = matching_rows[(safe_page - 1) * safe_page_size : safe_page * safe_page_size]
+        else:
+            with _social_profile_perf_span(breakdown, "assert_profile"):
+                _assert_social_account_profile_exists(normalized_platform, normalized_account)
+            with _social_profile_perf_span(breakdown, "fetch_total"):
+                total = _social_account_profile_total_posts(
+                    normalized_platform,
+                    normalized_account,
+                    search=normalized_search,
+                )
+            with _social_profile_perf_span(breakdown, "fetch_rows"):
+                rows = _fetch_social_account_profile_rows(
+                    normalized_platform,
+                    normalized_account,
+                    limit=safe_page_size,
+                    offset=(safe_page - 1) * safe_page_size,
+                    search=normalized_search,
+                )
+        with _social_profile_perf_span(breakdown, "build_items"):
+            known_handle_identity_index = _build_social_account_profile_known_handle_identity_index(
                 normalized_platform,
-                normalized_account,
-                page=safe_page,
-                page_size=safe_page_size,
-                sort_by=normalized_sort_by,
-                sort_dir=normalized_sort_dir,
-                conn=read_conn,
+                rows,
             )
-    elif normalized_platform == "instagram":
-        _assert_social_account_profile_exists(normalized_platform, normalized_account)
-        matching_rows = _instagram_social_account_profile_dataset_rows(
-            normalized_account,
-            search=normalized_search,
-            comments_only=comments_only,
-            sort_by=normalized_sort_by,
-            sort_dir=normalized_sort_dir,
-        )
-        total = len(matching_rows)
-        rows = matching_rows[(safe_page - 1) * safe_page_size : safe_page * safe_page_size]
-    else:
-        _assert_social_account_profile_exists(normalized_platform, normalized_account)
-        total = _social_account_profile_total_posts(normalized_platform, normalized_account, search=normalized_search)
-        rows = _fetch_social_account_profile_rows(
-            normalized_platform,
-            normalized_account,
-            limit=safe_page_size,
-            offset=(safe_page - 1) * safe_page_size,
-            search=normalized_search,
-        )
-    known_handle_identity_index = _build_social_account_profile_known_handle_identity_index(
-        normalized_platform,
-        rows,
-    )
-    items = [
-        _social_account_profile_post_item(
-            normalized_platform,
-            row,
-            account_handle=normalized_account,
-            known_handle_identity_index=known_handle_identity_index,
-        )
-        | {
-            "match_mode": str(row.get("_profile_match_mode") or "owner"),
-            "source_surface": str(row.get("_profile_source_surface") or "materialized"),
+            items = [
+                _social_account_profile_post_item(
+                    normalized_platform,
+                    row,
+                    account_handle=normalized_account,
+                    known_handle_identity_index=known_handle_identity_index,
+                )
+                | {
+                    "match_mode": str(row.get("_profile_match_mode") or "owner"),
+                    "source_surface": str(row.get("_profile_source_surface") or "materialized"),
+                }
+                for row in rows
+            ]
+        payload = {
+            "items": items,
+            "pagination": {
+                "page": safe_page,
+                "page_size": safe_page_size,
+                "total": total,
+                "total_pages": max(1, (total + safe_page_size - 1) // safe_page_size) if safe_page_size else 1,
+            },
         }
-        for row in rows
-    ]
-    return {
-        "items": items,
-        "pagination": {
-            "page": safe_page,
-            "page_size": safe_page_size,
-            "total": total,
-            "total_pages": max(1, (total + safe_page_size - 1) // safe_page_size) if safe_page_size else 1,
-        },
-    }
+        if sort_metadata is not None:
+            payload["sort_metadata"] = sort_metadata
+        return payload
+    finally:
+        _log_social_profile_perf(
+            route="get_social_account_profile_posts",
+            platform=normalized_platform,
+            handle=normalized_account,
+            breakdown=breakdown,
+        )
 
 
 def get_social_account_profile_comments(
@@ -1693,6 +2882,8 @@ _LOCAL_ROOM_NAMES = {
     "get_social_account_profile_comments",
     "get_social_account_profile_hashtags",
     "get_social_account_profile_collaborators_tags",
+    "instagram_comment_rollup_health",
+    "rebuild_instagram_post_comment_rollups",
 }
 _LOCAL_ROOM_FUNCTIONS = {_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES}
 _CORE_ROOM_WRAPPERS = {_name: getattr(_core, _name, None) for _name in _LOCAL_ROOM_NAMES}
@@ -1702,4 +2893,6 @@ __all__ = [
     "get_social_account_profile_comments",
     "get_social_account_profile_hashtags",
     "get_social_account_profile_collaborators_tags",
+    "instagram_comment_rollup_health",
+    "rebuild_instagram_post_comment_rollups",
 ]

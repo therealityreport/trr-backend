@@ -449,6 +449,26 @@ class ThreadsScraper:
             user_id=user_id,
         )
 
+    def validate_session_tokens(
+        self,
+        *,
+        probe_url: str = "https://www.threads.com/@threads",
+    ) -> tuple[bool, str | None]:
+        """In-protocol session check: the cookies must fetch a page that still
+        exposes GraphQL tokens (fb_dtsg/lsd). Anonymous and logged-out pages no
+        longer ship them, so page-state heuristics alone pass cookies that the
+        GraphQL lane cannot actually use."""
+        try:
+            html_text = self._fetch_html(probe_url, delay_seconds=0.5, document=True)
+        except Exception as exc:  # noqa: BLE001
+            return False, f"probe_fetch_failed:{exc.__class__.__name__}"
+        lowered = html_text.lower()
+        if "log in with your instagram account" in lowered or "continue with instagram" in lowered:
+            return False, "login_prompt_detected"
+        if self._extract_page_tokens(html_text) is None:
+            return False, "graphql_tokens_missing"
+        return True, None
+
     def _graphql_query(
         self,
         *,

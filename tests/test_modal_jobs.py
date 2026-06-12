@@ -211,26 +211,28 @@ def test_inject_modal_runtime_defaults_sets_canonical_modal_flags(
     assert os.environ["TRR_DB_POOL_ACQUIRE_ATTEMPTS"] == "30"
     assert os.environ["TRR_DB_POOL_ACQUIRE_SLEEP_MS"] == "200"
     assert os.environ["TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT"] == "8"
+    assert os.environ["TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT"] == "10"
     assert os.environ["TRR_MODAL_SOCIAL_MEDIA_JOB_CONCURRENCY_LIMIT"] == "10"
     assert os.environ["TRR_MODAL_CAST_SCREENTIME_FUNCTION"] == "run_cast_screentime_analysis"
     assert os.environ["TRR_MODAL_CAST_SCREENTIME_CONCURRENCY_LIMIT"] == "2"
-    assert os.environ["SOCIAL_MODAL_DISPATCH_LIMIT"] == "8"
+    assert os.environ["SOCIAL_MODAL_DISPATCH_LIMIT"] == "10"
     assert os.environ["SOCIAL_INSTAGRAM_POSTS_USE_STICKY_PROXY"] == "true"
     assert os.environ["SOCIAL_INSTAGRAM_POSTS_ANONYMOUS_ENABLED"] == "false"
     assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER"] == "decodo"
     assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY"] == "true"
     assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY"] == "false"
     assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS"] == "600"
-    assert os.environ["SOCIAL_WORKER_POOL_COMMENTS"] == "8"
+    assert os.environ["SOCIAL_WORKER_POOL_COMMENTS"] == "10"
     assert os.environ["SOCIAL_WORKER_POOL_SHARED_ACCOUNT_DISCOVERY"] == "3"
     assert os.environ["SOCIAL_WORKER_POOL_SHARED_ACCOUNT_POSTS"] == "8"
     assert os.environ["SOCIAL_SHARED_ACCOUNT_POSTS_PLATFORM_CAP_INSTAGRAM"] == "2"
     assert os.environ["SOCIAL_WORKER_POOL_MEDIA_MIRROR"] == "10"
     assert os.environ["SOCIAL_MIRROR_PLATFORM_CAP"] == "10"
     assert os.environ["SOCIAL_CATALOG_RUN_IN_FLIGHT_CAP"] == "8"
-    assert os.environ["SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM"] == "8"
+    assert os.environ["SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM"] == "10"
     assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT"] == "8"
-    assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_GLOBAL_RATE_LIMIT_MODE"] == "file_lock"
+    assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_GLOBAL_RATE_LIMIT_MODE"] == "advisory"
+    assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_PER_POST_CONCURRENCY"] == "2"
     assert os.environ["SOCIAL_THREADS_POSTS_SCRAPLING_ENABLED"] == "true"
     assert os.environ["SOCIAL_THREADS_POSTS_PROXY_PROVIDER"] == "decodo"
     assert "SOCIALBLADE_PROXY_PROVIDER" not in os.environ
@@ -303,12 +305,28 @@ def test_reddit_runtime_probe_payload_reports_healthy_oauth_env(
 
 def test_social_concurrency_limit_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT", "17")
+    monkeypatch.delenv("TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT", raising=False)
 
     reloaded = importlib.reload(modal_jobs)
     try:
         assert reloaded._SOCIAL_CONCURRENCY_LIMIT == 17
+        assert reloaded._SOCIAL_COMMENTS_CONCURRENCY_LIMIT == 17
     finally:
         monkeypatch.delenv("TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT", raising=False)
+        importlib.reload(modal_jobs)
+
+
+def test_social_comments_concurrency_limit_reads_comments_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT", "17")
+    monkeypatch.setenv("TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT", "11")
+
+    reloaded = importlib.reload(modal_jobs)
+    try:
+        assert reloaded._SOCIAL_CONCURRENCY_LIMIT == 17
+        assert reloaded._SOCIAL_COMMENTS_CONCURRENCY_LIMIT == 11
+    finally:
+        monkeypatch.delenv("TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT", raising=False)
+        monkeypatch.delenv("TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT", raising=False)
         importlib.reload(modal_jobs)
 
 
@@ -417,12 +435,178 @@ def test_sweep_social_dispatch_queue_closes_db_pool_after_success(monkeypatch: p
             },
         ),
     )
+    monkeypatch.setattr(
+        modal_jobs,
+        "_recover_stale_pending_social_catalog_launches",
+        lambda: {"scanned": 0, "recovered": 0, "recovered_run_ids": [], "failed_run_ids": []},
+    )
     monkeypatch.setattr(pg, "close_pool", lambda: close_calls.append("closed"))
 
     payload = modal_jobs.sweep_social_dispatch_queue.local()
 
-    assert payload == {"status": "completed", "recovered": 2, "dispatched": 1}
+    assert payload == {
+        "status": "completed",
+        "recovered": 2,
+        "dispatched": 1,
+        "pending_launch_recovery": {
+            "scanned": 0,
+            "recovered": 0,
+            "recovered_run_ids": [],
+            "failed_run_ids": [],
+        },
+    }
     assert close_calls == ["closed"]
+
+
+def test_sweep_social_dispatch_queue_invokes_pending_launch_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.db import pg
+
+    recovery_calls: list[str] = []
+    monkeypatch.setitem(
+        sys.modules,
+        "trr_backend.socials.control_plane",
+        types.SimpleNamespace(
+            recover_and_dispatch_due_social_jobs=lambda: {
+                "status": "completed",
+                "recovered": 0,
+                "dispatched": 0,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        modal_jobs,
+        "_recover_stale_pending_social_catalog_launches",
+        lambda: recovery_calls.append("recovered")
+        or {"scanned": 1, "recovered": 1, "recovered_run_ids": ["run-1"], "failed_run_ids": []},
+    )
+    monkeypatch.setattr(pg, "close_pool", lambda: None)
+
+    payload = modal_jobs.sweep_social_dispatch_queue.local()
+
+    assert recovery_calls == ["recovered"]
+    assert payload["pending_launch_recovery"] == {
+        "scanned": 1,
+        "recovered": 1,
+        "recovered_run_ids": ["run-1"],
+        "failed_run_ids": [],
+    }
+
+
+def test_sweep_social_dispatch_queue_pending_launch_recovery_error_does_not_fail_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.db import pg
+
+    monkeypatch.setitem(
+        sys.modules,
+        "trr_backend.socials.control_plane",
+        types.SimpleNamespace(
+            recover_and_dispatch_due_social_jobs=lambda: {
+                "status": "completed",
+                "recovered": 3,
+                "dispatched": 2,
+            },
+        ),
+    )
+
+    def _boom() -> dict[str, object]:
+        raise RuntimeError("recovery scan blew up")
+
+    monkeypatch.setattr(modal_jobs, "_recover_stale_pending_social_catalog_launches", _boom)
+    monkeypatch.setattr(pg, "close_pool", lambda: None)
+
+    payload = modal_jobs.sweep_social_dispatch_queue.local()
+
+    assert payload["status"] == "completed"
+    assert payload["recovered"] == 3
+    assert payload["dispatched"] == 2
+    assert payload["pending_launch_recovery"] == {"status": "error"}
+
+
+def test_recover_stale_pending_social_catalog_launches_recovers_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import trr_backend.socials.social_season_analytics_impl as social_core
+
+    fetched: list[tuple[str, list[object]]] = []
+    recover_calls: list[dict[str, str]] = []
+
+    def _fake_fetch_all(query: str, params=None, **_kwargs):
+        fetched.append((query, list(params or [])))
+        return [
+            {
+                "run_id": "run-1",
+                "config": {"platforms": ["instagram"], "accounts_override": ["bravotv"]},
+            },
+            {
+                "run_id": "run-2",
+                "config": {"platforms": ["tiktok"], "accounts_override": ["bravotv"]},
+            },
+            {
+                # Missing platform/account: not addressable per-account, must be skipped.
+                "run_id": "run-3",
+                "config": {},
+            },
+        ]
+
+    def _fake_recover(*, platform: str, account_handle: str, run_id: str) -> dict[str, object]:
+        recover_calls.append({"platform": platform, "account_handle": account_handle, "run_id": run_id})
+        if run_id == "run-2":
+            raise RuntimeError("finalize failed")
+        return {"recovered": True, "reason": "finalized", "run_id": run_id}
+
+    monkeypatch.setattr(social_core.pg, "fetch_all", _fake_fetch_all)
+    monkeypatch.setattr(social_core, "recover_pending_social_account_catalog_launch", _fake_recover)
+
+    summary = modal_jobs._recover_stale_pending_social_catalog_launches(limit=7)
+
+    assert len(fetched) == 1
+    query, params = fetched[0]
+    assert "launch_state" in query
+    assert "scrape_runs" in query
+    assert params[0] == social_core.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE
+    assert params[-1] == 7
+    assert recover_calls == [
+        {"platform": "instagram", "account_handle": "bravotv", "run_id": "run-1"},
+        {"platform": "tiktok", "account_handle": "bravotv", "run_id": "run-2"},
+    ]
+    assert summary == {
+        "scanned": 3,
+        "recovered": 1,
+        "recovered_run_ids": ["run-1"],
+        "failed_run_ids": ["run-2"],
+    }
+
+
+def test_recover_stale_pending_social_catalog_launches_skips_unrecovered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import trr_backend.socials.social_season_analytics_impl as social_core
+
+    monkeypatch.setattr(
+        social_core.pg,
+        "fetch_all",
+        lambda *_args, **_kwargs: [
+            {
+                "run_id": "run-1",
+                "config": {"platforms": ["instagram"], "accounts_override": ["bravotv"]},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        social_core,
+        "recover_pending_social_account_catalog_launch",
+        lambda **_kwargs: {"recovered": False, "reason": "recovery_lock_busy", "run_id": "run-1"},
+    )
+
+    summary = modal_jobs._recover_stale_pending_social_catalog_launches()
+
+    assert summary == {
+        "scanned": 1,
+        "recovered": 0,
+        "recovered_run_ids": [],
+        "failed_run_ids": [],
+    }
 
 
 def test_modal_deploy_schedules_are_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:

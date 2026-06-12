@@ -96,6 +96,11 @@
   },
   {
     "method": "POST",
+    "path": "/admin/socials/landing-progress-rollup",
+    "name": "post_social_landing_progress_rollup"
+  },
+  {
+    "method": "POST",
     "path": "/admin/socials/landing-socialblade-progress-counts",
     "name": "post_social_landing_socialblade_progress_counts"
   },

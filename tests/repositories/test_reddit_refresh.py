@@ -32,6 +32,39 @@ def _listing_row(
     }
 
 
+def test_build_reddit_refresh_save_proof_counts_saved_rows(monkeypatch) -> None:
+    def _fake_fetch_one(query, params=None, **_kwargs):  # noqa: ANN001
+        del params
+        normalized = " ".join(str(query).split()).lower()
+        if "from social.reddit_refresh_runs" in normalized:
+            return {
+                "id": "63a7be5d-0000-4000-8000-000000000001",
+                "community_id": "community-1",
+                "season_id": "season-1",
+                "period_key": "bravo-smoke",
+                "subreddit": "bravorealhousewives",
+                "status": "completed",
+                "total_rows": 7,
+                "matched_rows": 3,
+                "tracked_flair_rows": 2,
+                "diagnostics": {"result": {"totals": {"fetched_rows": 8, "matched_rows": 4}}},
+            }
+        if "count(distinct m.post_id)" in normalized:
+            return {"total": 4}
+        if "from social.reddit_period_post_matches" in normalized:
+            return {"total": 5}
+        raise AssertionError(normalized)
+
+    monkeypatch.setattr(reddit_refresh.pg, "fetch_one", _fake_fetch_one)
+
+    proof = reddit_refresh.build_reddit_refresh_save_proof("63a7be5d-0000-4000-8000-000000000001")
+
+    assert proof["fetched_count"] == 8
+    assert proof["upserted_count"] == 4
+    assert proof["materialized_count"] == 5
+    assert proof["verified"] is True
+
+
 def test_fetch_new_window_exhaustive_terminal_page_before_period_start_is_complete_when_exhausted(monkeypatch) -> None:
     newer_post_time = datetime(2025, 9, 10, 12, 0, tzinfo=UTC)
     period_start = datetime(2025, 8, 14, 0, 0, tzinfo=UTC)
@@ -110,6 +143,65 @@ def test_fetch_new_window_exhaustive_remains_incomplete_when_page_cap_is_hit(mon
     assert pages == 1
     assert len(rows) == 1
     assert complete is False
+
+
+def test_fetch_new_window_exhaustive_keeps_scanning_past_too_new_pages(monkeypatch) -> None:
+    period_start = datetime(2025, 1, 10, 0, 0, tzinfo=UTC)
+    period_end = datetime(2025, 1, 20, 23, 59, tzinfo=UTC)
+
+    def _payload(post_id: str, created_at: datetime, after: str | None) -> dict:
+        return {
+            "data": {
+                "children": [
+                    {
+                        "data": {
+                            "id": post_id,
+                            "title": "SLC recap",
+                            "selftext": "",
+                            "url": f"https://reddit.com/r/test/comments/{post_id}",
+                            "permalink": f"/r/test/comments/{post_id}",
+                            "author": "poster",
+                            "score": 5,
+                            "num_comments": 1,
+                            "created_utc": created_at.timestamp(),
+                            "link_flair_text": "Salt Lake City",
+                        }
+                    }
+                ],
+                "after": after,
+            }
+        }
+
+    pages = [
+        _payload("too-new-1", datetime(2025, 1, 30, 12, 0, tzinfo=UTC), "page-2"),
+        _payload("too-new-2", datetime(2025, 1, 29, 12, 0, tzinfo=UTC), "page-3"),
+        _payload("too-new-3", datetime(2025, 1, 28, 12, 0, tzinfo=UTC), "page-4"),
+        _payload("in-window", datetime(2025, 1, 15, 12, 0, tzinfo=UTC), None),
+    ]
+    calls: list[dict] = []
+
+    def fake_get_json(path, params):  # noqa: ANN001, ARG001
+        calls.append(dict(params))
+        return pages[len(calls) - 1]
+
+    monkeypatch.setattr(reddit_refresh._HTTP_CLIENT, "get_json", fake_get_json)  # noqa: SLF001
+
+    rows, pages_fetched, complete = reddit_refresh._fetch_new_window_exhaustive(  # noqa: SLF001
+        subreddit="bravorealhousewives",
+        period_start=period_start,
+        period_end=period_end,
+        max_pages=4,
+    )
+
+    assert pages_fetched == 4
+    assert complete is True
+    assert calls == [
+        {"limit": 100, "raw_json": 1},
+        {"limit": 100, "raw_json": 1, "after": "page-2"},
+        {"limit": 100, "raw_json": 1, "after": "page-3"},
+        {"limit": 100, "raw_json": 1, "after": "page-4"},
+    ]
+    assert [row["reddit_post_id"] for row in rows] == ["too-new-1", "too-new-2", "too-new-3", "in-window"]
 
 
 def test_fetch_sample_sorts_raises_when_all_sorts_fail(monkeypatch) -> None:
@@ -627,7 +719,7 @@ def test_cached_period_payload_uses_canonical_rows_over_stale_run_blob(monkeypat
     ]
 
     calls = {"count": 0}
-    monkeypatch.setattr(reddit_refresh, "_column_exists", lambda schema, table, column: True)  # noqa: ARG005
+    monkeypatch.setattr(reddit_refresh, "_column_exists", lambda schema, table, column, **kwargs: True)  # noqa: ARG005
 
     def fake_fetch_one(*args, **kwargs):  # noqa: ANN002, ANN003
         calls["count"] += 1
@@ -664,7 +756,7 @@ def test_replace_period_matches_skips_flair_mode_when_column_missing(monkeypatch
         def fetchall(self):  # noqa: ANN201
             return []
 
-    monkeypatch.setattr(reddit_refresh, "_column_exists", lambda schema, table, column: False)  # noqa: ARG005
+    monkeypatch.setattr(reddit_refresh, "_column_exists", lambda schema, table, column, **kwargs: False)  # noqa: ARG005
     monkeypatch.setattr(reddit_refresh.pg, "db_cursor", lambda conn=None: DummyCursor())  # noqa: ARG005
 
     def capture_execute(query, tuples, conn=None):  # noqa: ANN001, ANN201, ARG001
@@ -735,7 +827,7 @@ def test_cached_period_payload_returns_null_flair_mode_when_column_missing(monke
         }
     ]
 
-    monkeypatch.setattr(reddit_refresh, "_column_exists", lambda schema, table, column: False)  # noqa: ARG005
+    monkeypatch.setattr(reddit_refresh, "_column_exists", lambda schema, table, column, **kwargs: False)  # noqa: ARG005
     monkeypatch.setattr(reddit_refresh.pg, "fetch_one", lambda *args, **kwargs: run_row)  # noqa: ANN002, ANN003, ARG005
     monkeypatch.setattr(reddit_refresh.pg, "fetch_all", lambda *args, **kwargs: canonical_rows)  # noqa: ANN002, ANN003, ARG005
 
@@ -800,7 +892,7 @@ def test_get_cached_period_payload_resolves_stable_container_key_to_legacy_perio
             return {"period_key": legacy_period_key}
         return None
 
-    monkeypatch.setattr(reddit_refresh, "_column_exists", lambda schema, table, column: True)  # noqa: ARG005
+    monkeypatch.setattr(reddit_refresh, "_column_exists", lambda schema, table, column, **kwargs: True)  # noqa: ARG005
     monkeypatch.setattr(reddit_refresh.pg, "fetch_one", fake_fetch_one)
     monkeypatch.setattr(reddit_refresh.pg, "fetch_all", lambda *args, **kwargs: canonical_rows)  # noqa: ANN002, ANN003, ARG005
 
@@ -1069,6 +1161,33 @@ def test_create_or_reuse_refresh_run_reuses_matching_active_config(monkeypatch) 
 
     assert row["id"] == "active-run"
     assert row["reused"] is True
+
+
+def test_build_run_config_hash_distinguishes_behavior_inputs() -> None:
+    base_payload = {
+        "community_id": "community-1",
+        "season_id": "season-1",
+        "period_key": "pre-season",
+        "subreddit": "bravorealhousewives",
+        "show_name": "The Real Housewives of Salt Lake City",
+        "show_aliases": ["RHOSLC"],
+        "cast_names": ["Lisa Barlow"],
+        "coverage_mode": "adaptive_deep",
+        "preserve_existing_assignments": True,
+        "force_rescrape": False,
+    }
+    base_hash = reddit_refresh._build_run_config_hash(base_payload)  # noqa: SLF001
+
+    behavior_changes = [
+        {"subreddit": "Bravo"},
+        {"show_aliases": ["RHOSLC", "Salt Lake City"]},
+        {"cast_names": ["Meredith Marks"]},
+        {"preserve_existing_assignments": False},
+        {"force_rescrape": True},
+    ]
+
+    for change in behavior_changes:
+        assert reddit_refresh._build_run_config_hash({**base_payload, **change}) != base_hash  # noqa: SLF001
 
 
 def test_create_or_reuse_refresh_run_recovers_orphaned_matching_queued_run(monkeypatch) -> None:
@@ -2135,7 +2254,7 @@ def test_list_reddit_community_posts_applies_flair_and_container_filters(monkeyp
             }
         ]
 
-    monkeypatch.setattr(reddit_refresh, "_column_exists", lambda schema, table, column: True)  # noqa: ARG005
+    monkeypatch.setattr(reddit_refresh, "_column_exists", lambda schema, table, column, **kwargs: True)  # noqa: ARG005
     monkeypatch.setattr(reddit_refresh.pg, "fetch_one", fake_fetch_one)
     monkeypatch.setattr(reddit_refresh.pg, "fetch_all", fake_fetch_all)
 

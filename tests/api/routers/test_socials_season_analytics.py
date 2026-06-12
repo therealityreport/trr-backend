@@ -631,6 +631,56 @@ def test_get_social_account_profile_posts(client: TestClient, monkeypatch: pytes
     assert mocked.call_args.kwargs["page_size"] == 10
 
 
+def test_get_social_account_profile_posts_accepts_limit_alias(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "items": [],
+        "pagination": {"page": 1, "page_size": 20, "total": 0, "total_pages": 1},
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_social_account_profile_posts",
+        return_value=expected,
+    ) as mocked:
+        response = client.get(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/posts?limit=20",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["pagination"]["page_size"] == 20
+    assert mocked.call_args.kwargs["page_size"] == 20
+
+
+def test_get_social_account_profile_posts_page_size_overrides_limit_alias(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "items": [],
+        "pagination": {"page": 1, "page_size": 30, "total": 0, "total_pages": 1},
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_social_account_profile_posts",
+        return_value=expected,
+    ) as mocked:
+        response = client.get(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/posts?limit=20&page_size=30",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["pagination"]["page_size"] == 30
+    assert mocked.call_args.kwargs["page_size"] == 30
+
+
 def test_get_social_account_profile_posts_forwards_search(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -1205,6 +1255,65 @@ def test_queue_catalog_backfill_finalize_task_runs_finalize_and_clears_caches(
         }
     ]
     assert cleared == ["cleared"]
+
+
+def test_shared_account_deferred_comments_launch_requires_endpoint_auth_probe() -> None:
+    from api.routers import socials as socials_router
+
+    launch_kwargs: dict[str, Any] = {}
+    metadata_updates: list[dict[str, Any]] = []
+
+    def _start_comments_scrape(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        launch_kwargs.update(kwargs)
+        return {"run_id": "comments-run-1", "status": "queued"}
+
+    comments_run_id = socials_router._start_deferred_comments_inline_followup(
+        catalog_run_id="catalog-run-1",
+        normalized_platform="instagram",
+        normalized_account="bravotv",
+        source_scope="network",
+        initiated_by="admin@example.com",
+        allow_local_dev_inline_bypass=False,
+        launch_group_id="launch-group-1",
+        result={"effective_selected_tasks": ["comments"]},
+        start_social_account_comments_scrape=_start_comments_scrape,
+        social_ingest_conflict_error=Exception,
+        merge_catalog_run_config=lambda **kwargs: metadata_updates.append(kwargs),
+        metadata_dict=lambda value: dict(value or {}) if isinstance(value, dict) else {},
+        build_attached_comments_followup=lambda **kwargs: kwargs,
+        comments_worker_count=4,
+        comments_enable_media_followups=False,
+    )
+
+    assert comments_run_id == "comments-run-1"
+    assert launch_kwargs["skip_launch_auth_probe"] is False
+    assert launch_kwargs["comments_worker_count"] == 4
+    assert metadata_updates[0]["metadata_updates"]["deferred_comments_followup"]["state"] == "started"
+
+
+def test_comments_endpoint_auth_launch_blocker_detail_is_operator_safe() -> None:
+    from trr_backend.socials.pipelines.comments import instagram as comments_pipeline
+
+    detail = comments_pipeline._comments_launch_auth_blocker_detail(
+        account_handle="@BravoTV",
+        probe={
+            "shortcode": "SHORT1",
+            "status": "auth_blocked",
+            "reason": "html_challenge_or_auth_required",
+            "auth_source": "browser_session",
+            "cookie_fingerprint": "abc123",
+            "cookie_fingerprint_algorithm": "sha256:16",
+        },
+        reason="html_challenge_or_auth_required",
+    )
+
+    assert detail["account_handle"] == "bravotv"
+    assert detail["probe_shortcode"] == "SHORT1"
+    assert detail["reason"] == "html_challenge_or_auth_required"
+    assert detail["session_source"] == "browser_session"
+    assert detail["cookie_fingerprint"] == "abc123"
+    assert "cookie" not in detail["operator_action"].lower()
+    assert "sessionid" not in str(detail)
 
 
 def test_queue_catalog_backfill_finalize_task_starts_inline_fallback_runs(

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from trr_backend.socials.control_plane import dispatch_runtime
@@ -209,6 +211,7 @@ def test_dispatch_runtime_recovers_comments_capacity_jobs(monkeypatch: pytest.Mo
 def test_global_recover_and_dispatch_recovers_comments_capacity_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
     legacy = dispatch_runtime.legacy
 
+    monkeypatch.setattr(dispatch_runtime, "reconcile_terminal_modal_running_jobs", lambda **_kwargs: [])
     monkeypatch.setattr(legacy, "recover_stale_running_jobs", lambda **_kwargs: [])
     monkeypatch.setattr(dispatch_runtime, "recover_stale_unclaimed_dispatched_jobs", lambda **_kwargs: [])
     monkeypatch.setattr(
@@ -221,10 +224,101 @@ def test_global_recover_and_dispatch_recovers_comments_capacity_jobs(monkeypatch
         "dispatch_due_social_jobs",
         lambda **_kwargs: {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": None},
     )
+    monkeypatch.setattr(
+        legacy,
+        "dispatch_due_social_jobs",
+        lambda **_kwargs: {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": None},
+    )
 
     result = dispatch_runtime.recover_and_dispatch_due_social_jobs(limit=1)
 
     assert result["recovered_capacity_jobs"] == ["job-capacity"]
+
+
+def test_reconcile_terminal_modal_running_jobs_completes_successful_stale_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy = dispatch_runtime.legacy
+    now = datetime(2026, 6, 12, 4, 20, tzinfo=UTC)
+    finished: list[dict[str, object]] = []
+    refreshed: list[dict[str, object]] = []
+    row = {
+        "id": "job-terminal-success",
+        "run_id": "run-catalog",
+        "platform": "instagram",
+        "status": "running",
+        "items_found": 66,
+        "attempt_count": 2,
+        "max_attempts": 15,
+        "heartbeat_at": now - timedelta(seconds=301),
+        "started_at": now - timedelta(minutes=20),
+        "claimed_at": now - timedelta(minutes=16),
+        "created_at": now - timedelta(minutes=30),
+        "config": {
+            "stage": legacy.SHARED_ACCOUNT_POSTS_STAGE,
+            "account": "bravotv",
+        },
+        "metadata": {
+            "stage": legacy.SHARED_ACCOUNT_POSTS_STAGE,
+            "account": "bravotv",
+            "activity": {
+                "phase": "catalog_fetch_page",
+                "posts_checked": 66,
+                "saved_posts": 66,
+            },
+            "dispatch": {
+                "dispatch_backend": "modal",
+                "remote_invocation_id": "fc-success",
+                "remote_invocation_status": "running",
+            },
+        },
+    }
+
+    monkeypatch.setattr(legacy, "_scrape_jobs_features", lambda: {"has_queue_fields": True})
+    monkeypatch.setattr(legacy, "_now_utc", lambda: now)
+    monkeypatch.setattr(
+        legacy,
+        "_resolve_stale_seconds_for_job",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("stage stale window should not gate terminal success")),
+    )
+    monkeypatch.setattr(legacy.pg, "fetch_all", lambda *_args, **_kwargs: [dict(row)])
+    monkeypatch.setattr(
+        legacy,
+        "_refresh_remote_modal_invocation_state",
+        lambda job, **kwargs: refreshed.append({"job": job, **kwargs})
+        or {
+            "function_call_id": "fc-success",
+            "status": "completed",
+            "raw_status": "success",
+            "checked_at": now.isoformat(),
+            "reason": None,
+            "task_id": None,
+        },
+    )
+    monkeypatch.setattr(
+        legacy,
+        "_finish_job",
+        lambda job_id, **kwargs: finished.append({"job_id": job_id, **kwargs}),
+    )
+
+    result = dispatch_runtime.reconcile_terminal_modal_running_jobs(run_id="run-catalog", limit=10)
+
+    assert result == [
+        {
+            "id": "job-terminal-success",
+            "run_id": "run-catalog",
+            "platform": "instagram",
+            "status": "completed",
+            "remote_invocation_id": "fc-success",
+        }
+    ]
+    assert refreshed and refreshed[0]["lease_expires_at"] is None
+    assert finished[0]["status"] == "completed"
+    assert finished[0]["items_found"] == 66
+    metadata = finished[0]["metadata"]
+    assert metadata["dispatch"]["remote_invocation_status"] == "completed"
+    assert metadata["terminal_modal_reconciliation"]["function_call_id"] == "fc-success"
+    assert metadata["terminal_modal_reconciliation"]["reason"] == "modal_call_completed_but_db_job_still_running"
 
 
 def test_dispatch_runtime_uses_capacity_stage_and_job_config_cap(

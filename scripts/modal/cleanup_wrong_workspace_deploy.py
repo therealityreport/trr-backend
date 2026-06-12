@@ -169,7 +169,8 @@ def cleanup_wrong_workspace_deploy(
     stopped = False
     if stop and app_present:
         _run_text(
-            _modal_command("app", "stop", app_name, "--yes", modal_environment=modal_environment),
+            # `modal app stop` has no confirmation flag in the pinned CLI version.
+            _modal_command("app", "stop", app_name, modal_environment=modal_environment),
             env=modal_profile_env(wrong_profile),
         )
         stopped = True

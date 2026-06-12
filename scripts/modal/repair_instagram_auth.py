@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
@@ -15,6 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from scripts.modal.deploy_backend import REQUIRED_MODAL_PROFILE  # noqa: E402
 from trr_backend.utils.env import load_env  # noqa: E402
 
 VALIDATE_LOCAL_TIMEOUT_SECONDS = 120
@@ -1015,6 +1017,9 @@ def _print_text_summary(summary: dict[str, Any]) -> None:
 
 
 def main() -> int:
+    # Pin the Modal workspace so secret/deploy/verify subprocesses inherit it
+    # instead of the ambient ~/.modal.toml profile.
+    os.environ["MODAL_PROFILE"] = REQUIRED_MODAL_PROFILE
     args = parse_args()
     if bool(args.clear_auth_repair_cooldown):
         summary = run_clear_auth_repair_cooldown()

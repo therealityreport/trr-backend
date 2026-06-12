@@ -3242,6 +3242,7 @@ class TwitterScraper:
                     self._search_hash = None
                     self._detail_hash = None
                     logger.warning("GraphQL returned 404; retrying after hash rediscovery")
+                    page_num -= 1  # the retry must not consume page budget (at max_pages=1 it never ran)
                     continue
                 if self._last_graphql_status_code == 404:
                     self._mark_search_timeline_unavailable("http_404")

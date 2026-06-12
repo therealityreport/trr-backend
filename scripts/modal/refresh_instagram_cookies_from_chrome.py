@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -30,6 +31,9 @@ from dotenv import dotenv_values
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.modal.deploy_backend import REQUIRED_MODAL_PROFILE, pinned_modal_env  # noqa: E402
+
 CHROME_PROFILE_DIR = Path.home() / "Library" / "Application Support" / "Google" / "Chrome"
 REQUIRED_COOKIE_FIELDS = ("sessionid", "csrftoken", "ds_user_id")
 INSTAGRAM_REFRESH_CONFIRMATION = "I UNDERSTAND INSTAGRAM AUTH RISK"
@@ -254,7 +258,9 @@ def _push_to_modal(source_env: Path, *, cookies: dict[str, str] | None = None) -
         "--apply",
     ]
     try:
-        subprocess.run(cmd, check=True, capture_output=True, cwd=REPO_ROOT, text=True, timeout=120)
+        subprocess.run(
+            cmd, check=True, capture_output=True, cwd=REPO_ROOT, text=True, timeout=120, env=pinned_modal_env()
+        )
         return True, "secrets pushed successfully"
     except subprocess.CalledProcessError as exc:
         return False, f"prepare_named_secrets failed: {exc.stderr[:200]}"
@@ -272,7 +278,9 @@ def _deploy_modal() -> tuple[bool, str]:
     """Deploy Modal app to pick up new secrets."""
     cmd = [_python_command(), "-m", "modal", "deploy", "-m", "trr_backend.modal_jobs"]
     try:
-        subprocess.run(cmd, check=True, capture_output=True, cwd=REPO_ROOT, text=True, timeout=300)
+        subprocess.run(
+            cmd, check=True, capture_output=True, cwd=REPO_ROOT, text=True, timeout=300, env=pinned_modal_env()
+        )
         return True, "modal app deployed"
     except subprocess.CalledProcessError as exc:
         return False, f"modal deploy failed: {exc.stderr[:200]}"
@@ -359,6 +367,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    # Pin the Modal workspace before the lazy Modal SDK import in
+    # _verify_remote_auth resolves MODAL_PROFILE.
+    os.environ["MODAL_PROFILE"] = REQUIRED_MODAL_PROFILE
     args = parse_args()
 
     side_effect_requested = bool(args.sync_local or args.push_to_modal or args.deploy or args.verify_remote)

@@ -218,6 +218,15 @@ class DbQuery:
         placeholders = ",".join(["%s"] * len(vals))
         return self._add_filter(f"{column} IN ({placeholders})", vals)
 
+    def json_text_in(self, column: str, key: str, values: Iterable[Any]) -> DbQuery:
+        column = _validate_identifier(column)
+        key = _validate_identifier(key)
+        vals = list(values)
+        if not vals:
+            return self._add_filter("FALSE", [])
+        placeholders = ",".join(["%s"] * len(vals))
+        return self._add_filter(f"{column} ->> %s IN ({placeholders})", [key, *vals])
+
     def ilike(self, column: str, pattern: str) -> DbQuery:
         column = _validate_identifier(column)
         return self._add_filter(f"{column} ILIKE %s", [pattern])

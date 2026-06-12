@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -137,15 +138,50 @@ def test_fetch_fullcredits_page_uses_browser_fallback_on_blocked_response() -> N
     response.status_code = 202
     response.text = "<html>blocked</html>"
 
-    with patch.object(client._session, "get", return_value=response):
-        with patch(
-            "trr_backend.integrations.imdb.fullcredits_cast_parser._fetch_fullcredits_page_via_browser",
-            return_value="<html><div class='full-credits-page-container'></div></html>",
-        ) as mock_browser_fetch:
-            html = client.fetch_fullcredits_page("tt11363282", verbose=False)
+    with patch.dict(
+        "os.environ",
+        {"IMDB_FULLCREDITS_MAX_RETRIES": "0", "IMDB_FULLCREDITS_SCRAPLING_FALLBACK_ENABLED": "0"},
+    ):
+        with patch.object(client._session, "get", return_value=response):
+            with patch(
+                "trr_backend.integrations.imdb.fullcredits_cast_parser._fetch_fullcredits_page_via_browser",
+                return_value="<html><div class='full-credits-page-container'></div></html>",
+            ) as mock_browser_fetch:
+                html = client.fetch_fullcredits_page("tt11363282", verbose=False)
 
     assert "full-credits-page-container" in html
     mock_browser_fetch.assert_called_once()
+
+
+def test_fetch_fullcredits_page_uses_scrapling_fallback_before_browser_on_blocked_response() -> None:
+    client = HttpImdbFullCreditsClient()
+    response = MagicMock()
+    response.status_code = 202
+    response.text = "<html>blocked</html>"
+
+    with patch.dict("os.environ", {"IMDB_FULLCREDITS_MAX_RETRIES": "0"}):
+        with patch.object(client._session, "get", return_value=response):
+            with patch(
+                "trr_backend.integrations.imdb.fullcredits_cast_parser._fetch_fullcredits_page_via_scrapling",
+                return_value="<html><div class='full-credits-page-container'></div></html>",
+            ) as mock_scrapling_fetch:
+                with patch(
+                    "trr_backend.integrations.imdb.fullcredits_cast_parser._fetch_fullcredits_page_via_browser",
+                    return_value="<html><div>browser fallback</div></html>",
+                ) as mock_browser_fetch:
+                    html = client.fetch_fullcredits_page("tt11363282", verbose=False)
+
+    assert "full-credits-page-container" in html
+    mock_scrapling_fetch.assert_called_once()
+    mock_browser_fetch.assert_not_called()
+
+
+def test_scrapling_response_html_decodes_response_body() -> None:
+    from trr_backend.integrations.imdb.fullcredits_cast_parser import _scrapling_response_html
+
+    page = SimpleNamespace(body="<html>credits</html>".encode(), encoding="utf-8")
+
+    assert _scrapling_response_html(page) == "<html>credits</html>"
 
 
 def test_fetch_fullcredits_page_raises_when_browser_fallback_does_not_recover() -> None:
@@ -154,13 +190,17 @@ def test_fetch_fullcredits_page_raises_when_browser_fallback_does_not_recover() 
     response.status_code = 403
     response.text = "<html>blocked</html>"
 
-    with patch.object(client._session, "get", return_value=response):
-        with patch(
-            "trr_backend.integrations.imdb.fullcredits_cast_parser._fetch_fullcredits_page_via_browser",
-            return_value=None,
-        ) as mock_browser_fetch:
-            with pytest.raises(ImdbFullCreditsError) as exc_info:
-                client.fetch_fullcredits_page("tt11363282", verbose=False)
+    with patch.dict(
+        "os.environ",
+        {"IMDB_FULLCREDITS_MAX_RETRIES": "0", "IMDB_FULLCREDITS_SCRAPLING_FALLBACK_ENABLED": "0"},
+    ):
+        with patch.object(client._session, "get", return_value=response):
+            with patch(
+                "trr_backend.integrations.imdb.fullcredits_cast_parser._fetch_fullcredits_page_via_browser",
+                return_value=None,
+            ) as mock_browser_fetch:
+                with pytest.raises(ImdbFullCreditsError) as exc_info:
+                    client.fetch_fullcredits_page("tt11363282", verbose=False)
 
     assert exc_info.value.is_blocked is True
     assert exc_info.value.status_code == 403

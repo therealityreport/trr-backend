@@ -948,6 +948,9 @@ def _cumulative_items_found(counters: dict[str, Any]) -> int:
 
 
 def _is_comments_transport_error(exc: BaseException) -> bool:
+    class_name = exc.__class__.__name__.lower()
+    if class_name in {"closedresourceerror", "closedresource"}:
+        return True
     message = str(exc).lower()
     if not message:
         return False
@@ -960,6 +963,8 @@ def _is_comments_transport_error(exc: BaseException) -> bool:
             "ssl connection",
             "record layer failure",
             "closed unexpectedly",
+            "client has been closed",
+            "connection has been closed",
             "transport error",
             "transporterror",
             "proxy error",
@@ -976,6 +981,8 @@ def _is_comments_transport_error(exc: BaseException) -> bool:
             "remote protocol error",
             "network is unreachable",
             "temporarily unavailable",
+            "zstd decompressor error",
+            "decoding failed",
         )
     )
 
@@ -2153,6 +2160,38 @@ def _retryable_incomplete_target_source_ids(
         if target:
             targets.append(target)
     return list(dict.fromkeys(targets))
+
+
+def _filter_retryable_incomplete_targets_against_current_db(
+    *,
+    account_handle: str,
+    retryable_incomplete_targets: Sequence[str],
+    retry_fetch_reasons: Mapping[str, str | None],
+    repo: Any,
+) -> tuple[list[str], dict[str, str | None], list[str]]:
+    targets = list(dict.fromkeys(str(item or "").strip() for item in retryable_incomplete_targets if item))
+    if not targets:
+        return [], {}, []
+    if not str(account_handle or "").strip():
+        return targets, {target: retry_fetch_reasons.get(target) for target in targets}, []
+    try:
+        still_incomplete = repo._instagram_filter_incomplete_comment_targets(account_handle, targets)  # noqa: SLF001
+    except pg.DatabaseServiceUnavailableError as exc:
+        logger.warning(
+            "Continuing comments retry without final complete-target filter after database saturation: "
+            "account=%s error=%s",
+            account_handle,
+            exc,
+        )
+        return targets, {target: retry_fetch_reasons.get(target) for target in targets}, []
+    still_incomplete_set = {str(item or "").strip() for item in still_incomplete if str(item or "").strip()}
+    filtered_targets = [target for target in targets if target in still_incomplete_set]
+    skipped_complete = [target for target in targets if target not in still_incomplete_set]
+    return (
+        filtered_targets,
+        {target: retry_fetch_reasons.get(target) for target in filtered_targets},
+        skipped_complete,
+    )
 
 
 def _incomplete_retry_has_stalled(
@@ -3698,60 +3737,82 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                     shortcode: incomplete_fetch_reasons.get(shortcode) or auth_failed_fetch_reasons.get(shortcode)
                     for shortcode in retryable_incomplete_targets
                 }
-                stalled_retry = _incomplete_retry_has_stalled(
-                    job=job,
-                    attempt_count=attempt_count,
+                (
+                    retryable_incomplete_targets,
+                    retry_fetch_reasons,
+                    final_skipped_complete_targets,
+                ) = _filter_retryable_incomplete_targets_against_current_db(
+                    account_handle=account_handle,
                     retryable_incomplete_targets=retryable_incomplete_targets,
                     retry_fetch_reasons=retry_fetch_reasons,
-                    comments_fetched=comments_fetched,
-                    zero_comment_incomplete_targets=zero_comment_incomplete_target_source_ids,
+                    repo=repo,
                 )
-                if stalled_retry:
-                    incomplete_retry_stall_metadata = stalled_retry
-                    logger.info(
-                        "Instagram comments incomplete retry stalled; completing shard without requeue: "
-                        "job_id=%s attempt=%s targets=%s",
-                        job_id,
-                        attempt_count,
-                        retryable_incomplete_targets,
-                    )
-                elif incomplete_fill_enabled and attempt_count >= max_attempts:
+                if final_skipped_complete_targets:
+                    skipped_complete_target_source_ids.extend(final_skipped_complete_targets)
+                if not retryable_incomplete_targets:
                     incomplete_retry_stall_metadata = {
                         "stalled": False,
-                        "retry_exhausted": True,
-                        "attempt_count": attempt_count,
-                        "max_attempts": max_attempts,
-                        "target_source_ids": retryable_incomplete_targets,
-                        "fetch_reasons": retry_fetch_reasons,
-                        "current_comments_fetched": comments_fetched,
-                        "completion_status": "attempted_incomplete_fill",
+                        "completion_status": "current_db_targets_complete",
+                        "skipped_complete_target_source_ids": list(dict.fromkeys(final_skipped_complete_targets)),
                     }
-                    logger.info(
-                        "Instagram comments incomplete fill exhausted its one-pass retry budget; "
-                        "completing shard with unresolved targets: job_id=%s targets=%s",
-                        job_id,
-                        retryable_incomplete_targets,
-                    )
                 else:
-                    raise CommentsScraplingRuntimeError(
-                        "Instagram comments Scrapling job had retryable incomplete posts.",
-                        error_code="instagram_comments_incomplete_retryable",
-                        retryable=True,
-                        runtime_metadata={
-                            "incomplete_target_source_ids": retryable_incomplete_targets,
-                            "incomplete_fetch_reasons": retry_fetch_reasons,
-                            "zero_comment_incomplete_target_source_ids": list(
-                                dict.fromkeys(zero_comment_incomplete_target_source_ids)
-                            ),
-                            "coauthor_status_only_target_source_ids": list(
-                                dict.fromkeys(coauthor_status_only_target_source_ids)
-                            ),
-                            "auth_failed_target_source_ids": list(dict.fromkeys(auth_failed_target_source_ids)),
-                            "auth_failed_fetch_reasons": dict(auth_failed_fetch_reasons),
-                            "incomplete_raise_threshold": incomplete_raise_threshold,
-                            "target_source_ids_count": len(target_source_ids),
-                        },
+                    stalled_retry = _incomplete_retry_has_stalled(
+                        job=job,
+                        attempt_count=attempt_count,
+                        retryable_incomplete_targets=retryable_incomplete_targets,
+                        retry_fetch_reasons=retry_fetch_reasons,
+                        comments_fetched=comments_fetched,
+                        zero_comment_incomplete_targets=zero_comment_incomplete_target_source_ids,
                     )
+                    if stalled_retry:
+                        incomplete_retry_stall_metadata = stalled_retry
+                        logger.info(
+                            "Instagram comments incomplete retry stalled; completing shard without requeue: "
+                            "job_id=%s attempt=%s targets=%s",
+                            job_id,
+                            attempt_count,
+                            retryable_incomplete_targets,
+                        )
+                    elif incomplete_fill_enabled and attempt_count >= max_attempts:
+                        incomplete_retry_stall_metadata = {
+                            "stalled": False,
+                            "retry_exhausted": True,
+                            "attempt_count": attempt_count,
+                            "max_attempts": max_attempts,
+                            "target_source_ids": retryable_incomplete_targets,
+                            "fetch_reasons": retry_fetch_reasons,
+                            "current_comments_fetched": comments_fetched,
+                            "completion_status": "attempted_incomplete_fill",
+                        }
+                        logger.info(
+                            "Instagram comments incomplete fill exhausted its one-pass retry budget; "
+                            "completing shard with unresolved targets: job_id=%s targets=%s",
+                            job_id,
+                            retryable_incomplete_targets,
+                        )
+                    else:
+                        raise CommentsScraplingRuntimeError(
+                            "Instagram comments Scrapling job had retryable incomplete posts.",
+                            error_code="instagram_comments_incomplete_retryable",
+                            retryable=True,
+                            runtime_metadata={
+                                "incomplete_target_source_ids": retryable_incomplete_targets,
+                                "incomplete_fetch_reasons": retry_fetch_reasons,
+                                "zero_comment_incomplete_target_source_ids": list(
+                                    dict.fromkeys(zero_comment_incomplete_target_source_ids)
+                                ),
+                                "coauthor_status_only_target_source_ids": list(
+                                    dict.fromkeys(coauthor_status_only_target_source_ids)
+                                ),
+                                "auth_failed_target_source_ids": list(dict.fromkeys(auth_failed_target_source_ids)),
+                                "auth_failed_fetch_reasons": dict(auth_failed_fetch_reasons),
+                                "incomplete_raise_threshold": incomplete_raise_threshold,
+                                "target_source_ids_count": len(target_source_ids),
+                                "skipped_complete_target_source_ids": list(
+                                    dict.fromkeys(final_skipped_complete_targets)
+                                ),
+                            },
+                        )
 
             return auth_metadata, dict(fetcher.runtime_metadata)
         finally:

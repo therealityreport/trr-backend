@@ -73,8 +73,8 @@ from trr_backend.socials.scrapling_transport import build_stealthy_fetcher, scra
 
 logger = logging.getLogger("socials.instagram.comments_scrapling.fetcher")
 
-_COMMENT_PAGINATION_MAX_PAGES_DEFAULT = 250
-_REPLY_PAGINATION_MAX_PAGES_DEFAULT = 100
+_COMMENT_PAGINATION_MAX_PAGES_DEFAULT = 0
+_REPLY_PAGINATION_MAX_PAGES_DEFAULT = 0
 _COMMENT_PAGINATION_MAX_SECONDS_DEFAULT = 600.0
 _REPLY_PAGINATION_MAX_SECONDS_DEFAULT = 180.0
 _REPLY_TAIL_TOTAL_MAX_SECONDS_PER_POST_DEFAULT = 90.0
@@ -147,6 +147,7 @@ _POST_COMMENTS_CONTAINER_QUERY_RE = re.compile(
     r'"queryID":"(?P<query_id>\d+)","variables":\{"media_id":"(?P<media_id>\d+)"[^}]*\},'
     r'"queryName":"PolarisPostCommentsContainerQuery"'
 )
+_SAFE_HTTP_ACCEPT_ENCODING = "gzip, deflate"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -237,6 +238,20 @@ def _safe_non_negative_int(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed >= 0 else None
+
+
+def _resolve_optional_positive_int_env(name: str, default: int, *, minimum: int = 1) -> int | None:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        value = default
+    else:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = default
+    if value <= 0:
+        return None
+    return max(minimum, value)
 
 
 def _clean_html_text(fragment: str) -> str:
@@ -2337,6 +2352,8 @@ _TRANSPORT_FAILURE_MARKERS = (
     "server disconnected",
     "network is unreachable",
     "temporarily unavailable",
+    "zstd decompressor error",
+    "decoding failed",
 )
 
 
@@ -2352,7 +2369,7 @@ def _warmup_transport_failure(exc: BaseException) -> bool:
 
 
 def _api_transport_failure(exc: BaseException) -> bool:
-    if isinstance(exc, TimeoutError | httpx.TimeoutException | httpx.TransportError):
+    if isinstance(exc, TimeoutError | httpx.TimeoutException | httpx.TransportError | httpx.DecodingError):
         return True
     return isinstance(exc, OSError) and _transport_failure_message(exc)
 
@@ -2593,6 +2610,8 @@ class InstagramCommentsScraplingFetcher:
 
         # httpx client (for API calls). Created lazily after warmup bridges cookies.
         self._http_client: httpx.AsyncClient | None = None
+        self._http_client_lock = asyncio.Lock()
+        self._api_pace_lock = asyncio.Lock()
 
     # -------------------------------------------------------------------
     # Public API
@@ -3036,6 +3055,7 @@ class InstagramCommentsScraplingFetcher:
         fb_crosspost_pagination_incomplete = False
         cursor_shape_counts: Counter[str] = Counter()
         last_comment_filter_param: str | None = None
+        relay_recovered_with_remaining_gap = False
         # Phase A5 follow-up: track cursor-direction swaps so we can recover
         # from IG cursor-loops by switching min_id <-> max_id once before
         # falling back to terminal repeated_cursor.
@@ -3051,11 +3071,9 @@ class InstagramCommentsScraplingFetcher:
         if fetch_replies:
             if self._reply_tail_total_budget_seconds > 0:
                 reply_tail_deadline = min(deadline, time.monotonic() + self._reply_tail_total_budget_seconds)
-        page_cap = _resolve_positive_int_env(
+        page_cap = _resolve_optional_positive_int_env(
             "SOCIAL_INSTAGRAM_COMMENT_PAGINATION_MAX_PAGES",
             _COMMENT_PAGINATION_MAX_PAGES_DEFAULT,
-            minimum=1,
-            maximum=250,
         )
 
         def current_memory_guardrail_metadata() -> dict[str, Any]:
@@ -3737,7 +3755,7 @@ class InstagramCommentsScraplingFetcher:
                     cursor_direction_swaps,
                 )
                 break
-            if pages_seen >= page_cap:
+            if page_cap is not None and pages_seen >= page_cap:
                 has_gap = _has_expected_gap(
                     expected_comment_count=expected_comments,
                     max_comments=max_comments,
@@ -3874,11 +3892,10 @@ class InstagramCommentsScraplingFetcher:
                 else:
                     fetch_failed = True
                     retryable = False
+                    relay_recovered_with_remaining_gap = True
 
         if (
-            auth_failed
-            and not comments
-            and not reply_only
+            not reply_only
             and not single_session_load_all
             and fetch_reason != BROWSER_SESSION_INVALIDATED_REASON
             and not browser_session_invalidated_detected
@@ -3887,6 +3904,24 @@ class InstagramCommentsScraplingFetcher:
                 or (
                     _target_metadata_indicates_coauthor(target_metadata)
                     and _env_truthy(_COAUTHOR_AUTH_RENDERED_FALLBACK_ENV, True)
+                )
+            )
+            and (
+                (auth_failed and (
+                    not comments
+                    or _has_expected_gap(
+                        expected_comment_count=expected_comments,
+                        max_comments=max_comments,
+                        current_comment_count=flattened_comment_count(comments),
+                    )
+                ))
+                or (
+                    relay_recovered_with_remaining_gap
+                    and _has_expected_gap(
+                        expected_comment_count=expected_comments,
+                        max_comments=max_comments,
+                        current_comment_count=flattened_comment_count(comments),
+                    )
                 )
             )
         ):
@@ -3928,11 +3963,14 @@ class InstagramCommentsScraplingFetcher:
                 },
             )
             target_count = _expected_target_count(expected_comments, max_comments)
-            if rendered_merged_count and (target_count is None or flattened_comment_count(comments) >= target_count):
+            if rendered_merged_count:
                 auth_failed = False
-                fetch_failed = False
                 retryable = False
                 fetch_reason = fallback_reason
+                if target_count is None or flattened_comment_count(comments) >= target_count:
+                    fetch_failed = False
+                else:
+                    fetch_failed = True
 
         should_reveal_hidden_comments = self._should_reveal_hidden_comments(
             expected_comment_count=expected_comments,
@@ -4594,7 +4632,9 @@ class InstagramCommentsScraplingFetcher:
         self._hidden_comments_render_attempts += 1
         self._request_count += 1
         all_headers = self._parser.get_headers(post_url)
-        nav_headers = {k: v for k, v in all_headers.items() if k.lower() not in _API_HEADER_KEYS_TO_STRIP}
+        nav_headers = self._strip_accept_encoding_header(
+            {k: v for k, v in all_headers.items() if k.lower() not in _API_HEADER_KEYS_TO_STRIP}
+        )
         try:
             response = await self._fetcher.async_fetch(
                 post_url,
@@ -4945,7 +4985,9 @@ class InstagramCommentsScraplingFetcher:
         self._request_count += 1
         self._last_single_session_rendered_metadata = dict(metadata_base)
         all_headers = self._parser.get_headers(post_url)
-        nav_headers = {key: value for key, value in all_headers.items() if key.lower() not in _API_HEADER_KEYS_TO_STRIP}
+        nav_headers = self._strip_accept_encoding_header(
+            {key: value for key, value in all_headers.items() if key.lower() not in _API_HEADER_KEYS_TO_STRIP}
+        )
         try:
             response = await self._fetcher.async_fetch(
                 post_url,
@@ -5118,9 +5160,7 @@ class InstagramCommentsScraplingFetcher:
                 "reason": "missing_shortcode",
                 "relay_comments": relay_metadata,
             }
-        if self._http_client is None:
-            await self._rebuild_http_client()
-        headers = self._parser.get_headers(post_url)
+        headers = self._safe_httpx_headers(self._parser.get_headers(post_url))
         headers.update(
             {
                 "content-type": "application/x-www-form-urlencoded",
@@ -5137,16 +5177,17 @@ class InstagramCommentsScraplingFetcher:
             normalized_doc_id = str(doc_id or "").strip()
             if not normalized_doc_id:
                 continue
-            if not await self._pace_api_requests(deadline=None):
-                return [], {"reason": "graphql_preview_deadline_exceeded", "attempts": attempts}
-            self._request_count += 1
             try:
-                response = await self._http_client.post(  # type: ignore[union-attr]
+                response = await self._request_shared_http_client(
+                    "POST",
                     _POST_ACTION_GRAPHQL_URL,
+                    deadline=None,
                     data={**base_body, "doc_id": normalized_doc_id},
                     headers=headers,
                 )
-            except (TimeoutError, httpx.TimeoutException, httpx.TransportError, OSError) as exc:
+            except _PaginationDeadlineExceededError:
+                return [], {"reason": "graphql_preview_deadline_exceeded", "attempts": attempts}
+            except (TimeoutError, httpx.TimeoutException, httpx.TransportError, httpx.DecodingError, OSError) as exc:
                 reason = _transport_failure_reason(exc)
                 self._record_retry_reason(reason)
                 attempts.append(
@@ -5159,7 +5200,6 @@ class InstagramCommentsScraplingFetcher:
                 )
                 continue
 
-            self._sync_response_cookies(response)
             status_code = _status_code(response)
             attempt: dict[str, Any] = {
                 "doc_id": normalized_doc_id,
@@ -5285,7 +5325,7 @@ class InstagramCommentsScraplingFetcher:
             self._request_count += 1
             try:
                 page_response = await client.get(post_url, headers=dict(page_headers))
-            except (TimeoutError, httpx.TimeoutException, httpx.TransportError, OSError) as exc:
+            except (TimeoutError, httpx.TimeoutException, httpx.TransportError, httpx.DecodingError, OSError) as exc:
                 reason = _transport_failure_reason(exc)
                 self._record_retry_reason(reason)
                 return [], {"reason": reason, **attempt_metadata}
@@ -5317,7 +5357,7 @@ class InstagramCommentsScraplingFetcher:
                     jazoest = ""
             spin = context.get("spin") if isinstance(context.get("spin"), Mapping) else {}
             if relay_is_logged_in:
-                graphql_headers = self._parser.get_headers(post_url)
+                graphql_headers = self._safe_httpx_headers(self._parser.get_headers(post_url))
                 graphql_headers.update(
                     {
                         "accept": "*/*",
@@ -5425,7 +5465,7 @@ class InstagramCommentsScraplingFetcher:
                             },
                             headers=graphql_headers,
                         )
-                    except (TimeoutError, httpx.TimeoutException, httpx.TransportError, OSError) as exc:
+                    except (TimeoutError, httpx.TimeoutException, httpx.TransportError, httpx.DecodingError, OSError) as exc:
                         reason = _transport_failure_reason(exc)
                         self._record_retry_reason(reason)
                         attempt["reason"] = reason
@@ -5507,13 +5547,18 @@ class InstagramCommentsScraplingFetcher:
         sessionid = str(self._raw_cookies.get("sessionid") or "").strip()
         viewer_id = str(self._raw_cookies.get("ds_user_id") or "").strip()
         if sessionid and viewer_id:
-            if self._http_client is None:
-                await self._rebuild_http_client()
-            if self._http_client is not None:
+            async with httpx.AsyncClient(
+                cookies=dict(self._raw_cookies),
+                timeout=timeout,
+                proxy=self._api_proxy_url,
+                follow_redirects=False,
+                trust_env=False,
+                headers={"accept-encoding": _SAFE_HTTP_ACCEPT_ENCODING},
+            ) as authenticated_client:
                 all_headers = self._parser.get_headers(post_url)
-                authenticated_page_headers = {
+                authenticated_page_headers = self._safe_httpx_headers({
                     key: value for key, value in all_headers.items() if key.lower() not in _API_HEADER_KEYS_TO_STRIP
-                }
+                })
                 authenticated_page_headers.update(
                     {
                         "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -5524,7 +5569,7 @@ class InstagramCommentsScraplingFetcher:
                     }
                 )
                 auth_comments, auth_metadata = await run_relay_attempt(
-                    client=self._http_client,
+                    client=authenticated_client,
                     auth_mode="authenticated",
                     page_headers=authenticated_page_headers,
                     viewer_id=viewer_id,
@@ -5557,6 +5602,7 @@ class InstagramCommentsScraplingFetcher:
             proxy=self._api_proxy_url,
             follow_redirects=False,
             trust_env=False,
+            headers={"accept-encoding": _SAFE_HTTP_ACCEPT_ENCODING},
         ) as public_client:
             public_comments, public_metadata = await run_relay_attempt(
                 client=public_client,
@@ -5713,7 +5759,7 @@ class InstagramCommentsScraplingFetcher:
                                 "x-fb-friendly-name": normalized_friendly_name,
                             },
                         )
-                    except (TimeoutError, httpx.TimeoutException, httpx.TransportError, OSError) as exc:
+                    except (TimeoutError, httpx.TimeoutException, httpx.TransportError, httpx.DecodingError, OSError) as exc:
                         reason = _transport_failure_reason(exc)
                         self._record_retry_reason(reason)
                         stop_reason = reason
@@ -6273,12 +6319,13 @@ class InstagramCommentsScraplingFetcher:
 
     async def aclose(self) -> None:
         """Close the httpx client. Called by job_runner in finally."""
-        if self._http_client is not None:
-            try:
-                await self._http_client.aclose()
-            except Exception:  # noqa: BLE001
-                pass
-            self._http_client = None
+        async with self._http_client_lock:
+            if self._http_client is not None:
+                try:
+                    await self._http_client.aclose()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._http_client = None
 
     # -------------------------------------------------------------------
     # Reply fetching
@@ -6336,11 +6383,9 @@ class InstagramCommentsScraplingFetcher:
         )
         if deadline is not None:
             reply_deadline = min(reply_deadline, float(deadline))
-        page_cap = _resolve_positive_int_env(
+        page_cap = _resolve_optional_positive_int_env(
             "SOCIAL_INSTAGRAM_REPLY_PAGINATION_MAX_PAGES",
             _REPLY_PAGINATION_MAX_PAGES_DEFAULT,
-            minimum=1,
-            maximum=250,
         )
 
         while True:
@@ -6481,7 +6526,7 @@ class InstagramCommentsScraplingFetcher:
                     cursor_direction_swaps,
                 )
                 break
-            if pages_seen >= page_cap:
+            if page_cap is not None and pages_seen >= page_cap:
                 observed_reply_total = len(
                     merge_comment_replies(
                         preview_replies,
@@ -6650,6 +6695,11 @@ class InstagramCommentsScraplingFetcher:
 
     async def _rebuild_http_client(self) -> None:
         """Create or recreate the httpx client with current cookies and proxy."""
+        async with self._http_client_lock:
+            await self._rebuild_http_client_unlocked()
+
+    async def _rebuild_http_client_unlocked(self) -> None:
+        """Create or recreate the httpx client while holding the client lock."""
         existing_client = self._http_client
         self._http_client = None
         if existing_client is not None:
@@ -6663,7 +6713,42 @@ class InstagramCommentsScraplingFetcher:
             proxy=self._api_proxy_url,
             follow_redirects=False,
             trust_env=False,
+            # zstd bodies through the API proxy intermittently fail httpx's
+            # decoder ("Unknown frame descriptor"), and brotli is not installed;
+            # only advertise encodings every runtime can decode.
+            headers={"accept-encoding": _SAFE_HTTP_ACCEPT_ENCODING},
         )
+
+    async def _request_shared_http_client(
+        self,
+        method: str,
+        url: str,
+        *,
+        deadline: float | None = None,
+        **request_kwargs: Any,
+    ) -> httpx.Response:
+        """Send one paced request through the shared httpx client.
+
+        Comment shards can fetch more than one post concurrently. Recovery
+        paths rebuild the shared client after redirects/transient failures, so
+        request and rebuild must be serialized or one task can close the client
+        while another task is mid-request.
+        """
+        async with self._http_client_lock:
+            if self._http_client is None:
+                await self._rebuild_http_client_unlocked()
+            if not await self._pace_api_requests(deadline=deadline):
+                raise _PaginationDeadlineExceededError
+            self._request_count += 1
+            normalized_method = str(method or "").strip().upper()
+            if normalized_method == "GET":
+                response = await self._http_client.get(url, **request_kwargs)  # type: ignore[union-attr]
+            elif normalized_method == "POST":
+                response = await self._http_client.post(url, **request_kwargs)  # type: ignore[union-attr]
+            else:  # pragma: no cover - guarded by static call sites.
+                raise ValueError(f"Unsupported shared http client method: {method!r}")
+            self._sync_response_cookies(response)
+            return response
 
     # -------------------------------------------------------------------
     # Transport: browser (warmup only)
@@ -6681,7 +6766,9 @@ class InstagramCommentsScraplingFetcher:
         """
         self._request_count += 1
         all_headers = self._parser.get_headers(referer)
-        nav_headers = {k: v for k, v in all_headers.items() if k.lower() not in _API_HEADER_KEYS_TO_STRIP}
+        nav_headers = self._strip_accept_encoding_header(
+            {k: v for k, v in all_headers.items() if k.lower() not in _API_HEADER_KEYS_TO_STRIP}
+        )
         return await self._fetcher.async_fetch(
             url,
             headless=self._headless,
@@ -6699,6 +6786,22 @@ class InstagramCommentsScraplingFetcher:
     # Transport: httpx (API calls)
     # -------------------------------------------------------------------
 
+    @staticmethod
+    def _strip_accept_encoding_header(headers: Mapping[str, Any] | None) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for key, value in dict(headers or {}).items():
+            name = str(key or "").strip()
+            if not name or name.lower() == "accept-encoding":
+                continue
+            result[name] = str(value)
+        return result
+
+    @classmethod
+    def _safe_httpx_headers(cls, headers: Mapping[str, Any] | None) -> dict[str, str]:
+        result = cls._strip_accept_encoding_header(headers)
+        result["accept-encoding"] = _SAFE_HTTP_ACCEPT_ENCODING
+        return result
+
     async def _fetch_api(
         self,
         url: str,
@@ -6708,16 +6811,15 @@ class InstagramCommentsScraplingFetcher:
         deadline: float | None = None,
     ) -> httpx.Response:
         """Plain HTTP GET via httpx. Used for comments/replies JSON API calls."""
-        if self._http_client is None:
-            await self._rebuild_http_client()
-        if not await self._pace_api_requests(deadline=deadline):
-            raise _PaginationDeadlineExceededError
-        self._request_count += 1
-        headers = self._parser.get_headers(referer)
+        headers = self._safe_httpx_headers(self._parser.get_headers(referer))
         clean_params = {k: v for k, v in (params or {}).items() if v is not None} or None
-        response = await self._http_client.get(url, params=clean_params, headers=headers)  # type: ignore[union-attr]
-        self._sync_response_cookies(response)
-        return response
+        return await self._request_shared_http_client(
+            "GET",
+            url,
+            deadline=deadline,
+            params=clean_params,
+            headers=headers,
+        )
 
     @staticmethod
     def _browser_fetch_headers(headers: Mapping[str, Any]) -> dict[str, str]:
@@ -6841,7 +6943,7 @@ class InstagramCommentsScraplingFetcher:
             load_dom=True,
             cookies=_cookies_to_scrapling(self._raw_cookies),
             proxy_rotator=self._proxy_rotator,
-            extra_headers=self._parser.get_headers(referer),
+            extra_headers=self._strip_accept_encoding_header(self._parser.get_headers(referer)),
             timeout=fetch_timeout_ms,
             retries=1,
             retry_delay=1.0,
@@ -6879,7 +6981,7 @@ class InstagramCommentsScraplingFetcher:
         remaining = _deadline_remaining_seconds(deadline)
         if remaining is not None and remaining <= 0:
             raise _PaginationDeadlineExceededError
-        headers = self._parser.get_headers(referer)
+        headers = self._strip_accept_encoding_header(self._parser.get_headers(referer))
         self._request_count += 1
         fetch_timeout_ms = self._timeout_ms
         if remaining is not None:
@@ -6915,6 +7017,10 @@ class InstagramCommentsScraplingFetcher:
         return response
 
     async def _pace_api_requests(self, *, deadline: float | None = None) -> bool:
+        async with self._api_pace_lock:
+            return await self._pace_api_requests_unlocked(deadline=deadline)
+
+    async def _pace_api_requests_unlocked(self, *, deadline: float | None = None) -> bool:
         if self._global_api_delay_seconds > 0:
             # Phase 5.2: try Postgres advisory lock for cross-container coordination
             # when configured; fall through to per-container file lock otherwise.
@@ -7431,7 +7537,7 @@ class InstagramCommentsScraplingFetcher:
                 response = await self._fetch_api(url, referer=referer, params=params, deadline=deadline)
             except _PaginationDeadlineExceededError:
                 return _deadline_response(attempt)
-            except (TimeoutError, httpx.TimeoutException, httpx.TransportError, OSError) as exc:
+            except (TimeoutError, httpx.TimeoutException, httpx.TransportError, httpx.DecodingError, OSError) as exc:
                 if not _api_transport_failure(exc):
                     raise
                 last_transient_reason = _transport_failure_reason(exc)

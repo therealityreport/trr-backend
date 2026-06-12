@@ -878,6 +878,53 @@ def test_verify_modal_readiness_keeps_core_ready_when_only_getty_probe_is_blocke
     }
 
 
+def test_verify_modal_readiness_comments_retryable_transport_failure_is_advisory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "false")
+    monkeypatch.setattr(
+        cli,
+        "list_secret_names",
+        lambda *, modal_environment="": {"trr-backend-runtime", "trr-social-auth"},
+    )
+    monkeypatch.setattr(cli, "list_app_descriptions", lambda *, modal_environment="": {"trr-backend-jobs"})
+    monkeypatch.setattr(
+        cli,
+        "get_app_function_handles",
+        lambda *, app_name, modal_environment="": {
+            "serve_backend_api": _StubFunctionHandle(web_url="https://workspace--trr-backend-api.modal.run"),
+            "probe_instagram_comments_auth": _StubFunctionHandle(
+                remote_payload={
+                    "platform": "instagram",
+                    "account_handle": "thetraitorsus",
+                    "shortcode": "SHORT1",
+                    "status": "transport_blocked",
+                    "ready": False,
+                    "reason": "http_500",
+                    "retryable": True,
+                    "session_invalidated": False,
+                    "execution_backend": "modal",
+                }
+            ),
+        },
+    )
+
+    summary = cli.verify_modal_readiness(
+        app_name="trr-backend-jobs",
+        runtime_secret_name="trr-backend-runtime",
+        social_secret_name="trr-social-auth",
+        function_names=("serve_backend_api", "probe_instagram_comments_auth"),
+        probe_instagram_comments_auth_handle="thetraitorsus",
+        probe_instagram_comments_auth_shortcode="SHORT1",
+    )
+
+    assert summary["ok"] is True
+    assert summary["core_ok"] is True
+    assert summary["blocking_probe_failures"] == []
+    assert summary["advisory_probe_failures"] == ["http_500"]
+    assert summary["instagram_comments_auth_probe"]["advisory_continue"] is True
+
+
 def test_verify_modal_readiness_blocks_comments_html_challenge_with_rendered_fallback_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

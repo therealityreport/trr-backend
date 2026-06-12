@@ -88,7 +88,7 @@ def fetch_people_by_imdb_ids(db: DbSession, imdb_ids: Iterable[str]) -> list[dic
             db.schema("core")
             .table("people")
             .select("id,full_name,known_for,external_ids")
-            .in_("external_ids->>'imdb'", chunk)
+            .json_text_in("external_ids", "imdb", chunk)
             .execute()
         )
         if hasattr(response, "error") and response.error:

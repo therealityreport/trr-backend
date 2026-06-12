@@ -144,6 +144,114 @@ def recover_dispatch_blocked_no_progress_jobs(*, limit: int = 100) -> list[dict[
     return recovered
 
 
+def reconcile_terminal_modal_running_jobs(
+    *,
+    run_id: str | None = None,
+    platform: str | None = None,
+    account_handle: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    features = legacy._scrape_jobs_features()
+    if not bool(features.get("has_queue_fields")):
+        return []
+    safe_limit = max(1, min(int(limit), 250))
+    normalized_platform = legacy._normalize_platform_name(platform) or None
+    normalized_account = legacy._normalize_account_handle(account_handle) or None
+    rows = legacy.pg.fetch_all(
+        """
+        select
+          id::text as id,
+          run_id::text as run_id,
+          platform,
+          status,
+          items_found,
+          attempt_count,
+          max_attempts,
+          started_at,
+          claimed_at,
+          heartbeat_at,
+          created_at,
+          error_message,
+          last_error_code,
+          config,
+          metadata
+        from social.scrape_jobs
+        where status = 'running'
+          and (%s::uuid is null or run_id = %s::uuid)
+          and (%s::text is null or platform = %s::text)
+          and (%s::text is null or lower(coalesce(config->>'account', '')) = %s::text)
+          and coalesce(metadata->'dispatch'->>'dispatch_backend', '') = 'modal'
+          and nullif(coalesce(metadata->'dispatch'->>'remote_invocation_id', ''), '') is not null
+          and coalesce(heartbeat_at, started_at, claimed_at, created_at) < now() - interval '300 seconds'
+        order by coalesce(heartbeat_at, started_at, claimed_at, created_at) asc
+        limit %s
+        """,
+        [run_id, run_id, normalized_platform, normalized_platform, normalized_account, normalized_account, safe_limit],
+    )
+    if not rows:
+        return []
+
+    reconciled_rows: list[dict[str, Any]] = []
+    now_utc = legacy._now_utc()
+    for row in rows:
+        job_id = str(row.get("id") or "").strip()
+        if not job_id:
+            continue
+        stage = legacy._job_stage_from_row(row)
+        last_activity = legacy._coerce_dt(
+            row.get("heartbeat_at") or row.get("started_at") or row.get("claimed_at") or row.get("created_at")
+        )
+        if last_activity is None:
+            continue
+        if last_activity.tzinfo is None:
+            last_activity = last_activity.replace(tzinfo=legacy.UTC)
+
+        dispatch = legacy._job_dispatch_metadata(row)
+        remote_invocation_id = str(dispatch.get("remote_invocation_id") or "").strip()
+        if not remote_invocation_id:
+            continue
+        inspection = legacy._refresh_remote_modal_invocation_state(row, lease_expires_at=None)
+        inspection_status = str(inspection.get("status") or "").strip().lower()
+        if inspection_status != "completed":
+            continue
+
+        metadata_updates = dict(row.get("metadata") or {})
+        metadata_updates["dispatch"] = {
+            **dispatch,
+            "remote_invocation_status": "completed",
+            "remote_invocation_checked_at": inspection.get("checked_at") or legacy._iso(now_utc),
+            "remote_task_id": str(inspection.get("task_id") or "").strip() or None,
+            "remote_blocked_reason": str(inspection.get("reason") or "").strip() or None,
+        }
+        activity = dict(metadata_updates.get("activity") or {})
+        activity.setdefault("phase", f"{stage}_end")
+        activity["last_progress_at"] = legacy._iso(now_utc)
+        metadata_updates["activity"] = activity
+        metadata_updates["terminal_modal_reconciliation"] = {
+            "source": "reconcile_terminal_modal_running_jobs",
+            "function_call_id": remote_invocation_id,
+            "remote_status": inspection_status,
+            "reason": "modal_call_completed_but_db_job_still_running",
+            "reconciled_at": legacy._iso(now_utc),
+        }
+        legacy._finish_job(
+            job_id,
+            status="completed",
+            items_found=legacy._normalize_non_negative_int(row.get("items_found")),
+            metadata=metadata_updates,
+        )
+        reconciled_rows.append(
+            {
+                "id": job_id,
+                "run_id": str(row.get("run_id") or "").strip() or None,
+                "platform": str(row.get("platform") or "").strip() or None,
+                "status": "completed",
+                "remote_invocation_id": remote_invocation_id,
+            }
+        )
+    return reconciled_rows
+
+
 def recover_stale_unclaimed_dispatched_jobs(
     *,
     run_id: str | None = None,
@@ -669,6 +777,7 @@ def claim_and_process_social_job(*, job_id: str, worker_id: str) -> dict[str, An
 
 def recover_and_dispatch_due_social_jobs(*, limit: int | None = None) -> dict[str, Any]:
     safe_limit = max(1, min(int(limit or legacy._modal_dispatch_limit()), 250))
+    terminal_reconciled = reconcile_terminal_modal_running_jobs(limit=safe_limit)
     recovered = legacy.recover_stale_running_jobs(limit=safe_limit)
     recovered_unclaimed = _call_extracted_override(
         "recover_stale_unclaimed_dispatched_jobs",
@@ -678,6 +787,9 @@ def recover_and_dispatch_due_social_jobs(*, limit: int | None = None) -> dict[st
     recovered_capacity = legacy.recover_failed_instagram_comments_capacity_jobs(limit=max(safe_limit, 25))
     dispatch_summary = _call_extracted_override("dispatch_due_social_jobs", dispatch_due_social_jobs, limit=limit)
     return {
+        "reconciled_terminal_jobs": [
+            str(row.get("id") or "").strip() for row in terminal_reconciled if str(row.get("id") or "").strip()
+        ],
         "recovered_jobs": [str(row.get("id") or "").strip() for row in recovered],
         "recovered_unclaimed_jobs": [
             str(row.get("id") or "").strip() for row in recovered_unclaimed if str(row.get("id") or "").strip()

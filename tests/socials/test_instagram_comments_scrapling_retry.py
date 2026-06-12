@@ -24,6 +24,7 @@ from trr_backend.socials.instagram.comments_scrapling.fetcher import (
     _extract_rendered_permalink_comments,
     _pace_global_api_request,
     _record_global_api_cooldown,
+    _resolve_optional_positive_int_env,
     _try_advisory_lock_pace,
 )
 from trr_backend.socials.instagram.constants import resolve_comment_sort_order
@@ -44,6 +45,23 @@ class _TrackingClient:
         self.closed = True
 
 
+class _SlowSharedClient:
+    def __init__(self) -> None:
+        self.closed = False
+        self.closed_during_request = False
+        self.request_started = asyncio.Event()
+        self.allow_response = asyncio.Event()
+
+    async def get(self, url: str, **_kwargs: Any) -> httpx.Response:
+        self.request_started.set()
+        await self.allow_response.wait()
+        self.closed_during_request = self.closed
+        return httpx.Response(200, json={"status": "ok"}, request=httpx.Request("GET", url))
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
 def _build_fetcher() -> InstagramCommentsScraplingFetcher:
     """Construct a fetcher with mocked browser backend (no real Patchright)."""
     with patch("scrapling.fetchers.StealthyFetcher", MagicMock()):
@@ -55,6 +73,86 @@ def _build_fetcher() -> InstagramCommentsScraplingFetcher:
         # Pre-build httpx client so tests don't need warmup.
         asyncio.run(fetcher._rebuild_http_client())
         return fetcher
+
+
+def test_comment_pagination_page_cap_zero_means_uncapped(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENT_PAGINATION_MAX_PAGES", raising=False)
+    assert _resolve_optional_positive_int_env("SOCIAL_INSTAGRAM_COMMENT_PAGINATION_MAX_PAGES", 0) is None
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENT_PAGINATION_MAX_PAGES", "0")
+    assert _resolve_optional_positive_int_env("SOCIAL_INSTAGRAM_COMMENT_PAGINATION_MAX_PAGES", 250) is None
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENT_PAGINATION_MAX_PAGES", "1")
+    assert _resolve_optional_positive_int_env("SOCIAL_INSTAGRAM_COMMENT_PAGINATION_MAX_PAGES", 0) == 1
+
+
+def test_shared_http_client_rebuild_waits_for_inflight_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENT_GLOBAL_THROTTLE", "0")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENT_DELAY_SEC", "0")
+
+    async def scenario() -> None:
+        with patch("scrapling.fetchers.StealthyFetcher", MagicMock()):
+            fetcher = InstagramCommentsScraplingFetcher(
+                cookies=[],
+                raw_cookies={"csrftoken": "initial"},
+                browser_account_id="testaccount",
+            )
+        slow_client = _SlowSharedClient()
+        fetcher._http_client = slow_client  # type: ignore[assignment]
+
+        request_task = asyncio.create_task(
+            fetcher._fetch_api("https://www.instagram.com/api/v1/test/", referer="https://www.instagram.com/p/ABC/")
+        )
+        await slow_client.request_started.wait()
+
+        rebuild_task = asyncio.create_task(fetcher._rebuild_http_client())
+        await asyncio.sleep(0)
+        assert rebuild_task.done() is False
+
+        slow_client.allow_response.set()
+        response = await request_task
+        await rebuild_task
+
+        assert response.status_code == 200
+        assert slow_client.closed_during_request is False
+        assert slow_client.closed is True
+        await fetcher.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_api_pacing_serializes_concurrent_callers() -> None:
+    async def scenario() -> None:
+        with patch("scrapling.fetchers.StealthyFetcher", MagicMock()):
+            fetcher = InstagramCommentsScraplingFetcher(
+                cookies=[],
+                raw_cookies={"csrftoken": "initial"},
+                browser_account_id="testaccount",
+            )
+
+        active_calls = 0
+        max_active_calls = 0
+
+        async def fake_unlocked_pace(*, deadline: float | None = None) -> bool:
+            nonlocal active_calls, max_active_calls
+            active_calls += 1
+            max_active_calls = max(max_active_calls, active_calls)
+            await asyncio.sleep(0.01)
+            active_calls -= 1
+            return True
+
+        fetcher._pace_api_requests_unlocked = fake_unlocked_pace  # type: ignore[method-assign]
+
+        results = await asyncio.gather(
+            fetcher._pace_api_requests(deadline=None),
+            fetcher._pace_api_requests(deadline=None),
+        )
+
+        assert results == [True, True]
+        assert max_active_calls == 1
+        await fetcher.aclose()
+
+    asyncio.run(scenario())
 
 
 def test_comments_endpoint_probe_accepts_json_response() -> None:
@@ -859,6 +957,89 @@ def test_rebuild_http_client_closes_previous_client(monkeypatch) -> None:
     asyncio.run(fetcher._rebuild_http_client())
 
     assert old.closed is True
+
+
+def test_rebuild_http_client_forces_safe_accept_encoding(monkeypatch) -> None:
+    fetcher = _build_fetcher()
+    captured: dict[str, Any] = {}
+
+    def _client_factory(**kwargs: Any) -> _TrackingClient:
+        captured.update(kwargs)
+        return _TrackingClient()
+
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.comments_scrapling.fetcher.httpx.AsyncClient",
+        _client_factory,
+    )
+
+    asyncio.run(fetcher._rebuild_http_client())
+
+    assert captured["headers"]["accept-encoding"] == "gzip, deflate"
+
+
+def test_fetch_api_forces_safe_accept_encoding() -> None:
+    fetcher = _build_fetcher()
+    captured: dict[str, Any] = {}
+
+    class _Client:
+        async def get(self, url: str, *, params: dict[str, Any] | None = None, headers: dict[str, str] | None = None):
+            captured["url"] = url
+            captured["params"] = params
+            captured["headers"] = headers
+            return httpx.Response(200, json={"status": "ok"}, request=httpx.Request("GET", url))
+
+        async def aclose(self) -> None:
+            return None
+
+    fetcher._http_client = _Client()  # type: ignore[assignment]
+    fetcher._parser.get_headers = MagicMock(
+        return_value={
+            "accept-encoding": "gzip, deflate, br, zstd",
+            "x-ig-app-id": "936619743392459",
+        }
+    )
+
+    asyncio.run(
+        fetcher._fetch_api(
+            "https://www.instagram.com/api/v1/media/123/comments/",
+            referer="https://www.instagram.com/p/test/",
+            params={"max_id": None, "can_support_threading": "true"},
+        )
+    )
+
+    assert captured["headers"]["accept-encoding"] == "gzip, deflate"
+    assert "zstd" not in captured["headers"]["accept-encoding"]
+    assert captured["headers"]["x-ig-app-id"] == "936619743392459"
+    assert captured["params"] == {"can_support_threading": "true"}
+
+
+def test_fetch_api_with_browser_strips_accept_encoding() -> None:
+    fetcher = _build_fetcher()
+    fetcher._parser.get_headers = MagicMock(
+        return_value={
+            "accept-encoding": "gzip, deflate, br, zstd",
+            "x-ig-app-id": "936619743392459",
+        }
+    )
+    fetcher._fetcher.async_fetch = AsyncMock(
+        return_value=httpx.Response(
+            200,
+            json={"status": "ok"},
+            request=httpx.Request("GET", "https://www.instagram.com/api/v1/media/123/comments/"),
+        )
+    )
+    fetcher._rebuild_http_client = AsyncMock()
+
+    asyncio.run(
+        fetcher._fetch_api_with_browser(
+            "https://www.instagram.com/api/v1/media/123/comments/",
+            referer="https://www.instagram.com/p/test/",
+        )
+    )
+
+    extra_headers = fetcher._fetcher.async_fetch.call_args.kwargs["extra_headers"]
+    assert "accept-encoding" not in {key.lower(): value for key, value in extra_headers.items()}
+    assert extra_headers["x-ig-app-id"] == "936619743392459"
 
 
 def test_fetch_comments_preserves_reply_failure_across_later_pages(monkeypatch) -> None:
@@ -2486,6 +2667,71 @@ def test_partial_auth_failure_uses_public_relay_fallback_for_remaining_gap() -> 
     assert relay_lane["last_metadata"]["api_fetch_reason"] == "html_challenge_or_auth_required"
 
 
+def test_partial_relay_auth_recovery_uses_rendered_fallback_for_remaining_gap() -> None:
+    fetcher = _build_fetcher()
+    fetcher._parser._parse_comment = MagicMock(return_value=_comment("api-1"))
+    fetcher._fetch_json_response = AsyncMock(
+        side_effect=[
+            {
+                "payload": {
+                    "comments": [{"id": "api-1"}],
+                    "has_more_comments": True,
+                    "next_min_id": "cursor-1",
+                },
+                "failed": False,
+                "auth_failed": False,
+                "reason": None,
+                "retryable": False,
+            },
+            {
+                "payload": None,
+                "failed": True,
+                "auth_failed": True,
+                "reason": "html_challenge_or_auth_required",
+                "retryable": False,
+            },
+        ]
+    )
+    fetcher._fetch_public_relay_coauthor_comments_for_status_only = AsyncMock(
+        return_value=(
+            [_comment("api-1"), _comment("relay-2")],
+            {"reason": "graphql_relay_partial"},
+        )
+    )
+    fetcher._fetch_rendered_coauthor_comments_for_status_only = AsyncMock(
+        return_value=[_comment("api-1"), _comment("relay-2"), _comment("rendered-3")]
+    )
+
+    result = asyncio.run(
+        fetcher.fetch_comments_for_shortcode(
+            "DQ4lvpcj-gu",
+            max_comments=0,
+            fetch_replies=False,
+            expected_comment_count=3,
+            target_metadata={
+                "source_id": "DQ4lvpcj-gu",
+                "profile_account": "thetraitorsus",
+                "owner_username": "thetraitorsus",
+                "collaborators": [],
+                "is_collaborator_post": False,
+            },
+        )
+    )
+
+    assert [comment.comment_id for comment in result.comments] == ["api-1", "relay-2", "rendered-3"]
+    assert result.fetch_failed is False
+    assert result.auth_failed is False
+    assert result.retryable is False
+    assert result.fetch_reason == "auth_rendered_fallback_recovered"
+    fetcher._fetch_public_relay_coauthor_comments_for_status_only.assert_awaited_once()
+    fetcher._fetch_rendered_coauthor_comments_for_status_only.assert_awaited_once()
+    relay_lane = fetcher.runtime_metadata["lane_diagnostics"]["relay"]
+    assert relay_lane["last_reason"] == "auth_relay_fallback_recovered"
+    rendered_lane = fetcher.runtime_metadata["lane_diagnostics"]["rendered"]
+    assert rendered_lane["last_reason"] == "auth_rendered_fallback_recovered"
+    assert rendered_lane["last_metadata"]["merged_comments"] == 1
+
+
 def test_auth_failure_uses_rendered_post_fallback_for_non_collaborator() -> None:
     fetcher = _build_fetcher()
     rendered_comment = _comment("rendered-comment")
@@ -3826,6 +4072,57 @@ def test_terminal_missing_classified_targets_are_not_retried() -> None:
     )
 
     assert targets == ["RETRY1", "AUTH1"]
+
+
+def test_retryable_incomplete_targets_drop_currently_complete_rows() -> None:
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+
+    class _FakeRepo:
+        @staticmethod
+        def _instagram_filter_incomplete_comment_targets(account_handle: str, targets: list[str]) -> list[str]:
+            assert account_handle == "bravotv"
+            assert targets == ["SHORT1", "SHORT2"]
+            return ["SHORT2"]
+
+    targets, reasons, skipped = jr._filter_retryable_incomplete_targets_against_current_db(
+        account_handle="bravotv",
+        retryable_incomplete_targets=["SHORT1", "SHORT2", "SHORT1"],
+        retry_fetch_reasons={
+            "SHORT1": "coauthor_auth_relay_fallback_recovered",
+            "SHORT2": "reply_tail_incomplete",
+        },
+        repo=_FakeRepo(),
+    )
+
+    assert targets == ["SHORT2"]
+    assert reasons == {"SHORT2": "reply_tail_incomplete"}
+    assert skipped == ["SHORT1"]
+
+
+def test_retryable_incomplete_targets_keep_retry_path_when_db_saturated() -> None:
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+
+    class _FakeRepo:
+        @staticmethod
+        def _instagram_filter_incomplete_comment_targets(_account_handle: str, _targets: list[str]) -> list[str]:
+            raise jr.pg.DatabaseServiceUnavailableError("db saturated")
+
+    targets, reasons, skipped = jr._filter_retryable_incomplete_targets_against_current_db(
+        account_handle="bravotv",
+        retryable_incomplete_targets=["SHORT1", "SHORT2"],
+        retry_fetch_reasons={
+            "SHORT1": "coauthor_auth_relay_fallback_recovered",
+            "SHORT2": "reply_tail_incomplete",
+        },
+        repo=_FakeRepo(),
+    )
+
+    assert targets == ["SHORT1", "SHORT2"]
+    assert reasons == {
+        "SHORT1": "coauthor_auth_relay_fallback_recovered",
+        "SHORT2": "reply_tail_incomplete",
+    }
+    assert skipped == []
 
 
 def test_incomplete_retry_stall_stops_repeated_subset_of_prior_retry_targets() -> None:
@@ -5234,7 +5531,11 @@ def test_comments_job_runner_retries_raw_warmup_transport_error(
 def test_comments_job_runner_treats_closed_ssl_connection_as_transport_error() -> None:
     from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
 
+    ClosedResourceError = type("ClosedResourceError", (Exception,), {})
+
+    assert jr._is_comments_transport_error(ClosedResourceError())
     assert jr._is_comments_transport_error(Exception("SSL connection has been closed unexpectedly"))
+    assert jr._is_comments_transport_error(Exception("Cannot send a request, as the client has been closed."))
     assert jr._is_comments_transport_error(Exception("[SSL] record layer failure (_ssl.c:2590)"))
     assert jr._is_comments_transport_error(
         Exception(
@@ -6255,6 +6556,7 @@ def test_job_runner_reports_actual_comments_posts_checked(monkeypatch: pytest.Mo
         "comments_shard_target_count": 2,
         "comments_load_strategy": "cursor_api",
         "comments_session_scope": "cursor_api_worker",
+        "comments_per_post_concurrency": 1,
     }
     assert progress_activities[-1] == {
         "phase": "comments_scrapling_running",
@@ -6267,6 +6569,7 @@ def test_job_runner_reports_actual_comments_posts_checked(monkeypatch: pytest.Mo
         "comments_shard_target_count": 2,
         "comments_load_strategy": "cursor_api",
         "comments_session_scope": "cursor_api_worker",
+        "comments_per_post_concurrency": 1,
     }
 
 
@@ -8390,3 +8693,14 @@ def test_fetch_comments_swaps_cursor_direction_when_min_id_repeats(monkeypatch) 
     # Direction swap surfaced in runtime metadata.
     assert fetcher.runtime_metadata["cursor_direction_swaps"]["top_level"] == 1
     assert fetcher.runtime_metadata["retry_reason_counts"].get("pagination_repeated_cursor_swap_direction") == 1
+
+
+def test_zstd_decoding_error_is_retryable_transport_error() -> None:
+    """Regression (2026-06-11): zstd bodies mangled by the API proxy raise
+    httpx.DecodingError("zstd decompressor error: Unknown frame descriptor").
+    The job-level classifier must treat it as a retryable transport failure;
+    when it did not, whole comment shards failed terminally at attempt 1."""
+    from trr_backend.socials.instagram.comments_scrapling.job_runner import _is_comments_transport_error
+
+    exc = httpx.DecodingError("zstd decompressor error: Unknown frame descriptor")
+    assert _is_comments_transport_error(exc) is True

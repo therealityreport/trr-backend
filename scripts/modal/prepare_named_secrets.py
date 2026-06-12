@@ -14,6 +14,11 @@ from pathlib import Path
 from dotenv import dotenv_values
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.modal.deploy_backend import pinned_modal_env  # noqa: E402
+
 DEFAULT_SOURCE_ENV = REPO_ROOT / ".env"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / ".artifacts" / "modal-secrets"
 DEFAULT_RUNTIME_SECRET = "trr-backend-runtime"
@@ -73,18 +78,20 @@ MODAL_ALWAYS_ON_SAFE_DEFAULTS = {
 }
 CANONICAL_REMOTE_SOCIAL_CAP_DEFAULTS = {
     "TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT": "8",
-    "SOCIAL_MODAL_DISPATCH_LIMIT": "8",
+    "TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT": "10",
+    "SOCIAL_MODAL_DISPATCH_LIMIT": "10",
     "SOCIAL_WORKER_POOL_POSTS": "1",
-    "SOCIAL_WORKER_POOL_COMMENTS": "8",
+    "SOCIAL_WORKER_POOL_COMMENTS": "10",
     "SOCIAL_WORKER_POOL_SHARED_ACCOUNT_DISCOVERY": "3",
     "SOCIAL_WORKER_POOL_SHARED_ACCOUNT_POSTS": "8",
     "SOCIAL_SHARED_ACCOUNT_POSTS_PLATFORM_CAP_INSTAGRAM": "2",
     "SOCIAL_CATALOG_RUN_IN_FLIGHT_CAP": "8",
     "SOCIAL_WORKER_POOL_MEDIA_MIRROR": "1",
     "SOCIAL_WORKER_POOL_COMMENT_MEDIA_MIRROR": "1",
-    "SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM": "8",
+    "SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM": "10",
     "SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT": "8",
-    "SOCIAL_INSTAGRAM_COMMENTS_GLOBAL_RATE_LIMIT_MODE": "file_lock",
+    "SOCIAL_INSTAGRAM_COMMENTS_GLOBAL_RATE_LIMIT_MODE": "advisory",
+    "SOCIAL_INSTAGRAM_COMMENTS_PER_POST_CONCURRENCY": "2",
     "SOCIAL_THREADS_POSTS_SCRAPLING_ENABLED": "true",
     "SOCIAL_THREADS_POSTS_PROXY_PROVIDER": "decodo",
     "SOCIAL_TIKTOK_COMMENT_FETCH_TIMEOUT_SECONDS": "180",
@@ -352,7 +359,7 @@ def _run_command(command: list[str]) -> None:
     except ValueError:
         timeout_seconds = 120
     timeout_seconds = max(10, timeout_seconds)
-    subprocess.run(command, check=True, timeout=timeout_seconds)
+    subprocess.run(command, check=True, timeout=timeout_seconds, env=pinned_modal_env())
 
 
 def _cleanup_rendered_files(*paths: Path) -> None:

@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Mapping
 
 from psycopg2.extras import RealDictCursor
 
@@ -294,6 +294,43 @@ def _normalize_show_row(row: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def _build_show_sync_warnings(row: Mapping[str, Any]) -> list[dict[str, Any]]:
+    warnings: list[dict[str, Any]] = []
+    missing_count = _normalize_int(row.get("tmdb_episode_missing_imdb_count"))
+    ignored_season_zero_count = _normalize_int(
+        row.get("tmdb_episode_ignored_season_zero_missing_imdb_count")
+    )
+    if missing_count > 0:
+        samples = row.get("tmdb_episode_missing_imdb_samples")
+        sample_rows = samples[:5] if isinstance(samples, list) else []
+        warnings.append(
+            {
+                "code": "episodes_tmdb_missing_imdb_ids",
+                "severity": "warning",
+                "message": (
+                    f"{missing_count} TMDb-backed episode"
+                    f"{'' if missing_count == 1 else 's'} are missing IMDb episode IDs."
+                ),
+                "count": missing_count,
+                "ignored_season_zero_count": ignored_season_zero_count,
+                "samples": sample_rows,
+            }
+        )
+    elif ignored_season_zero_count > 0:
+        warnings.append(
+            {
+                "code": "episodes_tmdb_season_zero_ignored_specials",
+                "severity": "info",
+                "message": (
+                    f"{ignored_season_zero_count} TMDb season 0 special"
+                    f"{'' if ignored_season_zero_count == 1 else 's'} are ignored unless IMDb lists them in a numbered season."
+                ),
+                "count": ignored_season_zero_count,
+            }
+        )
+    return warnings
+
+
 def _augment_show_detail_row(row: dict[str, Any]) -> dict[str, Any]:
     normalized = _normalize_show_row(row)
     overview_networks, overview_streaming_providers = _build_show_overview_brand_buckets(
@@ -311,7 +348,11 @@ def _augment_show_detail_row(row: dict[str, Any]) -> dict[str, Any]:
     )
     normalized["watch_provider_regions"] = _normalize_watch_provider_regions(row.get("watch_provider_regions"))
     normalized["derived_external_links"] = _build_show_derived_external_links(row)
+    normalized["sync_warnings"] = _build_show_sync_warnings(row)
     normalized.pop("justwatch_url", None)
+    normalized.pop("tmdb_episode_missing_imdb_count", None)
+    normalized.pop("tmdb_episode_missing_imdb_samples", None)
+    normalized.pop("tmdb_episode_ignored_season_zero_missing_imdb_count", None)
     return normalized
 
 
@@ -2141,6 +2182,9 @@ def get_show_detail(show_id: str) -> tuple[dict[str, Any] | None, int]:
             watch.justwatch_url,
             watch.overview_watch_availability,
             watch.watch_provider_regions,
+            COALESCE(ep_id_health.tmdb_episode_missing_imdb_count, 0) AS tmdb_episode_missing_imdb_count,
+            COALESCE(ep_id_health.tmdb_episode_missing_imdb_samples, '[]'::jsonb) AS tmdb_episode_missing_imdb_samples,
+            COALESCE(ep_id_health.tmdb_episode_ignored_season_zero_missing_imdb_count, 0) AS tmdb_episode_ignored_season_zero_missing_imdb_count,
             COALESCE(s.tags, ARRAY[]::text[]) AS tags,
             s.primary_poster_image_id,
             s.primary_backdrop_image_id,
@@ -2272,6 +2316,42 @@ def get_show_detail(show_id: str) -> tuple[dict[str, Any] | None, int]:
             JOIN core.watch_providers AS wp ON wp.provider_id = swp.provider_id
             WHERE swp.show_id = s.id
           ) AS watch ON TRUE
+          LEFT JOIN LATERAL (
+            SELECT
+              COUNT(*) FILTER (
+                WHERE e.tmdb_episode_id IS NOT NULL
+                  AND COALESCE(e.season_number, -1) <> 0
+                  AND NULLIF(btrim(COALESCE(e.imdb_episode_id, '')), '') IS NULL
+                  AND NULLIF(btrim(COALESCE(e.external_ids->>'imdb', '')), '') IS NULL
+              )::int AS tmdb_episode_missing_imdb_count,
+              COALESCE(
+                jsonb_agg(
+                  jsonb_build_object(
+                    'episode_id', e.id,
+                    'season_number', e.season_number,
+                    'episode_number', e.episode_number,
+                    'title', e.title,
+                    'air_date', e.air_date,
+                    'tmdb_episode_id', e.tmdb_episode_id
+                  )
+                  ORDER BY e.season_number ASC NULLS LAST, e.episode_number ASC NULLS LAST, e.id ASC
+                ) FILTER (
+                  WHERE e.tmdb_episode_id IS NOT NULL
+                    AND COALESCE(e.season_number, -1) <> 0
+                    AND NULLIF(btrim(COALESCE(e.imdb_episode_id, '')), '') IS NULL
+                    AND NULLIF(btrim(COALESCE(e.external_ids->>'imdb', '')), '') IS NULL
+                ),
+                '[]'::jsonb
+              ) AS tmdb_episode_missing_imdb_samples,
+              COUNT(*) FILTER (
+                WHERE e.tmdb_episode_id IS NOT NULL
+                  AND COALESCE(e.season_number, -1) = 0
+                  AND NULLIF(btrim(COALESCE(e.imdb_episode_id, '')), '') IS NULL
+                  AND NULLIF(btrim(COALESCE(e.external_ids->>'imdb', '')), '') IS NULL
+              )::int AS tmdb_episode_ignored_season_zero_missing_imdb_count
+            FROM core.episodes AS e
+            WHERE e.show_id = s.id
+          ) AS ep_id_health ON TRUE
         )
         SELECT
           s.*,

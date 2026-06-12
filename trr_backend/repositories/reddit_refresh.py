@@ -459,6 +459,7 @@ def _canonical_reddit_container_key_sql(
 def _build_run_config_hash(payload: dict[str, Any]) -> str:
     canonical_payload = {
         "mode": str(payload.get("mode") or "sync_posts").strip().lower() or "sync_posts",
+        "subreddit": _normalize_subreddit(str(payload.get("subreddit") or "")),
         "coverage_mode": _normalize_coverage_mode(payload.get("coverage_mode")),
         "max_pages": _coerce_int(payload.get("max_pages"), default=0, minimum=0, maximum=10_000),
         "max_backfill_queries": _coerce_int(
@@ -477,8 +478,13 @@ def _build_run_config_hash(payload: dict[str, Any]) -> str:
         "exhaustive_window": bool(payload.get("exhaustive_window")),
         "fetch_comments": bool(payload.get("fetch_comments")),
         "comment_delta_only": bool(payload.get("comment_delta_only", True)),
+        "force_rescrape": bool(payload.get("force_rescrape")),
+        "preserve_existing_assignments": bool(payload.get("preserve_existing_assignments", True)),
         "period_start": _iso_utc(_parse_iso(payload.get("period_start"))),
         "period_end": _iso_utc(_parse_iso(payload.get("period_end"))),
+        "show_name": _normalize_text(str(payload.get("show_name") or "")),
+        "show_aliases": _normalize_string_list(payload.get("show_aliases")),
+        "cast_names": _normalize_string_list(payload.get("cast_names")),
         "analysis_flairs": _normalize_string_list(payload.get("analysis_flairs")),
         "analysis_all_flairs": _normalize_string_list(payload.get("analysis_all_flairs")),
         "force_include_flairs": _normalize_string_list(payload.get("force_include_flairs")),
@@ -1105,26 +1111,30 @@ _column_exists_cache: dict[tuple[str, str, str], bool] = {}
 ProgressCallback = Callable[[dict[str, Any]], None]
 
 
-def _column_exists(schema: str, table: str, column: str) -> bool:
+_COLUMN_EXISTS_SQL = """
+    select exists (
+      select 1
+      from information_schema.columns
+      where table_schema = %s
+        and table_name = %s
+        and column_name = %s
+    ) as exists
+"""
+
+
+def _column_exists(schema: str, table: str, column: str, *, conn: Any = None) -> bool:
     key = (schema, table, column)
     cached = _column_exists_cache.get(key)
     if cached is not None:
         return cached
-    row = (
-        pg.fetch_one(
-            """
-            select exists (
-              select 1
-              from information_schema.columns
-              where table_schema = %s
-                and table_name = %s
-                and column_name = %s
-            ) as exists
-            """,
-            [schema, table, column],
-        )
-        or {}
-    )
+    if conn is not None:
+        # Reuse the caller's held connection: acquiring a second pooled
+        # connection mid-write exhausts the pool at low TRR_DB_POOL_MAXCONN.
+        with pg.db_cursor(conn=conn, label="column-exists") as cur:
+            cur.execute(_COLUMN_EXISTS_SQL, [schema, table, column])
+            row = cur.fetchone() or {}
+    else:
+        row = pg.fetch_one(_COLUMN_EXISTS_SQL, [schema, table, column]) or {}
     result = bool(row.get("exists"))
     _column_exists_cache[key] = result
     return result
@@ -1160,10 +1170,9 @@ def _fetch_new_window_exhaustive(
     rows: list[dict[str, Any]] = []
     pages_fetched = 0
     after: str | None = None
+    submitted_cursor: str | None = None
     reached_period_start = False
     exhausted_listing = False
-    consecutive_empty_pages = 0  # early-stop: track pages with no in-window posts
-    early_stop_empty_pages = 3
 
     # Producer-consumer: prefetch next page while processing current page.
     # This overlaps network IO + cooldown with CPU-bound row processing.
@@ -1189,10 +1198,21 @@ def _fetch_new_window_exhaustive(
             # Determine the next cursor early so we can prefetch while processing
             after_value = listing.get("after") if isinstance(listing, dict) else None
             after = str(after_value) if after_value else None
+            if after is not None and after == submitted_cursor:
+                # Reddit repeated the cursor we just fetched with; further
+                # requests would return identical pages until max_pages burns.
+                logger.warning(
+                    "[reddit_refresh] r/%s new-listing repeated after-cursor %s; treating listing as exhausted",
+                    subreddit,
+                    after,
+                )
+                exhausted_listing = True
+                after = None
 
             # Prefetch next page while we process current results
             should_stop = False
             if after is not None and pages_fetched < max_pages:
+                submitted_cursor = after
                 pending_future = prefetch_pool.submit(_fetch_listing_page, after)
             else:
                 should_stop = True  # will stop after processing this page
@@ -1213,24 +1233,6 @@ def _fetch_new_window_exhaustive(
                 )
                 if reached_period_start:
                     break
-                # Early-stop: if page has rows but none fall within the target window,
-                # increment the empty counter. If we hit 3 consecutive empty pages,
-                # we've moved past the relevant date range — stop early.
-                if period_start and period_end:
-                    in_window = _filter_by_window(parsed_rows, period_start=period_start, period_end=period_end)
-                    if not in_window:
-                        consecutive_empty_pages += 1
-                        if consecutive_empty_pages >= early_stop_empty_pages:
-                            logger.info(
-                                "[reddit_refresh_early_stop] %d consecutive pages outside window, stopping. "
-                                "pages_fetched=%d rows=%d",
-                                early_stop_empty_pages,
-                                pages_fetched,
-                                len(rows),
-                            )
-                            break
-                    else:
-                        consecutive_empty_pages = 0
 
             if should_stop:
                 if after is None:
@@ -1411,7 +1413,17 @@ def _fetch_search_backfill(
                 rows_in_window += len(filtered)
 
             after_value = listing.get("after") if isinstance(listing, dict) else None
-            after = str(after_value) if after_value else None
+            next_after = str(after_value) if after_value else None
+            if next_after is not None and next_after == after:
+                logger.warning(
+                    "[reddit_refresh] r/%s %s repeated after-cursor %s; treating query as exhausted",
+                    subreddit,
+                    query_kind,
+                    next_after,
+                )
+                exhausted_query = True
+                break
+            after = next_after
             if after is None:
                 exhausted_query = True
                 break
@@ -1909,16 +1921,16 @@ def _upsert_posts(rows: list[dict[str, Any]], *, conn: Any) -> set[str]:
         return discovered_flairs
 
     # Check which Sprint-3 columns exist (backward compat before migration).
-    has_upvote_ratio = _column_exists("social", "reddit_posts", "upvote_ratio")
-    has_is_self = _column_exists("social", "reddit_posts", "is_self")
-    has_post_type = _column_exists("social", "reddit_posts", "post_type")
-    has_thumbnail = _column_exists("social", "reddit_posts", "thumbnail")
-    has_media_metadata = _column_exists("social", "reddit_posts", "media_metadata")
-    has_poll_data = _column_exists("social", "reddit_posts", "poll_data")
-    has_content_url = _column_exists("social", "reddit_posts", "content_url")
-    has_is_nsfw = _column_exists("social", "reddit_posts", "is_nsfw")
-    has_is_spoiler = _column_exists("social", "reddit_posts", "is_spoiler")
-    has_author_flair_text = _column_exists("social", "reddit_posts", "author_flair_text")
+    has_upvote_ratio = _column_exists("social", "reddit_posts", "upvote_ratio", conn=conn)
+    has_is_self = _column_exists("social", "reddit_posts", "is_self", conn=conn)
+    has_post_type = _column_exists("social", "reddit_posts", "post_type", conn=conn)
+    has_thumbnail = _column_exists("social", "reddit_posts", "thumbnail", conn=conn)
+    has_media_metadata = _column_exists("social", "reddit_posts", "media_metadata", conn=conn)
+    has_poll_data = _column_exists("social", "reddit_posts", "poll_data", conn=conn)
+    has_content_url = _column_exists("social", "reddit_posts", "content_url", conn=conn)
+    has_is_nsfw = _column_exists("social", "reddit_posts", "is_nsfw", conn=conn)
+    has_is_spoiler = _column_exists("social", "reddit_posts", "is_spoiler", conn=conn)
+    has_author_flair_text = _column_exists("social", "reddit_posts", "author_flair_text", conn=conn)
 
     tuples: list[tuple[Any, ...]] = []
     for row in rows:
@@ -2093,13 +2105,13 @@ def _upsert_comments(rows: list[dict[str, Any]], *, conn: Any) -> int:
         return 0
 
     # Check which Sprint-4 columns exist (backward compat before migration).
-    has_author_flair_text = _column_exists("social", "reddit_comments", "author_flair_text")
-    has_is_submitter = _column_exists("social", "reddit_comments", "is_submitter")
-    has_controversiality = _column_exists("social", "reddit_comments", "controversiality")
-    has_ups = _column_exists("social", "reddit_comments", "ups")
-    has_downs = _column_exists("social", "reddit_comments", "downs")
-    has_gildings = _column_exists("social", "reddit_comments", "gildings")
-    has_body_html = _column_exists("social", "reddit_comments", "body_html")
+    has_author_flair_text = _column_exists("social", "reddit_comments", "author_flair_text", conn=conn)
+    has_is_submitter = _column_exists("social", "reddit_comments", "is_submitter", conn=conn)
+    has_controversiality = _column_exists("social", "reddit_comments", "controversiality", conn=conn)
+    has_ups = _column_exists("social", "reddit_comments", "ups", conn=conn)
+    has_downs = _column_exists("social", "reddit_comments", "downs", conn=conn)
+    has_gildings = _column_exists("social", "reddit_comments", "gildings", conn=conn)
+    has_body_html = _column_exists("social", "reddit_comments", "body_html", conn=conn)
 
     tuples: list[tuple[Any, ...]] = []
     for row in rows:
@@ -2207,8 +2219,8 @@ def _replace_period_matches(
     conn: Any,
     preserve_existing_assignments: bool = True,
 ) -> None:
-    has_flair_mode = _column_exists("social", "reddit_period_post_matches", "flair_mode")
-    has_match_type = _column_exists("social", "reddit_period_post_matches", "match_type")
+    has_flair_mode = _column_exists("social", "reddit_period_post_matches", "flair_mode", conn=conn)
+    has_match_type = _column_exists("social", "reddit_period_post_matches", "match_type", conn=conn)
     if not rows:
         # Preserve existing assignments when a refresh returns no rows
         # (for example due to partial coverage or transient Reddit limits).
@@ -4440,6 +4452,75 @@ def get_refresh_run(run_id: str) -> dict[str, Any]:
         "stalled": run_meta.get("stalled"),
         "failure_reason_code": run_meta.get("failure_reason_code"),
         "operator_hint": run_meta.get("operator_hint"),
+    }
+
+
+def build_reddit_refresh_save_proof(run_id: str) -> dict[str, Any]:
+    row = pg.fetch_one(
+        """
+        select id::text as id,
+               community_id,
+               season_id,
+               period_key,
+               subreddit,
+               status,
+               total_rows,
+               matched_rows,
+               tracked_flair_rows,
+               diagnostics
+        from social.reddit_refresh_runs
+        where id = %s::uuid
+        """,
+        [run_id],
+    )
+    if not row:
+        raise ValueError("Refresh run not found")
+
+    materialized_row = (
+        pg.fetch_one(
+            """
+            select count(*)::int as total
+            from social.reddit_period_post_matches
+            where run_id = %s::uuid
+            """,
+            [run_id],
+        )
+        or {}
+    )
+    post_row = (
+        pg.fetch_one(
+            """
+            select count(distinct m.post_id)::int as total
+            from social.reddit_period_post_matches m
+            join social.reddit_posts p on p.id = m.post_id
+            where m.run_id = %s::uuid
+            """,
+            [run_id],
+        )
+        or {}
+    )
+    diagnostics = row.get("diagnostics") if isinstance(row.get("diagnostics"), dict) else {}
+    result = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else {}
+    totals = result.get("totals") if isinstance(result.get("totals"), dict) else {}
+    fetched_count = max(_safe_int(row.get("total_rows")), _safe_int(totals.get("fetched_rows")))
+    upserted_count = max(
+        _safe_int(row.get("matched_rows")),
+        _safe_int(totals.get("matched_rows")),
+        _safe_int(post_row.get("total")),
+    )
+    materialized_count = _safe_int(materialized_row.get("total"))
+    return {
+        "run_id": str(row.get("id") or ""),
+        "community_id": row.get("community_id"),
+        "season_id": row.get("season_id"),
+        "period_key": row.get("period_key"),
+        "subreddit": row.get("subreddit"),
+        "status": row.get("status"),
+        "fetched_count": fetched_count,
+        "upserted_count": upserted_count,
+        "materialized_count": materialized_count,
+        "tracked_flair_rows": _safe_int(row.get("tracked_flair_rows")),
+        "verified": fetched_count > 0 and upserted_count > 0 and materialized_count > 0,
     }
 
 

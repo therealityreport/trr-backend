@@ -33,6 +33,7 @@ _PLATFORM_ALLOWED_HOST_SUFFIXES: dict[str, tuple[str, ...]] = {
     ),
     "threads": (
         "threads.net",
+        "threads.com",
         "instagram.com",
         "cdninstagram.com",
         "fbcdn.net",

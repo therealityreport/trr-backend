@@ -9,6 +9,7 @@ import re
 import shutil
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -601,6 +602,7 @@ def refresh_simple_login_cookies(
     cookie_file: str | Path,
     headless: bool = True,
     timeout_seconds: int = 120,
+    validator: Callable[[dict[str, str]], tuple[bool, str | None]] | None = None,
 ) -> dict[str, str]:
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -631,8 +633,18 @@ def refresh_simple_login_cookies(
                 page,
                 spec=spec,
             ):
-                write_cookie_file(cookie_file, existing_cookies)
-                return existing_cookies
+                reuse_valid = True
+                if validator is not None:
+                    reuse_valid, reuse_reason = validator(existing_cookies)
+                    if not reuse_valid:
+                        logger.info(
+                            "%s Chrome-profile cookies failed in-protocol validation (%s); falling through to scripted login",
+                            spec.platform,
+                            reuse_reason or "unknown",
+                        )
+                if reuse_valid:
+                    write_cookie_file(cookie_file, existing_cookies)
+                    return existing_cookies
 
             page.goto(
                 spec.login_url,
@@ -700,5 +712,11 @@ def refresh_simple_login_cookies(
     )
     if not is_valid:
         raise RuntimeError(f"Cookie refresh produced an invalid authenticated session ({reason or 'unknown'})")
+    if validator is not None:
+        protocol_valid, protocol_reason = validator(refreshed_cookies)
+        if not protocol_valid:
+            raise RuntimeError(
+                f"Cookie refresh produced cookies that failed in-protocol validation ({protocol_reason or 'unknown'})"
+            )
     write_cookie_file(cookie_file, refreshed_cookies)
     return refreshed_cookies

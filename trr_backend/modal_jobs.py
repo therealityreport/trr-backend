@@ -109,11 +109,22 @@ _API_LABEL = str(os.getenv("TRR_MODAL_API_LABEL") or "trr-backend-api").strip() 
 _API_MIN_CONTAINERS = max(0, int(os.getenv("TRR_MODAL_API_MIN_CONTAINERS", "0")))
 _API_MAX_CONTAINERS = max(1, int(os.getenv("TRR_MODAL_API_MAX_CONTAINERS", "8")))
 _SOCIAL_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT", "8")))
+_SOCIAL_COMMENTS_CONCURRENCY_LIMIT = max(
+    1,
+    int(
+        os.getenv("TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT")
+        or os.getenv("TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT", "8")
+    ),
+)
 _SOCIAL_MEDIA_CONCURRENCY_LIMIT = max(
     1,
     int(os.getenv("TRR_MODAL_SOCIAL_MEDIA_JOB_CONCURRENCY_LIMIT", "10")),
 )
 _SOCIAL_RECOVERY_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_SOCIAL_RECOVERY_CONCURRENCY_LIMIT", "4")))
+_SOCIAL_PENDING_LAUNCH_RECOVERY_LIMIT = max(
+    1,
+    int(os.getenv("TRR_MODAL_SOCIAL_PENDING_LAUNCH_RECOVERY_LIMIT", "10")),
+)
 _ADMIN_KEEP_WARM = max(0, int(os.getenv("TRR_MODAL_ADMIN_KEEP_WARM", "0")))
 _ADMIN_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_ADMIN_OPERATION_CONCURRENCY_LIMIT", "8")))
 _GOOGLE_NEWS_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_GOOGLE_NEWS_CONCURRENCY_LIMIT", "4")))
@@ -238,20 +249,21 @@ _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "TRR_MODAL_SOCIALBLADE_FUNCTION": "run_socialblade_scrape",
     "TRR_MODAL_STALE_WORKER_CLEANUP_FUNCTION": "purge_stale_social_worker_heartbeats",
     "TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT": "8",
+    "TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT": "10",
     "TRR_MODAL_SOCIAL_MEDIA_JOB_CONCURRENCY_LIMIT": "10",
     "TRR_MODAL_GOOGLE_NEWS_CONCURRENCY_LIMIT": "4",
     "TRR_MODAL_REDDIT_REFRESH_CONCURRENCY_LIMIT": "2",
     "TRR_MODAL_VISION_CONCURRENCY_LIMIT": "4",
     "TRR_MODAL_CAST_SCREENTIME_CONCURRENCY_LIMIT": "2",
     "TRR_MODAL_SOCIALBLADE_CONCURRENCY_LIMIT": "3",
-    "SOCIAL_MODAL_DISPATCH_LIMIT": "8",
+    "SOCIAL_MODAL_DISPATCH_LIMIT": "10",
     "SOCIAL_INSTAGRAM_POSTS_USE_STICKY_PROXY": "true",
     "SOCIAL_INSTAGRAM_POSTS_ANONYMOUS_ENABLED": "false",
     "SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER": "decodo",
     "SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY": "true",
     "SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY": "false",
     "SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS": "600",
-    "SOCIAL_WORKER_POOL_COMMENTS": "8",
+    "SOCIAL_WORKER_POOL_COMMENTS": "10",
     "SOCIAL_WORKER_POOL_SHARED_ACCOUNT_DISCOVERY": "3",
     "SOCIAL_WORKER_POOL_SHARED_ACCOUNT_POSTS": "8",
     "SOCIAL_SHARED_ACCOUNT_POSTS_PLATFORM_CAP_INSTAGRAM": "2",
@@ -259,9 +271,10 @@ _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "SOCIAL_WORKER_POOL_COMMENT_MEDIA_MIRROR": "1",
     "SOCIAL_MIRROR_PLATFORM_CAP": "10",
     "SOCIAL_CATALOG_RUN_IN_FLIGHT_CAP": "8",
-    "SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM": "8",
+    "SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM": "10",
     "SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT": "8",
-    "SOCIAL_INSTAGRAM_COMMENTS_GLOBAL_RATE_LIMIT_MODE": "file_lock",
+    "SOCIAL_INSTAGRAM_COMMENTS_GLOBAL_RATE_LIMIT_MODE": "advisory",
+    "SOCIAL_INSTAGRAM_COMMENTS_PER_POST_CONCURRENCY": "2",
     "SOCIAL_THREADS_POSTS_SCRAPLING_ENABLED": "true",
     "SOCIAL_THREADS_POSTS_PROXY_PROVIDER": "decodo",
     "SOCIAL_TIKTOK_COMMENT_FETCH_TIMEOUT_SECONDS": "180",
@@ -1036,7 +1049,7 @@ def run_social_media_job(job_id: str) -> dict[str, object]:
     secrets=_secrets,
     retries=0,
     timeout=2 * 60 * 60,
-    max_containers=_SOCIAL_CONCURRENCY_LIMIT,
+    max_containers=_SOCIAL_COMMENTS_CONCURRENCY_LIMIT,
 )
 def run_social_comments_job(job_id: str) -> dict[str, object]:
     return _execute_social_job(job_id, worker_prefix="modal:social-comments")
@@ -1051,6 +1064,75 @@ def run_social_comments_job(job_id: str) -> dict[str, object]:
 )
 def run_social_job(job_id: str) -> dict[str, object]:
     return _execute_social_job(job_id, worker_prefix="modal:social")
+
+
+def _recover_stale_pending_social_catalog_launches(
+    *,
+    limit: int = _SOCIAL_PENDING_LAUNCH_RECOVERY_LIMIT,
+) -> dict[str, object]:
+    """Finalize catalog launches stuck in launch_state=pending/finalizing with no jobs.
+
+    Catalog launches reserve a durable run row first and finalize on a non-durable
+    daemon thread; if the backend dies in between, the run stays queued forever unless
+    a status read happens to trigger recovery. This sweep-side pass proactively invokes
+    the same idempotent, advisory-locked recovery entrypoint for stale candidates.
+    """
+    import trr_backend.socials.social_season_analytics_impl as social_core
+
+    safe_limit = max(1, min(int(limit), 50))
+    grace_seconds = max(
+        0,
+        int(getattr(social_core, "_CATALOG_LAUNCH_FINALIZING_RECOVERY_GRACE_SECONDS", 120)),
+    )
+    rows = social_core.pg.fetch_all(
+        """
+        select
+          r.id::text as run_id,
+          coalesce(r.config, '{}'::jsonb) as config
+        from social.scrape_runs r
+        where coalesce(r.config->>'pipeline_ingest_mode', '') = %s
+          and (
+            lower(coalesce(r.config->>'launch_state', '')) in ('pending', 'finalizing')
+            or lower(coalesce(r.config->>'launch_task_resolution_pending', 'false')) = 'true'
+          )
+          and r.created_at <= now() - make_interval(secs => %s)
+          and not exists (select 1 from social.scrape_jobs j where j.run_id = r.id)
+        order by r.created_at asc
+        limit %s
+        """,
+        [social_core.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE, grace_seconds, safe_limit],
+    )
+    recovered_run_ids: list[str] = []
+    failed_run_ids: list[str] = []
+    for row in rows:
+        run_id = str(row.get("run_id") or "").strip()
+        run_config = social_core._metadata_dict(row.get("config"))
+        platforms = social_core._as_text_list(run_config.get("platforms") or [])
+        accounts = social_core._as_text_list(run_config.get("accounts_override") or [])
+        if not run_id or not platforms or not accounts:
+            continue
+        try:
+            recovery = social_core.recover_pending_social_account_catalog_launch(
+                platform=platforms[0],
+                account_handle=accounts[0],
+                run_id=run_id,
+            )
+        except Exception:  # noqa: BLE001 - one bad candidate must not block the rest
+            failed_run_ids.append(run_id)
+            logger.warning(
+                "sweep_social_dispatch_queue: pending catalog launch recovery failed run_id=%s",
+                run_id,
+                exc_info=True,
+            )
+            continue
+        if bool(recovery.get("recovered")):
+            recovered_run_ids.append(run_id)
+    return {
+        "scanned": len(rows),
+        "recovered": len(recovered_run_ids),
+        "recovered_run_ids": recovered_run_ids,
+        "failed_run_ids": failed_run_ids,
+    }
 
 
 @app.function(
@@ -1070,12 +1152,22 @@ def sweep_social_dispatch_queue() -> dict[str, object]:
     )
     try:
         result = recover_and_dispatch_due_social_jobs()
+        try:
+            launch_recovery = _recover_stale_pending_social_catalog_launches()
+        except Exception:  # noqa: BLE001 - recovery is best-effort; never fail the sweep
+            logger.warning(
+                "sweep_social_dispatch_queue: pending catalog launch recovery sweep failed",
+                exc_info=True,
+            )
+            launch_recovery = {"status": "error"}
+        result["pending_launch_recovery"] = launch_recovery
         _worker_finished(
             "social_recovery",
             started_at,
             result_status=str(result.get("status") or "completed"),
             recovered=result.get("recovered"),
             dispatched=result.get("dispatched"),
+            pending_launches_recovered=launch_recovery.get("recovered"),
         )
         return result
     except Exception as exc:
@@ -1221,7 +1313,7 @@ def heartbeat_remote_executors(heartbeat_source: str = "backend_runtime_schedule
                         function_name="run_social_comments_job",
                         image_family="browser",
                         timeout_seconds=2 * 60 * 60,
-                        max_containers=_SOCIAL_CONCURRENCY_LIMIT,
+                        max_containers=_SOCIAL_COMMENTS_CONCURRENCY_LIMIT,
                     ),
                     _modal_capacity_metadata(
                         worker_family="socialblade",

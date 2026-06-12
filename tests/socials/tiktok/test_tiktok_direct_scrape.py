@@ -235,7 +235,7 @@ def test_preview_tiktok_profile_uses_loader_and_shapes_payload(monkeypatch: pyte
         "is_private": False,
         "followers": 10,
         "following": 20,
-        "likes": 30,
+        "likes": 999,
         "video_count": 40,
         "profile_pic_url": "https://example.test/avatar.jpg",
     }

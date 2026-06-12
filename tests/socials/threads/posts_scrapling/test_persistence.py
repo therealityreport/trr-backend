@@ -82,3 +82,40 @@ def test_persist_threads_posts_counts_skips_by_reason(monkeypatch: pytest.Monkey
         "canonical_upsert_returned_none": 1,
         "upsert_failed": 1,
     }
+
+
+def test_persist_threads_posts_shared_catalog_mode_writes_catalog_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.db import pg
+    from trr_backend.repositories import social_season_analytics as repo
+
+    catalog_calls: list[dict[str, object]] = []
+
+    @contextmanager
+    def _fake_conn(*, label: str | None = None):
+        del label
+        yield object()
+
+    monkeypatch.setattr(pg, "db_connection", _fake_conn)
+    monkeypatch.setattr(repo, "get_season_context", lambda _season_id: None)
+    monkeypatch.setattr(repo, "_upsert_meta_threads_post", lambda *_args, **_kwargs: {"id": "materialized"})
+
+    def _fake_catalog_upsert(**kwargs):
+        catalog_calls.append(kwargs)
+        return {"id": "catalog"}
+
+    monkeypatch.setattr(repo, "_upsert_shared_catalog_post", _fake_catalog_upsert)
+
+    result = persist_threads_posts(
+        account_handle="bravotv",
+        posts=[SimpleNamespace(post_id="th-1", to_dict=lambda: {"post_id": "th-1"})],
+        run_id="run-1",
+        job_id="job-1",
+        season_id=None,
+        pipeline_ingest_mode="shared_account_catalog_backfill",
+    )
+
+    assert result.posts_upserted == 1
+    assert result.catalog_posts_upserted == 1
+    assert catalog_calls[0]["platform"] == "threads"
+    assert catalog_calls[0]["run_id"] == "run-1"
+    assert catalog_calls[0]["account_handle"] == "bravotv"

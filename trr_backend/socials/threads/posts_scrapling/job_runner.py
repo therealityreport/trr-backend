@@ -10,6 +10,7 @@ from datetime import timedelta
 from typing import Any
 
 from trr_backend.db import pg
+from trr_backend.socials.instagram import auth_cooldown
 from trr_backend.socials.post_persist_truthfulness import apply_post_persist_truthfulness_metadata
 from trr_backend.socials.rollout_flags import resolve_rollout_flag
 
@@ -137,6 +138,27 @@ def _safe_auth_context(session: Any) -> dict[str, Any]:
     }
 
 
+def _auth_cooldown_metadata(cooldown: Any) -> dict[str, Any] | None:
+    if cooldown is None:
+        return None
+    if hasattr(cooldown, "to_metadata"):
+        return dict(cooldown.to_metadata())
+    return dict(cooldown) if isinstance(cooldown, dict) else None
+
+
+def _raise_if_threads_auth_cooldown_active(account_handle: str) -> None:
+    cooldown = auth_cooldown.get_active_cooldown("threads", account_handle)
+    metadata = _auth_cooldown_metadata(cooldown)
+    if not metadata:
+        return
+    raise ThreadsPostsScraplingRuntimeError(
+        f"Threads posts auth cooldown is active for @{account_handle}.",
+        error_code=str(metadata.get("last_error_code") or "threads_posts_auth_cooldown_active"),
+        retryable=True,
+        runtime_metadata={"auth_cooldown": metadata, "auth_cooldown_active": True},
+    )
+
+
 def _resolve_operation_timeout_seconds() -> float:
     raw_value = str(os.getenv("SOCIAL_THREADS_POSTS_SCRAPLING_OPERATION_TIMEOUT_SECONDS") or "").strip()
     if not raw_value:
@@ -242,6 +264,7 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
     max_pages: int | None = int(max_pages_raw) if max_pages_raw not in (None, 0, "") else None
     fast_mode = bool(config.get("fast_mode", False))
     season_id = str(config.get("season_id") or "").strip() or None
+    pipeline_ingest_mode = str(config.get("pipeline_ingest_mode") or "").strip().lower()
     rollout_flag = _resolve_threads_posts_scrapling_rollout_flag()
     threads_posts_scrapling_enabled = bool(rollout_flag["enabled"])
 
@@ -255,6 +278,8 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
     progress_state = lifecycle.new_job_progress_state()
     posts_fetched = 0
     posts_upserted = 0
+    materialized_posts_upserted = 0
+    catalog_posts_upserted = 0
     posts_skipped = 0
     posts_skipped_by_reason: dict[str, int] = {}
     pages_fetched = 0
@@ -279,6 +304,8 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
     def _persist_counters() -> dict[str, Any]:
         return {
             "posts_upserted": posts_upserted,
+            "materialized_posts_upserted": materialized_posts_upserted,
+            "catalog_posts_upserted": catalog_posts_upserted,
             "posts_skipped": posts_skipped,
             "posts_skipped_by_reason": dict(posts_skipped_by_reason),
         }
@@ -333,6 +360,7 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
             "platform": "threads",
             "account": account_handle,
             "fast_mode": fast_mode,
+            "pipeline_ingest_mode": pipeline_ingest_mode or None,
             "threads_posts_scrapling_enabled": threads_posts_scrapling_enabled,
             "rollout_flags": {
                 "threads_posts_scrapling": dict(rollout_flag),
@@ -369,9 +397,11 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
         return metadata
 
     async def _run_job() -> dict[str, Any]:
-        nonlocal posts_fetched, posts_upserted, posts_skipped, pages_fetched
+        nonlocal posts_fetched, posts_upserted, materialized_posts_upserted, catalog_posts_upserted
+        nonlocal posts_skipped, pages_fetched
         nonlocal fetcher_metadata, auth_metadata, stop_reason, persistence_state
 
+        _raise_if_threads_auth_cooldown_active(account_handle)
         session = resolve_threads_posts_session()
         auth_metadata = _safe_auth_context(session)
         proxy_config = select_threads_posts_proxy()
@@ -441,6 +471,22 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
             stop_reason = str(result.fetch_reason or fetcher_metadata.get("stop_reason") or "").strip() or None
             _raise_if_cancelled(job_id=job_id, run_id=run_id, runtime_metadata=fetcher_metadata)
 
+            if result.auth_failed and not result.posts:
+                error_code = str(result.fetch_reason or "threads_posts_auth_failed").strip()
+                cooldown = auth_cooldown.record_auth_block("threads", account_handle, error_code)
+                cooldown_metadata = _auth_cooldown_metadata(cooldown)
+                raise ThreadsPostsScraplingRuntimeError(
+                    f"Threads posts auth failed for @{account_handle}.",
+                    error_code=error_code,
+                    retryable=True,
+                    runtime_metadata={
+                        **fetcher_metadata,
+                        "fetch_reason": result.fetch_reason,
+                        "auth_cooldown": cooldown_metadata,
+                        "auth_cooldown_recorded": bool(cooldown_metadata),
+                    },
+                )
+
             if result.fetch_failed and not result.posts:
                 legacy_scraper = ThreadsScraper(
                     cookies=session.raw_cookies,
@@ -498,12 +544,18 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
                 run_id=run_id or None,
                 job_id=job_id or None,
                 season_id=season_id,
+                pipeline_ingest_mode=pipeline_ingest_mode,
             )
             posts_fetched = len(result.posts)
-            posts_upserted = persisted.posts_upserted
+            materialized_posts_upserted = persisted.posts_upserted
+            catalog_posts_upserted = int(getattr(persisted, "catalog_posts_upserted", 0) or 0)
+            posts_upserted = max(materialized_posts_upserted, catalog_posts_upserted)
             posts_skipped = persisted.posts_skipped
             _merge_skipped_reasons(dict(getattr(persisted, "posts_skipped_by_reason", {}) or {}))
             persistence_state = "completed"
+            if posts_fetched > 0 and posts_upserted > 0:
+                with contextlib.suppress(Exception):
+                    auth_cooldown.clear_cooldown("threads", account_handle)
             if stop_reason in {None, "", "complete"}:
                 stop_reason = "completed"
             final_fetcher_runtime = _fetcher_runtime_metadata()
@@ -568,6 +620,7 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
             posts_skipped_by_reason=posts_skipped_by_reason,
             alias_keys=("threads_posts_scrapling_persist_diagnostics",),
         )
+        metadata["threads_posts_scrapling_persist_diagnostics"] = metadata["persist_counters"]
         lifecycle.finish_job(
             job_id,
             status="completed",

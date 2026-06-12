@@ -1269,6 +1269,8 @@ class TikTokScraper:
             likes=self._safe_int_metric(
                 stats.get("diggCount")
                 or stats.get("digg_count")
+                or stats_v2.get("diggCount")
+                or stats_v2.get("digg_count")
                 or item.get("diggCount")
                 or item.get("digg_count")
                 or 0
@@ -1276,6 +1278,8 @@ class TikTokScraper:
             comments=self._safe_int_metric(
                 stats.get("commentCount")
                 or stats.get("comment_count")
+                or stats_v2.get("commentCount")
+                or stats_v2.get("comment_count")
                 or item.get("commentCount")
                 or item.get("comment_count")
                 or 0
