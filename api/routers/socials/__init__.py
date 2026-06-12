@@ -3232,6 +3232,20 @@ class SocialAccountCommentsScrapeRequest(SourceScopedRequest):
         return self
 
 
+class SocialAccountCommentsAuditCursorRetryRequest(BaseModel):
+    limit: int = Field(default=50, ge=1, le=500)
+    shortcodes: list[str] | None = Field(default=None, max_length=500)
+    stop_reasons: list[str] | None = Field(default=None, max_length=20)
+    batch_size: int = Field(default=1, ge=1, le=25)
+    comments_worker_count: int | None = Field(default=None, ge=1, le=24)
+    max_comments_per_post: int = Field(default=0, ge=0)
+    comments_load_strategy: Literal["cursor_api", "single_session_load_all"] = Field(default="cursor_api")
+    skip_launch_auth_probe: bool = Field(default=False)
+    attach_to_active_run: bool = Field(default=True)
+    dispatch_immediately: bool = Field(default=True)
+    dry_run: bool = Field(default=False)
+
+
 class CancelStuckJobsRequest(BaseModel):
     job_ids: list[UUID] | None = Field(default=None, max_length=500)
 
@@ -4711,6 +4725,79 @@ def get_instagram_profile_relationships_route(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch Instagram profile relationships: account=%s", account_handle)
         raise _to_social_read_http_exception(exc) from exc
+
+
+@router.get("/profiles/{platform}/{account_handle}/comments/audit-cursor-retries")
+def get_social_account_comments_audit_cursor_retries_route(
+    platform: str,
+    account_handle: str,
+    limit: int = Query(default=50, ge=1, le=500),
+    stop_reason: list[str] | None = Query(default=None),
+    shortcode: list[str] | None = Query(default=None),
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.socials.pipelines.comments.instagram import get_instagram_comments_audit_cursor_recovery
+
+    if platform.strip().lower() != "instagram":
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "SOCIAL_ACCOUNT_COMMENTS_UNSUPPORTED_PLATFORM", "message": "Audit cursor retries are Instagram-only."},
+        )
+    try:
+        return get_instagram_comments_audit_cursor_recovery(
+            account_handle=account_handle,
+            limit=limit,
+            shortcodes=shortcode,
+            stop_reasons=stop_reason,
+        )
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+
+
+@router.post("/profiles/{platform}/{account_handle}/comments/audit-cursor-retries")
+async def post_social_account_comments_audit_cursor_retries_route(
+    platform: str,
+    account_handle: str,
+    payload: SocialAccountCommentsAuditCursorRetryRequest,
+    user: InternalAdminUser,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import SocialIngestConflictError, SocialIngestValidationError
+    from trr_backend.socials.pipelines.comments.instagram import enqueue_instagram_comments_audit_cursor_retries
+
+    if platform.strip().lower() != "instagram":
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "SOCIAL_ACCOUNT_COMMENTS_UNSUPPORTED_PLATFORM", "message": "Audit cursor retries are Instagram-only."},
+        )
+    try:
+        return await run_in_threadpool(
+            enqueue_instagram_comments_audit_cursor_retries,
+            account_handle=account_handle,
+            limit=payload.limit,
+            shortcodes=payload.shortcodes,
+            stop_reasons=payload.stop_reasons,
+            batch_size=payload.batch_size,
+            comments_worker_count=payload.comments_worker_count,
+            max_comments_per_post=payload.max_comments_per_post,
+            comments_load_strategy=payload.comments_load_strategy,
+            skip_launch_auth_probe=payload.skip_launch_auth_probe,
+            dry_run=payload.dry_run,
+            attach_to_active_run=payload.attach_to_active_run,
+            dispatch_immediately=payload.dispatch_immediately,
+            initiated_by=(user or {}).get("email"),
+        )
+    except SocialIngestConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": exc.code, "message": str(exc), **jsonable_encoder(exc.detail)},
+        ) from exc
+    except SocialIngestValidationError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": exc.code, "message": str(exc), **jsonable_encoder(getattr(exc, "detail", {}) or {})},
+        ) from exc
 
 
 @router.post("/profiles/{platform}/{account_handle}/comments/scrape")

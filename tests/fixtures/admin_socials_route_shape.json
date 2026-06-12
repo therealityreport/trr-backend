@@ -235,6 +235,16 @@
     "name": "get_social_account_profile_comments_route"
   },
   {
+    "method": "GET",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/comments/audit-cursor-retries",
+    "name": "get_social_account_comments_audit_cursor_retries_route"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/comments/audit-cursor-retries",
+    "name": "post_social_account_comments_audit_cursor_retries_route"
+  },
+  {
     "method": "POST",
     "path": "/admin/socials/profiles/{platform}/{account_handle}/comments/runs/{run_id}/cancel",
     "name": "post_social_account_comments_run_cancel_route"
