@@ -31,6 +31,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--account", default="bravotv", help="Instagram account handle.")
     parser.add_argument("--limit", type=int, default=50, help="Maximum latest audit-cursor targets to inspect.")
     parser.add_argument("--shortcode", action="append", help="Restrict to one shortcode. Repeatable.")
+    parser.add_argument("--show-id", action="append", help="Restrict to posts assigned to a show UUID. Repeatable.")
+    parser.add_argument("--season-id", action="append", help="Restrict to posts assigned to a season UUID. Repeatable.")
+    parser.add_argument(
+        "--show-filter",
+        action="append",
+        help="Restrict by saved post show slug/name, caption, hashtag, or raw metadata text. Repeatable.",
+    )
     parser.add_argument(
         "--stop-reason",
         action="append",
@@ -51,6 +58,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--no-attach-active-run",
         action="store_true",
         help="Fail on an already-active run instead of splitting matching queued targets into batch jobs.",
+    )
+    parser.add_argument(
+        "--force-rerun-existing",
+        action="store_true",
+        help="Retire an existing queued one-target retry job and create a fresh priority recovery job.",
     )
     parser.add_argument("--enqueue", action="store_true", help="Create the comments retry run.")
     parser.add_argument(
@@ -78,6 +90,9 @@ def _build_payload(args: argparse.Namespace) -> dict[str, Any]:
         raise SystemExit("--account is required")
     stop_reasons = list(dict.fromkeys(args.stop_reason or DEFAULT_STOP_REASONS))
     shortcodes = _shortcode_filters(args.shortcode)
+    show_ids = _shortcode_filters(args.show_id)
+    season_ids = _shortcode_filters(args.season_id)
+    show_filters = _shortcode_filters(args.show_filter)
     if args.enqueue and args.confirm_enqueue != CONFIRM_ENQUEUE:
         return {
             "ok": False,
@@ -91,6 +106,9 @@ def _build_payload(args: argparse.Namespace) -> dict[str, Any]:
         limit=max(1, int(args.limit or 1)),
         shortcodes=shortcodes,
         stop_reasons=stop_reasons,
+        show_ids=show_ids,
+        season_ids=season_ids,
+        show_filters=show_filters,
         batch_size=max(1, int(args.batch_size or 1)),
         comments_worker_count=args.comments_worker_count,
         max_comments_per_post=max(0, int(args.max_comments_per_post or 0)),
@@ -98,6 +116,7 @@ def _build_payload(args: argparse.Namespace) -> dict[str, Any]:
         skip_launch_auth_probe=bool(args.skip_launch_auth_probe),
         dry_run=not bool(args.enqueue),
         attach_to_active_run=not bool(args.no_attach_active_run),
+        force_rerun_existing=bool(args.force_rerun_existing),
         initiated_by="audit-cursor-retry-cli",
     )
 

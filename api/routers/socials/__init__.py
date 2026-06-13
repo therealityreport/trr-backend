@@ -3236,6 +3236,10 @@ class SocialAccountCommentsAuditCursorRetryRequest(BaseModel):
     limit: int = Field(default=50, ge=1, le=500)
     shortcodes: list[str] | None = Field(default=None, max_length=500)
     stop_reasons: list[str] | None = Field(default=None, max_length=20)
+    show_ids: list[str] | None = Field(default=None, max_length=100)
+    season_ids: list[str] | None = Field(default=None, max_length=100)
+    show_filters: list[str] | None = Field(default=None, max_length=100)
+    show_filter: str | None = Field(default=None, max_length=128)
     batch_size: int = Field(default=1, ge=1, le=25)
     comments_worker_count: int | None = Field(default=None, ge=1, le=24)
     max_comments_per_post: int = Field(default=0, ge=0)
@@ -3243,6 +3247,7 @@ class SocialAccountCommentsAuditCursorRetryRequest(BaseModel):
     skip_launch_auth_probe: bool = Field(default=False)
     attach_to_active_run: bool = Field(default=True)
     dispatch_immediately: bool = Field(default=True)
+    force_rerun_existing: bool = Field(default=False)
     dry_run: bool = Field(default=False)
 
 
@@ -4734,6 +4739,9 @@ def get_social_account_comments_audit_cursor_retries_route(
     limit: int = Query(default=50, ge=1, le=500),
     stop_reason: list[str] | None = Query(default=None),
     shortcode: list[str] | None = Query(default=None),
+    show_id: list[str] | None = Query(default=None),
+    season_id: list[str] | None = Query(default=None),
+    show_filter: list[str] | None = Query(default=None),
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.socials.pipelines.comments.instagram import get_instagram_comments_audit_cursor_recovery
@@ -4749,6 +4757,9 @@ def get_social_account_comments_audit_cursor_retries_route(
             limit=limit,
             shortcodes=shortcode,
             stop_reasons=stop_reason,
+            show_ids=show_id,
+            season_ids=season_id,
+            show_filters=show_filter,
         )
     except ValueError as exc:
         raise _value_error_to_bad_request(exc) from exc
@@ -4778,6 +4789,12 @@ async def post_social_account_comments_audit_cursor_retries_route(
             limit=payload.limit,
             shortcodes=payload.shortcodes,
             stop_reasons=payload.stop_reasons,
+            show_ids=payload.show_ids,
+            season_ids=payload.season_ids,
+            show_filters=[
+                *list(payload.show_filters or []),
+                *([payload.show_filter] if payload.show_filter else []),
+            ],
             batch_size=payload.batch_size,
             comments_worker_count=payload.comments_worker_count,
             max_comments_per_post=payload.max_comments_per_post,
@@ -4786,6 +4803,7 @@ async def post_social_account_comments_audit_cursor_retries_route(
             dry_run=payload.dry_run,
             attach_to_active_run=payload.attach_to_active_run,
             dispatch_immediately=payload.dispatch_immediately,
+            force_rerun_existing=payload.force_rerun_existing,
             initiated_by=(user or {}).get("email"),
         )
     except SocialIngestConflictError as exc:

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from trr_backend.socials.pipelines.comments.instagram import (
     SocialWorkerUnavailableError,
     _build_comments_scrape_run_progress_payload,
+    _load_instagram_comments_audit_cursor_rows,
     _normalize_instagram_comments_audit_retry_stop_reasons,
     _split_instagram_comments_audit_cursor_targets_into_active_run,
     enqueue_instagram_comments_audit_cursor_retries,
@@ -115,6 +116,38 @@ def test_audit_cursor_retry_defaults_include_network_stops() -> None:
     assert "static_cdn_budget_exhausted" in stop_reasons
 
 
+def test_audit_cursor_recovery_show_filter_uses_saved_post_metadata(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def _fetch_all(query, params=None, **_kwargs):
+        calls.append({"query": query, "params": params})
+        return []
+
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram.pg.fetch_all",
+        _fetch_all,
+    )
+
+    _load_instagram_comments_audit_cursor_rows(
+        account_handle="bravotv",
+        limit=5,
+        show_ids=["show-1"],
+        season_ids=["season-1"],
+        show_filters=["Summer House"],
+    )
+
+    query = str(calls[0]["query"])
+    params = calls[0]["params"]
+    assert "left join social.instagram_posts p" in query
+    assert "left join core.shows sh" in query
+    assert "p.show_id::text = any" in query
+    assert "p.season_id::text = any" in query
+    assert "p.caption" in query
+    assert ["show-1"] in params
+    assert ["season-1"] in params
+    assert "summerhouse" in next(item for item in params if isinstance(item, list) and "summerhouse" in item)
+
+
 def test_audit_cursor_retry_attaches_to_active_run_when_worker_guard_blocks(monkeypatch) -> None:
     calls: list[dict[str, object]] = []
 
@@ -169,6 +202,7 @@ def test_audit_cursor_retry_attaches_to_active_run_when_worker_guard_blocks(monk
             "batch_size": 1,
             "initiated_by": "audit-cursor-retry",
             "dispatch_immediately": True,
+            "force_rerun_existing": False,
         }
     ]
 
@@ -232,3 +266,76 @@ def test_audit_cursor_split_creates_standalone_target_job_without_source_job(mon
     assert created_config["comments_audit_cursor_retry_standalone"] is True
     assert created_config["comments_target_batch_size"] == 1
     assert created_config["max_comments_per_post"] == 0
+
+
+def test_audit_cursor_split_force_rerun_replaces_existing_one_target_job(monkeypatch) -> None:
+    created_jobs: list[dict[str, object]] = []
+    fetch_one_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram.pg.fetch_all",
+        lambda *_args, **_kwargs: [
+            {
+                "run_id": "11111111-1111-1111-1111-111111111111",
+                "source_scope": "network",
+                "initiated_by": "admin",
+                "job_id": "33333333-3333-3333-3333-333333333333",
+                "status": "queued",
+                "priority": 104,
+                "target_count": 1,
+                "matched_targets": ["DTgXh94kXyo"],
+                "config": {
+                    "platform": "instagram",
+                    "account": "bravotv",
+                    "source_scope": "network",
+                    "target_source_ids": ["DTgXh94kXyo"],
+                    "comments_audit_cursor_retry": True,
+                },
+                "metadata": {
+                    "dispatch": {
+                        "remote_invocation_id": "fc-pending",
+                        "remote_invocation_status": "pending",
+                    }
+                },
+            }
+        ],
+    )
+
+    def _fetch_one(query, params=None, **_kwargs):
+        fetch_one_calls.append({"query": query, "params": params})
+        return {"id": "33333333-3333-3333-3333-333333333333"}
+
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram.pg.fetch_one",
+        _fetch_one,
+    )
+
+    def _create_job(_context, **kwargs):
+        created_jobs.append(kwargs)
+        return "44444444-4444-4444-4444-444444444444"
+
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram._create_job",
+        _create_job,
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram.dispatch_due_social_jobs",
+        lambda *, run_id: None,
+    )
+
+    payload = _split_instagram_comments_audit_cursor_targets_into_active_run(
+        run_id="11111111-1111-1111-1111-111111111111",
+        account_handle="bravotv",
+        target_source_ids=["DTgXh94kXyo"],
+        batch_size=1,
+        initiated_by="audit-cursor-retry",
+        dispatch_immediately=True,
+        force_rerun_existing=True,
+    )
+
+    assert payload["created_target_job_ids"] == ["44444444-4444-4444-4444-444444444444"]
+    assert payload["cancelled_source_job_ids"] == ["33333333-3333-3333-3333-333333333333"]
+    assert payload["force_rerun_existing"] is True
+    assert created_jobs[0]["priority"] == 104
+    assert created_jobs[0]["config"]["comments_audit_cursor_retry_force_rerun"] is True
+    assert any(call["params"] and call["params"][-2] is True for call in fetch_one_calls)

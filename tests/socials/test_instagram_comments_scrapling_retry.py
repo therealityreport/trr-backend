@@ -6727,6 +6727,13 @@ def test_audit_cursor_resume_repairs_degenerate_checkpoint_from_payload_cursor()
     assert item["next_top_level_cursor"] == "next-page-cursor"
     assert item["next_top_level_cursor_param"] == "min_id"
     assert item["last_top_level_cursor"] == "duplicate-cursor"
+    assert item["cursor_repair_applied"] is True
+    assert item["cursor_repair_reason"] == "degenerate_top_level_cursor_replayed"
+    assert item["cursor_repair_source"] == "cursor_payload.chosen_cursor"
+    assert item["cursor_repair"]["from_next_top_level_cursor"] == "duplicate-cursor"
+    assert item["cursor_repair"]["to_next_top_level_cursor"] == "next-page-cursor"
+    assert metadata["audit_cursor_resume"]["cursor_repair_count"] == 1
+    assert metadata["audit_cursor_resume"]["cursor_repaired_target_source_ids"] == ["SHORT1"]
 
 
 def test_job_resume_cursors_ignore_degenerate_top_level_checkpoint() -> None:

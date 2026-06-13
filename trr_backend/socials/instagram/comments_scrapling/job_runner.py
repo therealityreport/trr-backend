@@ -1870,7 +1870,15 @@ def _normalize_audit_top_level_checkpoint(row: Mapping[str, Any]) -> dict[str, A
         ).strip()
         last_cursor = str(checkpoint.get("last_top_level_cursor") or checkpoint.get("request_cursor") or "").strip()
         payload_next_cursor = str(payload.get("chosen_cursor") or payload.get("next_top_level_cursor") or "").strip()
+        cursor_repair: dict[str, Any] | None = None
         if next_cursor and last_cursor and next_cursor == last_cursor and payload_next_cursor != next_cursor:
+            cursor_repair = {
+                "applied": True,
+                "reason": "degenerate_top_level_cursor_replayed",
+                "source": "cursor_payload.chosen_cursor",
+                "from_next_top_level_cursor": next_cursor,
+                "to_next_top_level_cursor": payload_next_cursor,
+            }
             next_cursor = payload_next_cursor
         cursor = next_cursor or last_cursor
         if not target_shortcode or not cursor:
@@ -1899,6 +1907,11 @@ def _normalize_audit_top_level_checkpoint(row: Mapping[str, Any]) -> dict[str, A
             normalized["last_top_level_cursor"] = last_cursor
         if last_cursor_param:
             normalized["last_top_level_cursor_param"] = last_cursor_param
+        if cursor_repair:
+            normalized["cursor_repair_applied"] = True
+            normalized["cursor_repair_reason"] = cursor_repair["reason"]
+            normalized["cursor_repair_source"] = cursor_repair["source"]
+            normalized["cursor_repair"] = cursor_repair
         for key in ("media_id", "pages_seen", "observed_comment_count", "expected_comment_count", "updated_at"):
             if checkpoint.get(key) is not None:
                 normalized[key] = checkpoint.get(key)
@@ -2040,12 +2053,21 @@ def _audit_cursor_resume_metadata_from_rows(
     reply_items = list(reply_by_parent.values())[-_AUDIT_CURSOR_REPLY_CHECKPOINT_MAX_ITEMS:]
     if not top_level_items and not reply_items:
         return {}
+    repaired_top_level_items = [item for item in top_level_items if bool(item.get("cursor_repair_applied"))]
     metadata: dict[str, Any] = {
         "audit_cursor_resume": {
             "source_count": len(rows),
             "source_target_source_ids": sorted(source_shortcodes),
             "top_level_resume_count": len(top_level_items),
             "reply_resume_count": len(reply_items),
+            "cursor_repair_count": len(repaired_top_level_items),
+            "cursor_repaired_target_source_ids": sorted(
+                {
+                    str(item.get("target_shortcode") or item.get("source_id") or "").strip()
+                    for item in repaired_top_level_items
+                    if str(item.get("target_shortcode") or item.get("source_id") or "").strip()
+                }
+            ),
         }
     }
     _append_checkpoint_items(

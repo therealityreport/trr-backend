@@ -116,6 +116,10 @@ _SOCIAL_COMMENTS_CONCURRENCY_LIMIT = max(
         or os.getenv("TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT", "8")
     ),
 )
+_SOCIAL_COMMENTS_RECOVERY_CONCURRENCY_LIMIT = max(
+    1,
+    int(os.getenv("TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_CONCURRENCY_LIMIT", "2")),
+)
 _SOCIAL_MEDIA_CONCURRENCY_LIMIT = max(
     1,
     int(os.getenv("TRR_MODAL_SOCIAL_MEDIA_JOB_CONCURRENCY_LIMIT", "10")),
@@ -241,6 +245,7 @@ _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "TRR_MODAL_SOCIAL_POSTS_JOB_FUNCTION": "run_social_posts_job",
     "TRR_MODAL_SOCIAL_MEDIA_JOB_FUNCTION": "run_social_media_job",
     "TRR_MODAL_SOCIAL_COMMENTS_JOB_FUNCTION": "run_social_comments_job",
+    "TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_FUNCTION": "run_social_comments_recovery_job",
     "TRR_MODAL_SOCIAL_RECOVERY_FUNCTION": "sweep_social_dispatch_queue",
     "TRR_MODAL_SOCIAL_AUTH_PROBE_FUNCTION": "probe_social_remote_auth",
     "TRR_MODAL_GETTY_REMOTE_PROBE_FUNCTION": "probe_getty_remote_access",
@@ -250,6 +255,7 @@ _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "TRR_MODAL_STALE_WORKER_CLEANUP_FUNCTION": "purge_stale_social_worker_heartbeats",
     "TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT": "8",
     "TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT": "10",
+    "TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_CONCURRENCY_LIMIT": "2",
     "TRR_MODAL_SOCIAL_MEDIA_JOB_CONCURRENCY_LIMIT": "10",
     "TRR_MODAL_GOOGLE_NEWS_CONCURRENCY_LIMIT": "4",
     "TRR_MODAL_REDDIT_REFRESH_CONCURRENCY_LIMIT": "2",
@@ -378,6 +384,7 @@ _FUNCTION_IMAGE_BINDINGS: Final[dict[str, object]] = {
     "run_social_posts_job": _browser_image,
     "run_social_media_job": _browser_image,
     "run_social_comments_job": _browser_image,
+    "run_social_comments_recovery_job": _browser_image,
     "run_socialblade_scrape": _browser_image,
     "probe_socialblade_runtime": _browser_image,
     "heartbeat_remote_executors": _image,
@@ -1056,6 +1063,19 @@ def run_social_comments_job(job_id: str) -> dict[str, object]:
 
 
 @app.function(
+    name=str(os.getenv("TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_FUNCTION") or "run_social_comments_recovery_job").strip()
+    or "run_social_comments_recovery_job",
+    image=_FUNCTION_IMAGE_BINDINGS["run_social_comments_recovery_job"],
+    secrets=_secrets,
+    retries=0,
+    timeout=2 * 60 * 60,
+    max_containers=_SOCIAL_COMMENTS_RECOVERY_CONCURRENCY_LIMIT,
+)
+def run_social_comments_recovery_job(job_id: str) -> dict[str, object]:
+    return _execute_social_job(job_id, worker_prefix="modal:social-comments-recovery")
+
+
+@app.function(
     image=_FUNCTION_IMAGE_BINDINGS["run_social_job"],
     secrets=_secrets,
     retries=0,
@@ -1314,6 +1334,13 @@ def heartbeat_remote_executors(heartbeat_source: str = "backend_runtime_schedule
                         image_family="browser",
                         timeout_seconds=2 * 60 * 60,
                         max_containers=_SOCIAL_COMMENTS_CONCURRENCY_LIMIT,
+                    ),
+                    _modal_capacity_metadata(
+                        worker_family="social_comments_recovery",
+                        function_name="run_social_comments_recovery_job",
+                        image_family="browser",
+                        timeout_seconds=2 * 60 * 60,
+                        max_containers=_SOCIAL_COMMENTS_RECOVERY_CONCURRENCY_LIMIT,
                     ),
                     _modal_capacity_metadata(
                         worker_family="socialblade",

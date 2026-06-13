@@ -191,6 +191,9 @@ SOCIAL_MODAL_DISPATCH_BLOCKED_FAILURE_LIMIT_DEFAULT = 3
 SOCIAL_MODAL_DISPATCH_RETRY_DELAY_SECONDS_DEFAULT = 120
 SOCIAL_MODAL_DISPATCH_LIMIT_DEFAULT = 4
 SOCIAL_MODAL_STALE_UNCLAIMED_RECOVERY_LIMIT_DEFAULT = 3
+SOCIAL_MODAL_COMMENT_RECOVERY_PRIORITY_CUTOFF_DEFAULT = 104
+SOCIAL_MODAL_COMMENT_RECOVERY_PRIORITY_OVERRIDE_SLOTS_DEFAULT = 1
+SOCIAL_MODAL_PENDING_CAPACITY_STALE_SECONDS_DEFAULT = 300
 SOCIAL_MODAL_MIRROR_LAG_AGE_SECONDS_DEFAULT = 900
 SOCIAL_MODAL_REMOTE_AUTH_PROBE_CACHE_TTL_SECONDS_DEFAULT = 120
 SOCIAL_MODAL_REMOTE_AUTH_PROBE_FAILURE_CACHE_TTL_SECONDS = 20
@@ -11786,6 +11789,7 @@ def _touch_job_dispatch_metadata(
     dispatch_requested_at: datetime | None | object = FIELD_UNSET,
     dispatch_attempt_count: int | None | object = FIELD_UNSET,
     remote_invocation_id: str | None | object = FIELD_UNSET,
+    remote_function_name: str | None | object = FIELD_UNSET,
     lease_expires_at: datetime | None | object = FIELD_UNSET,
     last_dispatch_error: str | None | object = FIELD_UNSET,
     last_dispatch_error_code: str | None | object = FIELD_UNSET,
@@ -11826,6 +11830,7 @@ def _touch_job_dispatch_metadata(
         "dispatch_requested_at": _iso(_coerce_dt(dispatch_requested_at) or _now_utc()),
         "dispatch_attempt_count": max(1, int(dispatch_attempt_count)),
         "remote_invocation_id": _resolve_text(remote_invocation_id, "remote_invocation_id"),
+        "remote_function_name": _resolve_text(remote_function_name, "remote_function_name"),
         "lease_expires_at": _resolve_dt(lease_expires_at, "lease_expires_at"),
         "last_dispatch_error": _resolve_text(last_dispatch_error, "last_dispatch_error"),
         "last_dispatch_error_code": _resolve_text(last_dispatch_error_code, "last_dispatch_error_code"),
@@ -11990,6 +11995,143 @@ def _modal_invocation_status(dispatch: Mapping[str, Any] | None) -> str:
 
 def _modal_invocation_is_nonterminal(status: str | None) -> bool:
     return str(status or "").strip().lower() in {"pending", "running"}
+
+
+def _resolve_modal_comment_recovery_priority_cutoff() -> int:
+    return _resolve_int_env_with_bounds(
+        "SOCIAL_MODAL_COMMENT_RECOVERY_PRIORITY_CUTOFF",
+        SOCIAL_MODAL_COMMENT_RECOVERY_PRIORITY_CUTOFF_DEFAULT,
+        minimum=1,
+        maximum=999,
+    )
+
+
+def _modal_comment_recovery_priority_override_slots() -> int:
+    return _resolve_int_env_with_bounds(
+        "SOCIAL_MODAL_COMMENT_RECOVERY_PRIORITY_OVERRIDE_SLOTS",
+        SOCIAL_MODAL_COMMENT_RECOVERY_PRIORITY_OVERRIDE_SLOTS_DEFAULT,
+        minimum=0,
+        maximum=10,
+    )
+
+
+def _modal_pending_capacity_stale_seconds() -> int:
+    return _resolve_int_env_with_bounds(
+        "SOCIAL_MODAL_PENDING_CAPACITY_STALE_SECONDS",
+        SOCIAL_MODAL_PENDING_CAPACITY_STALE_SECONDS_DEFAULT,
+        minimum=60,
+        maximum=3600,
+    )
+
+
+def _job_is_priority_comment_recovery(
+    job: Mapping[str, Any] | None,
+    job_config: Mapping[str, Any] | None = None,
+    *,
+    stage: str | None = None,
+) -> bool:
+    if not isinstance(job, Mapping):
+        return False
+    config = _metadata_dict(job_config if job_config is not None else job.get("config"))
+    if not bool(config.get("comments_audit_cursor_retry")):
+        return False
+    normalized_stage = _modal_dispatch_capacity_stage(stage or _job_stage_from_row(job))
+    if normalized_stage != "comments":
+        return False
+    priority = _normalize_non_negative_int(job.get("priority")) or 999
+    return priority <= _resolve_modal_comment_recovery_priority_cutoff()
+
+
+def _current_modal_priority_comment_recovery_running_count() -> int:
+    try:
+        row = pg.fetch_one(
+            """
+            select count(*)::int as total
+            from social.scrape_jobs
+            where status = 'running'
+              and lower(coalesce(platform, '')) = 'instagram'
+              and coalesce(config->>'stage', metadata->>'stage', job_type) = %s
+              and lower(coalesce(config->>'comments_audit_cursor_retry', '')) in ('1', 'true', 'yes', 'on')
+              and priority <= %s
+            """,
+            [
+                INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+                _resolve_modal_comment_recovery_priority_cutoff(),
+            ],
+        )
+    except Exception:
+        logger.debug("Failed to count running priority comment recovery jobs", exc_info=True)
+        return 0
+    return _normalize_non_negative_int((row or {}).get("total"))
+
+
+def _modal_pending_capacity_invocation_is_stale(
+    job_dispatch: Mapping[str, Any] | None,
+    inspection: Mapping[str, Any] | None = None,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    dispatch = _metadata_dict(job_dispatch)
+    remote_status = str(
+        _metadata_dict(inspection).get("status") or dispatch.get("remote_invocation_status") or ""
+    ).strip().lower()
+    if remote_status != "pending":
+        return False
+    reason = str(
+        _metadata_dict(inspection).get("reason") or dispatch.get("remote_blocked_reason") or ""
+    ).strip().lower()
+    if reason and reason != "modal_capacity_pending":
+        return False
+    pending_since = _coerce_dt(dispatch.get("remote_pending_since")) or _coerce_dt(
+        dispatch.get("dispatch_requested_at")
+    )
+    if pending_since is None:
+        return False
+    if pending_since.tzinfo is None:
+        pending_since = pending_since.replace(tzinfo=UTC)
+    reference_now = now or _now_utc()
+    return (reference_now - pending_since).total_seconds() >= _modal_pending_capacity_stale_seconds()
+
+
+def _clear_stale_pending_modal_dispatch(
+    job_id: str,
+    job_dispatch: Mapping[str, Any] | None,
+    *,
+    reason: str = "stale_modal_pending_capacity_cleared",
+) -> dict[str, Any]:
+    dispatch = _metadata_dict(job_dispatch)
+    now_utc = _now_utc()
+    clear_count = _normalize_non_negative_int(dispatch.get("stale_pending_modal_clear_count")) + 1
+    _touch_job_dispatch_metadata(
+        job_id,
+        dispatch_backend=str(dispatch.get("dispatch_backend") or "modal"),
+        dispatch_requested_at=_coerce_dt(dispatch.get("dispatch_requested_at")),
+        dispatch_attempt_count=_dispatch_metadata_attempt_count(dispatch),
+        remote_invocation_id=None,
+        lease_expires_at=None,
+        remote_invocation_status="unknown",
+        remote_invocation_checked_at=now_utc,
+        remote_task_id=None,
+        remote_pending_since=None,
+        remote_blocked_reason=reason,
+        last_dispatch_error=None,
+        last_dispatch_error_code=None,
+        last_dispatch_error_at=None,
+        dispatch_blocked_failure_count=0,
+        dispatch_blocked_first_seen_at=None,
+    )
+    return {
+        **dispatch,
+        "remote_invocation_id": None,
+        "remote_invocation_status": "unknown",
+        "remote_invocation_checked_at": _iso(now_utc),
+        "remote_task_id": None,
+        "remote_pending_since": None,
+        "remote_blocked_reason": reason,
+        "lease_expires_at": None,
+        "stale_pending_modal_clear_count": clear_count,
+        "stale_pending_modal_cleared_at": _iso(now_utc),
+    }
 
 
 def _refresh_remote_modal_invocation_state(
@@ -40327,6 +40469,12 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
             running_by_run_stage_platform,
             active_accounts_by_stage_platform,
         ) = running_counts
+    priority_recovery_override_slots = _modal_comment_recovery_priority_override_slots()
+    priority_recovery_running_count = (
+        _current_modal_priority_comment_recovery_running_count()
+        if priority_recovery_override_slots > 0
+        else 0
+    )
     dispatched_job_ids: list[str] = []
     dispatch_attempts = 0
 
@@ -40341,6 +40489,10 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
         job_config = _metadata_dict(job.get("config"))
         job_dispatch = _job_dispatch_metadata(job)
         job_ingest_mode = _resolve_pipeline_ingest_mode(job_config.get("pipeline_ingest_mode"))
+        priority_recovery_job = _job_is_priority_comment_recovery(job, job_config, stage=stage)
+        priority_recovery_override_allowed = (
+            priority_recovery_job and priority_recovery_running_count < priority_recovery_override_slots
+        )
         if _job_blocked_by_posts_auth_cooldown(job) is not None:
             continue
         if _job_required_lane_blocks_modal_dispatch(job_config, platform=platform):
@@ -40361,22 +40513,35 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
             )
             inspection_status = str(inspection.get("status") or "").strip().lower()
             if _modal_invocation_is_nonterminal(inspection_status):
-                running_by_stage[capacity_stage] = running_by_stage.get(capacity_stage, 0) + 1
-                running_by_stage_platform[(capacity_stage, platform)] = (
-                    running_by_stage_platform.get((capacity_stage, platform), 0) + 1
-                )
-                nonterminal_account = _resolve_dispatch_account_handle(job_config)
-                if nonterminal_account:
-                    active_accounts_by_stage_platform.setdefault((capacity_stage, platform), set()).add(
-                        nonterminal_account
+                if (
+                    inspection_status == "pending"
+                    and status in {"queued", "pending", "retrying"}
+                    and _modal_pending_capacity_invocation_is_stale(job_dispatch, inspection)
+                ):
+                    job_id_for_clear = str(job.get("id") or "").strip()
+                    if not job_id_for_clear:
+                        continue
+                    job_dispatch = _clear_stale_pending_modal_dispatch(job_id_for_clear, job_dispatch)
+                    existing_remote_invocation_id = ""
+                else:
+                    if priority_recovery_job:
+                        priority_recovery_running_count += 1
+                    running_by_stage[capacity_stage] = running_by_stage.get(capacity_stage, 0) + 1
+                    running_by_stage_platform[(capacity_stage, platform)] = (
+                        running_by_stage_platform.get((capacity_stage, platform), 0) + 1
                     )
-                if job_run_id:
-                    running_by_run[job_run_id] = running_by_run.get(job_run_id, 0) + 1
-                    if job_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE:
-                        key = (job_run_id, capacity_stage, platform)
-                        running_by_run_stage_platform[key] = running_by_run_stage_platform.get(key, 0) + 1
-                continue
-            if inspection_status == "unknown":
+                    nonterminal_account = _resolve_dispatch_account_handle(job_config)
+                    if nonterminal_account:
+                        active_accounts_by_stage_platform.setdefault((capacity_stage, platform), set()).add(
+                            nonterminal_account
+                        )
+                    if job_run_id:
+                        running_by_run[job_run_id] = running_by_run.get(job_run_id, 0) + 1
+                        if job_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE:
+                            key = (job_run_id, capacity_stage, platform)
+                            running_by_run_stage_platform[key] = running_by_run_stage_platform.get(key, 0) + 1
+                    continue
+            if existing_remote_invocation_id and inspection_status == "unknown":
                 job_id_for_clear = str(job.get("id") or "").strip()
                 if status in {"queued", "pending", "retrying"} and job_id_for_clear:
                     _touch_job_dispatch_metadata(
@@ -40400,7 +40565,7 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
                     }
                 else:
                     continue
-            else:
+            elif existing_remote_invocation_id:
                 terminal_remote_invocation = True
                 job_dispatch = {
                     **job_dispatch,
@@ -40410,7 +40575,10 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
                 }
         if not terminal_remote_invocation and _dispatch_request_is_fresh(job):
             continue
-        if running_by_stage.get(capacity_stage, 0) >= _modal_dispatch_stage_global_cap(stage):
+        if (
+            running_by_stage.get(capacity_stage, 0) >= _modal_dispatch_stage_global_cap(stage)
+            and not priority_recovery_override_allowed
+        ):
             continue
         # Compute prospective account count: existing active accounts + this candidate
         candidate_account = _resolve_dispatch_account_handle(job_config)
@@ -40430,7 +40598,11 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
             active_account_count=len(prospective_accounts) if prospective_accounts else 1,
             job_config=job_config,
         )
-        if effective_cap is not None and running_by_stage_platform.get(sp_key, 0) >= effective_cap:
+        if (
+            effective_cap is not None
+            and running_by_stage_platform.get(sp_key, 0) >= effective_cap
+            and not priority_recovery_override_allowed
+        ):
             continue
         if job_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE and job_run_id:
             if running_by_run.get(job_run_id, 0) >= _resolve_catalog_run_in_flight_cap():
@@ -40480,7 +40652,10 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
             dispatch_blocked_failure_count=0,
             dispatch_blocked_first_seen_at=None,
         )
-        dispatch_result = dispatch_social_job(job_id=job_id, stage=stage)
+        dispatch_kwargs: dict[str, Any] = {"job_id": job_id, "stage": stage}
+        if priority_recovery_job:
+            dispatch_kwargs["priority_recovery"] = True
+        dispatch_result = dispatch_social_job(**dispatch_kwargs)
         if dispatch_result.get("dispatched"):
             _touch_job_dispatch_metadata(
                 job_id,
@@ -40488,6 +40663,7 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
                 dispatch_requested_at=_now_utc(),
                 dispatch_attempt_count=dispatch_attempt_count,
                 remote_invocation_id=str(dispatch_result.get("call_id") or "").strip() or None,
+                remote_function_name=str(dispatch_result.get("function_name") or "").strip() or None,
                 lease_expires_at=lease_expires_at,
                 last_dispatch_error=None,
                 last_dispatch_error_code=None,
@@ -40512,6 +40688,8 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
                 if job_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE:
                     key = (job_run_id, capacity_stage, platform)
                     running_by_run_stage_platform[key] = running_by_run_stage_platform.get(key, 0) + 1
+            if priority_recovery_job:
+                priority_recovery_running_count += 1
         else:
             dispatch_reason = str(dispatch_result.get("reason") or "dispatch_failed")
             dispatch_reason_code = str(dispatch_result.get("reason_code") or "").strip().lower() or (

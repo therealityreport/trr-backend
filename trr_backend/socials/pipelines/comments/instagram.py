@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import math
 import os
+import re
 import time as time_module
 from collections import Counter
 from collections.abc import Mapping
@@ -2037,41 +2038,116 @@ def _normalize_instagram_comments_audit_retry_shortcodes(shortcodes: Sequence[An
     return list(dict.fromkeys(normalized))
 
 
+def _normalize_instagram_comments_show_filter_values(values: Sequence[Any] | Any | None) -> list[str]:
+    raw_values = values if isinstance(values, (list, tuple, set)) else [values]
+    normalized: list[str] = []
+    for value in raw_values:
+        for part in str(value or "").split(","):
+            item = part.strip()
+            if item:
+                normalized.append(item)
+    return list(dict.fromkeys(normalized))
+
+
+def _instagram_comments_show_filter_terms(values: Sequence[Any] | Any | None) -> list[str]:
+    terms: list[str] = []
+    for value in _normalize_instagram_comments_show_filter_values(values):
+        lowered = value.strip().lower().lstrip("#")
+        if not lowered:
+            continue
+        terms.append(lowered)
+        compact = re.sub(r"[^a-z0-9]+", "", lowered)
+        if compact:
+            terms.append(compact)
+        spaced = re.sub(r"[^a-z0-9]+", " ", lowered).strip()
+        if spaced:
+            terms.append(spaced)
+    return list(dict.fromkeys(term for term in terms if term))
+
+
 def _load_instagram_comments_audit_cursor_rows(
     *,
     account_handle: str,
     limit: int,
     shortcodes: Sequence[Any] | None = None,
     stop_reasons: Sequence[Any] | None = None,
+    show_ids: Sequence[Any] | None = None,
+    season_ids: Sequence[Any] | None = None,
+    show_filters: Sequence[Any] | None = None,
 ) -> list[dict[str, Any]]:
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     safe_limit = max(1, min(int(limit or 1), 500))
     audit_row_limit = min(max(safe_limit * 50, safe_limit), 10_000)
     normalized_shortcodes = _normalize_instagram_comments_audit_retry_shortcodes(shortcodes)
     normalized_stop_reasons = _normalize_instagram_comments_audit_retry_stop_reasons(stop_reasons)
-    params: list[Any] = [normalized_account, normalized_stop_reasons, audit_row_limit]
+    normalized_show_ids = _normalize_instagram_comments_show_filter_values(show_ids)
+    normalized_season_ids = _normalize_instagram_comments_show_filter_values(season_ids)
+    normalized_show_terms = _instagram_comments_show_filter_terms(show_filters)
+    params: list[Any] = [normalized_account, normalized_stop_reasons]
     shortcode_sql = ""
     if normalized_shortcodes:
-        shortcode_sql = "and shortcode = any(%s::text[])"
-        params.insert(2, normalized_shortcodes)
+        shortcode_sql = "and a.shortcode = any(%s::text[])"
+        params.append(normalized_shortcodes)
+    show_filter_sql = ""
+    show_filter_clauses: list[str] = []
+    if normalized_show_ids:
+        show_filter_clauses.append("(p.show_id::text = any(%s::text[]) or sh.id::text = any(%s::text[]))")
+        params.extend([normalized_show_ids, normalized_show_ids])
+    if normalized_season_ids:
+        show_filter_clauses.append("(p.season_id::text = any(%s::text[]) or se.id::text = any(%s::text[]))")
+        params.extend([normalized_season_ids, normalized_season_ids])
+    if normalized_show_terms:
+        show_filter_clauses.append(
+            """
+            exists (
+              select 1
+              from unnest(%s::text[]) term(value)
+              where
+                lower(coalesce(sh.slug, '')) = term.value
+                or lower(coalesce(sh.name, '')) = term.value
+                or lower(regexp_replace(coalesce(sh.name, ''), '[^a-zA-Z0-9]+', '', 'g')) = term.value
+                or lower(coalesce(p.caption, '')) like '%%' || term.value || '%%'
+                or lower(regexp_replace(coalesce(p.caption, ''), '[^a-zA-Z0-9]+', '', 'g')) like '%%' || term.value || '%%'
+                or lower(coalesce(p.raw_data::text, '')) like '%%' || term.value || '%%'
+                or exists (
+                  select 1
+                  from jsonb_array_elements_text(coalesce(p.hashtags, '[]'::jsonb)) hashtag(value)
+                  where lower(ltrim(hashtag.value, '#')) = term.value
+                )
+            )
+            """
+        )
+        params.append(normalized_show_terms)
+    if show_filter_clauses:
+        show_filter_sql = "and (" + " or ".join(show_filter_clauses) + ")"
+    params.append(audit_row_limit)
     return pg.fetch_all(
         f"""
         select
-          post_id,
-          shortcode,
-          source_account,
-          cursor_stop_reason,
-          cursor_min_id,
-          cursor_param,
-          cursor_payload,
-          created_at::text
-        from social.instagram_post_comments_audit
-        where ltrim(lower(coalesce(source_account, '')), '@') = %s
-          and cursor_stop_reason = any(%s::text[])
-          and cursor_payload is not null
-          and cursor_payload <> '{{}}'::jsonb
+          a.post_id,
+          a.shortcode,
+          a.source_account,
+          a.cursor_stop_reason,
+          a.cursor_min_id,
+          a.cursor_param,
+          a.cursor_payload,
+          a.created_at::text,
+          p.show_id::text as show_id,
+          p.season_id::text as season_id,
+          sh.slug as show_slug,
+          sh.name as show_name
+        from social.instagram_post_comments_audit a
+        left join social.instagram_posts p
+          on p.id = a.post_id or p.shortcode = a.shortcode
+        left join core.shows sh on sh.id = p.show_id
+        left join core.seasons se on se.id = p.season_id
+        where ltrim(lower(coalesce(a.source_account, '')), '@') = %s
+          and a.cursor_stop_reason = any(%s::text[])
+          and a.cursor_payload is not null
+          and a.cursor_payload <> '{{}}'::jsonb
           {shortcode_sql}
-        order by created_at desc
+          {show_filter_sql}
+        order by a.created_at desc
         limit %s
         """,
         params,
@@ -2102,6 +2178,10 @@ def _select_instagram_comments_audit_cursor_retry_targets(
                 "post_id": row.get("post_id"),
                 "cursor_stop_reason": row.get("cursor_stop_reason"),
                 "created_at": row.get("created_at"),
+                "show_id": row.get("show_id"),
+                "season_id": row.get("season_id"),
+                "show_slug": row.get("show_slug"),
+                "show_name": row.get("show_name"),
                 "has_top_level_cursor": bool(top_level_checkpoint),
                 "reply_resume_count": len(reply_checkpoints),
             }
@@ -2196,14 +2276,23 @@ def get_instagram_comments_audit_cursor_recovery(
     limit: int = 50,
     shortcodes: Sequence[Any] | None = None,
     stop_reasons: Sequence[Any] | None = None,
+    show_ids: Sequence[Any] | None = None,
+    season_ids: Sequence[Any] | None = None,
+    show_filters: Sequence[Any] | None = None,
 ) -> dict[str, Any]:
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     normalized_stop_reasons = _normalize_instagram_comments_audit_retry_stop_reasons(stop_reasons)
+    normalized_show_ids = _normalize_instagram_comments_show_filter_values(show_ids)
+    normalized_season_ids = _normalize_instagram_comments_show_filter_values(season_ids)
+    normalized_show_terms = _instagram_comments_show_filter_terms(show_filters)
     rows = _load_instagram_comments_audit_cursor_rows(
         account_handle=normalized_account,
         limit=limit,
         shortcodes=shortcodes,
         stop_reasons=normalized_stop_reasons,
+        show_ids=normalized_show_ids,
+        season_ids=normalized_season_ids,
+        show_filters=normalized_show_terms,
     )
     target_source_ids, selected_rows = _select_instagram_comments_audit_cursor_retry_targets(rows)
     safe_limit = max(1, min(int(limit or 1), 500))
@@ -2252,6 +2341,11 @@ def get_instagram_comments_audit_cursor_recovery(
         "selected_target_source_ids_count": len(target_source_ids),
         "inspected_audit_rows_count": len(rows),
         "eligible_stop_reasons": normalized_stop_reasons,
+        "show_filter": {
+            "show_ids": normalized_show_ids,
+            "season_ids": normalized_season_ids,
+            "terms": normalized_show_terms,
+        },
         "active_run": active_run,
         "progress_rows": progress_rows,
         "rows": progress_rows,
@@ -2266,6 +2360,7 @@ def _split_instagram_comments_audit_cursor_targets_into_active_run(
     batch_size: int,
     initiated_by: str | None,
     dispatch_immediately: bool,
+    force_rerun_existing: bool = False,
 ) -> dict[str, Any]:
     normalized_run_id = str(run_id or "").strip()
     normalized_account = _normalize_social_account_profile_handle(account_handle)
@@ -2332,14 +2427,15 @@ def _split_instagram_comments_audit_cursor_targets_into_active_run(
         remote_invocation_id = str(dispatch.get("remote_invocation_id") or "").strip()
         remote_status = str(dispatch.get("remote_invocation_status") or "").strip().lower()
         if remote_invocation_id and remote_status in {"pending", "running", "queued"}:
-            skipped_sources.append(
-                {
-                    "job_id": source_job_id,
-                    "reason": "remote_invocation_active",
-                    "remote_invocation_status": remote_status,
-                }
-            )
-            continue
+            if not force_rerun_existing or remote_status == "running":
+                skipped_sources.append(
+                    {
+                        "job_id": source_job_id,
+                        "reason": "remote_invocation_active",
+                        "remote_invocation_status": remote_status,
+                    }
+                )
+                continue
         source_targets = [
             str(target or "").strip()
             for target in config.get("target_source_ids") or []
@@ -2350,15 +2446,16 @@ def _split_instagram_comments_audit_cursor_targets_into_active_run(
         if not retry_targets:
             continue
         if len(source_targets) == 1 and len(retry_targets) == 1 and source_targets[0] == retry_targets[0]:
-            remaining_targets = [target for target in remaining_targets if target not in set(retry_targets)]
-            skipped_sources.append(
-                {
-                    "job_id": source_job_id,
-                    "reason": "already_batch_size_1",
-                    "target_source_ids": retry_targets,
-                }
-            )
-            continue
+            if not force_rerun_existing:
+                remaining_targets = [target for target in remaining_targets if target not in set(retry_targets)]
+                skipped_sources.append(
+                    {
+                        "job_id": source_job_id,
+                        "reason": "already_batch_size_1",
+                        "target_source_ids": retry_targets,
+                    }
+                )
+                continue
         cancelled = pg.fetch_one(
             """
             update social.scrape_jobs
@@ -2371,7 +2468,8 @@ def _split_instagram_comments_audit_cursor_targets_into_active_run(
                 'comments_audit_cursor_retry_group_id', %s,
                 'comments_audit_cursor_retry_targets', %s,
                 'comments_audit_cursor_retry_remainder_targets', %s,
-                'comments_audit_cursor_retry_batch_size', %s
+                'comments_audit_cursor_retry_batch_size', %s,
+                'comments_audit_cursor_retry_force_rerun', %s
               )
             where id = %s::uuid
               and status in ('queued', 'pending', 'retrying')
@@ -2383,6 +2481,7 @@ def _split_instagram_comments_audit_cursor_targets_into_active_run(
                 len(retry_targets),
                 len([target for target in source_targets if target not in set(retry_targets)]),
                 safe_batch_size,
+                bool(force_rerun_existing),
                 source_job_id,
             ],
         )
@@ -2412,6 +2511,7 @@ def _split_instagram_comments_audit_cursor_targets_into_active_run(
                 "comments_audit_cursor_retry_group_id": retry_group_id,
                 "comments_audit_cursor_retry_index": created_sequence,
                 "comments_audit_cursor_retry_count": len(target_chunks),
+                "comments_audit_cursor_retry_force_rerun": bool(force_rerun_existing),
                 "comments_target_batch_size": safe_batch_size,
                 "max_comments_per_post": 0,
                 "comments_shard_index": original_shard_count + created_sequence,
@@ -2515,6 +2615,7 @@ def _split_instagram_comments_audit_cursor_targets_into_active_run(
                     "comments_audit_cursor_retry_index": created_sequence,
                     "comments_audit_cursor_retry_count": len(target_chunks),
                     "comments_audit_cursor_retry_standalone": True,
+                    "comments_audit_cursor_retry_force_rerun": bool(force_rerun_existing),
                     "comments_target_batch_size": safe_batch_size,
                     "max_comments_per_post": 0,
                     "comments_shard_index": base_shard_count + created_sequence,
@@ -2555,6 +2656,7 @@ def _split_instagram_comments_audit_cursor_targets_into_active_run(
         "retry_group_id": retry_group_id if created_job_ids else None,
         "pending_target_source_ids": remaining_targets,
         "target_rows": created_target_rows,
+        "force_rerun_existing": bool(force_rerun_existing),
     }
 
 
@@ -2564,6 +2666,9 @@ def enqueue_instagram_comments_audit_cursor_retries(
     limit: int = 50,
     shortcodes: Sequence[Any] | None = None,
     stop_reasons: Sequence[Any] | None = None,
+    show_ids: Sequence[Any] | None = None,
+    season_ids: Sequence[Any] | None = None,
+    show_filters: Sequence[Any] | None = None,
     batch_size: int = 1,
     comments_worker_count: int | None = None,
     max_comments_per_post: int = 0,
@@ -2572,6 +2677,7 @@ def enqueue_instagram_comments_audit_cursor_retries(
     dry_run: bool = False,
     attach_to_active_run: bool = True,
     dispatch_immediately: bool = True,
+    force_rerun_existing: bool = False,
     initiated_by: str | None = None,
 ) -> dict[str, Any]:
     normalized_account = _normalize_social_account_profile_handle(account_handle)
@@ -2582,6 +2688,9 @@ def enqueue_instagram_comments_audit_cursor_retries(
         limit=limit,
         shortcodes=shortcodes,
         stop_reasons=normalized_stop_reasons,
+        show_ids=show_ids,
+        season_ids=season_ids,
+        show_filters=show_filters,
     )
     target_source_ids = _as_text_list(recovery.get("selected_target_source_ids"))
     payload: dict[str, Any] = {
@@ -2606,6 +2715,7 @@ def enqueue_instagram_comments_audit_cursor_retries(
             batch_size=safe_batch_size,
             initiated_by=initiated_by or "audit-cursor-retry",
             dispatch_immediately=dispatch_immediately,
+            force_rerun_existing=force_rerun_existing,
         )
         payload["active_run"] = _metadata_dict(active_run_detail) or recovery_active_run
         payload["enqueue"] = {

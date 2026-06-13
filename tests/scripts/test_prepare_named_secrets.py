@@ -92,6 +92,8 @@ def test_apply_runtime_overrides_injects_canonical_modal_defaults(monkeypatch: p
     assert result["TRR_MODAL_ADMIN_KEEP_WARM"] == "0"
     assert result["TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT"] == "8"
     assert result["TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT"] == "10"
+    assert result["TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_CONCURRENCY_LIMIT"] == "2"
+    assert result["TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_FUNCTION"] == "run_social_comments_recovery_job"
     assert result["SOCIAL_MODAL_DISPATCH_LIMIT"] == "10"
     assert result["SOCIAL_WORKER_POOL_COMMENTS"] == "10"
     assert result["SOCIAL_WORKER_POOL_SHARED_ACCOUNT_DISCOVERY"] == "3"

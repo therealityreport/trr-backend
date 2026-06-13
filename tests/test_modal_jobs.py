@@ -212,6 +212,7 @@ def test_inject_modal_runtime_defaults_sets_canonical_modal_flags(
     assert os.environ["TRR_DB_POOL_ACQUIRE_SLEEP_MS"] == "200"
     assert os.environ["TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT"] == "8"
     assert os.environ["TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT"] == "10"
+    assert os.environ["TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_CONCURRENCY_LIMIT"] == "2"
     assert os.environ["TRR_MODAL_SOCIAL_MEDIA_JOB_CONCURRENCY_LIMIT"] == "10"
     assert os.environ["TRR_MODAL_CAST_SCREENTIME_FUNCTION"] == "run_cast_screentime_analysis"
     assert os.environ["TRR_MODAL_CAST_SCREENTIME_CONCURRENCY_LIMIT"] == "2"
@@ -311,6 +312,7 @@ def test_social_concurrency_limit_reads_env(monkeypatch: pytest.MonkeyPatch) -> 
     try:
         assert reloaded._SOCIAL_CONCURRENCY_LIMIT == 17
         assert reloaded._SOCIAL_COMMENTS_CONCURRENCY_LIMIT == 17
+        assert reloaded._SOCIAL_COMMENTS_RECOVERY_CONCURRENCY_LIMIT == 2
     finally:
         monkeypatch.delenv("TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT", raising=False)
         importlib.reload(modal_jobs)
@@ -319,14 +321,17 @@ def test_social_concurrency_limit_reads_env(monkeypatch: pytest.MonkeyPatch) -> 
 def test_social_comments_concurrency_limit_reads_comments_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT", "17")
     monkeypatch.setenv("TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT", "11")
+    monkeypatch.setenv("TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_CONCURRENCY_LIMIT", "3")
 
     reloaded = importlib.reload(modal_jobs)
     try:
         assert reloaded._SOCIAL_CONCURRENCY_LIMIT == 17
         assert reloaded._SOCIAL_COMMENTS_CONCURRENCY_LIMIT == 11
+        assert reloaded._SOCIAL_COMMENTS_RECOVERY_CONCURRENCY_LIMIT == 3
     finally:
         monkeypatch.delenv("TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT", raising=False)
         monkeypatch.delenv("TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT", raising=False)
+        monkeypatch.delenv("TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_CONCURRENCY_LIMIT", raising=False)
         importlib.reload(modal_jobs)
 
 
@@ -735,6 +740,7 @@ def test_run_social_job_uses_browser_capable_image_binding() -> None:
     assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_social_posts_job"] is modal_jobs._browser_image
     assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_social_media_job"] is modal_jobs._browser_image
     assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_social_comments_job"] is modal_jobs._browser_image
+    assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_social_comments_recovery_job"] is modal_jobs._browser_image
     assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_socialblade_scrape"] is modal_jobs._browser_image
     assert modal_jobs._FUNCTION_IMAGE_BINDINGS["probe_socialblade_runtime"] is modal_jobs._browser_image
     assert modal_jobs._FUNCTION_IMAGE_BINDINGS["heartbeat_remote_executors"] is modal_jobs._image
@@ -881,6 +887,11 @@ def test_heartbeat_remote_executors_reports_social_auth_capabilities(
     }
     assert social_call["metadata_updates"]["modal_capacity"]["modal_function"] == "run_social_job"
     assert social_call["metadata_updates"]["modal_capacity_by_function"]
+    assert any(
+        item["modal_function"] == "run_social_comments_recovery_job"
+        and item["max_containers"] == modal_jobs._SOCIAL_COMMENTS_RECOVERY_CONCURRENCY_LIMIT
+        for item in social_call["metadata_updates"]["modal_capacity_by_function"]
+    )
     admin_call = next(call for call in recorded if call["dispatcher_name"] == "admin")
     assert admin_call["metadata_updates"]["modal_capacity"] == {
         "worker_family": "admin_operations",

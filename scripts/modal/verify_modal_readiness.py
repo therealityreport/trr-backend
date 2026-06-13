@@ -80,6 +80,7 @@ os.environ["MODAL_PROFILE"] = REQUIRED_MODAL_PROFILE
 
 from scripts._workspace_runtime_env import apply_workspace_runtime_env
 from trr_backend.modal_dispatch import (
+    modal_social_comments_recovery_job_function_name,
     modal_social_comments_job_function_name,
     modal_social_job_function_name,
     modal_social_job_function_names,
@@ -285,6 +286,7 @@ def required_social_function_names(*, enabled: bool | None = None) -> tuple[str,
         modal_social_posts_job_function_name(),
         modal_social_media_job_function_name(),
         modal_social_comments_job_function_name(),
+        modal_social_comments_recovery_job_function_name(),
     )
 
 
