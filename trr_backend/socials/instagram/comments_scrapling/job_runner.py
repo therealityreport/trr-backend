@@ -130,6 +130,13 @@ _INCOMPLETE_RETRY_STALL_REASONS = {
     "persisted_reply_topology_gap",
     "reply_tail_incomplete",
     "reply_tail_budget_exhausted",
+    "network_budget_exhausted",
+    "network_policy_blocked",
+    "network_stop",
+    "network_stopped",
+    "proxy_budget_exhausted",
+    "proxy_network_stop",
+    "static_cdn_budget_exhausted",
     "transport_error",
     "transport_timeout",
 }
@@ -1676,8 +1683,12 @@ def _top_level_resume_cursors_from_job(job: dict[str, Any]) -> dict[str, str]:
         shortcode = str(item.get("target_shortcode") or item.get("source_id") or item.get("shortcode") or "").strip()
         stop_reason = str(item.get("stop_reason") or "").strip()
         cursor = str(item.get("next_top_level_cursor") or "").strip()
-        if not cursor and stop_reason != "pagination_repeated_cursor":
-            cursor = str(item.get("last_top_level_cursor") or "").strip()
+        last_cursor = str(item.get("last_top_level_cursor") or "").strip()
+        degenerate_next_cursor = bool(cursor and last_cursor and cursor == last_cursor)
+        if cursor and last_cursor and cursor == last_cursor:
+            cursor = ""
+        if not cursor and stop_reason != "pagination_repeated_cursor" and not degenerate_next_cursor:
+            cursor = last_cursor
         if shortcode and cursor:
             cursors[shortcode] = cursor
     return cursors
@@ -1711,9 +1722,15 @@ def _top_level_resume_cursor_params_from_job(job: dict[str, Any]) -> dict[str, s
         stop_reason = str(item.get("stop_reason") or "").strip()
         cursor = str(item.get("next_top_level_cursor") or "").strip()
         cursor_param = str(item.get("next_top_level_cursor_param") or "").strip()
-        if not cursor and stop_reason != "pagination_repeated_cursor":
-            cursor = str(item.get("last_top_level_cursor") or "").strip()
-            cursor_param = str(item.get("last_top_level_cursor_param") or "").strip()
+        last_cursor = str(item.get("last_top_level_cursor") or "").strip()
+        last_cursor_param = str(item.get("last_top_level_cursor_param") or "").strip()
+        degenerate_next_cursor = bool(cursor and last_cursor and cursor == last_cursor)
+        if cursor and last_cursor and cursor == last_cursor:
+            cursor = ""
+            cursor_param = ""
+        if not cursor and stop_reason != "pagination_repeated_cursor" and not degenerate_next_cursor:
+            cursor = last_cursor
+            cursor_param = last_cursor_param
         if cursor and cursor_param in {"min_id", "max_id"}:
             params[shortcode] = cursor_param
     return params
@@ -1852,6 +1869,9 @@ def _normalize_audit_top_level_checkpoint(row: Mapping[str, Any]) -> dict[str, A
             or ""
         ).strip()
         last_cursor = str(checkpoint.get("last_top_level_cursor") or checkpoint.get("request_cursor") or "").strip()
+        payload_next_cursor = str(payload.get("chosen_cursor") or payload.get("next_top_level_cursor") or "").strip()
+        if next_cursor and last_cursor and next_cursor == last_cursor and payload_next_cursor != next_cursor:
+            next_cursor = payload_next_cursor
         cursor = next_cursor or last_cursor
         if not target_shortcode or not cursor:
             continue
@@ -1861,6 +1881,9 @@ def _normalize_audit_top_level_checkpoint(row: Mapping[str, Any]) -> dict[str, A
         last_cursor_param = _cursor_param_value(
             checkpoint.get("last_top_level_cursor_param") or checkpoint.get("request_cursor_param")
         )
+        payload_next_cursor_param = _cursor_param_value(payload.get("chosen_cursor_param") or payload.get("cursor_param"))
+        if payload_next_cursor and next_cursor == payload_next_cursor and payload_next_cursor_param:
+            next_cursor_param = payload_next_cursor_param
         normalized = {
             "platform": "instagram",
             "target_shortcode": target_shortcode,

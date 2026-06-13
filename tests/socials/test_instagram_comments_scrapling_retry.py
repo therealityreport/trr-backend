@@ -1570,6 +1570,56 @@ def test_fetch_comments_records_top_level_resume_checkpoint_at_page_cap(monkeypa
     assert fetcher.runtime_metadata["top_level_checkpoint_metadata"]["items"][-1]["next_top_level_cursor"] == "cursor-2"
 
 
+def test_fetch_comments_deadline_inside_page_records_response_next_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENT_PAGINATION_MAX_SECONDS", "1")
+    fetcher = _build_fetcher()
+    clock_state = {"expired": False}
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.comments_scrapling.fetcher.time.monotonic",
+        lambda: 101.1 if clock_state["expired"] else 100.0,
+    )
+    fetcher._parser._parse_comment = MagicMock(return_value=_comment("c1"))
+    async def _fetch_page(*_args, **_kwargs):
+        clock_state["expired"] = True
+        return {
+            "payload": {
+                "comments": [{"id": "c1"}],
+                "has_more_comments": True,
+                "next_min_id": "cursor-after-returned-page",
+            },
+            "failed": False,
+            "auth_failed": False,
+            "reason": None,
+            "retryable": False,
+        }
+
+    fetcher._fetch_json_response = AsyncMock(side_effect=_fetch_page)
+    fetcher._fetch_rendered_comments_after_revealing_hidden = AsyncMock(return_value=[])
+
+    result = asyncio.run(
+        fetcher.fetch_comments_for_shortcode(
+            "ABC123",
+            max_comments=0,
+            fetch_replies=False,
+            expected_comment_count=10,
+            top_level_cursor="request-cursor",
+            top_level_cursor_param="min_id",
+        )
+    )
+
+    assert result.fetch_failed is True
+    assert result.retryable is True
+    assert result.fetch_reason == "pagination_deadline_exceeded"
+    assert result.top_level_checkpoint is not None
+    assert result.top_level_checkpoint["last_top_level_cursor"] == "request-cursor"
+    assert result.top_level_checkpoint["next_top_level_cursor"] == "cursor-after-returned-page"
+    assert result.top_level_checkpoint["last_top_level_cursor_param"] == "min_id"
+    assert result.top_level_checkpoint["next_top_level_cursor_param"] == "min_id"
+    fetcher._parser._parse_comment.assert_not_called()
+
+
 def test_fetch_comments_resumes_from_top_level_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
     fetcher = _build_fetcher()
     fetcher._parser._parse_comment = MagicMock(return_value=_comment("c2"))
@@ -6643,6 +6693,64 @@ def test_audit_cursor_resume_preserves_existing_job_metadata_precedence() -> Non
     )
 
     assert metadata == {}
+
+
+def test_audit_cursor_resume_repairs_degenerate_checkpoint_from_payload_cursor() -> None:
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+
+    metadata = jr._audit_cursor_resume_metadata_from_rows(
+        [
+            {
+                "shortcode": "SHORT1",
+                "cursor_stop_reason": "pagination_deadline_exceeded",
+                "cursor_param": "min_id",
+                "cursor_min_id": "duplicate-cursor",
+                "cursor_payload": {
+                    "chosen_cursor": "next-page-cursor",
+                    "chosen_cursor_param": "min_id",
+                    "top_level_checkpoint": {
+                        "target_shortcode": "SHORT1",
+                        "stop_reason": "pagination_deadline_exceeded",
+                        "last_top_level_cursor": "duplicate-cursor",
+                        "next_top_level_cursor": "duplicate-cursor",
+                        "last_top_level_cursor_param": "min_id",
+                        "next_top_level_cursor_param": "min_id",
+                    },
+                },
+            }
+        ],
+        existing_top_level_cursors={},
+        existing_reply_cursors={},
+    )
+
+    item = metadata["top_level_checkpoint_summary"]["items"][0]
+    assert item["next_top_level_cursor"] == "next-page-cursor"
+    assert item["next_top_level_cursor_param"] == "min_id"
+    assert item["last_top_level_cursor"] == "duplicate-cursor"
+
+
+def test_job_resume_cursors_ignore_degenerate_top_level_checkpoint() -> None:
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+
+    job = {
+        "metadata": {
+            "top_level_checkpoint_summary": {
+                "items": [
+                    {
+                        "target_shortcode": "SHORT1",
+                        "stop_reason": "pagination_deadline_exceeded",
+                        "last_top_level_cursor": "duplicate-cursor",
+                        "next_top_level_cursor": "duplicate-cursor",
+                        "last_top_level_cursor_param": "min_id",
+                        "next_top_level_cursor_param": "min_id",
+                    }
+                ]
+            }
+        }
+    }
+
+    assert jr._top_level_resume_cursors_from_job(job) == {}
+    assert jr._top_level_resume_cursor_params_from_job(job) == {}
 
 
 def test_job_runner_uses_reply_only_retry_for_persisted_missing_reply_parents(

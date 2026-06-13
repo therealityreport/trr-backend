@@ -41,6 +41,13 @@ _CORE_ROOM_WRAPPERS: dict[str, Any] = {}
 INSTAGRAM_COMMENTS_AUDIT_CURSOR_RETRY_STOP_REASONS = (
     "pagination_deadline_exceeded",
     "pagination_page_cap_reached",
+    "network_budget_exhausted",
+    "network_policy_blocked",
+    "network_stop",
+    "network_stopped",
+    "proxy_budget_exhausted",
+    "proxy_network_stop",
+    "static_cdn_budget_exhausted",
 )
 
 
@@ -1257,6 +1264,14 @@ def _instagram_filter_incomplete_comment_targets(
         """,
         [requested, normalized_account],
     )
+    if not rows:
+        logger.warning(
+            "Instagram comments incomplete-target filter returned no verification rows; preserving requested targets: "
+            "account=%s target_count=%d",
+            normalized_account,
+            len(requested),
+        )
+        return requested
     incomplete: list[str] = []
     for row in rows:
         shortcode = str(row.get("shortcode") or "").strip()
@@ -2450,6 +2465,81 @@ def _split_instagram_comments_audit_cursor_targets_into_active_run(
             )
         retry_target_set = set(retry_targets)
         remaining_targets = [target for target in remaining_targets if target not in retry_target_set]
+    if remaining_targets:
+        run_row = pg.fetch_one(
+            """
+            select
+              r.id::text as run_id,
+              r.source_scope,
+              r.initiated_by,
+              r.config as run_config,
+              coalesce(max(j.priority), 105) as source_priority,
+              count(j.id)::int as existing_job_count
+            from social.scrape_runs r
+            left join social.scrape_jobs j
+              on j.run_id = r.id
+             and coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type) = %s
+            where r.id = %s::uuid
+              and r.status in ('queued', 'pending', 'retrying', 'running')
+              and ltrim(lower(coalesce(r.config->>'account', '')), '@') = %s
+            group by r.id, r.source_scope, r.initiated_by, r.config
+            """,
+            [INSTAGRAM_COMMENTS_SCRAPLING_STAGE, normalized_run_id, normalized_account],
+        )
+        if run_row:
+            run_config = _metadata_dict(run_row.get("run_config"))
+            source_priority = _normalize_non_negative_int(run_row.get("source_priority")) or 105
+            source_scope = str(run_row.get("source_scope") or run_config.get("source_scope") or "network")
+            job_initiated_by = initiated_by or str(run_row.get("initiated_by") or "") or None
+            existing_job_count = _normalize_non_negative_int(run_row.get("existing_job_count"))
+            base_shard_count = max(
+                _normalize_non_negative_int(run_config.get("comments_shard_count")),
+                existing_job_count,
+                1,
+            )
+            target_chunks = [
+                remaining_targets[index : index + safe_batch_size]
+                for index in range(0, len(remaining_targets), safe_batch_size)
+            ]
+            effective_shard_count = base_shard_count + len(target_chunks)
+            for chunk in target_chunks:
+                created_sequence += 1
+                retry_config = {
+                    **run_config,
+                    "target_source_ids": chunk,
+                    "target_source_ids_count": len(chunk),
+                    "explicit_target_source_ids": True,
+                    "comments_audit_cursor_retry": True,
+                    "comments_audit_cursor_retry_source_job_id": None,
+                    "comments_audit_cursor_retry_group_id": retry_group_id,
+                    "comments_audit_cursor_retry_index": created_sequence,
+                    "comments_audit_cursor_retry_count": len(target_chunks),
+                    "comments_audit_cursor_retry_standalone": True,
+                    "comments_target_batch_size": safe_batch_size,
+                    "max_comments_per_post": 0,
+                    "comments_shard_index": base_shard_count + created_sequence,
+                    "comments_shard_count": effective_shard_count,
+                    "comments_shard_target_count": len(chunk),
+                    "account": normalized_account,
+                }
+                job_id = _create_job(
+                    None,
+                    run_id=normalized_run_id,
+                    platform="instagram",
+                    source_scope=source_scope,
+                    job_type="comments",
+                    stage=INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+                    config=retry_config,
+                    initiated_by=job_initiated_by,
+                    status="queued",
+                    priority=max(1, min(source_priority, 104)),
+                    max_attempts=_instagram_comments_job_max_attempts(retry_config),
+                )
+                created_target_job_ids.append(job_id)
+                for target in chunk:
+                    created_target_rows.append({"shortcode": target, "job_id": job_id, "source_job_id": None})
+            created_target_set = {target for chunk in target_chunks for target in chunk}
+            remaining_targets = [target for target in remaining_targets if target not in created_target_set]
     created_job_ids = [*created_target_job_ids, *created_remainder_job_ids]
     if dispatch_immediately and created_job_ids:
         dispatch_due_social_jobs(run_id=normalized_run_id)
@@ -2506,6 +2596,27 @@ def enqueue_instagram_comments_audit_cursor_retries(
     if not target_source_ids:
         payload.update({"ok": False, "failure_reason": "no_eligible_audit_cursor_targets"})
         return payload
+    recovery_active_run = _metadata_dict(recovery.get("active_run"))
+    recovery_active_run_id = str(recovery_active_run.get("run_id") or "").strip()
+    def _attach_targets_to_active_run(active_run_id: str, *, active_run_detail: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        split_result = _split_instagram_comments_audit_cursor_targets_into_active_run(
+            run_id=active_run_id,
+            account_handle=normalized_account,
+            target_source_ids=target_source_ids,
+            batch_size=safe_batch_size,
+            initiated_by=initiated_by or "audit-cursor-retry",
+            dispatch_immediately=dispatch_immediately,
+        )
+        payload["active_run"] = _metadata_dict(active_run_detail) or recovery_active_run
+        payload["enqueue"] = {
+            "requested": True,
+            "performed": bool(split_result.get("created_target_job_ids")),
+            "mode": "active_run_split",
+            "result": split_result,
+        }
+        if not split_result.get("created_target_job_ids"):
+            payload["failure_reason"] = split_result.get("reason") or "no_active_queued_targets_split"
+        return payload
     try:
         result = start_social_account_comments_scrape(
             "instagram",
@@ -2523,29 +2634,16 @@ def enqueue_instagram_comments_audit_cursor_retries(
         )
         payload["enqueue"] = {"requested": True, "performed": True, "mode": "new_run", "result": result}
         return payload
+    except SocialWorkerUnavailableError:
+        if not attach_to_active_run or not recovery_active_run_id:
+            raise
+        return _attach_targets_to_active_run(recovery_active_run_id)
     except SocialIngestConflictError as exc:
         active_run = _metadata_dict(getattr(exc, "detail", {}) or {}).get("run_id")
         active_run_id = str(active_run or "").strip()
         if not attach_to_active_run or not active_run_id:
             raise
-        split_result = _split_instagram_comments_audit_cursor_targets_into_active_run(
-            run_id=active_run_id,
-            account_handle=normalized_account,
-            target_source_ids=target_source_ids,
-            batch_size=safe_batch_size,
-            initiated_by=initiated_by or "audit-cursor-retry",
-            dispatch_immediately=dispatch_immediately,
-        )
-        payload["active_run"] = getattr(exc, "detail", {}) or recovery.get("active_run")
-        payload["enqueue"] = {
-            "requested": True,
-            "performed": bool(split_result.get("created_target_job_ids")),
-            "mode": "active_run_split",
-            "result": split_result,
-        }
-        if not split_result.get("created_target_job_ids"):
-            payload["failure_reason"] = split_result.get("reason") or "no_active_queued_targets_split"
-        return payload
+        return _attach_targets_to_active_run(active_run_id, active_run_detail=getattr(exc, "detail", {}) or {})
 
 
 def preview_social_account_comments_scrape(
@@ -3317,6 +3415,113 @@ def _comments_progress_merge_counts(*maps: Any) -> dict[str, int]:
     return dict(merged)
 
 
+_INSTAGRAM_STATIC_CDN_HOST = "static.cdninstagram.com"
+_INSTAGRAM_COMMENTS_NETWORK_STOP_REASONS = {
+    "network_budget_exhausted",
+    "network_policy_blocked",
+    "network_stop",
+    "network_stopped",
+    "proxy_budget_exhausted",
+    "proxy_network_stop",
+    "static_cdn_budget_exhausted",
+}
+
+
+def _comments_progress_network_spend_payload(
+    *,
+    bytes_by_host: Mapping[str, int],
+    request_count_by_host: Mapping[str, int],
+    blocked_request_count_by_host: Mapping[str, int],
+    blocked_bytes_estimate_by_host: Mapping[str, int],
+    policy_modes: Mapping[str, int] | None = None,
+    host_limit: int = 8,
+) -> dict[str, Any]:
+    byte_counts = Counter(_comments_progress_count_map(bytes_by_host))
+    request_counts = Counter(_comments_progress_count_map(request_count_by_host))
+    blocked_request_counts = Counter(_comments_progress_count_map(blocked_request_count_by_host))
+    blocked_byte_counts = Counter(_comments_progress_count_map(blocked_bytes_estimate_by_host))
+    all_hosts = set(byte_counts) | set(request_counts) | set(blocked_request_counts) | set(blocked_byte_counts)
+    top_hosts = sorted(
+        (
+            {
+                "host": host,
+                "bytes": int(byte_counts.get(host, 0)),
+                "request_count": int(request_counts.get(host, 0)),
+                "blocked_request_count": int(blocked_request_counts.get(host, 0)),
+                "blocked_bytes_estimate": int(blocked_byte_counts.get(host, 0)),
+            }
+            for host in all_hosts
+        ),
+        key=lambda item: (
+            -int(item.get("bytes") or 0),
+            -int(item.get("request_count") or 0),
+            str(item.get("host") or ""),
+        ),
+    )[: max(1, int(host_limit or 8))]
+    static_bytes = int(byte_counts.get(_INSTAGRAM_STATIC_CDN_HOST, 0))
+    static_requests = int(request_counts.get(_INSTAGRAM_STATIC_CDN_HOST, 0))
+    static_blocked_requests = int(blocked_request_counts.get(_INSTAGRAM_STATIC_CDN_HOST, 0))
+    total_bytes = int(sum(byte_counts.values()))
+    payload: dict[str, Any] = {
+        "observed_proxy_bytes": total_bytes,
+        "observed_proxy_megabytes": round(total_bytes / 1_000_000, 3) if total_bytes else 0,
+        "observed_request_count": int(sum(request_counts.values())),
+        "static_cdninstagram_bytes": static_bytes,
+        "static_cdninstagram_megabytes": round(static_bytes / 1_000_000, 3) if static_bytes else 0,
+        "static_cdninstagram_request_count": static_requests,
+        "static_cdninstagram_blocked_request_count": static_blocked_requests,
+        "blocked_request_count": int(sum(blocked_request_counts.values())),
+        "blocked_bytes_estimate": int(sum(blocked_byte_counts.values())),
+        "bytes_by_host": dict(sorted(byte_counts.items())),
+        "request_count_by_host": dict(sorted(request_counts.items())),
+        "blocked_request_count_by_host": dict(sorted(blocked_request_counts.items())),
+        "blocked_bytes_estimate_by_host": dict(sorted(blocked_byte_counts.items())),
+        "top_hosts": top_hosts,
+        "spend_basis": "observed_proxy_response_bytes",
+    }
+    normalized_policy_modes = _comments_progress_count_map(policy_modes or {})
+    if normalized_policy_modes:
+        payload["network_policy_modes"] = normalized_policy_modes
+    return payload
+
+
+def _comments_progress_sample_by_shortcode(value: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, Mapping):
+        return {}
+    samples: list[Any] = []
+    for key in ("samples", "slowest"):
+        raw_items = value.get(key)
+        if isinstance(raw_items, list):
+            samples.extend(raw_items)
+    by_shortcode: dict[str, dict[str, Any]] = {}
+    for raw_sample in samples:
+        if not isinstance(raw_sample, Mapping):
+            continue
+        shortcode = str(raw_sample.get("shortcode") or raw_sample.get("source_id") or "").strip()
+        if shortcode:
+            by_shortcode[shortcode] = dict(raw_sample)
+    return by_shortcode
+
+
+def _comments_progress_target_count_from_sample(sample: Mapping[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        if key not in sample:
+            continue
+        value = sample.get(key)
+        if value is None:
+            continue
+        return _normalize_non_negative_int(value)
+    return None
+
+
+def _comments_progress_has_network_stop_reason(*reason_sets: Mapping[str, int]) -> bool:
+    for reason_set in reason_sets:
+        for reason in reason_set:
+            if str(reason or "").strip().lower() in _INSTAGRAM_COMMENTS_NETWORK_STOP_REASONS:
+                return True
+    return False
+
+
 def _comments_progress_latest_mapping_value(value: Any) -> str | None:
     if not isinstance(value, Mapping):
         return None
@@ -3471,6 +3676,7 @@ def _comments_progress_recommended_next_action(
     failed_jobs: int,
     stale_shards: int,
     incomplete_posts_total: int,
+    network_stopped_targets: int = 0,
 ) -> str:
     if operational_state == "blocked_auth":
         return "repair_auth_then_retry"
@@ -3478,6 +3684,8 @@ def _comments_progress_recommended_next_action(
         return "wait_for_retry_jobs"
     if stale_shards > 0:
         return "mark_stale_jobs_terminal_or_retry"
+    if network_stopped_targets > 0:
+        return "retry_network_stopped_targets"
     if failed_remaining_targets > 0:
         return "retry_largest_gaps"
     if failed_jobs > 0:
@@ -3534,6 +3742,13 @@ def _build_comments_scrape_run_progress_payload(
     retry_source_job_ids: list[str] = []
     targeted_retry_targets: list[str] = []
     largest_remaining_gaps: list[dict[str, Any]] = []
+    network_bytes_by_host_total: Counter[str] = Counter()
+    network_request_count_by_host_total: Counter[str] = Counter()
+    network_blocked_request_count_by_host_total: Counter[str] = Counter()
+    network_blocked_bytes_estimate_by_host_total: Counter[str] = Counter()
+    network_policy_modes_total: Counter[str] = Counter()
+    target_progress_by_source: dict[str, dict[str, Any]] = {}
+    network_stopped_target_source_ids: list[str] = []
 
     for row in rows:
         config = _metadata_dict(row.get("config"))
@@ -3557,6 +3772,25 @@ def _build_comments_scrape_run_progress_payload(
         )
         if endpoint_probe:
             latest_comments_endpoint_probe = _comments_progress_safe_probe_payload(endpoint_probe)
+        network_policy = _metadata_dict(fetcher_runtime.get("network_policy"))
+        row_network_bytes_by_host = Counter(_comments_progress_count_map(fetcher_runtime.get("bytes_by_host")))
+        row_network_request_count_by_host = Counter(
+            _comments_progress_count_map(fetcher_runtime.get("request_count_by_host"))
+            or _comments_progress_count_map(network_policy.get("request_count_by_host"))
+        )
+        row_network_blocked_request_count_by_host = Counter(
+            _comments_progress_count_map(network_policy.get("blocked_request_count_by_host"))
+        )
+        row_network_blocked_bytes_estimate_by_host = Counter(
+            _comments_progress_count_map(network_policy.get("blocked_bytes_estimate_by_host"))
+        )
+        network_bytes_by_host_total.update(row_network_bytes_by_host)
+        network_request_count_by_host_total.update(row_network_request_count_by_host)
+        network_blocked_request_count_by_host_total.update(row_network_blocked_request_count_by_host)
+        network_blocked_bytes_estimate_by_host_total.update(row_network_blocked_bytes_estimate_by_host)
+        network_policy_mode = str(network_policy.get("mode") or "").strip().lower()
+        if network_policy_mode:
+            network_policy_modes_total[network_policy_mode] += 1
 
         if status == "completed":
             completed_jobs += 1
@@ -3698,7 +3932,53 @@ def _build_comments_scrape_run_progress_payload(
             remaining_target_count = 0
         post_fetch_failures = _metadata_dict(metadata.get("post_fetch_failures"))
         post_auth_failures = _metadata_dict(metadata.get("post_auth_failures"))
+        auth_failed_target_source_ids = [
+            str(item or "").strip()
+            for item in (
+                post_auth_failures.get("target_source_ids")
+                or metadata.get("auth_failed_target_source_ids")
+                or []
+            )
+            if str(item or "").strip()
+        ]
         comment_capture = _metadata_dict(metadata.get("comment_capture"))
+        post_latency_by_shortcode = _comments_progress_sample_by_shortcode(metadata.get("post_latency"))
+        post_fetch_failure_target_metadata = _metadata_dict(post_fetch_failures.get("target_metadata"))
+        top_level_checkpoint_by_source: dict[str, dict[str, Any]] = {}
+        for raw_checkpoint in metadata.get("top_level_checkpoints") or []:
+            if not isinstance(raw_checkpoint, Mapping):
+                continue
+            checkpoint_source = str(
+                raw_checkpoint.get("target_shortcode")
+                or raw_checkpoint.get("source_id")
+                or raw_checkpoint.get("shortcode")
+                or ""
+            ).strip()
+            if checkpoint_source:
+                top_level_checkpoint_by_source[checkpoint_source] = dict(raw_checkpoint)
+        for raw_checkpoint in _metadata_dict(metadata.get("top_level_checkpoint_summary")).get("items") or []:
+            if not isinstance(raw_checkpoint, Mapping):
+                continue
+            checkpoint_source = str(
+                raw_checkpoint.get("target_shortcode")
+                or raw_checkpoint.get("source_id")
+                or raw_checkpoint.get("shortcode")
+                or ""
+            ).strip()
+            if checkpoint_source:
+                top_level_checkpoint_by_source[checkpoint_source] = dict(raw_checkpoint)
+        reply_resume_counts_by_source: Counter[str] = Counter()
+        for raw_checkpoint in _metadata_dict(metadata.get("reply_checkpoint_summary")).get("items") or []:
+            if not isinstance(raw_checkpoint, Mapping):
+                continue
+            checkpoint_source = str(
+                raw_checkpoint.get("target_shortcode")
+                or raw_checkpoint.get("source_id")
+                or raw_checkpoint.get("shortcode")
+                or ""
+            ).strip()
+            if checkpoint_source:
+                reply_resume_counts_by_source[checkpoint_source] += 1
         row_fetch_reason_counts = Counter(_comments_progress_count_map(post_fetch_failures.get("reason_counts")))
         if not row_fetch_reason_counts:
             row_fetch_reason_counts.update(
@@ -3714,6 +3994,11 @@ def _build_comments_scrape_run_progress_payload(
         row_retry_reason_counts = _comments_progress_merge_counts(
             fetcher_runtime.get("retry_reason_counts"),
             runtime_metadata.get("retry_reason_counts"),
+        )
+        row_has_network_stop_reason = _comments_progress_has_network_stop_reason(
+            row_fetch_reason_counts,
+            row_stop_reason_counts,
+            row_retry_reason_counts,
         )
         fetch_reason_counts_total.update(row_fetch_reason_counts)
         stop_reason_counts_total.update(row_stop_reason_counts)
@@ -3767,6 +4052,121 @@ def _build_comments_scrape_run_progress_payload(
             limit=10,
         )
         largest_remaining_gaps.extend(gap_samples)
+        target_reason_maps = [
+            _metadata_dict(metadata.get("incomplete_fetch_reasons")),
+            _metadata_dict(runtime_metadata.get("incomplete_fetch_reasons")),
+            _metadata_dict(post_fetch_failures.get("fetch_reasons")),
+            _metadata_dict(post_auth_failures.get("fetch_reasons")),
+            _metadata_dict(metadata.get("auth_failed_fetch_reasons")),
+        ]
+        row_current_target_fetch = _metadata_dict(metadata.get("current_target_fetch"))
+        current_fetch_source = str(row_current_target_fetch.get("shortcode") or "").strip()
+        for target_index, source_id in enumerate(shard_target_source_ids, start=1):
+            if not source_id:
+                continue
+            target_row = target_progress_by_source.setdefault(
+                source_id,
+                {
+                    "source_id": source_id,
+                    "shortcode": source_id,
+                    "job_ids": [],
+                    "statuses": {},
+                },
+            )
+            job_id_text = str(row.get("job_id") or "").strip()
+            if job_id_text:
+                target_row["job_id"] = job_id_text
+                target_row.setdefault("job_ids", [])
+                if job_id_text not in target_row["job_ids"]:
+                    target_row["job_ids"].append(job_id_text)
+            if status:
+                target_row["status"] = status
+                statuses = _metadata_dict(target_row.get("statuses"))
+                statuses[status] = _normalize_non_negative_int(statuses.get(status)) + 1
+                target_row["statuses"] = statuses
+            target_row["target_index"] = target_index
+            target_row["job_target_count"] = shard_target_count
+            target_row["shard_index"] = _normalize_non_negative_int(config.get("comments_shard_index")) or None
+            target_row["shard_count"] = _normalize_non_negative_int(config.get("comments_shard_count")) or None
+            reason = None
+            for reason_map in target_reason_maps:
+                candidate = str(reason_map.get(source_id) or "").strip().lower()
+                if candidate:
+                    reason = candidate
+                    break
+            if reason:
+                target_row["latest_reason"] = reason
+                target_row["fetch_reason"] = reason
+            if latest_stop_reason:
+                target_row["latest_stop_reason"] = latest_stop_reason
+            if source_id in remaining_targets or source_id in remaining_retry_targets:
+                target_row["remaining"] = True
+                target_row["retryable"] = True
+            if source_id in auth_failed_target_source_ids:
+                target_row["auth_failed"] = True
+                target_row["remaining"] = True
+            if row_has_network_stop_reason and (
+                reason in _INSTAGRAM_COMMENTS_NETWORK_STOP_REASONS
+                or source_id in remaining_targets
+                or source_id in remaining_retry_targets
+            ):
+                target_row["network_stopped"] = True
+                target_row["retryable"] = True
+                if source_id in remaining_targets or source_id in remaining_retry_targets:
+                    network_stopped_target_source_ids.append(source_id)
+            target_metadata = _metadata_dict(post_fetch_failure_target_metadata.get(source_id))
+            sample = post_latency_by_shortcode.get(source_id) or {}
+            if current_fetch_source == source_id:
+                sample = {**sample, **row_current_target_fetch}
+                target_row["current_phase"] = row_current_target_fetch.get("phase")
+            reported_count = _comments_progress_target_count_from_sample(
+                sample,
+                "reported_comment_count",
+                "expected_comment_count",
+                "comments_count",
+            )
+            if reported_count is None:
+                reported_count = _comments_progress_target_count_from_sample(
+                    target_metadata,
+                    "reported_comment_count",
+                    "expected_comment_count",
+                    "comments_count",
+                )
+            saved_count = _comments_progress_target_count_from_sample(
+                sample,
+                "stored_total_comments",
+                "saved_comment_count",
+                "comments_upserted",
+            )
+            if saved_count is None:
+                saved_count = _comments_progress_target_count_from_sample(
+                    target_metadata,
+                    "stored_total_comments",
+                    "saved_comment_count",
+                    "comments_upserted",
+                )
+            observed_count = _comments_progress_target_count_from_sample(
+                sample,
+                "observed_comment_count",
+                "comments_fetched",
+                "top_level_comment_count",
+            )
+            if reported_count is not None:
+                target_row["reported_comment_count"] = reported_count
+            if saved_count is not None:
+                target_row["saved_comment_count"] = saved_count
+            if observed_count is not None:
+                target_row["observed_comment_count"] = observed_count
+            if reported_count is not None and saved_count is not None:
+                target_row["missing_comment_gap"] = max(reported_count - saved_count, 0)
+            if source_id in top_level_checkpoint_by_source:
+                checkpoint = top_level_checkpoint_by_source[source_id]
+                target_row["has_top_level_cursor"] = True
+                target_row["cursor_stop_reason"] = checkpoint.get("stop_reason")
+                if checkpoint.get("pages_seen") is not None:
+                    target_row["pages_seen"] = _normalize_non_negative_int(checkpoint.get("pages_seen"))
+            if reply_resume_counts_by_source.get(source_id):
+                target_row["reply_resume_count"] = int(reply_resume_counts_by_source[source_id])
         coverage_state = _comments_progress_coverage_state(
             status=status,
             row_incomplete_posts=row_incomplete_posts,
@@ -3811,6 +4211,15 @@ def _build_comments_scrape_run_progress_payload(
             "stop_reason_counts": row_stop_reason_counts,
             "retry_reason_counts": row_retry_reason_counts,
         }
+        if row_network_bytes_by_host or row_network_request_count_by_host or row_network_blocked_request_count_by_host:
+            shard_payload["network_spend"] = _comments_progress_network_spend_payload(
+                bytes_by_host=row_network_bytes_by_host,
+                request_count_by_host=row_network_request_count_by_host,
+                blocked_request_count_by_host=row_network_blocked_request_count_by_host,
+                blocked_bytes_estimate_by_host=row_network_blocked_bytes_estimate_by_host,
+                policy_modes={network_policy_mode: 1} if network_policy_mode else {},
+                host_limit=5,
+            )
         if gap_samples:
             shard_payload["largest_remaining_gaps"] = gap_samples
         if row_has_write_breakdown:
@@ -3881,6 +4290,41 @@ def _build_comments_scrape_run_progress_payload(
         summary["stop_reason_counts"] = dict(stop_reason_counts_total)
     if retry_reason_counts_total:
         summary["retry_reason_counts"] = dict(retry_reason_counts_total)
+    network_spend = _comments_progress_network_spend_payload(
+        bytes_by_host=network_bytes_by_host_total,
+        request_count_by_host=network_request_count_by_host_total,
+        blocked_request_count_by_host=network_blocked_request_count_by_host_total,
+        blocked_bytes_estimate_by_host=network_blocked_bytes_estimate_by_host_total,
+        policy_modes=network_policy_modes_total,
+    )
+    if network_spend.get("observed_proxy_bytes") or network_spend.get("observed_request_count"):
+        summary["observed_network_bytes_total"] = network_spend.get("observed_proxy_bytes", 0)
+        summary["static_cdninstagram_bytes"] = network_spend.get("static_cdninstagram_bytes", 0)
+        summary["static_cdninstagram_blocked_requests"] = network_spend.get(
+            "static_cdninstagram_blocked_request_count",
+            0,
+        )
+    network_stopped_target_source_ids = list(dict.fromkeys(network_stopped_target_source_ids))
+    target_progress_rows = list(target_progress_by_source.values())
+    for target_row in target_progress_rows:
+        job_ids = [str(item or "").strip() for item in target_row.get("job_ids") or [] if str(item or "").strip()]
+        if job_ids:
+            target_row["job_ids"] = job_ids[-5:]
+        else:
+            target_row.pop("job_ids", None)
+        if not target_row.get("latest_reason") and target_row.get("network_stopped"):
+            target_row["latest_reason"] = "network_stopped"
+        target_row.setdefault("remaining", False)
+        target_row.setdefault("retryable", False)
+        target_row.setdefault("network_stopped", False)
+    target_progress_rows.sort(
+        key=lambda item: (
+            not bool(item.get("remaining")),
+            not bool(item.get("network_stopped")),
+            -_normalize_non_negative_int(item.get("missing_comment_gap")),
+            str(item.get("shortcode") or item.get("source_id") or ""),
+        )
+    )
     latest_auth_context = _metadata_dict(latest_job_metadata.get("auth_context"))
     latest_fetcher_runtime = _metadata_dict(latest_job_metadata.get("fetcher_runtime")) or _metadata_dict(
         latest_job_metadata.get("runtime_metadata")
@@ -3947,6 +4391,7 @@ def _build_comments_scrape_run_progress_payload(
         failed_jobs=failed_jobs,
         stale_shards=stale_shards,
         incomplete_posts_total=incomplete_posts_total,
+        network_stopped_targets=len(network_stopped_target_source_ids),
     )
     proxy_session_state = {
         key: value
@@ -3977,6 +4422,7 @@ def _build_comments_scrape_run_progress_payload(
         "started_at": first.get("started_at"),
         "completed_at": first.get("completed_at"),
         "summary": summary,
+        "network_spend": network_spend,
         "job_status": latest_job_status,
         "job_metadata": latest_job_metadata,
         "error_message": latest_error,
@@ -4020,9 +4466,14 @@ def _build_comments_scrape_run_progress_payload(
             "retry_target_count": failed_remaining_targets,
             "retry_source_job_ids": list(dict.fromkeys(retry_source_job_ids)),
             "targeted_retry_target_count": len(dict.fromkeys(targeted_retry_targets)),
+            "network_stopped_target_count": len(network_stopped_target_source_ids),
+            "network_stopped_target_source_ids": network_stopped_target_source_ids[:50],
             "largest_remaining_gaps": largest_remaining_gaps[:10],
+            "target_progress_rows": target_progress_rows[:50],
             "top_incomplete_reasons": dict(completion_reason_counts_total or fetch_reason_counts_total),
         },
+        "target_progress_rows": target_progress_rows[:50],
+        "target_progress": target_progress_rows[:50],
         "largest_remaining_gaps": largest_remaining_gaps[:10],
         "top_incomplete_reasons": dict(completion_reason_counts_total or fetch_reason_counts_total),
         "comment_shards": comment_shards,
