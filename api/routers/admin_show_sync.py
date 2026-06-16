@@ -80,6 +80,7 @@ from trr_backend.pipeline.show_refresh_orchestrator import (
     build_show_refresh_sub_operation_request_payload,
 )
 from trr_backend.repositories import admin_operations as admin_operations_repo
+from trr_backend.repositories import admin_runtime_settings
 from trr_backend.repositories import brand_families
 from trr_backend.repositories.media_assets import update_asset_with_mirror_result
 from trr_backend.repositories.web_scrape_images import (
@@ -93,6 +94,65 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin/shows", tags=["admin-show-sync"])
 STREAM_HEARTBEAT_INTERVAL_SECONDS = 10
 VALID_REFRESH_TARGETS = frozenset({"show_core", "links", "bravo", "cast_profiles", "cast_media"})
+
+
+def _admin_actor(admin: InternalAdminUser | None) -> str:
+    return str((admin or {}).get("email") or (admin or {}).get("id") or "admin")
+
+
+def _show_core_auto_refresh_paused() -> bool:
+    try:
+        return admin_runtime_settings.show_core_auto_refresh_paused()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Unable to read show_core auto-refresh setting; defaulting to enabled: %s", exc)
+        return False
+
+
+def _raise_if_show_core_auto_refresh_paused(payload: "ShowRefreshRequest", targets: list[str]) -> None:
+    if not payload.auto_refresh or "show_core" not in targets:
+        return
+    if not _show_core_auto_refresh_paused():
+        return
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "message": "Automatic show_core refreshes are paused.",
+            "code": "SHOW_CORE_AUTO_REFRESH_PAUSED",
+            "auto_refresh_paused": True,
+        },
+    )
+
+
+class ShowCoreAutoRefreshSettingsRequest(BaseModel):
+    paused: bool = Field(default=False, description="Pause automatic show_core refreshes globally.")
+
+
+class ShowCoreAutoRefreshSettingsResponse(BaseModel):
+    paused: bool = False
+    updated_at: str | None = None
+    updated_by: str | None = None
+
+
+@router.get("/settings/show-core-auto-refresh", response_model=ShowCoreAutoRefreshSettingsResponse)
+def get_show_core_auto_refresh_settings(
+    _admin: InternalAdminUser = None,
+) -> ShowCoreAutoRefreshSettingsResponse:
+    return ShowCoreAutoRefreshSettingsResponse.model_validate(
+        admin_runtime_settings.get_show_core_auto_refresh_settings()
+    )
+
+
+@router.put("/settings/show-core-auto-refresh", response_model=ShowCoreAutoRefreshSettingsResponse)
+def update_show_core_auto_refresh_settings(
+    payload: ShowCoreAutoRefreshSettingsRequest,
+    admin: InternalAdminUser = None,
+) -> ShowCoreAutoRefreshSettingsResponse:
+    return ShowCoreAutoRefreshSettingsResponse.model_validate(
+        admin_runtime_settings.set_show_core_auto_refresh_paused(
+            paused=bool(payload.paused),
+            updated_by=_admin_actor(admin),
+        )
+    )
 
 
 def _maybe_reload_postgrest_schema_cache(enabled: bool) -> None:
@@ -378,6 +438,20 @@ class SyncFromListsRequest(BaseModel):
         default=False,
         description="Force refetch enrichment even if show_meta appears fresh.",
     )
+    auto_refresh: bool = Field(
+        default=True,
+        description="Start the show_core refresh pipeline for shows touched by this list sync.",
+    )
+    auto_refresh_targets: list[Literal["show_core", "links", "bravo", "cast_profiles", "cast_media"]] = Field(
+        default_factory=lambda: ["show_core"],
+        description="Refresh targets to enqueue after shows are inserted or updated.",
+    )
+
+
+class SyncFromListsAutoRefreshOperation(BaseModel):
+    show_id: str
+    operation_id: str
+    targets: list[str]
 
 
 class SyncFromListsResponse(BaseModel):
@@ -388,6 +462,77 @@ class SyncFromListsResponse(BaseModel):
     updated: int
     skipped: int
     duration_ms: int
+    auto_refresh_paused: bool = False
+    auto_refresh_operations: list[SyncFromListsAutoRefreshOperation] = Field(default_factory=list)
+    auto_refresh_errors: list[str] = Field(default_factory=list)
+
+
+def _enqueue_show_core_refreshes_for_list_sync(
+    *,
+    show_rows: list[dict[str, Any]],
+    targets: list[str],
+    db: SupabaseAdminClient,
+    initiated_by: str,
+) -> tuple[list[SyncFromListsAutoRefreshOperation], list[str]]:
+    normalized_targets = [target for target in targets if target in VALID_REFRESH_TARGETS]
+    if not normalized_targets:
+        normalized_targets = ["show_core"]
+
+    operations: list[SyncFromListsAutoRefreshOperation] = []
+    errors: list[str] = []
+    seen_show_ids: set[str] = set()
+
+    for row in show_rows:
+        show_id = str(row.get("id") or "").strip()
+        if not show_id or show_id in seen_show_ids:
+            continue
+        seen_show_ids.add(show_id)
+
+        request_id = f"sync-from-lists:{show_id}:{int(time.time())}"
+        payload_data = {
+            "targets": normalized_targets,
+            "skip_s3": True,
+            "verbose": False,
+            "force_new_operation": True,
+        }
+        request_payload = {
+            "show_id": show_id,
+            "payload": payload_data,
+            "request_id": request_id,
+            "initiated_by": initiated_by,
+            "source": "sync_from_lists_auto_refresh",
+        }
+        try:
+            orchestrator = ShowRefreshOrchestrator(
+                show_id=show_id,
+                targets=list(normalized_targets),
+                initiated_by=initiated_by,
+                request_payload=request_payload,
+                request_id=request_id,
+                client_workflow_id="sync-from-lists-auto-refresh",
+            )
+            parent_id, _sub_ops = orchestrator.create_operations()
+            for wave_ops in orchestrator.get_waves():
+                orchestrator.dispatch_wave(
+                    wave_ops,
+                    producer_factory=lambda sub_op: build_show_refresh_operation_producer(
+                        request_payload=sub_op.get("request_payload", {}),
+                        operation_id=str(sub_op["id"]),
+                        db=db,
+                    ),
+                )
+            operations.append(
+                SyncFromListsAutoRefreshOperation(
+                    show_id=show_id,
+                    operation_id=str(parent_id),
+                    targets=list(normalized_targets),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to enqueue list-sync auto refresh for show_id=%s", show_id)
+            errors.append(f"{show_id}: {exc}")
+
+    return operations, errors
 
 
 class SyncNetworksStreamingRequest(BaseModel):
@@ -617,6 +762,18 @@ def sync_from_lists(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Sync from lists failed")
         raise HTTPException(status_code=500, detail=f"Sync failed: {exc}") from exc
+    auto_refresh_operations: list[SyncFromListsAutoRefreshOperation] = []
+    auto_refresh_errors: list[str] = []
+    auto_refresh_paused = bool(payload.auto_refresh and _show_core_auto_refresh_paused())
+    if payload.auto_refresh and not auto_refresh_paused:
+        actor = _admin_actor(_)
+        auto_refresh_operations, auto_refresh_errors = _enqueue_show_core_refreshes_for_list_sync(
+            show_rows=result.upserted_show_rows,
+            targets=[str(target) for target in payload.auto_refresh_targets],
+            db=db,
+            initiated_by=actor,
+        )
+
     duration_ms = int((time.perf_counter() - started) * 1000)
 
     return SyncFromListsResponse(
@@ -627,6 +784,9 @@ def sync_from_lists(
         updated=int(result.updated),
         skipped=int(result.skipped),
         duration_ms=duration_ms,
+        auto_refresh_paused=auto_refresh_paused,
+        auto_refresh_operations=auto_refresh_operations,
+        auto_refresh_errors=auto_refresh_errors,
     )
 
 
@@ -2254,6 +2414,7 @@ class ShowRefreshRequest(BaseModel):
     verbose: bool = False
     reload_schema_cache: bool = False
     force_new_operation: bool = False
+    auto_refresh: bool = False
 
 
 class RefreshStepResult(BaseModel):
@@ -2475,16 +2636,22 @@ def _run_seasons_episodes_reconcile_step(
     verbose: bool,
     step_name: str,
 ) -> RefreshStepResult:
+    def _run_reconcile() -> int:
+        sync_seasons_episodes.reconcile_missing_episode_imdb_ids(
+            db,
+            show_ids=[show_id],
+            verbose=bool(verbose),
+        )
+        sync_seasons_episodes.reconcile_show_seasons_episodes(
+            db,
+            show_ids=[show_id],
+            verbose=bool(verbose),
+        )
+        return 0
+
     return _run_inline_step(
         step_name,
-        lambda: (
-            sync_seasons_episodes.reconcile_show_seasons_episodes(
-                db,
-                show_ids=[show_id],
-                verbose=bool(verbose),
-            ),
-            0,
-        )[1],
+        _run_reconcile,
     )
 
 
@@ -3169,6 +3336,8 @@ def refresh_show(
         seen.add(target)
         ordered.append(target)
 
+    _raise_if_show_core_auto_refresh_paused(payload, [str(target) for target in ordered])
+
     if any(target in {"cast_credits", "show_core", "credits_pipeline"} for target in ordered):
         _ensure_cast_refresh_imdb_id(show_row, show_id_str)
 
@@ -3457,6 +3626,8 @@ def refresh_show_stream(
             continue
         seen.add(target)
         ordered.append(target)
+
+    _raise_if_show_core_auto_refresh_paused(payload, [str(target) for target in ordered])
 
     if any(target in {"cast_credits", "show_core", "credits_pipeline"} for target in ordered):
         _ensure_cast_refresh_imdb_id(show_row, show_id_str)

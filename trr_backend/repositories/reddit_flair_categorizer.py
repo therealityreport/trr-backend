@@ -33,7 +33,7 @@ def _get_cast_names(show_id: str) -> list[dict[str, str]]:
         WHERE sc.show_id = %s
         ORDER BY display_name
     """
-    with pg.connection() as conn:
+    with pg.db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, (show_id,))
             rows = cur.fetchall()
@@ -57,7 +57,7 @@ def _get_cast_names(show_id: str) -> list[dict[str, str]]:
 def _get_season_numbers(show_id: str) -> set[int]:
     """Fetch season numbers for a show."""
     sql = "SELECT season_number FROM core.seasons WHERE show_id = %s AND season_number IS NOT NULL"
-    with pg.connection() as conn:
+    with pg.db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, (show_id,))
             return {row[0] for row in cur.fetchall()}
@@ -66,7 +66,7 @@ def _get_season_numbers(show_id: str) -> set[int]:
 def _get_community_flairs(community_id: str) -> list[str]:
     """Fetch post_flairs from admin.reddit_communities."""
     sql = "SELECT post_flairs FROM admin.reddit_communities WHERE id = %s"
-    with pg.connection() as conn:
+    with pg.db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, (community_id,))
             row = cur.fetchone()
@@ -146,7 +146,7 @@ def _get_communities_for_show(show_id: str) -> list[dict[str, Any]]:
         FROM admin.reddit_communities
         WHERE trr_show_id = %s
     """
-    with pg.connection() as conn:
+    with pg.db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, (show_id,))
             cols = [desc[0] for desc in cur.description]

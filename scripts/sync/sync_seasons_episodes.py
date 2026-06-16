@@ -6,8 +6,12 @@ import sys
 from collections.abc import Sequence
 from typing import Any
 
+import requests
+
 from scripts._sync_common import add_show_filter_args, fetch_show_rows, load_env_and_db
+from scripts.sync.episode_id_reconciliation import reconcile_episode_imdb_ids_from_tmdb
 from scripts.sync import sync_episodes, sync_seasons
+from trr_backend.integrations.tmdb.client import resolve_api_key
 from trr_backend.repositories.shows import update_show
 
 
@@ -67,7 +71,7 @@ def _fetch_episode_rows(db, show_id: str) -> list[dict[str, Any]]:
     response = (
         db.schema("core")
         .table("episodes")
-        .select("season_number,episode_number,title,air_date,imdb_episode_id")
+        .select("id,season_number,episode_number,title,air_date,imdb_episode_id,tmdb_episode_id,external_ids")
         .eq("show_id", show_id)
         .execute()
     )
@@ -85,6 +89,18 @@ def _fetch_show_rows_for_ids(db, show_ids: Sequence[str]) -> list[dict[str, Any]
     response = db.schema("core").table("shows").select("id,most_recent_episode").in_("id", normalized_ids).execute()
     if hasattr(response, "error") and response.error:
         raise RuntimeError(f"Supabase error listing shows: {response.error}")
+    data = response.data or []
+    return data if isinstance(data, list) else []
+
+
+def _fetch_show_identity_rows_for_ids(db, show_ids: Sequence[str]) -> list[dict[str, Any]]:
+    normalized_ids = [str(show_id or "").strip() for show_id in show_ids if str(show_id or "").strip()]
+    if not normalized_ids:
+        return []
+
+    response = db.schema("core").table("shows").select("id,tmdb_id").in_("id", normalized_ids).execute()
+    if hasattr(response, "error") and response.error:
+        raise RuntimeError(f"Supabase error listing show identities: {response.error}")
     data = response.data or []
     return data if isinstance(data, list) else []
 
@@ -159,6 +175,36 @@ def reconcile_show_seasons_episodes(db, *, show_ids: Sequence[str], verbose: boo
     return updated
 
 
+def reconcile_missing_episode_imdb_ids(db, *, show_ids: Sequence[str], verbose: bool = False) -> int:
+    show_rows = _fetch_show_identity_rows_for_ids(db, show_ids)
+    if not show_rows:
+        return 0
+
+    api_key = resolve_api_key()
+    session = requests.Session()
+    updated = 0
+    for show in show_rows:
+        show_id = str(show.get("id") or "").strip()
+        tmdb_id = _as_int(show.get("tmdb_id"))
+        if not show_id or tmdb_id is None:
+            continue
+        episodes = _fetch_episode_rows(db, show_id)
+        show_updated = reconcile_episode_imdb_ids_from_tmdb(
+            db,
+            show_id=show_id,
+            tmdb_series_id=tmdb_id,
+            episodes=episodes,
+            api_key=api_key,
+            session=session,
+            verbose=verbose,
+        )
+        updated += show_updated
+        if verbose and show_updated:
+            print(f"UPDATED episode_imdb_ids show_id={show_id} count={show_updated}")
+
+    return updated
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv or sys.argv[1:])
     if args.skip_db:
@@ -186,6 +232,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     show_ids = [str(show.get("id") or "").strip() for show in show_rows if str(show.get("id") or "").strip()]
+    reconcile_missing_episode_imdb_ids(db, show_ids=show_ids, verbose=bool(args.verbose))
     reconcile_show_seasons_episodes(db, show_ids=show_ids, verbose=bool(args.verbose))
 
     return 0

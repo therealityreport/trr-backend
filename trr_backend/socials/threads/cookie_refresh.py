@@ -32,6 +32,13 @@ _SPEC = SimpleLoginSpec(
 _DIRECT_LOGIN_SPEC = replace(_SPEC, pre_login_button_patterns=())
 
 
+def _validate_threads_cookies_in_protocol(cookies: dict[str, str]) -> tuple[bool, str | None]:
+    """Accept cookies only if they fetch a page that exposes GraphQL tokens."""
+    from trr_backend.socials.threads.scraper import ThreadsScraper
+
+    return ThreadsScraper(cookies=cookies).validate_session_tokens()
+
+
 def refresh_threads_cookies(
     *,
     username: str,
@@ -48,6 +55,7 @@ def refresh_threads_cookies(
             cookie_file=cookie_file,
             headless=headless,
             timeout_seconds=timeout_seconds,
+            validator=_validate_threads_cookies_in_protocol,
         )
     except RuntimeError as exc:
         logger.info("Threads Instagram-entry login retrying with direct form fallback: %s", exc)
@@ -58,4 +66,5 @@ def refresh_threads_cookies(
             cookie_file=cookie_file,
             headless=headless,
             timeout_seconds=timeout_seconds,
+            validator=_validate_threads_cookies_in_protocol,
         )

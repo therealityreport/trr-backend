@@ -14,8 +14,11 @@ from urllib.parse import urlencode
 import requests
 from bs4 import BeautifulSoup
 
+from trr_backend.utils.playwright_runtime import exclusive_runtime_lock
+
 _IMDB_TITLE_ID_RE = re.compile(r"^(tt[0-9]+)$")
 _IMDB_TITLE_HREF_RE = re.compile(r"/title/(tt[0-9]+)/")
+_SCRAPLING_RUNTIME_LOCK_NAME = "imdb-episodes-scrapling"
 
 
 class ImdbTitleMetadataClientError(RuntimeError):
@@ -307,6 +310,97 @@ def _extract_next_data_json(html: str) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _env_flag(name: str, *, default: bool) -> bool:
+    raw = str(os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _scrapling_response_html(page: Any) -> str:
+    body = getattr(page, "body", None)
+    if isinstance(body, bytes):
+        return body.decode(getattr(page, "encoding", None) or "utf-8", errors="replace")
+    if isinstance(body, str):
+        return body
+
+    for attr in ("html", "content", "text"):
+        value = getattr(page, attr, None)
+        if callable(value):
+            value = value()
+        if isinstance(value, bytes):
+            return value.decode(getattr(page, "encoding", None) or "utf-8", errors="replace")
+        if isinstance(value, str) and value:
+            return value
+
+    return ""
+
+
+def _looks_like_episodes_html(html: str) -> bool:
+    normalized = html or ""
+    if "__NEXT_DATA__" in normalized and "/title/tt" in normalized:
+        return True
+    return (
+        "ipc-title__text" in normalized
+        and "/title/tt" in normalized
+        and ("episode" in normalized.lower() or "season" in normalized.lower())
+    )
+
+
+def _fetch_episodes_page_via_scrapling(
+    url: str,
+    *,
+    extra_headers: Mapping[str, str],
+    timeout_seconds: float,
+    verbose: bool,
+) -> str | None:
+    if not _env_flag("IMDB_EPISODES_SCRAPLING_FALLBACK_ENABLED", default=True):
+        return None
+
+    try:
+        from scrapling.fetchers import StealthyFetcher
+    except Exception as exc:
+        if verbose:
+            print(f"IMDb episodes Scrapling fallback unavailable: {exc}")
+        return None
+
+    wait_selector = "#__NEXT_DATA__, [data-testid='episodes-section'], .ipc-title__text"
+    timeout_ms = max(int(timeout_seconds * 1000), 30_000)
+
+    try:
+        with exclusive_runtime_lock(_SCRAPLING_RUNTIME_LOCK_NAME):
+            page = StealthyFetcher.fetch(
+                url,
+                headless=True,
+                network_idle=True,
+                wait_selector=wait_selector,
+                timeout=timeout_ms,
+                extra_headers=dict(extra_headers),
+            )
+    except RuntimeError as exc:
+        if verbose and not str(exc).startswith("browser_runtime_locked:"):
+            print(f"IMDb episodes Scrapling fallback lock failed: {exc}")
+        return None
+    except Exception as exc:
+        if verbose:
+            print(f"IMDb episodes Scrapling fallback failed: {exc}")
+        return None
+
+    status = getattr(page, "status", None)
+    html = _scrapling_response_html(page)
+    if status == 200 and _looks_like_episodes_html(html):
+        if verbose:
+            print(f"IMDb episodes Scrapling fallback succeeded for {url}.")
+        return html
+
+    if verbose:
+        print(
+            "IMDb episodes Scrapling fallback did not load episodes "
+            f"(status={status}, bytes={len(html.encode('utf-8', errors='ignore'))})."
+        )
+    return None
+
+
 def _extract_imdb_episode_items_from_next_data(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     def _try_path(root: Mapping[str, Any], path: list[str]) -> list[Mapping[str, Any]] | None:
         node: Any = root
@@ -593,6 +687,18 @@ class HttpImdbTitleMetadataClient:
             raise ImdbTitleMetadataClientError(f"IMDb request failed: {exc}") from exc
 
         if resp.status_code != 200:
+            is_blocked = resp.status_code in {202, 403, 429}
+            request_url = getattr(resp, "url", None) or url
+            if is_blocked and "/episodes/" in str(request_url):
+                scrapling_html = _fetch_episodes_page_via_scrapling(
+                    str(request_url),
+                    extra_headers=headers,
+                    timeout_seconds=self._timeout_seconds,
+                    verbose=_env_flag("IMDB_EPISODES_SCRAPLING_VERBOSE", default=False),
+                )
+                if scrapling_html:
+                    return scrapling_html
+
             raise ImdbTitleMetadataClientError(
                 f"IMDb request failed with HTTP {resp.status_code}.",
                 status_code=resp.status_code,

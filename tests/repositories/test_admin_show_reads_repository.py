@@ -24,6 +24,23 @@ class _FakeConnection:
         return _FakeCursorContext()
 
 
+def test_show_detail_episode_id_gap_sql_excludes_tmdb_season_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, str] = {}
+
+    def fake_fetch_one_row(query: str, params=None, cur=None):  # noqa: ANN001
+        captured["query"] = query
+        return None
+
+    monkeypatch.setattr(repo, "_fetch_one_row", fake_fetch_one_row)
+
+    show, _query_count = repo.get_show_detail("show-1")
+
+    assert show is None
+    assert captured["query"].count("COALESCE(e.season_number, -1) <> 0") == 2
+    assert "tmdb_episode_ignored_season_zero_missing_imdb_count" in captured["query"]
+    assert "COALESCE(e.season_number, -1) = 0" in captured["query"]
+
+
 def test_search_shows_maps_explicit_show_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         repo.pg,
@@ -272,6 +289,149 @@ def test_get_show_detail_strips_raw_metadata_fields(monkeypatch: pytest.MonkeyPa
     assert row["canonical_slug"] == "bravo-show"
     assert "tmdb_meta" not in row
     assert "imdb_meta" not in row
+
+
+def test_get_show_detail_adds_episode_external_id_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    base_row = {
+        "id": "show-1",
+        "name": "Bravo Show",
+        "slug": "bravo-show",
+        "canonical_slug": "bravo-show",
+        "alternative_names": [],
+        "imdb_id": "tt123",
+        "tmdb_id": 456,
+        "tvdb_id": None,
+        "tvrage_id": None,
+        "wikidata_id": None,
+        "external_ids": {"imdb_id": "tt123"},
+        "show_total_seasons": 10,
+        "show_total_episodes": 20,
+        "description": "A Bravo show",
+        "premiere_date": "2020-01-01",
+        "genres": [],
+        "networks": [],
+        "streaming_providers": [],
+        "watch_providers": [],
+        "overview_watch_availability": [],
+        "watch_provider_regions": [],
+        "justwatch_url": None,
+        "tags": [],
+        "primary_poster_image_id": None,
+        "primary_backdrop_image_id": None,
+        "primary_logo_image_id": None,
+        "tmdb_status": "Returning Series",
+        "tmdb_vote_average": None,
+        "imdb_rating_value": None,
+        "created_at": "2024-01-01T00:00:00Z",
+        "updated_at": "2024-01-02T00:00:00Z",
+        "poster_url": None,
+        "backdrop_url": None,
+        "logo_url": None,
+        "computed_slug": "bravo-show",
+        "slug_collision_count": 0,
+        "tmdb_episode_missing_imdb_count": 2,
+        "tmdb_episode_ignored_season_zero_missing_imdb_count": 16,
+        "tmdb_episode_missing_imdb_samples": [
+            {
+                "episode_id": "episode-1",
+                "season_number": 10,
+                "episode_number": 13,
+                "title": "Ship Happens",
+                "air_date": "2026-04-28",
+                "tmdb_episode_id": 7118363,
+            }
+        ],
+    }
+    monkeypatch.setattr(repo, "_fetch_one_row", lambda query, params=None, cur=None: base_row)
+
+    row, query_count = repo.get_show_detail("show-1")
+
+    assert query_count == 1
+    assert row is not None
+    assert row["sync_warnings"] == [
+        {
+            "code": "episodes_tmdb_missing_imdb_ids",
+            "severity": "warning",
+            "message": "2 TMDb-backed episodes are missing IMDb episode IDs.",
+            "count": 2,
+            "ignored_season_zero_count": 16,
+            "samples": [
+                {
+                    "episode_id": "episode-1",
+                    "season_number": 10,
+                    "episode_number": 13,
+                    "title": "Ship Happens",
+                    "air_date": "2026-04-28",
+                    "tmdb_episode_id": 7118363,
+                }
+            ],
+        }
+    ]
+    assert "tmdb_episode_missing_imdb_count" not in row
+    assert "tmdb_episode_missing_imdb_samples" not in row
+    assert "tmdb_episode_ignored_season_zero_missing_imdb_count" not in row
+
+
+def test_get_show_detail_adds_ignored_season_zero_metric_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_row = {
+        "id": "show-1",
+        "name": "Bravo Show",
+        "slug": "bravo-show",
+        "canonical_slug": "bravo-show",
+        "alternative_names": [],
+        "imdb_id": "tt123",
+        "tmdb_id": 456,
+        "tvdb_id": None,
+        "tvrage_id": None,
+        "wikidata_id": None,
+        "external_ids": {"imdb_id": "tt123"},
+        "show_total_seasons": 10,
+        "show_total_episodes": 20,
+        "description": "A Bravo show",
+        "premiere_date": "2020-01-01",
+        "genres": [],
+        "networks": [],
+        "streaming_providers": [],
+        "watch_providers": [],
+        "overview_watch_availability": [],
+        "watch_provider_regions": [],
+        "justwatch_url": None,
+        "tags": [],
+        "primary_poster_image_id": None,
+        "primary_backdrop_image_id": None,
+        "primary_logo_image_id": None,
+        "tmdb_status": "Returning Series",
+        "tmdb_vote_average": None,
+        "imdb_rating_value": None,
+        "created_at": "2024-01-01T00:00:00Z",
+        "updated_at": "2024-01-02T00:00:00Z",
+        "poster_url": None,
+        "backdrop_url": None,
+        "logo_url": None,
+        "computed_slug": "bravo-show",
+        "slug_collision_count": 0,
+        "tmdb_episode_missing_imdb_count": 0,
+        "tmdb_episode_missing_imdb_samples": [],
+        "tmdb_episode_ignored_season_zero_missing_imdb_count": 16,
+    }
+    monkeypatch.setattr(repo, "_fetch_one_row", lambda query, params=None, cur=None: base_row)
+
+    row, query_count = repo.get_show_detail("show-1")
+
+    assert query_count == 1
+    assert row is not None
+    assert row["sync_warnings"] == [
+        {
+            "code": "episodes_tmdb_season_zero_ignored_specials",
+            "severity": "info",
+            "message": (
+                "16 TMDb season 0 specials are ignored unless IMDb lists them in a numbered season."
+            ),
+            "count": 16,
+        }
+    ]
 
 
 def test_get_show_detail_builds_overview_fields_without_mutating_raw_values(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -19,7 +19,7 @@ import os
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
-from threading import Thread
+from threading import Lock, Thread
 from time import monotonic as monotonic
 from time import perf_counter
 from typing import Any, Literal
@@ -154,6 +154,14 @@ INSTAGRAM_AUTH_REFRESH_WARNING = (
     "Manual Instagram auth can surface CAPTCHA, verification code, checkpoint, or account-lock prompts. "
     "Complete those steps yourself before confirming a validated-cookie sync."
 )
+SOCIAL_LANDING_PROGRESS_ROLLUP_CACHE_TTL_SECONDS = int(
+    os.getenv("SOCIAL_LANDING_PROGRESS_ROLLUP_CACHE_TTL_SECONDS", "300")
+)
+SOCIAL_LANDING_PROGRESS_ROLLUP_CACHE_MAX_ENTRIES = int(
+    os.getenv("SOCIAL_LANDING_PROGRESS_ROLLUP_CACHE_MAX_ENTRIES", "128")
+)
+_SOCIAL_LANDING_PROGRESS_ROLLUP_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
+_SOCIAL_LANDING_PROGRESS_ROLLUP_CACHE_LOCK = Lock()
 
 
 def normalize_source_scope_param(value: str | None, *, default: str = "network") -> str:
@@ -201,6 +209,70 @@ class SocialLandingSocialBladeRowsRequest(BaseModel):
 class SocialLandingSocialBladeProgressCountsRequest(BaseModel):
     platforms: list[str] = Field(default_factory=list, max_length=5000)
     account_handles: list[str] = Field(default_factory=list, max_length=5000)
+
+
+class SocialLandingProgressRollupRequest(BaseModel):
+    platforms: list[str] = Field(default_factory=list, max_length=5000)
+    account_handles: list[str] = Field(default_factory=list, max_length=5000)
+
+
+def _normalize_landing_progress_targets(
+    platforms: list[str],
+    account_handles: list[str],
+) -> list[tuple[str, str]]:
+    if len(platforms) != len(account_handles):
+        raise HTTPException(status_code=400, detail="platforms and account_handles must have matching lengths")
+
+    allowed_platforms = {"instagram", "tiktok", "twitter", "youtube", "facebook", "threads"}
+    targets: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for platform_raw, handle_raw in zip(platforms, account_handles, strict=True):
+        platform = str(platform_raw or "").strip().lower()
+        handle = str(handle_raw or "").strip().lower().lstrip("@")
+        if platform not in allowed_platforms or not handle:
+            continue
+        key = (platform, handle)
+        if key in seen:
+            continue
+        seen.add(key)
+        targets.append(key)
+    return targets
+
+
+def _landing_progress_cache_key(targets: list[tuple[str, str]]) -> tuple[Any, ...]:
+    return tuple(sorted(targets))
+
+
+def _sql_json_text_non_negative_int(expr: str) -> str:
+    return (
+        "coalesce(nullif(regexp_replace(coalesce("
+        f"{expr}, ''), '[^0-9]', '', 'g'), '')::bigint, 0)"
+    )
+
+
+def _instagram_reported_comments_sql(alias: str) -> str:
+    safe_alias = alias.strip() or "p"
+    raw = f"coalesce({safe_alias}.raw_data, '{{}}'::jsonb)"
+    raw_candidates = [
+        f"{raw} ->> 'comments_count'",
+        f"{raw} ->> 'comments'",
+        f"{raw} ->> 'comment_count'",
+        f"{raw} ->> 'commentsCount'",
+        f"{raw} -> 'edge_media_to_comment' ->> 'count'",
+        f"{raw} -> 'edge_media_to_parent_comment' ->> 'count'",
+        f"{raw} -> 'edge_media_preview_comment' ->> 'count'",
+        f"{raw} -> 'media' ->> 'comments_count'",
+        f"{raw} -> 'media' ->> 'comments'",
+        f"{raw} -> 'media' ->> 'comment_count'",
+        f"{raw} -> 'media' ->> 'commentsCount'",
+        f"{raw} -> 'metrics' ->> 'comments_count'",
+        f"{raw} -> 'metrics' ->> 'comments'",
+    ]
+    return (
+        f"greatest(coalesce({safe_alias}.comments_count, 0), "
+        + ", ".join(_sql_json_text_non_negative_int(candidate) for candidate in raw_candidates)
+        + ", 0)"
+    )
 
 
 def _reddit_refresh_worker_health_payload(
@@ -357,22 +429,7 @@ def post_social_landing_socialblade_progress_counts(
 ) -> dict[str, Any]:
     from trr_backend.db import pg
 
-    if len(payload.platforms) != len(payload.account_handles):
-        raise HTTPException(status_code=400, detail="platforms and account_handles must have matching lengths")
-
-    targets: list[tuple[str, str]] = []
-    allowed_platforms = {"instagram", "tiktok", "twitter", "youtube", "facebook", "threads"}
-    seen: set[tuple[str, str]] = set()
-    for platform_raw, handle_raw in zip(payload.platforms, payload.account_handles, strict=True):
-        platform = str(platform_raw or "").strip().lower()
-        handle = str(handle_raw or "").strip()
-        if platform not in allowed_platforms or not handle:
-            continue
-        key = (platform, handle.lower().lstrip("@"))
-        if key in seen:
-            continue
-        seen.add(key)
-        targets.append((platform, handle))
+    targets = _normalize_landing_progress_targets(payload.platforms, payload.account_handles)
 
     if not targets:
         return {"rows": []}
@@ -414,6 +471,337 @@ def post_social_landing_socialblade_progress_counts(
         return {"rows": jsonable_encoder(rows)}
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to read social landing SocialBlade progress counts")
+        raise _to_social_read_http_exception(exc) from exc
+
+
+@router.post("/landing-progress-rollup")
+def post_social_landing_progress_rollup(
+    payload: SocialLandingProgressRollupRequest,
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.db import pg
+
+    targets = _normalize_landing_progress_targets(payload.platforms, payload.account_handles)
+    if not targets:
+        return {
+            "rows": [],
+            "cache_status": "bypass",
+            "generated_at": datetime.now(tz=UTC).isoformat(),
+        }
+
+    cache_key = _landing_progress_cache_key(targets)
+    cached_payload = _get_ttl_cached_payload(
+        _SOCIAL_LANDING_PROGRESS_ROLLUP_CACHE,
+        _SOCIAL_LANDING_PROGRESS_ROLLUP_CACHE_LOCK,
+        cache_key,
+    )
+    if cached_payload is not None:
+        cached_payload["cache_status"] = "hit"
+        return cached_payload
+
+    started_at = perf_counter()
+    instagram_reported_comments_sql = _instagram_reported_comments_sql("p")
+    try:
+        rows = pg.fetch_all(
+            f"""
+            WITH targets AS (
+              SELECT DISTINCT
+                lower(input.platform) AS platform,
+                ltrim(lower(input.account_handle), '@') AS account_handle
+              FROM unnest(%s::text[], %s::text[]) AS input(platform, account_handle)
+              WHERE input.platform IN ('instagram', 'tiktok', 'twitter', 'youtube', 'facebook', 'threads')
+                AND nullif(trim(input.account_handle), '') IS NOT NULL
+            ),
+            materialized_rows AS (
+              SELECT
+                targets.platform,
+                targets.account_handle,
+                p.id,
+                nullif(p.shortcode, '') AS source_id,
+                ({instagram_reported_comments_sql})::bigint AS reported_comments,
+                jsonb_array_length(coalesce(p.media_urls, '[]'::jsonb))::bigint AS source_media_files,
+                (
+                  jsonb_array_length(coalesce(p.hosted_media_urls, '[]'::jsonb)) +
+                  case when nullif(p.hosted_thumbnail_url, '') is not null then 1 else 0 end
+                )::bigint AS hosted_media_files
+              FROM targets
+              INNER JOIN social.instagram_posts p
+                ON targets.platform = 'instagram'
+               AND ltrim(lower(coalesce(p.source_account, '')), '@') = targets.account_handle
+              UNION ALL
+              SELECT
+                targets.platform,
+                targets.account_handle,
+                p.id,
+                nullif(p.video_id, '') AS source_id,
+                greatest(coalesce(p.comments_count, 0), 0)::bigint AS reported_comments,
+                jsonb_array_length(coalesce(p.media_urls, '[]'::jsonb))::bigint AS source_media_files,
+                (
+                  jsonb_array_length(coalesce(p.hosted_media_urls, '[]'::jsonb)) +
+                  case when nullif(p.hosted_thumbnail_url, '') is not null then 1 else 0 end
+                )::bigint AS hosted_media_files
+              FROM targets
+              INNER JOIN social.tiktok_posts p
+                ON targets.platform = 'tiktok'
+               AND ltrim(lower(coalesce(p.source_account, '')), '@') = targets.account_handle
+              UNION ALL
+              SELECT
+                targets.platform,
+                targets.account_handle,
+                p.id,
+                nullif(p.tweet_id, '') AS source_id,
+                0::bigint AS reported_comments,
+                jsonb_array_length(coalesce(p.media_urls, '[]'::jsonb))::bigint AS source_media_files,
+                (
+                  jsonb_array_length(coalesce(p.hosted_media_urls, '[]'::jsonb)) +
+                  case when nullif(p.hosted_thumbnail_url, '') is not null then 1 else 0 end
+                )::bigint AS hosted_media_files
+              FROM targets
+              INNER JOIN social.twitter_tweets p
+                ON targets.platform = 'twitter'
+               AND ltrim(lower(coalesce(p.source_account, '')), '@') = targets.account_handle
+              UNION ALL
+              SELECT
+                targets.platform,
+                targets.account_handle,
+                p.id,
+                nullif(p.video_id, '') AS source_id,
+                greatest(coalesce(p.comments_count, 0), 0)::bigint AS reported_comments,
+                0::bigint AS source_media_files,
+                case when nullif(p.hosted_thumbnail_url, '') is not null then 1 else 0 end::bigint AS hosted_media_files
+              FROM targets
+              INNER JOIN social.youtube_videos p
+                ON targets.platform = 'youtube'
+               AND ltrim(lower(coalesce(p.source_account, '')), '@') = targets.account_handle
+              UNION ALL
+              SELECT
+                targets.platform,
+                targets.account_handle,
+                p.id,
+                nullif(p.post_id, '') AS source_id,
+                greatest(coalesce(p.comments_count, 0), 0)::bigint AS reported_comments,
+                jsonb_array_length(coalesce(p.media_urls, '[]'::jsonb))::bigint AS source_media_files,
+                (
+                  jsonb_array_length(coalesce(p.hosted_media_urls, '[]'::jsonb)) +
+                  case when nullif(p.hosted_thumbnail_url, '') is not null then 1 else 0 end
+                )::bigint AS hosted_media_files
+              FROM targets
+              INNER JOIN social.facebook_posts p
+                ON targets.platform = 'facebook'
+               AND ltrim(lower(coalesce(p.source_account, '')), '@') = targets.account_handle
+              UNION ALL
+              SELECT
+                targets.platform,
+                targets.account_handle,
+                p.id,
+                nullif(p.post_id, '') AS source_id,
+                0::bigint AS reported_comments,
+                jsonb_array_length(coalesce(p.media_urls, '[]'::jsonb))::bigint AS source_media_files,
+                (
+                  jsonb_array_length(coalesce(p.hosted_media_urls, '[]'::jsonb)) +
+                  case when nullif(p.hosted_thumbnail_url, '') is not null then 1 else 0 end
+                )::bigint AS hosted_media_files
+              FROM targets
+              INNER JOIN social.meta_threads_posts p
+                ON targets.platform = 'threads'
+               AND ltrim(lower(coalesce(p.source_account, '')), '@') = targets.account_handle
+            ),
+            catalog_rows AS (
+              SELECT
+                targets.platform,
+                targets.account_handle,
+                nullif(p.source_id, '') AS source_id,
+                ({instagram_reported_comments_sql})::bigint AS reported_comments,
+                jsonb_array_length(coalesce(p.media_urls, '[]'::jsonb))::bigint AS source_media_files
+              FROM targets
+              INNER JOIN social.instagram_account_catalog_posts p
+                ON targets.platform = 'instagram'
+               AND ltrim(lower(coalesce(p.source_account, '')), '@') = targets.account_handle
+              UNION ALL
+              SELECT
+                targets.platform,
+                targets.account_handle,
+                nullif(p.source_id, '') AS source_id,
+                greatest(coalesce(p.comments_count, 0), 0)::bigint AS reported_comments,
+                jsonb_array_length(coalesce(p.media_urls, '[]'::jsonb))::bigint AS source_media_files
+              FROM targets
+              INNER JOIN social.tiktok_account_catalog_posts p
+                ON targets.platform = 'tiktok'
+               AND ltrim(lower(coalesce(p.source_account, '')), '@') = targets.account_handle
+              UNION ALL
+              SELECT
+                targets.platform,
+                targets.account_handle,
+                nullif(p.source_id, '') AS source_id,
+                greatest(coalesce(p.comments_count, 0), 0)::bigint + greatest(coalesce(p.quotes, 0), 0)::bigint
+                  AS reported_comments,
+                jsonb_array_length(coalesce(p.media_urls, '[]'::jsonb))::bigint AS source_media_files
+              FROM targets
+              INNER JOIN social.twitter_account_catalog_posts p
+                ON targets.platform = 'twitter'
+               AND ltrim(lower(coalesce(p.source_account, '')), '@') = targets.account_handle
+              UNION ALL
+              SELECT
+                targets.platform,
+                targets.account_handle,
+                nullif(p.source_id, '') AS source_id,
+                greatest(coalesce(p.comments_count, 0), 0)::bigint AS reported_comments,
+                jsonb_array_length(coalesce(p.media_urls, '[]'::jsonb))::bigint AS source_media_files
+              FROM targets
+              INNER JOIN social.youtube_account_catalog_posts p
+                ON targets.platform = 'youtube'
+               AND ltrim(lower(coalesce(p.source_account, '')), '@') = targets.account_handle
+              UNION ALL
+              SELECT
+                targets.platform,
+                targets.account_handle,
+                nullif(p.source_id, '') AS source_id,
+                greatest(coalesce(p.comments_count, 0), 0)::bigint AS reported_comments,
+                jsonb_array_length(coalesce(p.media_urls, '[]'::jsonb))::bigint AS source_media_files
+              FROM targets
+              INNER JOIN social.facebook_account_catalog_posts p
+                ON targets.platform = 'facebook'
+               AND ltrim(lower(coalesce(p.source_account, '')), '@') = targets.account_handle
+              UNION ALL
+              SELECT
+                targets.platform,
+                targets.account_handle,
+                nullif(p.source_id, '') AS source_id,
+                greatest(coalesce(p.comments_count, 0), 0)::bigint AS reported_comments,
+                jsonb_array_length(coalesce(p.media_urls, '[]'::jsonb))::bigint AS source_media_files
+              FROM targets
+              INNER JOIN social.threads_account_catalog_posts p
+                ON targets.platform = 'threads'
+               AND ltrim(lower(coalesce(p.source_account, '')), '@') = targets.account_handle
+            ),
+            materialized_counts AS (
+              SELECT
+                rows.platform,
+                rows.account_handle,
+                count(*)::int AS saved_count,
+                sum(rows.reported_comments)::int AS comments_total_count,
+                sum(rows.hosted_media_files)::int AS media_saved_count
+              FROM materialized_rows rows
+              GROUP BY rows.platform, rows.account_handle
+            ),
+            catalog_counts AS (
+              SELECT
+                rows.platform,
+                rows.account_handle,
+                count(*)::int AS scraped_count,
+                sum(rows.reported_comments)::int AS comments_total_count,
+                sum(rows.source_media_files)::int AS media_total_count
+              FROM catalog_rows rows
+              GROUP BY rows.platform, rows.account_handle
+            ),
+            instagram_profile_targets AS (
+              SELECT DISTINCT ON (targets.account_handle)
+                targets.account_handle,
+                profiles.id AS profile_id,
+                greatest(coalesce(profiles.follows_count, 0), 0)::int AS following_total_count
+              FROM targets
+              INNER JOIN social.instagram_profiles profiles
+                ON targets.platform = 'instagram'
+               AND ltrim(
+                 lower(coalesce(profiles.normalized_username, profiles.username, profiles.source_account, '')),
+                 '@'
+               ) = targets.account_handle
+              ORDER BY
+                targets.account_handle,
+                profiles.last_scraped_at DESC NULLS LAST,
+                profiles.updated_at DESC NULLS LAST,
+                profiles.id
+            ),
+            following_counts AS (
+              SELECT
+                'instagram'::text AS platform,
+                profile_targets.account_handle,
+                count(relationships.id) FILTER (WHERE coalesce(relationships.is_missing, false) = false)::int
+                  AS following_saved_count,
+                max(profile_targets.following_total_count)::int AS following_total_count
+              FROM instagram_profile_targets profile_targets
+              LEFT JOIN social.instagram_profile_relationships relationships
+                ON relationships.owner_profile_id = profile_targets.profile_id
+               AND relationships.relationship_type = 'following'
+              GROUP BY profile_targets.account_handle
+            ),
+            socialblade_counts AS (
+              SELECT
+                targets.platform,
+                targets.account_handle,
+                count(growth.id)::int AS socialblade_scraped_count,
+                count(growth.id) FILTER (WHERE coalesce(growth.stats_refreshed, false) = true)::int
+                  AS socialblade_saved_count
+              FROM targets
+              LEFT JOIN pipeline.socialblade_growth_data growth
+                ON lower(coalesce(nullif(growth.platform, ''), 'instagram')) = targets.platform
+               AND ltrim(
+                 lower(coalesce(nullif(growth.account_handle, ''), growth.instagram_handle, '')),
+                 '@'
+               ) = targets.account_handle
+              GROUP BY targets.platform, targets.account_handle
+            )
+            SELECT
+              targets.platform,
+              targets.account_handle,
+              coalesce(materialized_counts.saved_count, 0)::int AS saved_count,
+              coalesce(catalog_counts.scraped_count, 0)::int AS scraped_count,
+              (targets.platform IN ('instagram', 'youtube', 'tiktok'))::boolean AS socialblade_supported,
+              coalesce(socialblade_counts.socialblade_scraped_count, 0)::int AS socialblade_scraped_count,
+              coalesce(socialblade_counts.socialblade_saved_count, 0)::int AS socialblade_saved_count,
+              coalesce(following_counts.following_saved_count, 0)::int AS following_saved_count,
+              coalesce(following_counts.following_total_count, 0)::int AS following_total_count,
+              0::int AS comments_saved_count,
+              greatest(
+                coalesce(materialized_counts.comments_total_count, 0),
+                coalesce(catalog_counts.comments_total_count, 0)
+              )::int AS comments_total_count,
+              coalesce(materialized_counts.media_saved_count, 0)::int AS media_saved_count,
+              greatest(
+                coalesce(catalog_counts.media_total_count, 0),
+                coalesce(materialized_counts.media_saved_count, 0)
+              )::int AS media_total_count
+            FROM targets
+            LEFT JOIN materialized_counts
+              ON materialized_counts.platform = targets.platform
+             AND materialized_counts.account_handle = targets.account_handle
+            LEFT JOIN catalog_counts
+              ON catalog_counts.platform = targets.platform
+             AND catalog_counts.account_handle = targets.account_handle
+            LEFT JOIN following_counts
+              ON following_counts.platform = targets.platform
+             AND following_counts.account_handle = targets.account_handle
+            LEFT JOIN socialblade_counts
+              ON socialblade_counts.platform = targets.platform
+             AND socialblade_counts.account_handle = targets.account_handle
+            ORDER BY targets.platform ASC, targets.account_handle ASC
+            """,
+            [[platform for platform, _handle in targets], [handle for _platform, handle in targets]],
+            pool_name="social_profile",
+        )
+        generated_at = datetime.now(tz=UTC).isoformat()
+        payload_out = {
+            "rows": jsonable_encoder(rows),
+            "cache_status": "miss",
+            "generated_at": generated_at,
+        }
+        _set_ttl_cached_payload(
+            _SOCIAL_LANDING_PROGRESS_ROLLUP_CACHE,
+            _SOCIAL_LANDING_PROGRESS_ROLLUP_CACHE_LOCK,
+            cache_key,
+            payload_out,
+            ttl_seconds=SOCIAL_LANDING_PROGRESS_ROLLUP_CACHE_TTL_SECONDS,
+            max_entries=SOCIAL_LANDING_PROGRESS_ROLLUP_CACHE_MAX_ENTRIES,
+        )
+        logger.info(
+            "Built social landing progress rollup targets=%s rows=%s elapsed_ms=%s cache_status=miss",
+            len(targets),
+            len(rows),
+            int((perf_counter() - started_at) * 1000),
+        )
+        return payload_out
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to read social landing progress rollup")
         raise _to_social_read_http_exception(exc) from exc
 
 
@@ -597,6 +985,7 @@ def _finalize_catalog_backfill_launch_task(
     comments_worker_count: int | None,
     comments_enable_media_followups: bool | None,
     launch_group_id: str | None,
+    force_catalog_rediscovery: bool = False,
 ) -> None:
     from trr_backend.repositories.social_season_analytics import (
         INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
@@ -642,6 +1031,7 @@ def _finalize_catalog_backfill_launch_task(
             comments_worker_count=comments_worker_count,
             comments_enable_media_followups=comments_enable_media_followups,
             launch_group_id=normalized_launch_group_id,
+            force_catalog_rediscovery=force_catalog_rediscovery,
         )
         if allow_local_dev_inline_bypass or not is_queue_enabled():
             catalog_run_id = str((result or {}).get("catalog_run_id") or (result or {}).get("run_id") or "").strip()
@@ -855,7 +1245,7 @@ def _start_deferred_comments_inline_followup(
                 else "media" in effective_tasks
             ),
             launch_group_id=launch_group_id,
-            skip_launch_auth_probe=True,
+            skip_launch_auth_probe=False,
             comments_worker_count=comments_worker_count,
         )
     except social_ingest_conflict_error as exc:
@@ -911,6 +1301,7 @@ def _queue_catalog_backfill_finalize_task(
     comments_worker_count: int | None,
     comments_enable_media_followups: bool | None,
     launch_group_id: str | None,
+    force_catalog_rediscovery: bool = False,
 ) -> None:
     if not str(run_id or "").strip():
         return
@@ -932,6 +1323,7 @@ def _queue_catalog_backfill_finalize_task(
             "comments_worker_count": comments_worker_count,
             "comments_enable_media_followups": comments_enable_media_followups,
             "launch_group_id": launch_group_id,
+            "force_catalog_rediscovery": force_catalog_rediscovery,
         },
         name=f"catalog-backfill-finalize:{platform}:{account_handle}:{run_id}",
         daemon=True,
@@ -1704,7 +2096,7 @@ async def scrape_instagram_async(
     worker_health: dict[str, Any] | None = None
     if queue_enabled:
         try:
-            worker_health = assert_worker_available_when_queue_enabled()
+            worker_health = await run_in_threadpool(assert_worker_available_when_queue_enabled)
         except SocialWorkerUnavailableError as exc:
             worker_health = exc.worker_health
             if request.allow_inline_dev_fallback and _is_local_or_dev_runtime() and not remote_plane_enforced:
@@ -2011,6 +2403,8 @@ class TweetResponse(BaseModel):
     replies: int
     quotes: int
     views: int
+    bookmarks: int = 0
+    shares: int = 0
     url: str
     username: str
     display_name: str
@@ -2018,6 +2412,10 @@ class TweetResponse(BaseModel):
     is_reply: bool
     is_retweet: bool
     is_quote: bool
+    thread_root_tweet_id: str | None = None
+    thread_position: int | None = None
+    is_thread_part: bool = False
+    twitter_context_role: str | None = None
     media_urls: list[str]
     hosted_media_urls: list[str] = Field(default_factory=list)
 
@@ -2091,6 +2489,8 @@ def _tweet_to_response(tweet: Any) -> TweetResponse:
         replies=tweet.replies,
         quotes=tweet.quotes,
         views=tweet.views,
+        bookmarks=getattr(tweet, "bookmarks", 0) or 0,
+        shares=getattr(tweet, "shares", 0) or getattr(tweet, "retweets", 0) or 0,
         url=tweet.url,
         username=tweet.username,
         display_name=tweet.display_name,
@@ -2098,6 +2498,10 @@ def _tweet_to_response(tweet: Any) -> TweetResponse:
         is_reply=tweet.is_reply,
         is_retweet=tweet.is_retweet,
         is_quote=tweet.is_quote,
+        thread_root_tweet_id=getattr(tweet, "thread_root_tweet_id", None),
+        thread_position=getattr(tweet, "thread_position", None),
+        is_thread_part=bool(getattr(tweet, "is_thread_part", False)),
+        twitter_context_role=getattr(tweet, "twitter_context_role", None),
         media_urls=tweet.media_urls,
         hosted_media_urls=getattr(tweet, "hosted_media_urls", []) or [],
     )
@@ -2191,7 +2595,10 @@ async def fetch_tweet_quotes(
 class YouTubeScrapeRequest(BaseModel):
     """Request to scrape YouTube channel videos."""
 
-    channel_handle: str = Field(..., description="YouTube channel handle (without @)")
+    channel_handle: str = Field(default="", description="YouTube channel handle (without @)")
+    source_type: Literal["account", "playlist"] = Field(default="account", description="YouTube source mode")
+    playlist_id: str | None = Field(default=None, description="YouTube playlist ID when source_type is playlist")
+    playlist_url: str | None = Field(default=None, description="YouTube playlist URL when source_type is playlist")
     keywords: list[str] = Field(..., description="Keywords to filter by (e.g., RHOSLC, 'Salt Lake City')")
     date_start: datetime = Field(..., description="Start date for filtering")
     date_end: datetime = Field(..., description="End date for filtering")
@@ -2202,6 +2609,16 @@ class YouTubeScrapeRequest(BaseModel):
     show_id: UUID | None = Field(default=None, description="Associated show ID")
     season_number: int | None = Field(default=None, ge=0, le=100, description="Associated season")
     person_id: UUID | None = Field(default=None, description="Associated person ID")
+
+    @model_validator(mode="after")
+    def validate_source(self) -> YouTubeScrapeRequest:
+        if self.source_type == "playlist":
+            if not (str(self.playlist_id or "").strip() or str(self.playlist_url or "").strip()):
+                raise ValueError("playlist_id or playlist_url is required when source_type is playlist")
+            return self
+        if not str(self.channel_handle or "").strip():
+            raise ValueError("channel_handle is required when source_type is account")
+        return self
 
 
 class YouTubeVideoResponse(BaseModel):
@@ -2601,9 +3018,9 @@ class SeasonSocialIngestRequest(SourceScopedRequest):
     hashtags_override: list[str] | None = Field(default=None)
     keywords_override: list[str] | None = Field(default=None)
     sound_ids: list[str] | None = Field(default=None, description="Optional TikTok sound IDs or sound URLs")
-    max_posts_per_target: int = Field(default=0, ge=0, le=1000000)
-    max_comments_per_post: int = Field(default=0, ge=0, le=1000000)
-    max_replies_per_post: int = Field(default=0, ge=0, le=1000000)
+    max_posts_per_target: int = Field(default=0, ge=0)
+    max_comments_per_post: int = Field(default=0, ge=0)
+    max_replies_per_post: int = Field(default=0, ge=0)
     fetch_replies: bool = Field(default=True)
     ingest_mode: Literal["posts_only", "posts_and_comments", "comments_only", "details_refresh"] = Field(
         default="posts_and_comments"
@@ -2641,9 +3058,9 @@ class SeasonSocialOrchestrationRequest(SourceScopedRequest):
     hashtags_override: list[str] | None = Field(default=None)
     keywords_override: list[str] | None = Field(default=None)
     sound_ids: list[str] | None = Field(default=None)
-    max_posts_per_target: int = Field(default=0, ge=0, le=1000000)
-    max_comments_per_post: int = Field(default=0, ge=0, le=1000000)
-    max_replies_per_post: int = Field(default=0, ge=0, le=1000000)
+    max_posts_per_target: int = Field(default=0, ge=0)
+    max_comments_per_post: int = Field(default=0, ge=0)
+    max_replies_per_post: int = Field(default=0, ge=0)
     fetch_replies: bool = Field(default=True)
     ingest_mode: Literal["posts_only", "posts_and_comments", "comments_only", "details_refresh"] = Field(
         default="posts_and_comments"
@@ -2728,6 +3145,7 @@ class CatalogBackfillRequest(SourceScopedRequest):
     detail_worker_count: int | None = Field(default=None, ge=1, le=12)
     comments_worker_count: int | None = Field(default=None, ge=1, le=24)
     comments_enable_media_followups: bool | None = Field(default=None)
+    force_catalog_rediscovery: bool = Field(default=False)
 
     @model_validator(mode="after")
     def validate_selected_tasks(self) -> CatalogBackfillRequest:
@@ -2789,7 +3207,7 @@ class CatalogReviewResolveRequest(BaseModel):
 
 
 class PostCommentRefreshRequest(BaseModel):
-    max_comments_per_post: int = Field(default=100000, ge=0, le=1000000)
+    max_comments_per_post: int = Field(default=0, ge=0)
     fetch_replies: bool = Field(default=True)
 
 
@@ -2797,11 +3215,13 @@ class SocialAccountCommentsScrapeRequest(SourceScopedRequest):
     mode: Literal["profile", "single_post"] = Field(default="profile")
     source_scope: Literal["bravo", "network", "creator", "community", "news"] = Field(default="network")
     source_id: str | None = Field(default=None, min_length=1, max_length=64)
-    max_posts: int | None = Field(default=None, ge=1, le=500)
-    max_comments_per_post: int | None = Field(default=None, ge=1, le=1000000)
+    max_posts: int | None = Field(default=None, ge=1)
+    max_comments_per_post: int | None = Field(default=None, ge=0)
     refresh_policy: Literal["stale_or_missing", "all_saved_posts"] = Field(default="stale_or_missing")
     target_filter: Literal["incomplete"] | None = Field(default=None)
-    comments_load_strategy: Literal["cursor_api", "single_session_load_all"] = Field(default="cursor_api")
+    comments_load_strategy: Literal["cursor_api", "single_session_load_all", "public_relay"] = Field(
+        default="public_relay"
+    )
     allow_inline_dev_fallback: bool = Field(default=False)
     dry_run: bool = Field(default=False)
 
@@ -2812,6 +3232,27 @@ class SocialAccountCommentsScrapeRequest(SourceScopedRequest):
         if self.mode == "single_post" and self.target_filter is not None:
             raise ValueError("target_filter is only supported for profile comment scrapes")
         return self
+
+
+class SocialAccountCommentsAuditCursorRetryRequest(BaseModel):
+    limit: int = Field(default=50, ge=1, le=500)
+    shortcodes: list[str] | None = Field(default=None, max_length=500)
+    stop_reasons: list[str] | None = Field(default=None, max_length=20)
+    show_ids: list[str] | None = Field(default=None, max_length=100)
+    season_ids: list[str] | None = Field(default=None, max_length=100)
+    show_filters: list[str] | None = Field(default=None, max_length=100)
+    show_filter: str | None = Field(default=None, max_length=128)
+    batch_size: int = Field(default=1, ge=1, le=25)
+    comments_worker_count: int | None = Field(default=None, ge=1, le=24)
+    max_comments_per_post: int = Field(default=0, ge=0)
+    comments_load_strategy: Literal["cursor_api", "single_session_load_all", "public_relay"] = Field(
+        default="public_relay"
+    )
+    skip_launch_auth_probe: bool = Field(default=False)
+    attach_to_active_run: bool = Field(default=True)
+    dispatch_immediately: bool = Field(default=True)
+    force_rerun_existing: bool = Field(default=False)
+    dry_run: bool = Field(default=False)
 
 
 class CancelStuckJobsRequest(BaseModel):
@@ -3125,7 +3566,8 @@ async def ingest_season_social(
             )
         if queue_enabled:
             try:
-                worker_health = assert_worker_available_when_queue_enabled(
+                worker_health = await run_in_threadpool(
+                    assert_worker_available_when_queue_enabled,
                     required_execution_backend="modal" if requires_modal_executor else None,
                 )
             except SocialWorkerUnavailableError as exc:
@@ -3362,7 +3804,7 @@ async def orchestrate_season_social_ingest(
     worker_health: dict[str, Any] | None = None
     if queue_enabled:
         try:
-            worker_health = assert_worker_available_when_queue_enabled()
+            worker_health = await run_in_threadpool(assert_worker_available_when_queue_enabled)
         except SocialWorkerUnavailableError as exc:
             if remote_plane_enforced:
                 raise HTTPException(
@@ -3489,7 +3931,8 @@ async def create_season_sync_session(
             )
         if queue_enabled:
             try:
-                assert_worker_available_when_queue_enabled(
+                await run_in_threadpool(
+                    assert_worker_available_when_queue_enabled,
                     required_execution_backend="modal" if requires_modal_executor else None,
                 )
             except SocialWorkerUnavailableError as exc:
@@ -3746,7 +4189,7 @@ async def get_season_ingest_schedule_preview(
     ingest_mode: Literal["posts_only", "posts_and_comments", "comments_only", "details_refresh"] = Query(
         default="posts_and_comments",
     ),
-    max_comments_per_post: int = Query(default=100000, ge=0, le=1000000),
+    max_comments_per_post: int = Query(default=0, ge=0),
     week_index: int | None = Query(default=None, ge=0, le=200),
     timezone: str = Query(default="America/New_York"),
     date_start: datetime | None = Query(default=None),
@@ -4065,10 +4508,12 @@ async def refresh_social_account_profile_socialblade_route(
 
 @router.get("/profiles/{platform}/{account_handle}/posts")
 def get_social_account_profile_posts_route(
+    request: Request,
     platform: str,
     account_handle: str,
     page: int = Query(default=1, ge=1, le=10_000),
     page_size: int = Query(default=25, ge=1, le=100),
+    limit: int | None = Query(default=None, ge=1, le=100),
     search: str | None = Query(default=None),
     comments_only: bool = Query(default=False),
     comment_filter: str | None = Query(default=None),
@@ -4076,12 +4521,14 @@ def get_social_account_profile_posts_route(
     sort_dir: str | None = Query(default=None),
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
+    started_at = perf_counter()
+    effective_page_size = page_size if "page_size" in request.query_params else (limit or page_size)
     cache_key = _account_profile_cache_key(
         surface="posts",
         platform=platform,
         account_handle=account_handle,
         page=page,
-        page_size=page_size,
+        page_size=effective_page_size,
         search=search,
         comments_only=comments_only,
         comment_filter=comment_filter,
@@ -4090,13 +4537,22 @@ def get_social_account_profile_posts_route(
     )
     cached_payload = _get_ttl_cached_payload(_ACCOUNT_PROFILE_POSTS_CACHE, _ACCOUNT_PROFILE_POSTS_CACHE_LOCK, cache_key)
     if cached_payload is not None:
+        if str(os.getenv("TRR_SOCIAL_PROFILE_PERF_DEBUG") or "").strip().lower() in {"1", "true", "yes", "on"}:
+            logger.info(
+                "[social-profile-perf] route=get_social_account_profile_posts_route platform=%s handle=%s "
+                "cache_status=hit elapsed_ms=%s page_size=%s",
+                platform,
+                account_handle,
+                int((perf_counter() - started_at) * 1000),
+                effective_page_size,
+            )
         return cached_payload
     try:
         payload = social_profile_reads.get_profile_posts(
             platform=platform,
             account_handle=account_handle,
             page=page,
-            page_size=page_size,
+            page_size=effective_page_size,
             search=search,
             comments_only=comments_only,
             comment_filter=comment_filter,
@@ -4111,6 +4567,15 @@ def get_social_account_profile_posts_route(
             ttl_seconds=_ACCOUNT_PROFILE_CACHE_TTL_SECONDS,
             max_entries=_ACCOUNT_PROFILE_CACHE_MAX_ENTRIES,
         )
+        if str(os.getenv("TRR_SOCIAL_PROFILE_PERF_DEBUG") or "").strip().lower() in {"1", "true", "yes", "on"}:
+            logger.info(
+                "[social-profile-perf] route=get_social_account_profile_posts_route platform=%s handle=%s "
+                "cache_status=miss elapsed_ms=%s page_size=%s",
+                platform,
+                account_handle,
+                int((perf_counter() - started_at) * 1000),
+                effective_page_size,
+            )
         return payload
     except ValueError as exc:
         raise _value_error_to_bad_request(exc) from exc
@@ -4271,6 +4736,92 @@ def get_instagram_profile_relationships_route(
         raise _to_social_read_http_exception(exc) from exc
 
 
+@router.get("/profiles/{platform}/{account_handle}/comments/audit-cursor-retries")
+def get_social_account_comments_audit_cursor_retries_route(
+    platform: str,
+    account_handle: str,
+    limit: int = Query(default=50, ge=1, le=500),
+    stop_reason: list[str] | None = Query(default=None),
+    shortcode: list[str] | None = Query(default=None),
+    show_id: list[str] | None = Query(default=None),
+    season_id: list[str] | None = Query(default=None),
+    show_filter: list[str] | None = Query(default=None),
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.socials.pipelines.comments.instagram import get_instagram_comments_audit_cursor_recovery
+
+    if platform.strip().lower() != "instagram":
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "SOCIAL_ACCOUNT_COMMENTS_UNSUPPORTED_PLATFORM", "message": "Audit cursor retries are Instagram-only."},
+        )
+    try:
+        return get_instagram_comments_audit_cursor_recovery(
+            account_handle=account_handle,
+            limit=limit,
+            shortcodes=shortcode,
+            stop_reasons=stop_reason,
+            show_ids=show_id,
+            season_ids=season_id,
+            show_filters=show_filter,
+        )
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+
+
+@router.post("/profiles/{platform}/{account_handle}/comments/audit-cursor-retries")
+async def post_social_account_comments_audit_cursor_retries_route(
+    platform: str,
+    account_handle: str,
+    payload: SocialAccountCommentsAuditCursorRetryRequest,
+    user: InternalAdminUser,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import SocialIngestConflictError, SocialIngestValidationError
+    from trr_backend.socials.pipelines.comments.instagram import enqueue_instagram_comments_audit_cursor_retries
+
+    if platform.strip().lower() != "instagram":
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "SOCIAL_ACCOUNT_COMMENTS_UNSUPPORTED_PLATFORM", "message": "Audit cursor retries are Instagram-only."},
+        )
+    try:
+        return await run_in_threadpool(
+            enqueue_instagram_comments_audit_cursor_retries,
+            account_handle=account_handle,
+            limit=payload.limit,
+            shortcodes=payload.shortcodes,
+            stop_reasons=payload.stop_reasons,
+            show_ids=payload.show_ids,
+            season_ids=payload.season_ids,
+            show_filters=[
+                *list(payload.show_filters or []),
+                *([payload.show_filter] if payload.show_filter else []),
+            ],
+            batch_size=payload.batch_size,
+            comments_worker_count=payload.comments_worker_count,
+            max_comments_per_post=payload.max_comments_per_post,
+            comments_load_strategy=payload.comments_load_strategy,
+            skip_launch_auth_probe=payload.skip_launch_auth_probe,
+            dry_run=payload.dry_run,
+            attach_to_active_run=payload.attach_to_active_run,
+            dispatch_immediately=payload.dispatch_immediately,
+            force_rerun_existing=payload.force_rerun_existing,
+            initiated_by=(user or {}).get("email"),
+        )
+    except SocialIngestConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": exc.code, "message": str(exc), **jsonable_encoder(exc.detail)},
+        ) from exc
+    except SocialIngestValidationError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": exc.code, "message": str(exc), **jsonable_encoder(getattr(exc, "detail", {}) or {})},
+        ) from exc
+
+
 @router.post("/profiles/{platform}/{account_handle}/comments/scrape")
 async def post_social_account_comments_scrape_route(
     platform: str,
@@ -4309,7 +4860,8 @@ async def post_social_account_comments_scrape_route(
         except SocialIngestValidationError as exc:
             raise HTTPException(status_code=400, detail={"code": exc.code, "message": str(exc)}) from exc
 
-    execution_state = _resolve_social_account_comments_route_execution(
+    execution_state = await run_in_threadpool(
+        _resolve_social_account_comments_route_execution,
         allow_inline_dev_fallback=payload.allow_inline_dev_fallback,
         platform=platform,
     )
@@ -4355,7 +4907,10 @@ async def post_social_account_comments_scrape_route(
         ) from exc
     except SocialIngestValidationError as exc:
         status_code = 503 if exc.code == "SOCIAL_INSTAGRAM_COMMENTS_AUTH_REPAIR_FAILED" else 400
-        raise HTTPException(status_code=status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+        raise HTTPException(
+            status_code=status_code,
+            detail={"code": exc.code, "message": str(exc), **jsonable_encoder(getattr(exc, "detail", {}) or {})},
+        ) from exc
     except SocialWorkerUnavailableError as exc:
         raise HTTPException(
             status_code=503,
@@ -4418,10 +4973,16 @@ def post_social_account_comments_run_rebalance_route(
     if platform.strip().lower() != "instagram":
         raise HTTPException(
             status_code=400,
-            detail={"code": "UNSUPPORTED_PLATFORM", "message": "Comments shard rebalance is only supported for Instagram."},
+            detail={
+                "code": "UNSUPPORTED_PLATFORM",
+                "message": "Comments shard rebalance is only supported for Instagram.",
+            },
         )
     if not account_handle.strip():
-        raise HTTPException(status_code=400, detail={"code": "ACCOUNT_HANDLE_REQUIRED", "message": "account_handle is required."})
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "ACCOUNT_HANDLE_REQUIRED", "message": "account_handle is required."},
+        )
     try:
         result = rebalance_slow_instagram_comments_shards(run_id=str(run_id))
         _clear_account_profile_caches()
@@ -5063,7 +5624,8 @@ async def post_social_account_catalog_backfill_route(
         launch_social_account_catalog_backfill,
     )
 
-    execution_state = _resolve_social_account_catalog_route_execution(
+    execution_state = await run_in_threadpool(
+        _resolve_social_account_catalog_route_execution,
         platform=platform,
         allow_inline_dev_fallback=payload.allow_inline_dev_fallback,
         execution_preference=payload.execution_preference,
@@ -5107,6 +5669,7 @@ async def post_social_account_catalog_backfill_route(
                 details_refresh_worker_count=payload.detail_worker_count,
                 comments_worker_count=payload.comments_worker_count,
                 comments_enable_media_followups=payload.comments_enable_media_followups,
+                force_catalog_rediscovery=payload.force_catalog_rediscovery,
             )
             _queue_catalog_backfill_finalize_task(
                 background_tasks=background_tasks,
@@ -5124,6 +5687,7 @@ async def post_social_account_catalog_backfill_route(
                 comments_worker_count=payload.comments_worker_count,
                 comments_enable_media_followups=payload.comments_enable_media_followups,
                 launch_group_id=str(result.get("launch_group_id") or ""),
+                force_catalog_rediscovery=payload.force_catalog_rediscovery,
             )
         else:
             result = await run_in_threadpool(
@@ -5141,6 +5705,7 @@ async def post_social_account_catalog_backfill_route(
                 details_refresh_worker_count=payload.detail_worker_count,
                 comments_worker_count=payload.comments_worker_count,
                 comments_enable_media_followups=payload.comments_enable_media_followups,
+                force_catalog_rediscovery=payload.force_catalog_rediscovery,
             )
         _clear_account_profile_caches()
     except SocialIngestConflictError as exc:
@@ -5222,7 +5787,8 @@ async def post_social_account_catalog_sync_recent_route(
         sync_recent_social_account_catalog,
     )
 
-    execution_state = _resolve_social_account_catalog_route_execution(
+    execution_state = await run_in_threadpool(
+        _resolve_social_account_catalog_route_execution,
         platform=platform,
         allow_inline_dev_fallback=payload.allow_inline_dev_fallback,
     )
@@ -5290,7 +5856,8 @@ async def post_social_account_catalog_sync_newer_route(
         sync_newer_social_account_catalog,
     )
 
-    execution_state = _resolve_social_account_catalog_route_execution(
+    execution_state = await run_in_threadpool(
+        _resolve_social_account_catalog_route_execution,
         platform=platform,
         allow_inline_dev_fallback=payload.allow_inline_dev_fallback,
     )
@@ -5358,7 +5925,8 @@ async def post_social_account_catalog_resume_tail_route(
         launch_social_account_catalog_backfill,
     )
 
-    execution_state = _resolve_social_account_catalog_route_execution(
+    execution_state = await run_in_threadpool(
+        _resolve_social_account_catalog_route_execution,
         platform=platform,
         allow_inline_dev_fallback=payload.allow_inline_dev_fallback,
     )
@@ -5709,7 +6277,8 @@ async def ingest_shared_social_accounts(
     worker_health: dict[str, Any] | None = None
     if queue_enabled:
         try:
-            worker_health = assert_worker_available_when_queue_enabled(
+            worker_health = await run_in_threadpool(
+                assert_worker_available_when_queue_enabled,
                 required_execution_backend="modal" if requires_modal_executor else None,
             )
         except SocialWorkerUnavailableError as exc:

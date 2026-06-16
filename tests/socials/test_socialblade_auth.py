@@ -40,6 +40,21 @@ def test_visible_chrome_cdp_url_defaults_to_manual_port(monkeypatch) -> None:
     assert auth_module._socialblade_visible_chrome_cdp_url() == "http://127.0.0.1:9222"
 
 
+def test_socialblade_chrome_profile_preflight_rejects_retired_managed_profile(monkeypatch) -> None:
+    retired_profile = "codex" + "-agent"
+    monkeypatch.setenv("CODEX_CHROME_SEED_PROFILE_DIR", f"/Users/test/.chrome-profiles/{retired_profile}")
+
+    with pytest.raises(auth_module.VisibleManagedChromeProfileError, match="retired profile"):
+        auth_module.preflight_socialblade_chrome_profile()
+
+
+def test_socialblade_chrome_profile_preflight_accepts_openai_agent(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_CHROME_SEED_PROFILE_DIR", "/Users/test/.chrome-profiles/openai-agent")
+    monkeypatch.setenv("CODEX_CHROME_PROFILE_DIR", "/Users/test/.chrome-profiles/openai-agent-devtools")
+
+    auth_module.preflight_socialblade_chrome_profile()
+
+
 def test_refresh_socialblade_cookies_prefers_visible_manual_port(monkeypatch) -> None:
     captured: dict[str, str] = {}
 

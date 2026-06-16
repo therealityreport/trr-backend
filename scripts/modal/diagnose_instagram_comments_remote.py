@@ -14,6 +14,12 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+from scripts.modal.deploy_backend import REQUIRED_MODAL_PROFILE  # noqa: E402
+
+# Pin the Modal workspace before importing the Modal SDK, which resolves
+# MODAL_PROFILE at import time.
+os.environ["MODAL_PROFILE"] = REQUIRED_MODAL_PROFILE
+
 import modal  # noqa: E402
 
 from trr_backend.db import pg  # noqa: E402

@@ -40,15 +40,18 @@ def test_select_posts_proxy_distributes_explicit_urls_by_session_key(monkeypatch
     assert "pass" not in first.fingerprint
 
 
-def test_job_runner_rollout_flags_default_to_authenticated_protection(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_job_runner_rollout_flags_default_to_public_first(monkeypatch: pytest.MonkeyPatch) -> None:
     from trr_backend.socials.instagram.posts_scrapling import job_runner as jr
 
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_SCRAPE_MODE", raising=False)
     monkeypatch.delenv("SOCIAL_INSTAGRAM_POSTS_ANONYMOUS_ENABLED", raising=False)
     monkeypatch.delenv("SOCIAL_INSTAGRAM_POSTS_ROTATE_ON_BLOCK_MAX_RETRIES", raising=False)
     monkeypatch.delenv("SOCIAL_INSTAGRAM_POSTS_ANONYMOUS_ROTATE_ON_BLOCK_MAX_RETRIES", raising=False)
 
+    assert jr._instagram_scrape_mode({}) == "public_first"
+    assert jr._posts_public_first_enabled({}) is True
     assert jr._posts_anonymous_enabled({}) is False
-    assert jr._posts_anonymous_enabled({"anonymous_enabled": True}) is True
+    assert jr._posts_anonymous_enabled({"instagram_scrape_mode": "anonymous"}) is True
     assert jr._rotate_on_block_max_retries(anonymous=False) == 0
     assert jr._rotate_on_block_max_retries(anonymous=True) == 2
 
@@ -106,7 +109,12 @@ def test_anonymous_job_skips_auth_session_and_cooldown(monkeypatch: pytest.Monke
         {
             "id": "job-1",
             "run_id": "run-1",
-            "config": {"account": "bravotv", "stage": "posts_scrapling", "anonymous_enabled": True},
+            "config": {
+                "account": "bravotv",
+                "stage": "posts_scrapling",
+                "instagram_scrape_mode": "anonymous",
+                "anonymous_enabled": True,
+            },
         },
         worker_id="worker-1",
     )
@@ -115,6 +123,115 @@ def test_anonymous_job_skips_auth_session_and_cooldown(monkeypatch: pytest.Monke
     assert fetcher_kwargs["cookies"] == []
     assert fetcher_kwargs["raw_cookies"] == {}
     assert finish_calls[-1]["status"] == "completed"
+
+
+def test_public_first_job_uses_no_auth_no_proxy_and_persists_cursors(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.instagram.posts_scrapling import job_runner as jr
+    from trr_backend.socials.instagram.posts_scrapling.persistence import PersistedInstagramPosts
+
+    scraper_kwargs: dict[str, Any] = {}
+    fetch_calls: list[dict[str, Any]] = []
+    persist_calls: list[dict[str, Any]] = []
+    pagination_calls: list[dict[str, Any]] = []
+    finish_calls: list[dict[str, Any]] = []
+
+    class _PublicScraper:
+        def __init__(self, **kwargs: Any) -> None:
+            scraper_kwargs.update(kwargs)
+            self._request_count = 0
+            self.last_retrieval_meta: dict[str, Any] = {}
+
+        def fetch_posts_graphql(self, username: str, **kwargs: Any) -> dict[str, Any]:
+            fetch_calls.append({"username": username, **kwargs})
+            self._request_count += 1
+            cursor = kwargs.get("cursor")
+            self.last_retrieval_meta = {
+                "retrieval_transport": "requests_enriched",
+                "graphql_cursor": cursor,
+                "doc_id_used": "doc-public",
+                "profile_posts_doc_ids_attempted": ["doc-public"],
+            }
+            shortcode = "ABC123" if cursor is None else "DEF456"
+            return {
+                "data": {
+                    "xdt_api__v1__feed__user_timeline_graphql_connection": {
+                        "edges": [{"node": {"code": shortcode, "pk": shortcode.lower(), "id": shortcode.lower()}}],
+                        "page_info": {
+                            "has_next_page": cursor is None,
+                            "end_cursor": "cursor-1" if cursor is None else None,
+                        },
+                    }
+                }
+            }
+
+    monkeypatch.setattr("trr_backend.socials.instagram.scraper.InstagramScraper", _PublicScraper)
+    monkeypatch.setattr(jr, "resolve_posts_scrapling_session", lambda **_kwargs: pytest.fail("auth session resolved"))
+    monkeypatch.setattr(jr, "_raise_if_auth_cooldown_active", lambda **_kwargs: pytest.fail("cooldown read"))
+    monkeypatch.setattr(jr, "select_posts_proxy", lambda **_kwargs: pytest.fail("proxy selected"))
+    monkeypatch.setattr(jr, "InstagramPostsScraplingFetcher", lambda **_kwargs: pytest.fail("scrapling fetcher used"))
+    monkeypatch.setattr(
+        jr,
+        "persist_instagram_posts",
+        lambda **kwargs: (
+            persist_calls.append(dict(kwargs))
+            or PersistedInstagramPosts(posts_upserted=len(kwargs["post_nodes"]), posts_skipped=0)
+        ),
+    )
+    monkeypatch.setattr(repo, "latest_instagram_profile_pagination_state", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        repo,
+        "persist_instagram_profile_pagination_state",
+        lambda **kwargs: pagination_calls.append(dict(kwargs)) or dict(kwargs),
+    )
+    monkeypatch.setattr(
+        jr,
+        "lifecycle",
+        SimpleNamespace(
+            new_job_progress_state=lambda: {},
+            touch_job_heartbeat=lambda *_args, **_kwargs: None,
+            emit_job_progress=lambda **_kwargs: True,
+            finish_job=lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}),
+            finalize_run_status=lambda *_args, **_kwargs: {},
+            now_utc=lambda: datetime(2026, 4, 28, tzinfo=UTC),
+            format_time=lambda value: value.isoformat(),
+        ),
+    )
+    monkeypatch.setattr(
+        jr.pg,
+        "fetch_one",
+        lambda *_args, **_kwargs: {"status": "running"},
+    )
+
+    jr.run_instagram_posts_scrapling_job(
+        {
+            "id": "job-public",
+            "run_id": "run-public",
+            "config": {
+                "account": "bravotv",
+                "stage": "posts_scrapling",
+                "instagram_scrape_mode": "public_first",
+                "max_pages": 2,
+            },
+        },
+        worker_id="worker-public",
+    )
+
+    assert scraper_kwargs["cookies"] == {}
+    assert scraper_kwargs["attach_auth_session"] is False
+    assert fetch_calls[0]["allow_browser_fallback"] is False
+    assert fetch_calls[0]["allow_recovery"] is False
+    assert [call["cursor"] for call in fetch_calls] == [None, "cursor-1"]
+    assert len(persist_calls) == 2
+    assert pagination_calls[0]["proxy_fingerprint"] == "none"
+    assert pagination_calls[0]["proxy_session_key"] is None
+    assert pagination_calls[0]["metadata"]["auth_state"] == "public"
+    assert pagination_calls[0]["metadata"]["proxy_state"] == "none"
+    assert pagination_calls[0]["end_cursor"] == "cursor-1"
+    assert finish_calls[-1]["status"] == "completed"
+    assert finish_calls[-1]["metadata"]["instagram_scrape_mode"] == "public_first"
+    assert finish_calls[-1]["metadata"]["auth_state"] == "public"
+    assert finish_calls[-1]["metadata"]["proxy_state"] == "none"
 
 
 def test_job_runner_emits_post_skip_truthfulness_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -195,7 +312,11 @@ def test_job_runner_emits_post_skip_truthfulness_metadata(monkeypatch: pytest.Mo
     job = {
         "id": "job-1",
         "run_id": "run-1",
-        "config": {"account": "thetraitorsus", "stage": "posts_scrapling"},
+        "config": {
+            "account": "thetraitorsus",
+            "stage": "posts_scrapling",
+            "instagram_scrape_mode": "authenticated",
+        },
     }
     run_instagram_posts_scrapling_job(job, worker_id="worker-1")
 
@@ -268,7 +389,11 @@ def test_job_runner_preserves_warmup_error_runtime_metadata(monkeypatch: pytest.
     job = {
         "id": "job-1",
         "run_id": "run-1",
-        "config": {"account": "thetraitorsus", "stage": "posts_scrapling"},
+        "config": {
+            "account": "thetraitorsus",
+            "stage": "posts_scrapling",
+            "instagram_scrape_mode": "authenticated",
+        },
         "attempt_count": 1,
         "max_attempts": 2,
     }
@@ -334,7 +459,11 @@ def test_job_runner_cancels_before_fetching_next_posts_page(monkeypatch: pytest.
     monkeypatch.setattr(repo, "_now_utc", lambda: None)
 
     payload = jr.run_instagram_posts_scrapling_job(
-        {"id": "job-1", "run_id": "run-1", "config": {"account": "thetraitorsus"}},
+        {
+            "id": "job-1",
+            "run_id": "run-1",
+            "config": {"account": "thetraitorsus", "instagram_scrape_mode": "authenticated"},
+        },
         worker_id="worker-1",
     )
 
@@ -403,7 +532,11 @@ def test_job_runner_returns_degraded_completed_summary_when_final_read_saturates
     monkeypatch.setattr(repo, "_now_utc", lambda: None)
 
     payload = jr.run_instagram_posts_scrapling_job(
-        {"id": "job-1", "run_id": "run-1", "config": {"account": "thetraitorsus"}},
+        {
+            "id": "job-1",
+            "run_id": "run-1",
+            "config": {"account": "thetraitorsus", "instagram_scrape_mode": "authenticated"},
+        },
         worker_id="worker-1",
     )
 
@@ -493,7 +626,11 @@ def test_job_runner_persists_page_checkpoint_and_resumes_latest_cursor(monkeypat
     monkeypatch.setattr(jr.pg, "fetch_one", lambda *_args, **_kwargs: {"id": "job-1", "status": "completed"})
 
     jr.run_instagram_posts_scrapling_job(
-        {"id": "job-1", "run_id": "11111111-1111-4111-8111-111111111111", "config": {"account": "thetraitorsus"}},
+        {
+            "id": "job-1",
+            "run_id": "11111111-1111-4111-8111-111111111111",
+            "config": {"account": "thetraitorsus", "instagram_scrape_mode": "authenticated"},
+        },
         worker_id="worker-1",
     )
 
@@ -581,7 +718,7 @@ def test_job_runner_retries_when_page_checkpoint_persist_fails(monkeypatch: pyte
             "run_id": "11111111-1111-4111-8111-111111111111",
             "attempt_count": 1,
             "max_attempts": 2,
-            "config": {"account": "thetraitorsus"},
+            "config": {"account": "thetraitorsus", "instagram_scrape_mode": "authenticated"},
         },
         worker_id="worker-1",
     )
@@ -686,7 +823,11 @@ def test_job_runner_rotates_page_proxy_when_enabled(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(jr.pg, "fetch_one", lambda *_args, **_kwargs: {"id": "job-1", "status": "completed"})
 
     jr.run_instagram_posts_scrapling_job(
-        {"id": "job-1", "run_id": "11111111-1111-4111-8111-111111111111", "config": {"account": "thetraitorsus"}},
+        {
+            "id": "job-1",
+            "run_id": "11111111-1111-4111-8111-111111111111",
+            "config": {"account": "thetraitorsus", "instagram_scrape_mode": "authenticated"},
+        },
         worker_id="worker-1",
     )
 
@@ -806,7 +947,11 @@ def test_job_runner_starts_reverse_walker_after_bidirectional_probe_passes(
     monkeypatch.setattr(jr.pg, "fetch_one", lambda *_args, **_kwargs: {"id": "job-1", "status": "completed"})
 
     jr.run_instagram_posts_scrapling_job(
-        {"id": "job-1", "run_id": "11111111-1111-4111-8111-111111111111", "config": {"account": "thetraitorsus"}},
+        {
+            "id": "job-1",
+            "run_id": "11111111-1111-4111-8111-111111111111",
+            "config": {"account": "thetraitorsus", "instagram_scrape_mode": "authenticated"},
+        },
         worker_id="worker-1",
     )
 
@@ -869,7 +1014,11 @@ def test_job_runner_timeout_guard_records_partial_retry(monkeypatch: pytest.Monk
             "run_id": "11111111-1111-4111-8111-111111111111",
             "attempt_count": 1,
             "max_attempts": 2,
-            "config": {"account": "thetraitorsus", "pagination_timeout_guard_seconds": 1},
+            "config": {
+                "account": "thetraitorsus",
+                "instagram_scrape_mode": "authenticated",
+                "pagination_timeout_guard_seconds": 1,
+            },
         },
         worker_id="worker-1",
     )
@@ -944,7 +1093,7 @@ def test_job_runner_cursor_expired_records_restart_required(monkeypatch: pytest.
             "run_id": "11111111-1111-4111-8111-111111111111",
             "attempt_count": 1,
             "max_attempts": 1,
-            "config": {"account": "thetraitorsus"},
+            "config": {"account": "thetraitorsus", "instagram_scrape_mode": "authenticated"},
         },
         worker_id="worker-1",
     )

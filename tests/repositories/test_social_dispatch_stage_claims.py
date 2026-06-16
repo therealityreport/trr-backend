@@ -10,7 +10,10 @@ from trr_backend.socials.pipelines.job_handlers import resolve_platform_job_hand
 def test_stage_claim_candidates_do_not_let_comments_workers_borrow_posts() -> None:
     assert repo._stage_claim_candidates("comments") == ("comments",)  # noqa: SLF001
     assert repo._stage_claim_candidates("comments_scrapling") == ("comments_scrapling",)  # noqa: SLF001
-    assert repo._stage_claim_candidates("shared_account_posts") == ("shared_account_posts",)  # noqa: SLF001
+    assert repo._stage_claim_candidates("shared_account_posts") == (  # noqa: SLF001
+        "shared_account_posts",
+        "threads_posts_scrapling",
+    )
 
 
 def test_effective_runtime_version_tracks_stage_specific_modal_function(monkeypatch) -> None:

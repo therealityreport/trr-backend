@@ -16,6 +16,9 @@ from trr_backend.socials.youtube import direct_scrape
 def _request() -> SimpleNamespace:
     return SimpleNamespace(
         channel_handle="bravo",
+        source_type="account",
+        playlist_id=None,
+        playlist_url=None,
         keywords=["RHOSLC", "Salt Lake City"],
         date_start=datetime(2025, 8, 14, tzinfo=UTC),
         date_end=datetime(2026, 2, 4, tzinfo=UTC),
@@ -95,6 +98,7 @@ def test_scrape_youtube_uses_package_imports_for_existing_monkeypatch_path(
     assert _FakeScraper.last_config is not None
     assert _FakeScraper.last_config.kwargs == {
         "channel_handle": "bravo",
+        "source_type": "account",
         "keywords": ["RHOSLC", "Salt Lake City"],
         "date_start": request.date_start,
         "date_end": request.date_end,
@@ -114,6 +118,56 @@ def test_scrape_youtube_uses_package_imports_for_existing_monkeypatch_path(
         "date_end": "2026-02-04T00:00:00+00:00",
     }
     assert response["error"] is None
+
+
+def test_scrape_youtube_passes_playlist_source_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request()
+    request.channel_handle = ""
+    request.source_type = "playlist"
+    request.playlist_id = "PLBravoUploads"
+    request.playlist_url = "https://www.youtube.com/playlist?list=PLBravoUploads"
+
+    class _FakeConfig:
+        kwargs: dict[str, Any]
+
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class _FakeScraper:
+        last_config: _FakeConfig | None = None
+
+        def scrape(self, config: _FakeConfig) -> list[SimpleNamespace]:
+            self.__class__.last_config = config
+            return []
+
+    monkeypatch.setattr(youtube_package, "YouTubeScrapeConfig", _FakeConfig)
+    monkeypatch.setattr(youtube_package, "YouTubeScraper", _FakeScraper)
+
+    response = direct_scrape.scrape_youtube(request)
+
+    assert _FakeScraper.last_config is not None
+    assert _FakeScraper.last_config.kwargs["source_type"] == "playlist"
+    assert _FakeScraper.last_config.kwargs["playlist_id"] == "PLBravoUploads"
+    assert _FakeScraper.last_config.kwargs["playlist_url"] == "https://www.youtube.com/playlist?list=PLBravoUploads"
+    assert response["success"] is True
+
+
+def test_youtube_scrape_request_accepts_playlist_source_without_channel_handle() -> None:
+    from api.routers.socials import YouTubeScrapeRequest
+
+    request = YouTubeScrapeRequest(
+        source_type="playlist",
+        playlist_url="https://www.youtube.com/playlist?list=PLBravoUploads",
+        keywords=["RHOSLC"],
+        date_start=datetime(2025, 8, 14, tzinfo=UTC),
+        date_end=datetime(2026, 2, 4, tzinfo=UTC),
+    )
+
+    assert request.channel_handle == ""
+    assert request.source_type == "playlist"
+    assert request.playlist_url == "https://www.youtube.com/playlist?list=PLBravoUploads"
 
 
 def test_scrape_youtube_returns_existing_error_shape(

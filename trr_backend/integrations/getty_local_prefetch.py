@@ -26,8 +26,8 @@ from trr_backend.utils.playwright_runtime import (
 logger = logging.getLogger(__name__)
 
 _DEFAULT_CHROME_PROFILE_GLOBS = (
-    "codex-agent",
-    "codex-agent-*",
+    "openai-agent",
+    "openai-agent-*",
 )
 _GETTY_SIGN_IN_URL = "https://www.gettyimages.com/sign-in"
 _BROWSER_WAIT_MS = 1_500
@@ -344,7 +344,7 @@ def _build_browser_bridge(profile_dir: Path) -> LocalGettyBridge | None:
                 authenticated = True
                 auth_mode = "chrome_profile_browser_login_bootstrap"
             else:
-                auth_warning = "Codex Getty Chrome profile is not authenticated; Getty scraping may be truncated."
+                auth_warning = "openai-agent Getty Chrome profile is not authenticated; Getty scraping may be truncated."
 
         session, cookie_count = _context_cookies_to_session(browser_context)
 
@@ -852,11 +852,11 @@ def fetch_person_getty_prefetch_payload(
                     )
                     if credentials_available:
                         _raise_getty_session_error(
-                            "Getty login bootstrap failed for the codex Chrome profile.",
+                            "Getty login bootstrap failed for the openai-agent Chrome profile.",
                             code="getty_login_bootstrap_failed",
                         )
                     _raise_getty_session_error(
-                        "Getty profile is not authenticated in the codex Chrome profile.",
+                        "Getty profile is not authenticated in the openai-agent Chrome profile.",
                         code="getty_profile_not_authenticated",
                     )
 

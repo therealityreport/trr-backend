@@ -1,0 +1,26 @@
+{
+  "sync_fix_paths": [
+    "api/routers/admin_show_sync.py",
+    "scripts/modal/deploy_sync_fixes_clean.py",
+    "scripts/modal/sync_fix_deploy_paths.json",
+    "scripts/sync/episode_id_reconciliation.py",
+    "scripts/sync/sync_episode_appearances.py",
+    "scripts/sync/sync_seasons_episodes.py",
+    "scripts/sync/sync_show_cast.py",
+    "trr_backend/db/session.py",
+    "trr_backend/integrations/imdb/fullcredits_cast_parser.py",
+    "trr_backend/integrations/imdb/title_metadata_client.py",
+    "trr_backend/integrations/tmdb/client.py",
+    "trr_backend/repositories/admin_runtime_settings.py",
+    "trr_backend/repositories/admin_show_reads.py",
+    "trr_backend/repositories/episodes.py",
+    "trr_backend/repositories/people.py"
+  ],
+  "required_local_dirs": [
+    "scripts/socials/instagram",
+    "scripts/socials/tiktok",
+    "scripts/socials/twitter",
+    "scripts/socials/threads",
+    "scripts/socials/facebook"
+  ]
+}

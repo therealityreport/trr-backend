@@ -109,9 +109,17 @@ def modal_social_comments_job_function_name() -> str:
     return str(os.getenv("TRR_MODAL_SOCIAL_COMMENTS_JOB_FUNCTION") or "run_social_comments_job").strip()
 
 
-def modal_social_job_function_name_for_stage(stage: str | None) -> str:
+def modal_social_comments_recovery_job_function_name() -> str:
+    return str(
+        os.getenv("TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_FUNCTION") or "run_social_comments_recovery_job"
+    ).strip()
+
+
+def modal_social_job_function_name_for_stage(stage: str | None, *, priority_recovery: bool = False) -> str:
     normalized_stage = str(stage or "").strip().lower()
     if normalized_stage in {"comments", "comments_scrapling"}:
+        if priority_recovery:
+            return modal_social_comments_recovery_job_function_name() or modal_social_comments_job_function_name()
         return modal_social_comments_job_function_name() or modal_social_job_function_name()
     if normalized_stage in {"media_mirror", "comment_media_mirror"}:
         return modal_social_media_job_function_name() or modal_social_job_function_name()
@@ -138,6 +146,7 @@ def modal_social_job_function_names() -> list[str]:
         modal_social_posts_job_function_name(),
         modal_social_media_job_function_name(),
         modal_social_comments_job_function_name(),
+        modal_social_comments_recovery_job_function_name(),
     ]
     deduped: list[str] = []
     for name in names:
@@ -204,12 +213,14 @@ def modal_dispatch_config() -> dict[str, Any]:
         "social_posts_job_function": modal_social_posts_job_function_name(),
         "social_media_job_function": modal_social_media_job_function_name(),
         "social_comments_job_function": modal_social_comments_job_function_name(),
+        "social_comments_recovery_job_function": modal_social_comments_recovery_job_function_name(),
         "social_job_function_names": modal_social_job_function_names(),
         "social_required_function_names": [
             modal_social_job_function_name(),
             modal_social_posts_job_function_name(),
             modal_social_media_job_function_name(),
             modal_social_comments_job_function_name(),
+            modal_social_comments_recovery_job_function_name(),
         ],
         "social_recovery_function": modal_social_recovery_function_name(),
         "heartbeat_function": modal_heartbeat_function_name(),
@@ -712,10 +723,10 @@ def dispatch_cast_screentime_run(*, run_id: str) -> dict[str, Any]:
     )
 
 
-def dispatch_social_job(*, job_id: str, stage: str | None = None) -> dict[str, Any]:
+def dispatch_social_job(*, job_id: str, stage: str | None = None, priority_recovery: bool = False) -> dict[str, Any]:
     return _spawn_named_modal_function(
-        function_name=modal_social_job_function_name_for_stage(stage),
-        log_label="social ingest",
+        function_name=modal_social_job_function_name_for_stage(stage, priority_recovery=priority_recovery),
+        log_label="social comment recovery" if priority_recovery else "social ingest",
         kwargs={"job_id": job_id},
         dispatcher_name="social",
         supported_platforms=list(SOCIAL_SUPPORTED_PLATFORMS),

@@ -40,6 +40,20 @@ def test_fetch_episode_index_includes_season_number() -> None:
     assert index["tt0000001"].season_number == 3
 
 
+def test_missing_self_credit_rows_preserves_existing_show_cast_rows() -> None:
+    credit_rows = [
+        {"person_id": "person-1", "source_type": "credits_graphql_paginated"},
+        {"person_id": "person-2", "source_type": "credits_graphql_paginated"},
+    ]
+    existing_credit_rows = [
+        {"id": "credit-1", "person_id": "person-1", "source_type": "fullcredits_html"},
+    ]
+
+    missing = module._missing_self_credit_rows(credit_rows, existing_credit_rows)
+
+    assert missing == [{"person_id": "person-2", "source_type": "credits_graphql_paginated"}]
+
+
 def test_fetch_episodic_credits_prefers_episode_index_seasons(
     monkeypatch,
 ) -> None:

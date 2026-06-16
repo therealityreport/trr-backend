@@ -57,7 +57,9 @@ def test_no_season_persistence_preserves_media_and_reply_metadata() -> None:
         conflict_col: list[str],
         conn: object | None = None,
         include_inserted_flag: bool = False,
+        coalesce_preserve_cols: object | None = None,
     ) -> list[dict[str, Any]]:
+        assert coalesce_preserve_cols == persistence._INSTAGRAM_COMMENT_COALESCE_PRESERVE_COLS
         captured_batches.append([dict(item) for item in batch])
         return [
             {
@@ -296,7 +298,9 @@ def test_no_season_persistence_writes_comment_api_metadata_when_enabled(
         conflict_col: list[str],
         conn: object | None = None,
         include_inserted_flag: bool = False,
+        coalesce_preserve_cols: object | None = None,
     ) -> list[dict[str, Any]]:
+        assert coalesce_preserve_cols == persistence._INSTAGRAM_COMMENT_COALESCE_PRESERVE_COLS
         captured_batches.append([dict(item) for item in batch])
         return [
             {
@@ -374,7 +378,9 @@ def test_no_season_persistence_metadata_flag_disabled_keeps_legacy_payload(
         conflict_col: list[str],
         conn: object | None = None,
         include_inserted_flag: bool = False,
+        coalesce_preserve_cols: object | None = None,
     ) -> list[dict[str, Any]]:
+        assert coalesce_preserve_cols == persistence._INSTAGRAM_COMMENT_COALESCE_PRESERVE_COLS
         captured_batches.append([dict(item) for item in batch])
         return [
             {
@@ -512,3 +518,165 @@ def test_materialize_instagram_post_for_comments_preserves_catalog_owner(
     assert captured["upsert"]["post"].username == "peacock"
     assert captured["upsert"]["post"].owner_username == "peacock"
     assert captured["upsert"]["post"].source_account == "peacock"
+
+
+def _flatten_with_depth(comment: InstagramComment, parent_external_id: str | None = None):
+    result = [(comment, parent_external_id)]
+    external_id = str(comment.comment_id or "").strip()
+    for reply in comment.replies:
+        result.extend(_flatten_with_depth(reply, external_id or parent_external_id))
+    return result
+
+
+def _make_no_season_repo(captured_batches: list[list[dict[str, Any]]]) -> SimpleNamespace:
+    now = datetime(2026, 5, 1, tzinfo=UTC)
+
+    def _fake_upsert_many(
+        _table: str,
+        batch: list[dict[str, Any]],
+        *,
+        conflict_col: list[str],
+        conn: object | None = None,
+        include_inserted_flag: bool = False,
+        coalesce_preserve_cols: object | None = None,
+    ) -> list[dict[str, Any]]:
+        assert coalesce_preserve_cols == persistence._INSTAGRAM_COMMENT_COALESCE_PRESERVE_COLS
+        captured_batches.append([dict(item) for item in batch])
+        return [
+            {
+                "id": f"row-{item['comment_id']}",
+                "comment_id": item["comment_id"],
+                "post_id": item["post_id"],
+                "__trr_inserted": include_inserted_flag,
+            }
+            for item in batch
+        ]
+
+    return SimpleNamespace(
+        _column_exists=lambda _schema, _table, column: column
+        in {"parent_comment_external_id", "reply_depth", "source_snapshot_type"},
+        _comment_lifecycle_supported=lambda table: table == "instagram_comments",
+        _flatten_instagram_comment_tree=_flatten_with_depth,
+        _new_comment_persist_stats=lambda: {},
+        _now_utc=lambda: now,
+        _parse_instagram_time=lambda value: datetime.fromtimestamp(int(value), tz=UTC),
+        _apply_instagram_comment_queryable_columns=lambda payload, _comment, **kwargs: payload.update(
+            {
+                "parent_comment_external_id": kwargs["parent_external_id"],
+                "reply_depth": kwargs["reply_depth"],
+                "source_snapshot_type": kwargs.get("source_snapshot_type", "full_comments_scrape"),
+            }
+        ),
+        _pg_upsert_many=_fake_upsert_many,
+    )
+
+
+def test_no_season_reply_parent_link_seeded_from_db_when_parent_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Bug #10c: a reply whose parent is NOT in this call's top-level batch must
+    # still resolve parent_comment_id from the DB instead of dropping to NULL.
+    captured_batches: list[list[dict[str, Any]]] = []
+    fetch_calls: list[tuple[str, list[Any]]] = []
+
+    def _fake_fetch_all(sql: str, params: list[Any], *, conn: object | None = None) -> list[dict[str, Any]]:
+        fetch_calls.append((sql, params))
+        # Simulate the parent already persisted in an earlier pass.
+        return [{"comment_id": "absent-parent", "id": "db-row-absent-parent"}]
+
+    monkeypatch.setattr(persistence.pg, "fetch_all", _fake_fetch_all)
+
+    fake_repo = _make_no_season_repo(captured_batches)
+    # Top-level comment whose comment_id != the reply's parent, so the parent is
+    # absent from this batch and only resolvable via DB seeding.
+    orphan_reply = _comment("reply-orphan", is_reply=True, parent_comment_id="absent-parent")
+    orphan_reply.replies = []  # parent is referenced only by _parent_external_id
+    standalone = _comment("standalone-1")
+
+    # Build the flat tree so the reply carries parent_external_id "absent-parent"
+    # without that parent being present as a top-level payload.
+    def _flatten(comment: InstagramComment, parent_external_id: str | None = None):
+        if comment is standalone:
+            return [(standalone, None), (orphan_reply, "absent-parent")]
+        return _flatten_with_depth(comment, parent_external_id)
+
+    fake_repo._flatten_instagram_comment_tree = _flatten
+
+    written = persistence._persist_without_season_context(
+        repo=fake_repo,
+        post_id="post-1",
+        account_handle="bravotv",
+        comments=[standalone],
+        run_id="run-1",
+        job_id="job-1",
+        observed_comment_ids=set(),
+        persist_stats={},
+        enable_media_followups=True,
+        conn=object(),
+    )
+
+    assert written == 2
+    # Exactly one DB seed query for the absent parent.
+    assert len(fetch_calls) == 1
+    seed_sql, seed_params = fetch_calls[0]
+    assert "social.instagram_comments" in seed_sql
+    assert seed_params[0] == "post-1"
+    assert seed_params[1] == ["absent-parent"]
+    # The reply batch is the last captured batch; parent_comment_id came from DB.
+    reply_payload = captured_batches[-1][0]
+    assert reply_payload["comment_id"] == "reply-orphan"
+    assert reply_payload["parent_comment_id"] == "db-row-absent-parent"
+    assert reply_payload["parent_comment_external_id"] == "absent-parent"
+
+
+def test_no_season_same_batch_depth_two_reply_resolves_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Bug #10c: a reply-of-reply (depth 2) whose immediate parent is itself a new
+    # reply in this batch must resolve parent_comment_id from the freshly-built
+    # ext_to_db, not NULL. Depth ordering creates the depth-1 reply first.
+    captured_batches: list[list[dict[str, Any]]] = []
+
+    def _fake_fetch_all(sql: str, params: list[Any], *, conn: object | None = None) -> list[dict[str, Any]]:
+        # All parents are co-present in-batch, so no DB seeding should be needed.
+        raise AssertionError("DB seed query should not run when parents are in-batch")
+
+    monkeypatch.setattr(persistence.pg, "fetch_all", _fake_fetch_all)
+
+    fake_repo = _make_no_season_repo(captured_batches)
+
+    depth2 = _comment("reply-depth2", is_reply=True, parent_comment_id="reply-depth1")
+    depth2.reply_depth = 2  # type: ignore[attr-defined]
+    depth1 = _comment("reply-depth1", is_reply=True, parent_comment_id="root-1", replies=[depth2])
+    depth1.reply_depth = 1  # type: ignore[attr-defined]
+    root = _comment("root-1", replies=[depth1])
+
+    written = persistence._persist_without_season_context(
+        repo=fake_repo,
+        post_id="post-1",
+        account_handle="bravotv",
+        comments=[root],
+        run_id="run-1",
+        job_id="job-1",
+        observed_comment_ids=set(),
+        persist_stats={},
+        enable_media_followups=True,
+        conn=object(),
+    )
+
+    assert written == 3
+    # Collect every payload that was upserted, keyed by comment_id.
+    upserted_by_id: dict[str, dict[str, Any]] = {}
+    for batch in captured_batches:
+        for payload in batch:
+            upserted_by_id[payload["comment_id"]] = payload
+
+    # depth-1 reply parents to the root top-level comment.
+    assert upserted_by_id["reply-depth1"]["parent_comment_id"] == "row-root-1"
+    assert upserted_by_id["reply-depth1"]["parent_comment_external_id"] == "root-1"
+    # depth-2 reply parents to the depth-1 reply created earlier in this batch.
+    assert upserted_by_id["reply-depth2"]["parent_comment_id"] == "row-reply-depth1"
+    assert upserted_by_id["reply-depth2"]["parent_comment_external_id"] == "reply-depth1"
+    # parent_comment_id key is present on every payload (column derivation safety).
+    for payload in upserted_by_id.values():
+        assert "parent_comment_id" in payload

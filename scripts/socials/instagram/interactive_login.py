@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Open a headed Chrome browser for manual Instagram login.
 
-Uses the codex Chrome profile so Instagram sees a familiar browser fingerprint.
+Uses the codex@thereality.report Chrome profile so Instagram sees a familiar browser fingerprint.
 Once you complete login (including any captchas/2FA), cookies are extracted
 and saved to the local cookie file.
 

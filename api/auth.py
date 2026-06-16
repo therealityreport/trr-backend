@@ -8,6 +8,7 @@ All user-scoped writes must enforce ownership using the JWT subject.
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import logging
 import os
 from typing import Annotated, Any
@@ -20,11 +21,65 @@ from trr_backend.security.jwt import InvalidTokenError, verify_jwt_token
 logger = logging.getLogger(__name__)
 
 
+_LOCAL_INTERNAL_ADMIN_PROXY_HEADER = "x-trr-local-admin-proxy"
+
+
 def _env_flag_strict(name: str, default: bool = False) -> bool:
     raw = (os.getenv(name) or "").strip().lower()
     if not raw:
         return default
     return raw in {"1", "true", "yes", "on"}
+
+
+def _normalize_host(value: str | None) -> str:
+    raw = (value or "").strip().lower()
+    if not raw:
+        return ""
+    if raw.startswith("[") and "]" in raw:
+        return raw[1 : raw.index("]")]
+    if raw.count(":") > 1:
+        return raw
+    return raw.rsplit(":", 1)[0]
+
+
+def _is_loopback_host(value: str | None) -> bool:
+    host = _normalize_host(value)
+    if host in {"localhost", "ip6-localhost", "ip6-loopback"} or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _local_internal_admin_proxy_allowed(request: Request) -> bool:
+    if (request.headers.get(_LOCAL_INTERNAL_ADMIN_PROXY_HEADER) or "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return False
+    client_host = request.client.host if request.client else ""
+    if not _is_loopback_host(client_host):
+        return False
+    return _is_loopback_host(request.headers.get("host"))
+
+
+def _build_local_internal_admin_identity(request: Request) -> dict[str, Any]:
+    admin_uid = (request.headers.get("x-trr-admin-uid") or "").strip() or "local-loopback"
+    admin_email = (request.headers.get("x-trr-admin-email") or "").strip() or None
+    return {
+        "id": f"internal-admin:{admin_uid}",
+        "email": admin_email,
+        "role": "internal_admin",
+        "token": get_bearer_token(request),
+        "issuer": "local-loopback",
+        "scope": "internal_admin",
+        "admin_uid": admin_uid,
+        "admin_email": admin_email,
+        "verified_at": request.headers.get("x-trr-admin-verified-at"),
+    }
 
 
 def get_bearer_token(request: Request) -> str | None:
@@ -242,6 +297,9 @@ async def require_internal_admin(request: Request) -> dict:
                 detail="Authentication service unavailable",
                 headers={"x-error-code": "AUTH_SERVICE_UNAVAILABLE"},
             ) from exc
+    if _local_internal_admin_proxy_allowed(request):
+        logger.warning("[auth] local loopback internal-admin proxy bypass accepted")
+        return _build_local_internal_admin_identity(request)
 
     if current_user:
         raise HTTPException(status_code=403, detail="Allowlist admin access required")

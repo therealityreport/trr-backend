@@ -82,7 +82,7 @@ def upsert_episodes(
     *,
     on_conflict: str = "show_id,season_number,episode_number",
 ) -> list[dict[str, Any]]:
-    payload = [{k: v for k, v in dict(r).items() if v is not None} for r in rows]
+    payload = [_build_episode_upsert_payload(r) for r in rows]
     payload = [r for r in payload if r]
     if not payload:
         return []
@@ -91,6 +91,13 @@ def upsert_episodes(
         raise EpisodeRepositoryError(f"Supabase error upserting episodes: {response.error}")
     data = response.data or []
     return data if isinstance(data, list) else []
+
+
+def _build_episode_upsert_payload(row: Mapping[str, Any]) -> dict[str, Any]:
+    payload = {k: v for k, v in dict(row).items() if v is not None}
+    external_ids = row.get("external_ids")
+    payload["external_ids"] = external_ids if isinstance(external_ids, Mapping) else {}
+    return payload
 
 
 def fetch_episodes_for_show_season(

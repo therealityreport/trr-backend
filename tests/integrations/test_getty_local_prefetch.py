@@ -20,7 +20,7 @@ def test_resolve_getty_browser_mode_defaults_to_isolated(monkeypatch) -> None:
 
 
 def test_local_getty_bridge_prefers_isolated_browser_mode(monkeypatch) -> None:
-    profile_dir = Path("/tmp/codex-agent")
+    profile_dir = Path("/tmp/openai-agent")
     attempts: list[tuple[str, Path]] = []
     isolated_bridge = getty_local_prefetch.LocalGettyBridge(
         session=object(),  # type: ignore[arg-type]
@@ -53,7 +53,7 @@ def test_local_getty_bridge_prefers_isolated_browser_mode(monkeypatch) -> None:
 
 
 def test_local_getty_bridge_live_mode_is_opt_in(monkeypatch) -> None:
-    profile_dir = Path("/tmp/codex-agent")
+    profile_dir = Path("/tmp/openai-agent")
     attempts: list[tuple[str, Path]] = []
     live_bridge = getty_local_prefetch.LocalGettyBridge(
         session=object(),  # type: ignore[arg-type]
@@ -289,7 +289,7 @@ def test_fetch_person_getty_prefetch_payload_requires_authenticated_profile(monk
             session=object(),  # type: ignore[arg-type]
             auth_details={
                 "auth_mode": "chrome_profile_browser_session",
-                "auth_warning": "Codex Getty Chrome profile is not authenticated; Getty scraping may be truncated.",
+                "auth_warning": "openai-agent Getty Chrome profile is not authenticated; Getty scraping may be truncated.",
             },
             search_page_fetcher=lambda url: ("<html></html>", url, 200),
         )
@@ -323,7 +323,7 @@ def test_fetch_person_getty_prefetch_payload_reports_login_bootstrap_failure(mon
             session=object(),  # type: ignore[arg-type]
             auth_details={
                 "auth_mode": "chrome_profile_browser_session",
-                "auth_warning": "Codex Getty Chrome profile is not authenticated; Getty scraping may be truncated.",
+                "auth_warning": "openai-agent Getty Chrome profile is not authenticated; Getty scraping may be truncated.",
             },
             search_page_fetcher=lambda url: ("<html></html>", url, 200),
         )
@@ -420,7 +420,7 @@ def test_fetch_person_getty_prefetch_payload_retries_with_isolated_bridge(monkey
         session=object(),  # type: ignore[arg-type]
         auth_details={"auth_mode": "chrome_profile_browser_session", "auth_warning": None},
         search_page_fetcher=base_fetcher,
-        profile_dir="/tmp/codex-agent",
+        profile_dir="/tmp/openai-agent",
     )
     isolated_bridge = getty_local_prefetch.LocalGettyBridge(
         session=object(),  # type: ignore[arg-type]

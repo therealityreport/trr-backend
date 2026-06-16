@@ -68,6 +68,12 @@ def test_search_twitter_includes_hosted_media_field_without_mirroring(
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     tweet = _build_tweet("tweet-1")
+    tweet.bookmarks = 4
+    tweet.shares = 5
+    tweet.thread_root_tweet_id = "root-1"
+    tweet.thread_position = 2
+    tweet.is_thread_part = True
+    tweet.twitter_context_role = "reply"
 
     from trr_backend.socials.twitter import TwitterScraper
 
@@ -98,6 +104,12 @@ def test_search_twitter_includes_hosted_media_field_without_mirroring(
     body = response.json()
     assert body["success"] is True
     assert body["tweets"][0]["tweet_id"] == "tweet-1"
+    assert body["tweets"][0]["bookmarks"] == 4
+    assert body["tweets"][0]["shares"] == 5
+    assert body["tweets"][0]["thread_root_tweet_id"] == "root-1"
+    assert body["tweets"][0]["thread_position"] == 2
+    assert body["tweets"][0]["is_thread_part"] is True
+    assert body["tweets"][0]["twitter_context_role"] == "reply"
     assert body["tweets"][0]["hosted_media_urls"] == []
 
 

@@ -261,6 +261,13 @@ def create_reddit_community(*, payload: dict[str, Any], actor_uid: str) -> tuple
         franchise_focus_targets=payload.get("franchise_focus_targets"),
     )
     subreddit = _validate_subreddit(str(payload.get("subreddit") or ""))
+    analysis_flairs, analysis_all_flairs = _sanitize_analysis_flair_modes(
+        subreddit=subreddit,
+        existing_analysis_flairs=[],
+        existing_analysis_all_flairs=[],
+        analysis_flairs=payload.get("analysis_flairs"),
+        analysis_all_flairs=payload.get("analysis_all_flairs"),
+    )
     rows = pg.execute_returning(
         f"""
         insert into {COMMUNITIES_TABLE} (
@@ -273,11 +280,13 @@ def create_reddit_community(*, payload: dict[str, Any], actor_uid: str) -> tuple
           is_show_focused,
           network_focus_targets,
           franchise_focus_targets,
+          analysis_flairs,
+          analysis_all_flairs,
           episode_title_patterns,
           created_by_firebase_uid
         ) values (
           %s::uuid, %s, %s, %s, %s, %s,
-          %s, %s::jsonb, %s::jsonb, %s::jsonb, %s
+          %s, %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb, %s
         )
         returning *
         """,
@@ -291,6 +300,8 @@ def create_reddit_community(*, payload: dict[str, Any], actor_uid: str) -> tuple
             focus_state["is_show_focused"],
             _json_dumps(focus_state["network_focus_targets"]),
             _json_dumps(focus_state["franchise_focus_targets"]),
+            _json_dumps(analysis_flairs),
+            _json_dumps(analysis_all_flairs),
             _json_dumps(_to_string_list(payload.get("episode_title_patterns"))),
             actor_uid,
         ],

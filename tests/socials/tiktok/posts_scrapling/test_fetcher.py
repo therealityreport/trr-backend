@@ -49,10 +49,10 @@ def test_tiktok_extracts_sec_uid_from_warmup_html():
 
 
 def test_tiktok_challenge_detection():
-    from trr_backend.socials.tiktok.posts_scrapling.fetcher import _classify_challenge_response, _is_challenge_response
+    from trr_backend.socials.tiktok.posts_scrapling.fetcher import _classify_challenge_response
 
-    assert _is_challenge_response("<html><body>captcha verify</body></html>") is True
-    assert _is_challenge_response('{"statusCode": 0}') is False
+    assert _classify_challenge_response("<html><body>captcha verify</body></html>") is not None
+    assert _classify_challenge_response('{"statusCode": 0}') is None
     assert _classify_challenge_response("X-Bogus or _signature is required") == "js_generated_params_required"
 
 

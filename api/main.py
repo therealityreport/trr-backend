@@ -17,6 +17,15 @@ import os
 import time
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover - python-dotenv is expected locally, optional in slim runtimes.
+    load_dotenv = None  # type: ignore[assignment]
+
+if load_dotenv is not None:
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -51,6 +60,7 @@ from trr_backend.security.jwt import (
     expected_supabase_issuer,
     expected_supabase_project_ref,
 )
+from trr_backend.socials.read_models.account_profile.common import instagram_comment_rollup_health
 
 configure_runtime_observability(service_name="trr-backend-api")
 
@@ -774,6 +784,13 @@ def admin_health_db_pressure(_: InternalAdminUser = None) -> dict[str, object]:
         },
     }
     return snapshot
+
+
+@app.get("/admin/health/instagram-comment-rollups")
+@app.get("/api/v1/admin/health/instagram-comment-rollups")
+def admin_health_instagram_comment_rollups(sample_limit: int = 25, _: InternalAdminUser = None) -> dict[str, object]:
+    """Internal exact-count health check for persisted Instagram comment rollups."""
+    return instagram_comment_rollup_health(sample_limit=sample_limit)
 
 
 @app.get("/health/runtime")

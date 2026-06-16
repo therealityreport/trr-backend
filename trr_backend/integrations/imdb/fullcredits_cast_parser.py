@@ -39,8 +39,9 @@ _IMDB_ALLOWED_CREW_SECTIONS = {
     "editorial department": "Editorial Department",
     "production department": "Production Department",
 }
-_DEFAULT_IMDB_BROWSER_PROFILE_DIR = Path.home() / ".chrome-profiles" / "codex-agent"
+_DEFAULT_IMDB_BROWSER_PROFILE_DIR = Path.home() / ".chrome-profiles" / "openai-agent"
 _BROWSER_RUNTIME_LOCK_NAME = "imdb-fullcredits-playwright"
+_SCRAPLING_RUNTIME_LOCK_NAME = "imdb-fullcredits-scrapling"
 
 
 class ImdbFullCreditsError(RuntimeError):
@@ -171,6 +172,15 @@ class HttpImdbFullCreditsClient:
                 continue
 
             if is_blocked:
+                scrapling_html = _fetch_fullcredits_page_via_scrapling(
+                    imdb_series_id,
+                    extra_headers=headers,
+                    timeout_seconds=self._timeout_seconds,
+                    verbose=verbose,
+                )
+                if scrapling_html:
+                    return scrapling_html
+
                 browser_html = _fetch_fullcredits_page_via_browser(
                     imdb_series_id,
                     timeout_seconds=self._timeout_seconds,
@@ -263,6 +273,80 @@ def _resolve_browser_modes() -> list[bool]:
 def _looks_like_fullcredits_html(html: str) -> bool:
     normalized = html or ""
     return "full-credits-page-container" in normalized or 'data-testid="name-credits-list-item"' in normalized
+
+
+def _scrapling_response_html(page: Any) -> str:
+    body = getattr(page, "body", None)
+    if isinstance(body, bytes):
+        return body.decode(getattr(page, "encoding", None) or "utf-8", errors="replace")
+    if isinstance(body, str):
+        return body
+
+    for attr in ("html", "content", "text"):
+        value = getattr(page, attr, None)
+        if callable(value):
+            value = value()
+        if isinstance(value, bytes):
+            return value.decode(getattr(page, "encoding", None) or "utf-8", errors="replace")
+        if isinstance(value, str) and value:
+            return value
+
+    return ""
+
+
+def _fetch_fullcredits_page_via_scrapling(
+    imdb_series_id: str,
+    *,
+    extra_headers: Mapping[str, str],
+    timeout_seconds: float,
+    verbose: bool,
+) -> str | None:
+    if not _env_flag("IMDB_FULLCREDITS_SCRAPLING_FALLBACK_ENABLED", default=True):
+        return None
+
+    try:
+        from scrapling.fetchers import StealthyFetcher
+    except Exception as exc:
+        if verbose:
+            print(f"IMDb fullcredits Scrapling fallback unavailable: {exc}")
+        return None
+
+    url = f"https://www.imdb.com/title/{imdb_series_id}/fullcredits/"
+    wait_selector = "[data-testid='name-credits-list-item'], [data-testid^='sub-section-'], .full-credits-page-container"
+    timeout_ms = max(int(timeout_seconds * 1000), 30_000)
+
+    try:
+        with exclusive_runtime_lock(_SCRAPLING_RUNTIME_LOCK_NAME):
+            page = StealthyFetcher.fetch(
+                url,
+                headless=True,
+                network_idle=True,
+                wait_selector=wait_selector,
+                timeout=timeout_ms,
+                extra_headers=dict(extra_headers),
+            )
+    except RuntimeError as exc:
+        if verbose and not str(exc).startswith("browser_runtime_locked:"):
+            print(f"IMDb fullcredits Scrapling fallback lock failed: {exc}")
+        return None
+    except Exception as exc:
+        if verbose:
+            print(f"IMDb fullcredits Scrapling fallback failed: {exc}")
+        return None
+
+    status = getattr(page, "status", None)
+    html = _scrapling_response_html(page)
+    if status == 200 and _looks_like_fullcredits_html(html):
+        if verbose:
+            print(f"IMDb fullcredits Scrapling fallback succeeded for {imdb_series_id}.")
+        return html
+
+    if verbose:
+        print(
+            "IMDb fullcredits Scrapling fallback did not load credits "
+            f"(status={status}, bytes={len(html.encode('utf-8', errors='ignore'))})."
+        )
+    return None
 
 
 def _fetch_fullcredits_page_via_browser(

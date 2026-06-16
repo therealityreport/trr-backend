@@ -56,7 +56,7 @@ ModuleNotFoundError("No module named 'scripts'")
   `https://modal.com/apps/admin-56995/main/deployed/trr-backend-jobs`
 - Readiness:
   - `ok = true`
-  - `modal_workspace.workspace = admin-56995`
+  - `api_web_url` resolved for `serve_backend_api`
   - `missing_functions = []`
   - `missing_web_endpoints = []`
 - `/health` returned HTTP 200 three times after `v440`.
@@ -88,17 +88,17 @@ crash-looping entries.
 <!-- modal-deploy-history:start -->
 ## Deploy History Stamp
 
-- Last stamped: `2026-05-28T13:55:36-04:00`
+- Last stamped: `2026-06-11T23:22:58-04:00`
 - Workspace: `admin-56995`
 - Profile: `admin-56995`
 - Canary: `https://admin-56995--trr-backend-api.modal.run/health` HTTP `200` on attempt `1`
 
 | Version | Deployed At | Deployed By | Commit | Client |
 | --- | --- | --- | --- | --- |
-| v443 | 2026-05-28 13:55:19-04:00 | admin-56995 | c150a64* | 1.4.0 |
-| v442 | 2026-05-28 13:51:21-04:00 | admin-56995 | c150a64* | 1.4.0 |
-| v441 | 2026-05-28 11:46:53-04:00 | admin-56995 | c150a64* | 1.4.0 |
-| v440 | 2026-05-28 11:23:23-04:00 | admin-56995 | c150a64* | 1.4.0 |
-| v439 | 2026-05-28 10:37:31-04:00 | admin-56995 | c150a64* | 1.4.0 |
+| v456 | 2026-06-11 23:22:38-04:00 | admin-56995 | 9ca1486* | 1.4.0 |
+| v455 | 2026-06-11 23:22:02-04:00 | admin-56995 | 9ca1486* | 1.4.0 |
+| v454 | 2026-06-11 21:49:18-04:00 | admin-56995 | 9ca1486* | 1.4.0 |
+| v453 | 2026-06-11 21:42:34-04:00 | admin-56995 | 9ca1486* | 1.4.0 |
+| v452 | 2026-06-11 19:14:52-04:00 | admin-56995 | 9ca1486* | 1.4.0 |
 
 <!-- modal-deploy-history:end -->

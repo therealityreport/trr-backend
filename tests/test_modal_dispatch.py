@@ -125,6 +125,10 @@ def test_modal_social_job_function_name_for_stage_routes_three_backfill_lanes() 
     assert modal_dispatch.modal_social_job_function_name_for_stage("threads_posts_scrapling") == "run_social_posts_job"
     assert modal_dispatch.modal_social_job_function_name_for_stage("media_mirror") == "run_social_media_job"
     assert modal_dispatch.modal_social_job_function_name_for_stage("comments_scrapling") == "run_social_comments_job"
+    assert (
+        modal_dispatch.modal_social_job_function_name_for_stage("comments_scrapling", priority_recovery=True)
+        == "run_social_comments_recovery_job"
+    )
 
 
 def test_modal_social_job_function_names_dedupes_names(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -132,11 +136,17 @@ def test_modal_social_job_function_names_dedupes_names(monkeypatch: pytest.Monke
     monkeypatch.setattr(modal_dispatch, "modal_social_posts_job_function_name", lambda: "run_social_job")
     monkeypatch.setattr(modal_dispatch, "modal_social_media_job_function_name", lambda: "run_social_media_job")
     monkeypatch.setattr(modal_dispatch, "modal_social_comments_job_function_name", lambda: "run_social_comments_job")
+    monkeypatch.setattr(
+        modal_dispatch,
+        "modal_social_comments_recovery_job_function_name",
+        lambda: "run_social_comments_recovery_job",
+    )
 
     assert modal_dispatch.modal_social_job_function_names() == [
         "run_social_job",
         "run_social_media_job",
         "run_social_comments_job",
+        "run_social_comments_recovery_job",
     ]
 
 
@@ -147,6 +157,11 @@ def test_modal_dispatch_config_exposes_comments_lane_contract(monkeypatch: pytes
     monkeypatch.setattr(modal_dispatch, "modal_social_posts_job_function_name", lambda: "run_social_posts_job")
     monkeypatch.setattr(modal_dispatch, "modal_social_media_job_function_name", lambda: "run_social_media_job")
     monkeypatch.setattr(modal_dispatch, "modal_social_comments_job_function_name", lambda: "run_social_comments_job")
+    monkeypatch.setattr(
+        modal_dispatch,
+        "modal_social_comments_recovery_job_function_name",
+        lambda: "run_social_comments_recovery_job",
+    )
     monkeypatch.setattr(modal_dispatch, "modal_cast_screentime_function_name", lambda: "run_cast_screentime_analysis")
 
     config = modal_dispatch.modal_dispatch_config()
@@ -158,13 +173,16 @@ def test_modal_dispatch_config_exposes_comments_lane_contract(monkeypatch: pytes
         "run_social_posts_job",
         "run_social_media_job",
         "run_social_comments_job",
+        "run_social_comments_recovery_job",
     ]
+    assert config["social_comments_recovery_job_function"] == "run_social_comments_recovery_job"
     assert config["cast_screentime_function"] == "run_cast_screentime_analysis"
     assert config["social_job_function_names"] == [
         "run_social_job",
         "run_social_posts_job",
         "run_social_media_job",
         "run_social_comments_job",
+        "run_social_comments_recovery_job",
     ]
 
 
@@ -181,6 +199,12 @@ def test_dispatch_social_job_uses_stage_specific_function(monkeypatch: pytest.Mo
 
     assert captured["function_name"] == "run_social_comments_job"
     assert captured["kwargs"] == {"job_id": "job-1"}
+
+    modal_dispatch.dispatch_social_job(job_id="job-2", stage="comments_scrapling", priority_recovery=True)
+
+    assert captured["function_name"] == "run_social_comments_recovery_job"
+    assert captured["log_label"] == "social comment recovery"
+    assert captured["kwargs"] == {"job_id": "job-2"}
 
 
 def test_dispatch_cast_screentime_run_uses_cast_function(monkeypatch: pytest.MonkeyPatch) -> None:

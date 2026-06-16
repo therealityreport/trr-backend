@@ -100,9 +100,6 @@ def build_readiness_command(args: argparse.Namespace) -> list[str]:
         python_command(),
         str(REPO_ROOT / "scripts" / "modal" / "verify_modal_readiness.py"),
         "--json",
-        "--probe-api-canary",
-        "--api-canary-timeout-seconds",
-        str(max(1, int(args.canary_timeout_seconds or DEFAULT_CANARY_TIMEOUT_SECONDS))),
     ]
     if args.env:
         command.extend(["--env", args.env])
@@ -164,6 +161,9 @@ def format_deploy_history_stamp(
     workspace_context: dict[str, Any],
     limit: int = DEFAULT_HISTORY_LIMIT,
 ) -> str:
+    canary_url = str(canary.get("url") or "<unknown>")
+    canary_status = str(canary.get("status") or "<unknown>")
+    canary_attempt = str(canary.get("attempt") or "<unknown>")
     lines = [
         HISTORY_STAMP_START,
         "## Deploy History Stamp",
@@ -171,7 +171,7 @@ def format_deploy_history_stamp(
         f"- Last stamped: `{datetime.now().astimezone().isoformat(timespec='seconds')}`",
         f"- Workspace: `{workspace_context['active_workspace']}`",
         f"- Profile: `{workspace_context['active_profile']}`",
-        f"- Canary: `{canary['url']}` HTTP `{canary['status']}` on attempt `{canary['attempt']}`",
+        f"- Canary: `{canary_url}` HTTP `{canary_status}` on attempt `{canary_attempt}`",
         "",
         "| Version | Deployed At | Deployed By | Commit | Client |",
         "| --- | --- | --- | --- | --- |",
@@ -203,14 +203,14 @@ def stamp_incident_note(
         canary=canary,
         workspace_context=workspace_context,
     )
-    current = note_path.read_text()
+    current = note_path.read_text(encoding="utf-8")
     if HISTORY_STAMP_START in current and HISTORY_STAMP_END in current:
         before, rest = current.split(HISTORY_STAMP_START, 1)
         _old, after = rest.split(HISTORY_STAMP_END, 1)
         updated = before.rstrip() + "\n\n" + stamp.rstrip() + after
     else:
         updated = current.rstrip() + "\n\n" + stamp
-    note_path.write_text(updated)
+    note_path.write_text(updated, encoding="utf-8")
     return True
 
 
@@ -291,7 +291,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(
         "Modal API cold-start canary passed: "
-        f"url={canary['url']} status={canary['status']} attempt={canary['attempt']}",
+        f"url={canary.get('url', '<unknown>')} "
+        f"status={canary.get('status', '<unknown>')} "
+        f"attempt={canary.get('attempt', '<unknown>')}",
         flush=True,
     )
     if not args.skip_incident_stamp:

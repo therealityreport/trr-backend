@@ -664,3 +664,22 @@ def fetch_tv_episode_images(
     if cache is not None:
         cache[cache_key] = payload
     return payload
+
+
+def fetch_tv_episode_external_ids(
+    tv_id: int,
+    season_number: int,
+    episode_number: int,
+    *,
+    api_key: str | None = None,
+    bearer_token: str | None = None,
+    session: requests.Session | None = None,
+) -> dict[str, Any]:
+    """Fetch external IDs for one TV episode from TMDb."""
+
+    session = session or requests.Session()
+    url = (
+        f"{TMDB_API_BASE_URL}/tv/{int(tv_id)}/season/{int(season_number)}"
+        f"/episode/{int(episode_number)}/external_ids"
+    )
+    return _request_tmdb_json(session, url, api_key=api_key, bearer_token=bearer_token)

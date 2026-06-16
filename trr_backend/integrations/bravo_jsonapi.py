@@ -9,7 +9,6 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
-from scrapling import Selector
 
 BRAVO_BASE_URL = "https://www.bravotv.com"
 JSONAPI_BASE_URL = f"{BRAVO_BASE_URL}/jsonapi"
@@ -222,6 +221,10 @@ def extract_gallery_assets_from_html(
     """Fallback parser for Bravo gallery pages when JSONAPI media includes are incomplete."""
     if not str(page_html or "").strip():
         return []
+
+    # Lazy import: scrapling is only installed on the browser image, and this
+    # module is imported by the lean-image API at startup.
+    from scrapling import Selector
 
     page = Selector(page_html)
     settings = extract_drupal_settings(page_html)

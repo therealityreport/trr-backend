@@ -15,6 +15,7 @@ from trr_backend.socials.pipelines.comments.instagram import (
     get_social_account_comments_scrape_run_progress,
     preview_social_account_comments_scrape,
     rebalance_failed_instagram_comments_shard,
+    rebalance_waiting_instagram_comments_shards,
     repair_instagram_comments_scrape_run_target_gaps,
     start_social_account_comments_scrape,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "get_social_account_comments_scrape_run_progress",
     "preview_social_account_comments_scrape",
     "rebalance_failed_instagram_comments_shard",
+    "rebalance_waiting_instagram_comments_shards",
     "repair_instagram_comments_scrape_run_target_gaps",
     "start_social_account_comments_scrape",
 ]

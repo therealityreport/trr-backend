@@ -61,6 +61,29 @@ def test_anonymous_fetcher_strips_authenticated_cookies(_mock_scrapling):
     assert metadata["authenticated_cookie_count"] == 0
 
 
+def test_public_fetcher_strips_authenticated_cookies(_mock_scrapling):
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsScraplingFetcher
+
+    fetcher = InstagramPostsScraplingFetcher(
+        cookies=[{"name": "sessionid", "value": "abc", "domain": ".instagram.com", "path": "/"}],
+        raw_cookies={
+            "sessionid": "abc",
+            "csrftoken": "csrf",
+            "ds_user_id": "123",
+            "mid": "mid-token",
+        },
+        browser_account_id="test",
+        auth_state="public",
+    )
+
+    metadata = fetcher.runtime_metadata
+    assert fetcher._cookies == []
+    assert fetcher._raw_cookies == {}
+    assert metadata["auth_state"] == "public"
+    assert metadata["cookie_count"] == 0
+    assert metadata["authenticated_cookie_count"] == 0
+
+
 def test_requests_fallback_can_disable_graphql_recovery(_mock_scrapling):
     from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsScraplingFetcher
 
