@@ -4709,18 +4709,35 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                             retryable_incomplete_targets,
                         )
                     elif public_comments_mode:
-                        incomplete_retry_stall_metadata = {
-                            "stalled": False,
-                            "completion_status": "public_comments_requires_approval",
-                            "target_source_ids": retryable_incomplete_targets,
-                            "fetch_reasons": retry_fetch_reasons,
-                            "current_comments_fetched": comments_fetched,
-                            "fallback_policy": "requires_approval",
-                        }
                         logger.info(
-                            "Instagram public comments stopped before auth/proxy fallback: job_id=%s targets=%s",
+                            "Instagram public comments require approval before fallback; failing shard with action: "
+                            "job_id=%s targets=%s",
                             job_id,
                             retryable_incomplete_targets,
+                        )
+                        raise CommentsScraplingRuntimeError(
+                            "Instagram public comments require approval before auth/proxy fallback.",
+                            error_code="instagram_comments_public_requires_approval",
+                            retryable=False,
+                            runtime_metadata={
+                                "incomplete_target_source_ids": retryable_incomplete_targets,
+                                "incomplete_fetch_reasons": retry_fetch_reasons,
+                                "zero_comment_incomplete_target_source_ids": list(
+                                    dict.fromkeys(zero_comment_incomplete_target_source_ids)
+                                ),
+                                "coauthor_status_only_target_source_ids": list(
+                                    dict.fromkeys(coauthor_status_only_target_source_ids)
+                                ),
+                                "auth_failed_target_source_ids": list(dict.fromkeys(auth_failed_target_source_ids)),
+                                "auth_failed_fetch_reasons": dict(auth_failed_fetch_reasons),
+                                "completion_status": "public_comments_requires_approval",
+                                "current_comments_fetched": comments_fetched,
+                                "fallback_policy": "requires_approval",
+                                "target_source_ids_count": len(target_source_ids),
+                                "skipped_complete_target_source_ids": list(
+                                    dict.fromkeys(final_skipped_complete_targets)
+                                ),
+                            },
                         )
                     else:
                         raise CommentsScraplingRuntimeError(

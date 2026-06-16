@@ -7,6 +7,9 @@ create table if not exists core.admin_runtime_settings (
 
 alter table core.admin_runtime_settings enable row level security;
 
+grant all privileges on table core.admin_runtime_settings to service_role;
+revoke all on table core.admin_runtime_settings from public, anon, authenticated;
+
 drop policy if exists admin_runtime_settings_service_role_all on core.admin_runtime_settings;
 create policy admin_runtime_settings_service_role_all
 on core.admin_runtime_settings

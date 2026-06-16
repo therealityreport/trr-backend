@@ -234,7 +234,7 @@ def test_require_internal_admin_rejects_non_allowlisted_user_token(monkeypatch):
     assert response.json() == {"detail": "Allowlist admin access required"}
 
 
-def test_require_internal_admin_accepts_local_loopback_proxy_marker(monkeypatch):
+def test_require_internal_admin_rejects_local_loopback_proxy_marker(monkeypatch):
     monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "backend-secret-32-bytes-minimum")
     app = _build_app()
     client = TestClient(app, client=("127.0.0.1", 50000))
@@ -250,8 +250,8 @@ def test_require_internal_admin_accepts_local_loopback_proxy_marker(monkeypatch)
         },
     )
 
-    assert response.status_code == 200
-    assert response.json() == {"user_id": "internal-admin:local-admin", "role": "internal_admin"}
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Allowlist admin access required"}
 
 
 def test_require_internal_admin_rejects_remote_spoofed_local_proxy_marker(monkeypatch):
