@@ -10,6 +10,7 @@ import re
 import time as time_module
 from collections import Counter
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from typing import Any, Sequence
 
 import trr_backend.socials.social_season_analytics_impl as _core
@@ -572,6 +573,68 @@ def _set_instagram_comments_target_preview_cache(cache_key: tuple[Any, ...], pay
         _INSTAGRAM_COMMENTS_TARGET_PREVIEW_CACHE[cache_key] = (time_module.monotonic(), copy.deepcopy(payload))
 
 
+def _normalize_comment_date_window(
+    date_start: str | None,
+    date_end: str | None,
+) -> tuple[datetime | None, datetime | None]:
+    """Parse an ISO 8601 comment-target date window into UTC datetimes.
+
+    The window is start-inclusive and end-exclusive. Returns ``(None, None)``
+    when both bounds are absent. Naive inputs are assumed to be UTC. Raises
+    ``ValueError`` on malformed input or when ``date_start`` is not strictly
+    before ``date_end``.
+    """
+
+    def _parse_one(raw: str | None) -> datetime | None:
+        if raw is None:
+            return None
+        text = str(raw).strip()
+        if not text:
+            return None
+        normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError as exc:
+            raise ValueError(f"Invalid ISO 8601 datetime: {raw!r}") from exc
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    start_dt = _parse_one(date_start)
+    end_dt = _parse_one(date_end)
+    if start_dt is None and end_dt is None:
+        return (None, None)
+    if start_dt is not None and end_dt is not None and start_dt >= end_dt:
+        raise ValueError("date_start must be strictly before date_end")
+    return (start_dt, end_dt)
+
+
+def _comment_date_window_predicate(
+    start_dt: datetime | None,
+    end_dt: datetime | None,
+    *,
+    alias: str,
+    column: str = "posted_at",
+) -> tuple[str, list[Any]]:
+    """Build a posted_at window predicate and its bound params for ``alias``.
+
+    Returns an empty predicate (and no params) when the window is unbounded.
+    Start is inclusive, end is exclusive.
+    """
+
+    clauses: list[str] = []
+    params: list[Any] = []
+    if start_dt is not None:
+        clauses.append(f"{alias}.{column} >= %s")
+        params.append(start_dt)
+    if end_dt is not None:
+        clauses.append(f"{alias}.{column} < %s")
+        params.append(end_dt)
+    if not clauses:
+        return "", []
+    return " and " + " and ".join(clauses), params
+
+
 def _instagram_social_account_comment_target_preview(
     account_handle: str,
     *,
@@ -579,6 +642,8 @@ def _instagram_social_account_comment_target_preview(
     refresh_policy: str = "stale_or_missing",
     target_filter: str | None = None,
     sample_limit: int = 12,
+    date_start: str | None = None,
+    date_end: str | None = None,
 ) -> dict[str, Any]:
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     normalized_refresh_policy = str(refresh_policy or "stale_or_missing").strip().lower() or "stale_or_missing"
@@ -592,6 +657,7 @@ def _instagram_social_account_comment_target_preview(
     safe_sample_limit = max(1, min(int(sample_limit or 12), 50))
     if safe_limit is not None:
         safe_sample_limit = min(safe_sample_limit, safe_limit)
+    window_start, window_end = _normalize_comment_date_window(date_start, date_end)
     target_priority = _instagram_comments_target_priority(normalized_refresh_policy)
     cache_key = (
         "instagram_comments_target_preview",
@@ -601,6 +667,8 @@ def _instagram_social_account_comment_target_preview(
         target_priority,
         safe_limit,
         safe_sample_limit,
+        window_start.isoformat() if window_start is not None else None,
+        window_end.isoformat() if window_end is not None else None,
     )
     total_started_at = time_module.perf_counter()
     cache_lookup_started_at = time_module.perf_counter()
@@ -625,6 +693,8 @@ def _instagram_social_account_comment_target_preview(
         target_source_ids = _instagram_social_account_incomplete_comment_target_shortcodes(
             normalized_account,
             limit=safe_limit,
+            date_start=date_start,
+            date_end=date_end,
         )
         raw_target_count = len(target_source_ids)
         target_count = raw_target_count
@@ -647,6 +717,12 @@ def _instagram_social_account_comment_target_preview(
             if target_priority == "gap_first"
             else "posted_at desc nulls last, shortcode desc"
         )
+        owner_window_sql, owner_window_params = _comment_date_window_predicate(
+            window_start, window_end, alias="p"
+        )
+        catalog_window_sql, catalog_window_params = _comment_date_window_predicate(
+            window_start, window_end, alias="p", column=posted_at_column
+        )
         sql = f"""
         with saved_posts as (
           select
@@ -656,7 +732,7 @@ def _instagram_social_account_comment_target_preview(
             {reported_comments_expr}::bigint as reported_comments
           from social.instagram_posts p
           where {owner_match_clause}
-            and nullif(p.shortcode, '') is not null
+            and nullif(p.shortcode, '') is not null{owner_window_sql}
           union all
           select
             null::uuid as post_id,
@@ -665,7 +741,7 @@ def _instagram_social_account_comment_target_preview(
             {catalog_reported_comments_expr}::bigint as reported_comments
           from social.{table} p
           where lower(p.source_account) = lower(%s)
-            and nullif(p.{source_id_column}::text, '') is not null
+            and nullif(p.{source_id_column}::text, '') is not null{catalog_window_sql}
         ),
         deduped_posts as (
           select
@@ -702,7 +778,13 @@ def _instagram_social_account_comment_target_preview(
             limit %s
           ) as sample_target_source_ids
         """
-        params: list[Any] = [normalized_account, normalized_account, safe_sample_limit]
+        params: list[Any] = [
+            normalized_account,
+            *owner_window_params,
+            normalized_account,
+            *catalog_window_params,
+            safe_sample_limit,
+        ]
         row = pg.fetch_one(sql, params) or {}
         query_ms = round((time_module.perf_counter() - query_started_at) * 1000, 1)
         raw_target_count = _normalize_non_negative_int(row.get("raw_target_source_ids_count"))
@@ -714,6 +796,9 @@ def _instagram_social_account_comment_target_preview(
             "(count(c.id) filter (where c.is_missing = false))::bigint"
             if _comment_lifecycle_supported("instagram_comments")
             else "count(c.id)::bigint"
+        )
+        owner_window_sql, owner_window_params = _comment_date_window_predicate(
+            window_start, window_end, alias="p"
         )
         sql = f"""
         with posts as (
@@ -727,7 +812,7 @@ def _instagram_social_account_comment_target_preview(
           left join social.instagram_comments c on c.post_id = p.id
           where {owner_match_clause}
             and nullif(p.shortcode, '') is not null
-            and {reported_comments_expr} > 0
+            and {reported_comments_expr} > 0{owner_window_sql}
           group by p.shortcode, p.posted_at, p.comments_count, p.fb_comment_count, p.raw_data
         ),
         targets as (
@@ -757,7 +842,12 @@ def _instagram_social_account_comment_target_preview(
             limit %s
           ) as sample_target_source_ids
         """
-        params = [normalized_account, _instagram_comments_stale_after_hours(), safe_sample_limit]
+        params = [
+            normalized_account,
+            *owner_window_params,
+            _instagram_comments_stale_after_hours(),
+            safe_sample_limit,
+        ]
         row = pg.fetch_one(sql, params) or {}
         query_ms = round((time_module.perf_counter() - query_started_at) * 1000, 1)
         raw_target_count = _normalize_non_negative_int(row.get("raw_target_source_ids_count"))
@@ -775,6 +865,17 @@ def _instagram_social_account_comment_target_preview(
         "target_filter": normalized_target_filter,
         "incomplete_fill": normalized_target_filter == "incomplete",
         "target_priority": target_priority,
+        "date_start": window_start.isoformat() if window_start is not None else None,
+        "date_end": window_end.isoformat() if window_end is not None else None,
+        "target_window": (
+            {
+                "date_start": window_start.isoformat() if window_start is not None else None,
+                "date_end": window_end.isoformat() if window_end is not None else None,
+                "end_exclusive": True,
+            }
+            if (window_start is not None or window_end is not None)
+            else None
+        ),
         "timing": {
             "target_preview_ms": query_ms,
             "target_count_ms": query_ms,
@@ -922,12 +1023,15 @@ def _instagram_social_account_comment_target_shortcodes(
     *,
     limit: int | None,
     refresh_policy: str = "stale_or_missing",
+    date_start: str | None = None,
+    date_end: str | None = None,
 ) -> list[str]:
     _sync_core_overrides()
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     owner_match_clause = _social_account_profile_owner_match_sql("instagram", alias="p")
     normalized_refresh_policy = str(refresh_policy or "stale_or_missing").strip().lower() or "stale_or_missing"
     safe_limit = None if limit is None else max(1, min(int(limit), 500))
+    window_start, window_end = _normalize_comment_date_window(date_start, date_end)
     if normalized_refresh_policy == "all_saved_posts":
         target_priority = _instagram_comments_target_priority(normalized_refresh_policy)
         table, source_id_column, posted_at_column = _shared_catalog_base_query_parts("instagram")
@@ -952,6 +1056,12 @@ def _instagram_social_account_comment_target_shortcodes(
             if target_priority == "gap_first"
             else "order by posted_at desc nulls last, shortcode desc"
         )
+        owner_window_sql, owner_window_params = _comment_date_window_predicate(
+            window_start, window_end, alias="p"
+        )
+        catalog_window_sql, catalog_window_params = _comment_date_window_predicate(
+            window_start, window_end, alias="p", column=posted_at_column
+        )
         sql = f"""
         with saved_posts as (
           select
@@ -961,7 +1071,7 @@ def _instagram_social_account_comment_target_shortcodes(
             {reported_comments_expr}::bigint as reported_comments
           from social.instagram_posts p
           where {owner_match_clause}
-            and nullif(p.shortcode, '') is not null
+            and nullif(p.shortcode, '') is not null{owner_window_sql}
           union all
           select
             null::uuid as post_id,
@@ -970,7 +1080,7 @@ def _instagram_social_account_comment_target_shortcodes(
             {catalog_reported_comments_expr}::bigint as reported_comments
           from social.{table} p
           where lower(p.source_account) = lower(%s)
-            and nullif(p.{source_id_column}::text, '') is not null
+            and nullif(p.{source_id_column}::text, '') is not null{catalog_window_sql}
         ),
         deduped_posts as (
           select
@@ -998,7 +1108,12 @@ def _instagram_social_account_comment_target_shortcodes(
         left join saved_comment_counts scc on scc.shortcode = dp.shortcode
         {order_sql}
         """
-        params: list[Any] = [normalized_account, normalized_account]
+        params: list[Any] = [
+            normalized_account,
+            *owner_window_params,
+            normalized_account,
+            *catalog_window_params,
+        ]
         if safe_limit is not None:
             sql += " limit %s"
             params.append(safe_limit)
@@ -1009,6 +1124,9 @@ def _instagram_social_account_comment_target_shortcodes(
             "(count(c.id) filter (where c.is_missing = false))::bigint"
             if _comment_lifecycle_supported("instagram_comments")
             else "count(c.id)::bigint"
+        )
+        owner_window_sql, owner_window_params = _comment_date_window_predicate(
+            window_start, window_end, alias="p"
         )
         sql = f"""
         with posts as (
@@ -1022,7 +1140,7 @@ def _instagram_social_account_comment_target_shortcodes(
           left join social.instagram_comments c on c.post_id = p.id
           where {owner_match_clause}
             and nullif(p.shortcode, '') is not null
-            and {reported_comments_expr} > 0
+            and {reported_comments_expr} > 0{owner_window_sql}
           group by p.shortcode, p.posted_at, p.comments_count, p.fb_comment_count, p.raw_data
         )
         select shortcode
@@ -1038,7 +1156,11 @@ def _instagram_social_account_comment_target_shortcodes(
           posted_at desc nulls last,
           shortcode desc
         """
-        params = [normalized_account, _instagram_comments_stale_after_hours()]
+        params = [
+            normalized_account,
+            *owner_window_params,
+            _instagram_comments_stale_after_hours(),
+        ]
         if safe_limit is not None:
             sql += " limit %s"
             params.append(safe_limit)
@@ -1050,6 +1172,8 @@ def _instagram_social_account_incomplete_comment_target_shortcodes(
     account_handle: str,
     *,
     limit: int | None,
+    date_start: str | None = None,
+    date_end: str | None = None,
 ) -> list[str]:
     """Return comments-tab incomplete post shortcodes for the account.
 
@@ -1061,6 +1185,13 @@ def _instagram_social_account_incomplete_comment_target_shortcodes(
 
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     safe_limit = None if limit is None else max(1, min(int(limit), 500))
+    window_start, window_end = _normalize_comment_date_window(date_start, date_end)
+    owner_window_sql, owner_window_params = _comment_date_window_predicate(
+        window_start, window_end, alias="p"
+    )
+    collaborator_window_sql, collaborator_window_params = _comment_date_window_predicate(
+        window_start, window_end, alias="p"
+    )
     owner_match_clause = _social_account_profile_owner_match_sql("instagram", alias="p")
     lifecycle_supported = _comment_lifecycle_supported("instagram_comments")
     active_condition = "c.is_missing is not true" if lifecycle_supported else "true"
@@ -1112,7 +1243,7 @@ def _instagram_social_account_incomplete_comment_target_shortcodes(
           group by shortcode
         ),
     """
-    params: list[Any] = [normalized_account]
+    params: list[Any] = [normalized_account, *owner_window_params]
     if collaborator_membership_available:
         collaborator_rows_sql = f"""
         collaborator_rows as materialized (
@@ -1128,7 +1259,7 @@ def _instagram_social_account_incomplete_comment_target_shortcodes(
           where m.collaborator_handle = %s
             and lower(p.source_account) <> %s
             and nullif(p.source_id, '') is not null
-            and {catalog_reported_comments_expr} > 0
+            and {catalog_reported_comments_expr} > 0{collaborator_window_sql}
         ),
         """
         deduped_rows_sql = """
@@ -1147,7 +1278,7 @@ def _instagram_social_account_incomplete_comment_target_shortcodes(
           group by shortcode
         ),
         """
-        params.extend([normalized_account, normalized_account])
+        params.extend([normalized_account, normalized_account, *collaborator_window_params])
     sql = f"""
         with owner_rows as materialized (
           select
@@ -1159,7 +1290,7 @@ def _instagram_social_account_incomplete_comment_target_shortcodes(
           from social.instagram_posts p
           where {owner_match_clause}
             and nullif(p.shortcode, '') is not null
-            and {reported_comments_expr} > 0
+            and {reported_comments_expr} > 0{owner_window_sql}
         ),
         {collaborator_rows_sql}
         {deduped_rows_sql}
@@ -1852,6 +1983,8 @@ def start_social_account_comments_scrape(
     comments_worker_count: int | None = None,
     comments_target_batch_size: int | None = None,
     cancel_active_before_relaunch: bool | None = None,
+    date_start: str | None = None,
+    date_end: str | None = None,
 ) -> dict[str, Any]:
     _sync_core_overrides()
     normalized_platform = _normalize_social_account_profile_platform(platform)
@@ -1859,6 +1992,9 @@ def start_social_account_comments_scrape(
     normalized_mode = str(mode or "").strip().lower()
     normalized_refresh_policy = str(refresh_policy or "stale_or_missing").strip().lower()
     normalized_target_filter = _normalize_instagram_comments_target_filter(target_filter)
+    window_start, window_end = _normalize_comment_date_window(date_start, date_end)
+    normalized_date_start = window_start.isoformat() if window_start is not None else None
+    normalized_date_end = window_end.isoformat() if window_end is not None else None
     public_comments_mode = comments_public_mode_from_config(
         {
             "comments_load_strategy": comments_load_strategy,
@@ -2010,6 +2146,8 @@ def start_social_account_comments_scrape(
                     )(
                         normalized_account,
                         limit=normalized_max_posts,
+                        date_start=normalized_date_start,
+                        date_end=normalized_date_end,
                     )
                 else:
                     target_source_ids = _room_callable(
@@ -2019,6 +2157,8 @@ def start_social_account_comments_scrape(
                         normalized_account,
                         limit=normalized_max_posts,
                         refresh_policy=normalized_refresh_policy,
+                        date_start=normalized_date_start,
+                        date_end=normalized_date_end,
                     )
                 if not target_source_ids:
                     message = (
@@ -2155,6 +2295,17 @@ def start_social_account_comments_scrape(
                 "instagram_scrape_mode": PUBLIC_COMMENTS_SCRAPE_MODE if public_comments_mode else None,
                 "comments_worker_count": requested_comments_worker_count,
                 "comments_target_batch_size": effective_comments_target_batch_size,
+                "date_start": normalized_date_start,
+                "date_end": normalized_date_end,
+                "target_window": (
+                    {
+                        "date_start": normalized_date_start,
+                        "date_end": normalized_date_end,
+                        "end_exclusive": True,
+                    }
+                    if (normalized_date_start is not None or normalized_date_end is not None)
+                    else None
+                ),
                 "launch_group_id": str(launch_group_id or "").strip() or None,
                 "required_worker_lane": required_worker_lane,
                 "required_execution_backend": required_execution_backend,
@@ -3054,8 +3205,12 @@ def preview_social_account_comments_scrape(
     refresh_policy: str = "stale_or_missing",
     target_filter: str | None = None,
     comments_load_strategy: str = "public_relay",
+    date_start: str | None = None,
+    date_end: str | None = None,
 ) -> dict[str, Any]:
     started_at = time_module.perf_counter()
+    # Validate the window eagerly so malformed input fails fast with a 400.
+    _normalize_comment_date_window(date_start, date_end)
     normalized_platform = _normalize_social_account_profile_platform(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     normalized_mode = str(mode or "").strip().lower()
@@ -3141,6 +3296,8 @@ def preview_social_account_comments_scrape(
             limit=None if max_posts is None else max(1, int(max_posts)),
             refresh_policy=normalized_refresh_policy,
             target_filter=normalized_target_filter,
+            date_start=date_start,
+            date_end=date_end,
         )
     timing = _metadata_dict(plan.get("timing"))
     timing["total_ms"] = round((time_module.perf_counter() - started_at) * 1000, 1)
@@ -5160,6 +5317,8 @@ def resume_social_account_comments_run(
         target_source_ids=remaining_target_source_ids,
         comments_worker_count=_normalize_non_negative_int(run_config.get("comments_worker_count")) or None,
         comments_target_batch_size=_normalize_non_negative_int(run_config.get("comments_target_batch_size")) or None,
+        date_start=(str(run_config.get("date_start")).strip() or None) if run_config.get("date_start") else None,
+        date_end=(str(run_config.get("date_end")).strip() or None) if run_config.get("date_end") else None,
     )
     payload.update(
         {

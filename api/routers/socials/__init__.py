@@ -3222,6 +3222,10 @@ class SocialAccountCommentsScrapeRequest(SourceScopedRequest):
     comments_load_strategy: Literal["cursor_api", "single_session_load_all", "public_relay"] = Field(
         default="public_relay"
     )
+    comments_worker_count: int | None = Field(default=None, ge=1, le=24)
+    comments_target_batch_size: int | None = Field(default=None, ge=1, le=500)
+    date_start: str | None = Field(default=None, max_length=64)
+    date_end: str | None = Field(default=None, max_length=64)
     allow_inline_dev_fallback: bool = Field(default=False)
     dry_run: bool = Field(default=False)
 
@@ -3231,6 +3235,17 @@ class SocialAccountCommentsScrapeRequest(SourceScopedRequest):
             raise ValueError("source_id is required for single_post comment scrapes")
         if self.mode == "single_post" and self.target_filter is not None:
             raise ValueError("target_filter is only supported for profile comment scrapes")
+        normalized_start = str(self.date_start or "").strip() or None
+        normalized_end = str(self.date_end or "").strip() or None
+        if normalized_start is not None or normalized_end is not None:
+            from trr_backend.socials.pipelines.comments.instagram import _normalize_comment_date_window
+
+            try:
+                _normalize_comment_date_window(normalized_start, normalized_end)
+            except ValueError as exc:
+                raise ValueError(str(exc)) from exc
+        self.date_start = normalized_start
+        self.date_end = normalized_end
         return self
 
 
@@ -4856,6 +4871,8 @@ async def post_social_account_comments_scrape_route(
                 refresh_policy=payload.refresh_policy,
                 target_filter=payload.target_filter,
                 comments_load_strategy=payload.comments_load_strategy,
+                date_start=payload.date_start,
+                date_end=payload.date_end,
             )
         except SocialIngestValidationError as exc:
             raise HTTPException(status_code=400, detail={"code": exc.code, "message": str(exc)}) from exc
@@ -4881,6 +4898,10 @@ async def post_social_account_comments_scrape_route(
             refresh_policy=payload.refresh_policy,
             target_filter=payload.target_filter,
             comments_load_strategy=payload.comments_load_strategy,
+            comments_worker_count=payload.comments_worker_count,
+            comments_target_batch_size=payload.comments_target_batch_size,
+            date_start=payload.date_start,
+            date_end=payload.date_end,
             initiated_by=(user or {}).get("email"),
             inline_worker_id=None if queue_enabled else f"api-background:comments:{platform}",
             allow_local_dev_inline_bypass=used_inline_fallback,
