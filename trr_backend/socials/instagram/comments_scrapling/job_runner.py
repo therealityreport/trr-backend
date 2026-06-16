@@ -85,6 +85,20 @@ _MIN_INCOMPLETE_RAISE_TARGETS = 1
 # social.scrape_jobs.metadata.comment_failures so a runaway shard cannot bloat
 # the job-metadata column.
 _COMMENT_FAILURE_METADATA_MAX_ENTRIES = 200
+# Public-blocked pause/early-stop thresholds.
+# A public_blocked post stays retryable and never completes. The current shard
+# stops early after _PUBLIC_BLOCKED_EARLY_STOP_CONSECUTIVE consecutive
+# public-blocked posts that recovered 0 comments. A run-level pause is
+# recommended (dispatch_control.pause_after_current) once EITHER:
+#   (a) >= _PUBLIC_BLOCKED_PAUSE_MIN_BLOCKED public-blocked posts AND 0 recovered
+#       comments, OR
+#   (b) >= _PUBLIC_BLOCKED_PAUSE_MIN_CHECKED checked posts AND the public-blocked
+#       ratio is >= _PUBLIC_BLOCKED_PAUSE_RATIO.
+_PUBLIC_BLOCKED_EARLY_STOP_CONSECUTIVE = 3
+_PUBLIC_BLOCKED_PAUSE_MIN_BLOCKED = 10
+_PUBLIC_BLOCKED_PAUSE_MIN_CHECKED = 25
+_PUBLIC_BLOCKED_PAUSE_RATIO = 0.70
+_PUBLIC_BLOCKED_SAMPLE_LIMIT = 20
 _RECONCILABLE_REPORTED_GAP_MAX_DEFAULT = 1
 _RECONCILABLE_REPORTED_GAP_RATIO_DEFAULT = 0.0
 _RECONCILABLE_REPORTED_GAP_REASONS = {
@@ -518,12 +532,39 @@ def _persisted_reply_topology_metadata(persisted: PersistedInstagramComments) ->
     }
 
 
+_EXPECTED_COUNT_UNKNOWN_FETCH_REASON = "expected_count_unknown"
+
+
+def _expected_count_is_unknown(result: Any) -> bool:
+    """True when the per-post expected comment count is degraded/unknown.
+
+    The fetcher sets either ``fetch_reason == "expected_count_unknown"`` or
+    ``diagnostic_metadata["expected_count_unknown"] is True`` when the job runner
+    fed it ``expected_count_unknown=True`` (the expected-count load was zeroed by
+    a transient DB error). A post in that state cannot be trusted to complete via
+    the unlimited-cap unknown-count fall-through, so completeness must stay
+    retryable for the whole shard.
+    """
+    fetch_reason = str(getattr(result, "fetch_reason", "") or "").strip()
+    if fetch_reason == _EXPECTED_COUNT_UNKNOWN_FETCH_REASON:
+        return True
+    metadata = _fetch_result_diagnostic_metadata(result) or {}
+    return bool(metadata.get("expected_count_unknown"))
+
+
 def _comments_scrape_is_complete(
     *,
     result: InstagramCommentsFetchResult,
     max_comments_per_post: int,
 ) -> bool:
     if result.fetch_failed or result.auth_failed:
+        return False
+    # When the expected-count map was zeroed by a transient DB error the
+    # fetcher reports an unknown expected count. A post whose true expected count
+    # is unknown for that reason must NOT be allowed to complete via the
+    # reported-count-is-None unlimited-cap fall-through (see the Bug #4 guard
+    # below) — it stays retryable until the count can be loaded again.
+    if _expected_count_is_unknown(result):
         return False
     if _result_parentless_reply_ids(result):
         return False
@@ -1623,6 +1664,91 @@ def _comment_completeness_metadata(samples: list[dict[str, Any]]) -> dict[str, A
     }
 
 
+def _public_blocked_pause_should_trigger(
+    *,
+    checked: int,
+    blocked: int,
+    recovered_comments: int,
+) -> bool:
+    """True when the run should pause after the current shard.
+
+    Pauses when EITHER:
+      (a) at least _PUBLIC_BLOCKED_PAUSE_MIN_BLOCKED public-blocked posts AND no
+          comments were recovered at all, OR
+      (b) at least _PUBLIC_BLOCKED_PAUSE_MIN_CHECKED checked posts AND the
+          public-blocked ratio is >= _PUBLIC_BLOCKED_PAUSE_RATIO.
+    """
+    checked = max(0, int(checked or 0))
+    blocked = max(0, int(blocked or 0))
+    recovered_comments = max(0, int(recovered_comments or 0))
+    if blocked >= _PUBLIC_BLOCKED_PAUSE_MIN_BLOCKED and recovered_comments <= 0:
+        return True
+    if checked >= _PUBLIC_BLOCKED_PAUSE_MIN_CHECKED and checked > 0:
+        ratio = blocked / checked
+        if ratio >= _PUBLIC_BLOCKED_PAUSE_RATIO:
+            return True
+    return False
+
+
+def _recommend_public_blocked_pause(
+    *,
+    repo: Any,
+    run_id: str | None,
+    job_id: str,
+    checked: int,
+    blocked_target_source_ids: Sequence[str],
+    recovered_comments: int,
+) -> None:
+    """Set dispatch_control.pause_after_current on the RUN config.
+
+    Best-effort. The dispatcher already honors dispatch_control.pause_after_current
+    (see social_season_analytics_impl._run_pause_after_current_requested), so this
+    only needs to persist the flag + audit detail. A transient DB error or any
+    other failure must never crash the shard, so failures are logged and swallowed.
+    """
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id:
+        return
+    blocked = [
+        str(item or "").strip() for item in (blocked_target_source_ids or []) if str(item or "").strip()
+    ]
+    blocked = list(dict.fromkeys(blocked))
+    checked = max(0, int(checked or 0))
+    recovered_comments = max(0, int(recovered_comments or 0))
+    ratio = round(len(blocked) / checked, 4) if checked > 0 else None
+    metadata_updates = {
+        "dispatch_control": {
+            "pause_after_current": True,
+            "pause_reason": "public_blocked_repeated",
+            "public_blocked": {
+                "checked": checked,
+                "blocked": len(blocked),
+                "recovered_comments": recovered_comments,
+                "ratio": ratio,
+                "blocked_target_source_ids_sample": blocked[:_PUBLIC_BLOCKED_SAMPLE_LIMIT],
+            },
+        }
+    }
+    try:
+        repo._merge_catalog_run_config(run_id=normalized_run_id, metadata_updates=metadata_updates)
+        logger.warning(
+            "Recommended pause for repeated public-blocked Instagram comments: job_id=%s run_id=%s "
+            "checked=%s blocked=%s recovered_comments=%s",
+            job_id,
+            normalized_run_id,
+            checked,
+            len(blocked),
+            recovered_comments,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Failed to set public-blocked pause on run config (continuing shard): job_id=%s run_id=%s",
+            job_id,
+            normalized_run_id,
+            exc_info=True,
+        )
+
+
 def _retry_rebalance_metadata(
     *,
     comments_shard_count: int,
@@ -1630,12 +1756,20 @@ def _retry_rebalance_metadata(
     processed_posts: int,
     incomplete_target_source_ids: list[str] | None = None,
     auth_failed_target_source_ids: list[str] | None = None,
+    public_blocked_target_source_ids: list[str] | None = None,
 ) -> dict[str, Any] | None:
     retry_targets = [
         str(item or "").strip() for item in (incomplete_target_source_ids or []) if str(item or "").strip()
     ]
     retry_targets.extend(
         str(item or "").strip() for item in (auth_failed_target_source_ids or []) if str(item or "").strip()
+    )
+    # Public-blocked shortcodes must stay retry targets even if processed_posts
+    # advanced past them, so re-add them explicitly before the unprocessed tail.
+    retry_targets.extend(
+        str(item or "").strip()
+        for item in (public_blocked_target_source_ids or [])
+        if str(item or "").strip()
     )
     retry_targets.extend(target_source_ids[max(0, processed_posts) :])
     remaining_targets = list(dict.fromkeys(retry_targets))
@@ -2608,6 +2742,10 @@ def _prior_retry_incomplete_targets(job: dict[str, Any]) -> list[str]:
     candidates: list[Any] = [
         metadata.get("incomplete_target_source_ids"),
         metadata.get("auth_failed_target_source_ids"),
+        # Public-blocked shortcodes must be re-queued on resume even if
+        # processed_posts advanced past them, so add them as an explicit candidate
+        # independent of the incomplete-target list.
+        metadata.get("public_blocked_target_source_ids"),
     ]
     runtime_metadata = metadata.get("runtime_metadata")
     if isinstance(runtime_metadata, dict):
@@ -2615,6 +2753,7 @@ def _prior_retry_incomplete_targets(job: dict[str, Any]) -> list[str]:
             [
                 runtime_metadata.get("incomplete_target_source_ids"),
                 runtime_metadata.get("auth_failed_target_source_ids"),
+                runtime_metadata.get("public_blocked_target_source_ids"),
             ]
         )
     retry_rebalance = metadata.get("retry_rebalance")
@@ -2959,16 +3098,24 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
             error_code="instagram_comments_targets_missing",
             retryable=False,
         )
+    # Only a transient DB-saturation error is allowed to zero the
+    # expected-count map. Any OTHER exception (a real SQL/attr bug) must
+    # propagate and crash the shard loudly instead of silently marking every
+    # post complete. When the map is degraded we flag it so completeness stays
+    # retryable for the whole shard (threaded into per-post fetch kwargs below).
+    expected_counts_degraded = False
     try:
         expected_comment_counts_by_shortcode = _load_expected_comment_counts(
             repo=repo,
             account_handle=account_handle,
             target_source_ids=target_source_ids,
         )
-    except Exception as exc:  # noqa: BLE001
+    except pg.DatabaseServiceUnavailableError as exc:
         expected_comment_counts_by_shortcode = {}
+        expected_counts_degraded = True
         logger.warning(
-            "Continuing Instagram comments job without expected comment counts: job_id=%s error=%s",
+            "Continuing Instagram comments job without expected comment counts after database saturation: "
+            "job_id=%s error=%s",
             job_id,
             exc,
             exc_info=True,
@@ -3046,6 +3193,18 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
     post_fetch_failure_metadata_by_shortcode: dict[str, dict[str, Any]] = {}
     auth_failed_target_source_ids: list[str] = []
     auth_failed_fetch_reasons: dict[str, str] = {}
+    # Public-blocked accumulation. A public_blocked post stays retryable, is
+    # never marked complete, and never writes missing-comment markers. When the
+    # blocked posts accumulate past either threshold we recommend pausing the run
+    # (dispatch_control.pause_after_current) so a human can intervene instead of
+    # burning the whole shard list against a hard public block.
+    public_blocked_target_source_ids: list[str] = []
+    public_blocked_fetch_reasons: dict[str, str] = {}
+    public_blocked_zero_comment_count = 0
+    public_blocked_consecutive_zero_comment_count = 0
+    public_blocked_checked_count = 0
+    public_blocked_recovered_comments = 0
+    public_blocked_pause_recommended = False
     consecutive_post_auth_failures = 0
     consecutive_post_fetch_failures = 0
     successful_target_fetches = 0
@@ -3169,6 +3328,15 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
             "coauthor_status_only_target_source_ids": list(dict.fromkeys(coauthor_status_only_target_source_ids)),
             "auth_failed_target_source_ids": list(dict.fromkeys(auth_failed_target_source_ids)),
             "auth_failed_fetch_reasons": dict(auth_failed_fetch_reasons),
+            # Public-blocked retry/pause accumulation surfaced for the run-level
+            # recompute helper and dispatcher pause checks.
+            "public_blocked_target_source_ids": list(dict.fromkeys(public_blocked_target_source_ids)),
+            "public_blocked_fetch_reasons": dict(public_blocked_fetch_reasons),
+            "public_blocked_zero_comment_count": public_blocked_zero_comment_count,
+            "public_blocked_consecutive_zero_comment_count": public_blocked_consecutive_zero_comment_count,
+            "public_blocked_checked_count": public_blocked_checked_count,
+            "public_blocked_recovered_comments": public_blocked_recovered_comments,
+            "public_blocked_pause_recommended": public_blocked_pause_recommended,
             "target_metadata_summary": {
                 "loaded": bool(target_metadata_by_shortcode),
                 "count": len(target_metadata_by_shortcode),
@@ -3241,6 +3409,12 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
         # reads the live values and _maybe_refresh_warmup() writes propagate.
         nonlocal posts_since_last_warmup, mid_run_warmup_count, last_mid_run_warmup_reason
         nonlocal failed_comment_ids_truncated, incomplete_retry_stall_metadata
+        # Public-blocked counters are reassigned inside the post loop, so they
+        # must be nonlocal for progress_metadata_common()/terminal metadata to read
+        # the live values. The list accumulators are mutated in place and do not.
+        nonlocal public_blocked_zero_comment_count, public_blocked_consecutive_zero_comment_count
+        nonlocal public_blocked_checked_count, public_blocked_recovered_comments
+        nonlocal public_blocked_pause_recommended
 
         if public_comments_mode:
             session = SimpleNamespace(
@@ -3548,6 +3722,11 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                     "fetch_replies": fetch_replies,
                     "expected_comment_count": expected_comment_counts_by_shortcode.get(shortcode),
                     "load_strategy": comments_load_strategy,
+                    # Tell the fetcher the expected-count map was zeroed by a
+                    # transient DB error so it can set fetch_reason/diagnostic
+                    # "expected_count_unknown" and keep the post retryable instead of
+                    # being treated as a legitimate unknown-count.
+                    "expected_count_unknown": expected_counts_degraded,
                 }
                 target_metadata = target_metadata_by_shortcode.get(shortcode)
                 if target_metadata:
@@ -4039,10 +4218,25 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                         )
                         continue
                     if public_comments_mode and normalized_fetch_reason == "public_blocked":
+                        # A public_blocked post stays retryable. It is appended to
+                        # BOTH the incomplete-target metadata AND the public-blocked
+                        # accumulators, never written as a missing-comment marker, and
+                        # never classified complete. It emits progress with
+                        # completion_reason="public_blocked_requires_retry".
+                        recovered_comments = len(result.comments or [])
                         if normalized_incomplete_shortcode:
                             incomplete_target_source_ids.append(normalized_incomplete_shortcode)
                             incomplete_fetch_reasons[normalized_incomplete_shortcode] = normalized_fetch_reason
                             zero_comment_incomplete_target_source_ids.append(normalized_incomplete_shortcode)
+                            public_blocked_target_source_ids.append(normalized_incomplete_shortcode)
+                            public_blocked_fetch_reasons[normalized_incomplete_shortcode] = normalized_fetch_reason
+                        public_blocked_checked_count += 1
+                        public_blocked_recovered_comments += recovered_comments
+                        if recovered_comments <= 0:
+                            public_blocked_zero_comment_count += 1
+                            public_blocked_consecutive_zero_comment_count += 1
+                        else:
+                            public_blocked_consecutive_zero_comment_count = 0
                         total_elapsed_ms = int((time.monotonic() - post_started_at) * 1000)
                         post_latency_samples.append(
                             {
@@ -4050,14 +4244,14 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                                 "fetch_elapsed_ms": fetch_elapsed_ms,
                                 "persist_elapsed_ms": 0,
                                 "total_elapsed_ms": total_elapsed_ms,
-                                "comments_fetched": 0,
-                                "observed_comment_count": 0,
+                                "comments_fetched": recovered_comments,
+                                "observed_comment_count": _extract_observed_comment_count(result),
                                 "top_level_comment_count": 0,
                                 "comments_upserted": 0,
                                 "comments_marked_missing": 0,
                                 "fetch_reason": result.fetch_reason,
                                 "is_complete": False,
-                                "completion_reason": "public_blocked_requires_approval",
+                                "completion_reason": "public_blocked_requires_retry",
                                 "reported_comment_count": _extract_reported_comment_count(result),
                                 "comments_load_strategy": comments_load_strategy,
                                 "comments_session_scope": comments_session_scope,
@@ -4066,6 +4260,23 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                             }
                         )
                         processed_posts += 1
+                        # Pause evaluation: once either threshold is met, recommend
+                        # pausing the run after the current shard. The run-config update
+                        # is best-effort — a transient DB error must not crash the shard.
+                        if not public_blocked_pause_recommended and _public_blocked_pause_should_trigger(
+                            checked=public_blocked_checked_count,
+                            blocked=len(public_blocked_target_source_ids),
+                            recovered_comments=public_blocked_recovered_comments,
+                        ):
+                            public_blocked_pause_recommended = True
+                            _recommend_public_blocked_pause(
+                                repo=repo,
+                                run_id=run_id,
+                                job_id=job_id,
+                                checked=public_blocked_checked_count,
+                                blocked_target_source_ids=public_blocked_target_source_ids,
+                                recovered_comments=public_blocked_recovered_comments,
+                            )
                         activity = {
                             "phase": "comments_scrapling_running",
                             "posts_checked": processed_posts,
@@ -4081,6 +4292,14 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                             auth_failed_target_source_ids=auth_failed_target_source_ids,
                             auth_failed_fetch_reasons=auth_failed_fetch_reasons,
                         )
+                        activity["completion_reason"] = "public_blocked_requires_retry"
+                        activity["public_blocked"] = {
+                            "checked": public_blocked_checked_count,
+                            "blocked": len(public_blocked_target_source_ids),
+                            "recovered_comments": public_blocked_recovered_comments,
+                            "consecutive_zero": public_blocked_consecutive_zero_comment_count,
+                            "pause_recommended": public_blocked_pause_recommended,
+                        }
                         lifecycle.emit_job_progress(
                             job_id=job_id,
                             stage=stage,
@@ -4096,6 +4315,24 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                             force=index == len(target_source_ids),
                             extra_metadata=progress_metadata_common(),
                         )
+                        # Early stop: bail out of the current shard once enough
+                        # consecutive public-blocked posts recover 0 comments — the
+                        # remaining targets stay retryable (resume re-adds them from
+                        # public_blocked_target_source_ids) instead of burning time.
+                        if (
+                            public_blocked_consecutive_zero_comment_count
+                            >= _PUBLIC_BLOCKED_EARLY_STOP_CONSECUTIVE
+                        ):
+                            logger.warning(
+                                "Stopping Instagram comments shard early after %s consecutive public-blocked "
+                                "zero-recovery posts: job_id=%s run_id=%s checked=%s blocked=%s",
+                                public_blocked_consecutive_zero_comment_count,
+                                job_id,
+                                run_id,
+                                public_blocked_checked_count,
+                                len(public_blocked_target_source_ids),
+                            )
+                            break
                         continue
                     raise CommentsScraplingRuntimeError(
                         f"Instagram comments fetch failed for {shortcode}.",
@@ -4686,6 +4923,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                     processed_posts=processed_posts,
                     incomplete_target_source_ids=incomplete_target_source_ids,
                     auth_failed_target_source_ids=[] if single_session_load_all else auth_failed_target_source_ids,
+                    public_blocked_target_source_ids=public_blocked_target_source_ids,
                 ),
             },
             last_error_code="instagram_comments_scrapling_cancelled",
@@ -4721,6 +4959,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
             processed_posts=processed_posts,
             incomplete_target_source_ids=retry_incomplete_targets or incomplete_target_source_ids,
             auth_failed_target_source_ids=[] if single_session_load_all else auth_failed_target_source_ids,
+            public_blocked_target_source_ids=public_blocked_target_source_ids,
         )
         retry_target_source_ids = retry_incomplete_targets or [
             str(item or "").strip()
