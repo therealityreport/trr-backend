@@ -2368,12 +2368,21 @@ def _advisory_lock_keys_for(key: str) -> tuple[int, int]:
 
 
 def _try_advisory_lock_pace(*, key: str, delay_seconds: float, deadline: float | None) -> dict[str, Any]:
-    """Phase 5.2: try cross-container advisory-lock pacing first.
+    """Cross-container minimum-spacing pace via a DB-clock slot reservation.
 
-    Returns ``{"acquired": bool, "paced": bool, "wait_ms": int, "error": str|None}``.
-    On any DB-side error, ``acquired`` is False and the caller falls back to
-    the per-container file-lock path. Wall-clock waits are still respected
-    inside the lock so the rate-limit semantics stay identical.
+    Phase 6 (throughput): replaces the previous advisory-lock-with-in-lock-sleep.
+    A single atomic ``INSERT ... ON CONFLICT DO UPDATE ... RETURNING`` claims the
+    next request slot — spaced ``delay_seconds`` after the prior claim, using the
+    DB clock (``now()``) so timestamps are comparable across containers — and the
+    wait then happens OUTSIDE the row lock and AFTER the pooled connection is
+    returned. This removes the serialized critical section (and the connection
+    pinned for the full delay) that capped the lane while preserving the same
+    average request rate (ban/429 exposure unchanged). The mode is still named
+    ``advisory`` for config back-compat; it now means "DB-coordinated".
+
+    Returns ``{"acquired", "paced", "wait_ms", "error", "cooldown_blocked"}``.
+    On any DB-side error, ``acquired`` is False so the caller falls back to the
+    per-container file-lock path.
     """
     delay = max(0.0, float(delay_seconds or 0))
     started_at = time.monotonic()
@@ -2385,31 +2394,47 @@ def _try_advisory_lock_pace(*, key: str, delay_seconds: float, deadline: float |
             "error": None,
             "cooldown_blocked": True,
         }
-    namespace, lock_key = _advisory_lock_keys_for(key)
     try:
         from trr_backend.db import pg
     except Exception as exc:  # noqa: BLE001
         return {"acquired": False, "paced": True, "wait_ms": 0, "error": f"pg_import_failed:{exc}"}
+    remaining_seconds = 0.0
     try:
-        with pg.db_connection(label="instagram-comments-rate-limit-advisory", pool_name="social_control") as conn:
+        with pg.db_connection(label="instagram-comments-rate-limit-pace", pool_name="social_control") as conn:
             with pg.db_cursor(conn=conn) as cur:
-                cur.execute("select pg_advisory_lock(%s::int, %s::int)", (namespace, lock_key))
-                wait_ms = int((time.monotonic() - started_at) * 1000)
-                try:
-                    if delay > 0:
-                        deadline_remaining = _deadline_remaining_seconds(deadline)
-                        if deadline_remaining is not None and deadline_remaining <= 0:
-                            return {"acquired": True, "paced": False, "wait_ms": wait_ms, "error": None}
-                        sleep_for = delay
-                        if deadline_remaining is not None:
-                            sleep_for = min(sleep_for, deadline_remaining)
-                        if sleep_for > 0:
-                            time.sleep(sleep_for)
-                    return {"acquired": True, "paced": True, "wait_ms": wait_ms, "error": None}
-                finally:
-                    cur.execute("select pg_advisory_unlock(%s::int, %s::int)", (namespace, lock_key))
+                # Atomic slot reservation. The row-level lock on the upsert is the
+                # cross-container serializer; it is held only for this statement,
+                # NOT for the subsequent wait. greatest(..., now()) floors the slot
+                # at the present so idle periods reset spacing (no unbounded drift)
+                # and uses the DB clock for cross-container comparability.
+                cur.execute(
+                    """
+                    insert into social.ig_comment_rate_pace as p (rate_key, last_start)
+                    values (%s, now())
+                    on conflict (rate_key) do update
+                       set last_start = greatest(p.last_start + make_interval(secs => %s), now())
+                    returning extract(epoch from (last_start - now()))::float8
+                    """,
+                    (str(key or "instagram"), delay),
+                )
+                row = cur.fetchone()
+                if row and row[0] is not None:
+                    remaining_seconds = max(0.0, float(row[0]))
     except Exception as exc:  # noqa: BLE001
         return {"acquired": False, "paced": True, "wait_ms": 0, "error": str(exc)}
+    # Connection returned to the pool above; wait OUTSIDE the lock so concurrent
+    # workers' waits overlap instead of serializing through one critical section.
+    wait_ms = int((time.monotonic() - started_at) * 1000)
+    if remaining_seconds > 0:
+        deadline_remaining = _deadline_remaining_seconds(deadline)
+        if deadline_remaining is not None:
+            if deadline_remaining <= 0:
+                return {"acquired": True, "paced": False, "wait_ms": wait_ms, "error": None}
+            if remaining_seconds > deadline_remaining:
+                time.sleep(deadline_remaining)
+                return {"acquired": True, "paced": False, "wait_ms": wait_ms, "error": None}
+        time.sleep(remaining_seconds)
+    return {"acquired": True, "paced": True, "wait_ms": wait_ms, "error": None}
 
 
 def _pace_global_api_request(*, key: str, delay_seconds: float, deadline: float | None = None) -> bool:
@@ -2656,7 +2681,7 @@ class InstagramCommentsScraplingFetcher:
             minimum=0.0,
             maximum=30.0,
         )
-        self._global_api_delay_seconds = (
+        _base_global_api_delay_seconds = (
             _resolve_positive_float_env(
                 "SOCIAL_INSTAGRAM_COMMENT_GLOBAL_DELAY_SEC",
                 self._api_delay_seconds,
@@ -2664,6 +2689,23 @@ class InstagramCommentsScraplingFetcher:
                 maximum=60.0,
             )
             if _env_truthy("SOCIAL_INSTAGRAM_COMMENT_GLOBAL_THROTTLE", True)
+            else 0.0
+        )
+        # T2: the public backfill runs a single egress IP (no proxy), so the
+        # global delay IS the binding throughput lever (1/delay req/s). Allow a
+        # public-specific override so operators can tune req/s against the 429
+        # rate as the explicit speed<->ban tradeoff. Default == base, so
+        # non-public behavior is byte-for-byte unchanged; when the global throttle
+        # is disabled the override cannot re-enable it.
+        self._public_global_delay_env = os.getenv("SOCIAL_INSTAGRAM_PUBLIC_COMMENTS_GLOBAL_DELAY_SEC")
+        self._global_api_delay_seconds = (
+            _resolve_positive_float_env(
+                "SOCIAL_INSTAGRAM_PUBLIC_COMMENTS_GLOBAL_DELAY_SEC",
+                _base_global_api_delay_seconds,
+                minimum=0.0,
+                maximum=60.0,
+            )
+            if _base_global_api_delay_seconds > 0
             else 0.0
         )
         self._comment_sort_order = resolve_comment_sort_order()
@@ -2785,6 +2827,7 @@ class InstagramCommentsScraplingFetcher:
             "proxy_session_mode": self._proxy_session_mode,
             "api_delay_seconds": self._api_delay_seconds,
             "global_api_delay_seconds": self._global_api_delay_seconds,
+            "public_global_delay_env": self._public_global_delay_env,
             "comment_sort_order": self._comment_sort_order,
             "global_rate_limit_key": self._global_rate_limit_key,
             "global_rate_limit": {
@@ -8108,10 +8151,15 @@ class InstagramCommentsScraplingFetcher:
                 )
                 sleep_for = sleep_seconds
                 if status_code == 429:
+                    # The recorded cross-process cooldown is always the inflated
+                    # anti-ban value max(backoff*multiplier, floor) — other workers
+                    # honor it regardless of this response's Retry-After.
                     cooldown_seconds = max(
                         sleep_seconds * self._rate_limit_cooldown_multiplier,
                         self._rate_limit_cooldown_min_seconds,
                     )
+                    # Bug #9: wrap so a transient FS error can't turn a recoverable
+                    # 429 into a crash.
                     try:
                         _record_global_api_cooldown(
                             key=self._global_rate_limit_key,
@@ -8119,7 +8167,14 @@ class InstagramCommentsScraplingFetcher:
                         )
                     except OSError:
                         logger.debug("failed to record global api cooldown", exc_info=True)
-                    sleep_for = max(sleep_seconds, cooldown_seconds)
+                    # Bug #5: honor the cooldown IN-PROCESS (previously only the
+                    # short backoff was slept, and the file cooldown was skipped
+                    # entirely when the global throttle was disabled — so a 429
+                    # hammered IG). But when the server gave an explicit Retry-After
+                    # that hint is authoritative, so respect it rather than inflating
+                    # to the floor; only apply the floor when there is no hint.
+                    if retry_after is None:
+                        sleep_for = max(sleep_seconds, cooldown_seconds)
                 if not await _sleep_before_deadline(sleep_for, deadline):
                     return _deadline_response(attempt)
                 continue

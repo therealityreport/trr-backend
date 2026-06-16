@@ -2914,13 +2914,15 @@ def test_single_session_load_all_memory_guardrail_stops_retryable(monkeypatch: p
         )
     )
 
-    assert [comment.comment_id for comment in result.comments] == ["api-1", "api-2"]
+    # Bug #10b: the guardrail trips at exactly max_in_memory_rows (inclusive cap),
+    # so only the first row is retained before the loop stops.
+    assert [comment.comment_id for comment in result.comments] == ["api-1"]
     assert result.fetch_failed is True
     assert result.retryable is True
     assert result.fetch_reason == "memory_guardrail_reached"
     assert result.diagnostic_metadata["memory_guardrail"] == {
         "max_in_memory_rows": 1,
-        "current_rows": 2,
+        "current_rows": 1,
         "reached": True,
         "stop_reason": "memory_guardrail_reached",
     }
@@ -3303,6 +3305,10 @@ def test_advisory_api_pacing_uses_social_control_pool(monkeypatch: pytest.Monkey
         def execute(self, _sql: str, _params: Any = None) -> None:
             return None
 
+        def fetchone(self) -> list[float]:
+            # Reservation upsert returns remaining-seconds; 0 ⇒ no wait.
+            return [0.0]
+
     @contextmanager
     def fake_db_connection(*, label: str, pool_name: str = "default"):
         calls.append((label, pool_name))
@@ -3321,7 +3327,7 @@ def test_advisory_api_pacing_uses_social_control_pool(monkeypatch: pytest.Monkey
     assert result["acquired"] is True
     assert result["paced"] is True
     assert result["error"] is None
-    assert calls == [("instagram-comments-rate-limit-advisory", "social_control")]
+    assert calls == [("instagram-comments-rate-limit-pace", "social_control")]
 
 
 # ---------------------------------------------------------------------------

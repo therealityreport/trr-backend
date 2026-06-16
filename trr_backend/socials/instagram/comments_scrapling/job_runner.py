@@ -3722,12 +3722,14 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                     "fetch_replies": fetch_replies,
                     "expected_comment_count": expected_comment_counts_by_shortcode.get(shortcode),
                     "load_strategy": comments_load_strategy,
-                    # Tell the fetcher the expected-count map was zeroed by a
-                    # transient DB error so it can set fetch_reason/diagnostic
-                    # "expected_count_unknown" and keep the post retryable instead of
-                    # being treated as a legitimate unknown-count.
-                    "expected_count_unknown": expected_counts_degraded,
                 }
+                if expected_counts_degraded:
+                    # The expected-count map was zeroed by a transient DB error, so
+                    # tell the fetcher to set fetch_reason/diagnostic
+                    # "expected_count_unknown" and keep the post retryable instead of
+                    # treating it as a legitimate unknown-count. Added only on the
+                    # degraded path so the common-path fetch contract is unchanged.
+                    fetch_kwargs["expected_count_unknown"] = True
                 target_metadata = target_metadata_by_shortcode.get(shortcode)
                 if target_metadata:
                     fetch_kwargs["target_metadata"] = dict(target_metadata)
