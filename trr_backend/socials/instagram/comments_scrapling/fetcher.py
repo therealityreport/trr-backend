@@ -3109,6 +3109,49 @@ class InstagramCommentsScraplingFetcher:
         reply_only: bool = False,
         target_metadata: Mapping[str, Any] | None = None,
         load_strategy: str = _COMMENTS_LOAD_STRATEGY_CURSOR_API,
+        expected_count_unknown: bool = False,
+    ) -> InstagramCommentsFetchResult:
+        # Bug #2: accept the degraded-expected-counts signal from the job runner
+        # (set when _load_expected_comment_counts hit a transient DB error) and
+        # stamp it onto the result so completeness detection keeps the post
+        # retryable instead of completing via the reported-count-is-None path.
+        result = await self._fetch_comments_for_shortcode_impl(
+            shortcode,
+            max_comments=max_comments,
+            fetch_replies=fetch_replies,
+            expected_comment_count=expected_comment_count,
+            top_level_cursor=top_level_cursor,
+            top_level_cursor_param=top_level_cursor_param,
+            reply_resume_cursors=reply_resume_cursors,
+            reply_resume_cursor_params=reply_resume_cursor_params,
+            persisted_replies_by_parent=persisted_replies_by_parent,
+            persisted_top_level_comments=persisted_top_level_comments,
+            reply_only=reply_only,
+            target_metadata=target_metadata,
+            load_strategy=load_strategy,
+        )
+        if expected_count_unknown and isinstance(result, InstagramCommentsFetchResult):
+            meta = dict(result.diagnostic_metadata or {})
+            meta["expected_count_unknown"] = True
+            result.diagnostic_metadata = meta
+        return result
+
+    async def _fetch_comments_for_shortcode_impl(
+        self,
+        shortcode: str,
+        *,
+        max_comments: int,
+        fetch_replies: bool,
+        expected_comment_count: int | None = None,
+        top_level_cursor: str | None = None,
+        top_level_cursor_param: str | None = None,
+        reply_resume_cursors: dict[str, str] | None = None,
+        reply_resume_cursor_params: dict[str, str] | None = None,
+        persisted_replies_by_parent: dict[str, list[InstagramComment]] | None = None,
+        persisted_top_level_comments: list[InstagramComment] | None = None,
+        reply_only: bool = False,
+        target_metadata: Mapping[str, Any] | None = None,
+        load_strategy: str = _COMMENTS_LOAD_STRATEGY_CURSOR_API,
     ) -> InstagramCommentsFetchResult:
         requested_load_strategy = str(load_strategy or _COMMENTS_LOAD_STRATEGY_CURSOR_API).strip().lower()
         selected_load_strategy = normalize_comments_load_strategy(load_strategy)
