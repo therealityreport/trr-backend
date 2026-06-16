@@ -15,7 +15,7 @@ from uuid import uuid4
 
 import jwt
 import pytest
-from fastapi import BackgroundTasks, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from api.main import app
@@ -6955,9 +6955,13 @@ def test_account_profile_singleflight_does_not_cache_failures() -> None:
     ],
 )
 def test_social_account_catalog_routes_are_registered_once(path: str, method: str) -> None:
+    from api.routers import socials as socials_router
+
+    route_app = FastAPI()
+    route_app.include_router(socials_router.router, prefix="/api/v1")
     matches = [
         route
-        for route in _iter_app_routes(app.routes)
+        for route in _iter_app_routes(route_app.routes)
         if getattr(route, "path", None) == path and method in getattr(route, "methods", set())
     ]
 

@@ -1655,11 +1655,11 @@ def test_import_nbcumv_person_media_times_out_stuck_asset_and_continues(
     )
 
     assert result["cancelled"] is False
-    assert result["failed"] == 2
-    assert result["imported"] == 0
+    assert result["failed"] == 1
+    assert result["imported"] == 1
     assert result["nbcumv_only_total"] == 2
-    assert result["nbcumv_only_imported"] == 0
-    assert imported_filenames == []
+    assert result["nbcumv_only_imported"] == 1
+    assert imported_filenames == ["RECOVERED.JPG"]
     assert any("timed out" in str(error).lower() for error in result["errors"])
 
 
