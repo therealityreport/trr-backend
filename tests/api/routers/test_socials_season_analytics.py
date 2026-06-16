@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
@@ -6955,8 +6956,9 @@ def test_account_profile_singleflight_does_not_cache_failures() -> None:
     ],
 )
 def test_social_account_catalog_routes_are_registered_once(path: str, method: str) -> None:
-    from api.routers import socials as socials_router
+    from api.routers import socials as socials_router_module
 
+    socials_router = importlib.reload(socials_router_module)
     route_app = FastAPI()
     route_app.include_router(socials_router.router, prefix="/api/v1")
     matches = [
