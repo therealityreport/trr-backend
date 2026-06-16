@@ -22,6 +22,16 @@ from api.main import app
 from trr_backend.db.pg import DatabaseServiceUnavailableError
 
 
+def _iter_app_routes(routes: Any) -> list[Any]:
+    flattened: list[Any] = []
+    for route in routes:
+        flattened.append(route)
+        child_routes = getattr(route, "routes", None)
+        if child_routes:
+            flattened.extend(_iter_app_routes(child_routes))
+    return flattened
+
+
 def _make_admin_token(secret: str, subject: str = "admin-1") -> str:
     now = datetime.now(tz=UTC)
     payload = {
@@ -1252,6 +1262,7 @@ def test_queue_catalog_backfill_finalize_task_runs_finalize_and_clears_caches(
             "comments_worker_count": 4,
             "comments_enable_media_followups": True,
             "launch_group_id": "launch-group-1",
+            "force_catalog_rediscovery": False,
         }
     ]
     assert cleared == ["cleared"]
@@ -6946,7 +6957,7 @@ def test_account_profile_singleflight_does_not_cache_failures() -> None:
 def test_social_account_catalog_routes_are_registered_once(path: str, method: str) -> None:
     matches = [
         route
-        for route in app.routes
+        for route in _iter_app_routes(app.routes)
         if getattr(route, "path", None) == path and method in getattr(route, "methods", set())
     ]
 

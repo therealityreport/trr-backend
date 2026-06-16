@@ -4,7 +4,7 @@ from api.main import app
 
 
 def test_legacy_screenalytics_v2_paths_are_not_registered() -> None:
-    paths = {route.path for route in app.routes}
+    paths = {path for route in app.routes if (path := getattr(route, "path", None))}
 
     assert not any(path.startswith("/api/v1/screenalytics/v2") for path in paths)
 
