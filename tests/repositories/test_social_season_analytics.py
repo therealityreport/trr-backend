@@ -25165,6 +25165,7 @@ def test_batch_upsert_instagram_comments_persists_media_and_reply_metadata(
         conflict_col: list[str],
         conn: object | None = None,
         include_inserted_flag: bool = False,
+        coalesce_preserve_cols: object | None = None,
     ) -> list[dict[str, Any]]:
         captured_batches.append([dict(item) for item in batch])
         return [
@@ -25296,6 +25297,7 @@ def test_batch_upsert_instagram_comments_preserves_ranked_duplicate_metadata(
         conflict_col: list[str],
         conn: object | None = None,
         include_inserted_flag: bool = False,
+        coalesce_preserve_cols: object | None = None,
     ) -> list[dict[str, Any]]:
         captured_batches.append([dict(item) for item in batch])
         return [
@@ -25389,6 +25391,7 @@ def test_batch_upsert_instagram_comments_savepoints_media_enqueue_failure(
         conflict_col: list[str],
         conn: object | None = None,
         include_inserted_flag: bool = False,
+        coalesce_preserve_cols: object | None = None,
     ) -> list[dict[str, Any]]:
         return [
             {

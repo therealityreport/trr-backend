@@ -47,10 +47,20 @@ _FALLBACK_SHARED_CHROME_CDP_URLS = (
     "http://127.0.0.1:9422",
     "http://127.0.0.1:9222",
 )
+_RETIRED_CODEX_PROFILE_PREFIX = "codex" + "-agent"
+_LEGACY_MANAGED_CHROME_PROFILE_NAMES = frozenset(
+    {_RETIRED_CODEX_PROFILE_PREFIX, f"{_RETIRED_CODEX_PROFILE_PREFIX}-devtools"}
+)
+_MANAGED_CHROME_PROFILE_ENV_KEYS = (
+    "CODEX_CHROME_SEED_PROFILE_DIR",
+    "CODEX_CHROME_PROFILE_DIR",
+    "CHROME_AGENT_PROFILE_DIR",
+    "SOCIALBLADE_CHROME_PROFILE_DIR",
+)
 
 
 class VisibleManagedChromeProfileError(RuntimeError):
-    """Raised when the local visible managed Chrome is not the codex profile."""
+    """Raised when local SocialBlade Chrome profile routing is unsafe."""
 
 
 def _default_socialblade_cookie_file_path() -> Path:
@@ -225,9 +235,42 @@ def _run_visible_managed_chrome_guard(cdp_url: str) -> bool:
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or str(exc)).strip()
         raise VisibleManagedChromeProfileError(
-            f"Visible shared Chrome is not using the expected codex@thereality.report profile. {detail}"
+            "Visible shared Chrome is not using the expected openai-agent managed clone. "
+            "If the user asks for the Codex profile, use the real codex@thereality.report Chrome profile, "
+            f"not the managed clone. {detail}"
         ) from exc
     return True
+
+
+def _legacy_managed_chrome_profile_name(raw_value: str) -> str | None:
+    rendered = str(raw_value or "").strip()
+    if not rendered:
+        return None
+    name = Path(rendered).expanduser().name
+    if name in _LEGACY_MANAGED_CHROME_PROFILE_NAMES or name.startswith(f"{_RETIRED_CODEX_PROFILE_PREFIX}-"):
+        return name
+    return None
+
+
+def preflight_socialblade_chrome_profile(*, require_visible_managed: bool = False) -> None:
+    """Fail before a SocialBlade run can use the retired managed profile."""
+    violations: list[str] = []
+    for env_key in _MANAGED_CHROME_PROFILE_ENV_KEYS:
+        env_value = str(os.getenv(env_key) or "").strip()
+        legacy_name = _legacy_managed_chrome_profile_name(env_value)
+        if legacy_name:
+            violations.append(f"{env_key}={env_value!r} uses retired profile {legacy_name!r}")
+
+    if violations:
+        raise VisibleManagedChromeProfileError(
+            "SocialBlade Chrome profile preflight failed: "
+            + "; ".join(violations)
+            + ". Use the openai-agent managed clone for automation. "
+            "When the user says Codex profile, use the real codex@thereality.report Chrome profile."
+        )
+
+    if require_visible_managed:
+        _ensure_visible_managed_chrome_available(_socialblade_visible_chrome_cdp_url())
 
 
 def _ensure_visible_managed_chrome_available(cdp_url: str) -> bool:
@@ -413,6 +456,7 @@ def refresh_socialblade_cookies(
     allow_headless_fallback: bool = True,
 ) -> dict[str, str]:
     del reason
+    preflight_socialblade_chrome_profile()
     visible_cdp_url = _socialblade_visible_chrome_cdp_url()
     auto_launched_visible_chrome = False
     try:

@@ -1121,7 +1121,11 @@ def scrape_socialblade_with_shared_browser_session(
     playwright: Any | None = None,
 ) -> dict[str, Any]:
     """Scrape SocialBlade via the visible shared Chrome session."""
-    from trr_backend.socials.socialblade.auth import _chrome_cdp_endpoint_reachable, _socialblade_visible_chrome_cdp_url
+    from trr_backend.socials.socialblade.auth import (
+        _chrome_cdp_endpoint_reachable,
+        _socialblade_visible_chrome_cdp_url,
+        preflight_socialblade_chrome_profile,
+    )
 
     if playwright is None:
         from playwright.sync_api import sync_playwright
@@ -1139,6 +1143,7 @@ def scrape_socialblade_with_shared_browser_session(
             "Visible shared Chrome session is not running on port 9222; "
             "start the manual browser session before retrying SocialBlade"
         )
+    preflight_socialblade_chrome_profile(require_visible_managed=True)
 
     browser = playwright.chromium.connect_over_cdp(cdp_url)
     try:
@@ -1171,6 +1176,9 @@ def scrape_socialblade(
     recovery fallbacks when the authenticated SocialBlade endpoints challenge
     the default fetch path.
     """
+    from trr_backend.socials.socialblade.auth import preflight_socialblade_chrome_profile
+
+    preflight_socialblade_chrome_profile()
     _log(f"Scraping SocialBlade for {platform} @{handle}")
     attempted_login_fallback = False
     first_payload: dict[str, Any] | None = None
@@ -1387,9 +1395,11 @@ async def _refresh_socialblade_cookies_via_visible_login_async() -> dict[str, st
         _cdp_send_command,
         _ensure_visible_managed_chrome_available,
         _socialblade_visible_chrome_cdp_url,
+        preflight_socialblade_chrome_profile,
     )
 
     cdp_url = _socialblade_visible_chrome_cdp_url()
+    preflight_socialblade_chrome_profile()
     _ensure_visible_managed_chrome_available(cdp_url)
     target = _cdp_http_json(cdp_url, "/json/new?https://socialblade.com/login", method="PUT")
     target_id = str(target.get("id") or "").strip()
@@ -1588,8 +1598,10 @@ def _refresh_socialblade_cookies_via_login(*, headless: bool | None = None) -> d
     from trr_backend.socials.socialblade.auth import (
         SOCIALBLADE_STEALTH_INIT_SCRIPT,
         SOCIALBLADE_STEALTH_USER_AGENT,
+        preflight_socialblade_chrome_profile,
     )
 
+    preflight_socialblade_chrome_profile()
     if headless is None:
         headless_raw = str(os.getenv("SOCIALBLADE_LOGIN_HEADLESS") or "true").strip().lower()
         headless = headless_raw not in {"0", "false", "off", "no"}

@@ -7,6 +7,25 @@ from typing import Any
 from trr_backend.db import pg
 from trr_backend.socials.instagram.scraper import InstagramComment
 
+# Author/url metadata columns the no-season comment upsert must not NULL-clobber
+# on a later metadata-poor pass (bug #3). Every name here is conditionally
+# written by the no-season payload builder below (gated on column existence), so
+# COALESCE preserves a previously-good value when an incoming pass omits it.
+# Deliberately excludes media_mirror_* (intentionally reset to None) and the
+# array columns media_urls/hosted_media_urls (which arrive as [] not NULL).
+_INSTAGRAM_COMMENT_COALESCE_PRESERVE_COLS: tuple[str, ...] = (
+    "author_profile_pic_url",
+    "author_profile_pic_url_hd",
+    "author_full_name",
+    "author_is_verified",
+    "author_fbid_v2",
+    "author_is_mentionable",
+    "author_is_private",
+    "author_latest_reel_media",
+    "author_profile_pic_id",
+    "comment_url",
+)
+
 
 @dataclass(slots=True)
 class PersistedInstagramComments:
@@ -742,6 +761,7 @@ def _persist_without_season_context(
             top_level.append(payload)
         else:
             payload["_parent_external_id"] = parent_external_id
+            payload["_reply_depth"] = reply_depth
             replies.append(payload)
 
     dedupe_payloads = getattr(repo, "_dedupe_instagram_comment_payloads_for_upsert", None)
@@ -751,11 +771,16 @@ def _persist_without_season_context(
 
     ext_to_db: dict[str, str] = {}
     upserted = 0
-    for batch in (top_level, replies):
-        if batch is replies:
-            for payload in batch:
-                parent_external_id = str(payload.pop("_parent_external_id", "") or "").strip()
-                payload["parent_comment_id"] = ext_to_db.get(parent_external_id)
+
+    def _upsert_batch(batch: list[dict[str, Any]]) -> tuple[int, int]:
+        """Run baseline/preserve/changed bookkeeping + upsert for one batch.
+
+        Records freshly-assigned DB ids into ``ext_to_db`` and returns the
+        (total, inserted) write counts. Author/url columns use COALESCE-preserve
+        so a metadata-poor pass cannot NULL-clobber prior good values (bug #3).
+        """
+        if not batch:
+            return 0, 0
         load_baseline = getattr(repo, "_load_instagram_comment_write_baseline", None)
         count_new_or_changed = getattr(repo, "_count_new_or_changed_instagram_comment_payloads", None)
         write_baseline = load_baseline(batch, conn=conn) if callable(load_baseline) and batch else {}
@@ -763,16 +788,13 @@ def _persist_without_season_context(
         if callable(preserve_ranked) and write_baseline:
             preserve_ranked(batch, write_baseline)
         batch_changed = count_new_or_changed(batch, write_baseline) if callable(count_new_or_changed) else None
-        rows = (
-            repo._pg_upsert_many(
-                "instagram_comments",
-                batch,
-                conflict_col=["post_id", "comment_id"],
-                conn=conn,
-                include_inserted_flag=True,
-            )
-            if batch
-            else []
+        rows = repo._pg_upsert_many(
+            "instagram_comments",
+            batch,
+            conflict_col=["post_id", "comment_id"],
+            conn=conn,
+            include_inserted_flag=True,
+            coalesce_preserve_cols=_INSTAGRAM_COMMENT_COALESCE_PRESERVE_COLS,
         )
         batch_total, batch_inserted = _upsert_write_counts(rows)
         for row in rows:
@@ -780,6 +802,67 @@ def _persist_without_season_context(
             db_id = str(row.get("id") or "").strip()
             if ext_id and db_id:
                 ext_to_db[ext_id] = db_id
-        upserted += batch_total
         _record_comment_write_counts(persist_stats, total=batch_total, inserted=batch_inserted, changed=batch_changed)
+        return batch_total, batch_inserted
+
+    # Phase 1: top-level comments first so their DB ids seed ext_to_db.
+    top_total, _ = _upsert_batch(top_level)
+    upserted += top_total
+
+    # Phase 2 (bug #10c): seed ext_to_db from the DB for any reply parent that is
+    # not resolvable from this call alone, so a reply whose parent was persisted
+    # in an earlier pass keeps its parent_comment_id instead of dropping to NULL.
+    # A parent is resolvable in-batch when its external id is the comment_id of a
+    # top-level OR reply payload in this call (depth>=2 parents are themselves new
+    # replies here), so those are excluded to avoid a redundant DB round-trip.
+    in_batch_external_ids = {
+        str(payload.get("comment_id") or "").strip()
+        for payload in (*top_level, *replies)
+        if str(payload.get("comment_id") or "").strip()
+    }
+    missing_parent_externals = sorted(
+        {
+            parent_ext
+            for payload in replies
+            if (parent_ext := str(payload.get("_parent_external_id") or "").strip())
+            and parent_ext not in ext_to_db
+            and parent_ext not in in_batch_external_ids
+        }
+    )
+    if missing_parent_externals:
+        existing_parent_rows = pg.fetch_all(
+            """
+            select comment_id, id::text as id
+            from social.instagram_comments
+            where post_id = %s
+              and comment_id = any(%s)
+            """,
+            [post_id, missing_parent_externals],
+            conn=conn,
+        )
+        for row in existing_parent_rows or []:
+            ext_id = str(row.get("comment_id") or "").strip()
+            db_id = str(row.get("id") or "").strip()
+            if ext_id and db_id:
+                ext_to_db[ext_id] = db_id
+
+    # Phase 3 (bug #10c): upsert replies grouped by ascending reply_depth so a
+    # reply-of-reply whose immediate parent is itself a new reply in this batch
+    # gets re-resolved from the freshly-built ext_to_db before its own upsert.
+    replies_by_depth: dict[int, list[dict[str, Any]]] = {}
+    for payload in replies:
+        depth = max(1, int(payload.pop("_reply_depth", 1) or 1))
+        replies_by_depth.setdefault(depth, []).append(payload)
+    for depth in sorted(replies_by_depth):
+        depth_batch = replies_by_depth[depth]
+        for payload in depth_batch:
+            parent_external_id = str(payload.pop("_parent_external_id", "") or "").strip()
+            # Only refresh parent_comment_external_id when the column is present
+            # (queryable-columns already added the key); never inject a column
+            # the DB lacks, since the upsert derives columns from payloads[0].
+            if "parent_comment_external_id" in payload and not payload.get("parent_comment_external_id"):
+                payload["parent_comment_external_id"] = parent_external_id or None
+            payload["parent_comment_id"] = ext_to_db.get(parent_external_id)
+        depth_total, _ = _upsert_batch(depth_batch)
+        upserted += depth_total
     return upserted

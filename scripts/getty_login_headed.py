@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Launch a HEADED Playwright Chromium browser with the codex-agent Chrome profile
+Launch a HEADED Playwright Chromium browser with the openai-agent Chrome profile
 and navigate to the Getty Images sign-in page.
 
 The user logs in manually. Once authenticated, the Chrome profile persists the
@@ -22,7 +22,7 @@ from pathlib import Path
 _project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_project_root))
 
-PROFILE_DIR = Path.home() / ".chrome-profiles" / "codex-agent"
+PROFILE_DIR = Path.home() / ".chrome-profiles" / "openai-agent"
 GETTY_SIGN_IN_URL = "https://www.gettyimages.com/sign-in"
 
 

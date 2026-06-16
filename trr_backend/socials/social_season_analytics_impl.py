@@ -19528,6 +19528,49 @@ def _shared_account_frontier_lease_deadline(platform: str) -> datetime:
     return _now_utc() + timedelta(seconds=safe_lease_seconds)
 
 
+# Author/url metadata columns that a later metadata-poor Instagram-comment pass
+# must not clobber with NULL. Every name here is conditionally written by the
+# Instagram comment payload builders (gated on column existence), so COALESCE
+# preserves a previously-good value when the incoming pass omits it. Deliberately
+# excludes media_mirror_* (intentionally reset to None) and the array columns
+# media_urls/hosted_media_urls (which arrive as [] rather than NULL).
+_INSTAGRAM_COMMENT_COALESCE_PRESERVE_COLS: tuple[str, ...] = (
+    "author_profile_pic_url",
+    "author_profile_pic_url_hd",
+    "author_full_name",
+    "author_is_verified",
+    "author_fbid_v2",
+    "author_is_mentionable",
+    "author_is_private",
+    "author_latest_reel_media",
+    "author_profile_pic_id",
+    "comment_url",
+)
+
+
+def _build_upsert_update_clause(
+    table: str,
+    updates: list[str],
+    coalesce_preserve_cols: Sequence[str] | None,
+) -> str:
+    """Render the ``ON CONFLICT DO UPDATE SET`` clause for ``_pg_upsert_many``.
+
+    For each update column, emit ``c = EXCLUDED.c`` by default. When ``c`` is in
+    ``coalesce_preserve_cols`` emit ``c = COALESCE(EXCLUDED.c, social.<table>.c)``
+    instead so a metadata-poor later pass cannot clobber a previously-good value
+    with NULL. Passing ``None`` (the default) reproduces the legacy all-EXCLUDED
+    behavior for every other caller.
+    """
+    preserve = {str(column).strip() for column in (coalesce_preserve_cols or []) if str(column).strip()}
+    clauses: list[str] = []
+    for column in updates:
+        if column in preserve:
+            clauses.append(f"{column} = COALESCE(EXCLUDED.{column}, social.{table}.{column})")
+        else:
+            clauses.append(f"{column} = EXCLUDED.{column}")
+    return ", ".join(clauses)
+
+
 def _pg_upsert_many(
     table: str,
     payloads: list[dict[str, Any]],
@@ -19535,6 +19578,7 @@ def _pg_upsert_many(
     conflict_col: str | Sequence[str],
     conn: Any | None = None,
     include_inserted_flag: bool = False,
+    coalesce_preserve_cols: Sequence[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Batch upsert rows into social.{table} using execute_values."""
     if not payloads:
@@ -19567,7 +19611,7 @@ def _pg_upsert_many(
         values.append(tuple(adapted.get(column) for column in columns))
 
     col_list = ", ".join(columns)
-    update_sql = ", ".join(f"{column} = EXCLUDED.{column}" for column in updates)
+    update_sql = _build_upsert_update_clause(table, updates, coalesce_preserve_cols)
     conflict_list = ", ".join(conflict_cols)
     returning_sql = "*, (xmax = 0) as __trr_inserted" if include_inserted_flag else "*"
     sql = f"""
@@ -22492,6 +22536,7 @@ def _batch_upsert_instagram_comments(
             conflict_col=["post_id", "comment_id"],
             conn=conn,
             include_inserted_flag=True,
+            coalesce_preserve_cols=_INSTAGRAM_COMMENT_COALESCE_PRESERVE_COLS,
         )
         batch_total, batch_inserted = _upsert_write_counts(rows)
         for row_index, row in enumerate(rows, start=1):
@@ -22551,6 +22596,7 @@ def _batch_upsert_instagram_comments(
             conflict_col=["post_id", "comment_id"],
             conn=conn,
             include_inserted_flag=True,
+            coalesce_preserve_cols=_INSTAGRAM_COMMENT_COALESCE_PRESERVE_COLS,
         )
         batch_total, batch_inserted = _upsert_write_counts(rows)
         for row_index, row in enumerate(rows, start=1):

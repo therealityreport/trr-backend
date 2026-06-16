@@ -39,7 +39,7 @@ _IMDB_ALLOWED_CREW_SECTIONS = {
     "editorial department": "Editorial Department",
     "production department": "Production Department",
 }
-_DEFAULT_IMDB_BROWSER_PROFILE_DIR = Path.home() / ".chrome-profiles" / "codex-agent"
+_DEFAULT_IMDB_BROWSER_PROFILE_DIR = Path.home() / ".chrome-profiles" / "openai-agent"
 _BROWSER_RUNTIME_LOCK_NAME = "imdb-fullcredits-playwright"
 _SCRAPLING_RUNTIME_LOCK_NAME = "imdb-fullcredits-scrapling"
 
