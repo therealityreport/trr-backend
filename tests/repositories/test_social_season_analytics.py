@@ -4197,6 +4197,7 @@ def test_remote_auth_capability_from_workers_prefers_checkpoint_reason() -> None
 def test_probe_remote_auth_health_reports_instagram_structure_flags(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_SCRAPE_MODE", "authenticated")
     monkeypatch.setattr(
         social_repo,
         "_load_instagram_cookies_from_sources",
@@ -7746,7 +7747,7 @@ def test_instagram_comments_profile_shard_count_bounds(monkeypatch: pytest.Monke
     assert social_repo._instagram_comments_profile_shard_count(4874) == 8
 
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT", "999")
-    assert social_repo._instagram_comments_profile_shard_count(431) == 24
+    assert social_repo._instagram_comments_profile_shard_count(431) == 431
 
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT", "0")
     assert social_repo._instagram_comments_profile_shard_count(431) == 1
@@ -8762,6 +8763,12 @@ def test_start_social_account_comments_scrape_reuses_lock_connection_for_active_
         ],
     )
     monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: [{}])
+    monkeypatch.setattr(social_repo, "assert_worker_available_when_queue_enabled", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        instagram_comments_pipeline,
+        "assert_worker_available_when_queue_enabled",
+        lambda **_kwargs: None,
+    )
 
     with pytest.raises(social_repo.SocialIngestConflictError) as exc_info:
         social_repo.start_social_account_comments_scrape(
@@ -8800,6 +8807,12 @@ def test_start_social_account_comments_scrape_lock_contention_without_run_report
         lambda *_args, **_kwargs: [],
     )
     monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: [{}])
+    monkeypatch.setattr(social_repo, "assert_worker_available_when_queue_enabled", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        instagram_comments_pipeline,
+        "assert_worker_available_when_queue_enabled",
+        lambda **_kwargs: None,
+    )
 
     with pytest.raises(social_repo.SocialIngestConflictError) as exc_info:
         social_repo.start_social_account_comments_scrape(
@@ -10418,6 +10431,23 @@ def test_launch_social_account_catalog_backfill_instagram_starts_comments_after_
             "eligible_posts": 5,
             "missing_posts": 0,
             "stale_posts": 2,
+            },
+        )
+    monkeypatch.setattr(
+        social_repo,
+        "_instagram_materialization_state",
+        lambda *_args, **_kwargs: {
+            "platform": "instagram",
+            "account_handle": "bravotv",
+            "catalog_posts": 12,
+            "materialized_posts": 12,
+            "expected_total_posts": 12,
+            "completion_target_posts": 12,
+            "missing_catalog_posts": 0,
+            "missing_materialized_posts": 0,
+            "detail_gap_counts": _complete_instagram_detail_gap_counts(),
+            "details_complete": True,
+            "bootstrap_required": False,
         },
     )
     monkeypatch.setattr(
@@ -12669,6 +12699,23 @@ def test_launch_social_account_catalog_backfill_tolerates_comments_launch_in_pro
     monkeypatch.setattr(social_repo, "_shared_catalog_total_posts_for_window", lambda *_args, **_kwargs: 12)
     monkeypatch.setattr(social_repo, "_materialized_social_account_total_posts", lambda *_args, **_kwargs: 12)
     monkeypatch.setattr(social_repo, "_instagram_materialized_detail_gap_counts", _complete_instagram_detail_gap_counts)
+    monkeypatch.setattr(
+        social_repo,
+        "_instagram_materialization_state",
+        lambda *_args, **_kwargs: {
+            "platform": "instagram",
+            "account_handle": "bravotv",
+            "catalog_posts": 12,
+            "materialized_posts": 12,
+            "expected_total_posts": 12,
+            "completion_target_posts": 12,
+            "missing_catalog_posts": 0,
+            "missing_materialized_posts": 0,
+            "detail_gap_counts": _complete_instagram_detail_gap_counts(),
+            "details_complete": True,
+            "bootstrap_required": False,
+        },
+    )
     monkeypatch.setattr(
         social_repo,
         "_instagram_social_account_comments_target_counts",
@@ -14963,9 +15010,9 @@ def test_target_accounts_by_platform_uses_direct_targets_query(monkeypatch) -> N
     assert "from social.season_targets" in str(captured["sql"]).lower()
     assert payload["youtube"] == {"bravo", "wwhl"}
     assert payload["instagram"] == {"bravotv", "bravodailydish", "bravowwhl"}
-    assert payload["tiktok"] == set()
-    assert payload["twitter"] == set()
-    assert payload["facebook"] == {"default_fb"}
+    assert payload["tiktok"] == {"bravotv", "bravowwhl"}
+    assert payload["twitter"] == {"bravotv", "bravowwhl"}
+    assert payload["facebook"] == {"bravo", "default_fb"}
     assert payload["threads"] == {"default_threads", "bravotv", "bravodailydish", "bravowwhl"}
 
 
@@ -15007,9 +15054,9 @@ def test_target_accounts_by_platform_does_not_override_explicit_platform_rows(mo
 
     assert payload["youtube"] == {"bravo"}
     assert payload["instagram"] == {"bravotv", "bravodailydish", "bravowwhl"}
-    assert payload["tiktok"] == set()
-    assert payload["twitter"] == set()
-    assert payload["facebook"] == set()
+    assert payload["tiktok"] == {"bravotv", "bravowwhl"}
+    assert payload["twitter"] == {"bravotv", "bravowwhl"}
+    assert payload["facebook"] == {"bravo"}
     assert payload["threads"] == {"default_threads", "bravotv", "bravodailydish", "bravowwhl"}
 
 
@@ -15043,7 +15090,7 @@ def test_target_accounts_by_platform_enforces_rhoslc_instagram_account_floor(mon
     payload = social_repo._target_accounts_by_platform(season_id, source_scope="bravo")
 
     assert payload["instagram"] == {"bravotv", "bravodailydish", "bravowwhl"}
-    assert payload["tiktok"] == set()
+    assert payload["tiktok"] == {"bravotv", "bravowwhl"}
     assert payload["twitter"] == {"bravotv", "bravowwhl"}
     assert payload["threads"] == {"bravotv", "bravodailydish", "bravowwhl"}
 
@@ -15088,7 +15135,7 @@ def test_put_targets_enforces_bravo_core_platform_accounts_on_write(monkeypatch:
     assert payload["targets"] == [{"platform": "tiktok"}]
     assert captured_calls
     stored_accounts = json.loads(str(captured_calls[0][5]))
-    assert stored_accounts == ["bravotv"]
+    assert stored_accounts == ["bravotv", "bravowwhl"]
 
 
 def test_get_social_account_profile_summary_includes_avatar_url(monkeypatch: pytest.MonkeyPatch) -> None:

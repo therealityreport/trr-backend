@@ -1760,7 +1760,7 @@ def launch_social_account_catalog_backfill(
                     allow_local_dev_inline_bypass=allow_local_dev_inline_bypass,
                     comments_enable_media_followups=effective_comments_enable_media_followups,
                     launch_group_id=launch_group_id,
-                    skip_launch_auth_probe=False,
+                    skip_launch_auth_probe=bool(instagram_targeted_comment_source_ids),
                     target_source_ids=instagram_targeted_comment_source_ids or None,
                     comments_worker_count=comments_worker_count,
                 )

@@ -6,6 +6,7 @@ import importlib
 from datetime import datetime
 from types import ModuleType
 from typing import Any
+from uuid import UUID
 
 from psycopg2 import InterfaceError, OperationalError
 from psycopg2.pool import PoolError
@@ -477,6 +478,10 @@ def _persist_run_counters_and_summary(
         items_found_total=items_found_total,
         stage_counts=stage_counts,
     )
+    try:
+        UUID(str(run_id))
+    except (ValueError, TypeError, AttributeError):
+        return summary
     with legacy.pg.db_cursor(conn=conn) as cur:
         legacy.pg.fetch_one_with_cursor(
             cur,

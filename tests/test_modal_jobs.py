@@ -748,6 +748,8 @@ def test_modal_deploy_schedules_are_disabled_by_default(monkeypatch: pytest.Monk
     partial_modal = types.ModuleType("modal")
     monkeypatch.setitem(sys.modules, "modal", partial_modal)
     monkeypatch.delenv("TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED", raising=False)
+    monkeypatch.delenv("TRR_MODAL_RUNTIME_SCHEDULER_ENABLED", raising=False)
+    monkeypatch.delenv("TRR_MODAL_MAINTENANCE_OWNER_REQUIRED", raising=False)
     monkeypatch.delenv("TRR_MODAL_API_MIN_CONTAINERS", raising=False)
     monkeypatch.delenv("TRR_MODAL_ADMIN_KEEP_WARM", raising=False)
 
