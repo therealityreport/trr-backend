@@ -57,6 +57,41 @@ INSTAGRAM_COMMENTS_AUDIT_CURSOR_RETRY_STOP_REASONS = (
     "static_cdn_budget_exhausted",
 )
 
+# Worker-cap ramp (REVISED §4 "Decouple Active Workers From Job Count").
+# Active worker concurrency for a public Instagram comments run is decoupled from
+# the number of batch-size-10 shard jobs. The run config carries a current cap
+# that the dispatcher honors when claiming jobs for the run, and a ramp helper
+# raises or lowers that cap based on the live public-blocked ratio.
+_PUBLIC_COMMENTS_WORKER_CAP_FLOOR = 6
+_PUBLIC_COMMENTS_WORKER_CAP_START = 12
+_PUBLIC_COMMENTS_WORKER_CAP_STEPS = (15, 20)
+_PUBLIC_COMMENTS_WORKER_CAP_CEILING = 20
+# Ramp up only while the public-blocked ratio stays below this fraction.
+_PUBLIC_COMMENTS_WORKER_CAP_RAMP_UP_MAX_RATIO = 0.20
+# Back down to the floor once the public-blocked ratio reaches this fraction.
+_PUBLIC_COMMENTS_WORKER_CAP_RAMP_DOWN_RATIO = 0.50
+# Cap on retained comments_worker_cap_history entries on the run config.
+_PUBLIC_COMMENTS_WORKER_CAP_HISTORY_LIMIT = 50
+# Job-metadata fetch reasons that indicate a hard block (not a soft public block).
+# Their presence forces the worker cap back down to the floor regardless of ratio.
+_PUBLIC_COMMENTS_WORKER_CAP_HARD_BLOCK_REASONS = frozenset(
+    {
+        "instagram_comments_endpoint_auth_blocked",
+        "instagram_comments_browser_session_invalidated",
+        "instagram_comments_warmup_auth_failed",
+        "instagram_comments_warmup_no_cookies",
+        "html_challenge_or_auth_required",
+        "login_required",
+        "checkpoint_required",
+        "challenge_required",
+    }
+)
+# Public-run rebalance arguments reused from rebalance_slow_instagram_comments_shards.
+_PUBLIC_COMMENTS_WORKER_CAP_REBALANCE_SLOW_ELAPSED_SECONDS = 240
+_PUBLIC_COMMENTS_WORKER_CAP_REBALANCE_SLOW_POSTS_PER_MINUTE = 0.5
+_PUBLIC_COMMENTS_WORKER_CAP_REBALANCE_MIN_REMAINING_TARGETS = 10
+_PUBLIC_COMMENTS_WORKER_CAP_REBALANCE_MAX_RETRY_SHARD_SIZE = 10
+
 
 def _sync_core_overrides() -> None:
     for _name in _IMPORTED_CORE_NAMES - _LOCAL_ROOM_NAMES:
@@ -2295,6 +2330,10 @@ def start_social_account_comments_scrape(
                 "instagram_scrape_mode": PUBLIC_COMMENTS_SCRAPE_MODE if public_comments_mode else None,
                 "comments_worker_count": requested_comments_worker_count,
                 "comments_target_batch_size": effective_comments_target_batch_size,
+                **_instagram_comments_worker_cap_launch_config(
+                    public_mode=public_comments_mode,
+                    requested_comments_worker_count=requested_comments_worker_count,
+                ),
                 "date_start": normalized_date_start,
                 "date_end": normalized_date_end,
                 "target_window": (
@@ -3737,6 +3776,326 @@ def repair_instagram_comments_scrape_run_target_gaps(
         "missing_target_source_ids_count": len(missing_targets),
         "target_source_ids_count": len(target_source_ids),
         "assigned_target_source_ids_count": len(active_assigned_targets),
+    }
+
+
+def _instagram_comments_worker_cap_launch_config(
+    *,
+    public_mode: bool,
+    requested_comments_worker_count: int | None,
+) -> dict[str, Any]:
+    """Worker-cap config stored on the run config at launch (REVISED §4).
+
+    Only public Instagram comments runs decouple active workers from job count, so
+    non-public runs get an empty dict and behave exactly as before. The current
+    cap starts at ``_PUBLIC_COMMENTS_WORKER_CAP_START`` (12) unless a smaller
+    explicit ``comments_worker_count`` was requested, in which case that smaller
+    value is honored as the starting cap. The cap never starts above the ceiling.
+    """
+    if not public_mode:
+        return {}
+    start = _PUBLIC_COMMENTS_WORKER_CAP_START
+    current = start
+    if requested_comments_worker_count is not None:
+        requested = max(1, int(requested_comments_worker_count))
+        current = min(current, requested)
+    current = max(_PUBLIC_COMMENTS_WORKER_CAP_FLOOR, min(current, _PUBLIC_COMMENTS_WORKER_CAP_CEILING))
+    return {
+        "comments_worker_cap_current": current,
+        "comments_worker_cap_floor": _PUBLIC_COMMENTS_WORKER_CAP_FLOOR,
+        "comments_worker_cap_start": start,
+        "comments_worker_cap_steps": list(_PUBLIC_COMMENTS_WORKER_CAP_STEPS),
+        "comments_worker_cap_ceiling": _PUBLIC_COMMENTS_WORKER_CAP_CEILING,
+        "comments_worker_cap_pause_reason": None,
+        "comments_worker_cap_history": [],
+    }
+
+
+def _normalize_instagram_comments_worker_cap_config(run_config: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Return the normalized worker-cap config from a run config, or None.
+
+    Returns None when the run config does not carry a worker-cap (i.e. it is not a
+    public comments run that was launched with §4 enabled). Defensive: any missing
+    field falls back to the module defaults.
+    """
+    config = _metadata_dict(run_config)
+    if "comments_worker_cap_current" not in config:
+        return None
+    floor = _normalize_non_negative_int(config.get("comments_worker_cap_floor")) or _PUBLIC_COMMENTS_WORKER_CAP_FLOOR
+    ceiling = (
+        _normalize_non_negative_int(config.get("comments_worker_cap_ceiling")) or _PUBLIC_COMMENTS_WORKER_CAP_CEILING
+    )
+    start = _normalize_non_negative_int(config.get("comments_worker_cap_start")) or _PUBLIC_COMMENTS_WORKER_CAP_START
+    raw_steps = config.get("comments_worker_cap_steps")
+    steps = [
+        _normalize_non_negative_int(item)
+        for item in (raw_steps if isinstance(raw_steps, (list, tuple)) else [])
+        if _normalize_non_negative_int(item) > 0
+    ] or list(_PUBLIC_COMMENTS_WORKER_CAP_STEPS)
+    current = _normalize_non_negative_int(config.get("comments_worker_cap_current")) or start
+    current = max(floor, min(current, ceiling))
+    history = config.get("comments_worker_cap_history")
+    return {
+        "current": current,
+        "floor": max(1, floor),
+        "start": start,
+        "steps": steps,
+        "ceiling": ceiling,
+        "history": list(history) if isinstance(history, list) else [],
+    }
+
+
+def _aggregate_instagram_comments_public_blocked_from_jobs(
+    job_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Recompute run-level public-blocked totals from per-job metadata (REVISED §4).
+
+    Reads the J4 metadata keys persisted by the job runner
+    (``public_blocked_checked_count``, ``public_blocked_target_source_ids``,
+    ``public_blocked_recovered_comments``, ``public_blocked_fetch_reasons``) and
+    aggregates them across every shard job for the run.
+    """
+    checked = 0
+    blocked = 0
+    recovered_comments = 0
+    hard_block = False
+    for row in job_rows:
+        metadata = _metadata_dict(row.get("metadata"))
+        checked += _normalize_non_negative_int(metadata.get("public_blocked_checked_count"))
+        recovered_comments += _normalize_non_negative_int(metadata.get("public_blocked_recovered_comments"))
+        blocked_ids = metadata.get("public_blocked_target_source_ids")
+        if isinstance(blocked_ids, (list, tuple)):
+            blocked += sum(1 for item in blocked_ids if str(item or "").strip())
+        fetch_reasons = metadata.get("public_blocked_fetch_reasons")
+        if isinstance(fetch_reasons, Mapping):
+            for reason in fetch_reasons.values():
+                if str(reason or "").strip().lower() in _PUBLIC_COMMENTS_WORKER_CAP_HARD_BLOCK_REASONS:
+                    hard_block = True
+                    break
+    ratio = round(blocked / checked, 4) if checked > 0 else None
+    return {
+        "checked": checked,
+        "blocked": blocked,
+        "recovered_comments": recovered_comments,
+        "ratio": ratio,
+        "hard_block": hard_block,
+    }
+
+
+def _compute_instagram_comments_worker_cap_ramp(
+    *,
+    cap_config: Mapping[str, Any],
+    public_blocked: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Pure ramp decision: given the current cap and public-blocked totals, return
+    the next cap and the reason for any change (REVISED §4).
+
+    Ramp up 12 -> 15 -> 20 only when a checked sample exists AND the public-blocked
+    ratio stays below 20%. Back down to the floor (6) when the ratio reaches 50% or
+    a hard-block status appears. Otherwise hold steady.
+    """
+    floor = max(1, _normalize_non_negative_int(cap_config.get("floor")) or _PUBLIC_COMMENTS_WORKER_CAP_FLOOR)
+    ceiling = _normalize_non_negative_int(cap_config.get("ceiling")) or _PUBLIC_COMMENTS_WORKER_CAP_CEILING
+    start = _normalize_non_negative_int(cap_config.get("start")) or _PUBLIC_COMMENTS_WORKER_CAP_START
+    current = _normalize_non_negative_int(cap_config.get("current")) or start
+    raw_steps = cap_config.get("steps")
+    steps = [
+        _normalize_non_negative_int(item)
+        for item in (raw_steps if isinstance(raw_steps, (list, tuple)) else [])
+        if _normalize_non_negative_int(item) > 0
+    ] or list(_PUBLIC_COMMENTS_WORKER_CAP_STEPS)
+    ramp_ladder = [start, *steps]
+
+    checked = _normalize_non_negative_int(public_blocked.get("checked"))
+    ratio = public_blocked.get("ratio")
+    hard_block = bool(public_blocked.get("hard_block"))
+
+    # Back down first: hard block or high public-blocked ratio forces the floor.
+    if hard_block or (
+        ratio is not None and float(ratio) >= _PUBLIC_COMMENTS_WORKER_CAP_RAMP_DOWN_RATIO
+    ):
+        next_cap = floor
+        reason = "hard_block" if hard_block else "public_blocked_ratio_high"
+        if next_cap != current:
+            return {"changed": True, "next_cap": next_cap, "reason": reason, "ratio": ratio}
+        return {"changed": False, "next_cap": current, "reason": reason, "ratio": ratio}
+
+    # Ramp up only with a checked sample and a low public-blocked ratio.
+    if (
+        checked > 0
+        and ratio is not None
+        and float(ratio) < _PUBLIC_COMMENTS_WORKER_CAP_RAMP_UP_MAX_RATIO
+        and current < ceiling
+    ):
+        next_cap = current
+        for rung in ramp_ladder:
+            if rung > current:
+                next_cap = min(rung, ceiling)
+                break
+        else:
+            next_cap = ceiling
+        if next_cap > current:
+            return {
+                "changed": True,
+                "next_cap": next_cap,
+                "reason": "public_blocked_ratio_low",
+                "ratio": ratio,
+            }
+
+    return {"changed": False, "next_cap": current, "reason": "hold", "ratio": ratio}
+
+
+def _ramp_instagram_comments_worker_cap(
+    *,
+    run_id: str,
+    dispatch_immediately: bool = True,
+) -> dict[str, Any]:
+    """Recompute the public-blocked ratio for a run and ramp its worker cap.
+
+    Call this from dispatcher recovery / refill paths or an explicit rebalance
+    action after a comments shard completes -- NEVER from a progress GET (progress
+    polling must not mutate the run). When the cap changes, the new value is
+    persisted, a ``comments_worker_cap_history`` entry is appended, and queued jobs
+    are refilled to the new cap (dispatch + reuse of the slow-shard rebalancer with
+    public-run arguments). Best-effort: any failure is swallowed so it can never
+    crash a shard.
+    """
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id:
+        return {"changed": False, "reason": "run_id_required"}
+    try:
+        run_row = pg.fetch_one(
+            """
+            select config
+            from social.scrape_runs
+            where id = %s::uuid
+            """,
+            [normalized_run_id],
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("[comments-worker-cap] failed to load run config: run_id=%s", normalized_run_id, exc_info=True)
+        return {"changed": False, "reason": "run_load_failed"}
+    if not run_row:
+        return {"changed": False, "reason": "run_not_found"}
+    run_config = _metadata_dict(run_row.get("config"))
+    cap_config = _normalize_instagram_comments_worker_cap_config(run_config)
+    if cap_config is None:
+        # Non-public run (or §4 not enabled). Leave concurrency untouched.
+        return {"changed": False, "reason": "worker_cap_not_configured"}
+
+    try:
+        job_rows = pg.fetch_all(
+            """
+            select status, metadata
+            from social.scrape_jobs
+            where run_id = %s::uuid
+              and coalesce(config->>'stage', metadata->>'stage', job_type) = %s
+            """,
+            [normalized_run_id, INSTAGRAM_COMMENTS_SCRAPLING_STAGE],
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("[comments-worker-cap] failed to load job metadata: run_id=%s", normalized_run_id, exc_info=True)
+        return {"changed": False, "reason": "job_load_failed"}
+
+    public_blocked = _aggregate_instagram_comments_public_blocked_from_jobs(job_rows)
+    decision = _compute_instagram_comments_worker_cap_ramp(cap_config=cap_config, public_blocked=public_blocked)
+    if not decision.get("changed"):
+        return {
+            "changed": False,
+            "reason": decision.get("reason"),
+            "cap": cap_config["current"],
+            "public_blocked": public_blocked,
+        }
+
+    next_cap = int(decision["next_cap"])
+    history_entry = {
+        "at": _iso(_now_utc()),
+        "from": cap_config["current"],
+        "to": next_cap,
+        "reason": decision.get("reason"),
+        "ratio": public_blocked.get("ratio"),
+        "checked": public_blocked.get("checked"),
+        "blocked": public_blocked.get("blocked"),
+    }
+    history = [*cap_config["history"], history_entry][-_PUBLIC_COMMENTS_WORKER_CAP_HISTORY_LIMIT:]
+    pause_reason = (
+        decision.get("reason")
+        if decision.get("reason") in {"hard_block", "public_blocked_ratio_high"}
+        else None
+    )
+    metadata_updates = {
+        "comments_worker_cap_current": next_cap,
+        "comments_worker_cap_history": history,
+        "comments_worker_cap_pause_reason": pause_reason,
+    }
+    try:
+        _merge_catalog_run_config(run_id=normalized_run_id, metadata_updates=metadata_updates)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "[comments-worker-cap] failed to persist new worker cap (continuing): run_id=%s from=%s to=%s",
+            normalized_run_id,
+            cap_config["current"],
+            next_cap,
+            exc_info=True,
+        )
+        return {"changed": False, "reason": "persist_failed", "cap": cap_config["current"]}
+
+    logger.info(
+        "[comments-worker-cap] ramped Instagram public comments worker cap: run_id=%s from=%s to=%s reason=%s "
+        "checked=%s blocked=%s ratio=%s",
+        normalized_run_id,
+        cap_config["current"],
+        next_cap,
+        decision.get("reason"),
+        public_blocked.get("checked"),
+        public_blocked.get("blocked"),
+        public_blocked.get("ratio"),
+    )
+
+    if dispatch_immediately:
+        # Refill queued jobs up to the new cap. The dispatcher honors the per-run
+        # worker cap when claiming, but we also bound the dispatch `limit` to
+        # cap - active_running_or_pending so the refill claims at most the
+        # remaining headroom even on the legacy dispatch path.
+        active_running_or_pending = 0
+        for row in job_rows:
+            status = str(row.get("status") or "").strip().lower()
+            if status in {"queued", "pending", "retrying", "running"}:
+                active_running_or_pending += 1
+        refill_headroom = max(0, next_cap - active_running_or_pending)
+        if refill_headroom > 0:
+            try:
+                dispatch_due_social_jobs(run_id=normalized_run_id, limit=refill_headroom)
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "[comments-worker-cap] refill dispatch failed after ramp: run_id=%s",
+                    normalized_run_id,
+                    exc_info=True,
+                )
+        # Reuse the slow-shard rebalancer with public-run arguments so slow shards
+        # are re-sharded to the active concurrency rather than starving the cap.
+        try:
+            rebalance_slow_instagram_comments_shards(
+                run_id=normalized_run_id,
+                slow_elapsed_seconds=_PUBLIC_COMMENTS_WORKER_CAP_REBALANCE_SLOW_ELAPSED_SECONDS,
+                slow_posts_per_minute=_PUBLIC_COMMENTS_WORKER_CAP_REBALANCE_SLOW_POSTS_PER_MINUTE,
+                min_remaining_targets=_PUBLIC_COMMENTS_WORKER_CAP_REBALANCE_MIN_REMAINING_TARGETS,
+                max_retry_shard_size=_PUBLIC_COMMENTS_WORKER_CAP_REBALANCE_MAX_RETRY_SHARD_SIZE,
+                dispatch_immediately=True,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "[comments-worker-cap] slow-shard rebalance failed after ramp: run_id=%s",
+                normalized_run_id,
+                exc_info=True,
+            )
+
+    return {
+        "changed": True,
+        "reason": decision.get("reason"),
+        "cap": next_cap,
+        "previous_cap": cap_config["current"],
+        "public_blocked": public_blocked,
     }
 
 

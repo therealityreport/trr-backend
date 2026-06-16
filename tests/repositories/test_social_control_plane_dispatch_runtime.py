@@ -649,3 +649,132 @@ def test_dispatch_runtime_marks_claimed_modal_dispatch_running(monkeypatch: pyte
 
     assert result["claimed"] is True
     assert marked == [claimed_job]
+
+
+# --- REVISED §4: per-run Instagram public-comments worker-cap claim bound -------
+
+
+def _setup_public_comments_cap_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    running_by_run_count: int,
+    run_worker_cap: int | None,
+    shard_count: int = 3,
+) -> list[str]:
+    """Stub the dispatch surface for a public Instagram comments run.
+
+    Returns the list that ``dispatch_social_job`` appends claimed job ids to.
+    The run config returned by ``legacy.pg.fetch_one`` carries
+    ``comments_worker_cap_current`` (the §4 cap) when ``run_worker_cap`` is set.
+    """
+    legacy = dispatch_runtime.legacy
+    comments_stage = legacy.INSTAGRAM_COMMENTS_SCRAPLING_STAGE
+    dispatched_job_ids: list[str] = []
+
+    candidates = [
+        {
+            "id": f"job-comments-{index}",
+            "run_id": "run-public",
+            "platform": "instagram",
+            "job_type": "comments",
+            "status": "queued",
+            "config": {
+                "stage": comments_stage,
+                "account": "bravotv",
+                "comments_shard_count": shard_count,
+                "instagram_scrape_mode": "public_first",
+            },
+            "metadata": {},
+        }
+        for index in range(shard_count)
+    ]
+
+    monkeypatch.setattr(legacy, "is_queue_enabled", lambda: True)
+    monkeypatch.setattr(legacy, "is_modal_remote_executor_enabled", lambda: True)
+    monkeypatch.setattr(legacy, "_run_pause_after_current_requested", lambda _run_id: False)
+    monkeypatch.setattr(legacy, "recover_failed_instagram_comments_capacity_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(legacy, "recover_dispatch_blocked_no_progress_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(legacy, "recover_stale_unclaimed_dispatched_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(legacy, "_modal_social_dispatch_resolution", lambda: {"resolved": True, "reason": None})
+    monkeypatch.setattr(legacy, "_list_candidate_jobs_for_modal_dispatch", lambda **_kwargs: list(candidates))
+    monkeypatch.setattr(
+        legacy,
+        "_current_modal_dispatch_running_counts",
+        lambda: (
+            {comments_stage: 0, "comments": 0},
+            {(comments_stage, "instagram"): 0, ("comments", "instagram"): 0},
+            {"run-public": running_by_run_count},
+            {},
+            {},
+        ),
+    )
+    # Keep the generic stage/platform caps wide open so only the §4 cap can bind.
+    monkeypatch.setattr(legacy, "_modal_dispatch_stage_global_cap", lambda _stage: 1000)
+    monkeypatch.setattr(
+        legacy,
+        "_modal_dispatch_effective_platform_cap",
+        lambda stage, platform, *, active_account_count=1, job_config=None: 1000,
+    )
+    monkeypatch.setattr(legacy, "_touch_job_dispatch_metadata", lambda job_id, **kwargs: None)
+    monkeypatch.setattr(legacy, "_touch_modal_social_dispatcher_heartbeat", lambda **kwargs: {})
+    monkeypatch.setattr(
+        legacy,
+        "dispatch_social_job",
+        lambda *, job_id, stage=None, priority_recovery=False: (
+            dispatched_job_ids.append(job_id) or {"dispatched": True, "reason": None, "call_id": f"call-{job_id}"}
+        ),
+    )
+
+    run_config = (
+        {"comments_worker_cap_current": run_worker_cap} if run_worker_cap is not None else {}
+    )
+    monkeypatch.setattr(legacy.pg, "fetch_one", lambda *_args, **_kwargs: {"config": run_config})
+
+    return dispatched_job_ids
+
+
+def test_dispatch_runtime_bounds_public_comments_claims_by_worker_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # cap_current=6, already 4 active for the run => headroom 2 => claim only 2 of
+    # the 3 queued shards even though limit allows more.
+    dispatched = _setup_public_comments_cap_dispatch(
+        monkeypatch,
+        running_by_run_count=4,
+        run_worker_cap=6,
+        shard_count=3,
+    )
+    result = dispatch_runtime.dispatch_due_social_jobs(run_id="run-public", limit=10)
+    assert result["dispatched_job_ids"] == ["job-comments-0", "job-comments-1"]
+    assert dispatched == ["job-comments-0", "job-comments-1"]
+
+
+def test_dispatch_runtime_blocks_public_comments_claims_when_cap_reached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # cap_current=6, already 6 active => no headroom => nothing claimed.
+    dispatched = _setup_public_comments_cap_dispatch(
+        monkeypatch,
+        running_by_run_count=6,
+        run_worker_cap=6,
+        shard_count=3,
+    )
+    result = dispatch_runtime.dispatch_due_social_jobs(run_id="run-public", limit=10)
+    assert result["dispatched_job_ids"] == []
+    assert dispatched == []
+
+
+def test_dispatch_runtime_without_worker_cap_is_unbounded_by_section4(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Run config has no comments_worker_cap_current => §4 bound does not apply, so
+    # all queued shards dispatch (subject only to the wide-open generic caps).
+    dispatched = _setup_public_comments_cap_dispatch(
+        monkeypatch,
+        running_by_run_count=20,
+        run_worker_cap=None,
+        shard_count=3,
+    )
+    result = dispatch_runtime.dispatch_due_social_jobs(run_id="run-public", limit=10)
+    assert result["dispatched_job_ids"] == ["job-comments-0", "job-comments-1", "job-comments-2"]
+    assert dispatched == ["job-comments-0", "job-comments-1", "job-comments-2"]

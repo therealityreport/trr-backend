@@ -159,6 +159,22 @@ def _comments_auto_refill_dispatch_limit(config: Mapping[str, Any]) -> int:
     except (TypeError, ValueError):
         requested = 25
     return max(1, min(requested, 250))
+
+
+def _ramp_public_comments_worker_cap(*, run_id: str) -> dict[str, Any]:
+    """Recompute the run's public-blocked ratio and ramp its active worker cap.
+
+    Thin wrapper around the comments pipeline ramp helper (REVISED §4). Imported
+    lazily so the comments pipeline module (which pulls in the large analytics
+    impl) is only loaded when a public comments shard actually completes.
+    """
+    from trr_backend.socials.pipelines.comments.instagram import (
+        _ramp_instagram_comments_worker_cap,
+    )
+
+    return _ramp_instagram_comments_worker_cap(run_id=run_id, dispatch_immediately=True)
+
+
 _INCOMPLETE_RETRY_STALL_ATTEMPTS_DEFAULT = 2
 _INCOMPLETE_RETRY_STALL_REASONS = {
     *_RECONCILABLE_REPORTED_GAP_REASONS,
@@ -4851,6 +4867,21 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
         )
         terminal_status = "completed"
         terminal_error_message = None
+        # REVISED §4: after a public comments shard completes, recompute the
+        # public-blocked ratio from job metadata and ramp the run's active worker
+        # cap (12 -> 15 -> 20 while blocked ratio stays low; back to 6 on spikes).
+        # The ramp helper also refills queued jobs to the new cap, so it runs
+        # before the generic auto-refill below. Best-effort and public-mode only.
+        if public_comments_mode and run_id:
+            try:
+                _ramp_public_comments_worker_cap(run_id=run_id)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Instagram comments worker-cap ramp failed after shard completion: job_id=%s run_id=%s",
+                    job_id,
+                    run_id,
+                    exc_info=True,
+                )
         auto_refill_limit = _comments_auto_refill_dispatch_limit(config)
         if auto_refill_limit > 0 and run_id:
             try:

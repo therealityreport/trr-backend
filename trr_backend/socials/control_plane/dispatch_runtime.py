@@ -15,6 +15,39 @@ def _call_extracted_override(name: str, local_impl: Any, /, *args: Any, **kwargs
     return local_impl(*args, **kwargs)
 
 
+def _instagram_public_comments_worker_cap(
+    run_id: str,
+    cache: dict[str, int | None],
+) -> int | None:
+    """Current active-worker cap for an Instagram public comments run (REVISED §4).
+
+    Returns the run config's ``comments_worker_cap_current`` (only public comments
+    runs carry it) or None when no cap applies. Results are cached per run_id so a
+    multi-shard run's config is loaded at most once per dispatch sweep. A missing
+    run or any load failure resolves to None so dispatch falls back to the normal
+    stage/platform caps.
+    """
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id:
+        return None
+    if normalized_run_id in cache:
+        return cache[normalized_run_id]
+    cap: int | None = None
+    try:
+        row = legacy.pg.fetch_one(
+            "select config from social.scrape_runs where id = %s::uuid",
+            [normalized_run_id],
+        )
+        config = legacy._metadata_dict((row or {}).get("config"))
+        raw_cap = config.get("comments_worker_cap_current")
+        if raw_cap is not None:
+            cap = max(1, legacy._normalize_non_negative_int(raw_cap))
+    except Exception:  # noqa: BLE001
+        cap = None
+    cache[normalized_run_id] = cap
+    return cap
+
+
 def recover_dispatch_blocked_no_progress_jobs(*, limit: int = 100) -> list[dict[str, Any]]:
     safe_limit = max(1, min(int(limit), 500))
     blocked_rows, _ = legacy._list_dispatch_blocked_jobs(limit=safe_limit)
@@ -486,6 +519,9 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
     )
     dispatched_job_ids: list[str] = []
     dispatch_attempts = 0
+    # REVISED §4: per-run active-worker cap for Instagram public comments runs.
+    # Cached run worker caps keyed by run_id so a multi-shard run is queried once.
+    worker_cap_by_run: dict[str, int | None] = {}
 
     for job in candidates:
         if len(dispatched_job_ids) >= safe_limit:
@@ -625,6 +661,22 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
                     and running_by_run_stage_platform.get((job_run_id, stage, platform), 0) >= platform_run_cap
                 ):
                     continue
+
+        # REVISED §4: Instagram public comments runs decouple active workers from
+        # the (batch-size-10) shard count. Claim only up to
+        # comments_worker_cap_current - active_running_or_pending_jobs for the run.
+        # This is an *additional* bound layered on top of the stage/platform caps
+        # above and applies only to runs whose config carries a worker cap (i.e.
+        # public comments runs launched with §4 enabled); all other dispatch is
+        # unchanged.
+        if (
+            job_run_id
+            and stage == legacy.INSTAGRAM_COMMENTS_SCRAPLING_STAGE
+            and platform == "instagram"
+        ):
+            run_worker_cap = _instagram_public_comments_worker_cap(job_run_id, worker_cap_by_run)
+            if run_worker_cap is not None and running_by_run.get(job_run_id, 0) >= run_worker_cap:
+                continue
 
         job_id = str(job.get("id") or "").strip()
         if not job_id:
