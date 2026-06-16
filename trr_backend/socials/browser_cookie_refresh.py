@@ -345,22 +345,23 @@ def open_cookie_refresh_context(
     timezone_id: str | None = None,
     extra_args: list[str] | None = None,
     enforce_rate_limit: bool = True,
+    require_profile: bool | None = None,
 ) -> CookieRefreshBrowserContext:
     if enforce_rate_limit:
         reserve_social_auth_refresh_attempt(platform)
 
     resolved_profile = resolve_social_auth_chrome_profile(platform, profile_name)
-    require_profile = social_auth_requires_chrome_profile(platform)
+    effective_require_profile = social_auth_requires_chrome_profile(platform) if require_profile is None else require_profile
     profile_selection: ChromeProfileSelection | None = None
     if resolved_profile:
         try:
             profile_selection = resolve_chrome_profile_selection(resolved_profile)
         except ChromeProfileNotAvailableError:
-            if require_profile:
+            if effective_require_profile:
                 raise
             logger.warning(
                 "[%s] Chrome profile %r unavailable; falling back to profile-less cookie refresh because "
-                "SOCIAL_COOKIE_REFRESH_REQUIRE_CHROME_PROFILE is disabled",
+                "Chrome profile requirement is disabled",
                 platform,
                 resolved_profile,
             )
@@ -406,7 +407,7 @@ def open_cookie_refresh_context(
             preferences_path=profile_selection.preferences_path,
         )
 
-    if require_profile:
+    if effective_require_profile:
         raise ChromeProfileNotAvailableError(
             f"{platform} cookie refresh requires Chrome profile {resolved_profile!r}; refusing profile-less launch"
         )

@@ -5787,7 +5787,7 @@ def test_post_social_account_comments_scrape_accepts_all_saved_posts_profile_syn
     assert scrape_mock.call_args.kwargs["max_posts"] is None
     assert scrape_mock.call_args.kwargs["max_comments_per_post"] is None
     assert scrape_mock.call_args.kwargs["refresh_policy"] == "all_saved_posts"
-    assert scrape_mock.call_args.kwargs["comments_load_strategy"] == "cursor_api"
+    assert scrape_mock.call_args.kwargs["comments_load_strategy"] == "public_relay"
     assert scrape_mock.call_args.kwargs["dispatch_immediately"] is True
 
 
@@ -6038,7 +6038,7 @@ def test_post_social_account_comments_scrape_dry_run_returns_preview_without_lau
     assert body["debug"]["target_plan_strategy"] == "bounded_profile_preview"
     preview_mock.assert_called_once()
     assert preview_mock.call_args.kwargs["refresh_policy"] == "all_saved_posts"
-    assert preview_mock.call_args.kwargs["comments_load_strategy"] == "cursor_api"
+    assert preview_mock.call_args.kwargs["comments_load_strategy"] == "public_relay"
 
 
 def test_post_social_account_comments_scrape_dry_run_forwards_incomplete_target_filter(

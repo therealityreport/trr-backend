@@ -3219,7 +3219,9 @@ class SocialAccountCommentsScrapeRequest(SourceScopedRequest):
     max_comments_per_post: int | None = Field(default=None, ge=0)
     refresh_policy: Literal["stale_or_missing", "all_saved_posts"] = Field(default="stale_or_missing")
     target_filter: Literal["incomplete"] | None = Field(default=None)
-    comments_load_strategy: Literal["cursor_api", "single_session_load_all"] = Field(default="cursor_api")
+    comments_load_strategy: Literal["cursor_api", "single_session_load_all", "public_relay"] = Field(
+        default="public_relay"
+    )
     allow_inline_dev_fallback: bool = Field(default=False)
     dry_run: bool = Field(default=False)
 
@@ -3243,7 +3245,9 @@ class SocialAccountCommentsAuditCursorRetryRequest(BaseModel):
     batch_size: int = Field(default=1, ge=1, le=25)
     comments_worker_count: int | None = Field(default=None, ge=1, le=24)
     max_comments_per_post: int = Field(default=0, ge=0)
-    comments_load_strategy: Literal["cursor_api", "single_session_load_all"] = Field(default="cursor_api")
+    comments_load_strategy: Literal["cursor_api", "single_session_load_all", "public_relay"] = Field(
+        default="public_relay"
+    )
     skip_launch_auth_probe: bool = Field(default=False)
     attach_to_active_run: bool = Field(default=True)
     dispatch_immediately: bool = Field(default=True)

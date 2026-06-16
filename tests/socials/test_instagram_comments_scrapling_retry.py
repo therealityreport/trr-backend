@@ -33,6 +33,11 @@ from trr_backend.socials.instagram.scraper import InstagramComment
 _FIXTURE_DIR = Path(__file__).parents[1] / "fixtures" / "instagram" / "scrapling"
 
 
+@pytest.fixture(autouse=True)
+def _default_legacy_retry_tests_to_authenticated_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_SCRAPE_MODE", "authenticated")
+
+
 def _fixture_json(name: str) -> dict:
     return json.loads((_FIXTURE_DIR / name).read_text(encoding="utf-8"))
 
@@ -1532,7 +1537,7 @@ def test_fetch_comments_repeated_cursor_is_complete_when_expected_count_met(monk
     fetcher._fetch_rendered_comments_after_revealing_hidden.assert_not_awaited()
 
 
-def test_fetch_comments_records_top_level_resume_checkpoint_at_page_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fetch_comments_ignores_page_cap_env_and_stops_on_repeated_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENT_PAGINATION_MAX_PAGES", "1")
     fetcher = _build_fetcher()
     fetcher._parser._parse_comment = MagicMock(return_value=_comment("c1"))
@@ -1562,12 +1567,12 @@ def test_fetch_comments_records_top_level_resume_checkpoint_at_page_cap(monkeypa
 
     assert result.fetch_failed is True
     assert result.retryable is True
-    assert result.fetch_reason == "pagination_page_cap_reached"
+    assert result.fetch_reason == "pagination_repeated_cursor"
     assert result.top_level_checkpoint is not None
     assert result.top_level_checkpoint["target_shortcode"] == "ABC123"
-    assert result.top_level_checkpoint["next_top_level_cursor"] == "cursor-2"
-    assert result.top_level_checkpoint["pages_seen"] == 1
-    assert fetcher.runtime_metadata["top_level_checkpoint_metadata"]["items"][-1]["next_top_level_cursor"] == "cursor-2"
+    assert result.top_level_checkpoint["last_top_level_cursor"] == "cursor-2"
+    assert result.top_level_checkpoint["pages_seen"] == 2
+    assert fetcher.runtime_metadata["top_level_checkpoint_metadata"]["items"][-1]["last_top_level_cursor"] == "cursor-2"
 
 
 def test_fetch_comments_deadline_inside_page_records_response_next_cursor(
@@ -1910,7 +1915,7 @@ def test_fetch_comments_resumes_top_level_cursor_with_recorded_param() -> None:
     assert "min_id" not in fetcher._fetch_json_response.await_args.kwargs["params"]
 
 
-def test_fetch_comment_replies_marks_page_cap_retryable(monkeypatch) -> None:
+def test_fetch_comment_replies_ignores_page_cap_env_and_records_repeated_cursor(monkeypatch) -> None:
     monkeypatch.setenv("SOCIAL_INSTAGRAM_REPLY_PAGINATION_MAX_PAGES", "1")
     fetcher = _build_fetcher()
     fetcher._parser._parse_comment = MagicMock(
@@ -1953,7 +1958,7 @@ def test_fetch_comment_replies_marks_page_cap_retryable(monkeypatch) -> None:
     assert len(result.comments) == 1
     assert result.fetch_failed is True
     assert result.retryable is True
-    assert result.fetch_reason == "pagination_page_cap_reached"
+    assert result.fetch_reason == "pagination_repeated_cursor"
     assert result.reply_checkpoints == [
         {
             "platform": "instagram",
@@ -1961,13 +1966,15 @@ def test_fetch_comment_replies_marks_page_cap_retryable(monkeypatch) -> None:
             "source_id": "ABC123",
             "media_id": "media-1",
             "parent_comment_id": "c1",
-            "stop_reason": "pagination_page_cap_reached",
+            "stop_reason": "pagination_repeated_cursor",
             "attempt_count": 0,
-            "last_error_code": "pagination_page_cap_reached",
+            "last_error_code": "pagination_repeated_cursor",
+            "last_reply_cursor": "reply-cursor-2",
             "next_reply_cursor": "reply-cursor-2",
+            "last_reply_cursor_param": "min_id",
             "next_reply_cursor_param": "min_id",
             "saved_reply_count_observed": 1,
-            "pages_seen": 1,
+            "pages_seen": 2,
             "retryable": True,
             "updated_at": result.reply_checkpoints[0]["updated_at"],
         }
@@ -2120,7 +2127,7 @@ def test_fetch_comment_replies_counts_existing_preview_replies_before_retrying(m
     assert len(result.comments) == 1
     assert result.fetch_failed is False
     assert result.retryable is False
-    assert result.fetch_reason == "pagination_page_cap_reached"
+    assert result.fetch_reason == "pagination_repeated_cursor"
     assert result.reply_checkpoints == []
 
 
@@ -3807,6 +3814,7 @@ def test_selected_proxy_identical_across_transports() -> None:
 
 def test_select_comments_proxy_decodo_sticky_session(monkeypatch) -> None:
     monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_URLS", raising=False)
+    monkeypatch.delenv("DECODO_PROXY_URL", raising=False)
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER", "decodo")
     monkeypatch.setenv("DECODO_USERNAME", "user1")
     monkeypatch.setenv("DECODO_PASSWORD", "p@ss!")
@@ -6947,6 +6955,10 @@ def test_job_runner_reports_actual_comments_posts_checked(monkeypatch: pytest.Mo
         "comments_load_strategy": "cursor_api",
         "comments_session_scope": "cursor_api_worker",
         "comments_per_post_concurrency": 1,
+        "instagram_scrape_mode": None,
+        "auth_state": "authenticated",
+        "proxy_state": "configured_by_environment",
+        "fallback_policy": "automatic_enabled",
     }
     assert progress_activities[-1] == {
         "phase": "comments_scrapling_running",
@@ -6960,6 +6972,10 @@ def test_job_runner_reports_actual_comments_posts_checked(monkeypatch: pytest.Mo
         "comments_load_strategy": "cursor_api",
         "comments_session_scope": "cursor_api_worker",
         "comments_per_post_concurrency": 1,
+        "instagram_scrape_mode": None,
+        "auth_state": "authenticated",
+        "proxy_state": "configured_by_environment",
+        "fallback_policy": "automatic_enabled",
     }
 
 

@@ -18,6 +18,10 @@ from urllib.parse import quote, urlparse
 
 from trr_backend.socials._scrapling_http_utils import env_truthy, resolve_positive_int_env
 from trr_backend.socials.instagram._proxy_sessions import apply_decodo_session_affinity
+from trr_backend.socials.instagram.comments_scrapling.public_mode import (
+    comments_proxy_provider_disabled,
+    comments_proxy_provider_name,
+)
 
 
 @dataclass(slots=True)
@@ -114,7 +118,12 @@ def _explicit_proxy_url_for_session(proxy_urls: list[str], session_key: str | No
 
 def _load_proxy_urls_from_env() -> list[str]:
     """Read explicit proxy URLs from env. Returns list[str] only."""
+    if comments_proxy_provider_disabled():
+        return []
     proxy_urls = _split_proxy_values(os.getenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_URLS") or "")
+    provider = comments_proxy_provider_name()
+    if not proxy_urls and provider in {"decodo", "smartproxy"}:
+        proxy_urls = _split_proxy_values(os.getenv("DECODO_PROXY_URL") or "")
     return proxy_urls
 
 
@@ -133,7 +142,7 @@ def _decodo_env() -> tuple[str, str, str] | None:
 # ---------------------------------------------------------------------------
 
 
-def select_comments_proxy(*, session_key: str | None = None) -> CommentsProxyConfig | None:
+def select_comments_proxy(*, session_key: str | None = None, public_mode: bool = False) -> CommentsProxyConfig | None:
     """Single entry point for all proxy needs. Returns None when no proxy
     is configured (local-dev cookies-only mode).
 
@@ -145,6 +154,9 @@ def select_comments_proxy(*, session_key: str | None = None) -> CommentsProxyCon
       browser_proxy = first URL string (ProxyRotator parses it)
       api_proxy_url = same URL string
     """
+    if public_mode:
+        return None
+
     # 1. Explicit proxy URLs take precedence.
     explicit_urls = _load_proxy_urls_from_env()
     if explicit_urls:
@@ -167,7 +179,7 @@ def select_comments_proxy(*, session_key: str | None = None) -> CommentsProxyCon
     # 2. Explicit Decodo provider. Credentials alone are not enough because a
     # stale residential proxy can make healthy auth cookies look blocked. The
     # sticky comments flag remains an explicit comments-lane opt-in for Decodo.
-    provider = str(os.getenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER") or "").strip().lower()
+    provider = comments_proxy_provider_name()
     force_rotating_proxy = env_truthy("SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY", False)
     sticky_proxy_requested = env_truthy(
         "SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY",

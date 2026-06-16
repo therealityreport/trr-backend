@@ -227,6 +227,10 @@ SOCIAL_AVATAR_SKIP_TTL_HOURS_DEFAULT = 168
 SOCIAL_MEDIA_MIRROR_DOWNLOAD_RETRIES_DEFAULT = 3
 SOCIAL_MEDIA_MIRROR_DOWNLOAD_RETRY_BACKOFF_SECONDS_DEFAULT = 1
 SOCIAL_YOUTUBE_TRANSCRIPT_INGEST_ENABLED_DEFAULT = True
+SOCIAL_INSTAGRAM_SCRAPE_MODE_DEFAULT = "public_first"
+SOCIAL_INSTAGRAM_PUBLIC_FIRST_MODE_ALIASES = frozenset(
+    {"", "public", "public-first", "public_first", "no_login", "nologin"}
+)
 INSTAGRAM_MEDIA_MIRROR_STAGE = "media_mirror"
 COMMENT_MEDIA_MIRROR_STAGE = "comment_media_mirror"
 INSTAGRAM_COMMENTS_SCRAPLING_STAGE = "comments_scrapling"
@@ -2306,6 +2310,8 @@ def _build_modal_executor_health_payload(
     remote_probe_cache: dict[str, dict[str, Any] | None] = {}
 
     def _resolved_remote_auth_capability(candidate_platform: str, *, allow_probe: bool = False) -> dict[str, Any]:
+        if candidate_platform == "instagram" and _instagram_public_first_scrape_mode_enabled():
+            return _instagram_public_auth_capability()
         capability = (
             _metadata_dict(remote_auth_capabilities.get(candidate_platform))
             if isinstance(remote_auth_capabilities, dict)
@@ -2463,6 +2469,21 @@ def _build_modal_executor_health_payload(
                 "dispatcher_ready": dispatcher_resolved,
                 "dispatcher_heartbeat_fresh": dispatcher_heartbeat_fresh,
                 "platform": target_platform,
+                "instagram_scrape_mode": (
+                    "public_first"
+                    if target_platform == "instagram" and _instagram_public_first_scrape_mode_enabled()
+                    else None
+                ),
+                "auth_state": (
+                    "public"
+                    if target_platform == "instagram" and _instagram_public_first_scrape_mode_enabled()
+                    else None
+                ),
+                "proxy_state": (
+                    "none"
+                    if target_platform == "instagram" and _instagram_public_first_scrape_mode_enabled()
+                    else None
+                ),
                 "platform_requires_remote_auth": target_platform_requires_auth,
                 "platform_remote_auth_ready": target_remote_auth_ready,
                 "platform_remote_auth_reason": (
@@ -2807,8 +2828,43 @@ def get_worker_auth_capabilities(platforms: Sequence[Any] | None = None) -> dict
     }
 
 
+def _instagram_public_first_scrape_mode_enabled(config: Mapping[str, Any] | None = None) -> bool:
+    metadata = _metadata_dict(config)
+    raw_mode = (
+        metadata.get("instagram_scrape_mode")
+        or metadata.get("scrape_mode")
+        or os.getenv("SOCIAL_INSTAGRAM_SCRAPE_MODE")
+        or SOCIAL_INSTAGRAM_SCRAPE_MODE_DEFAULT
+    )
+    return str(raw_mode or "").strip().lower() in SOCIAL_INSTAGRAM_PUBLIC_FIRST_MODE_ALIASES
+
+
+def _instagram_public_auth_capability() -> dict[str, Any]:
+    return {
+        "required": False,
+        "executor_backend": "modal",
+        "ready": True,
+        "reason": None,
+        "detail": {
+            "instagram_scrape_mode": "public_first",
+            "auth_state": "public",
+            "proxy_state": "none",
+            "auth_probe_skipped": True,
+            "fallback_policy": {
+                "auth_fallback": "requires_approval",
+                "proxy_fallback": "requires_approval",
+            },
+        },
+        "missing_hints": [],
+        "probe_source": "public_first_mode",
+    }
+
+
 def _platform_requires_remote_auth(platform: Any) -> bool:
-    return _normalize_platform_name(platform) in set(REMOTE_AUTH_REQUIRED_PLATFORMS)
+    normalized_platform = _normalize_platform_name(platform)
+    if normalized_platform == "instagram" and _instagram_public_first_scrape_mode_enabled():
+        return False
+    return normalized_platform in set(REMOTE_AUTH_REQUIRED_PLATFORMS)
 
 
 def _remote_auth_safe_structure_flags(
@@ -2843,6 +2899,20 @@ def _remote_auth_safe_structure_flags(
 def probe_remote_auth_health(platform: str) -> dict[str, Any]:
     normalized_platform = _normalize_platform_name(platform)
     if normalized_platform == "instagram":
+        if _instagram_public_first_scrape_mode_enabled():
+            return {
+                "platform": normalized_platform,
+                "ready": True,
+                "reason": None,
+                "instagram_scrape_mode": "public_first",
+                "auth_state": "public",
+                "proxy_state": "none",
+                "auth_probe_skipped": True,
+                "fallback_policy": {
+                    "auth_fallback": "requires_approval",
+                    "proxy_fallback": "requires_approval",
+                },
+            }
         cookies = _load_instagram_cookies_from_sources()
         validation = _inspect_instagram_cookie_health(cookies)
         detail = dict(validation.get("detail") or {}) if isinstance(validation.get("detail"), dict) else None
@@ -41263,6 +41333,8 @@ def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -
         use_crawlee = (
             should_use_crawlee(platform) and stage in {"posts", "comments"} and normalized_mode != "details_refresh"
         )
+        if platform == "instagram" and _instagram_public_first_scrape_mode_enabled(config):
+            use_crawlee = False
         runtime_config = build_runtime_config(platform)
         cancelled_result = _abort_claimed_job_if_cancelled(
             job_id=job_id,

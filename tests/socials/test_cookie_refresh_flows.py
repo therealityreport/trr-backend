@@ -13,6 +13,7 @@ from trr_backend.socials.facebook import cookie_refresh as facebook_cookie_refre
 from trr_backend.socials.instagram import auth_runtime as instagram_auth_runtime
 from trr_backend.socials.instagram import cookie_refresh as instagram_cookie_refresh
 from trr_backend.socials.instagram.scraper import load_cookies_from_file
+from trr_backend.socials.socialblade import auth as socialblade_auth
 from trr_backend.socials.threads import cookie_refresh as threads_cookie_refresh
 from trr_backend.socials.tiktok import cookie_refresh as tiktok_cookie_refresh
 from trr_backend.socials.twitter import cookie_refresh as twitter_cookie_refresh
@@ -28,6 +29,36 @@ def test_tiktok_cookie_refresh_requires_authenticated_session_cookies() -> None:
     assert any(
         "Maximum number of attempts reached" in pattern for pattern in tiktok_cookie_refresh._SPEC.invalid_body_patterns
     )
+
+
+def test_socialblade_cookie_contract_requires_login_session() -> None:
+    assert socialblade_auth.SOCIALBLADE_REQUIRED_COOKIE_NAMES_ANY == ("cf_clearance",)
+    assert socialblade_auth.SOCIALBLADE_REQUIRED_COOKIE_NAMES_ALL == ("session",)
+
+    with pytest.raises(RuntimeError, match="missing_required_cookie:session"):
+        socialblade_auth.require_socialblade_authenticated_cookies(
+            {"cf_clearance": "cloudflare-only"},
+            source="SocialBlade test",
+        )
+
+
+def test_socialblade_cookie_loader_prefers_authenticated_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cookie_file = tmp_path / "socialblade-cookies.json"
+    cookie_file.write_text(
+        json.dumps({"cf_clearance": "from-file", "session": "logged-in"}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("SOCIALBLADE_COOKIES_JSON", json.dumps({"cf_clearance": "env-cloudflare-only"}))
+    monkeypatch.setenv("SOCIALBLADE_COOKIES_FILE", str(cookie_file))
+
+    assert socialblade_auth.load_socialblade_cookies_from_sources() == {
+        "cf_clearance": "from-file",
+        "session": "logged-in",
+    }
 
 
 def test_facebook_cookie_refresh_detects_verification_checkpoint() -> None:
@@ -367,6 +398,49 @@ def test_cookie_refresh_context_refuses_profileless_browser_by_default(
             headless=True,
             viewport={"width": 100, "height": 100},
         )
+
+
+def test_cookie_refresh_context_allows_profileless_browser_with_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    chrome_root = tmp_path / "Chrome"
+    captured: dict[str, object] = {}
+
+    class _FakeContext:
+        def close(self) -> None:
+            captured["context_closed"] = True
+
+    class _FakeBrowser:
+        def new_context(self, **kwargs: object) -> _FakeContext:
+            captured["context_kwargs"] = kwargs
+            return _FakeContext()
+
+        def close(self) -> None:
+            captured["browser_closed"] = True
+
+    class _FakeChromium:
+        def launch(self, **kwargs: object) -> _FakeBrowser:
+            captured["launch_kwargs"] = kwargs
+            return _FakeBrowser()
+
+        def launch_persistent_context(self, **_kwargs: object) -> object:
+            raise AssertionError("profile-less override should not launch a persistent Chrome profile")
+
+    monkeypatch.setattr(browser_cookie_refresh, "_chrome_profile_base_dir", lambda: chrome_root)
+
+    session = browser_cookie_refresh.open_cookie_refresh_context(
+        SimpleNamespace(chromium=_FakeChromium()),
+        platform="socialblade",
+        headless=True,
+        viewport={"width": 100, "height": 100},
+        require_profile=False,
+    )
+    session.close()
+
+    assert captured["launch_kwargs"]["headless"] is True
+    assert captured["context_kwargs"] == {"viewport": {"width": 100, "height": 100}}
+    assert captured["browser_closed"] is True
 
 
 def test_social_auth_refresh_rate_limit_blocks_repeated_attempts(

@@ -352,7 +352,9 @@ def _warmup_pool_enabled() -> bool:
 
 def _normalize_auth_state(auth_state: str | None) -> str:
     normalized = str(auth_state or "authenticated").strip().lower()
-    return "anonymous" if normalized == "anonymous" else "authenticated"
+    if normalized in {"anonymous", "public"}:
+        return normalized
+    return "authenticated"
 
 
 def _strip_authenticated_cookies(raw_cookies: dict[str, str]) -> dict[str, str]:
@@ -771,11 +773,15 @@ class InstagramPostsScraplingFetcher:
         auth_state: str | None = None,
     ) -> None:
         self._auth_state = _normalize_auth_state(auth_state)
-        self._anonymous_mode = self._auth_state == "anonymous"
+        self._anonymous_mode = self._auth_state in {"anonymous", "public"}
         self._cookies = [] if self._anonymous_mode else list(cookies or [])
         resolved_raw_cookies = raw_cookies if isinstance(raw_cookies, dict) else dict(raw_cookies or {})
         self._raw_cookies = (
-            _strip_authenticated_cookies(resolved_raw_cookies) if self._anonymous_mode else resolved_raw_cookies
+            {}
+            if self._auth_state == "public"
+            else _strip_authenticated_cookies(resolved_raw_cookies)
+            if self._anonymous_mode
+            else resolved_raw_cookies
         )
         self._browser_account_id = str(browser_account_id or "").strip() or None
         # A3: optional zero-arg callable returning the next pool identity as a

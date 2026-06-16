@@ -113,8 +113,8 @@ _INSTAGRAM_BROWSER_SESSIONS = AccountBrowserSessionManager(
     platform="instagram",
     cookie_domains=(".instagram.com",),
 )
-_COMMENT_PAGINATION_MAX_PAGES_DEFAULT = 25
-_REPLY_PAGINATION_MAX_PAGES_DEFAULT = 10
+_COMMENT_PAGINATION_MAX_PAGES_DEFAULT = 0
+_REPLY_PAGINATION_MAX_PAGES_DEFAULT = 0
 _COMMENT_PAGINATION_MAX_SECONDS_DEFAULT = 30.0
 _REPLY_PAGINATION_MAX_SECONDS_DEFAULT = 20.0
 
@@ -428,8 +428,8 @@ class InstagramScraper:
     REQUEST_CONNECT_TIMEOUT_SECONDS = 10
     REQUEST_READ_TIMEOUT_SECONDS = 45
     METRICS_REQUEST_READ_TIMEOUT_SECONDS = 20
-    DEFAULT_NO_MATCH_PAGE_LIMIT = 40
-    DEFAULT_METRICS_MAX_PAGES = 250
+    DEFAULT_NO_MATCH_PAGE_LIMIT = 0
+    DEFAULT_METRICS_MAX_PAGES = 0
     DEFAULT_METRICS_TIMEOUT_SECONDS = 420
     _VIEW_COUNT_FIELD_PRIORITY = (
         "video_view_count",
@@ -467,6 +467,7 @@ class InstagramScraper:
         *,
         browser_account_id: str | None = None,
         browser_session_manager: AccountBrowserSessionManager | None = None,
+        attach_auth_session: bool = True,
     ):
         self.cookies = cookies or {}
         self.session = session if session is not None else self._create_session()
@@ -491,7 +492,8 @@ class InstagramScraper:
         self._fallback_chain: list[str] = []
         self._identity_rotation_attempted_this_scrape = False
         self._auth_session = None
-        self._attach_current_auth_session()
+        if attach_auth_session:
+            self._attach_current_auth_session()
 
     @property
     def _request_count(self) -> int:
@@ -1614,32 +1616,10 @@ class InstagramScraper:
             except (TypeError, ValueError):
                 return 0
 
-        raw = (os.getenv("SOCIAL_INSTAGRAM_NO_MATCH_PAGE_LIMIT") or "").strip() or (
-            os.getenv("SOCIAL_NO_MATCH_PAGE_LIMIT") or ""
-        ).strip()
-        if raw:
-            try:
-                return max(0, int(raw))
-            except ValueError:
-                return 0
-
-        if config.date_start or config.date_end:
-            return self.DEFAULT_NO_MATCH_PAGE_LIMIT
         return 0
 
-    def _resolve_metrics_max_pages(self, config: ScrapeConfig) -> int:
-        if config.max_pages is not None:
-            try:
-                return max(1, int(config.max_pages))
-            except (TypeError, ValueError):
-                return self.DEFAULT_METRICS_MAX_PAGES
-        raw = (os.getenv("SOCIAL_INSTAGRAM_METRICS_MAX_PAGES") or "").strip()
-        if raw:
-            try:
-                return max(1, int(raw))
-            except ValueError:
-                return self.DEFAULT_METRICS_MAX_PAGES
-        return self.DEFAULT_METRICS_MAX_PAGES
+    def _resolve_metrics_max_pages(self, config: ScrapeConfig) -> int | None:
+        return None
 
     def _resolve_metrics_timeout_seconds(self) -> int:
         raw = (os.getenv("SOCIAL_INSTAGRAM_METRICS_TIMEOUT_SECONDS") or "").strip()
@@ -3051,7 +3031,9 @@ class InstagramScraper:
                 headers["x-bloks-version-id"] = bloks_version
 
             saw_request_error = False
+            doc_ids_attempted: list[str] = []
             for doc_id in self._profile_posts_doc_ids():
+                doc_ids_attempted.append(doc_id)
                 data["doc_id"] = doc_id
                 try:
                     payload = self._request_client.post_form_json(
@@ -3084,10 +3066,17 @@ class InstagramScraper:
                         else {}
                     )
                     if connection:
-                        self.last_retrieval_meta["graphql_cursor"] = str(cursor or "").strip() or None
-                        self.last_retrieval_meta["retrieval_mode"] = "graphql_requests_enriched"
-                        self.last_retrieval_meta["transport"] = "requests_enriched"
-                        self.last_retrieval_meta["retrieval_transport"] = "requests_enriched"
+                        self.last_retrieval_meta.update(
+                            {
+                                "graphql_cursor": str(cursor or "").strip() or None,
+                                "retrieval_mode": "graphql_requests_enriched",
+                                "transport": "requests_enriched",
+                                "retrieval_transport": "requests_enriched",
+                                "profile_posts_doc_id": doc_id,
+                                "doc_id_used": doc_id,
+                                "profile_posts_doc_ids_attempted": list(doc_ids_attempted),
+                            }
+                        )
                         return payload
                     logger.warning("Instagram GraphQL doc_id %s returned no connection data; trying fallback", doc_id)
                 except InstagramRequestFailure as exc:
@@ -3444,12 +3433,6 @@ class InstagramScraper:
             minimum=1.0,
             maximum=300.0,
         )
-        page_cap = self._resolve_positive_int_env(
-            "SOCIAL_INSTAGRAM_COMMENT_PAGINATION_MAX_PAGES",
-            _COMMENT_PAGINATION_MAX_PAGES_DEFAULT,
-            minimum=1,
-            maximum=250,
-        )
 
         while True:
             response: requests.Response | None = None
@@ -3589,14 +3572,6 @@ class InstagramScraper:
                     next_cursor,
                 )
                 break
-            if pages_seen >= page_cap:
-                self.last_comment_fetch_reason = "pagination_page_cap_reached"
-                logger.warning(
-                    "Instagram comments pagination page cap reached for shortcode=%s page_cap=%d",
-                    shortcode,
-                    page_cap,
-                )
-                break
             seen_cursors.add(next_cursor_key)
             cursor = (cursor_param_name, next_cursor)
 
@@ -3660,12 +3635,6 @@ class InstagramScraper:
             _REPLY_PAGINATION_MAX_SECONDS_DEFAULT,
             minimum=1.0,
             maximum=300.0,
-        )
-        page_cap = self._resolve_positive_int_env(
-            "SOCIAL_INSTAGRAM_REPLY_PAGINATION_MAX_PAGES",
-            _REPLY_PAGINATION_MAX_PAGES_DEFAULT,
-            minimum=1,
-            maximum=250,
         )
 
         while True:
@@ -3761,14 +3730,6 @@ class InstagramScraper:
                     "Instagram reply pagination repeated cursor for comment_id=%s cursor=%s",
                     comment_id,
                     next_cursor,
-                )
-                break
-            if pages_seen >= page_cap:
-                self.last_comment_fetch_reason = "pagination_page_cap_reached"
-                logger.warning(
-                    "Instagram reply pagination page cap reached for comment_id=%s page_cap=%d",
-                    comment_id,
-                    page_cap,
                 )
                 break
             seen_cursors.add(next_cursor_key)
@@ -4599,7 +4560,7 @@ class InstagramScraper:
         cursor: str | None = None
         while True:
             pages_scanned += 1
-            if pages_scanned > max_pages_limit:
+            if max_pages_limit is not None and pages_scanned > max_pages_limit:
                 break
             if time.monotonic() >= timeout_deadline:
                 logger.warning(
@@ -4940,10 +4901,6 @@ class InstagramScraper:
 
         while not reached_date_limit:
             page_num += 1
-            if config.max_pages and page_num > config.max_pages:
-                logger.info("Reached max pages limit (%s)", config.max_pages)
-                stop_reason = "max_pages_reached"
-                break
             if time.monotonic() - _t0 > config.max_scrape_seconds:
                 logger.warning(
                     "[instagram] graphql pagination timed out after %.0fs (limit: %.0fs)",
@@ -5186,7 +5143,7 @@ class InstagramScraper:
 
         user_agent = self._get_headers().get("user-agent", "Mozilla/5.0")
         timeout_ms = 60_000
-        max_posts = config.max_pages * 50 if config.max_pages else 10_000
+        max_posts: int | None = None
 
         with sync_playwright() as playwright:
             try:
@@ -5300,7 +5257,7 @@ class InstagramScraper:
                         and no_new_data_scrolls < max_no_new_data_scrolls
                         and (time.monotonic() - _scroll_t0) < config.max_scrape_seconds
                     ):
-                        if len(posts) >= max_posts:
+                        if max_posts is not None and len(posts) >= max_posts:
                             logger.info("browser_intercept: reached max posts (%d)", max_posts)
                             break
 
@@ -5349,8 +5306,6 @@ class InstagramScraper:
         stop_reason = (
             "date_start_reached"
             if reached_date_limit
-            else "max_posts_reached"
-            if len(posts) >= max_posts
             else "timeout"
             if scroll_timed_out
             else "no_new_data"

@@ -1185,15 +1185,6 @@ def scrape_socialblade(
         ):
             metrics = payload.get("daily_channel_metrics_60day") if isinstance(payload, dict) else {}
             row_count = metrics.get("row_count") if isinstance(metrics, dict) else None
-            if (
-                _modal_runtime_disallows_visible_socialblade_login()
-                and _socialblade_payload_has_authenticated_seed_session(payload)
-            ):
-                _log(
-                    "SocialBlade scrape returned short authenticated history "
-                    f"({row_count or 0} rows) in Modal; keeping seeded-session table result."
-                )
-                return payload
             _log(
                 "SocialBlade scrape returned short history "
                 f"({row_count or 0} rows); logging in and retrying authenticated scrape..."
@@ -1372,12 +1363,14 @@ def _persist_socialblade_context_cookies(context: Any) -> dict[str, str]:
     from trr_backend.socials.browser_cookie_refresh import cookie_payload, write_cookie_file
     from trr_backend.socials.socialblade.auth import (
         SOCIALBLADE_COOKIE_DOMAINS,
+        require_socialblade_authenticated_cookies,
         socialblade_cookie_file_path,
     )
 
     refreshed = cookie_payload(context.cookies(), domains=SOCIALBLADE_COOKIE_DOMAINS)
     if not refreshed:
         raise RuntimeError("SocialBlade login fallback completed without any SocialBlade cookies")
+    require_socialblade_authenticated_cookies(refreshed, source="SocialBlade login fallback")
     write_cookie_file(socialblade_cookie_file_path(), refreshed)
     return refreshed
 
@@ -1406,6 +1399,8 @@ async def _refresh_socialblade_cookies_via_visible_login_async() -> dict[str, st
 
     email = os.environ.get("SOCIALBLADE_EMAIL", "")
     password = os.environ.get("SOCIALBLADE_PASSWORD", "")
+    if not email or not password:
+        raise RuntimeError("SocialBlade login required but SOCIALBLADE_EMAIL / SOCIALBLADE_PASSWORD not set")
     command_id = 1
     login_completed = False
     try:
@@ -1566,11 +1561,16 @@ async def _refresh_socialblade_cookies_via_visible_login_async() -> dict[str, st
                 {"urls": ["https://socialblade.com/"]},
             )
             from trr_backend.socials.browser_cookie_refresh import cookie_payload, write_cookie_file
-            from trr_backend.socials.socialblade.auth import SOCIALBLADE_COOKIE_DOMAINS, socialblade_cookie_file_path
+            from trr_backend.socials.socialblade.auth import (
+                SOCIALBLADE_COOKIE_DOMAINS,
+                require_socialblade_authenticated_cookies,
+                socialblade_cookie_file_path,
+            )
 
             refreshed = cookie_payload(cookie_result.get("cookies") or [], domains=SOCIALBLADE_COOKIE_DOMAINS)
             if not refreshed:
                 raise RuntimeError("Visible SocialBlade login completed without any SocialBlade cookies")
+            require_socialblade_authenticated_cookies(refreshed, source="Visible SocialBlade login")
             write_cookie_file(socialblade_cookie_file_path(), refreshed)
             return refreshed
     finally:
@@ -1593,6 +1593,8 @@ def _refresh_socialblade_cookies_via_login(*, headless: bool | None = None) -> d
     if headless is None:
         headless_raw = str(os.getenv("SOCIALBLADE_LOGIN_HEADLESS") or "true").strip().lower()
         headless = headless_raw not in {"0", "false", "off", "no"}
+    if _modal_runtime_disallows_visible_socialblade_login():
+        headless = True
 
     try:
         with sync_playwright() as pw:
@@ -1604,6 +1606,7 @@ def _refresh_socialblade_cookies_via_login(*, headless: bool | None = None) -> d
                 user_agent=SOCIALBLADE_STEALTH_USER_AGENT,
                 locale="en-US",
                 timezone_id="America/New_York",
+                require_profile=not _modal_runtime_disallows_visible_socialblade_login(),
             )
             try:
                 context = session.context

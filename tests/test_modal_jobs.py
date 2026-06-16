@@ -212,17 +212,21 @@ def test_inject_modal_runtime_defaults_sets_canonical_modal_flags(
     assert os.environ["TRR_DB_POOL_ACQUIRE_SLEEP_MS"] == "200"
     assert os.environ["TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT"] == "8"
     assert os.environ["TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT"] == "10"
-    assert os.environ["TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_CONCURRENCY_LIMIT"] == "2"
+    assert os.environ["TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_CONCURRENCY_LIMIT"] == "10"
     assert os.environ["TRR_MODAL_SOCIAL_MEDIA_JOB_CONCURRENCY_LIMIT"] == "10"
     assert os.environ["TRR_MODAL_CAST_SCREENTIME_FUNCTION"] == "run_cast_screentime_analysis"
     assert os.environ["TRR_MODAL_CAST_SCREENTIME_CONCURRENCY_LIMIT"] == "2"
-    assert os.environ["SOCIAL_MODAL_DISPATCH_LIMIT"] == "10"
+    assert os.environ["SOCIAL_MODAL_DISPATCH_LIMIT"] == "25"
     assert os.environ["SOCIAL_INSTAGRAM_POSTS_USE_STICKY_PROXY"] == "true"
     assert os.environ["SOCIAL_INSTAGRAM_POSTS_ANONYMOUS_ENABLED"] == "false"
-    assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER"] == "decodo"
+    assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER"] == "none"
     assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY"] == "true"
     assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY"] == "false"
     assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS"] == "600"
+    assert os.environ["INSTAGRAM_BROWSER_NETWORK_POLICY_ENABLED"] == "true"
+    assert os.environ["INSTAGRAM_BROWSER_BLOCK_STATIC_ASSETS"] == "true"
+    assert os.environ["INSTAGRAM_BROWSER_DISABLE_EXTRA_RESOURCES"] == "true"
+    assert os.environ["INSTAGRAM_BROWSER_NETWORK_POLICY_REPORT_ONLY"] == "false"
     assert os.environ["SOCIAL_WORKER_POOL_COMMENTS"] == "10"
     assert os.environ["SOCIAL_WORKER_POOL_SHARED_ACCOUNT_DISCOVERY"] == "3"
     assert os.environ["SOCIAL_WORKER_POOL_SHARED_ACCOUNT_POSTS"] == "8"
@@ -232,6 +236,7 @@ def test_inject_modal_runtime_defaults_sets_canonical_modal_flags(
     assert os.environ["SOCIAL_CATALOG_RUN_IN_FLIGHT_CAP"] == "8"
     assert os.environ["SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM"] == "10"
     assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT"] == "8"
+    assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_MAX_SHARD_COUNT"] == "1000"
     assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_GLOBAL_RATE_LIMIT_MODE"] == "advisory"
     assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_PER_POST_CONCURRENCY"] == "2"
     assert os.environ["SOCIAL_THREADS_POSTS_SCRAPLING_ENABLED"] == "true"
@@ -304,6 +309,131 @@ def test_reddit_runtime_probe_payload_reports_healthy_oauth_env(
     assert payload["effective_user_agent"] == "TRRTest/1.0"
 
 
+def test_probe_instagram_public_history_scrubs_auth_proxy_and_decodo_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from trr_backend.socials.instagram import public_probe
+
+    for name in (
+        *public_probe.COOKIE_ENV_VARS,
+        *public_probe.DECODO_ENV_VARS,
+        *public_probe.PROXY_ENV_VARS,
+        *public_probe.AUTH_ENV_VARS,
+        *public_probe.PROXY_PROVIDER_ENV_VARS,
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COOKIES_JSON", "{}")
+    monkeypatch.setenv("DECODO_USERNAME", "decodo-user")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_PROXY_URLS", "http://proxy.example")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_SESSION_ACCOUNT_ID", "trr")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_PROXY_PROVIDER", "decodo")
+
+    def fake_run_public_probe(config):
+        assert public_probe.validate_public_environment(
+            strict_public=config.strict_public,
+            fail_if_cookies=config.fail_if_cookies,
+            fail_if_decodo=config.fail_if_decodo,
+        ) == []
+        assert config.target_years == (2025, 2026)
+        assert config.continue_after_boundary is True
+        return public_probe.PublicProbeResult(
+            account=config.account,
+            historical_boundary=config.until_date.isoformat(),
+            target_years=list(config.target_years),
+            continue_after_boundary=config.continue_after_boundary,
+            stop_reason="account_exhausted",
+            account_exhausted=True,
+        )
+
+    monkeypatch.setattr(public_probe, "run_public_probe", fake_run_public_probe)
+
+    payload = modal_jobs.probe_instagram_public_history.local(
+        account_handle="BravoTV",
+        until_date="2025-01-01",
+        target_years="2025,2026",
+        max_pages=1,
+        state_file=str(tmp_path / "state.json"),
+        output_file=str(tmp_path / "output.json"),
+    )
+
+    assert payload["account"] == "bravotv"
+    assert payload["stop_reason"] == "account_exhausted"
+    assert payload["execution_backend"] == "modal"
+    assert payload["auth_state"] == "public"
+    assert payload["proxy_state"] == "none"
+    assert payload["decodo_state"] == "none"
+    assert payload["target_years"] == [2025, 2026]
+    assert payload["continue_after_boundary"] is True
+    assert payload["output_file"] == str(tmp_path / "output.json")
+    assert payload["modal_public_env_scrubbed"] == [
+        "DECODO_USERNAME",
+        "SOCIAL_INSTAGRAM_COOKIES_JSON",
+        "SOCIAL_INSTAGRAM_POSTS_PROXY_PROVIDER",
+        "SOCIAL_INSTAGRAM_POSTS_PROXY_URLS",
+        "SOCIAL_INSTAGRAM_SESSION_ACCOUNT_ID",
+    ]
+    assert os.environ["DECODO_USERNAME"] == "decodo-user"
+
+
+def test_probe_instagram_public_history_accepts_and_returns_resume_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from trr_backend.socials.instagram import public_probe
+
+    for name in (
+        *public_probe.COOKIE_ENV_VARS,
+        *public_probe.DECODO_ENV_VARS,
+        *public_probe.PROXY_ENV_VARS,
+        *public_probe.AUTH_ENV_VARS,
+        *public_probe.PROXY_PROVIDER_ENV_VARS,
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    state_path = tmp_path / "state.json"
+    incoming_state = {
+        "account": "bravotv",
+        "cursor": "cursor-2",
+        "pages_recovered": 1,
+        "posts": [],
+        "seen_cursors": ["cursor-2"],
+        "unique_shortcodes": [],
+    }
+
+    def fake_run_public_probe(config):
+        loaded = public_probe._load_state(config.state_file)  # noqa: SLF001
+        assert loaded["cursor"] == "cursor-2"
+        loaded["cursor"] = "cursor-3"
+        loaded["pages_recovered"] = 2
+        config.state_file.write_text(__import__("json").dumps(loaded), encoding="utf-8")
+        return public_probe.PublicProbeResult(
+            account=config.account,
+            historical_boundary=config.until_date.isoformat(),
+            target_years=list(config.target_years),
+            stop_reason="public_graphql_403_backoff_required",
+            next_retry_after_seconds=7200,
+        )
+
+    monkeypatch.setattr(public_probe, "run_public_probe", fake_run_public_probe)
+
+    payload = modal_jobs.probe_instagram_public_history.local(
+        account_handle="BravoTV",
+        until_date="2025-01-01",
+        target_years="2025,2026",
+        max_pages=5,
+        state_file=str(state_path),
+        state_payload=incoming_state,
+        scrub_public_env=True,
+    )
+
+    assert payload["stop_reason"] == "public_graphql_403_backoff_required"
+    assert payload["next_retry_after_seconds"] == 7200
+    assert payload["state_payload"]["cursor"] == "cursor-3"
+    assert payload["state_payload"]["pages_recovered"] == 2
+
+
 def test_social_concurrency_limit_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT", "17")
     monkeypatch.delenv("TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT", raising=False)
@@ -312,7 +442,7 @@ def test_social_concurrency_limit_reads_env(monkeypatch: pytest.MonkeyPatch) -> 
     try:
         assert reloaded._SOCIAL_CONCURRENCY_LIMIT == 17
         assert reloaded._SOCIAL_COMMENTS_CONCURRENCY_LIMIT == 17
-        assert reloaded._SOCIAL_COMMENTS_RECOVERY_CONCURRENCY_LIMIT == 2
+        assert reloaded._SOCIAL_COMMENTS_RECOVERY_CONCURRENCY_LIMIT == 10
     finally:
         monkeypatch.delenv("TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT", raising=False)
         importlib.reload(modal_jobs)

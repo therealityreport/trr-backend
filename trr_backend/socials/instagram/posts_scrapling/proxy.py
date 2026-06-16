@@ -189,7 +189,10 @@ def _explicit_proxy_url_for_page(proxy_urls: list[str], page_index: int | None) 
 
 
 def _load_proxy_urls_from_env() -> list[str]:
-    return _split_proxy_values(os.getenv("SOCIAL_INSTAGRAM_POSTS_PROXY_URLS") or "")
+    proxy_urls = _split_proxy_values(os.getenv("SOCIAL_INSTAGRAM_POSTS_PROXY_URLS") or "")
+    if not proxy_urls:
+        proxy_urls = _split_proxy_values(os.getenv("DECODO_PROXY_URL") or "")
+    return proxy_urls
 
 
 def _decodo_env() -> tuple[str, str, str] | None:
@@ -201,8 +204,16 @@ def _decodo_env() -> tuple[str, str, str] | None:
     return username, password, gateway
 
 
-def select_posts_proxy(*, session_key: str | None = None, page_index: int | None = None) -> PostsProxyConfig | None:
+def select_posts_proxy(
+    *,
+    session_key: str | None = None,
+    page_index: int | None = None,
+    public_mode: bool = False,
+) -> PostsProxyConfig | None:
     """Single entry point. Returns None when no proxy is configured."""
+    if public_mode:
+        return None
+
     # 1. Explicit proxy URLs take precedence.
     explicit_urls = _load_proxy_urls_from_env()
     if explicit_urls:

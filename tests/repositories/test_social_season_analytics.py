@@ -8441,11 +8441,11 @@ def test_start_social_account_comments_scrape_incomplete_fill_uses_incomplete_ta
     assert created_runs[0]["target_filter"] == "incomplete"
     assert created_runs[0]["incomplete_fill"] is True
     assert created_runs[0]["comments_max_attempts"] == 12
-    assert created_runs[0]["comments_auth_validation_mode"] == "schema_only"
+    assert created_runs[0]["comments_auth_validation_mode"] == "public_relay"
     assert created_jobs[0]["target_filter"] == "incomplete"
     assert created_jobs[0]["incomplete_fill"] is True
     assert created_jobs[0]["comments_max_attempts"] == 12
-    assert created_jobs[0]["comments_auth_validation_mode"] == "schema_only"
+    assert created_jobs[0]["comments_auth_validation_mode"] == "public_relay"
     assert created_jobs[0]["target_source_ids"] == ["GAP1", "GAP2"]
 
 
@@ -8769,6 +8769,7 @@ def test_start_social_account_comments_scrape_reuses_lock_connection_for_active_
             "bravotv",
             mode="profile",
             refresh_policy="all_saved_posts",
+            cancel_active_before_relaunch=False,
         )
 
     assert exc_info.value.code == "SOCIAL_ACCOUNT_COMMENTS_RUN_ALREADY_ACTIVE"
@@ -9023,13 +9024,168 @@ def test_start_social_account_comments_scrape_shards_profile_targets(
     assert {job["config"]["target_source_ids_count"] for job in created_jobs} == {10}
     assert created_runs[0]["comments_shard_count"] == 4
     assert created_runs[0]["target_source_ids_count"] == 10
-    assert created_runs[0]["comments_proxy_shard_sessions"] is True
+    assert created_runs[0]["comments_proxy_shard_sessions"] is False
     assert created_runs[0]["comments_max_attempts"] == 12
     assert created_runs[0]["timing"]["target_source_ids_count"] == 10
     assert created_runs[0]["timing"]["target_enumeration_ms"] >= 0
     assert {job["max_attempts"] for job in created_jobs} == {12}
     assert payload["timing"]["target_source_ids_count"] == 10
     assert dispatch_calls == [{"run_id": "comments-run-1"}]
+
+
+def test_instagram_comments_batch_shards_are_not_clamped_to_24(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_MAX_SHARD_COUNT", raising=False)
+
+    shard_count = instagram_comments_pipeline._comments_shard_count_for_batch_size(
+        target_count=3134,
+        batch_size=5,
+    )
+
+    assert shard_count == 627
+
+
+def test_instagram_comments_batch_shards_respect_configurable_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_MAX_SHARD_COUNT", "100")
+
+    shard_count = instagram_comments_pipeline._comments_shard_count_for_batch_size(
+        target_count=3134,
+        batch_size=5,
+    )
+
+    assert shard_count == 100
+
+
+def test_start_social_account_comments_scrape_cancels_active_run_before_relaunch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cancelled_runs: list[dict[str, Any]] = []
+    created_runs: list[dict[str, Any]] = []
+    created_jobs: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None, **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_one_with_cursor",
+        lambda *_args, **kwargs: (
+            {"locked": True}
+            if "pg_try_advisory_lock" in (kwargs.get("query") or (_args[1] if len(_args) > 1 else ""))
+            else {"unlocked": True}
+        ),
+    )
+    monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: [{}])
+    monkeypatch.setattr(
+        social_repo,
+        "get_active_social_account_comments_run",
+        lambda *_args, **_kwargs: {"run_id": "active-run-1", "status": "running"},
+    )
+    monkeypatch.setattr(social_repo, "is_queue_enabled", lambda: False)
+    monkeypatch.setattr(
+        social_repo,
+        "_instagram_social_account_comment_target_shortcodes",
+        lambda *_args, **_kwargs: ["C123"],
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_create_run",
+        lambda *_args, **kwargs: created_runs.append(dict(kwargs.get("config") or {})) or "new-run-1",
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_create_job",
+        lambda *_args, **kwargs: created_jobs.append(dict(kwargs.get("config") or {})) or "comments-job-1",
+    )
+    monkeypatch.setattr(
+        instagram_comments_pipeline,
+        "cancel_social_account_comments_run",
+        lambda **kwargs: (
+            cancelled_runs.append(dict(kwargs))
+            or {"run_id": kwargs["run_id"], "status": "cancelled", "cancelled_jobs": 7}
+        ),
+    )
+
+    payload = social_repo.start_social_account_comments_scrape(
+        "instagram",
+        "bravotv",
+        mode="profile",
+        refresh_policy="all_saved_posts",
+    )
+
+    assert payload["run_id"] == "new-run-1"
+    assert cancelled_runs[0]["run_id"] == "active-run-1"
+    assert cancelled_runs[0]["cancelled_by"] == "comments_relaunch_guard"
+    assert payload["relaunch_guard"] == {
+        "cancel_active_before_relaunch": True,
+        "cancelled_previous_run_id": "active-run-1",
+        "cancelled_previous_job_count": 7,
+    }
+    assert created_runs[0]["relaunch_guard"] == payload["relaunch_guard"]
+    assert created_jobs[0]["target_source_ids"] == ["C123"]
+
+
+def test_create_instagram_comments_shard_jobs_uses_bulk_insert_for_large_queues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_BULK_INSERT_THRESHOLD", "2")
+    monkeypatch.setattr(instagram_comments_pipeline, "_scrape_jobs_features", lambda: {"has_queue_fields": True})
+    monkeypatch.setattr(
+        instagram_comments_pipeline,
+        "_resolve_runtime_version_stamp",
+        lambda: {"commit_sha": "local-test"},
+    )
+    monkeypatch.setattr(
+        instagram_comments_pipeline,
+        "_resolve_effective_runtime_version",
+        lambda **_kwargs: {"execution_backend": "modal", "label": "modal-test"},
+    )
+    monkeypatch.setattr(
+        instagram_comments_pipeline,
+        "_create_job",
+        lambda *_args, **_kwargs: pytest.fail("large comments queues should use bulk insert"),
+    )
+
+    def _fake_execute_values_returning(sql: str, rows: list[tuple[Any, ...]], *, conn: Any = None) -> list[dict[str, Any]]:
+        captured["sql"] = sql
+        captured["rows"] = rows
+        captured["conn"] = conn
+        return [{"id": f"job-{index}"} for index, _row in enumerate(rows, start=1)]
+
+    monkeypatch.setattr(instagram_comments_pipeline.pg, "execute_values_returning", _fake_execute_values_returning)
+
+    job_ids, mode = instagram_comments_pipeline._create_instagram_comments_shard_jobs(
+        run_id="11111111-1111-4111-8111-111111111111",
+        platform="instagram",
+        source_scope="network",
+        source_id=None,
+        account_handle="bravotv",
+        mode="profile",
+        run_config={"required_execution_backend": "modal", "comments_load_strategy": "public_relay"},
+        target_source_id_shards=[["A"], ["B"], ["C"]],
+        target_source_ids_count=3,
+        comments_shard_count=3,
+        initiated_by="test",
+        job_status="queued",
+        priority=105,
+        max_attempts=12,
+        required_worker_lane=None,
+        required_execution_backend="modal",
+        inline_worker_id=None,
+        conn=object(),
+    )
+
+    assert mode == "bulk"
+    assert job_ids == ["job-1", "job-2", "job-3"]
+    assert "from (values %s)" in captured["sql"].lower()
+    assert len(captured["rows"]) == 3
+    first_config = json.loads(captured["rows"][0][3])
+    assert first_config["target_source_ids"] == ["A"]
+    assert first_config["comments_shard_index"] == 1
+    assert first_config["comments_shard_count"] == 3
+    assert first_config["required_execution_backend"] == "modal"
 
 
 def test_start_social_account_comments_scrape_single_session_profile_uses_one_job(
@@ -37393,17 +37549,18 @@ def test_social_account_comments_scrape_run_progress_aggregates_shards(
         "reply_tail_incomplete": 14,
         "pagination_deadline_exceeded": 4,
     }
-    assert payload["retry_progress"] == {
-        "retry_target_count": 0,
-        "retry_source_job_ids": [],
-        "targeted_retry_target_count": 0,
-        "largest_remaining_gaps": [],
-        "top_incomplete_reasons": {
-            "complete": 48,
-            "reply_tail_incomplete": 14,
-            "pagination_deadline_exceeded": 4,
-        },
+    assert payload["retry_progress"]["retry_target_count"] == 0
+    assert payload["retry_progress"]["retry_source_job_ids"] == []
+    assert payload["retry_progress"]["targeted_retry_target_count"] == 0
+    assert payload["retry_progress"]["network_stopped_target_count"] == 0
+    assert payload["retry_progress"]["network_stopped_target_source_ids"] == []
+    assert payload["retry_progress"]["largest_remaining_gaps"] == []
+    assert payload["retry_progress"]["top_incomplete_reasons"] == {
+        "complete": 48,
+        "reply_tail_incomplete": 14,
+        "pagination_deadline_exceeded": 4,
     }
+    assert len(payload["retry_progress"]["target_progress_rows"]) == 2
     assert payload["post_progress"] == {
         "completed_posts": 66,
         "matched_posts": 66,
@@ -37424,7 +37581,13 @@ def test_social_account_comments_scrape_run_progress_aggregates_shards(
     assert payload["throughput"] == {
         "elapsed_seconds": 600,
         "posts_per_minute": 6.6,
+        "posts_per_second": 0.11,
         "comments_per_minute": 593.4,
+        "comments_per_second": 9.89,
+        "average_seconds_per_post": 9.09,
+        "average_seconds_per_comment": 0.1011,
+        "remaining_posts": 365,
+        "estimated_seconds_remaining": 3318,
     }
     assert payload["summary"]["comments_processed_total"] == 5934
     assert payload["summary"]["comments_upserted_total"] == 120
@@ -37481,7 +37644,12 @@ def test_social_account_comments_scrape_run_progress_aggregates_shards(
             "new_comments": 12,
             "queue_wait_seconds": 60,
             "posts_per_minute": 5.4,
+            "posts_per_second": 0.09,
             "comments_per_minute": 494.6,
+            "comments_per_second": 8.2433,
+            "average_seconds_per_post": 11.11,
+            "average_seconds_per_comment": 0.1213,
+            "estimated_seconds_remaining": 0,
             "items_found_total": 5000,
             "error_message": None,
             "latest_failure_reason": None,
@@ -37516,7 +37684,12 @@ def test_social_account_comments_scrape_run_progress_aggregates_shards(
             "new_comments": 3,
             "queue_wait_seconds": 120,
             "posts_per_minute": 1.33,
+            "posts_per_second": 0.0222,
             "comments_per_minute": 109.78,
+            "comments_per_second": 1.8296,
+            "average_seconds_per_post": 45.0,
+            "average_seconds_per_comment": 0.5466,
+            "estimated_seconds_remaining": 1890,
             "items_found_total": 1000,
             "error_message": None,
             "latest_failure_reason": None,

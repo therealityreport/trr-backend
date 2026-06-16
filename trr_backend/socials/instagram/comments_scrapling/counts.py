@@ -131,11 +131,29 @@ def media_comment_count(comments: Iterable[Any]) -> int:
     )
 
 
-def missing_reply_count_for_parent(comment: Any) -> int:
+def expected_reply_count(comment: Any) -> int:
+    """Expected reply total for a parent, matching the persistence topology.
+
+    The reply-topology gap query measures a parent's expected replies as
+    ``greatest(coalesce(reply_count, 0), coalesce(child_comment_count, 0))``
+    (persistence.py). Reply-fetch gates must use the SAME measure, otherwise a
+    parent whose ``child_comment_count`` exceeds its ``reply_count`` is reported
+    incomplete by topology forever while no fetch is ever triggered. Use this
+    helper everywhere a fetch decision or missing-reply count is made.
+    """
     try:
-        expected = int(getattr(comment, "reply_count", 0) or 0)
+        reply_count = int(getattr(comment, "reply_count", 0) or 0)
     except (TypeError, ValueError):
-        expected = 0
+        reply_count = 0
+    try:
+        child_comment_count = int(getattr(comment, "child_comment_count", 0) or 0)
+    except (TypeError, ValueError):
+        child_comment_count = 0
+    return max(reply_count, child_comment_count)
+
+
+def missing_reply_count_for_parent(comment: Any) -> int:
+    expected = expected_reply_count(comment)
     if expected <= 0:
         return 0
     return max(0, expected - reply_count_observed(comment))

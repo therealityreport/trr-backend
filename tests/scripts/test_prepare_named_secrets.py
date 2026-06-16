@@ -12,6 +12,28 @@ def test_default_source_env_can_follow_guardrail_source_env(monkeypatch: pytest.
     assert cli._default_source_env() == source_env
 
 
+def test_overlay_shell_runtime_env_values_adds_decodo_proxy_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DECODO_PROXY_URL", "http://user:pass@proxy.example.test:10000")
+
+    result = cli._overlay_shell_runtime_env_values({"TRR_DB_URL": "postgresql://example"})
+
+    assert result["TRR_DB_URL"] == "postgresql://example"
+    assert result["DECODO_PROXY_URL"] == "http://user:pass@proxy.example.test:10000"
+
+
+def test_overlay_shell_runtime_env_values_preserves_source_decodo_proxy_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DECODO_PROXY_URL", "http://user:pass@proxy.example.test:10000")
+
+    result = cli._overlay_shell_runtime_env_values(
+        {
+            "TRR_DB_URL": "postgresql://example",
+            "DECODO_PROXY_URL": "http://source:pass@proxy.example.test:10000",
+        }
+    )
+
+    assert result["DECODO_PROXY_URL"] == "http://source:pass@proxy.example.test:10000"
+
+
 def test_split_env_excludes_modal_deploy_tokens_from_runtime_secret(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -81,10 +103,14 @@ def test_apply_runtime_overrides_injects_canonical_modal_defaults(monkeypatch: p
     )
     assert result["SOCIAL_INSTAGRAM_POSTS_USE_STICKY_PROXY"] == "true"
     assert result["SOCIAL_INSTAGRAM_POSTS_ANONYMOUS_ENABLED"] == "false"
-    assert result["SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER"] == "decodo"
+    assert result["SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER"] == "none"
     assert result["SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY"] == "true"
     assert result["SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY"] == "false"
     assert result["SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS"] == "600"
+    assert result["INSTAGRAM_BROWSER_NETWORK_POLICY_ENABLED"] == "true"
+    assert result["INSTAGRAM_BROWSER_BLOCK_STATIC_ASSETS"] == "true"
+    assert result["INSTAGRAM_BROWSER_DISABLE_EXTRA_RESOURCES"] == "true"
+    assert result["INSTAGRAM_BROWSER_NETWORK_POLICY_REPORT_ONLY"] == "false"
     assert result["TRR_MODAL_MAINTENANCE_OWNER_REQUIRED"] == "1"
     assert result["TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED"] == "0"
     assert result["TRR_MODAL_RUNTIME_SCHEDULER_ENABLED"] == "1"
@@ -92,9 +118,9 @@ def test_apply_runtime_overrides_injects_canonical_modal_defaults(monkeypatch: p
     assert result["TRR_MODAL_ADMIN_KEEP_WARM"] == "0"
     assert result["TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT"] == "8"
     assert result["TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT"] == "10"
-    assert result["TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_CONCURRENCY_LIMIT"] == "2"
+    assert result["TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_CONCURRENCY_LIMIT"] == "10"
     assert result["TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_FUNCTION"] == "run_social_comments_recovery_job"
-    assert result["SOCIAL_MODAL_DISPATCH_LIMIT"] == "10"
+    assert result["SOCIAL_MODAL_DISPATCH_LIMIT"] == "25"
     assert result["SOCIAL_WORKER_POOL_COMMENTS"] == "10"
     assert result["SOCIAL_WORKER_POOL_SHARED_ACCOUNT_DISCOVERY"] == "3"
     assert result["SOCIAL_WORKER_POOL_SHARED_ACCOUNT_POSTS"] == "8"
@@ -102,6 +128,7 @@ def test_apply_runtime_overrides_injects_canonical_modal_defaults(monkeypatch: p
     assert result["SOCIAL_CATALOG_RUN_IN_FLIGHT_CAP"] == "8"
     assert result["SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM"] == "10"
     assert result["SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT"] == "8"
+    assert result["SOCIAL_INSTAGRAM_COMMENTS_MAX_SHARD_COUNT"] == "1000"
     assert result["SOCIAL_INSTAGRAM_COMMENTS_GLOBAL_RATE_LIMIT_MODE"] == "advisory"
     assert result["SOCIAL_THREADS_POSTS_SCRAPLING_ENABLED"] == "true"
     assert result["SOCIAL_THREADS_POSTS_PROXY_PROVIDER"] == "decodo"
@@ -131,7 +158,7 @@ def test_apply_runtime_overrides_preserves_explicit_social_caps() -> None:
     assert result["SOCIAL_WORKER_POOL_COMMENTS"] == "4"
     assert result["SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM"] == "4"
     assert result["SOCIAL_INSTAGRAM_POSTS_USE_STICKY_PROXY"] == "true"
-    assert result["SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER"] == "decodo"
+    assert result["SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER"] == "none"
     assert result["SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY"] == "true"
     assert result["SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY"] == "false"
     assert result["SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS"] == "600"
@@ -247,9 +274,13 @@ def test_split_env_materializes_file_backed_social_auth(tmp_path, monkeypatch: p
     }
 
 
-def test_split_env_prefers_configured_cookie_file_over_stale_inline_json(tmp_path) -> None:
+def test_split_env_prefers_configured_cookie_file_over_stale_inline_json(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     cookie_file = tmp_path / "instagram-cookies.json"
     cookie_file.write_text('{\n  "sessionid": "fresh-file-session"\n}\n', encoding="utf-8")
+    monkeypatch.setattr(cli, "DEFAULT_SOCIALBLADE_COOKIE_FILE", tmp_path / "missing-socialblade-cookies.json")
 
     _runtime_values, social_values = cli._split_env(
         {
@@ -296,11 +327,32 @@ def test_split_env_preserves_non_empty_socialblade_inline_json(
     _runtime_values, social_values = cli._split_env(
         {
             "TRR_DB_URL": "postgresql://example",
-            "SOCIALBLADE_COOKIES_JSON": '{"session":"inline-session"}',
+            "SOCIALBLADE_COOKIES_JSON": '{"cf_clearance":"inline-clearance","session":"inline-session"}',
         }
     )
 
-    assert social_values["SOCIALBLADE_COOKIES_JSON"] == '{"session":"inline-session"}'
+    assert (
+        social_values["SOCIALBLADE_COOKIES_JSON"]
+        == '{"cf_clearance":"inline-clearance","session":"inline-session"}'
+    )
+
+
+def test_split_env_rejects_socialblade_cookie_payload_without_login_session(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cookie_file = tmp_path / "socialblade-cookies.json"
+    cookie_file.write_text('{\n  "cf_clearance": "cloudflare-only"\n}\n', encoding="utf-8")
+    monkeypatch.setattr(cli, "DEFAULT_SOCIALBLADE_COOKIE_FILE", cookie_file)
+
+    with pytest.raises(ValueError, match="SOCIALBLADE_COOKIES_JSON.*session"):
+        cli._split_env(
+            {
+                "TRR_DB_URL": "postgresql://example",
+                "SOCIALBLADE_COOKIES_JSON": "[]",
+                "SOCIALBLADE_EMAIL": "ops@example.com",
+            }
+        )
 
 
 def test_split_env_raises_for_missing_file_backed_social_auth() -> None:

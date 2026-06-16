@@ -35,6 +35,20 @@ _POSTS_PLATFORM = "instagram"
 # identity without writing account auth cooldown rows.
 _POSTS_AUTHENTICATED_ROTATE_ON_BLOCK_MAX_RETRIES_DEFAULT = 0
 _POSTS_ANONYMOUS_ROTATE_ON_BLOCK_MAX_RETRIES_DEFAULT = 2
+_INSTAGRAM_SCRAPE_MODE_DEFAULT = "public_first"
+_INSTAGRAM_SCRAPE_MODE_ENV = "SOCIAL_INSTAGRAM_SCRAPE_MODE"
+_INSTAGRAM_SCRAPE_MODE_ALIASES = {
+    "": _INSTAGRAM_SCRAPE_MODE_DEFAULT,
+    "public": "public_first",
+    "public-first": "public_first",
+    "public_first": "public_first",
+    "no_login": "public_first",
+    "nologin": "public_first",
+    "anonymous": "anonymous",
+    "authenticated": "authenticated",
+    "auth": "authenticated",
+    "login": "authenticated",
+}
 
 logger = logging.getLogger("socials.instagram.posts_scrapling.job_runner")
 
@@ -96,10 +110,28 @@ class PostsAuthCooldownActive(Exception):
 
 
 def _posts_anonymous_enabled(config: dict[str, Any]) -> bool:
+    if _instagram_scrape_mode(config) == "anonymous":
+        return True
     raw = config.get("anonymous_enabled")
     if raw in (None, ""):
         raw = os.getenv("SOCIAL_INSTAGRAM_POSTS_ANONYMOUS_ENABLED")
     return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _instagram_scrape_mode(config: dict[str, Any] | None = None) -> str:
+    metadata = config or {}
+    raw = (
+        metadata.get("instagram_scrape_mode")
+        or metadata.get("scrape_mode")
+        or os.getenv(_INSTAGRAM_SCRAPE_MODE_ENV)
+        or _INSTAGRAM_SCRAPE_MODE_DEFAULT
+    )
+    normalized = str(raw or "").strip().lower()
+    return _INSTAGRAM_SCRAPE_MODE_ALIASES.get(normalized, _INSTAGRAM_SCRAPE_MODE_DEFAULT)
+
+
+def _posts_public_first_enabled(config: dict[str, Any] | None = None) -> bool:
+    return _instagram_scrape_mode(config) == "public_first"
 
 
 def _rotate_on_block_max_retries(*, anonymous: bool) -> int:
@@ -197,6 +229,76 @@ def _posts_pagination_stop_reason(result: Any) -> str | None:
     if "cursor" in reason and ("expired" in reason or "stale" in reason or "invalid" in reason):
         return "cursor_expired_restart_required"
     return None
+
+
+def _public_graphql_connection(payload: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return {}
+    connection = data.get("xdt_api__v1__feed__user_timeline_graphql_connection")
+    return connection if isinstance(connection, dict) else {}
+
+
+def _public_graphql_page_posts(payload: dict[str, Any] | None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    connection = _public_graphql_connection(payload)
+    edges = connection.get("edges") if isinstance(connection, dict) else []
+    posts = [
+        node
+        for edge in (edges or [])
+        if isinstance(edge, dict)
+        for node in [edge.get("node")]
+        if isinstance(node, dict) and node
+    ]
+    page_info = connection.get("page_info") if isinstance(connection.get("page_info"), dict) else {}
+    return posts, dict(page_info or {})
+
+
+def _public_scraper_runtime_metadata(scraper: Any | None = None) -> dict[str, Any]:
+    retrieval_meta = dict(getattr(scraper, "last_retrieval_meta", {}) or {}) if scraper is not None else {}
+    doc_ids_attempted = [
+        str(value).strip()
+        for value in (retrieval_meta.get("profile_posts_doc_ids_attempted") or [])
+        if str(value).strip()
+    ]
+    doc_id_used = str(retrieval_meta.get("doc_id_used") or retrieval_meta.get("profile_posts_doc_id") or "").strip()
+    return {
+        "scrape_mode": "public_first",
+        "auth_state": "public",
+        "proxy_state": "none",
+        "selected_proxy_fingerprint": "none",
+        "proxy_session_mode": "none",
+        "proxy_identity": {
+            "configured_fingerprint": "none",
+            "observed_identity": None,
+            "observed_fingerprint": None,
+            "pacing_identity": "instagram:global",
+            "redacted_api_proxy_url": None,
+            "redacted_browser_proxy": None,
+            "session_mode": "none",
+        },
+        "proxy_session_key": None,
+        "transport": retrieval_meta.get("retrieval_transport") or retrieval_meta.get("transport") or "requests_enriched",
+        "retrieval_transport": retrieval_meta.get("retrieval_transport") or retrieval_meta.get("transport"),
+        "graphql_cursor": retrieval_meta.get("graphql_cursor"),
+        "request_count": int(getattr(scraper, "_request_count", 0) or 0) if scraper is not None else 0,
+        "profile_posts_doc_id": doc_id_used or None,
+        "doc_id_used": doc_id_used or None,
+        "profile_posts_doc_ids_attempted": doc_ids_attempted,
+        "doc_ids_attempted": doc_ids_attempted,
+        "profile_posts_doc_ids": {
+            "attempted": doc_ids_attempted,
+            "used": doc_id_used or None,
+            "final_selected": doc_id_used or None,
+        },
+        "fallback_policy": {
+            "auth_fallback": "requires_approval",
+            "proxy_fallback": "requires_approval",
+            "decodo_fallback": "requires_approval",
+        },
+        "retrieval_meta": retrieval_meta,
+    }
 
 
 def _raise_if_pagination_state_persist_failed(
@@ -470,11 +572,12 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
     job_metadata = dict(job.get("metadata") or {})
     account_handle = str(config.get("account") or "").strip().lower().lstrip("@")
     stage = str(config.get("stage") or "posts_scrapling").strip().lower()
-    max_pages_raw = config.get("max_pages")
-    max_pages: int | None = int(max_pages_raw) if max_pages_raw not in (None, 0, "") else None
+    max_pages: int | None = None
     fast_mode = bool(config.get("fast_mode", False))
     source_scope = str(config.get("source_scope") or "network").strip().lower() or "network"
     season_id = str(config.get("season_id") or "").strip() or None
+    instagram_scrape_mode = _instagram_scrape_mode(config)
+    public_first_enabled = instagram_scrape_mode == "public_first"
     anonymous_enabled = _posts_anonymous_enabled(config)
 
     if not account_handle:
@@ -511,7 +614,261 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
         nonlocal pages_fetched, fetcher_metadata, bidirectional_probe_done
         nonlocal reverse_posts_fetched, reverse_posts_upserted, reverse_pages_fetched, reverse_stop_reason
         nonlocal bidirectional_reverse_started, bidirectional_reverse_error
+        nonlocal pagination_state, stop_reason
         nonlocal warmup_duration_ms, listing_duration_ms, persistence_duration_ms
+
+        if public_first_enabled:
+            from trr_backend.socials.instagram.scraper import InstagramScraper
+
+            scraper = InstagramScraper(cookies={}, browser_account_id=None, attach_auth_session=False)
+            auth_metadata = {
+                "source": "public",
+                "browser_account_id": None,
+                "validation_category": "public",
+            }
+            fetcher_metadata = _public_scraper_runtime_metadata(scraper)
+            lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id)
+            restart_requested = bool(config.get("restart") or config.get("restart_pagination"))
+            cursor: str | None = (
+                str(config.get("resume_cursor") or config.get("resume_frontier_cursor") or "").strip() or None
+            )
+            if not cursor and not restart_requested:
+                pagination_state = repo.latest_instagram_profile_pagination_state(
+                    account_handle=account_handle,
+                    source_scope=source_scope,
+                    run_id=run_id or None,
+                    direction="forward",
+                )
+                cursor = str(pagination_state.get("end_cursor") or "").strip() or None
+            seen_cursors: set[str] = set()
+            unique_post_ids: set[str] = set()
+
+            while True:
+                timeout_guard_elapsed = (
+                    timeout_guard_seconds is not None
+                    and (time.monotonic() - started_monotonic) >= timeout_guard_seconds
+                )
+                if timeout_guard_elapsed:
+                    stop_reason = "timeout_guard"
+                    pagination_state = repo.persist_instagram_profile_pagination_state(
+                        run_id=run_id or None,
+                        job_id=job_id,
+                        account_handle=account_handle,
+                        source_scope=source_scope,
+                        direction="forward",
+                        cursor_in=cursor,
+                        end_cursor=cursor,
+                        page_index=pages_fetched,
+                        posts_seen=posts_fetched,
+                        posts_upserted=posts_upserted,
+                        doc_id_used=str(fetcher_metadata.get("doc_id_used") or "").strip() or None,
+                        doc_ids_attempted=_posts_pagination_doc_ids_attempted(fetcher_metadata),
+                        proxy_fingerprint="none",
+                        proxy_session_key=None,
+                        stop_reason=stop_reason,
+                        partial=True,
+                        completed=False,
+                        metadata={
+                            "reason": stop_reason,
+                            "listing_progress": True,
+                            "instagram_scrape_mode": "public_first",
+                            "auth_state": "public",
+                            "proxy_state": "none",
+                        },
+                    )
+                    _raise_if_pagination_state_persist_failed(
+                        pagination_state,
+                        account_handle=account_handle,
+                        direction="forward",
+                        runtime_metadata=fetcher_metadata,
+                        listing_progress={
+                            "page_index": pages_fetched,
+                            "posts_seen": posts_fetched,
+                            "posts_upserted": posts_upserted,
+                            "stop_reason": stop_reason,
+                            "partial": True,
+                        },
+                    )
+                    break
+
+                lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id)
+                _raise_if_cancelled(
+                    job_id=job_id,
+                    run_id=run_id,
+                    runtime_metadata=fetcher_metadata,
+                )
+                phase_started = time.monotonic()
+                payload = await asyncio.to_thread(
+                    scraper.fetch_posts_graphql,
+                    account_handle,
+                    cursor=cursor,
+                    delay=float(os.getenv("SOCIAL_INSTAGRAM_DELAY_SEC") or "0.15"),
+                    fast_mode=fast_mode,
+                    allow_browser_fallback=False,
+                    allow_recovery=False,
+                )
+                listing_duration_ms += int((time.monotonic() - phase_started) * 1000)
+                fetcher_metadata = _public_scraper_runtime_metadata(scraper)
+                page_posts, page_info = _public_graphql_page_posts(payload if isinstance(payload, dict) else None)
+                retrieval_meta = dict(fetcher_metadata.get("retrieval_meta") or {})
+                error_code = str(
+                    retrieval_meta.get("error_code")
+                    or retrieval_meta.get("request_error_code")
+                    or "public_graphql_no_connection"
+                ).strip()
+
+                if not page_posts and not _public_graphql_connection(payload if isinstance(payload, dict) else None):
+                    if posts_fetched > 0:
+                        stop_reason = (
+                            "public_pagination_rate_limited"
+                            if "rate_limited" in error_code or retrieval_meta.get("error_status_code") == 429
+                            else "public_account_pagination_requires_approval"
+                        )
+                        pagination_state = repo.persist_instagram_profile_pagination_state(
+                            run_id=run_id or None,
+                            job_id=job_id,
+                            account_handle=account_handle,
+                            source_scope=source_scope,
+                            direction="forward",
+                            cursor_in=cursor,
+                            end_cursor=cursor,
+                            page_index=pages_fetched,
+                            posts_seen=posts_fetched,
+                            posts_upserted=posts_upserted,
+                            doc_id_used=str(fetcher_metadata.get("doc_id_used") or "").strip() or None,
+                            doc_ids_attempted=_posts_pagination_doc_ids_attempted(fetcher_metadata),
+                            proxy_fingerprint="none",
+                            proxy_session_key=None,
+                            stop_reason=stop_reason,
+                            partial=True,
+                            completed=False,
+                            metadata={
+                                "fetch_reason": error_code,
+                                "instagram_scrape_mode": "public_first",
+                                "auth_state": "public",
+                                "proxy_state": "none",
+                                "fallback_requires_approval": True,
+                            },
+                        )
+                        break
+                    raise PostsScraplingRuntimeError(
+                        f"Public Instagram posts pagination failed for @{account_handle}: {error_code}.",
+                        error_code=error_code or "public_graphql_no_connection",
+                        retryable=bool(retrieval_meta.get("retryable") or retrieval_meta.get("request_error_retryable")),
+                        runtime_metadata={
+                            **fetcher_metadata,
+                            "fallback_requires_approval": True,
+                        },
+                    )
+
+                if page_posts:
+                    phase_started = time.monotonic()
+                    persisted = persist_instagram_posts(
+                        account_handle=account_handle,
+                        post_nodes=page_posts,
+                        run_id=run_id or None,
+                        job_id=job_id,
+                        season_id=season_id,
+                        source_scope=source_scope,
+                    )
+                    persistence_duration_ms += int((time.monotonic() - phase_started) * 1000)
+                    posts_fetched += len(page_posts)
+                    posts_upserted += persisted.posts_upserted
+                    posts_skipped += persisted.posts_skipped
+                    for reason, count in persisted.posts_skipped_by_reason.items():
+                        posts_skipped_by_reason[reason] = posts_skipped_by_reason.get(reason, 0) + int(count or 0)
+                    unique_post_ids.update(
+                        identity for post in page_posts if (identity := _posts_node_identity(post))
+                    )
+
+                pages_fetched += 1
+                has_next = bool(page_info.get("has_next_page"))
+                next_cursor = str(page_info.get("end_cursor") or "").strip() or None
+                if next_cursor and next_cursor in seen_cursors:
+                    stop_reason = "repeating_cursor"
+                elif not has_next or not next_cursor:
+                    stop_reason = "public_pagination_ok"
+                else:
+                    stop_reason = None
+
+                pagination_state = repo.persist_instagram_profile_pagination_state(
+                    run_id=run_id or None,
+                    job_id=job_id,
+                    account_handle=account_handle,
+                    source_scope=source_scope,
+                    direction="forward",
+                    cursor_in=cursor,
+                    end_cursor=next_cursor,
+                    page_index=pages_fetched,
+                    posts_seen=posts_fetched,
+                    posts_upserted=posts_upserted,
+                    doc_id_used=str(fetcher_metadata.get("doc_id_used") or "").strip() or None,
+                    doc_ids_attempted=_posts_pagination_doc_ids_attempted(fetcher_metadata),
+                    proxy_fingerprint="none",
+                    proxy_session_key=None,
+                    stop_reason=stop_reason,
+                    partial=stop_reason not in {None, "public_pagination_ok"},
+                    completed=stop_reason == "public_pagination_ok",
+                    metadata={
+                        "fetch_reason": None,
+                        "has_next_page": has_next,
+                        "instagram_scrape_mode": "public_first",
+                        "auth_state": "public",
+                        "proxy_state": "none",
+                        "page_number": pages_fetched,
+                        "cursor_in": cursor,
+                        "end_cursor": next_cursor,
+                        "doc_id": str(fetcher_metadata.get("doc_id_used") or "").strip() or None,
+                        "transport": fetcher_metadata.get("transport"),
+                        "unique_shortcode_count": len(unique_post_ids),
+                    },
+                )
+                _raise_if_pagination_state_persist_failed(
+                    pagination_state,
+                    account_handle=account_handle,
+                    direction="forward",
+                    runtime_metadata=fetcher_metadata,
+                    listing_progress={
+                        "page_index": pages_fetched,
+                        "posts_seen": posts_fetched,
+                        "posts_upserted": posts_upserted,
+                        "stop_reason": stop_reason,
+                        "partial": stop_reason not in {None, "public_pagination_ok"},
+                    },
+                )
+                lifecycle.emit_job_progress(
+                    job_id=job_id,
+                    stage=stage,
+                    platform="instagram",
+                    account=account_handle,
+                    scraped_posts=posts_fetched,
+                    scraped_comments=0,
+                    posts_upserted=posts_upserted,
+                    comments_upserted=0,
+                    activity={
+                        "phase": "posts_public_first_running",
+                        "pages_fetched": pages_fetched,
+                        "listing_progress": {
+                            "page_index": pages_fetched,
+                            "posts_seen": posts_fetched,
+                            "posts_upserted": posts_upserted,
+                            "end_cursor": next_cursor,
+                            "stop_reason": stop_reason,
+                            "auth_state": "public",
+                            "proxy_state": "none",
+                        },
+                    },
+                    progress_state=progress_state,
+                    force=not has_next,
+                )
+                if stop_reason:
+                    break
+                if next_cursor:
+                    seen_cursors.add(next_cursor)
+                cursor = next_cursor
+
+            fetcher_metadata = _public_scraper_runtime_metadata(scraper)
+            return auth_metadata, fetcher_metadata
 
         # A4 READ (job start): authenticated runs honor account cooldowns before
         # warmup. Anonymous canaries have no account session to burn, so they do
@@ -626,8 +983,6 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                     reverse_stop_reason = "bidirectional_overlap" if overlap else None
                     if not reverse_stop_reason and (not result.has_next_page or not result.end_cursor):
                         reverse_stop_reason = "completed"
-                    elif not reverse_stop_reason and max_pages and reverse_pages_fetched >= max_pages:
-                        reverse_stop_reason = "max_pages"
 
                     reverse_pagination_state = repo.persist_instagram_profile_pagination_state(
                         run_id=run_id or None,
@@ -947,8 +1302,6 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                 stop_reason = _posts_pagination_stop_reason(result)
                 if not stop_reason and (not result.has_next_page or not result.end_cursor):
                     stop_reason = "completed"
-                elif not stop_reason and max_pages and pages_fetched >= max_pages:
-                    stop_reason = "max_pages"
                 pagination_state = repo.persist_instagram_profile_pagination_state(
                     run_id=run_id or None,
                     job_id=job_id,
@@ -1012,8 +1365,6 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                 if stop_reason == "pagination_doc_id_stale":
                     break
                 if not result.has_next_page or not result.end_cursor:
-                    break
-                if max_pages and pages_fetched >= max_pages:
                     break
                 cursor = result.end_cursor
 
@@ -1081,6 +1432,10 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
             "platform": "instagram",
             "account": account_handle,
             "fast_mode": fast_mode,
+            "instagram_scrape_mode": instagram_scrape_mode,
+            "auth_state": fetcher_metadata.get("auth_state"),
+            "proxy_state": fetcher_metadata.get("proxy_state")
+            or ("none" if fetcher_metadata.get("selected_proxy_fingerprint") == "none" else "configured"),
             "source_scope": source_scope,
             "stage_counters": {
                 "posts": posts_fetched + reverse_posts_fetched,
@@ -1107,7 +1462,7 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                 "posts_seen": posts_fetched,
                 "posts_upserted": posts_upserted,
                 "stop_reason": stop_reason,
-                "partial": stop_reason not in {None, "completed"},
+                "partial": stop_reason not in {None, "completed", "public_pagination_ok"},
             },
             "bidirectional_listing": {
                 "reverse_started": bidirectional_reverse_started,

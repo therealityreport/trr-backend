@@ -13,6 +13,11 @@ from collections.abc import Mapping
 from typing import Any, Sequence
 
 import trr_backend.socials.social_season_analytics_impl as _core
+from trr_backend.socials.instagram.comments_scrapling.public_mode import (
+    PUBLIC_COMMENTS_SCRAPE_MODE,
+    comments_load_strategy_for_mode,
+    comments_public_mode_from_config,
+)
 
 _RESERVED_CORE_EXPORTS = {
     "__builtins__",
@@ -360,7 +365,7 @@ def _instagram_comments_target_priority(refresh_policy: str) -> str:
     return "missing_first_recent"
 
 
-_INSTAGRAM_COMMENTS_LOAD_STRATEGIES = {"cursor_api", "single_session_load_all"}
+_INSTAGRAM_COMMENTS_LOAD_STRATEGIES = {"cursor_api", "single_session_load_all", "public_relay"}
 _INSTAGRAM_COMMENTS_SINGLE_SESSION_ENV = "SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_LOAD_ALL_ENABLED"
 _BROWSER_SESSION_INVALIDATED_REASON = "browser_session_invalidated"
 
@@ -416,9 +421,12 @@ def _instagram_comments_load_strategy_metadata(
     recommended_shard_count: int,
     effective_shard_count: int,
 ) -> dict[str, Any]:
+    public_relay = load_strategy == "public_relay"
     single_session = load_strategy == "single_session_load_all"
     forced_single_session = single_session and mode == "profile" and target_count > 1
-    if single_session:
+    if public_relay:
+        session_scope = "public_relay"
+    elif single_session:
         session_scope = "post_continuous" if mode == "single_post" else "profile_single_worker"
     else:
         session_scope = "cursor_api_worker"
@@ -431,6 +439,64 @@ def _instagram_comments_load_strategy_metadata(
         "effective_comments_shard_count": effective_shard_count,
         "single_session_enabled": _instagram_comments_single_session_load_all_enabled(),
     }
+
+
+def _public_comments_config_overlay(config: Mapping[str, Any] | None) -> dict[str, Any]:
+    normalized = dict(config or {})
+    public_comments_mode = comments_public_mode_from_config(normalized)
+    normalized["comments_load_strategy"] = comments_load_strategy_for_mode(
+        normalized.get("comments_load_strategy"),
+        public_mode=public_comments_mode,
+    )
+    if public_comments_mode:
+        normalized.update(
+            {
+                "instagram_scrape_mode": PUBLIC_COMMENTS_SCRAPE_MODE,
+                "comments_session_scope": "public_relay",
+                "comments_auth_validation_mode": "public_relay",
+                "comments_proxy_shard_sessions": False,
+            }
+        )
+    normalized["instagram_access_proof"] = _instagram_comments_access_proof(public_mode=public_comments_mode)
+    return normalized
+
+
+def _instagram_comments_access_proof(*, public_mode: bool) -> dict[str, Any]:
+    if public_mode:
+        return {
+            "auth_state": "public",
+            "cookie_state": "none",
+            "proxy_state": "none",
+            "decodo_state": "not_used",
+            "no_cookies": True,
+            "no_decodo": True,
+            "proof_label": "No cookies · No Decodo",
+        }
+    return {
+        "auth_state": "authenticated",
+        "cookie_state": "required",
+        "proxy_state": "configured_by_environment",
+        "decodo_state": "environment_dependent",
+        "no_cookies": False,
+        "no_decodo": False,
+        "proof_label": "Auth/proxy dependent",
+    }
+
+
+def _instagram_comments_cancel_active_before_relaunch_enabled(value: Any = None) -> bool:
+    if value is not None:
+        return _metadata_truthy(value)
+    raw_value = str(os.getenv("SOCIAL_INSTAGRAM_COMMENTS_CANCEL_ACTIVE_BEFORE_RELAUNCH", "1")).strip().lower()
+    return raw_value in {"1", "true", "yes", "on"}
+
+
+def _instagram_comments_bulk_insert_threshold() -> int:
+    raw_value = str(os.getenv("SOCIAL_INSTAGRAM_COMMENTS_BULK_INSERT_THRESHOLD", "25")).strip()
+    try:
+        requested = int(raw_value)
+    except ValueError:
+        return 25
+    return max(2, min(requested, 10000))
 
 
 def _instagram_comments_load_strategy_warnings(metadata: Mapping[str, Any]) -> list[dict[str, str]]:
@@ -1309,7 +1375,7 @@ def _instagram_comments_profile_shard_count(target_count: int) -> int:
         requested = int(raw_value)
     except ValueError:
         return recommended
-    requested = max(1, min(requested, 24))
+    requested = max(1, min(requested, _instagram_comments_max_shard_count()))
     return min(requested, target_count)
 
 
@@ -1377,7 +1443,178 @@ def _comments_shard_count_for_batch_size(*, target_count: int, batch_size: int |
     requested_batch_size = max(0, int(batch_size or 0))
     if requested_batch_size <= 0:
         return None
-    return min(24, target_count, max(1, math.ceil(target_count / requested_batch_size)))
+    return min(
+        _instagram_comments_max_shard_count(),
+        target_count,
+        max(1, math.ceil(target_count / requested_batch_size)),
+    )
+
+
+def _instagram_comments_max_shard_count() -> int:
+    raw_value = str(os.getenv("SOCIAL_INSTAGRAM_COMMENTS_MAX_SHARD_COUNT") or "").strip()
+    if not raw_value:
+        return 1000
+    try:
+        requested = int(raw_value)
+    except ValueError:
+        return 1000
+    return max(1, min(requested, 5000))
+
+
+def _create_instagram_comments_shard_jobs(
+    *,
+    run_id: str,
+    platform: str,
+    source_scope: str,
+    source_id: str | None,
+    account_handle: str,
+    mode: str,
+    run_config: Mapping[str, Any],
+    target_source_id_shards: Sequence[Sequence[str]],
+    target_source_ids_count: int,
+    comments_shard_count: int,
+    initiated_by: str | None,
+    job_status: str,
+    priority: int,
+    max_attempts: int,
+    required_worker_lane: str | None,
+    required_execution_backend: str | None,
+    inline_worker_id: str | None,
+    conn: Any,
+) -> tuple[list[str], str]:
+    if (
+        inline_worker_id
+        or len(target_source_id_shards) < _instagram_comments_bulk_insert_threshold()
+        or not bool(_scrape_jobs_features().get("has_queue_fields"))
+    ):
+        job_ids: list[str] = []
+        for shard_index, target_source_id_shard in enumerate(target_source_id_shards, start=1):
+            job_ids.append(
+                _create_job(
+                    None,
+                    run_id=run_id,
+                    platform=platform,
+                    source_scope=source_scope,
+                    job_type="comments",
+                    stage=INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+                    config={
+                        **dict(run_config),
+                        "source_id": source_id if mode == "single_post" else None,
+                        "target_source_ids": list(target_source_id_shard),
+                        "target_source_ids_count": target_source_ids_count,
+                        "comments_shard_index": shard_index,
+                        "comments_shard_count": comments_shard_count,
+                        "comments_shard_target_count": len(target_source_id_shard),
+                        "account": account_handle,
+                        "required_worker_lane": required_worker_lane,
+                        "required_execution_backend": required_execution_backend,
+                    },
+                    initiated_by=initiated_by,
+                    status=job_status,
+                    priority=priority,
+                    max_attempts=max_attempts,
+                    worker_id=inline_worker_id if comments_shard_count == 1 else None,
+                    preclaim=bool(inline_worker_id and comments_shard_count == 1),
+                    conn=conn,
+                    track_run_counters=False,
+                )
+            )
+        return job_ids, "single"
+
+    required_backend = _job_required_execution_backend(dict(run_config), platform=platform)
+    creator_runtime_version = dict(_resolve_runtime_version_stamp())
+    effective_runtime_version = _resolve_effective_runtime_version(
+        required_execution_backend=required_backend,
+        stage=INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+    )
+    runtime_metadata = _job_runtime_metadata(
+        INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+        runtime_version=effective_runtime_version,
+        created_by_runtime_version=creator_runtime_version,
+    )
+    values: list[tuple[Any, ...]] = []
+    for shard_index, target_source_id_shard in enumerate(target_source_id_shards, start=1):
+        config_payload = {
+            **dict(run_config),
+            "source_id": source_id if mode == "single_post" else None,
+            "target_source_ids": list(target_source_id_shard),
+            "target_source_ids_count": target_source_ids_count,
+            "comments_shard_index": shard_index,
+            "comments_shard_count": comments_shard_count,
+            "comments_shard_target_count": len(target_source_id_shard),
+            "account": account_handle,
+            "required_worker_lane": required_worker_lane,
+            "required_execution_backend": required_execution_backend,
+        }
+        if required_backend:
+            config_payload.setdefault("required_execution_backend", required_backend)
+        if effective_runtime_version:
+            config_payload.setdefault("required_runtime_version", effective_runtime_version)
+        elif required_backend != "modal":
+            config_payload.setdefault("required_runtime_version", creator_runtime_version)
+        if creator_runtime_version:
+            config_payload.setdefault("created_by_runtime_version", creator_runtime_version)
+        values.append(
+            (
+                run_id,
+                platform,
+                "comments",
+                _json_dumps(config_payload),
+                job_status,
+                priority,
+                source_scope,
+                initiated_by,
+                _json_dumps(runtime_metadata),
+                max(1, int(max_attempts)),
+            )
+        )
+    rows = pg.execute_values_returning(
+        """
+        insert into social.scrape_jobs (
+          run_id,
+          platform,
+          job_type,
+          config,
+          status,
+          available_at,
+          priority,
+          source_scope,
+          initiated_by,
+          metadata,
+          attempt_count,
+          max_attempts
+        )
+        select
+          run_id::uuid,
+          platform,
+          job_type,
+          config::jsonb,
+          status,
+          now(),
+          priority,
+          source_scope,
+          initiated_by,
+          metadata::jsonb,
+          0,
+          max_attempts
+        from (values %s) as v(
+          run_id,
+          platform,
+          job_type,
+          config,
+          status,
+          priority,
+          source_scope,
+          initiated_by,
+          metadata,
+          max_attempts
+        )
+        returning id::text
+        """,
+        values,
+        conn=conn,
+    )
+    return [str(row.get("id") or "").strip() for row in rows if str(row.get("id") or "").strip()], "bulk"
 
 
 def _instagram_comments_launch_auth_check_enabled() -> bool:
@@ -1603,7 +1840,7 @@ def start_social_account_comments_scrape(
     max_comments_per_post: int | None = None,
     refresh_policy: str = "stale_or_missing",
     target_filter: str | None = None,
-    comments_load_strategy: str = "cursor_api",
+    comments_load_strategy: str = "public_relay",
     initiated_by: str | None = None,
     inline_worker_id: str | None = None,
     allow_local_dev_inline_bypass: bool = False,
@@ -1614,6 +1851,7 @@ def start_social_account_comments_scrape(
     target_source_ids: Sequence[Any] | None = None,
     comments_worker_count: int | None = None,
     comments_target_batch_size: int | None = None,
+    cancel_active_before_relaunch: bool | None = None,
 ) -> dict[str, Any]:
     _sync_core_overrides()
     normalized_platform = _normalize_social_account_profile_platform(platform)
@@ -1621,7 +1859,16 @@ def start_social_account_comments_scrape(
     normalized_mode = str(mode or "").strip().lower()
     normalized_refresh_policy = str(refresh_policy or "stale_or_missing").strip().lower()
     normalized_target_filter = _normalize_instagram_comments_target_filter(target_filter)
-    normalized_load_strategy = _normalize_instagram_comments_load_strategy(comments_load_strategy)
+    public_comments_mode = comments_public_mode_from_config(
+        {
+            "comments_load_strategy": comments_load_strategy,
+        }
+    )
+    effective_comments_load_strategy = comments_load_strategy_for_mode(
+        comments_load_strategy,
+        public_mode=public_comments_mode,
+    )
+    normalized_load_strategy = _normalize_instagram_comments_load_strategy(effective_comments_load_strategy)
     _assert_instagram_comments_load_strategy_enabled(normalized_load_strategy)
     if normalized_platform != "instagram":
         raise SocialIngestValidationError(
@@ -1648,6 +1895,9 @@ def start_social_account_comments_scrape(
     explicit_target_source_ids = list(
         dict.fromkeys(str(item or "").strip() for item in list(target_source_ids or []) if str(item or "").strip())
     )
+    should_cancel_active_before_relaunch = _instagram_comments_cancel_active_before_relaunch_enabled(
+        cancel_active_before_relaunch
+    )
     effective_profile_max_comments_per_post = (
         0
         if normalized_mode == "profile" and normalized_max_comments_per_post is None
@@ -1658,7 +1908,11 @@ def start_social_account_comments_scrape(
     required_worker_lane = None if modal_queue_dispatch else INSTAGRAM_COMMENTS_SCRAPLING_WORKER_LANE
     required_execution_backend = "modal" if modal_queue_dispatch else None
     comments_auth_preflight_platform = (
-        normalized_platform if _instagram_comments_launch_auth_check_enabled() and not skip_launch_auth_probe else None
+        None
+        if public_comments_mode
+        else normalized_platform
+        if _instagram_comments_launch_auth_check_enabled() and not skip_launch_auth_probe
+        else None
     )
     if queue_enabled and not allow_local_dev_inline_bypass:
         if modal_queue_dispatch:
@@ -1676,6 +1930,7 @@ def start_social_account_comments_scrape(
     lock_label = f"comments-scrape-lock:{normalized_platform}:{normalized_account[:48]}"
     run_id: str | None = None
     payload: dict[str, Any] | None = None
+    cancelled_active_run: dict[str, Any] | None = None
     with pg.db_connection(label=lock_label, pool_name="social_control") as lock_conn:
         with pg.db_cursor(conn=lock_conn, label=lock_label) as cur:
             lock_row = pg.fetch_one_with_cursor(cur, "select pg_try_advisory_lock(%s) as locked", [lock_key]) or {}
@@ -1717,13 +1972,21 @@ def start_social_account_comments_scrape(
                 conn=lock_conn,
             )
             if active_run:
-                raise SocialIngestConflictError(
-                    "SOCIAL_ACCOUNT_COMMENTS_RUN_ALREADY_ACTIVE",
-                    (
-                        f"Comments scrape run {active_run.get('run_id') or 'unknown'} "
-                        f"is already active for @{normalized_account}."
-                    ),
-                    detail=active_run,
+                if not should_cancel_active_before_relaunch:
+                    raise SocialIngestConflictError(
+                        "SOCIAL_ACCOUNT_COMMENTS_RUN_ALREADY_ACTIVE",
+                        (
+                            f"Comments scrape run {active_run.get('run_id') or 'unknown'} "
+                            f"is already active for @{normalized_account}."
+                        ),
+                        detail=active_run,
+                    )
+                cancelled_active_run = cancel_social_account_comments_run(
+                    platform=normalized_platform,
+                    account_handle=normalized_account,
+                    run_id=str(active_run.get("run_id") or ""),
+                    cancelled_by="comments_relaunch_guard",
+                    conn=lock_conn,
                 )
             target_source_ids: list[str]
             target_enumeration_started_at = time_module.perf_counter()
@@ -1774,17 +2037,23 @@ def start_social_account_comments_scrape(
             target_enumeration_ms = round((time_module.perf_counter() - target_enumeration_started_at) * 1000, 1)
 
             deferred_launch_auth_reason = "catalog_parallel_launch" if skip_launch_auth_probe else None
-            launch_auth_metadata = (
-                _comments_launch_auth_metadata(
-                    status="deferred",
-                    reason=deferred_launch_auth_reason,
+            if public_comments_mode:
+                launch_auth_metadata = _comments_launch_auth_metadata(
+                    status="skipped",
+                    reason="public_relay_mode_no_auth_probe",
                 )
-                if deferred_launch_auth_reason
-                else _ensure_instagram_comments_auth_ready_for_launch(
-                    account_handle=normalized_account,
-                    representative_shortcode=target_source_ids[0] if target_source_ids else None,
+            else:
+                launch_auth_metadata = (
+                    _comments_launch_auth_metadata(
+                        status="deferred",
+                        reason=deferred_launch_auth_reason,
+                    )
+                    if deferred_launch_auth_reason
+                    else _ensure_instagram_comments_auth_ready_for_launch(
+                        account_handle=normalized_account,
+                        representative_shortcode=target_source_ids[0] if target_source_ids else None,
+                    )
                 )
-            )
             public_launch_auth_metadata = _public_comments_launch_auth_metadata(launch_auth_metadata)
             if public_launch_auth_metadata.get("auth_repair_status") == "failed":
                 reason = str(
@@ -1851,9 +2120,22 @@ def start_social_account_comments_scrape(
                     "incomplete_fill": normalized_target_filter == "incomplete",
                 }
             )
-            comments_auth_validation_mode = "comments_endpoint"
+            comments_auth_validation_mode = "public_relay" if public_comments_mode else "comments_endpoint"
             run_status = "queued" if queue_enabled else "running"
             job_status = "queued" if queue_enabled else "pending"
+            planned_job_creation_mode = (
+                "bulk"
+                if (
+                    not inline_worker_id
+                    and len(target_source_id_shards) >= _instagram_comments_bulk_insert_threshold()
+                    and bool(_scrape_jobs_features().get("has_queue_fields"))
+                )
+                else "single"
+            )
+            job_creation_payload = {
+                "mode": planned_job_creation_mode,
+                "job_count": len(target_source_id_shards),
+            }
             run_config = {
                 "platform": normalized_platform,
                 "account": normalized_account,
@@ -1870,6 +2152,7 @@ def start_social_account_comments_scrape(
                     else normalized_max_comments_per_post
                 ),
                 "comments_enable_media_followups": bool(comments_enable_media_followups),
+                "instagram_scrape_mode": PUBLIC_COMMENTS_SCRAPE_MODE if public_comments_mode else None,
                 "comments_worker_count": requested_comments_worker_count,
                 "comments_target_batch_size": effective_comments_target_batch_size,
                 "launch_group_id": str(launch_group_id or "").strip() or None,
@@ -1891,11 +2174,24 @@ def start_social_account_comments_scrape(
                 "recommended_comments_shard_count": recommended_comments_shard_count,
                 "strategy_warnings": strategy_warnings,
                 "comments_max_attempts": comments_max_attempts,
+                "job_creation": job_creation_payload,
+                "relaunch_guard": {
+                    "cancel_active_before_relaunch": should_cancel_active_before_relaunch,
+                    "cancelled_previous_run_id": (
+                        str(cancelled_active_run.get("run_id") or "").strip() if cancelled_active_run else None
+                    ),
+                    "cancelled_previous_job_count": (
+                        _normalize_non_negative_int(cancelled_active_run.get("cancelled_jobs"))
+                        if cancelled_active_run
+                        else 0
+                    ),
+                },
                 "timing": {
                     "target_enumeration_ms": target_enumeration_ms,
                     "target_source_ids_count": target_source_ids_count,
                 },
             }
+            run_config = _public_comments_config_overlay(run_config)
             if public_launch_auth_metadata.get("comments_auth_probe") or public_launch_auth_metadata.get(
                 "auth_repair_attempted"
             ):
@@ -1919,38 +2215,27 @@ def start_social_account_comments_scrape(
                 status=run_status,
                 conn=lock_conn,
             )
-            job_ids: list[str] = []
-            for shard_index, target_source_id_shard in enumerate(target_source_id_shards, start=1):
-                job_ids.append(
-                    _create_job(
-                        None,
-                        run_id=run_id,
-                        platform=normalized_platform,
-                        source_scope=source_scope,
-                        job_type="comments",
-                        stage=INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
-                        config={
-                            **run_config,
-                            "source_id": source_id if normalized_mode == "single_post" else None,
-                            "target_source_ids": target_source_id_shard,
-                            "target_source_ids_count": target_source_ids_count,
-                            "comments_shard_index": shard_index,
-                            "comments_shard_count": comments_shard_count,
-                            "comments_shard_target_count": len(target_source_id_shard),
-                            "account": normalized_account,
-                            "required_worker_lane": required_worker_lane,
-                            "required_execution_backend": required_execution_backend,
-                        },
-                        initiated_by=initiated_by,
-                        status=job_status,
-                        priority=105,
-                        max_attempts=comments_max_attempts,
-                        worker_id=inline_worker_id if comments_shard_count == 1 else None,
-                        preclaim=bool(inline_worker_id and comments_shard_count == 1),
-                        conn=lock_conn,
-                        track_run_counters=False,
-                    )
-                )
+            job_ids, job_creation_mode = _create_instagram_comments_shard_jobs(
+                run_id=run_id,
+                platform=normalized_platform,
+                source_scope=source_scope,
+                source_id=source_id,
+                account_handle=normalized_account,
+                mode=normalized_mode,
+                run_config=run_config,
+                target_source_id_shards=target_source_id_shards,
+                target_source_ids_count=target_source_ids_count,
+                comments_shard_count=comments_shard_count,
+                initiated_by=initiated_by,
+                job_status=job_status,
+                priority=105,
+                max_attempts=comments_max_attempts,
+                required_worker_lane=required_worker_lane,
+                required_execution_backend=required_execution_backend,
+                inline_worker_id=inline_worker_id,
+                conn=lock_conn,
+            )
+            job_creation_payload = {"mode": job_creation_mode, "job_count": len(job_ids)}
             if _run_counter_columns_ready():
                 _persist_run_counters_and_summary(
                     conn=lock_conn,
@@ -1990,11 +2275,14 @@ def start_social_account_comments_scrape(
                 },
                 "comments_enable_media_followups": bool(comments_enable_media_followups),
                 "comments_worker_count": requested_comments_worker_count,
+                "job_creation": job_creation_payload,
                 "launch_group_id": str(launch_group_id or "").strip() or None,
                 "required_worker_lane": required_worker_lane,
                 "required_execution_backend": required_execution_backend,
                 "runtime_version": _metadata_dict(run_config.get("required_runtime_version")) or None,
                 "created_by_runtime_version": _metadata_dict(run_config.get("created_by_runtime_version")) or None,
+                "instagram_access_proof": _metadata_dict(run_config.get("instagram_access_proof")),
+                "relaunch_guard": _metadata_dict(run_config.get("relaunch_guard")),
             }
             if public_launch_auth_metadata.get("comments_auth_probe") or public_launch_auth_metadata.get(
                 "auth_repair_attempted"
@@ -2421,7 +2709,7 @@ def _split_instagram_comments_audit_cursor_targets_into_active_run(
         source_job_id = str(row.get("job_id") or "").strip()
         if not source_job_id:
             continue
-        config = _metadata_dict(row.get("config"))
+        config = _public_comments_config_overlay(_metadata_dict(row.get("config")))
         metadata = _metadata_dict(row.get("metadata"))
         dispatch = _metadata_dict(metadata.get("dispatch"))
         remote_invocation_id = str(dispatch.get("remote_invocation_id") or "").strip()
@@ -2503,7 +2791,7 @@ def _split_instagram_comments_audit_cursor_targets_into_active_run(
         effective_shard_count = original_shard_count + total_new_chunks
         for chunk in target_chunks:
             created_sequence += 1
-            retry_config = {
+            retry_config = _public_comments_config_overlay({
                 **config,
                 "target_source_ids": chunk,
                 "comments_audit_cursor_retry": True,
@@ -2518,7 +2806,7 @@ def _split_instagram_comments_audit_cursor_targets_into_active_run(
                 "comments_shard_count": effective_shard_count,
                 "comments_shard_target_count": len(chunk),
                 "account": normalized_account,
-            }
+            })
             job_id = _create_job(
                 None,
                 run_id=normalized_run_id,
@@ -2537,7 +2825,7 @@ def _split_instagram_comments_audit_cursor_targets_into_active_run(
                 created_target_rows.append({"shortcode": target, "job_id": job_id, "source_job_id": source_job_id})
         for chunk in remainder_chunks:
             created_sequence += 1
-            remainder_config = {
+            remainder_config = _public_comments_config_overlay({
                 **config,
                 "target_source_ids": chunk,
                 "comments_audit_cursor_retry_remainder": True,
@@ -2547,7 +2835,7 @@ def _split_instagram_comments_audit_cursor_targets_into_active_run(
                 "comments_shard_count": effective_shard_count,
                 "comments_shard_target_count": len(chunk),
                 "account": normalized_account,
-            }
+            })
             created_remainder_job_ids.append(
                 _create_job(
                     None,
@@ -2587,7 +2875,7 @@ def _split_instagram_comments_audit_cursor_targets_into_active_run(
             [INSTAGRAM_COMMENTS_SCRAPLING_STAGE, normalized_run_id, normalized_account],
         )
         if run_row:
-            run_config = _metadata_dict(run_row.get("run_config"))
+            run_config = _public_comments_config_overlay(_metadata_dict(run_row.get("run_config")))
             source_priority = _normalize_non_negative_int(run_row.get("source_priority")) or 105
             source_scope = str(run_row.get("source_scope") or run_config.get("source_scope") or "network")
             job_initiated_by = initiated_by or str(run_row.get("initiated_by") or "") or None
@@ -2604,7 +2892,7 @@ def _split_instagram_comments_audit_cursor_targets_into_active_run(
             effective_shard_count = base_shard_count + len(target_chunks)
             for chunk in target_chunks:
                 created_sequence += 1
-                retry_config = {
+                retry_config = _public_comments_config_overlay({
                     **run_config,
                     "target_source_ids": chunk,
                     "target_source_ids_count": len(chunk),
@@ -2622,7 +2910,7 @@ def _split_instagram_comments_audit_cursor_targets_into_active_run(
                     "comments_shard_count": effective_shard_count,
                     "comments_shard_target_count": len(chunk),
                     "account": normalized_account,
-                }
+                })
                 job_id = _create_job(
                     None,
                     run_id=normalized_run_id,
@@ -2672,7 +2960,7 @@ def enqueue_instagram_comments_audit_cursor_retries(
     batch_size: int = 1,
     comments_worker_count: int | None = None,
     max_comments_per_post: int = 0,
-    comments_load_strategy: str = "cursor_api",
+    comments_load_strategy: str = "public_relay",
     skip_launch_auth_probe: bool = False,
     dry_run: bool = False,
     attach_to_active_run: bool = True,
@@ -2765,7 +3053,7 @@ def preview_social_account_comments_scrape(
     max_posts: int | None = None,
     refresh_policy: str = "stale_or_missing",
     target_filter: str | None = None,
-    comments_load_strategy: str = "cursor_api",
+    comments_load_strategy: str = "public_relay",
 ) -> dict[str, Any]:
     started_at = time_module.perf_counter()
     normalized_platform = _normalize_social_account_profile_platform(platform)
@@ -3211,7 +3499,7 @@ def repair_instagram_comments_scrape_run_target_gaps(
     )
     if not run_row:
         return {"created_job_ids": [], "reason": "run_not_found"}
-    run_config = _metadata_dict(run_row.get("config"))
+    run_config = _public_comments_config_overlay(_metadata_dict(run_row.get("config")))
     account_handle = _normalize_social_account_profile_handle(run_config.get("account"))
     if not account_handle:
         return {"created_job_ids": [], "reason": "account_missing"}
@@ -3257,7 +3545,7 @@ def repair_instagram_comments_scrape_run_target_gaps(
     original_shard_count = _normalize_non_negative_int(run_config.get("comments_shard_count")) or len(job_rows) or 1
     effective_shard_count = original_shard_count + len(chunks)
     for index, chunk in enumerate(chunks, start=1):
-        repair_config = {
+        repair_config = _public_comments_config_overlay({
             **run_config,
             "target_source_ids": chunk,
             "comments_target_gap_repair": True,
@@ -3268,7 +3556,7 @@ def repair_instagram_comments_scrape_run_target_gaps(
             "comments_shard_count": effective_shard_count,
             "comments_shard_target_count": len(chunk),
             "account": account_handle,
-        }
+        })
         created_job_ids.append(
             _create_job(
                 None,
@@ -3523,6 +3811,34 @@ def _comments_progress_merge_counts(*maps: Any) -> dict[str, int]:
         for key, value in _comments_progress_count_map(count_map).items():
             merged[key] += value
     return dict(merged)
+
+
+def _comments_progress_per_minute(count: int, elapsed_seconds: int) -> float | None:
+    if elapsed_seconds <= 0:
+        return None
+    return round((_normalize_non_negative_int(count) * 60.0) / elapsed_seconds, 2)
+
+
+def _comments_progress_per_second(count: int, elapsed_seconds: int) -> float | None:
+    if elapsed_seconds <= 0:
+        return None
+    return round(_normalize_non_negative_int(count) / elapsed_seconds, 4)
+
+
+def _comments_progress_average_seconds(elapsed_seconds: int, count: int, *, digits: int = 2) -> float | None:
+    normalized_count = _normalize_non_negative_int(count)
+    if elapsed_seconds <= 0 or normalized_count <= 0:
+        return None
+    return round(elapsed_seconds / normalized_count, digits)
+
+
+def _comments_progress_estimated_seconds_remaining(
+    remaining_count: int,
+    average_seconds_per_item: float | None,
+) -> int | None:
+    if average_seconds_per_item is None:
+        return None
+    return round(_normalize_non_negative_int(remaining_count) * average_seconds_per_item)
 
 
 _INSTAGRAM_STATIC_CDN_HOST = "static.cdninstagram.com"
@@ -4286,6 +4602,12 @@ def _build_comments_scrape_run_progress_payload(
             latest_error_code=shard_error_code,
             retry_target_count=retry_target_count,
         )
+        shard_average_seconds_per_post = _comments_progress_average_seconds(shard_elapsed_seconds, row_posts)
+        shard_average_seconds_per_comment = _comments_progress_average_seconds(
+            shard_elapsed_seconds,
+            stage_comments,
+            digits=4,
+        )
         shard_payload = {
             "job_id": str(row.get("job_id") or "").strip() or None,
             "shard_index": _normalize_non_negative_int(config.get("comments_shard_index")) or None,
@@ -4306,11 +4628,15 @@ def _build_comments_scrape_run_progress_payload(
             "comments_processed": stage_comments,
             "comments_upserted": row_comments_upserted,
             "queue_wait_seconds": queue_wait_seconds,
-            "posts_per_minute": (
-                round((row_posts * 60.0) / shard_elapsed_seconds, 2) if shard_elapsed_seconds else None
-            ),
-            "comments_per_minute": (
-                round((stage_comments * 60.0) / shard_elapsed_seconds, 2) if shard_elapsed_seconds else None
+            "posts_per_minute": _comments_progress_per_minute(row_posts, shard_elapsed_seconds),
+            "posts_per_second": _comments_progress_per_second(row_posts, shard_elapsed_seconds),
+            "comments_per_minute": _comments_progress_per_minute(stage_comments, shard_elapsed_seconds),
+            "comments_per_second": _comments_progress_per_second(stage_comments, shard_elapsed_seconds),
+            "average_seconds_per_post": shard_average_seconds_per_post,
+            "average_seconds_per_comment": shard_average_seconds_per_comment,
+            "estimated_seconds_remaining": _comments_progress_estimated_seconds_remaining(
+                remaining_target_count,
+                shard_average_seconds_per_post,
             ),
             "items_found_total": row_items_found_display,
             "error_message": shard_error_message,
@@ -4360,8 +4686,10 @@ def _build_comments_scrape_run_progress_payload(
     elapsed_seconds = (
         max(1, int((elapsed_until - started_at).total_seconds())) if isinstance(started_at, datetime) else 0
     )
-    posts_per_minute = round((completed_posts * 60.0) / elapsed_seconds, 2) if elapsed_seconds else None
-    comments_per_minute = round((comments_processed_total * 60.0) / elapsed_seconds, 2) if elapsed_seconds else None
+    posts_per_minute = _comments_progress_per_minute(completed_posts, elapsed_seconds)
+    posts_per_second = _comments_progress_per_second(completed_posts, elapsed_seconds)
+    comments_per_minute = _comments_progress_per_minute(comments_processed_total, elapsed_seconds)
+    comments_per_second = _comments_progress_per_second(comments_processed_total, elapsed_seconds)
     run_target_total = _normalize_non_negative_int(run_config.get("target_source_ids_count"))
     target_source_ids_count = run_target_total or len(dict.fromkeys(target_source_ids))
     shard_count = _normalize_non_negative_int(run_config.get("comments_shard_count")) or max(1, total_jobs)
@@ -4371,6 +4699,20 @@ def _build_comments_scrape_run_progress_payload(
         min(completed_posts, target_source_ids_count) if target_source_ids_count else completed_posts
     )
     display_matched_posts = min(matched_posts, target_source_ids_count) if target_source_ids_count else matched_posts
+    remaining_post_count = (
+        max(post_progress_total - display_completed_posts, 0) if post_progress_total is not None else None
+    )
+    average_seconds_per_post = _comments_progress_average_seconds(elapsed_seconds, display_completed_posts)
+    average_seconds_per_comment = _comments_progress_average_seconds(
+        elapsed_seconds,
+        comments_processed_total,
+        digits=4,
+    )
+    estimated_seconds_remaining = (
+        _comments_progress_estimated_seconds_remaining(remaining_post_count, average_seconds_per_post)
+        if remaining_post_count is not None
+        else None
+    )
     summary = {
         "total_jobs": total_jobs,
         "completed_jobs": completed_jobs,
@@ -4521,6 +4863,24 @@ def _build_comments_scrape_run_progress_payload(
     if has_comment_completeness_breakdown:
         post_progress["complete_posts"] = complete_posts_total
         post_progress["incomplete_posts"] = incomplete_posts_total
+    instagram_access_proof = _metadata_dict(run_config.get("instagram_access_proof")) or _metadata_dict(
+        latest_job_metadata.get("instagram_access_proof")
+    )
+    if not instagram_access_proof:
+        instagram_access_proof = _instagram_comments_access_proof(
+            public_mode=comments_public_mode_from_config(run_config),
+        )
+    worker_counters = {
+        "total": total_jobs,
+        "active": active_jobs + queued_jobs + retrying_jobs,
+        "running": active_jobs,
+        "queued": queued_jobs,
+        "retrying": retrying_jobs,
+        "completed": completed_jobs,
+        "cancelled": cancelled_jobs,
+        "failed": failed_jobs,
+        "stale": stale_shards,
+    }
     return {
         "run_id": str(first.get("run_id") or "").strip(),
         "platform": platform,
@@ -4545,6 +4905,7 @@ def _build_comments_scrape_run_progress_payload(
         "comments_endpoint_probe_advisory_active": endpoint_probe_advisory_active,
         "manual_auth_required": manual_auth_required,
         "proxy_session_state": proxy_session_state or None,
+        "instagram_access_proof": instagram_access_proof,
         "target_source_ids": list(dict.fromkeys(target_source_ids)),
         "target_source_ids_count": target_source_ids_count,
         "comments_shard_count": shard_count,
@@ -4560,11 +4921,18 @@ def _build_comments_scrape_run_progress_payload(
         "cancelled_comment_jobs": cancelled_jobs,
         "failed_comment_jobs": failed_jobs,
         "stale_comment_jobs": stale_shards,
+        "worker_counters": worker_counters,
         "post_progress": post_progress,
         "throughput": {
             "elapsed_seconds": elapsed_seconds,
             "posts_per_minute": posts_per_minute,
+            "posts_per_second": posts_per_second,
             "comments_per_minute": comments_per_minute,
+            "comments_per_second": comments_per_second,
+            "average_seconds_per_post": average_seconds_per_post,
+            "average_seconds_per_comment": average_seconds_per_comment,
+            "remaining_posts": remaining_post_count,
+            "estimated_seconds_remaining": estimated_seconds_remaining,
         },
         "cancellation_summary": {
             "cancelled_jobs": cancelled_jobs,
@@ -4771,7 +5139,7 @@ def resume_social_account_comments_run(
             "original_target_source_ids_count": original_target_count,
         }
 
-    run_config = _metadata_dict(rows[0].get("run_config"))
+    run_config = _public_comments_config_overlay(_metadata_dict(rows[0].get("run_config")))
     normalized_mode = str(run_config.get("mode") or "profile").strip().lower() or "profile"
     source_scope = str(rows[0].get("source_scope") or run_config.get("source_scope") or "network").strip() or "network"
     payload = start_social_account_comments_scrape(
@@ -4784,7 +5152,7 @@ def resume_social_account_comments_run(
         max_comments_per_post=_normalize_non_negative_int(run_config.get("max_comments_per_post")) or None,
         refresh_policy=str(run_config.get("refresh_policy") or "stale_or_missing"),
         target_filter=run_config.get("target_filter"),
-        comments_load_strategy=str(run_config.get("comments_load_strategy") or "cursor_api"),
+        comments_load_strategy=str(run_config.get("comments_load_strategy") or "public_relay"),
         initiated_by=initiated_by or str(rows[0].get("initiated_by") or "").strip() or "resume_comments_run",
         allow_local_dev_inline_bypass=bool(run_config.get("allow_local_dev_inline_bypass")),
         comments_enable_media_followups=bool(run_config.get("comments_enable_media_followups")),

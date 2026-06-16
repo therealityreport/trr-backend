@@ -13,6 +13,12 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
 
+from trr_backend.socials.instagram.public_post_extractor import (
+    PublicInstagramPost,
+    fetch_public_post_html,
+    parse_public_post_from_html,
+)
+
 _DATA_SJS_RE = re.compile(r"<script[^>]*data-sjs[^>]*>(.*?)</script>", re.IGNORECASE | re.DOTALL)
 _WRAPPED_JSON_CALL_RE = re.compile(r"^[A-Za-z0-9_$.]+\([^,]*,\s*(\{.*\})\s*\)\s*;?$", re.DOTALL)
 _SHARED_DATA_RE = re.compile(r"window\._sharedData\s*=\s*(\{.*?\})\s*;", re.DOTALL)
@@ -1112,6 +1118,40 @@ def _metadata_from_graphql_node(node: dict[str, Any]) -> InstagramPermalinkMetad
     )
 
 
+def _metadata_from_public_post(post: PublicInstagramPost | None) -> InstagramPermalinkMetadata | None:
+    if post is None:
+        return None
+    taken_at: datetime | None = None
+    if isinstance(post.taken_at, int) and post.taken_at > 0:
+        taken_at = datetime.fromtimestamp(post.taken_at, tz=UTC)
+
+    raw_media = post.to_raw_media()
+    public_summary = raw_media.get("public_post_extractor")
+    duration_seconds = _extract_duration_seconds(post.raw_media) if isinstance(post.raw_media, dict) else None
+    media_type = post.media_type
+    post_format = (
+        "carousel"
+        if media_type == "carousel"
+        else ("reel" if str(post.product_type or "").lower() == "clips" else "post")
+    )
+    return InstagramPermalinkMetadata(
+        taken_at=taken_at,
+        post_format=post_format,
+        profile_tags=list(post.profile_tags),
+        collaborators=list(post.coauthors),
+        hashtags=list(post.hashtags),
+        mentions=list(post.mentions),
+        duration_seconds=duration_seconds,
+        media_type=media_type,
+        media_urls=list(post.media_urls),
+        thumbnail_url=post.thumbnail_url,
+        raw_media=raw_media,
+        tagged_users_detail=list(post.tagged_users_detail),
+        collaborators_detail=list(post.coauthors_detail),
+        child_posts_data=(list(public_summary.get("children") or []) if isinstance(public_summary, dict) else []),
+    )
+
+
 def _fetch_shortcode_graphql_node(
     *,
     shortcode: str,
@@ -1457,7 +1497,54 @@ def resolve_instagram_media(
     client = session or requests.Session()
     html_cache: str | None = None
 
-    # 1) Existing API-based media info path.
+    # 1) Public static post page application/json extraction. This path is
+    # intentionally no-login and passes no cookies to the Scrapling fetcher.
+    try:
+        public_html, public_status = fetch_public_post_html(
+            shortcode_or_url,
+            timeout_ms=max(1_000, int(max(timeout) * 1000)),
+            headers=req_headers,
+        )
+        html_cache = public_html
+        public_post = parse_public_post_from_html(public_html or "", shortcode=shortcode) if public_html else None
+        metadata = _metadata_from_public_post(public_post)
+        if metadata and (metadata.media_urls or metadata.thumbnail_url):
+            attempts.append(
+                _resolution_attempt(
+                    source="public_app_json",
+                    success=True,
+                    selected_url_count=len(metadata.media_urls),
+                    http_status=public_status,
+                )
+            )
+            return InstagramMediaResolution(
+                source="public_app_json",
+                media_type=metadata.media_type,
+                media_urls=list(metadata.media_urls),
+                thumbnail_url=metadata.thumbnail_url,
+                metadata=metadata,
+                attempts=attempts,
+            )
+        attempts.append(
+            _resolution_attempt(
+                source="public_app_json",
+                success=False,
+                reason_code="instagram_media_not_found",
+                http_status=public_status,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        attempts.append(
+            _resolution_attempt(
+                source="public_app_json",
+                success=False,
+                reason_code="instagram_public_app_json_failed",
+                http_status=_http_status_from_exception(exc),
+                error=exc,
+            )
+        )
+
+    # 2) Existing API-based media info path.
     try:
         post_info = fetch_post_info(shortcode) if fetch_post_info is not None else None
         if post_info is None:
@@ -1509,7 +1596,7 @@ def resolve_instagram_media(
             )
         )
 
-    # 2) HOAIAN-style GraphQL fallback by shortcode.
+    # 3) HOAIAN-style GraphQL fallback by shortcode.
     try:
         node, status_code = _fetch_shortcode_graphql_node(
             shortcode=shortcode,
@@ -1555,7 +1642,7 @@ def resolve_instagram_media(
             )
         )
 
-    # 3) mikesmith-style HTML/JSON extraction fallback.
+    # 4) mikesmith-style HTML/JSON extraction fallback.
     try:
         html_cache, html_status = _fetch_permalink_html(
             shortcode_or_url=shortcode_or_url,
@@ -1574,6 +1661,9 @@ def resolve_instagram_media(
                     break
             if media_item is not None:
                 metadata = parse_permalink_metadata(media_item)
+            if metadata is None:
+                public_post = parse_public_post_from_html(html_cache, shortcode=shortcode)
+                metadata = _metadata_from_public_post(public_post)
             if metadata is None:
                 node = _html_shared_data_node(html_cache)
                 metadata = _metadata_from_graphql_node(node or {})
@@ -1615,7 +1705,7 @@ def resolve_instagram_media(
             )
         )
 
-    # 4) Open Graph fallback.
+    # 5) Open Graph fallback.
     if html_cache is None:
         try:
             html_cache, _ = _fetch_permalink_html(

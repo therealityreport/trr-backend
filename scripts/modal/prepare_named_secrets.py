@@ -24,6 +24,7 @@ DEFAULT_OUTPUT_DIR = REPO_ROOT / ".artifacts" / "modal-secrets"
 DEFAULT_RUNTIME_SECRET = "trr-backend-runtime"
 DEFAULT_SOCIAL_SECRET = "trr-social-auth"
 DEFAULT_SOCIALBLADE_COOKIE_FILE = REPO_ROOT / "scripts" / "socials" / "socialblade" / "socialblade_cookies.json"
+SOCIALBLADE_REQUIRED_COOKIE_NAMES = ("cf_clearance", "session")
 CANONICAL_DB_ENV = "TRR_DB_URL"
 RETIRED_DB_ENV_NAMES = ("SUPABASE_DB_URL", "DATABASE_URL")
 REMOTE_RUNTIME_EXCLUDED_ENV_NAMES = ("TRR_DB_DIRECT_URL",)
@@ -64,10 +65,14 @@ CANONICAL_REMOTE_RUNTIME_OVERRIDES = {
     "TRR_MODAL_SOCIALBLADE_FUNCTION": "run_socialblade_scrape",
     "SOCIAL_INSTAGRAM_POSTS_USE_STICKY_PROXY": "true",
     "SOCIAL_INSTAGRAM_POSTS_ANONYMOUS_ENABLED": "false",
-    "SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER": "decodo",
+    "SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER": "none",
     "SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY": "true",
     "SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY": "false",
     "SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS": "600",
+    "INSTAGRAM_BROWSER_NETWORK_POLICY_ENABLED": "true",
+    "INSTAGRAM_BROWSER_BLOCK_STATIC_ASSETS": "true",
+    "INSTAGRAM_BROWSER_DISABLE_EXTRA_RESOURCES": "true",
+    "INSTAGRAM_BROWSER_NETWORK_POLICY_REPORT_ONLY": "false",
     "TRR_MODAL_MAINTENANCE_OWNER_REQUIRED": "1",
     "TRR_MODAL_RUNTIME_SECRET_NAME": DEFAULT_RUNTIME_SECRET,
     "TRR_MODAL_SOCIAL_SECRET_NAME": DEFAULT_SOCIAL_SECRET,
@@ -83,8 +88,8 @@ MODAL_ALWAYS_ON_SAFE_DEFAULTS = {
 CANONICAL_REMOTE_SOCIAL_CAP_DEFAULTS = {
     "TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT": "8",
     "TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT": "10",
-    "TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_CONCURRENCY_LIMIT": "2",
-    "SOCIAL_MODAL_DISPATCH_LIMIT": "10",
+    "TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_CONCURRENCY_LIMIT": "10",
+    "SOCIAL_MODAL_DISPATCH_LIMIT": "25",
     "SOCIAL_WORKER_POOL_POSTS": "1",
     "SOCIAL_WORKER_POOL_COMMENTS": "10",
     "SOCIAL_WORKER_POOL_SHARED_ACCOUNT_DISCOVERY": "3",
@@ -95,6 +100,7 @@ CANONICAL_REMOTE_SOCIAL_CAP_DEFAULTS = {
     "SOCIAL_WORKER_POOL_COMMENT_MEDIA_MIRROR": "1",
     "SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM": "10",
     "SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT": "8",
+    "SOCIAL_INSTAGRAM_COMMENTS_MAX_SHARD_COUNT": "1000",
     "SOCIAL_INSTAGRAM_COMMENTS_GLOBAL_RATE_LIMIT_MODE": "advisory",
     "SOCIAL_INSTAGRAM_COMMENTS_PER_POST_CONCURRENCY": "2",
     "SOCIAL_THREADS_POSTS_SCRAPLING_ENABLED": "true",
@@ -106,6 +112,9 @@ LOCAL_ONLY_ENV_KEYS = {
     "FIREBASE_SERVICE_ACCOUNT_FILE",
     "GOOGLE_APPLICATION_CREDENTIALS",
     "GOOGLE_SERVICE_ACCOUNT_FILE",
+}
+SHELL_RUNTIME_ENV_KEYS = {
+    "DECODO_PROXY_URL",
 }
 DEPLOY_ONLY_ENV_KEYS = {
     "MODAL_TOKEN_ID",
@@ -263,6 +272,45 @@ def _read_non_empty_secret_file(path: Path, *, env_key: str) -> str:
     return _compact_secret_value(file_contents)
 
 
+def _cookie_names_from_secret_payload(value: str) -> set[str]:
+    stripped = str(value or "").strip()
+    if not stripped:
+        return set()
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        return {
+            part.split("=", 1)[0].strip()
+            for part in stripped.split(";")
+            if "=" in part and part.split("=", 1)[0].strip()
+        }
+    if isinstance(parsed, dict):
+        return {str(name).strip() for name, cookie_value in parsed.items() if str(name).strip() and cookie_value}
+    if isinstance(parsed, list):
+        names: set[str] = set()
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            cookie_value = item.get("value")
+            if name and cookie_value:
+                names.add(name)
+        return names
+    return set()
+
+
+def _validate_socialblade_cookie_secret(value: str | None) -> None:
+    if not _secret_payload_has_content(value):
+        return
+    names = _cookie_names_from_secret_payload(str(value or ""))
+    missing = [name for name in SOCIALBLADE_REQUIRED_COOKIE_NAMES if name not in names]
+    if missing:
+        raise ValueError(
+            "SOCIALBLADE_COOKIES_JSON is missing required authenticated cookie names: "
+            + ", ".join(missing)
+        )
+
+
 def _materialize_file_backed_social_auth(
     source_values: dict[str, str],
     social_values: dict[str, str],
@@ -289,6 +337,7 @@ def _materialize_file_backed_social_auth(
             DEFAULT_SOCIALBLADE_COOKIE_FILE,
             env_key="SOCIALBLADE_COOKIES_FILE",
         )
+    _validate_socialblade_cookie_secret(rendered.get("SOCIALBLADE_COOKIES_JSON"))
     return rendered
 
 
@@ -310,6 +359,17 @@ def _load_source_env(path: Path) -> dict[str, str]:
             continue
         result[normalized] = rendered
     return result
+
+
+def _overlay_shell_runtime_env_values(values: dict[str, str]) -> dict[str, str]:
+    rendered = dict(values)
+    for key in SHELL_RUNTIME_ENV_KEYS:
+        if (rendered.get(key) or "").strip():
+            continue
+        value = str(os.getenv(key) or "").strip()
+        if value:
+            rendered[key] = value
+    return rendered
 
 
 def _split_env(values: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
@@ -378,7 +438,7 @@ def _cleanup_rendered_files(*paths: Path) -> None:
 
 def main() -> int:
     args = _parse_args()
-    source_values = _load_source_env(args.source_env)
+    source_values = _overlay_shell_runtime_env_values(_load_source_env(args.source_env))
     runtime_values, social_values = _split_env(source_values)
     runtime_values = _apply_runtime_overrides(
         runtime_values,

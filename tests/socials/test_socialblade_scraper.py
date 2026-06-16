@@ -707,7 +707,7 @@ def test_scrape_socialblade_logs_in_and_retries_when_history_is_short(
     assert calls == [{"cf_clearance": "stale"}, {"cf_clearance": "fresh", "session": "logged-in"}]
 
 
-def test_scrape_socialblade_keeps_seeded_modal_table_result_when_history_is_short(
+def test_scrape_socialblade_marks_seeded_modal_table_result_degraded_when_history_is_short(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fake_run_scrapling(_handle: str, _cookies: object, *, platform: str):
@@ -733,7 +733,7 @@ def test_scrape_socialblade_keeps_seeded_modal_table_result_when_history_is_shor
     )
     monkeypatch.setattr(
         "trr_backend.socials.socialblade.scraper._refresh_socialblade_cookies_via_login",
-        lambda: (_ for _ in ()).throw(AssertionError("Modal should not try visible login for seeded sessions")),
+        lambda: (_ for _ in ()).throw(RuntimeError("Headless SocialBlade login was challenged in Modal")),
     )
 
     payload = scrape_socialblade(
@@ -744,10 +744,11 @@ def test_scrape_socialblade_keeps_seeded_modal_table_result_when_history_is_shor
         allow_visible_browser_retry=False,
     )
 
-    assert payload["stats_refreshed"] is True
+    assert payload["stats_refreshed"] is False
     assert payload["history_source"] == "table_fallback"
     assert payload["daily_channel_metrics_60day"]["row_count"] == 14
     assert payload["runtime_metadata"]["seed_has_socialblade_session"] is True
+    assert "Headless SocialBlade login was challenged in Modal" in payload["error"]
 
 
 def test_scrape_socialblade_accepts_tiktok_daily_total_control_capture_without_login(
