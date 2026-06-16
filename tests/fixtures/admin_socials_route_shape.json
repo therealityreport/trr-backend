@@ -251,6 +251,11 @@
   },
   {
     "method": "POST",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/comments/runs/{run_id}/guarded-restart",
+    "name": "post_social_account_comments_run_guarded_restart_route"
+  },
+  {
+    "method": "POST",
     "path": "/admin/socials/profiles/{platform}/{account_handle}/comments/runs/{run_id}/jobs/{job_id}/cancel",
     "name": "post_social_account_comments_job_cancel_route"
   },

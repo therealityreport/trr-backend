@@ -301,6 +301,173 @@ def test_recompute_run_summary_ignores_superseded_instagram_comments_failures(
     assert "where not superseded_by_comments_rebalance" in sql_text
 
 
+def test_preserve_protected_run_summary_fields_carries_audit_keys() -> None:
+    summary = {"total_jobs": 4, "completed_jobs": 2, "failed_jobs": 0, "active_jobs": 2}
+    existing = {
+        "total_jobs": 99,  # stale count must NOT override the recomputed value
+        "cancelled_by": "comments_guarded_restart",
+        "cancel_requested_at": "2026-06-16T00:00:00+00:00",
+        "cancel_reason": "public_comments_guarded_restart",
+        "guarded_restart": True,
+        "guarded_restart_from_run_id": "old-run",
+        "guarded_restart_to_run_id": "new-run",
+        "public_blocked_pause": {"checked": 25, "blocked": 20},
+        "dispatch_control": {"pause_after_current": True, "pause_reason": "public_blocked_repeated"},
+        "noise_field": "should-not-copy",
+    }
+
+    merged = run_lifecycle._preserve_protected_run_summary_fields(summary, existing)
+
+    # Recomputed counts win.
+    assert merged["total_jobs"] == 4
+    # Protected audit fields preserved.
+    assert merged["cancelled_by"] == "comments_guarded_restart"
+    assert merged["cancel_requested_at"] == "2026-06-16T00:00:00+00:00"
+    assert merged["cancel_reason"] == "public_comments_guarded_restart"
+    assert merged["guarded_restart"] is True
+    assert merged["guarded_restart_from_run_id"] == "old-run"
+    assert merged["guarded_restart_to_run_id"] == "new-run"
+    assert merged["public_blocked_pause"] == {"checked": 25, "blocked": 20}
+    assert merged["dispatch_control"]["pause_after_current"] is True
+    # Non-protected keys are not carried forward.
+    assert "noise_field" not in merged
+
+
+def test_preserve_protected_run_summary_fields_skips_missing_and_null() -> None:
+    summary = {"total_jobs": 1}
+    existing = {"cancelled_by": None, "dispatch_control": {"pause_after_current": True}}
+
+    merged = run_lifecycle._preserve_protected_run_summary_fields(summary, existing)
+
+    # Null protected values are skipped; present ones are copied.
+    assert "cancelled_by" not in merged
+    assert merged["dispatch_control"] == {"pause_after_current": True}
+
+
+def test_update_run_summary_incremental_preserves_audit_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(social_repo, "_run_counter_columns_ready", lambda: True)
+    captured: dict[str, object] = {}
+
+    def _fake_fetch_one(sql: str, params: list[object]):  # noqa: ARG001
+        normalized = " ".join(sql.lower().split())
+        if "from social.scrape_runs where id = %s" in normalized and "select total_jobs" in normalized:
+            # The recompute read must include the existing summary.
+            assert ", summary" in normalized
+            return {
+                "total_jobs": 6,
+                "completed_jobs": 3,
+                "failed_jobs": 1,
+                "active_jobs": 2,
+                "items_found_total": 77,
+                "stage_counts": {"posts": {"total": 3, "completed": 2, "failed": 0, "active": 1}},
+                "summary": {
+                    "total_jobs": 6,
+                    "cancelled_by": "comments_guarded_restart",
+                    "cancel_reason": "public_comments_guarded_restart",
+                    "guarded_restart": True,
+                    "guarded_restart_to_run_id": "new-run-id",
+                    "dispatch_control": {"pause_after_current": True},
+                },
+            }
+        if "update social.scrape_runs set summary = %s::jsonb" in normalized:
+            captured["written_summary"] = social_repo.json.loads(params[0])
+            return {"id": "run-1"}
+        return {}
+
+    monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
+
+    summary = social_repo._update_run_summary("run-1")
+
+    # Count fields refreshed.
+    assert summary["completed_jobs"] == 3
+    assert summary["active_jobs"] == 2
+    # Audit fields preserved in both the returned dict and the persisted summary.
+    assert summary["cancelled_by"] == "comments_guarded_restart"
+    assert summary["cancel_reason"] == "public_comments_guarded_restart"
+    assert summary["guarded_restart"] is True
+    assert summary["guarded_restart_to_run_id"] == "new-run-id"
+    assert summary["dispatch_control"] == {"pause_after_current": True}
+    written = captured["written_summary"]
+    assert written["cancelled_by"] == "comments_guarded_restart"
+    assert written["dispatch_control"] == {"pause_after_current": True}
+
+
+def test_update_run_summary_force_recompute_preserves_audit_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(run_lifecycle.legacy, "_run_counter_columns_ready", lambda: True)
+    existing_summary = {
+        "total_jobs": 2,
+        "cancelled_by": "comments_guarded_restart",
+        "cancel_requested_at": "2026-06-16T00:00:00+00:00",
+        "cancel_reason": "public_comments_guarded_restart",
+        "guarded_restart": True,
+        "guarded_restart_from_run_id": "old-run",
+        "guarded_restart_to_run_id": "new-run",
+        "public_blocked_pause": {"checked": 25, "blocked": 20},
+        "dispatch_control": {"pause_after_current": True, "pause_reason": "public_blocked_repeated"},
+    }
+    captured: dict[str, object] = {}
+
+    # Recompute aggregation read (plain fetch_one).
+    def _fake_fetch_one(sql: str, params: list[object]):  # noqa: ARG001
+        return {
+            "stats": {
+                "total_jobs": 2,
+                "completed_jobs": 1,
+                "failed_jobs": 0,
+                "active_jobs": 1,
+                "items_found_total": 10,
+            },
+            "stage_counts": {
+                social_repo.INSTAGRAM_COMMENTS_SCRAPLING_STAGE: {
+                    "total": 2,
+                    "completed": 1,
+                    "failed": 0,
+                    "active": 1,
+                }
+            },
+        }
+
+    # _persist_run_counters_and_summary reads existing summary + writes via cursor.
+    def _fake_fetch_one_with_cursor(cur: object, sql: str, params: list[object]):  # noqa: ARG001
+        normalized = " ".join(sql.lower().split())
+        if "select summary from social.scrape_runs" in normalized:
+            return {"summary": existing_summary}
+        if "update social.scrape_runs" in normalized:
+            captured["written_summary"] = social_repo.json.loads(params[-2])
+            return {"id": str(params[-1])}
+        return {}
+
+    @contextmanager
+    def _fake_db_cursor(*, conn=None):  # noqa: ARG001
+        yield object()
+
+    monkeypatch.setattr(run_lifecycle.legacy.pg, "fetch_one", _fake_fetch_one)
+    monkeypatch.setattr(run_lifecycle.legacy.pg, "fetch_one_with_cursor", _fake_fetch_one_with_cursor)
+    monkeypatch.setattr(run_lifecycle.legacy.pg, "db_cursor", _fake_db_cursor)
+
+    summary = run_lifecycle._update_run_summary(
+        "11111111-1111-1111-1111-111111111111",
+        force_recompute=True,
+        conn=object(),
+    )
+
+    # Count fields recomputed from jobs.
+    assert summary["completed_jobs"] == 1
+    assert summary["active_jobs"] == 1
+    written = captured["written_summary"]
+    # Audit fields preserved through the recompute persistence.
+    assert written["cancelled_by"] == "comments_guarded_restart"
+    assert written["cancel_reason"] == "public_comments_guarded_restart"
+    assert written["guarded_restart"] is True
+    assert written["guarded_restart_from_run_id"] == "old-run"
+    assert written["guarded_restart_to_run_id"] == "new-run"
+    assert written["public_blocked_pause"] == {"checked": 25, "blocked": 20}
+    assert written["dispatch_control"]["pause_after_current"] is True
+    # And recomputed counts still win over the stale existing summary value.
+    assert written["total_jobs"] == 2
+    assert written["completed_jobs"] == 1
+
+
 def test_finalize_run_status_reuses_lock_connection_for_all_reads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

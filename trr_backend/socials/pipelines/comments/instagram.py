@@ -5332,6 +5332,220 @@ def resume_social_account_comments_run(
     return payload
 
 
+# Default BRAVOTV public-comments proof window, applied only when the guarded
+# restart request explicitly asks for proof defaults and the original run did
+# not carry an explicit date window.
+_GUARDED_RESTART_PROOF_DATE_START = "2025-01-01T00:00:00+00:00"
+_GUARDED_RESTART_PROOF_DATE_END = "2027-01-01T00:00:00+00:00"
+# Public-only relaunch shape (REVISED §5 Backend): ramp starts at 12 workers
+# with batch-size-10 shards.
+_GUARDED_RESTART_WORKER_CAP_START = 12
+_GUARDED_RESTART_TARGET_BATCH_SIZE = 10
+
+
+def _guarded_restart_normalized_date_window(value: Any) -> str | None:
+    """Return a normalized ISO date-window value from run config, or None."""
+    text = str(value or "").strip()
+    return text or None
+
+
+def _stamp_guarded_restart_audit_on_old_run(
+    *,
+    run_id: str,
+    new_run_id: str,
+    cancel_reason: str,
+    conn: Any | None = None,
+) -> None:
+    """Record guarded-restart audit fields on the cancelled run summary.
+
+    ``cancel_social_account_comments_run`` already writes ``cancelled_by`` and
+    ``cancel_requested_at`` to the run summary; this layers the guarded-restart
+    audit fields on top with an explicit jsonb merge so neither write clobbers
+    the other. The protected-field preservation in
+    ``control_plane.run_lifecycle`` keeps these intact across summary recompute.
+    """
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id:
+        return
+    try:
+        pg.fetch_one(
+            """
+            update social.scrape_runs
+            set summary = coalesce(summary, '{}'::jsonb) || jsonb_build_object(
+              'cancel_reason', %s,
+              'guarded_restart', true,
+              'guarded_restart_to_run_id', %s
+            )
+            where id = %s::uuid
+            returning id::text
+            """,
+            [cancel_reason, str(new_run_id or "").strip() or None, normalized_run_id],
+            conn=conn,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "[comments-guarded-restart] failed to stamp audit fields on old run %s (continuing)",
+            normalized_run_id,
+            exc_info=True,
+        )
+
+
+def guarded_restart_social_account_comments_run(
+    *,
+    platform: str,
+    account_handle: str,
+    run_id: str,
+    initiated_by: str | None = None,
+    use_proof_defaults: bool = False,
+) -> dict[str, Any]:
+    """Cancel an active/blocked comments run and relaunch the same public-only window.
+
+    REVISED §5 (Backend): the relaunch is public-relay only (no auth probe, no
+    cookies, no proxy/Decodo). The original date window and target filter are
+    preserved; the worker cap starts at 12 and shards use batch size 10.
+    """
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    normalized_run_id = str(run_id or "").strip()
+    if normalized_platform != "instagram":
+        raise SocialIngestValidationError(
+            "SOCIAL_ACCOUNT_COMMENTS_UNSUPPORTED_PLATFORM",
+            "Standalone comments scraping is currently only supported for Instagram.",
+        )
+    if not normalized_run_id:
+        raise LookupError("Comments scrape run not found.")
+
+    lock_key = _social_account_comments_start_lock_key(normalized_platform, normalized_account)
+    lock_label = f"comments-guarded-restart-lock:{normalized_platform}:{normalized_account[:48]}"
+    with pg.db_connection(label=lock_label, pool_name="social_control") as lock_conn:
+        with pg.db_cursor(conn=lock_conn, label=lock_label) as cur:
+            lock_row = pg.fetch_one_with_cursor(cur, "select pg_try_advisory_lock(%s) as locked", [lock_key]) or {}
+        if not bool(lock_row.get("locked")):
+            raise SocialIngestConflictError(
+                "SOCIAL_ACCOUNT_COMMENTS_LAUNCH_IN_PROGRESS",
+                f"Comments sync is already starting for @{normalized_account}.",
+                detail={
+                    "platform": normalized_platform,
+                    "account_handle": normalized_account,
+                    "status": "starting",
+                    "retryable": True,
+                },
+            )
+        try:
+            run_row = _load_social_account_comments_run_row(
+                platform=normalized_platform,
+                account_handle=normalized_account,
+                run_id=normalized_run_id,
+                conn=lock_conn,
+            )
+            old_run_id = str(run_row.get("id") or "").strip()
+            if not old_run_id:
+                raise LookupError("Comments scrape run not found.")
+            original_config = _public_comments_config_overlay(_metadata_dict(run_row.get("config")))
+            normalized_mode = str(original_config.get("mode") or "profile").strip().lower() or "profile"
+            source_scope = (
+                str(run_row.get("source_scope") or original_config.get("source_scope") or "network").strip()
+                or "network"
+            )
+            original_date_start = _guarded_restart_normalized_date_window(original_config.get("date_start"))
+            original_date_end = _guarded_restart_normalized_date_window(original_config.get("date_end"))
+            if original_date_start is None and original_date_end is None and use_proof_defaults:
+                restart_date_start = _GUARDED_RESTART_PROOF_DATE_START
+                restart_date_end = _GUARDED_RESTART_PROOF_DATE_END
+                used_proof_defaults = True
+            else:
+                restart_date_start = original_date_start
+                restart_date_end = original_date_end
+                used_proof_defaults = False
+            original_target_filter = _normalize_instagram_comments_target_filter(
+                original_config.get("target_filter")
+            )
+            restart_target_filter = (
+                original_target_filter if original_target_filter is not None else "incomplete"
+            ) if normalized_mode == "profile" else None
+
+            cancellation_summary = cancel_social_account_comments_run(
+                platform=normalized_platform,
+                account_handle=normalized_account,
+                run_id=old_run_id,
+                cancelled_by="comments_guarded_restart",
+                conn=lock_conn,
+            )
+
+            new_run_payload = start_social_account_comments_scrape(
+                normalized_platform,
+                normalized_account,
+                mode=normalized_mode,
+                source_scope=source_scope,
+                source_id=str(original_config.get("source_id") or "").strip() or None,
+                max_posts=_normalize_non_negative_int(original_config.get("max_posts")) or None,
+                max_comments_per_post=_normalize_non_negative_int(original_config.get("max_comments_per_post"))
+                or None,
+                refresh_policy=str(original_config.get("refresh_policy") or "stale_or_missing"),
+                target_filter=restart_target_filter,
+                comments_load_strategy="public_relay",
+                initiated_by=initiated_by or "comments_guarded_restart",
+                allow_local_dev_inline_bypass=bool(original_config.get("allow_local_dev_inline_bypass")),
+                comments_enable_media_followups=bool(original_config.get("comments_enable_media_followups")),
+                launch_group_id=str(original_config.get("launch_group_id") or "").strip() or None,
+                skip_launch_auth_probe=True,
+                comments_worker_count=_GUARDED_RESTART_WORKER_CAP_START,
+                comments_target_batch_size=_GUARDED_RESTART_TARGET_BATCH_SIZE,
+                cancel_active_before_relaunch=False,
+                date_start=restart_date_start,
+                date_end=restart_date_end,
+            )
+            new_run_id = str(new_run_payload.get("run_id") or "").strip()
+
+            _stamp_guarded_restart_audit_on_old_run(
+                run_id=old_run_id,
+                new_run_id=new_run_id,
+                cancel_reason="public_comments_guarded_restart",
+                conn=lock_conn,
+            )
+        finally:
+            try:
+                with pg.db_cursor(conn=lock_conn, label=lock_label) as cur:
+                    pg.fetch_one_with_cursor(cur, "select pg_advisory_unlock(%s) as unlocked", [lock_key])
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "[comments-guarded-restart-lock] advisory unlock failed for %s/%s",
+                    normalized_platform,
+                    normalized_account,
+                    exc_info=True,
+                )
+
+    public_only_proof = {
+        "no_cookies": True,
+        "no_proxy": True,
+        "comments_load_strategy": "public_relay",
+    }
+    instagram_access_proof = _metadata_dict(new_run_payload.get("instagram_access_proof"))
+    if instagram_access_proof:
+        public_only_proof["instagram_access_proof"] = instagram_access_proof
+
+    return {
+        "accepted": True,
+        "old_run_id": old_run_id,
+        "new_run_id": new_run_id or None,
+        "platform": normalized_platform,
+        "account_handle": normalized_account,
+        "public_only_proof": public_only_proof,
+        "comments_load_strategy": "public_relay",
+        "date_window": {
+            "date_start": restart_date_start,
+            "date_end": restart_date_end,
+            "end_exclusive": True,
+            "used_proof_defaults": used_proof_defaults,
+        },
+        "target_filter": restart_target_filter,
+        "comments_worker_cap_start": _GUARDED_RESTART_WORKER_CAP_START,
+        "comments_target_batch_size": _GUARDED_RESTART_TARGET_BATCH_SIZE,
+        "cancellation_summary": cancellation_summary,
+        "new_run": new_run_payload,
+    }
+
+
 def cancel_social_account_comments_run(
     *,
     platform: str,
@@ -5519,6 +5733,7 @@ _LOCAL_ROOM_NAMES = {
     "_build_comments_scrape_run_progress_payload",
     "get_social_account_comments_scrape_run_progress",
     "resume_social_account_comments_run",
+    "guarded_restart_social_account_comments_run",
     "cancel_social_account_comments_run",
     "cancel_social_account_comments_job",
 }
@@ -5566,6 +5781,7 @@ __all__ = [
     "_build_comments_scrape_run_progress_payload",
     "get_social_account_comments_scrape_run_progress",
     "resume_social_account_comments_run",
+    "guarded_restart_social_account_comments_run",
     "cancel_social_account_comments_run",
     "cancel_social_account_comments_job",
 ]

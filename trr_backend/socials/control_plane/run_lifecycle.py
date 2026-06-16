@@ -440,6 +440,48 @@ def _normalize_stage_counts(stage_counts: Any) -> dict[str, dict[str, int]]:
     return normalized
 
 
+# Audit fields written to ``social.scrape_runs.summary`` by cancellation and the
+# guarded-restart flow (REVISED §6). A summary recompute rebuilds only the job
+# count rollups, so these must be carried forward from the existing summary or
+# run history loses its cancellation / restart provenance.
+_PROTECTED_RUN_SUMMARY_FIELDS = (
+    "cancelled_by",
+    "cancel_requested_at",
+    "cancel_reason",
+    "guarded_restart",
+    "guarded_restart_from_run_id",
+    "guarded_restart_to_run_id",
+    "public_blocked_pause",
+    "dispatch_control",
+)
+
+
+def _preserve_protected_run_summary_fields(
+    summary: dict[str, Any],
+    existing_summary: Any,
+) -> dict[str, Any]:
+    """Carry protected audit fields from an existing summary into a recompute.
+
+    Only copies a protected key when it is present (and not ``None``) on the
+    existing summary, so a recompute refreshes count fields without clobbering
+    cancellation / guarded-restart provenance. Returns ``summary`` mutated in
+    place for caller convenience.
+    """
+    existing = legacy._metadata_dict(existing_summary)
+    if not existing:
+        return summary
+    for field in _PROTECTED_RUN_SUMMARY_FIELDS:
+        if field in summary:
+            continue
+        value = existing.get(field)
+        if value is None and field not in existing:
+            continue
+        if value is None:
+            continue
+        summary[field] = value
+    return summary
+
+
 def _build_run_summary_payload(
     *,
     total_jobs: Any,
@@ -483,6 +525,15 @@ def _persist_run_counters_and_summary(
     except (ValueError, TypeError, AttributeError):
         return summary
     with legacy.pg.db_cursor(conn=conn) as cur:
+        existing_row = (
+            legacy.pg.fetch_one_with_cursor(
+                cur,
+                "select summary from social.scrape_runs where id = %s",
+                [run_id],
+            )
+            or {}
+        )
+        _preserve_protected_run_summary_fields(summary, existing_row.get("summary"))
         legacy.pg.fetch_one_with_cursor(
             cur,
             """
@@ -792,7 +843,8 @@ def _update_run_summary(
                   failed_jobs,
                   active_jobs,
                   items_found_total,
-                  stage_counts
+                  stage_counts,
+                  summary
                 from social.scrape_runs
                 where id = %s
                 """,
@@ -809,6 +861,7 @@ def _update_run_summary(
             items_found_total=row.get("items_found_total"),
             stage_counts=row.get("stage_counts"),
         )
+        _preserve_protected_run_summary_fields(summary, row.get("summary"))
         _call_with_optional_conn(
             legacy.pg.fetch_one,
             """
@@ -848,6 +901,16 @@ def _update_run_summary(
                     stage_counts=dict(summary.get("stage_counts") or {}),
                 )
     else:
+        existing_row = (
+            _call_with_optional_conn(
+                legacy.pg.fetch_one,
+                "select summary from social.scrape_runs where id = %s",
+                [run_id],
+                conn=conn,
+            )
+            or {}
+        )
+        _preserve_protected_run_summary_fields(summary, existing_row.get("summary"))
         _call_with_optional_conn(
             legacy.pg.fetch_one,
             """

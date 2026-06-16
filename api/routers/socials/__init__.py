@@ -5086,6 +5086,58 @@ def post_social_account_comments_run_cancel_route(
         raise _lookup_error_to_not_found(exc) from exc
 
 
+@router.post("/profiles/{platform}/{account_handle}/comments/runs/{run_id}/guarded-restart")
+def post_social_account_comments_run_guarded_restart_route(
+    platform: str,
+    account_handle: str,
+    run_id: UUID,
+    user: InternalAdminUser,
+    use_proof_defaults: bool = Query(default=False),
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import (
+        SocialIngestConflictError,
+        SocialIngestValidationError,
+        SocialWorkerUnavailableError,
+    )
+    from trr_backend.socials.pipelines.comments.instagram import (
+        guarded_restart_social_account_comments_run,
+    )
+
+    try:
+        result = guarded_restart_social_account_comments_run(
+            platform=platform,
+            account_handle=account_handle,
+            run_id=str(run_id),
+            initiated_by=(user or {}).get("email"),
+            use_proof_defaults=use_proof_defaults,
+        )
+        _clear_account_profile_caches()
+        return result
+    except SocialIngestConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": exc.code, "message": str(exc), **jsonable_encoder(exc.detail)},
+        ) from exc
+    except SocialIngestValidationError as exc:
+        status_code = 503 if exc.code == "SOCIAL_INSTAGRAM_COMMENTS_AUTH_REPAIR_FAILED" else 400
+        raise HTTPException(status_code=status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+    except SocialWorkerUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "SOCIAL_WORKER_UNAVAILABLE",
+                "message": str(exc),
+                "execution_mode": canonical_execution_mode(),
+                "execution_owner": execution_owner_label(),
+                "worker_health": _worker_health_detail(exc.worker_health),
+            },
+        ) from exc
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+
+
 @router.post("/profiles/{platform}/{account_handle}/comments/runs/{run_id}/jobs/{job_id}/cancel")
 def post_social_account_comments_job_cancel_route(
     platform: str,

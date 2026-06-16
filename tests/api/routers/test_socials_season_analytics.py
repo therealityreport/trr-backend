@@ -3042,6 +3042,76 @@ def test_post_social_account_comments_run_cancel(client: TestClient, monkeypatch
     assert mocked.call_args.kwargs["cancelled_by"] == "admin@example.com"
 
 
+def test_post_social_account_comments_run_guarded_restart(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    old_run_id = str(uuid4())
+    expected = {
+        "accepted": True,
+        "old_run_id": old_run_id,
+        "new_run_id": str(uuid4()),
+        "public_only_proof": {
+            "no_cookies": True,
+            "no_proxy": True,
+            "comments_load_strategy": "public_relay",
+        },
+        "comments_load_strategy": "public_relay",
+        "comments_worker_cap_start": 12,
+        "comments_target_batch_size": 10,
+    }
+
+    with patch(
+        "trr_backend.socials.pipelines.comments.instagram.guarded_restart_social_account_comments_run",
+        return_value=expected,
+    ) as mocked:
+        response = client.post(
+            f"/api/v1/admin/socials/profiles/instagram/bravotv/comments/runs/{old_run_id}/guarded-restart"
+            "?use_proof_defaults=true",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is True
+    assert body["public_only_proof"]["comments_load_strategy"] == "public_relay"
+    assert mocked.call_args.kwargs["platform"] == "instagram"
+    assert mocked.call_args.kwargs["account_handle"] == "bravotv"
+    assert mocked.call_args.kwargs["run_id"] == old_run_id
+    assert mocked.call_args.kwargs["initiated_by"] == "admin@example.com"
+    assert mocked.call_args.kwargs["use_proof_defaults"] is True
+
+
+def test_post_social_account_comments_run_guarded_restart_conflict_returns_409(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from trr_backend.repositories.social_season_analytics import SocialIngestConflictError
+
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    run_id = str(uuid4())
+
+    def _raise_conflict(**_kwargs: Any) -> None:
+        raise SocialIngestConflictError(
+            "SOCIAL_ACCOUNT_COMMENTS_LAUNCH_IN_PROGRESS",
+            "Comments sync is already starting for @bravotv.",
+            detail={"retryable": True},
+        )
+
+    with patch(
+        "trr_backend.socials.pipelines.comments.instagram.guarded_restart_social_account_comments_run",
+        side_effect=_raise_conflict,
+    ):
+        response = client.post(
+            f"/api/v1/admin/socials/profiles/instagram/bravotv/comments/runs/{run_id}/guarded-restart",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "SOCIAL_ACCOUNT_COMMENTS_LAUNCH_IN_PROGRESS"
+
+
 def test_post_social_account_comments_job_cancel(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
