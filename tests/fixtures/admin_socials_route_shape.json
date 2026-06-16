@@ -96,6 +96,11 @@
   },
   {
     "method": "POST",
+    "path": "/admin/socials/landing-progress-rollup",
+    "name": "post_social_landing_progress_rollup"
+  },
+  {
+    "method": "POST",
     "path": "/admin/socials/landing-socialblade-progress-counts",
     "name": "post_social_landing_socialblade_progress_counts"
   },
@@ -228,6 +233,16 @@
     "method": "GET",
     "path": "/admin/socials/profiles/{platform}/{account_handle}/comments",
     "name": "get_social_account_profile_comments_route"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/comments/audit-cursor-retries",
+    "name": "get_social_account_comments_audit_cursor_retries_route"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/comments/audit-cursor-retries",
+    "name": "post_social_account_comments_audit_cursor_retries_route"
   },
   {
     "method": "POST",

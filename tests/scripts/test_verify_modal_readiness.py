@@ -73,6 +73,7 @@ def test_expected_function_names_includes_runtime_probes(monkeypatch: pytest.Mon
     monkeypatch.delenv("TRR_MODAL_SOCIAL_POSTS_JOB_FUNCTION", raising=False)
     monkeypatch.delenv("TRR_MODAL_SOCIAL_MEDIA_JOB_FUNCTION", raising=False)
     monkeypatch.delenv("TRR_MODAL_SOCIAL_COMMENTS_JOB_FUNCTION", raising=False)
+    monkeypatch.delenv("TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_FUNCTION", raising=False)
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "true")
 
     function_names = cli.expected_function_names()
@@ -90,11 +91,13 @@ def test_expected_function_names_includes_runtime_probes(monkeypatch: pytest.Mon
     assert "run_social_posts_job" in function_names
     assert "run_social_media_job" in function_names
     assert "run_social_comments_job" in function_names
+    assert "run_social_comments_recovery_job" in function_names
     assert cli.required_social_function_names() == (
         "run_social_job",
         "run_social_posts_job",
         "run_social_media_job",
         "run_social_comments_job",
+        "run_social_comments_recovery_job",
     )
 
 
@@ -191,6 +194,7 @@ def test_verify_modal_readiness_passes_when_all_resources_exist(monkeypatch: pyt
             "run_social_posts_job": _StubFunctionHandle(),
             "run_social_media_job": _StubFunctionHandle(),
             "run_social_comments_job": _StubFunctionHandle(),
+            "run_social_comments_recovery_job": _StubFunctionHandle(),
             "run_socialblade_scrape": _StubFunctionHandle(),
             "probe_social_remote_auth": _StubFunctionHandle(
                 remote_payload={"platform": "instagram", "ready": True, "reason": None}
@@ -248,6 +252,7 @@ def test_verify_modal_readiness_passes_when_all_resources_exist(monkeypatch: pyt
             "run_social_posts_job",
             "run_social_media_job",
             "run_social_comments_job",
+            "run_social_comments_recovery_job",
             "run_socialblade_scrape",
             "probe_social_remote_auth",
             "probe_instagram_posts_auth",
@@ -278,12 +283,14 @@ def test_verify_modal_readiness_passes_when_all_resources_exist(monkeypatch: pyt
         "run_social_posts_job",
         "run_social_media_job",
         "run_social_comments_job",
+        "run_social_comments_recovery_job",
     ]
     assert summary["configured_social_function_names"] == [
         "run_social_job",
         "run_social_posts_job",
         "run_social_media_job",
         "run_social_comments_job",
+        "run_social_comments_recovery_job",
     ]
     assert summary["api_web_url"] == "https://workspace--trr-backend-api.modal.run"
     assert summary["missing_web_endpoints"] == []
@@ -385,6 +392,7 @@ def test_verify_modal_readiness_accepts_tiktok_remote_auth_probe(monkeypatch: py
             "run_social_posts_job": _StubFunctionHandle(),
             "run_social_media_job": _StubFunctionHandle(),
             "run_social_comments_job": _StubFunctionHandle(),
+            "run_social_comments_recovery_job": _StubFunctionHandle(),
             "probe_social_remote_auth": _StubFunctionHandle(
                 remote_payload={
                     "platform": "tiktok",
@@ -409,6 +417,7 @@ def test_verify_modal_readiness_accepts_tiktok_remote_auth_probe(monkeypatch: py
             "run_social_posts_job",
             "run_social_media_job",
             "run_social_comments_job",
+            "run_social_comments_recovery_job",
             "probe_social_remote_auth",
         ),
         probe_remote_auth_platform="tiktok",
@@ -546,6 +555,7 @@ def test_verify_modal_readiness_reports_missing_social_comments_function(monkeyp
             "run_social_job": _StubFunctionHandle(),
             "run_social_posts_job": _StubFunctionHandle(),
             "run_social_media_job": _StubFunctionHandle(),
+            "run_social_comments_recovery_job": _StubFunctionHandle(),
             "probe_social_remote_auth": _StubFunctionHandle(
                 remote_payload={"platform": "instagram", "ready": True, "reason": None}
             ),
@@ -562,6 +572,7 @@ def test_verify_modal_readiness_reports_missing_social_comments_function(monkeyp
             "run_social_posts_job",
             "run_social_media_job",
             "run_social_comments_job",
+            "run_social_comments_recovery_job",
             "probe_social_remote_auth",
         ),
         probe_remote_auth_platform="instagram",
@@ -569,7 +580,8 @@ def test_verify_modal_readiness_reports_missing_social_comments_function(monkeyp
 
     assert summary["ok"] is False
     assert "run_social_comments_job" in summary["missing_functions"]
-    assert summary["required_social_function_names"][-1] == "run_social_comments_job"
+    assert "run_social_comments_job" in summary["required_social_function_names"]
+    assert "run_social_comments_recovery_job" in summary["required_social_function_names"]
 
 
 def test_verify_modal_readiness_requires_missing_social_comments_function_even_if_caller_omits_it(
@@ -590,6 +602,7 @@ def test_verify_modal_readiness_requires_missing_social_comments_function_even_i
             "run_social_job": _StubFunctionHandle(),
             "run_social_posts_job": _StubFunctionHandle(),
             "run_social_media_job": _StubFunctionHandle(),
+            "run_social_comments_recovery_job": _StubFunctionHandle(),
             "probe_social_remote_auth": _StubFunctionHandle(
                 remote_payload={"platform": "instagram", "ready": True, "reason": None}
             ),
@@ -605,13 +618,15 @@ def test_verify_modal_readiness_requires_missing_social_comments_function_even_i
             "run_social_job",
             "run_social_posts_job",
             "run_social_media_job",
+            "run_social_comments_recovery_job",
             "probe_social_remote_auth",
         ),
         probe_remote_auth_platform="instagram",
     )
 
     assert summary["ok"] is False
-    assert summary["required_social_function_names"][-1] == "run_social_comments_job"
+    assert "run_social_comments_job" in summary["required_social_function_names"]
+    assert "run_social_comments_recovery_job" in summary["required_social_function_names"]
     assert summary["missing_required_social_functions"] == ["run_social_comments_job"]
 
 
@@ -876,6 +891,53 @@ def test_verify_modal_readiness_keeps_core_ready_when_only_getty_probe_is_blocke
         "ready": False,
         "reason": "challenge_page",
     }
+
+
+def test_verify_modal_readiness_comments_retryable_transport_failure_is_advisory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "false")
+    monkeypatch.setattr(
+        cli,
+        "list_secret_names",
+        lambda *, modal_environment="": {"trr-backend-runtime", "trr-social-auth"},
+    )
+    monkeypatch.setattr(cli, "list_app_descriptions", lambda *, modal_environment="": {"trr-backend-jobs"})
+    monkeypatch.setattr(
+        cli,
+        "get_app_function_handles",
+        lambda *, app_name, modal_environment="": {
+            "serve_backend_api": _StubFunctionHandle(web_url="https://workspace--trr-backend-api.modal.run"),
+            "probe_instagram_comments_auth": _StubFunctionHandle(
+                remote_payload={
+                    "platform": "instagram",
+                    "account_handle": "thetraitorsus",
+                    "shortcode": "SHORT1",
+                    "status": "transport_blocked",
+                    "ready": False,
+                    "reason": "http_500",
+                    "retryable": True,
+                    "session_invalidated": False,
+                    "execution_backend": "modal",
+                }
+            ),
+        },
+    )
+
+    summary = cli.verify_modal_readiness(
+        app_name="trr-backend-jobs",
+        runtime_secret_name="trr-backend-runtime",
+        social_secret_name="trr-social-auth",
+        function_names=("serve_backend_api", "probe_instagram_comments_auth"),
+        probe_instagram_comments_auth_handle="thetraitorsus",
+        probe_instagram_comments_auth_shortcode="SHORT1",
+    )
+
+    assert summary["ok"] is True
+    assert summary["core_ok"] is True
+    assert summary["blocking_probe_failures"] == []
+    assert summary["advisory_probe_failures"] == ["http_500"]
+    assert summary["instagram_comments_auth_probe"]["advisory_continue"] is True
 
 
 def test_verify_modal_readiness_blocks_comments_html_challenge_with_rendered_fallback_enabled(

@@ -14,7 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.modal import prepare_named_secrets, verify_modal_readiness  # noqa: E402
+from scripts.modal import deploy_backend, prepare_named_secrets, verify_modal_readiness  # noqa: E402
 
 
 def workspace_logs_dir(repo_root: Path = REPO_ROOT) -> Path:
@@ -161,6 +161,11 @@ def modal_fingerprint_files(repo_root: Path = REPO_ROOT) -> list[Path]:
         repo_root / "trr_backend" / "repositories" / "social_sync_orchestrator.py",
         repo_root / "trr_backend" / "repositories" / "socialblade_growth.py",
         repo_root / "trr_backend" / "scraping" / "url_image_scraper.py",
+        repo_root / "trr_backend" / "socials" / "control_plane" / "__init__.py",
+        repo_root / "trr_backend" / "socials" / "control_plane" / "dispatch.py",
+        repo_root / "trr_backend" / "socials" / "control_plane" / "dispatch_runtime.py",
+        repo_root / "trr_backend" / "socials" / "control_plane" / "recovery.py",
+        repo_root / "trr_backend" / "socials" / "control_plane" / "run_lifecycle.py",
         repo_root / "trr_backend" / "socials" / "social_season_analytics_impl.py",
         repo_root / "trr_backend" / "socials" / "instagram" / "auth_runtime.py",
         repo_root / "trr_backend" / "socials" / "socialblade" / "auth.py",
@@ -283,6 +288,7 @@ def verify_readiness(repo_root: Path = REPO_ROOT) -> dict[str, Any]:
             text=True,
             check=False,
             timeout=timeout_seconds,
+            env=deploy_backend.pinned_modal_env(),
         )
     except subprocess.TimeoutExpired:
         expected_functions = list(verify_modal_readiness.expected_function_names())
@@ -361,6 +367,7 @@ def apply_named_secrets(repo_root: Path = REPO_ROOT) -> subprocess.CompletedProc
         text=True,
         check=False,
         timeout=command_timeout_seconds(),
+        env=deploy_backend.pinned_modal_env(),
     )
 
 
@@ -373,6 +380,7 @@ def deploy_modal_app(repo_root: Path = REPO_ROOT) -> subprocess.CompletedProcess
         text=True,
         check=False,
         timeout=command_timeout_seconds(),
+        env=deploy_backend.pinned_modal_env(),
     )
 
 

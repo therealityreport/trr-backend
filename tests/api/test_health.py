@@ -10,7 +10,14 @@ from fastapi.testclient import TestClient
 
 from api import main as api_main
 from api.auth import require_internal_admin
-from api.main import admin_health_db_pressure, health, health_db_pressure, health_live, health_runtime
+from api.main import (
+    admin_health_db_pressure,
+    admin_health_instagram_comment_rollups,
+    health,
+    health_db_pressure,
+    health_live,
+    health_runtime,
+)
 from trr_backend.db import pg as _real_pg
 
 _test_app = FastAPI()
@@ -18,6 +25,7 @@ _test_app.get("/health")(health)
 _test_app.get("/health/live")(health_live)
 _test_app.get("/health/db-pressure")(health_db_pressure)
 _test_app.get("/admin/health/db-pressure")(admin_health_db_pressure)
+_test_app.get("/admin/health/instagram-comment-rollups")(admin_health_instagram_comment_rollups)
 _test_app.get("/health/runtime")(health_runtime)
 _test_app.dependency_overrides[require_internal_admin] = lambda: {"role": "internal_admin"}
 
@@ -249,6 +257,31 @@ def test_admin_health_db_pressure_marks_activity_permission_blocked() -> None:
         "holders": [],
     }
     assert "permission denied" not in str(body).lower()
+
+
+def test_admin_health_instagram_comment_rollups_returns_snapshot() -> None:
+    with patch.object(
+        api_main,
+        "instagram_comment_rollup_health",
+        lambda sample_limit=25: {
+            "status": "healthy",
+            "reason": "ok",
+            "rollup_table": "social.instagram_post_comment_rollups",
+            "sample_limit": sample_limit,
+            "mismatch_count": 0,
+        },
+    ):
+        resp = client.get("/admin/health/instagram-comment-rollups?sample_limit=7")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {
+        "status": "healthy",
+        "reason": "ok",
+        "rollup_table": "social.instagram_post_comment_rollups",
+        "sample_limit": 7,
+        "mismatch_count": 0,
+    }
 
 
 def test_health_runtime_ignores_database_failure():

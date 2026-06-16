@@ -123,6 +123,28 @@ def test_or_filter_supports_null_now_and_not_ilike(monkeypatch: pytest.MonkeyPat
     ]
 
 
+def test_json_text_in_filter_validates_and_parameterizes_json_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    counter = {"read": 0, "write": 0}
+    executed: list[tuple[str, list[object] | None]] = []
+    monkeypatch.setattr(session, "db_read_connection", _checkout_counter(counter, "read", executed))
+    monkeypatch.setattr(session, "db_connection", _checkout_counter(counter, "write", executed))
+
+    response = (
+        session.DbSession()
+        .schema("core")
+        .table("people")
+        .select("id,external_ids")
+        .json_text_in("external_ids", "imdb", ["nm1", "nm2"])
+        .execute()
+    )
+
+    assert counter == {"read": 1, "write": 0}
+    assert response.data == [{"id": 1}]
+    assert executed == [
+        ("SELECT id,external_ids FROM core.people WHERE external_ids ->> %s IN (%s,%s)", ["imdb", "nm1", "nm2"])
+    ]
+
+
 @pytest.mark.parametrize(
     ("builder", "expected"),
     [

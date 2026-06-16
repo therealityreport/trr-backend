@@ -583,8 +583,6 @@ class YouTubeScraper:
                     effective_delay = delay * 0.25  # e.g. 0.5 * 0.25 = 0.125s
                 else:
                     effective_delay = delay * 0.5  # e.g. 0.5 * 0.5 = 0.25s
-            elif self._consecutive_success >= 20:
-                effective_delay = delay * 0.5
             else:
                 effective_delay = delay * 0.5
             logger.debug(

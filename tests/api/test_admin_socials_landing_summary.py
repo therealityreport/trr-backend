@@ -123,7 +123,7 @@ def test_social_landing_socialblade_progress_counts_uses_social_profile_pool(mon
     assert captured["pool_name"] == "social_profile"
     assert "FROM targets" in str(captured["query"])
     assert "pipeline.socialblade_growth_data" in str(captured["query"])
-    assert captured["params"] == [["instagram", "twitter"], ["@heathergay", "heathergay"]]
+    assert captured["params"] == [["instagram", "twitter"], ["heathergay", "heathergay"]]
     assert payload["rows"][0] == {
         "platform": "instagram",
         "account_handle": "heathergay",
@@ -146,6 +146,98 @@ def test_social_landing_socialblade_progress_counts_rejects_mismatched_targets()
         assert getattr(exc, "detail", None) == "platforms and account_handles must have matching lengths"
     else:  # pragma: no cover - assertion guard
         raise AssertionError("Expected mismatched SocialBlade progress targets to fail")
+
+
+def test_social_landing_progress_rollup_returns_empty_rows_without_db(monkeypatch) -> None:
+    def fail_fetch_all(*_args, **_kwargs):
+        raise AssertionError("progress rollup should skip DB when no valid targets are provided")
+
+    monkeypatch.setattr("trr_backend.db.pg.fetch_all", fail_fetch_all)
+
+    payload = socials.post_social_landing_progress_rollup(
+        socials.SocialLandingProgressRollupRequest(platforms=[], account_handles=[])
+    )
+
+    assert payload["rows"] == []
+    assert payload["cache_status"] == "bypass"
+    assert "generated_at" in payload
+
+
+def test_social_landing_progress_rollup_rejects_mismatched_targets() -> None:
+    try:
+        socials.post_social_landing_progress_rollup(
+            socials.SocialLandingProgressRollupRequest(
+                platforms=["instagram"],
+                account_handles=[],
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        assert getattr(exc, "status_code", None) == 400
+        assert getattr(exc, "detail", None) == "platforms and account_handles must have matching lengths"
+    else:  # pragma: no cover - assertion guard
+        raise AssertionError("Expected mismatched social progress targets to fail")
+
+
+def test_social_landing_progress_rollup_uses_social_profile_pool_and_caches(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    calls = {"fetch_all": 0}
+    socials._SOCIAL_LANDING_PROGRESS_ROLLUP_CACHE.clear()
+
+    def fake_fetch_all(query, params, *, pool_name):
+        calls["fetch_all"] += 1
+        captured["query"] = query
+        captured["params"] = params
+        captured["pool_name"] = pool_name
+        return [
+            {
+                "platform": "instagram",
+                "account_handle": "bravotv",
+                "saved_count": 2,
+                "scraped_count": 3,
+                "socialblade_supported": True,
+                "socialblade_scraped_count": 1,
+                "socialblade_saved_count": 1,
+                "following_saved_count": 10,
+                "following_total_count": 20,
+                "comments_saved_count": 0,
+                "comments_total_count": 120,
+                "media_saved_count": 4,
+                "media_total_count": 6,
+            }
+        ]
+
+    monkeypatch.setattr("trr_backend.db.pg.fetch_all", fake_fetch_all)
+
+    request = socials.SocialLandingProgressRollupRequest(
+        platforms=["instagram", "instagram"],
+        account_handles=["@BravoTV", "bravotv"],
+    )
+    first = socials.post_social_landing_progress_rollup(request)
+    second = socials.post_social_landing_progress_rollup(request)
+
+    assert calls["fetch_all"] == 1
+    assert captured["pool_name"] == "social_profile"
+    assert captured["params"] == [["instagram"], ["bravotv"]]
+    assert "social.instagram_comments" not in str(captured["query"])
+    assert "pipeline.socialblade_growth_data" in str(captured["query"])
+    assert "comment_counts AS" not in str(captured["query"])
+    assert first["cache_status"] == "miss"
+    assert second["cache_status"] == "hit"
+    assert first["rows"][0] == {
+        "platform": "instagram",
+        "account_handle": "bravotv",
+        "saved_count": 2,
+        "scraped_count": 3,
+        "socialblade_supported": True,
+        "socialblade_scraped_count": 1,
+        "socialblade_saved_count": 1,
+        "following_saved_count": 10,
+        "following_total_count": 20,
+        "comments_saved_count": 0,
+        "comments_total_count": 120,
+        "media_saved_count": 4,
+        "media_total_count": 6,
+    }
 
 
 def test_social_live_status_reuses_cached_snapshot(monkeypatch) -> None:

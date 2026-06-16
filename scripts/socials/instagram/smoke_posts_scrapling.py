@@ -35,6 +35,25 @@ def _print_operator_summary(summary: dict[str, Any]) -> None:
     print(f"  stop_reason: {summary['stop_reason'] or 'none'}")
     print(f"  decodo_mode: {summary['decodo_mode'] or 'unknown'}")
     print(f"  cooldown_state: {summary['cooldown_state']}")
+    print("  performance:")
+    for key in (
+        "elapsed_ms",
+        "warmup_duration_ms",
+        "listing_duration_ms",
+        "persistence_duration_ms",
+        "pages_per_second",
+        "posts_per_second",
+        "doc_id_attempts",
+        "bytes_total",
+    ):
+        print(f"    {key}: {summary.get(key)}")
+    warmup_pool = _metadata_dict(summary.get("warmup_pool"))
+    if warmup_pool:
+        print(
+            "    warmup_pool: "
+            f"enabled={warmup_pool.get('enabled')} hit={warmup_pool.get('hit')} "
+            f"miss={warmup_pool.get('miss')} reason={warmup_pool.get('refresh_reason')}"
+        )
     if summary.get("error_message"):
         print(f"  error_message: {summary['error_message']}")
     print("  proxy_pacing:")
@@ -52,6 +71,7 @@ def _build_operator_summary(*, account: str, run_id: str, job_id: str, result: d
         metadata.get("persist_counters") or metadata.get("posts_scrapling_persist_diagnostics")
     )
     fetcher_runtime = _metadata_dict(metadata.get("fetcher_runtime") or metadata.get("runtime_metadata"))
+    performance = _metadata_dict(metadata.get("performance"))
     proxy_pacing = _metadata_dict(fetcher_runtime.get("proxy_pacing") or metadata.get("proxy_pacing"))
     proxy_identity = _metadata_dict(proxy_pacing.get("identity") or fetcher_runtime.get("proxy_identity"))
     auth_cooldown = _metadata_dict(metadata.get("auth_cooldown"))
@@ -89,6 +109,17 @@ def _build_operator_summary(*, account: str, run_id: str, job_id: str, result: d
             str(proxy_identity.get("provider") or fetcher_runtime.get("selected_proxy_fingerprint") or "").strip()
             or None
         ),
+        "elapsed_ms": performance.get("elapsed_ms"),
+        "warmup_duration_ms": performance.get("warmup_duration_ms"),
+        "listing_duration_ms": performance.get("listing_duration_ms"),
+        "persistence_duration_ms": performance.get("persistence_duration_ms"),
+        "pages_per_second": performance.get("pages_per_second"),
+        "posts_per_second": performance.get("posts_per_second"),
+        "doc_id_attempts": performance.get("doc_id_attempts"),
+        "doc_ids_attempted": performance.get("doc_ids_attempted") or [],
+        "warmup_pool": performance.get("warmup_pool") or fetcher_runtime.get("warmup_pool") or {},
+        "bytes_total": performance.get("bytes_total") or fetcher_runtime.get("bytes_total") or 0,
+        "bytes_by_host": performance.get("bytes_by_host") or fetcher_runtime.get("bytes_by_host") or {},
         "cooldown_state": cooldown_state,
         "cooldown": auth_cooldown or None,
         "error_message": str(result.get("error_message") or "").strip() or None,

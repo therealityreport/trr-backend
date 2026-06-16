@@ -4,7 +4,7 @@ from api.main import app
 
 
 def test_legacy_screenalytics_ingest_paths_are_not_registered() -> None:
-    paths = {route.path for route in app.routes}
+    paths = {path for route in app.routes if (path := getattr(route, "path", None))}
 
     assert "/api/v1/screenalytics/episodes/{episode_id}/cast" not in paths
     assert "/api/v1/screenalytics/seasons/{season_id}/cast" not in paths

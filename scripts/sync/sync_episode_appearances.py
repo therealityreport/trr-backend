@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -28,6 +29,7 @@ from scripts._sync_common import (
     filter_show_rows_for_sync,
     load_env_and_db,
 )
+from scripts.sync.episode_id_reconciliation import safe_match_episode_ref, update_episode_imdb_id
 from trr_backend.ingestion.show_importer import parse_imdb_headers_json_env
 from trr_backend.integrations.imdb.episodic_client import (
     IMDB_JOB_CATEGORY_SELF,
@@ -74,6 +76,8 @@ class EpisodeMeta:
     id: str | None
     air_date: str | None
     season_number: int | None
+    episode_number: int | None = None
+    title: str | None = None
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -181,11 +185,11 @@ def _air_year_from_air_date(value: str | None) -> int | None:
     return int(year)
 
 
-def _fetch_episode_index(db, *, show_id: str) -> dict[str, EpisodeMeta]:
+def _fetch_episode_rows(db, *, show_id: str) -> list[dict[str, Any]]:
     response = (
         db.schema("core")
         .table("episodes")
-        .select("id,imdb_episode_id,air_date,season_number")
+        .select("id,imdb_episode_id,air_date,season_number,episode_number,title,external_ids")
         .eq("show_id", show_id)
         .execute()
     )
@@ -193,19 +197,32 @@ def _fetch_episode_index(db, *, show_id: str) -> dict[str, EpisodeMeta]:
         raise RuntimeError(f"Supabase error listing episodes for show_id={show_id}: {response.error}")
     data = response.data or []
     if not isinstance(data, list):
-        return {}
+        return []
+    return data
 
+
+def _build_episode_index(rows: Sequence[Mapping[str, Any]]) -> dict[str, EpisodeMeta]:
     index: dict[str, EpisodeMeta] = {}
-    for row in data:
+    for row in rows:
         imdb_id = str(row.get("imdb_episode_id") or "").strip()
+        if not imdb_id:
+            external_ids = row.get("external_ids")
+            if isinstance(external_ids, Mapping):
+                imdb_id = str(external_ids.get("imdb") or "").strip()
         if not imdb_id:
             continue
         index[imdb_id] = EpisodeMeta(
             id=str(row.get("id") or "").strip() or None,
             air_date=_coerce_air_date(row.get("air_date")),
             season_number=_coerce_int(row.get("season_number")),
+            episode_number=_coerce_int(row.get("episode_number")),
+            title=str(row.get("title") or "").strip() or None,
         )
     return index
+
+
+def _fetch_episode_index(db, *, show_id: str) -> dict[str, EpisodeMeta]:
+    return _build_episode_index(_fetch_episode_rows(db, show_id=show_id))
 
 
 def _fetch_episodic_credits(
@@ -283,6 +300,36 @@ def _pick_credit_id(
     return str(rows[0].get("id") or "") or None
 
 
+def _missing_self_credit_rows(
+    credit_rows: Sequence[dict[str, object]],
+    existing_credit_rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, object]]:
+    existing_person_ids = {
+        str(row.get("person_id") or "").strip() for row in existing_credit_rows if str(row.get("person_id") or "").strip()
+    }
+    return [row for row in credit_rows if str(row.get("person_id") or "").strip() not in existing_person_ids]
+
+
+def _print_skipped_episode_details(
+    skipped_episode_details: Counter[tuple[str, str, int | None, int | None, int | None]],
+    *,
+    limit: int = 20,
+) -> None:
+    if not skipped_episode_details:
+        return
+    print("OCCURRENCES skipped_episode_details", file=sys.stderr)
+    for (imdb_id, title, season_number, episode_number, year), count in skipped_episode_details.most_common(limit):
+        code = (
+            f"S{season_number}.E{episode_number}"
+            if season_number is not None and episode_number is not None
+            else "S?.E?"
+        )
+        print(
+            f"- count={count} imdb_episode_id={imdb_id} code={code} year={year or ''} title={title or ''}",
+            file=sys.stderr,
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv or sys.argv[1:])
     if args.skip_db:
@@ -347,9 +394,11 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             try:
-                episode_index = _fetch_episode_index(db, show_id=show_id)
+                local_episode_rows = _fetch_episode_rows(db, show_id=show_id)
+                episode_index = _build_episode_index(local_episode_rows)
             except Exception as exc:  # noqa: BLE001
                 print(f"WARNING: Unable to load episodes for show_id={show_id}: {exc}", file=sys.stderr)
+                local_episode_rows = []
                 episode_index = {}
             season_numbers_from_episodes = sorted(
                 {
@@ -361,6 +410,7 @@ def main(argv: list[str] | None = None) -> int:
             seasons_used_for_show: set[int] = set(season_numbers_from_episodes)
             season_sources_used: set[str] = {"episodes_index"} if season_numbers_from_episodes else set()
             show_occurrences_skipped_missing_episode = 0
+            skipped_episode_details: Counter[tuple[str, str, int | None, int | None, int | None]] = Counter()
 
             print(f"Fetching IMDb Full Credits cast rows for {imdb_series_id}...", flush=True)
             cast_rows, source_type, _person_images = fetch_fullcredits_cast_with_fallback(
@@ -376,6 +426,10 @@ def main(argv: list[str] | None = None) -> int:
             if args.limit_cast is not None:
                 self_rows = self_rows[: max(0, int(args.limit_cast))]
             print(f"Parsed IMDb Self credits: {len(self_rows)} cast rows.", flush=True)
+            if not self_rows:
+                raise RuntimeError(
+                    "IMDb occurrence refresh returned zero usable Self rows; refusing to mark credit_occurrences successful."
+                )
 
             # Ensure people exist.
             name_ids = [row.name_id.strip().lower() for row in self_rows if row.name_id]
@@ -452,7 +506,8 @@ def main(argv: list[str] | None = None) -> int:
                         if imdb_id:
                             people_cache[imdb_id] = f"dry-run-{imdb_id}"
 
-            # Replace scraped credits (Self only) for this show.
+            # Reuse show-cast Self credits when they already exist. The occurrence
+            # refresh should not narrow a fuller fullcredits cast refresh.
             credit_rows: list[dict[str, object]] = []
             for row in self_rows:
                 person_id = people_cache.get(row.name_id.strip().lower())
@@ -475,33 +530,35 @@ def main(argv: list[str] | None = None) -> int:
                     }
                 )
 
-            if credit_rows and not args.dry_run:
-                print(f"Writing cast membership credits for {show_id}: {len(credit_rows)} rows.", flush=True)
-                delete_resp = (
-                    db.schema("core")
-                    .table("credits")
-                    .delete()
-                    .eq("show_id", show_id)
-                    .eq("credit_category", "Self")
-                    .not_.eq("source_type", "manual")
-                    .execute()
-                )
-                if hasattr(delete_resp, "error") and delete_resp.error:
-                    raise RuntimeError(f"Supabase error deleting existing credits: {delete_resp.error}")
+            existing_credits_resp = (
+                db.schema("core")
+                .table("credits")
+                .select("id,person_id,role,source_type")
+                .eq("show_id", show_id)
+                .eq("credit_category", "Self")
+                .execute()
+            )
+            if hasattr(existing_credits_resp, "error") and existing_credits_resp.error:
+                raise RuntimeError(f"Supabase error fetching existing credits: {existing_credits_resp.error}")
+            existing_credit_rows = existing_credits_resp.data or []
+            if not isinstance(existing_credit_rows, list):
+                existing_credit_rows = []
 
-                inserted_credits = insert_credits_ignore_conflicts(db, credit_rows)
+            missing_credit_rows = _missing_self_credit_rows(credit_rows, existing_credit_rows)
+            if missing_credit_rows and not args.dry_run:
+                print(f"Writing missing cast membership credits for {show_id}: {len(missing_credit_rows)} rows.", flush=True)
+                inserted_credits = insert_credits_ignore_conflicts(db, missing_credit_rows)
                 credits_inserted += len(inserted_credits)
-            elif credit_rows:
-                credits_inserted += len(credit_rows)
+            elif missing_credit_rows:
+                credits_inserted += len(missing_credit_rows)
 
-            # Fetch credit ids for mapping to occurrences (limit to this source_type).
+            # Fetch credit ids for mapping to occurrences.
             credits_resp = (
                 db.schema("core")
                 .table("credits")
                 .select("id,person_id,role")
                 .eq("show_id", show_id)
                 .eq("credit_category", "Self")
-                .eq("source_type", source_type)
                 .execute()
             )
             if hasattr(credits_resp, "error") and credits_resp.error:
@@ -509,6 +566,16 @@ def main(argv: list[str] | None = None) -> int:
             credits_rows = credits_resp.data or []
             if not isinstance(credits_rows, list):
                 credits_rows = []
+
+            if not credits_rows and credit_rows and args.dry_run:
+                credits_rows = [
+                    {
+                        "id": f"dry-run-{idx}",
+                        "person_id": row.get("person_id"),
+                        "role": row.get("role"),
+                    }
+                    for idx, row in enumerate(credit_rows, start=1)
+                ]
 
             credits_by_person: dict[str, list[dict[str, Any]]] = {}
             for row in credits_rows:
@@ -573,9 +640,48 @@ def main(argv: list[str] | None = None) -> int:
                             continue
                         meta = episode_index.get(imdb_episode_id)
                         if not meta or not meta.id:
-                            occurrences_skipped_missing_episode += 1
-                            show_occurrences_skipped_missing_episode += 1
-                            continue
+                            matched = safe_match_episode_ref(
+                                local_episode_rows,
+                                imdb_episode_id=imdb_episode_id,
+                                season_number=credit.episode.season_number,
+                                episode_number=credit.episode.episode_number,
+                                title=credit.episode.title,
+                                air_date=credit.episode.air_date,
+                                year=credit.episode.year,
+                            )
+                            if matched is not None:
+                                for local_episode in local_episode_rows:
+                                    if str(local_episode.get("id") or "") != matched.episode_id:
+                                        continue
+                                    if not args.dry_run:
+                                        update_episode_imdb_id(
+                                            db,
+                                            episode=local_episode,
+                                            imdb_episode_id=matched.imdb_episode_id,
+                                        )
+                                    meta = EpisodeMeta(
+                                        id=matched.episode_id,
+                                        air_date=_coerce_air_date(local_episode.get("air_date")),
+                                        season_number=_coerce_int(local_episode.get("season_number")),
+                                        episode_number=_coerce_int(local_episode.get("episode_number")),
+                                        title=str(local_episode.get("title") or "").strip() or None,
+                                    )
+                                    episode_index[imdb_episode_id] = meta
+                                    break
+
+                            if not meta or not meta.id:
+                                occurrences_skipped_missing_episode += 1
+                                show_occurrences_skipped_missing_episode += 1
+                                skipped_episode_details[
+                                    (
+                                        imdb_episode_id,
+                                        str(credit.episode.title or "").strip(),
+                                        credit.episode.season_number,
+                                        credit.episode.episode_number,
+                                        credit.episode.year,
+                                    )
+                                ] += 1
+                                continue
 
                         key = (credit_id, meta.id)
                         row = occurrence_by_key.get(key)
@@ -628,6 +734,7 @@ def main(argv: list[str] | None = None) -> int:
                     f"occurrences_skipped_missing_episode={show_occurrences_skipped_missing_episode}",
                     file=sys.stderr,
                 )
+                _print_skipped_episode_details(skipped_episode_details)
                 fatal_show_failures += 1
                 if not args.dry_run:
                     mark_sync_state_failed(
@@ -670,6 +777,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"occurrences_skipped_missing_episode={show_occurrences_skipped_missing_episode}",
                 file=sys.stderr,
             )
+            _print_skipped_episode_details(skipped_episode_details)
 
             if not args.dry_run:
                 mark_sync_state_success(

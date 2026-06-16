@@ -198,7 +198,7 @@ def main() -> int:
             stage="starting",
             started_at=_utcnow_iso(),
             progress_message=(
-                f'Fetching Getty search candidates for "{args.person_name}" via the codex Chrome profile...'
+                f'Fetching Getty search candidates for "{args.person_name}" via the openai-agent Chrome profile...'
             ),
         )
         result = fetch_person_getty_prefetch_payload(

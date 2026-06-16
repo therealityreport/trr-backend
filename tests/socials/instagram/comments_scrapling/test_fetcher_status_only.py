@@ -751,7 +751,11 @@ def test_coauthor_status_only_du_shape_classifies_terminal_missing_comments() ->
     assert result.comments[0].replies[0].username == "champagne.roast"
 
 
-def test_public_relay_child_hydration_probes_zero_count_parent() -> None:
+def test_public_relay_child_hydration_probes_zero_count_parent_when_enabled(monkeypatch) -> None:
+    # T3: the default skips reply-less parents (limit 0). A positive probe limit
+    # re-enables probing them, preserving the hidden-reply capability as opt-in.
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_COAUTHOR_GRAPHQL_CHILD_MAX_PAGES", raising=False)
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_PUBLIC_COMMENTS_ZERO_REPLY_PROBE_LIMIT", "5")
     fetcher = _build_fetcher()
     fetcher._pace_api_requests = AsyncMock(return_value=True)
     parent = _comment("18346102966234863", username="bracketology.tv", reply_count=0)
@@ -792,14 +796,18 @@ def test_public_relay_child_hydration_probes_zero_count_parent() -> None:
     )
 
     assert metadata["attempted"] is True
+    assert metadata["max_pages"] is None
+    assert metadata["page_cap_disabled"] is True
     assert metadata["parent_attempts"] == 1
     assert metadata["merged_replies"] == 1
     assert parent.reply_count == 1
     assert parent.replies[0].username == "champagne.roast"
 
 
-def test_public_relay_child_hydration_caps_zero_count_parent_probes(monkeypatch) -> None:
-    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_COAUTHOR_GRAPHQL_CHILD_ZERO_COUNT_PROBE_LIMIT", "1")
+def test_public_relay_child_hydration_honors_zero_count_parent_cap(monkeypatch) -> None:
+    # T3: with a probe limit of 1, only the first reply-less parent is probed and
+    # the rest are skipped — saving child requests on the global ~4 req/s budget.
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_PUBLIC_COMMENTS_ZERO_REPLY_PROBE_LIMIT", "1")
     fetcher = _build_fetcher()
     fetcher._pace_api_requests = AsyncMock(return_value=True)
     parents = [
@@ -835,7 +843,41 @@ def test_public_relay_child_hydration_caps_zero_count_parent_probes(monkeypatch)
     assert metadata["zero_count_parent_probes"] == 1
     assert metadata["parent_attempts"] == 1
     assert metadata["parents_skipped_without_reply_gap"] == 1
-    public_client.post.assert_awaited_once()
+    assert public_client.post.await_count == 1
+
+
+def test_public_relay_child_hydration_skips_zero_count_parents_by_default(monkeypatch) -> None:
+    # T3 default: reply-less parents issue NO child GraphQL request (the dominant
+    # per-post cost on the global ~4 req/s budget). One env var re-enables probing.
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_PUBLIC_COMMENTS_ZERO_REPLY_PROBE_LIMIT", raising=False)
+    fetcher = _build_fetcher()
+    fetcher._pace_api_requests = AsyncMock(return_value=True)
+    parents = [
+        _comment("parent-1", username="alpha", reply_count=0),
+        _comment("parent-2", username="beta", reply_count=0),
+    ]
+    public_client = MagicMock()
+    public_client.post = AsyncMock(return_value=httpx.Response(200, json={"data": {}}))
+
+    metadata = asyncio.run(
+        fetcher._fetch_public_relay_child_comments_for_status_only(
+            public_client=public_client,
+            shortcode="DVPmpFkgfzS",
+            post_url="https://www.instagram.com/p/DVPmpFkgfzS/",
+            media_id="123",
+            comments=parents,
+            graphql_headers={},
+            common_body={},
+            target_count=2,
+            max_comments=0,
+        )
+    )
+
+    assert metadata["zero_count_probe_limit"] == 0
+    assert metadata["zero_count_parent_probes"] == 0
+    assert metadata["parent_attempts"] == 0
+    assert metadata["parents_skipped_without_reply_gap"] == 2
+    assert public_client.post.await_count == 0
 
 
 def test_coauthor_relay_prefers_authenticated_session_for_parent_comments() -> None:
@@ -915,6 +957,89 @@ def test_coauthor_relay_prefers_authenticated_session_for_parent_comments() -> N
     assert fetcher._fetch_public_relay_child_comments_for_status_only.await_args.kwargs["relay_is_logged_in"] is True
 
 
+def test_public_relay_parent_pagination_defaults_to_uncapped(monkeypatch) -> None:
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_COAUTHOR_GRAPHQL_MAX_PAGES", raising=False)
+    fetcher = _build_fetcher()
+    fetcher._raw_cookies.update(
+        {
+            "csrftoken": "csrf-token",
+            "ds_user_id": "123456",
+            "sessionid": "session-token",
+        }
+    )
+    fetcher._pace_api_requests = AsyncMock(return_value=True)
+    fetcher._fetch_public_relay_child_comments_for_status_only = AsyncMock(
+        return_value={"attempted": False, "reason": "test_child_lane_skipped"}
+    )
+    html = '"LSD",[],{"token":"lsd-token"}'
+
+    def page_payload(comment_id: str, *, cursor: str | None, has_next: bool) -> dict[str, object]:
+        return {
+            "data": {
+                "xdt_api__v1__media__media_id__comments__connection": {
+                    "edges": [
+                        {
+                            "node": {
+                                "pk": comment_id,
+                                "text": f"comment {comment_id}",
+                                "created_at": 1772766459,
+                                "child_comment_count": 0,
+                                "comment_like_count": 0,
+                                "user": {"pk": f"user-{comment_id}", "username": f"user{comment_id}"},
+                            }
+                        }
+                    ],
+                    "page_info": {"has_next_page": has_next, "end_cursor": cursor},
+                }
+            }
+        }
+
+    fake_client = MagicMock()
+    fake_client.get = AsyncMock(
+        return_value=httpx.Response(
+            200,
+            text=html,
+            request=httpx.Request("GET", "https://www.instagram.com/p/DU_oEbbgZfJ/"),
+        )
+    )
+    fake_client.post = AsyncMock(
+        side_effect=[
+            httpx.Response(
+                200,
+                json=page_payload("1", cursor="cursor-1", has_next=True),
+                request=httpx.Request("POST", "https://www.instagram.com/graphql/query/"),
+            ),
+            httpx.Response(
+                200,
+                json=page_payload("2", cursor="cursor-2", has_next=True),
+                request=httpx.Request("POST", "https://www.instagram.com/graphql/query/"),
+            ),
+            httpx.Response(
+                200,
+                json=page_payload("3", cursor=None, has_next=False),
+                request=httpx.Request("POST", "https://www.instagram.com/graphql/query/"),
+            ),
+        ]
+    )
+    fetcher._http_client = fake_client
+
+    comments, metadata = asyncio.run(
+        fetcher._fetch_public_relay_coauthor_comments_for_status_only(
+            "DU_oEbbgZfJ",
+            "https://www.instagram.com/p/DU_oEbbgZfJ/",
+            media_id="123",
+            expected_comment_count=3,
+            max_comments=0,
+        )
+    )
+
+    assert [comment.comment_id for comment in comments] == ["1", "2", "3"]
+    assert metadata["max_pages"] is None
+    assert metadata["page_cap_disabled"] is True
+    assert metadata["attempts"][0]["pages"] == 3
+    assert fake_client.post.await_count == 3
+
+
 def test_single_session_load_all_memory_guardrail_marks_retryable(monkeypatch) -> None:
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_MAX_IN_MEMORY_ROWS", "1")
     fetcher = _build_fetcher()
@@ -948,13 +1073,15 @@ def test_single_session_load_all_memory_guardrail_marks_retryable(monkeypatch) -
     assert result.fetch_failed is True
     assert result.retryable is True
     assert result.fetch_reason == "memory_guardrail_reached"
-    assert [comment.comment_id for comment in result.comments] == ["api-1", "api-2"]
+    # Bug #10b: the guardrail now trips at exactly max_in_memory_rows (inclusive
+    # cap) rather than max+1, so only the first row is retained before stopping.
+    assert [comment.comment_id for comment in result.comments] == ["api-1"]
     assert result.diagnostic_metadata["strategy_decision"]["selected_strategy"] == "single_session_load_all"
     assert result.diagnostic_metadata["api_pages_loaded"] == 1
-    assert result.diagnostic_metadata["api_rows_seen"] == 2
+    assert result.diagnostic_metadata["api_rows_seen"] == 1
     assert result.diagnostic_metadata["memory_guardrail"] == {
         "max_in_memory_rows": 1,
-        "current_rows": 2,
+        "current_rows": 1,
         "reached": True,
         "stop_reason": "memory_guardrail_reached",
     }

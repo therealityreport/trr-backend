@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from contextlib import nullcontext
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -16,6 +17,7 @@ from trr_backend.socials.instagram.comments_scrapling.job_runner import (
 )
 from trr_backend.socials.instagram.comments_scrapling.proxy import select_comments_proxy
 from trr_backend.socials.instagram.comments_scrapling.session import resolve_comments_scrapling_session
+from trr_backend.socials.instagram.scraper import InstagramComment
 
 
 def test_select_comments_proxy_prefers_explicit_proxy_urls(monkeypatch) -> None:
@@ -386,3 +388,177 @@ def test_job_runner_uses_resolved_browser_account_id_as_proxy_session_key(monkey
     )
 
     assert captured["session_key"] == "shared-auth"
+
+
+def test_instagram_public_first_comments_job_skips_auth_resolver_and_proxy_selector(monkeypatch) -> None:
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+
+    captured: dict[str, object] = {}
+    monkeypatch.setenv("DECODO_PROXY_URL", "http://user:pass@gate.decodo.com:7000")
+    monkeypatch.setenv("DECODO_USERNAME", "user")
+    monkeypatch.setenv("DECODO_PASSWORD", "pass")
+    monkeypatch.setenv("DECODO_GATEWAY", "gate.decodo.com:7000")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER", "decodo")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_URLS", "http://user:pass@proxy-one.test:8000")
+
+    class FakeFetcher:
+        runtime_metadata = {"request_count": 2}
+
+        def __init__(self, **kwargs):
+            captured["fetcher_kwargs"] = kwargs
+
+        async def warmup(self):
+            raise AssertionError("public comments mode must not warm up an authenticated browser session")
+
+        async def aclose(self):
+            return None
+
+        async def fetch_comments_for_shortcode(self, shortcode: str, **kwargs):
+            captured["fetch_shortcode"] = shortcode
+            captured["fetch_kwargs"] = kwargs
+            return InstagramCommentsFetchResult(
+                comments=[
+                    InstagramComment(
+                        comment_id="comment-1",
+                        text="first",
+                        username="viewer",
+                        user_id="user-1",
+                        created_at=0,
+                        date_time="",
+                        likes=0,
+                        is_reply=False,
+                        parent_comment_id=None,
+                        reply_count=0,
+                        phase="ranked",
+                    )
+                ],
+                fetch_failed=False,
+                auth_failed=False,
+                fetch_reason="public_complete",
+                reported_comment_count=1,
+                request_count=2,
+                retryable=False,
+                diagnostic_metadata={
+                    "phase_counts": {"ranked": 1},
+                    "public_comments": {
+                        "classification": "public_complete",
+                        "advertised_count": 1,
+                        "recovered_count": 1,
+                        "coverage_ratio": 1.0,
+                        "terminal_reason": "pagination_complete",
+                    },
+                },
+            )
+
+    def fail_auth_resolver(**_kwargs):
+        raise AssertionError("public comments mode must not resolve Instagram auth")
+
+    def fail_proxy_selector(**_kwargs):
+        raise AssertionError("public comments mode must not select Decodo/proxy")
+
+    finish_payloads: list[dict[str, object]] = []
+    monkeypatch.setattr(jr, "resolve_comments_scrapling_session", fail_auth_resolver)
+    monkeypatch.setattr(jr, "select_comments_proxy", fail_proxy_selector)
+    monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", FakeFetcher)
+    monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {"ABC12345": 1})
+    monkeypatch.setattr(jr, "_load_comment_target_metadata", lambda **_kwargs: {})
+    monkeypatch.setattr(jr, "_load_instagram_comments_audit_cursor_resume_metadata", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        jr,
+        "_load_persisted_replies_by_parent",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("public comments mode must not use the authenticated reply-only shortcut")
+        ),
+    )
+    monkeypatch.setattr(
+        jr,
+        "_load_persisted_top_level_comments_for_reply_retry",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("public comments mode must not use persisted top-level reply retry")
+        ),
+    )
+    monkeypatch.setattr(
+        jr,
+        "_reply_only_fast_path_reason",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("public comments mode must not enter reply-only fast path")
+        ),
+    )
+    monkeypatch.setattr(jr, "_insert_instagram_post_comments_audit", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        jr,
+        "persist_instagram_comments_for_post",
+        lambda **_kwargs: SimpleNamespace(
+            post_id="00000000-0000-0000-0000-000000000001",
+            stored_total_comments=1,
+            comments_upserted=1,
+            comments_marked_missing=0,
+            comment_media_mirror_jobs_enqueued=0,
+            comment_media_mirror_job_enqueue_errors=0,
+            comments_inserted=1,
+            comments_refreshed=0,
+            comments_changed=1,
+            stored_parent_comments=1,
+            stored_child_replies=0,
+            expected_child_replies=0,
+            stored_reply_gap_total=0,
+            stored_reply_gap_parent_count=0,
+            stored_reply_gap_samples=[],
+        ),
+    )
+    monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(SimpleNamespace(commit=lambda: None)))
+    monkeypatch.setattr(
+        jr.pg,
+        "fetch_one",
+        lambda *_args, **_kwargs: {
+            "id": "job-1",
+            "run_id": "run-1",
+            "status": "running",
+            "worker_id": "test-worker",
+            "claimed_at": object(),
+            "metadata": {},
+        },
+    )
+    monkeypatch.setattr(jr.pg, "fetch_all", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        jr,
+        "lifecycle",
+        SimpleNamespace(
+            now_utc=lambda: datetime(2026, 6, 15, tzinfo=UTC),
+            format_time=lambda value: value.isoformat() if value else None,
+            new_job_progress_state=lambda: {},
+            touch_job_heartbeat=lambda *_args, **_kwargs: True,
+            emit_job_progress=lambda **_kwargs: None,
+            finish_job=lambda *args, **kwargs: finish_payloads.append({"args": args, "kwargs": kwargs}),
+            finalize_run_status=lambda *_args, **_kwargs: {},
+            metadata_dict=lambda value: dict(value or {}),
+            retry_backoff_seconds=lambda _attempt: 0,
+        ),
+    )
+
+    jr.run_instagram_comments_scrapling_job(
+        {
+            "id": "job-1",
+            "run_id": "run-1",
+            "status": "queued",
+            "config": {
+                "account": "bravotv",
+                "stage": "comments_scrapling",
+                "mode": "profile",
+                "instagram_scrape_mode": "public_first",
+                "source_scope": "bravo",
+                "target_source_ids": ["ABC12345"],
+            },
+        },
+        worker_id="test-worker",
+    )
+
+    assert captured["fetcher_kwargs"]["raw_cookies"] == {}
+    assert captured["fetcher_kwargs"]["proxy_config"] is None
+    assert captured["fetch_kwargs"]["load_strategy"] == "public_relay"
+    assert captured["fetch_kwargs"].get("reply_only") is None
+    assert finish_payloads
+    metadata = finish_payloads[-1]["kwargs"]["metadata"]
+    assert metadata["comments_load_strategy"] == "public_relay"
+    assert metadata["comments_strategy"]["auth_state"] == "public"
+    assert metadata["comments_strategy"]["proxy_state"] == "none"

@@ -63,6 +63,7 @@ class BrowserAccountSessionHandle:
     context: Any
     paths: BrowserAccountSessionPaths
     cookie_domains: tuple[str, ...]
+    network_policy_recorder: Any | None = None
 
 
 class AccountBrowserSessionManager:
@@ -210,6 +211,19 @@ class AccountBrowserSessionManager:
         with self._lock_for(paths.account_id):
             browser = launch_browser(playwright, headless=headless)
             context = browser.new_context(**context_kwargs)
+            network_policy_recorder = None
+            if self.platform == "instagram":
+                try:
+                    from trr_backend.socials.instagram.network_policy import install_sync_context_network_policy
+
+                    network_policy_recorder = install_sync_context_network_policy(context)
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "Failed installing browser network policy for %s/%s",
+                        self.platform,
+                        paths.account_id,
+                        exc_info=True,
+                    )
             try:
                 if seed_cookies:
                     cookies = [
@@ -240,6 +254,7 @@ class AccountBrowserSessionManager:
                     context=context,
                     paths=paths,
                     cookie_domains=self.cookie_domains,
+                    network_policy_recorder=network_policy_recorder,
                 )
             finally:
                 try:

@@ -25,7 +25,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import httpx
 
@@ -58,6 +58,7 @@ from trr_backend.socials._scrapling_http_utils import (
 )
 from trr_backend.socials.instagram.comments_scrapling.counts import (
     child_reply_count,
+    expected_reply_count,
     flattened_comment_count,
     merge_comment_replies,
     missing_reply_count,
@@ -68,13 +69,17 @@ from trr_backend.socials.instagram.comments_scrapling.counts import (
 from trr_backend.socials.instagram.comments_scrapling.proxy import CommentsProxyConfig
 from trr_backend.socials.instagram.constants import COMMENT_REPLIES_URL, COMMENTS_URL, resolve_comment_sort_order
 from trr_backend.socials.instagram.permalink_metadata import _graphql_doc_ids, _shortcode_to_media_id
+from trr_backend.socials.instagram.network_policy import (
+    default_instagram_network_policy,
+    instagram_scrapling_network_kwargs,
+)
 from trr_backend.socials.instagram.scraper import InstagramComment, InstagramScraper
 from trr_backend.socials.scrapling_transport import build_stealthy_fetcher, scrapling_runtime_metadata
 
 logger = logging.getLogger("socials.instagram.comments_scrapling.fetcher")
 
-_COMMENT_PAGINATION_MAX_PAGES_DEFAULT = 250
-_REPLY_PAGINATION_MAX_PAGES_DEFAULT = 100
+_COMMENT_PAGINATION_MAX_PAGES_DEFAULT = 0
+_REPLY_PAGINATION_MAX_PAGES_DEFAULT = 0
 _COMMENT_PAGINATION_MAX_SECONDS_DEFAULT = 600.0
 _REPLY_PAGINATION_MAX_SECONDS_DEFAULT = 180.0
 _REPLY_TAIL_TOTAL_MAX_SECONDS_PER_POST_DEFAULT = 90.0
@@ -101,14 +106,26 @@ _HIDDEN_UNAVAILABLE_GAP_MAX_DEFAULT = 1
 _HIDDEN_UNAVAILABLE_GAP_RATIO_DEFAULT = 0.0
 _COAUTHOR_STATUS_ONLY_CLICK_LIMIT_DEFAULT = 8
 _COAUTHOR_STATUS_ONLY_SCROLL_LIMIT_DEFAULT = 8
+# Public PUBLIC-mode relay knobs (T3/T4). Zero-reply parents are skipped by
+# default (limit 0) so reply-less parents never issue a child GraphQL probe,
+# and public requests use short fast-fail timeouts independent of the
+# authenticated pagination deadlines.
+_PUBLIC_COMMENTS_ZERO_REPLY_PROBE_LIMIT_ENV = "SOCIAL_INSTAGRAM_PUBLIC_COMMENTS_ZERO_REPLY_PROBE_LIMIT"
+_PUBLIC_COMMENTS_ZERO_REPLY_PROBE_LIMIT_DEFAULT = 0
+_PUBLIC_COMMENTS_POST_TIMEOUT_SEC_ENV = "SOCIAL_INSTAGRAM_PUBLIC_COMMENTS_POST_TIMEOUT_SEC"
+_PUBLIC_COMMENTS_POST_TIMEOUT_SEC_DEFAULT = 20.0
+_PUBLIC_COMMENTS_CHILD_TIMEOUT_SEC_ENV = "SOCIAL_INSTAGRAM_PUBLIC_COMMENTS_CHILD_TIMEOUT_SEC"
+_PUBLIC_COMMENTS_CHILD_TIMEOUT_SEC_DEFAULT = 10.0
 _COAUTHOR_RENDERED_FALLBACK_VERSION = "2026-05-06.coauthor-rendered-dom-v3"
 BROWSER_SESSION_INVALIDATED_REASON = "browser_session_invalidated"
 _COMMENTS_LOAD_STRATEGY_CURSOR_API = "cursor_api"
 _COMMENTS_LOAD_STRATEGY_SINGLE_SESSION_LOAD_ALL = "single_session_load_all"
+_COMMENTS_LOAD_STRATEGY_PUBLIC_RELAY = "public_relay"
 _COMMENTS_LOAD_STRATEGIES = frozenset(
     {
         _COMMENTS_LOAD_STRATEGY_CURSOR_API,
         _COMMENTS_LOAD_STRATEGY_SINGLE_SESSION_LOAD_ALL,
+        _COMMENTS_LOAD_STRATEGY_PUBLIC_RELAY,
     }
 )
 _SINGLE_SESSION_RENDERED_FALLBACK_VERSION = "2026-05-06.single-session-rendered-dom-v1"
@@ -124,15 +141,15 @@ _POST_COMMENTS_GRAPHQL_FRIENDLY_NAME = "PolarisPostCommentsPaginationQuery"
 _POST_COMMENTS_GRAPHQL_HEADER_FRIENDLY_NAME = "PolarisPostCommentsPaginationQuery"
 _POST_COMMENTS_GRAPHQL_DOC_IDS = ("25516980651312394", "26113520058347588")
 _POST_COMMENTS_GRAPHQL_PAGE_SIZE = 12
-_POST_COMMENTS_GRAPHQL_MAX_PAGES = 25
+_POST_COMMENTS_GRAPHQL_MAX_PAGES = 0
 _POST_CHILD_COMMENTS_GRAPHQL_FRIENDLY_NAME = "PolarisPostChildCommentsQuery"
 _POST_CHILD_COMMENTS_GRAPHQL_DOC_ATTEMPTS = (
     ("PolarisPostChildCommentsQuery", "34884685271179117"),
     ("PolarisPostCommentsChildrenPaginationtQuery", "36239935742272683"),
 )
 _POST_CHILD_COMMENTS_GRAPHQL_PAGE_SIZE = 12
-_POST_CHILD_COMMENTS_GRAPHQL_MAX_PAGES = 10
-_POST_CHILD_COMMENTS_GRAPHQL_ZERO_COUNT_PROBE_LIMIT = 20
+_POST_CHILD_COMMENTS_GRAPHQL_MAX_PAGES = 0
+_POST_CHILD_COMMENTS_GRAPHQL_ZERO_COUNT_PROBE_LIMIT = 0
 _GRAPHQL_COAUTHOR_SOURCE_SNAPSHOT_TYPE = "graphql_coauthor_preview_comments"
 _RELAY_COAUTHOR_SOURCE_SNAPSHOT_TYPE = "graphql_coauthor_relay_comments"
 _TERMINAL_MISSING_CLASSIFIED_REASON = "coverage_terminal_missing_classified"
@@ -147,6 +164,7 @@ _POST_COMMENTS_CONTAINER_QUERY_RE = re.compile(
     r'"queryID":"(?P<query_id>\d+)","variables":\{"media_id":"(?P<media_id>\d+)"[^}]*\},'
     r'"queryName":"PolarisPostCommentsContainerQuery"'
 )
+_SAFE_HTTP_ACCEPT_ENCODING = "gzip, deflate"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -156,6 +174,65 @@ _POST_COMMENTS_CONTAINER_QUERY_RE = re.compile(
 def normalize_comments_load_strategy(value: Any) -> str:
     normalized = str(value or _COMMENTS_LOAD_STRATEGY_CURSOR_API).strip().lower()
     return normalized if normalized in _COMMENTS_LOAD_STRATEGIES else _COMMENTS_LOAD_STRATEGY_CURSOR_API
+
+
+def _public_comments_coverage_metadata(
+    *,
+    advertised_count: int | None,
+    recovered_count: int,
+    terminal_reason: str | None,
+    max_comments: int,
+    missing_replies: int = 0,
+) -> dict[str, Any]:
+    advertised = _safe_non_negative_int(advertised_count)
+    recovered = max(0, int(recovered_count or 0))
+    effective_target = _expected_target_count(advertised, max_comments)
+    terminal = str(terminal_reason or "").strip() or None
+    if advertised is None:
+        coverage_ratio = None
+    elif advertised <= 0:
+        coverage_ratio = 1.0 if recovered == 0 else None
+    else:
+        coverage_ratio = min(1.0, recovered / advertised)
+
+    complete_terminal_reasons = {
+        "child_comments_target_reached",
+        "graphql_relay_target_reached",
+        "pagination_complete",
+    }
+    if (
+        effective_target is not None
+        and recovered >= effective_target
+        and max(0, int(missing_replies or 0)) == 0
+    ) or (
+        terminal in complete_terminal_reasons
+        and max(0, int(missing_replies or 0)) == 0
+        and (advertised is None or (advertised == 0 and recovered == 0))
+    ):
+        classification = "public_complete"
+    elif recovered > 0:
+        classification = "public_partial"
+    else:
+        classification = "public_blocked"
+
+    return {
+        "mode": "public_relay",
+        "classification": classification,
+        "advertised_count": advertised,
+        "recovered_count": recovered,
+        "coverage_ratio": coverage_ratio,
+        "terminal_reason": terminal,
+        "max_comments": max(0, int(max_comments or 0)),
+        "effective_target_count": effective_target,
+        "missing_reply_count": max(0, int(missing_replies or 0)),
+        "fallback_blocked_reason": (
+            "public_comments_partial_requires_approval"
+            if classification == "public_partial"
+            else "public_comments_blocked_requires_approval"
+            if classification == "public_blocked"
+            else None
+        ),
+    }
 
 
 _API_HEADER_KEYS_TO_STRIP = frozenset(
@@ -217,6 +294,40 @@ def _deadline_response(attempt_count: int) -> dict[str, Any]:
     }
 
 
+def _response_url_host(response: Any) -> str:
+    try:
+        url = getattr(response, "url", None)
+        if url is None:
+            return "unknown"
+        host = getattr(url, "host", None)
+        if host:
+            return str(host).strip().lower() or "unknown"
+        parsed = urlparse(str(url))
+        return (parsed.hostname or "unknown").strip().lower() or "unknown"
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+def _response_byte_size(response: Any) -> int:
+    try:
+        content = getattr(response, "content", None)
+        if content is not None:
+            try:
+                return len(content)
+            except TypeError:
+                pass
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        headers = getattr(response, "headers", None) or {}
+        raw = headers.get("content-length") if hasattr(headers, "get") else None
+        if raw is not None:
+            return max(0, int(raw))
+    except Exception:  # noqa: BLE001
+        return 0
+    return 0
+
+
 async def _sleep_before_deadline(seconds: float, deadline: float | None) -> bool:
     delay = max(0.0, float(seconds or 0.0))
     remaining = _deadline_remaining_seconds(deadline)
@@ -237,6 +348,62 @@ def _safe_non_negative_int(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed >= 0 else None
+
+
+def _resolve_optional_positive_int_env(name: str, default: int, *, minimum: int = 1) -> int | None:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        value = default
+    else:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = default
+    if value <= 0:
+        return None
+    return max(minimum, value)
+
+
+def _resolve_non_negative_int_env(name: str, default: int) -> int:
+    """Parse an env var as a non-negative integer (0 allowed), falling back to default.
+
+    Unlike ``_resolve_positive_int_env``/``_resolve_optional_positive_int_env`` this
+    preserves an explicit ``0`` (used by the PUBLIC-mode zero-reply probe limit, where
+    0 means "skip reply-less parents entirely" rather than "no limit").
+    """
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return max(0, default)
+    try:
+        value = int(raw)
+    except ValueError:
+        return max(0, default)
+    return max(0, value)
+
+
+def _resolve_public_zero_reply_probe_limit() -> int:
+    return _resolve_non_negative_int_env(
+        _PUBLIC_COMMENTS_ZERO_REPLY_PROBE_LIMIT_ENV,
+        _PUBLIC_COMMENTS_ZERO_REPLY_PROBE_LIMIT_DEFAULT,
+    )
+
+
+def _resolve_public_post_timeout_seconds() -> float:
+    return _resolve_positive_float_env(
+        _PUBLIC_COMMENTS_POST_TIMEOUT_SEC_ENV,
+        _PUBLIC_COMMENTS_POST_TIMEOUT_SEC_DEFAULT,
+        minimum=0.1,
+        maximum=600.0,
+    )
+
+
+def _resolve_public_child_timeout_seconds() -> float:
+    return _resolve_positive_float_env(
+        _PUBLIC_COMMENTS_CHILD_TIMEOUT_SEC_ENV,
+        _PUBLIC_COMMENTS_CHILD_TIMEOUT_SEC_DEFAULT,
+        minimum=0.1,
+        maximum=600.0,
+    )
 
 
 def _clean_html_text(fragment: str) -> str:
@@ -2337,6 +2504,8 @@ _TRANSPORT_FAILURE_MARKERS = (
     "server disconnected",
     "network is unreachable",
     "temporarily unavailable",
+    "zstd decompressor error",
+    "decoding failed",
 )
 
 
@@ -2352,7 +2521,7 @@ def _warmup_transport_failure(exc: BaseException) -> bool:
 
 
 def _api_transport_failure(exc: BaseException) -> bool:
-    if isinstance(exc, TimeoutError | httpx.TimeoutException | httpx.TransportError):
+    if isinstance(exc, TimeoutError | httpx.TimeoutException | httpx.TransportError | httpx.DecodingError):
         return True
     return isinstance(exc, OSError) and _transport_failure_message(exc)
 
@@ -2474,6 +2643,10 @@ class InstagramCommentsScraplingFetcher:
         self._timeout_ms = max(5_000, int(timeout_ms))
         self._parser = InstagramScraper(cookies=self._raw_cookies, browser_account_id=self._browser_account_id)
         self._request_count = 0
+        self._bytes_total = 0
+        self._bytes_by_host: dict[str, int] = {}
+        self._request_count_by_host: dict[str, int] = {}
+        self._network_policy = default_instagram_network_policy()
         self._warmup_cookie_delta: dict[str, str] = {}
         self._selected_proxy_fingerprint: str = proxy_config.fingerprint if proxy_config else "none"
         self._proxy_session_mode: str = proxy_config.session_mode if proxy_config else "none"
@@ -2593,6 +2766,8 @@ class InstagramCommentsScraplingFetcher:
 
         # httpx client (for API calls). Created lazily after warmup bridges cookies.
         self._http_client: httpx.AsyncClient | None = None
+        self._http_client_lock = asyncio.Lock()
+        self._api_pace_lock = asyncio.Lock()
 
     # -------------------------------------------------------------------
     # Public API
@@ -2629,6 +2804,10 @@ class InstagramCommentsScraplingFetcher:
             "transport": "httpx_after_browser_warmup",
             "comments_auth_validation": dict(self._comments_auth_validation),
             "request_count": self._request_count,
+            "bytes_total": self._bytes_total,
+            "bytes_by_host": dict(sorted(self._bytes_by_host.items())),
+            "request_count_by_host": dict(sorted(self._request_count_by_host.items())),
+            "network_policy": self._network_policy.to_metadata(),
             "retry_reason_counts": dict(sorted(self._retry_reason_counts.items())),
             "lane_diagnostics": {lane: dict(metadata) for lane, metadata in sorted(self._lane_diagnostics.items())},
             "challenge_responses": {
@@ -2930,11 +3109,57 @@ class InstagramCommentsScraplingFetcher:
         reply_only: bool = False,
         target_metadata: Mapping[str, Any] | None = None,
         load_strategy: str = _COMMENTS_LOAD_STRATEGY_CURSOR_API,
+        expected_count_unknown: bool = False,
+    ) -> InstagramCommentsFetchResult:
+        # Bug #2: accept the degraded-expected-counts signal from the job runner
+        # (set when _load_expected_comment_counts hit a transient DB error) and
+        # stamp it onto the result so completeness detection keeps the post
+        # retryable instead of completing via the reported-count-is-None path.
+        result = await self._fetch_comments_for_shortcode_impl(
+            shortcode,
+            max_comments=max_comments,
+            fetch_replies=fetch_replies,
+            expected_comment_count=expected_comment_count,
+            top_level_cursor=top_level_cursor,
+            top_level_cursor_param=top_level_cursor_param,
+            reply_resume_cursors=reply_resume_cursors,
+            reply_resume_cursor_params=reply_resume_cursor_params,
+            persisted_replies_by_parent=persisted_replies_by_parent,
+            persisted_top_level_comments=persisted_top_level_comments,
+            reply_only=reply_only,
+            target_metadata=target_metadata,
+            load_strategy=load_strategy,
+        )
+        if expected_count_unknown and isinstance(result, InstagramCommentsFetchResult):
+            meta = dict(result.diagnostic_metadata or {})
+            meta["expected_count_unknown"] = True
+            result.diagnostic_metadata = meta
+        return result
+
+    async def _fetch_comments_for_shortcode_impl(
+        self,
+        shortcode: str,
+        *,
+        max_comments: int,
+        fetch_replies: bool,
+        expected_comment_count: int | None = None,
+        top_level_cursor: str | None = None,
+        top_level_cursor_param: str | None = None,
+        reply_resume_cursors: dict[str, str] | None = None,
+        reply_resume_cursor_params: dict[str, str] | None = None,
+        persisted_replies_by_parent: dict[str, list[InstagramComment]] | None = None,
+        persisted_top_level_comments: list[InstagramComment] | None = None,
+        reply_only: bool = False,
+        target_metadata: Mapping[str, Any] | None = None,
+        load_strategy: str = _COMMENTS_LOAD_STRATEGY_CURSOR_API,
     ) -> InstagramCommentsFetchResult:
         requested_load_strategy = str(load_strategy or _COMMENTS_LOAD_STRATEGY_CURSOR_API).strip().lower()
         selected_load_strategy = normalize_comments_load_strategy(load_strategy)
         single_session_load_all = selected_load_strategy == _COMMENTS_LOAD_STRATEGY_SINGLE_SESSION_LOAD_ALL
-        strategy_lane_order: list[str] = [_COMMENTS_LOAD_STRATEGY_CURSOR_API]
+        public_relay_load = selected_load_strategy == _COMMENTS_LOAD_STRATEGY_PUBLIC_RELAY
+        strategy_lane_order: list[str] = [
+            _COMMENTS_LOAD_STRATEGY_PUBLIC_RELAY if public_relay_load else _COMMENTS_LOAD_STRATEGY_CURSOR_API
+        ]
         strategy_fallback_trigger: str | None = None
         strategy_stop_reason: str | None = None
         single_session_rendered_metadata: dict[str, Any] = {}
@@ -2957,7 +3182,8 @@ class InstagramCommentsScraplingFetcher:
             "requested_strategy": requested_load_strategy or _COMMENTS_LOAD_STRATEGY_CURSOR_API,
             "selected_strategy": selected_load_strategy,
             "defaulted": selected_load_strategy != (requested_load_strategy or _COMMENTS_LOAD_STRATEGY_CURSOR_API),
-            "api_first": True,
+            "api_first": not public_relay_load,
+            "public_relay_first": public_relay_load,
             "rendered_dom_canonical": False,
             "reply_only": bool(reply_only),
         }
@@ -2995,6 +3221,99 @@ class InstagramCommentsScraplingFetcher:
 
         expected_comments = _safe_non_negative_int(expected_comment_count)
         post_url = f"https://www.instagram.com/p/{shortcode}/"
+        if public_relay_load and not reply_only:
+            relay_comments, relay_metadata = await self._fetch_public_relay_coauthor_comments_for_status_only(
+                shortcode,
+                post_url,
+                media_id=media_id,
+                expected_comment_count=expected_comments,
+                max_comments=max_comments,
+                allow_authenticated=False,
+                use_proxy=False,
+            )
+            _ensure_child_reply_phase(relay_comments)
+            recovered_count = flattened_comment_count(relay_comments)
+            relay_terminal_reason = str(relay_metadata.get("reason") or "").strip() or None
+            public_comments_metadata = _public_comments_coverage_metadata(
+                advertised_count=expected_comments,
+                recovered_count=recovered_count,
+                terminal_reason=relay_terminal_reason,
+                max_comments=max_comments,
+                missing_replies=missing_reply_count(relay_comments),
+            )
+            classification = str(public_comments_metadata.get("classification") or "public_blocked")
+            pages_seen = len([page for page in relay_metadata.get("pages", []) if isinstance(page, dict)])
+            top_level_checkpoint = self._record_top_level_checkpoint(
+                shortcode=shortcode,
+                media_id=media_id,
+                stop_reason=relay_terminal_reason or classification,
+                last_error_code=classification if classification != "public_complete" else None,
+                last_top_level_cursor=None,
+                next_top_level_cursor=None,
+                last_top_level_cursor_param=None,
+                next_top_level_cursor_param=None,
+                observed_comment_count=recovered_count,
+                expected_comment_count=expected_comments,
+                pages_seen=pages_seen,
+                diagnostic_metadata={
+                    "public_comments": dict(public_comments_metadata),
+                    "relay": dict(relay_metadata),
+                },
+            )
+            strategy_stop_reason = relay_terminal_reason or classification
+            strategy_metadata = {
+                "strategy_decision": strategy_decision,
+                "fallback_trigger": None,
+                "lane_order": list(strategy_lane_order),
+                "stop_reason": strategy_stop_reason,
+                "api_pages_loaded": 0,
+                "api_rows_seen": 0,
+                "rendered_load_attempts": 0,
+                "rendered_rows_seen": 0,
+                "rendered_merged_comments": 0,
+                "merged_comments": recovered_count,
+                "top_level_comments": parent_comment_count(relay_comments),
+                "child_replies": child_reply_count(relay_comments),
+                "challenge_stop": False,
+                "session_invalidated": False,
+                "memory_guardrail": {
+                    "max_in_memory_rows": None,
+                    "current_rows": recovered_count,
+                    "reached": False,
+                    "stop_reason": None,
+                },
+            }
+            diagnostic_metadata = {
+                "phase_counts": _instagram_comment_phase_counts(relay_comments),
+                "public_comments": dict(public_comments_metadata),
+                "relay_comments": dict(relay_metadata),
+                **strategy_metadata,
+            }
+            self._last_single_session_strategy_metadata = {
+                "shortcode": str(shortcode or "").strip() or None,
+                **strategy_metadata,
+            }
+            self._record_lane_diagnostic(
+                "public_relay",
+                shortcode=shortcode,
+                reason=classification,
+                count=recovered_count,
+                metadata=dict(public_comments_metadata),
+            )
+            return InstagramCommentsFetchResult(
+                comments=relay_comments,
+                fetch_failed=classification != "public_complete",
+                auth_failed=False,
+                fetch_reason=classification,
+                reported_comment_count=expected_comments,
+                request_count=self._request_count,
+                retryable=False,
+                reply_checkpoints=[],
+                top_level_checkpoint=top_level_checkpoint,
+                diagnostic_metadata=diagnostic_metadata,
+                failed_comment_ids=[],
+            )
+
         comments: list[InstagramComment] = []
         cursor: str | None = str(top_level_cursor or "").strip() or None
         cursor_param_name = _normalize_top_level_cursor_param(top_level_cursor_param)
@@ -3036,6 +3355,7 @@ class InstagramCommentsScraplingFetcher:
         fb_crosspost_pagination_incomplete = False
         cursor_shape_counts: Counter[str] = Counter()
         last_comment_filter_param: str | None = None
+        relay_recovered_with_remaining_gap = False
         # Phase A5 follow-up: track cursor-direction swaps so we can recover
         # from IG cursor-loops by switching min_id <-> max_id once before
         # falling back to terminal repeated_cursor.
@@ -3051,12 +3371,6 @@ class InstagramCommentsScraplingFetcher:
         if fetch_replies:
             if self._reply_tail_total_budget_seconds > 0:
                 reply_tail_deadline = min(deadline, time.monotonic() + self._reply_tail_total_budget_seconds)
-        page_cap = _resolve_positive_int_env(
-            "SOCIAL_INSTAGRAM_COMMENT_PAGINATION_MAX_PAGES",
-            _COMMENT_PAGINATION_MAX_PAGES_DEFAULT,
-            minimum=1,
-            maximum=250,
-        )
 
         def current_memory_guardrail_metadata() -> dict[str, Any]:
             return {
@@ -3075,7 +3389,7 @@ class InstagramCommentsScraplingFetcher:
             if single_session_memory_guardrail_reached:
                 return True
             current_rows = flattened_comment_count(comments)
-            if current_rows <= max_in_memory_rows:
+            if current_rows < max_in_memory_rows:
                 return False
             single_session_memory_guardrail_reached = True
             single_session_memory_guardrail_stop_reason = "memory_guardrail_reached"
@@ -3419,9 +3733,9 @@ class InstagramCommentsScraplingFetcher:
                         stop_reason=fetch_reason,
                         last_error_code=fetch_reason,
                         last_top_level_cursor=cursor,
-                        next_top_level_cursor=cursor,
+                        next_top_level_cursor=next_cursor,
                         last_top_level_cursor_param=cursor_param_name,
-                        next_top_level_cursor_param=cursor_param_name,
+                        next_top_level_cursor_param=next_cursor_param_name,
                         observed_comment_count=flattened_comment_count(comments),
                         expected_comment_count=expected_comments,
                         pages_seen=pages_seen,
@@ -3453,7 +3767,12 @@ class InstagramCommentsScraplingFetcher:
                         parent_comment_id=comment.comment_id,
                     )
                 observed_replies = reply_count_observed(comment)
-                if fetch_replies and comment.reply_count > observed_replies:
+                # Bug #1: gate on the unified expectation (greatest(reply_count,
+                # child_comment_count)) so a parent whose child_comment_count
+                # exceeds its reply_count still triggers a reply fetch, matching
+                # the persistence topology query.
+                expected_replies = expected_reply_count(comment)
+                if fetch_replies and expected_replies > observed_replies:
                     reply_fetch_deadline = deadline
                     if reply_tail_deadline is not None:
                         if _deadline_remaining_seconds(reply_tail_deadline) == 0.0:
@@ -3467,7 +3786,7 @@ class InstagramCommentsScraplingFetcher:
                                 last_reply_cursor=None,
                                 next_reply_cursor=None,
                                 saved_reply_count=observed_replies,
-                                expected_reply_count=comment.reply_count,
+                                expected_reply_count=expected_replies,
                                 pages_seen=0,
                             )
                             if checkpoint:
@@ -3494,7 +3813,7 @@ class InstagramCommentsScraplingFetcher:
                         count=observed_replies,
                         metadata={
                             "parent_comment_id": str(comment.comment_id or "").strip() or None,
-                            "expected_reply_count": comment.reply_count,
+                            "expected_reply_count": expected_replies,
                         },
                     )
                     replies_result = await self._fetch_comment_replies(
@@ -3502,7 +3821,7 @@ class InstagramCommentsScraplingFetcher:
                         comment_id=comment.comment_id,
                         shortcode=shortcode,
                         post_url=post_url,
-                        expected_reply_count=comment.reply_count,
+                        expected_reply_count=expected_replies,
                         existing_replies=comment.replies,
                         resume_cursor=reply_resume_cursors_by_parent.get(str(comment.comment_id or "").strip()),
                         resume_cursor_param=reply_resume_cursor_params_by_parent.get(
@@ -3550,7 +3869,7 @@ class InstagramCommentsScraplingFetcher:
                             last_reply_cursor=None,
                             next_reply_cursor=None,
                             saved_reply_count=reply_count_observed(comment),
-                            expected_reply_count=comment.reply_count,
+                            expected_reply_count=expected_replies,
                             pages_seen=0,
                         )
                         if checkpoint:
@@ -3737,38 +4056,6 @@ class InstagramCommentsScraplingFetcher:
                     cursor_direction_swaps,
                 )
                 break
-            if pages_seen >= page_cap:
-                has_gap = _has_expected_gap(
-                    expected_comment_count=expected_comments,
-                    max_comments=max_comments,
-                    current_comment_count=flattened_comment_count(comments),
-                )
-                if expected_comments is None:
-                    has_gap = True
-                fetch_failed = fetch_failed or has_gap
-                fetch_reason = "pagination_page_cap_reached"
-                retryable = retryable or has_gap
-                api_top_level_reveal_candidate = api_top_level_reveal_candidate or has_gap
-                if has_gap:
-                    top_level_checkpoint = self._record_top_level_checkpoint(
-                        shortcode=shortcode,
-                        media_id=media_id,
-                        stop_reason=fetch_reason,
-                        last_error_code=fetch_reason,
-                        last_top_level_cursor=cursor,
-                        next_top_level_cursor=next_cursor,
-                        last_top_level_cursor_param=cursor_param_name,
-                        next_top_level_cursor_param=next_cursor_param_name,
-                        observed_comment_count=flattened_comment_count(comments),
-                        expected_comment_count=expected_comments,
-                        pages_seen=pages_seen,
-                    )
-                logger.warning(
-                    "Instagram comments pagination page cap reached for shortcode=%s page_cap=%d",
-                    shortcode,
-                    page_cap,
-                )
-                break
             if next_cursor_key:
                 seen_cursors.add(next_cursor_key)
             cursor = next_cursor
@@ -3874,11 +4161,10 @@ class InstagramCommentsScraplingFetcher:
                 else:
                     fetch_failed = True
                     retryable = False
+                    relay_recovered_with_remaining_gap = True
 
         if (
-            auth_failed
-            and not comments
-            and not reply_only
+            not reply_only
             and not single_session_load_all
             and fetch_reason != BROWSER_SESSION_INVALIDATED_REASON
             and not browser_session_invalidated_detected
@@ -3887,6 +4173,24 @@ class InstagramCommentsScraplingFetcher:
                 or (
                     _target_metadata_indicates_coauthor(target_metadata)
                     and _env_truthy(_COAUTHOR_AUTH_RENDERED_FALLBACK_ENV, True)
+                )
+            )
+            and (
+                (auth_failed and (
+                    not comments
+                    or _has_expected_gap(
+                        expected_comment_count=expected_comments,
+                        max_comments=max_comments,
+                        current_comment_count=flattened_comment_count(comments),
+                    )
+                ))
+                or (
+                    relay_recovered_with_remaining_gap
+                    and _has_expected_gap(
+                        expected_comment_count=expected_comments,
+                        max_comments=max_comments,
+                        current_comment_count=flattened_comment_count(comments),
+                    )
                 )
             )
         ):
@@ -3928,11 +4232,14 @@ class InstagramCommentsScraplingFetcher:
                 },
             )
             target_count = _expected_target_count(expected_comments, max_comments)
-            if rendered_merged_count and (target_count is None or flattened_comment_count(comments) >= target_count):
+            if rendered_merged_count:
                 auth_failed = False
-                fetch_failed = False
                 retryable = False
                 fetch_reason = fallback_reason
+                if target_count is None or flattened_comment_count(comments) >= target_count:
+                    fetch_failed = False
+                else:
+                    fetch_failed = True
 
         should_reveal_hidden_comments = self._should_reveal_hidden_comments(
             expected_comment_count=expected_comments,
@@ -3961,7 +4268,6 @@ class InstagramCommentsScraplingFetcher:
                 )
             if api_top_level_reveal_candidate and fetch_reason in {
                 "pagination_repeated_cursor",
-                "pagination_page_cap_reached",
             }:
                 target_count = _expected_target_count(expected_comments, max_comments)
                 current_flattened_count = flattened_comment_count(comments)
@@ -3989,7 +4295,6 @@ class InstagramCommentsScraplingFetcher:
             elif fetch_reason in {
                 "hidden_comments_unresolved",
                 "pagination_deadline_exceeded",
-                "pagination_page_cap_reached",
                 "pagination_repeated_cursor",
                 "reply_tail_budget_exhausted",
                 "reply_tail_incomplete",
@@ -4048,7 +4353,6 @@ class InstagramCommentsScraplingFetcher:
                 if fetch_reason in {
                     "hidden_comments_unresolved",
                     "pagination_deadline_exceeded",
-                    "pagination_page_cap_reached",
                     "pagination_repeated_cursor",
                     "reply_tail_incomplete",
                 }:
@@ -4243,7 +4547,11 @@ class InstagramCommentsScraplingFetcher:
                     parent_comment_id=comment.comment_id,
                 )
             observed_replies = reply_count_observed(comment)
-            if fetch_replies and comment.reply_count > observed_replies:
+            # Bug #1: gate on the unified expectation (greatest(reply_count,
+            # child_comment_count)) so a parent whose child_comment_count exceeds
+            # its reply_count still triggers a reply fetch on the persisted tail.
+            expected_replies = expected_reply_count(comment)
+            if fetch_replies and expected_replies > observed_replies:
                 reply_fetch_deadline = deadline
                 if reply_tail_deadline is not None:
                     if _deadline_remaining_seconds(reply_tail_deadline) == 0.0:
@@ -4257,7 +4565,7 @@ class InstagramCommentsScraplingFetcher:
                             last_reply_cursor=None,
                             next_reply_cursor=None,
                             saved_reply_count=observed_replies,
-                            expected_reply_count=comment.reply_count,
+                            expected_reply_count=expected_replies,
                             pages_seen=0,
                         )
                         if checkpoint:
@@ -4276,7 +4584,7 @@ class InstagramCommentsScraplingFetcher:
                     comment_id=comment.comment_id,
                     shortcode=shortcode,
                     post_url=post_url,
-                    expected_reply_count=comment.reply_count,
+                    expected_reply_count=expected_replies,
                     existing_replies=comment.replies,
                     resume_cursor=reply_resume_cursors_by_parent.get(comment_id),
                     resume_cursor_param=reply_resume_cursor_params_by_parent.get(comment_id),
@@ -4312,7 +4620,7 @@ class InstagramCommentsScraplingFetcher:
                         last_reply_cursor=None,
                         next_reply_cursor=None,
                         saved_reply_count=reply_count_observed(comment),
-                        expected_reply_count=comment.reply_count,
+                        expected_reply_count=expected_replies,
                         pages_seen=0,
                     )
                     if checkpoint:
@@ -4327,8 +4635,16 @@ class InstagramCommentsScraplingFetcher:
             if not fetch_failed and not auth_failed and merged_reply_count == 0:
                 for comment in comments:
                     observed_replies = reply_count_observed(comment)
-                    if int(getattr(comment, "reply_count", 0) or 0) > observed_replies:
+                    # Bug #1: clamp BOTH reply_count and child_comment_count to
+                    # what was actually observed, using the unified expectation
+                    # greatest(reply_count, child_comment_count). Clamping only
+                    # reply_count left child_comment_count inflated, so the
+                    # topology query still reported the parent incomplete forever.
+                    er = int(getattr(comment, "reply_count", 0) or 0)
+                    ec = int(getattr(comment, "child_comment_count", 0) or 0)
+                    if max(er, ec) > observed_replies:
                         comment.reply_count = observed_replies
+                        comment.child_comment_count = min(ec, observed_replies)
                 fetch_failed = False
                 retryable = False
                 fetch_reason = _TERMINAL_MISSING_CLASSIFIED_REASON
@@ -4594,7 +4910,9 @@ class InstagramCommentsScraplingFetcher:
         self._hidden_comments_render_attempts += 1
         self._request_count += 1
         all_headers = self._parser.get_headers(post_url)
-        nav_headers = {k: v for k, v in all_headers.items() if k.lower() not in _API_HEADER_KEYS_TO_STRIP}
+        nav_headers = self._strip_accept_encoding_header(
+            {k: v for k, v in all_headers.items() if k.lower() not in _API_HEADER_KEYS_TO_STRIP}
+        )
         try:
             response = await self._fetcher.async_fetch(
                 post_url,
@@ -4609,7 +4927,9 @@ class InstagramCommentsScraplingFetcher:
                 retry_delay=1.0,
                 wait=1_000,
                 page_action=reveal_hidden_comments,
+                **instagram_scrapling_network_kwargs(policy=self._network_policy),
             )
+            self._record_response_bytes(response)
         except Exception as exc:  # noqa: BLE001
             self._record_retry_reason("hidden_comments_render_fetch_failed")
             logger.warning(
@@ -4945,7 +5265,9 @@ class InstagramCommentsScraplingFetcher:
         self._request_count += 1
         self._last_single_session_rendered_metadata = dict(metadata_base)
         all_headers = self._parser.get_headers(post_url)
-        nav_headers = {key: value for key, value in all_headers.items() if key.lower() not in _API_HEADER_KEYS_TO_STRIP}
+        nav_headers = self._strip_accept_encoding_header(
+            {key: value for key, value in all_headers.items() if key.lower() not in _API_HEADER_KEYS_TO_STRIP}
+        )
         try:
             response = await self._fetcher.async_fetch(
                 post_url,
@@ -4960,7 +5282,9 @@ class InstagramCommentsScraplingFetcher:
                 retry_delay=1.0,
                 wait=1_000,
                 page_action=load_all_visible_comments,
+                **instagram_scrapling_network_kwargs(policy=self._network_policy),
             )
+            self._record_response_bytes(response)
         except Exception as exc:  # noqa: BLE001
             self._record_retry_reason("single_session_render_fetch_failed")
             metadata = {
@@ -5118,9 +5442,7 @@ class InstagramCommentsScraplingFetcher:
                 "reason": "missing_shortcode",
                 "relay_comments": relay_metadata,
             }
-        if self._http_client is None:
-            await self._rebuild_http_client()
-        headers = self._parser.get_headers(post_url)
+        headers = self._safe_httpx_headers(self._parser.get_headers(post_url))
         headers.update(
             {
                 "content-type": "application/x-www-form-urlencoded",
@@ -5137,16 +5459,17 @@ class InstagramCommentsScraplingFetcher:
             normalized_doc_id = str(doc_id or "").strip()
             if not normalized_doc_id:
                 continue
-            if not await self._pace_api_requests(deadline=None):
-                return [], {"reason": "graphql_preview_deadline_exceeded", "attempts": attempts}
-            self._request_count += 1
             try:
-                response = await self._http_client.post(  # type: ignore[union-attr]
+                response = await self._request_shared_http_client(
+                    "POST",
                     _POST_ACTION_GRAPHQL_URL,
+                    deadline=None,
                     data={**base_body, "doc_id": normalized_doc_id},
                     headers=headers,
                 )
-            except (TimeoutError, httpx.TimeoutException, httpx.TransportError, OSError) as exc:
+            except _PaginationDeadlineExceededError:
+                return [], {"reason": "graphql_preview_deadline_exceeded", "attempts": attempts}
+            except (TimeoutError, httpx.TimeoutException, httpx.TransportError, httpx.DecodingError, OSError) as exc:
                 reason = _transport_failure_reason(exc)
                 self._record_retry_reason(reason)
                 attempts.append(
@@ -5159,7 +5482,6 @@ class InstagramCommentsScraplingFetcher:
                 )
                 continue
 
-            self._sync_response_cookies(response)
             status_code = _status_code(response)
             attempt: dict[str, Any] = {
                 "doc_id": normalized_doc_id,
@@ -5225,6 +5547,9 @@ class InstagramCommentsScraplingFetcher:
         media_id: str | None = None,
         expected_comment_count: int | None = None,
         max_comments: int = 0,
+        allow_authenticated: bool = True,
+        use_proxy: bool = True,
+        deadline: float | None = None,
     ) -> tuple[list[InstagramComment], dict[str, Any]]:
         normalized_shortcode = str(shortcode or "").strip()
         if not normalized_shortcode:
@@ -5245,18 +5570,27 @@ class InstagramCommentsScraplingFetcher:
             minimum=1,
             maximum=50,
         )
-        max_pages = _resolve_positive_int_env(
-            "SOCIAL_INSTAGRAM_COMMENTS_COAUTHOR_GRAPHQL_MAX_PAGES",
-            _POST_COMMENTS_GRAPHQL_MAX_PAGES,
-            minimum=1,
-            maximum=100,
-        )
+        relay_deadline = deadline
+        if relay_deadline is None:
+            relay_deadline = time.monotonic() + _resolve_positive_float_env(
+                "SOCIAL_INSTAGRAM_COMMENT_PAGINATION_MAX_SECONDS",
+                _COMMENT_PAGINATION_MAX_SECONDS_DEFAULT,
+                minimum=1.0,
+                maximum=1_800.0,
+            )
+        max_pages: int | None = None
         timeout = httpx.Timeout(self._timeout_ms / 1000)
+        # T4: PUBLIC requests fail fast. Cap the public client timeout at the
+        # configured post timeout (a ceiling over the base client timeout) so a
+        # stalled logged-out relay request does not burn the whole pagination
+        # window. The authenticated client keeps the base ``timeout`` unchanged.
+        public_timeout = httpx.Timeout(min(self._timeout_ms / 1000, _resolve_public_post_timeout_seconds()))
         metadata: dict[str, Any] = {
             "media_id": normalized_media_id,
             "target_count": target_count,
             "page_size": page_size,
             "max_pages": max_pages,
+            "page_cap_disabled": max_pages is None,
             "attempts": [],
             "pages": [],
             "mode_attempts": [],
@@ -5275,23 +5609,25 @@ class InstagramCommentsScraplingFetcher:
                 "target_count": target_count,
                 "page_size": page_size,
                 "max_pages": max_pages,
+                "page_cap_disabled": max_pages is None,
                 "auth_mode": auth_mode,
                 "relay_is_logged_in": relay_is_logged_in,
                 "attempts": [],
                 "pages": [],
             }
-            if not await self._pace_api_requests(deadline=None):
+            if not await self._pace_api_requests(deadline=relay_deadline):
                 return [], {"reason": "graphql_relay_deadline_exceeded", **attempt_metadata}
             self._request_count += 1
             try:
                 page_response = await client.get(post_url, headers=dict(page_headers))
-            except (TimeoutError, httpx.TimeoutException, httpx.TransportError, OSError) as exc:
+            except (TimeoutError, httpx.TimeoutException, httpx.TransportError, httpx.DecodingError, OSError) as exc:
                 reason = _transport_failure_reason(exc)
                 self._record_retry_reason(reason)
                 return [], {"reason": reason, **attempt_metadata}
             self._sync_response_cookies(page_response)
 
             status_code = _status_code(page_response)
+            self._record_response_bytes(page_response)
             attempt_metadata["post_page_status"] = status_code
             if status_code >= 400 or 300 <= status_code < 400:
                 attempt_metadata["post_page_location"] = _safe_location(page_response)
@@ -5317,7 +5653,7 @@ class InstagramCommentsScraplingFetcher:
                     jazoest = ""
             spin = context.get("spin") if isinstance(context.get("spin"), Mapping) else {}
             if relay_is_logged_in:
-                graphql_headers = self._parser.get_headers(post_url)
+                graphql_headers = self._safe_httpx_headers(self._parser.get_headers(post_url))
                 graphql_headers.update(
                     {
                         "accept": "*/*",
@@ -5391,6 +5727,7 @@ class InstagramCommentsScraplingFetcher:
                         relay_is_logged_in=relay_is_logged_in,
                         target_count=target_count,
                         max_comments=max_comments,
+                        deadline=relay_deadline,
                     )
                     attempt_metadata["child_comments"] = child_metadata
                     attempt_ref["comments"] = flattened_comment_count(comments_ref)
@@ -5402,8 +5739,10 @@ class InstagramCommentsScraplingFetcher:
                         return "child_comments_partial" if target_count is not None else "pagination_complete"
                     return terminal_reason
 
-                for page_index in range(1, max_pages + 1):
-                    if not await self._pace_api_requests(deadline=None):
+                page_index = 0
+                while max_pages is None or page_index < max_pages:
+                    page_index += 1
+                    if not await self._pace_api_requests(deadline=relay_deadline):
                         attempt["reason"] = "graphql_relay_deadline_exceeded"
                         return comments, {"reason": "graphql_relay_deadline_exceeded", **attempt_metadata}
                     variables: dict[str, Any] = {
@@ -5425,7 +5764,8 @@ class InstagramCommentsScraplingFetcher:
                             },
                             headers=graphql_headers,
                         )
-                    except (TimeoutError, httpx.TimeoutException, httpx.TransportError, OSError) as exc:
+                        self._record_response_bytes(response)
+                    except (TimeoutError, httpx.TimeoutException, httpx.TransportError, httpx.DecodingError, OSError) as exc:
                         reason = _transport_failure_reason(exc)
                         self._record_retry_reason(reason)
                         attempt["reason"] = reason
@@ -5506,23 +5846,21 @@ class InstagramCommentsScraplingFetcher:
         mode_attempts: list[dict[str, Any]] = []
         sessionid = str(self._raw_cookies.get("sessionid") or "").strip()
         viewer_id = str(self._raw_cookies.get("ds_user_id") or "").strip()
-        if sessionid and viewer_id:
-            if self._http_client is None:
-                await self._rebuild_http_client()
-            if self._http_client is not None:
-                all_headers = self._parser.get_headers(post_url)
-                authenticated_page_headers = {
-                    key: value for key, value in all_headers.items() if key.lower() not in _API_HEADER_KEYS_TO_STRIP
+        if allow_authenticated and sessionid and viewer_id:
+            all_headers = self._parser.get_headers(post_url)
+            authenticated_page_headers = self._safe_httpx_headers({
+                key: value for key, value in all_headers.items() if key.lower() not in _API_HEADER_KEYS_TO_STRIP
+            })
+            authenticated_page_headers.update(
+                {
+                    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "referer": post_url,
+                    "sec-fetch-dest": "document",
+                    "sec-fetch-mode": "navigate",
+                    "sec-fetch-site": "same-origin",
                 }
-                authenticated_page_headers.update(
-                    {
-                        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                        "referer": post_url,
-                        "sec-fetch-dest": "document",
-                        "sec-fetch-mode": "navigate",
-                        "sec-fetch-site": "same-origin",
-                    }
-                )
+            )
+            if self._http_client is not None:
                 auth_comments, auth_metadata = await run_relay_attempt(
                     client=self._http_client,
                     auth_mode="authenticated",
@@ -5535,11 +5873,41 @@ class InstagramCommentsScraplingFetcher:
                     auth_metadata["mode_attempts"] = mode_attempt_summaries()
                     auth_metadata["fallback_source"] = "authenticated_relay_comments"
                     return auth_comments, auth_metadata
-        else:
+            else:
+                async with httpx.AsyncClient(
+                    cookies=dict(self._raw_cookies),
+                    timeout=timeout,
+                    proxy=self._api_proxy_url,
+                    follow_redirects=False,
+                    trust_env=False,
+                    headers={"accept-encoding": _SAFE_HTTP_ACCEPT_ENCODING},
+                ) as authenticated_client:
+                    auth_comments, auth_metadata = await run_relay_attempt(
+                        client=authenticated_client,
+                        auth_mode="authenticated",
+                        page_headers=authenticated_page_headers,
+                        viewer_id=viewer_id,
+                        relay_is_logged_in=True,
+                    )
+                    mode_attempts.append(auth_metadata)
+                    if auth_comments:
+                        auth_metadata["mode_attempts"] = mode_attempt_summaries()
+                        auth_metadata["fallback_source"] = "authenticated_relay_comments"
+                        return auth_comments, auth_metadata
+        elif allow_authenticated:
             mode_attempts.append(
                 {
                     "auth_mode": "authenticated",
                     "reason": "authenticated_relay_missing_cookies",
+                    "has_sessionid": bool(sessionid),
+                    "has_ds_user_id": bool(viewer_id),
+                }
+            )
+        else:
+            mode_attempts.append(
+                {
+                    "auth_mode": "authenticated",
+                    "reason": "authenticated_relay_skipped_public_mode",
                     "has_sessionid": bool(sessionid),
                     "has_ds_user_id": bool(viewer_id),
                 }
@@ -5553,10 +5921,11 @@ class InstagramCommentsScraplingFetcher:
             "user-agent": "Mozilla/5.0",
         }
         async with httpx.AsyncClient(
-            timeout=timeout,
-            proxy=self._api_proxy_url,
+            timeout=public_timeout,
+            proxy=self._api_proxy_url if use_proxy else None,
             follow_redirects=False,
             trust_env=False,
+            headers={"accept-encoding": _SAFE_HTTP_ACCEPT_ENCODING},
         ) as public_client:
             public_comments, public_metadata = await run_relay_attempt(
                 client=public_client,
@@ -5592,38 +5961,37 @@ class InstagramCommentsScraplingFetcher:
         target_count: int | None,
         max_comments: int,
         relay_is_logged_in: bool = False,
+        deadline: float | None = None,
     ) -> dict[str, Any]:
         if not comments:
             return {"attempted": False, "reason": "no_parent_comments"}
 
+        child_deadline = deadline
+        if child_deadline is None:
+            child_deadline = time.monotonic() + _resolve_positive_float_env(
+                "SOCIAL_INSTAGRAM_REPLY_PAGINATION_MAX_SECONDS",
+                _REPLY_PAGINATION_MAX_SECONDS_DEFAULT,
+                minimum=1.0,
+                maximum=1_800.0,
+            )
         page_size = _resolve_positive_int_env(
             "SOCIAL_INSTAGRAM_COMMENTS_COAUTHOR_GRAPHQL_CHILD_PAGE_SIZE",
             _POST_CHILD_COMMENTS_GRAPHQL_PAGE_SIZE,
             minimum=1,
             maximum=50,
         )
-        max_pages = _resolve_positive_int_env(
-            "SOCIAL_INSTAGRAM_COMMENTS_COAUTHOR_GRAPHQL_CHILD_MAX_PAGES",
-            _POST_CHILD_COMMENTS_GRAPHQL_MAX_PAGES,
-            minimum=1,
-            maximum=100,
-        )
-        parent_limit = _resolve_positive_int_env(
-            "SOCIAL_INSTAGRAM_COMMENTS_COAUTHOR_GRAPHQL_CHILD_PARENT_LIMIT",
-            len(comments),
-            minimum=1,
-            maximum=500,
-        )
-        zero_count_probe_limit = _resolve_positive_int_env(
-            "SOCIAL_INSTAGRAM_COMMENTS_COAUTHOR_GRAPHQL_CHILD_ZERO_COUNT_PROBE_LIMIT",
-            _POST_CHILD_COMMENTS_GRAPHQL_ZERO_COUNT_PROBE_LIMIT,
-            minimum=1,
-            maximum=500,
-        )
+        max_pages: int | None = None
+        parent_limit: int | None = None
+        # T3: PUBLIC mode skips reply-less parents entirely by default (limit 0),
+        # so a parent whose expected_replies<=0 never issues a child GraphQL
+        # probe. A positive override probes at most that many zero-reply parents.
+        zero_count_probe_limit: int = _resolve_public_zero_reply_probe_limit()
+        child_post_timeout = httpx.Timeout(_resolve_public_child_timeout_seconds())
         metadata: dict[str, Any] = {
             "attempted": True,
             "page_size": page_size,
             "max_pages": max_pages,
+            "page_cap_disabled": max_pages is None,
             "parent_limit": parent_limit,
             "zero_count_probe_limit": zero_count_probe_limit,
             "zero_count_parent_probes": 0,
@@ -5639,7 +6007,8 @@ class InstagramCommentsScraplingFetcher:
         if not attempts:
             return {**metadata, "reason": "missing_child_graphql_doc_ids"}
 
-        for parent in comments[:parent_limit]:
+        parent_comments = comments if parent_limit is None else comments[:parent_limit]
+        for parent in parent_comments:
             if max_comments > 0 and flattened_comment_count(comments) >= max_comments:
                 metadata["reason"] = "max_comments_reached"
                 break
@@ -5647,16 +6016,19 @@ class InstagramCommentsScraplingFetcher:
             parent_comment_id = str(parent.comment_id or "").strip()
             if not parent_comment_id:
                 continue
-            try:
-                expected_replies = max(0, int(getattr(parent, "reply_count", 0) or 0))
-            except (TypeError, ValueError):
-                expected_replies = 0
+            # Bug #1: use the unified expectation (greatest(reply_count,
+            # child_comment_count)) so a parent whose child_comment_count exceeds
+            # its reply_count is still probed — matching the persistence topology.
+            expected_replies = expected_reply_count(parent)
             observed_replies = reply_count_observed(parent)
             if expected_replies > 0 and expected_replies <= observed_replies:
                 metadata["parents_skipped_without_reply_gap"] += 1
                 continue
             if expected_replies <= 0:
-                if metadata["zero_count_parent_probes"] >= zero_count_probe_limit:
+                if (
+                    zero_count_probe_limit is not None
+                    and metadata["zero_count_parent_probes"] >= zero_count_probe_limit
+                ):
                     metadata["parents_skipped_without_reply_gap"] += 1
                     continue
                 metadata["zero_count_parent_probes"] += 1
@@ -5684,8 +6056,10 @@ class InstagramCommentsScraplingFetcher:
                 seen_cursors: set[str] = set()
                 stop_reason: str | None = None
 
-                for page_index in range(1, max_pages + 1):
-                    if not await self._pace_api_requests(deadline=None):
+                page_index = 0
+                while max_pages is None or page_index < max_pages:
+                    page_index += 1
+                    if not await self._pace_api_requests(deadline=child_deadline):
                         metadata["reason"] = "graphql_child_relay_deadline_exceeded"
                         return metadata
                     variables: dict[str, Any] = {
@@ -5712,8 +6086,9 @@ class InstagramCommentsScraplingFetcher:
                                 **dict(graphql_headers),
                                 "x-fb-friendly-name": normalized_friendly_name,
                             },
+                            timeout=child_post_timeout,
                         )
-                    except (TimeoutError, httpx.TimeoutException, httpx.TransportError, OSError) as exc:
+                    except (TimeoutError, httpx.TimeoutException, httpx.TransportError, httpx.DecodingError, OSError) as exc:
                         reason = _transport_failure_reason(exc)
                         self._record_retry_reason(reason)
                         stop_reason = reason
@@ -6191,7 +6566,9 @@ class InstagramCommentsScraplingFetcher:
                     retry_delay=1.0,
                     wait=1_000,
                     page_action=load_visible_comments,
+                    **instagram_scrapling_network_kwargs(policy=self._network_policy),
                 )
+                self._record_response_bytes(response)
             except Exception as exc:  # noqa: BLE001
                 self._record_retry_reason("coauthor_status_only_render_fetch_failed")
                 failed_metadata = {
@@ -6273,12 +6650,13 @@ class InstagramCommentsScraplingFetcher:
 
     async def aclose(self) -> None:
         """Close the httpx client. Called by job_runner in finally."""
-        if self._http_client is not None:
-            try:
-                await self._http_client.aclose()
-            except Exception:  # noqa: BLE001
-                pass
-            self._http_client = None
+        async with self._http_client_lock:
+            if self._http_client is not None:
+                try:
+                    await self._http_client.aclose()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._http_client = None
 
     # -------------------------------------------------------------------
     # Reply fetching
@@ -6336,12 +6714,6 @@ class InstagramCommentsScraplingFetcher:
         )
         if deadline is not None:
             reply_deadline = min(reply_deadline, float(deadline))
-        page_cap = _resolve_positive_int_env(
-            "SOCIAL_INSTAGRAM_REPLY_PAGINATION_MAX_PAGES",
-            _REPLY_PAGINATION_MAX_PAGES_DEFAULT,
-            minimum=1,
-            maximum=250,
-        )
 
         while True:
             if time.monotonic() >= reply_deadline:
@@ -6479,24 +6851,6 @@ class InstagramCommentsScraplingFetcher:
                     next_cursor,
                     sorted(cursor_directions_attempted),
                     cursor_direction_swaps,
-                )
-                break
-            if pages_seen >= page_cap:
-                observed_reply_total = len(
-                    merge_comment_replies(
-                        preview_replies,
-                        replies,
-                        parent_comment_id=comment_id,
-                    )
-                )
-                has_gap = expected_reply_count is None or observed_reply_total < expected_reply_count
-                fetch_failed = fetch_failed or has_gap
-                fetch_reason = "pagination_page_cap_reached"
-                retryable = retryable or has_gap
-                logger.warning(
-                    "Instagram reply pagination page cap reached for comment_id=%s page_cap=%d",
-                    comment_id,
-                    page_cap,
                 )
                 break
             seen_cursors.add(next_cursor_key)
@@ -6650,6 +7004,11 @@ class InstagramCommentsScraplingFetcher:
 
     async def _rebuild_http_client(self) -> None:
         """Create or recreate the httpx client with current cookies and proxy."""
+        async with self._http_client_lock:
+            await self._rebuild_http_client_unlocked()
+
+    async def _rebuild_http_client_unlocked(self) -> None:
+        """Create or recreate the httpx client while holding the client lock."""
         existing_client = self._http_client
         self._http_client = None
         if existing_client is not None:
@@ -6663,7 +7022,43 @@ class InstagramCommentsScraplingFetcher:
             proxy=self._api_proxy_url,
             follow_redirects=False,
             trust_env=False,
+            # zstd bodies through the API proxy intermittently fail httpx's
+            # decoder ("Unknown frame descriptor"), and brotli is not installed;
+            # only advertise encodings every runtime can decode.
+            headers={"accept-encoding": _SAFE_HTTP_ACCEPT_ENCODING},
         )
+
+    async def _request_shared_http_client(
+        self,
+        method: str,
+        url: str,
+        *,
+        deadline: float | None = None,
+        **request_kwargs: Any,
+    ) -> httpx.Response:
+        """Send one paced request through the shared httpx client.
+
+        Comment shards can fetch more than one post concurrently. Recovery
+        paths rebuild the shared client after redirects/transient failures, so
+        request and rebuild must be serialized or one task can close the client
+        while another task is mid-request.
+        """
+        async with self._http_client_lock:
+            if self._http_client is None:
+                await self._rebuild_http_client_unlocked()
+            if not await self._pace_api_requests(deadline=deadline):
+                raise _PaginationDeadlineExceededError
+            self._request_count += 1
+            normalized_method = str(method or "").strip().upper()
+            if normalized_method == "GET":
+                response = await self._http_client.get(url, **request_kwargs)  # type: ignore[union-attr]
+            elif normalized_method == "POST":
+                response = await self._http_client.post(url, **request_kwargs)  # type: ignore[union-attr]
+            else:  # pragma: no cover - guarded by static call sites.
+                raise ValueError(f"Unsupported shared http client method: {method!r}")
+            self._sync_response_cookies(response)
+            self._record_response_bytes(response)
+            return response
 
     # -------------------------------------------------------------------
     # Transport: browser (warmup only)
@@ -6681,8 +7076,10 @@ class InstagramCommentsScraplingFetcher:
         """
         self._request_count += 1
         all_headers = self._parser.get_headers(referer)
-        nav_headers = {k: v for k, v in all_headers.items() if k.lower() not in _API_HEADER_KEYS_TO_STRIP}
-        return await self._fetcher.async_fetch(
+        nav_headers = self._strip_accept_encoding_header(
+            {k: v for k, v in all_headers.items() if k.lower() not in _API_HEADER_KEYS_TO_STRIP}
+        )
+        response = await self._fetcher.async_fetch(
             url,
             headless=self._headless,
             network_idle=False,
@@ -6693,11 +7090,42 @@ class InstagramCommentsScraplingFetcher:
             timeout=self._timeout_ms,
             retries=1,
             retry_delay=1.0,
+            **instagram_scrapling_network_kwargs(policy=self._network_policy),
         )
+        self._record_response_bytes(response)
+        return response
+
+    def _record_response_bytes(self, response: Any) -> None:
+        try:
+            size = _response_byte_size(response)
+            host = _response_url_host(response)
+            self._request_count_by_host[host] = self._request_count_by_host.get(host, 0) + 1
+            if size <= 0:
+                return
+            self._bytes_total += size
+            self._bytes_by_host[host] = self._bytes_by_host.get(host, 0) + size
+        except Exception:  # noqa: BLE001
+            pass
 
     # -------------------------------------------------------------------
     # Transport: httpx (API calls)
     # -------------------------------------------------------------------
+
+    @staticmethod
+    def _strip_accept_encoding_header(headers: Mapping[str, Any] | None) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for key, value in dict(headers or {}).items():
+            name = str(key or "").strip()
+            if not name or name.lower() == "accept-encoding":
+                continue
+            result[name] = str(value)
+        return result
+
+    @classmethod
+    def _safe_httpx_headers(cls, headers: Mapping[str, Any] | None) -> dict[str, str]:
+        result = cls._strip_accept_encoding_header(headers)
+        result["accept-encoding"] = _SAFE_HTTP_ACCEPT_ENCODING
+        return result
 
     async def _fetch_api(
         self,
@@ -6708,16 +7136,15 @@ class InstagramCommentsScraplingFetcher:
         deadline: float | None = None,
     ) -> httpx.Response:
         """Plain HTTP GET via httpx. Used for comments/replies JSON API calls."""
-        if self._http_client is None:
-            await self._rebuild_http_client()
-        if not await self._pace_api_requests(deadline=deadline):
-            raise _PaginationDeadlineExceededError
-        self._request_count += 1
-        headers = self._parser.get_headers(referer)
+        headers = self._safe_httpx_headers(self._parser.get_headers(referer))
         clean_params = {k: v for k, v in (params or {}).items() if v is not None} or None
-        response = await self._http_client.get(url, params=clean_params, headers=headers)  # type: ignore[union-attr]
-        self._sync_response_cookies(response)
-        return response
+        return await self._request_shared_http_client(
+            "GET",
+            url,
+            deadline=deadline,
+            params=clean_params,
+            headers=headers,
+        )
 
     @staticmethod
     def _browser_fetch_headers(headers: Mapping[str, Any]) -> dict[str, str]:
@@ -6841,13 +7268,15 @@ class InstagramCommentsScraplingFetcher:
             load_dom=True,
             cookies=_cookies_to_scrapling(self._raw_cookies),
             proxy_rotator=self._proxy_rotator,
-            extra_headers=self._parser.get_headers(referer),
+            extra_headers=self._strip_accept_encoding_header(self._parser.get_headers(referer)),
             timeout=fetch_timeout_ms,
             retries=1,
             retry_delay=1.0,
             page_action=page_action,
             google_search=False,
+            **instagram_scrapling_network_kwargs(policy=self._network_policy),
         )
+        self._record_response_bytes(container_response)
         self._sync_response_cookies(container_response)
         result_payload = self._extract_browser_evaluated_fetch_payload(container_response)
         return self._browser_evaluated_fetch_response(
@@ -6879,7 +7308,7 @@ class InstagramCommentsScraplingFetcher:
         remaining = _deadline_remaining_seconds(deadline)
         if remaining is not None and remaining <= 0:
             raise _PaginationDeadlineExceededError
-        headers = self._parser.get_headers(referer)
+        headers = self._strip_accept_encoding_header(self._parser.get_headers(referer))
         self._request_count += 1
         fetch_timeout_ms = self._timeout_ms
         if remaining is not None:
@@ -6896,10 +7325,12 @@ class InstagramCommentsScraplingFetcher:
                 timeout=fetch_timeout_ms,
                 retries=1,
                 retry_delay=1.0,
+                **instagram_scrapling_network_kwargs(policy=self._network_policy),
             )
             response = (
                 await asyncio.wait_for(fetch_task, timeout=remaining) if remaining is not None else await fetch_task
             )
+            self._record_response_bytes(response)
         except Exception as exc:  # noqa: BLE001
             if not _warmup_transport_failure(exc):
                 raise
@@ -6915,6 +7346,10 @@ class InstagramCommentsScraplingFetcher:
         return response
 
     async def _pace_api_requests(self, *, deadline: float | None = None) -> bool:
+        async with self._api_pace_lock:
+            return await self._pace_api_requests_unlocked(deadline=deadline)
+
+    async def _pace_api_requests_unlocked(self, *, deadline: float | None = None) -> bool:
         if self._global_api_delay_seconds > 0:
             # Phase 5.2: try Postgres advisory lock for cross-container coordination
             # when configured; fall through to per-container file lock otherwise.
@@ -7431,7 +7866,7 @@ class InstagramCommentsScraplingFetcher:
                 response = await self._fetch_api(url, referer=referer, params=params, deadline=deadline)
             except _PaginationDeadlineExceededError:
                 return _deadline_response(attempt)
-            except (TimeoutError, httpx.TimeoutException, httpx.TransportError, OSError) as exc:
+            except (TimeoutError, httpx.TimeoutException, httpx.TransportError, httpx.DecodingError, OSError) as exc:
                 if not _api_transport_failure(exc):
                     raise
                 last_transient_reason = _transport_failure_reason(exc)
@@ -7671,16 +8106,21 @@ class InstagramCommentsScraplingFetcher:
                     self._BASE_BACKOFF_SECONDS,
                     retry_after=retry_after,
                 )
+                sleep_for = sleep_seconds
                 if status_code == 429:
                     cooldown_seconds = max(
                         sleep_seconds * self._rate_limit_cooldown_multiplier,
                         self._rate_limit_cooldown_min_seconds,
                     )
-                    _record_global_api_cooldown(
-                        key=self._global_rate_limit_key,
-                        delay_seconds=cooldown_seconds,
-                    )
-                if not await _sleep_before_deadline(sleep_seconds, deadline):
+                    try:
+                        _record_global_api_cooldown(
+                            key=self._global_rate_limit_key,
+                            delay_seconds=cooldown_seconds,
+                        )
+                    except OSError:
+                        logger.debug("failed to record global api cooldown", exc_info=True)
+                    sleep_for = max(sleep_seconds, cooldown_seconds)
+                if not await _sleep_before_deadline(sleep_for, deadline):
                     return _deadline_response(attempt)
                 continue
 

@@ -4,9 +4,9 @@ absl-py==2.4.0
     # via
     #   keras
     #   tensorflow
-aiohappyeyeballs==2.6.1
+aiohappyeyeballs==2.6.2
     # via aiohttp
-aiohttp==3.13.3
+aiohttp==3.14.1
     # via modal
 aiosignal==1.4.0
     # via aiohttp
@@ -16,7 +16,7 @@ annotated-doc==0.0.4
     #   typer
 annotated-types==0.7.0
     # via pydantic
-anthropic==0.86.0
+anthropic==0.109.1
     # via -r requirements.in
 anyio==4.13.0
     # via
@@ -45,15 +45,15 @@ attrs==26.1.0
     #   referencing
 backports-tarfile==1.2.0
     # via jaraco-context
-beautifulsoup4==4.14.3
+beautifulsoup4==4.15.0
     # via
     #   -r requirements.in
     #   gdown
 blinker==1.9.0
     # via flask
-boto3==1.42.76
+boto3==1.43.29
     # via -r requirements.in
-botocore==1.42.76
+botocore==1.43.29
     # via
     #   boto3
     #   s3transfer
@@ -69,9 +69,9 @@ cairocffi==1.7.1
     # via cairosvg
 cairosvg==2.9.0
     # via -r requirements.in
-cbor2==5.9.0
+cbor2==6.1.2
     # via modal
-certifi==2026.2.25
+certifi==2026.5.20
     # via
     #   curl-cffi
     #   httpcore
@@ -84,22 +84,21 @@ cffi==2.0.0
     #   cairocffi
     #   cryptography
     #   curl-cffi
-charset-normalizer==3.4.6
+charset-normalizer==3.4.7
     # via
     #   reportlab
     #   requests
-click==8.3.1
+click==8.4.1
     # via
     #   browserforge
     #   flask
     #   modal
     #   pyiceberg
     #   scrapling
-    #   typer
     #   uvicorn
 colorama==0.4.6
     # via crawlee
-crawlee==1.6.0
+crawlee==1.7.2
     # via -r requirements.in
 cryptography==43.0.3
     # via
@@ -115,7 +114,7 @@ curl-cffi==0.15.0
     # via
     #   -r requirements.in
     #   scrapling
-deepface==0.0.99
+deepface==0.0.100
     # via -r requirements.in
 defusedxml==0.7.1
     # via cairosvg
@@ -127,25 +126,25 @@ distro==1.9.0
     # via
     #   anthropic
     #   google-genai
-docstring-parser==0.17.0
+docstring-parser==0.18.0
     # via anthropic
-fastapi==0.135.2
+fastapi==0.137.1
     # via
     #   -r requirements.in
     #   sentry-sdk
-filelock==3.25.2
+filelock==3.29.4
     # via
     #   gdown
     #   tldextract
 fire==0.7.1
     # via deepface
-firebase-admin==7.3.0
+firebase-admin==7.4.0
     # via -r requirements.in
 flask==3.1.3
     # via
     #   deepface
     #   flask-cors
-flask-cors==6.0.2
+flask-cors==6.0.5
     # via deepface
 flatbuffers==25.12.19
     # via tensorflow
@@ -153,21 +152,21 @@ frozenlist==1.8.0
     # via
     #   aiohttp
     #   aiosignal
-fsspec==2026.2.0
+fsspec==2026.4.0
     # via pyiceberg
 gast==0.7.0
     # via tensorflow
-gdown==5.2.1
+gdown==6.1.0
     # via
     #   deepface
     #   retina-face
-google-api-core==2.30.0
+google-api-core==2.31.0
     # via
     #   firebase-admin
     #   google-cloud-core
     #   google-cloud-firestore
     #   google-cloud-storage
-google-auth==2.49.1
+google-auth==2.54.0
     # via
     #   -r requirements.in
     #   google-api-core
@@ -177,49 +176,49 @@ google-auth==2.49.1
     #   google-cloud-storage
     #   google-genai
     #   gspread
-google-auth-oauthlib==1.3.0
+google-auth-oauthlib==1.4.0
     # via
     #   -r requirements.in
     #   gspread
-google-cloud-core==2.5.0
+google-cloud-core==2.6.0
     # via
     #   google-cloud-firestore
     #   google-cloud-storage
-google-cloud-firestore==2.26.0
+google-cloud-firestore==2.27.0
     # via firebase-admin
-google-cloud-storage==3.10.1
+google-cloud-storage==3.12.0
     # via firebase-admin
 google-crc32c==1.8.0
     # via
     #   google-cloud-storage
     #   google-resumable-media
-google-genai==1.68.0
+google-genai==2.8.0
     # via -r requirements.in
 google-pasta==0.2.0
     # via tensorflow
-google-resumable-media==2.8.0
+google-resumable-media==2.10.0
     # via google-cloud-storage
-googleapis-common-protos==1.73.0
+googleapis-common-protos==1.75.0
     # via
     #   google-api-core
     #   grpcio-status
-greenlet==3.3.2
+greenlet==3.5.1
     # via
     #   patchright
     #   playwright
-grpcio==1.78.0
+grpcio==1.81.1
     # via
     #   google-api-core
     #   google-cloud-firestore
     #   grpcio-status
     #   tensorflow
-grpcio-status==1.78.0
+grpcio-status==1.81.1
     # via google-api-core
 grpclib==0.4.9
     # via modal
 gspread==6.2.1
     # via -r requirements.in
-gunicorn==25.2.0
+gunicorn==26.0.0
     # via
     #   -r requirements.in
     #   deepface
@@ -239,7 +238,7 @@ hpack==4.1.0
     # via h2
 httpcore==1.0.9
     # via httpx
-httptools==0.7.1
+httptools==0.8.0
     # via uvicorn
 httpx==0.28.1
     # via
@@ -257,7 +256,7 @@ httpx-sse==0.4.3
     # via mcp
 hyperframe==6.1.0
     # via h2
-idna==3.11
+idna==3.18
     # via
     #   anyio
     #   httpx
@@ -284,7 +283,7 @@ jeepney==0.9.0
     #   secretstorage
 jinja2==3.1.6
     # via flask
-jiter==0.13.0
+jiter==0.15.0
     # via anthropic
 jmespath==1.1.0
     # via
@@ -296,7 +295,7 @@ jsonschema==4.26.0
     # via mcp
 jsonschema-specifications==2025.9.1
     # via jsonschema
-keras==3.14.0
+keras==3.14.1
     # via
     #   deepface
     #   tensorflow
@@ -306,17 +305,17 @@ libclang==18.1.1
     # via tensorflow
 lightdsa==0.0.3
     # via deepface
-lightecc==0.0.5
+lightecc==0.0.7
     # via
     #   lightdsa
     #   lightphe
-lightphe==0.0.21
+lightphe==0.0.25
     # via deepface
 lxml==6.1.1
     # via scrapling
 lz4==4.4.5
     # via mtcnn
-markdown-it-py==4.0.0
+markdown-it-py==4.2.0
     # via rich
 markupsafe==3.0.3
     # via
@@ -333,16 +332,16 @@ ml-dtypes==0.5.4
     #   tensorflow
 mmh3==5.2.1
     # via pyiceberg
-modal==1.4.0
+modal==1.5.0
     # via -r requirements.in
-more-itertools==10.8.0
+more-itertools==11.1.0
     # via
     #   crawlee
     #   jaraco-classes
     #   jaraco-functools
 mpmath==1.3.0
     # via sympy
-msgpack==1.1.2
+msgpack==1.2.0
     # via cachecontrol
 msgspec==0.21.1
     # via scrapling
@@ -355,7 +354,7 @@ multidict==6.7.1
     #   yarl
 namex==0.1.0
     # via keras
-numpy==2.4.4
+numpy==2.4.6
     # via
     #   deepface
     #   h5py
@@ -374,11 +373,11 @@ opencv-python==4.13.0.92
     #   retina-face
 opt-einsum==3.4.0
     # via tensorflow
-optree==0.19.0
+optree==0.19.1
     # via keras
-orjson==3.11.8
+orjson==3.11.9
     # via scrapling
-packaging==26.0
+packaging==26.2
     # via
     #   deprecation
     #   gunicorn
@@ -386,11 +385,11 @@ packaging==26.0
     #   pytest
     #   tensorflow
     #   wheel
-pandas==3.0.2
+pandas==3.0.3
     # via deepface
 patchright==1.60.1
     # via scrapling
-pillow==12.1.1
+pillow==12.2.0
     # via
     #   -r requirements.in
     #   cairosvg
@@ -407,15 +406,15 @@ postgrest==2.28.3
     # via
     #   -r requirements.in
     #   supabase
-propcache==0.4.1
+propcache==0.5.2
     # via
     #   aiohttp
     #   yarl
-protego==0.6.0
+protego==0.6.1
     # via
     #   crawlee
     #   scrapling
-proto-plus==1.27.1
+proto-plus==1.28.0
     # via
     #   google-api-core
     #   google-cloud-firestore
@@ -430,7 +429,7 @@ protobuf==6.33.6
     #   tensorflow
 psutil==7.2.2
     # via crawlee
-psycopg2-binary==2.9.11
+psycopg2-binary==2.9.12
     # via -r requirements.in
 pyasn1==0.6.3
     # via pyasn1-modules
@@ -440,7 +439,7 @@ pycookiecheat==0.8.0
     # via -r requirements.in
 pycparser==3.0
     # via cffi
-pydantic==2.12.5
+pydantic==2.13.4
     # via
     #   -r requirements.in
     #   anthropic
@@ -454,9 +453,9 @@ pydantic==2.12.5
     #   realtime
     #   storage3
     #   supabase-auth
-pydantic-core==2.41.5
+pydantic-core==2.46.4
     # via pydantic
-pydantic-settings==2.13.1
+pydantic-settings==2.14.1
     # via
     #   crawlee
     #   mcp
@@ -465,13 +464,13 @@ pyee==13.0.1
     #   crawlee
     #   patchright
     #   playwright
-pygments==2.19.2
+pygments==2.20.0
     # via
     #   pytest
     #   rich
 pyiceberg==0.11.1
     # via storage3
-pyjwt==2.12.1
+pyjwt==2.13.0
     # via
     #   -r requirements.in
     #   firebase-admin
@@ -479,11 +478,11 @@ pyjwt==2.12.1
     #   supabase-auth
 pyparsing==3.3.2
     # via pyiceberg
-pyroaring==1.0.4
+pyroaring==1.1.0
     # via pyiceberg
 pysocks==1.7.1
     # via requests
-pytest==9.0.2
+pytest==9.1.0
     # via -r requirements.in
 python-dateutil==2.9.0.post0
     # via
@@ -496,7 +495,7 @@ python-dotenv==1.2.2
     #   deepface
     #   pydantic-settings
     #   uvicorn
-python-multipart==0.0.22
+python-multipart==0.0.32
     # via
     #   -r requirements.in
     #   mcp
@@ -510,9 +509,9 @@ referencing==0.37.0
     # via
     #   jsonschema
     #   jsonschema-specifications
-reportlab==4.4.10
+reportlab==4.5.1
     # via -r requirements.in
-requests==2.33.0
+requests==2.34.2
     # via
     #   -r requirements.in
     #   cachecontrol
@@ -531,9 +530,9 @@ requests-file==3.0.1
     # via tldextract
 requests-oauthlib==2.0.0
     # via google-auth-oauthlib
-retina-face==0.0.17
+retina-face==0.0.18
     # via deepface
-rich==14.3.3
+rich==14.3.4
     # via
     #   curl-cffi
     #   keras
@@ -544,7 +543,7 @@ rpds-py==2026.5.1
     # via
     #   jsonschema
     #   referencing
-s3transfer==0.16.0
+s3transfer==0.18.0
     # via boto3
 scrapling==0.4.9
     # via -r requirements.in
@@ -566,13 +565,13 @@ sniffio==1.3.1
     # via
     #   anthropic
     #   google-genai
-soupsieve==2.8.3
+soupsieve==2.8.4
     # via beautifulsoup4
-sse-starlette==3.3.3
+sse-starlette==3.4.4
     # via
     #   -r requirements.in
     #   mcp
-starlette==1.0.0
+starlette==1.3.1
     # via
     #   fastapi
     #   mcp
@@ -593,7 +592,7 @@ sympy==1.14.0
     # via
     #   lightdsa
     #   lightphe
-synchronicity==0.11.1
+synchronicity==0.12.3
     # via modal
 tenacity==9.1.4
     # via
@@ -618,7 +617,7 @@ tldextract==5.3.1
     # via crawlee
 toml==0.10.2
     # via modal
-tqdm==4.67.3
+tqdm==4.68.2
     # via
     #   deepface
     #   gdown
@@ -629,22 +628,22 @@ tree-sitter==0.25.2
     # via -r requirements.in
 tree-sitter-python==0.25.0
     # via -r requirements.in
-typer==0.24.1
-    # via
-    #   -r requirements.in
-    #   modal
+typer==0.26.7
+    # via -r requirements.in
 types-certifi==2021.10.8.3
     # via modal
-types-toml==0.10.8.20240310
+types-toml==0.10.8.20260518
     # via modal
 typing-extensions==4.15.0
     # via
+    #   aiohttp
     #   aiosignal
     #   anthropic
     #   anyio
     #   beautifulsoup4
     #   crawlee
     #   fastapi
+    #   gdown
     #   google-genai
     #   grpcio
     #   mcp
@@ -666,12 +665,12 @@ typing-inspection==0.4.2
     #   mcp
     #   pydantic
     #   pydantic-settings
-urllib3==2.6.3
+urllib3==2.7.0
     # via
     #   botocore
     #   requests
     #   sentry-sdk
-uvicorn==0.42.0
+uvicorn==0.49.0
     # via
     #   -r requirements.in
     #   mcp
@@ -679,7 +678,7 @@ uvloop==0.22.1
     # via uvicorn
 w3lib==2.4.1
     # via scrapling
-watchfiles==1.1.1
+watchfiles==1.2.0
     # via
     #   modal
     #   uvicorn
@@ -696,11 +695,11 @@ werkzeug==3.1.8
     # via
     #   flask
     #   flask-cors
-wheel==0.46.3
+wheel==0.47.0
     # via astunparse
-wrapt==2.1.2
+wrapt==2.2.1
     # via tensorflow
-yarl==1.23.0
+yarl==1.24.2
     # via
     #   aiohttp
     #   crawlee

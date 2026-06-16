@@ -108,3 +108,33 @@ def test_reconcile_show_seasons_episodes_skips_empty_patches() -> None:
 
     assert updated == 0
     update_show.assert_not_called()
+
+
+def test_reconcile_missing_episode_imdb_ids_uses_tmdb_episode_external_ids() -> None:
+    db = MagicMock()
+    show_id = "show-1"
+
+    with patch.object(cli, "_fetch_show_identity_rows_for_ids", return_value=[{"id": show_id, "tmdb_id": 69720}]):
+        with patch.object(
+            cli,
+            "_fetch_episode_rows",
+            return_value=[
+                {
+                    "id": "episode-1",
+                    "season_number": 10,
+                    "episode_number": 13,
+                    "title": "Ship Happens",
+                    "air_date": "2026-04-28",
+                    "imdb_episode_id": None,
+                    "tmdb_episode_id": 7118363,
+                    "external_ids": {"tmdb": 7118363},
+                }
+            ],
+        ):
+            with patch.object(cli, "resolve_api_key", return_value="tmdb-key"):
+                with patch.object(cli, "reconcile_episode_imdb_ids_from_tmdb", return_value=1) as reconcile:
+                    updated = cli.reconcile_missing_episode_imdb_ids(db, show_ids=[show_id], verbose=False)
+
+    assert updated == 1
+    reconcile.assert_called_once()
+    assert reconcile.call_args.kwargs["tmdb_series_id"] == 69720

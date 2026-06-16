@@ -733,6 +733,7 @@ def start_social_account_catalog_backfill(
             assert_worker_available_when_queue_enabled(
                 required_execution_backend="modal",
                 platform=normalized_platform,
+                account_handle=normalized_account,
             )
         skip_implicit_frontier_resume = (
             normalized_platform == "instagram"
@@ -850,6 +851,7 @@ def begin_social_account_catalog_backfill_launch(
     comments_worker_count: int | None = None,
     comments_enable_media_followups: bool | None = None,
     comment_anchor_source_ids: dict[str, list[str]] | None = None,
+    force_catalog_rediscovery: bool = False,
 ) -> dict[str, Any]:
     _sync_core_overrides()
     normalized_platform = _normalize_social_account_profile_platform(platform)
@@ -890,6 +892,7 @@ def begin_social_account_catalog_backfill_launch(
                 comments_worker_count=comments_worker_count,
                 comments_enable_media_followups=comments_enable_media_followups,
                 comment_anchor_source_ids=comment_anchor_source_ids,
+                force_catalog_rediscovery=bool(force_catalog_rediscovery),
                 task_resolution_pending=True,
             ),
             **_catalog_stage_graph_metadata(
@@ -966,6 +969,7 @@ def finalize_social_account_catalog_backfill_launch(
     comment_anchor_source_ids: dict[str, list[str]] | None = None,
     catalog_action: str | None = None,
     catalog_action_scope: str | None = None,
+    force_catalog_rediscovery: bool = False,
 ) -> dict[str, Any]:
     _sync_core_overrides()
     normalized_platform = _normalize_social_account_profile_platform(platform)
@@ -1001,6 +1005,7 @@ def finalize_social_account_catalog_backfill_launch(
             launch_group_id_override=launch_group_id,
             catalog_action=catalog_action,
             catalog_action_scope=catalog_action_scope,
+            force_catalog_rediscovery=force_catalog_rediscovery,
         )
         logger.info(
             "[catalog-launch] finalize_complete platform=%s account=%s run_id=%s total_ms=%.1f comments_run_id=%s",
@@ -1025,6 +1030,16 @@ def finalize_social_account_catalog_backfill_launch(
         raise
 
 
+def _force_catalog_rediscovery_env(platform: str, account_handle: str) -> bool:
+    raw = (os.getenv("TRR_SOCIAL_FORCE_CATALOG_REDISCOVERY_ACCOUNTS") or "").strip()
+    if not raw:
+        return False
+    if raw == "*":
+        return True
+    wanted = {p.strip().lower().lstrip("@") for p in raw.split(",") if p.strip()}
+    return str(account_handle or "").strip().lower().lstrip("@") in wanted
+
+
 def launch_social_account_catalog_backfill(
     platform: str,
     account_handle: str,
@@ -1045,10 +1060,15 @@ def launch_social_account_catalog_backfill(
     comment_anchor_source_ids: dict[str, list[str]] | None = None,
     catalog_action: str | None = None,
     catalog_action_scope: str | None = None,
+    force_catalog_rediscovery: bool = False,
 ) -> dict[str, Any]:
     _sync_core_overrides()
     normalized_platform = _normalize_social_account_profile_platform(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
+    effective_force_catalog_rediscovery = bool(force_catalog_rediscovery) or _force_catalog_rediscovery_env(
+        normalized_platform,
+        normalized_account,
+    )
     launch_started_at = time_module.perf_counter()
     coverage_ms = 0.0
     catalog_launch_ms = 0.0
@@ -1356,6 +1376,7 @@ def launch_social_account_catalog_backfill(
             existing_catalog_run_id
             and bounded_window_scope == "full_history"
             and "post_details" in normalized_selected_tasks
+            and not effective_force_catalog_rediscovery
         )
         if use_fast_existing_posts_launch_state:
             materialized_posts = _materialized_social_account_total_posts(
@@ -1395,6 +1416,8 @@ def launch_social_account_catalog_backfill(
         )
         if set(effective_selected_tasks) == {"post_details"} and stored_post_count > 0:
             requires_catalog_bootstrap = False
+        if effective_force_catalog_rediscovery and not instagram_targeted_comments_only:
+            requires_catalog_bootstrap = True
         if "comments" in effective_selected_tasks:
             if instagram_targeted_comment_source_ids:
                 target_count = len(instagram_targeted_comment_source_ids)
@@ -1448,6 +1471,31 @@ def launch_social_account_catalog_backfill(
                         ),
                         "target_priority": "missing_first_recent",
                     },
+                    "timing_ms": coverage_ms,
+                }
+            elif requires_catalog_bootstrap:
+                # Discovery/bootstrap mode: the catalog is about to be (re)walked, so
+                # comments are deferred until catalog completion anyway. Computing the
+                # comment-target preview now is premature and runs an expensive coverage
+                # query that can exceed statement_timeout and abort the whole launch.
+                # Emit a lightweight deferred-readiness placeholder instead.
+                target_readiness = {
+                    "status": "deferred_until_catalog_complete",
+                    "account_handle": normalized_account,
+                    "saved_source_ids_count": max(
+                        _normalize_non_negative_int(coverage.get("materialized_posts")),
+                        _normalize_non_negative_int(coverage.get("catalog_posts")),
+                    ),
+                    "commentable_target_count": 0,
+                    "comments_target_source_ids_count": 0,
+                    "incomplete_comment_target_count": 0,
+                    "media_candidate_count": 0,
+                    "detail_gap_count": 0,
+                    "can_start_comments": False,
+                    "blocker_reasons": [],
+                    "comments_blocker_reasons": ["comments_deferred_pending_discovery"],
+                    "refresh_policy": "stale_or_missing",
+                    "comments_preview": {},
                     "timing_ms": coverage_ms,
                 }
             else:
@@ -1712,7 +1760,7 @@ def launch_social_account_catalog_backfill(
                     allow_local_dev_inline_bypass=allow_local_dev_inline_bypass,
                     comments_enable_media_followups=effective_comments_enable_media_followups,
                     launch_group_id=launch_group_id,
-                    skip_launch_auth_probe=bool(catalog_result) or bool(instagram_targeted_comment_source_ids),
+                    skip_launch_auth_probe=bool(instagram_targeted_comment_source_ids),
                     target_source_ids=instagram_targeted_comment_source_ids or None,
                     comments_worker_count=comments_worker_count,
                 )

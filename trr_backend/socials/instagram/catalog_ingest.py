@@ -1899,15 +1899,7 @@ def _scrape_shared_instagram_post_details_refresh(
                     account_handle,
                 )
 
-    detail_fetch_cap_raw = (os.getenv("SOCIAL_INSTAGRAM_DETAILS_REFRESH_MAX_DETAIL_FETCHES") or "").strip()
-    try:
-        detail_fetch_cap = (
-            None
-            if force_network_detail_fetch and not detail_fetch_cap_raw
-            else max(0, int(detail_fetch_cap_raw or "150"))
-        )
-    except ValueError:
-        detail_fetch_cap = 150
+    detail_fetch_cap: int | None = None
 
     now_utc = _now_utc()
     details_refreshed_posts = 0
@@ -2341,7 +2333,7 @@ def _scrape_shared_instagram_posts(
             date_start=_coerce_dt(config.get("date_start")),
             date_end=_coerce_dt(config.get("date_end")),
             delay_seconds=float((os.getenv("SOCIAL_INSTAGRAM_DELAY_SEC") or "").strip() or "0.15"),
-            max_pages=_shared_stage_post_limit(config),
+            max_pages=None,
         )
         posts = scraper.scrape(scrape_config, progress_cb=progress_cb)
         # If auth scraper returned nothing, fall back to public transport.

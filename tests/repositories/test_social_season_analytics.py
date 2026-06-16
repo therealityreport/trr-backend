@@ -20,6 +20,7 @@ import trr_backend.repositories.social_season_analytics as social_repo
 import trr_backend.socials.instagram.auth_runtime as instagram_auth_runtime
 import trr_backend.socials.pipelines.account_catalog.progress as catalog_progress
 import trr_backend.socials.pipelines.comments.instagram as instagram_comments_pipeline
+import trr_backend.socials.read_models.account_profile.common as profile_common
 from trr_backend.socials.control_plane import (
     SeasonContext,
     SentimentAnalyzerContext,
@@ -277,29 +278,58 @@ def test_sentiment_for_text_deterministic() -> None:
 
 
 def test_get_social_account_profile_posts_filters_all_captions(monkeypatch: pytest.MonkeyPatch) -> None:
+    summary_conn = object()
+    captured: dict[str, Any] = {}
+
+    @contextmanager
+    def fake_read_conn(_label: str):
+        yield summary_conn
+
+    monkeypatch.setattr(social_repo, "_social_account_profile_summary_connection", fake_read_conn)
     monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: [])
+
+    def fake_profile_rows_page(
+        account_handle: str,
+        *,
+        page: int,
+        page_size: int,
+        search: str | None = None,
+        sort_by: str | None = None,
+        sort_dir: str | None = None,
+        conn: object | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        captured.update(
+            {
+                "account_handle": account_handle,
+                "page": page,
+                "page_size": page_size,
+                "search": search,
+                "sort_by": sort_by,
+                "sort_dir": sort_dir,
+                "conn": conn,
+            }
+        )
+        return [
+            {
+                "id": "post-1",
+                "source_id": "source-1",
+                "posted_at": "2026-03-22T12:00:00Z",
+                "caption": "BravoCon backstage with @andycohen",
+                "show_name": "Watch What Happens Live",
+                "season_number": 21,
+                "hashtags": ["BravoCon"],
+                "mentions": ["andycohen"],
+                "source_account": "bravotv",
+                "_profile_match_mode": "owner",
+                "_profile_source_surface": "materialized",
+            }
+        ], 1
+
+    monkeypatch.setattr(profile_common, "_fetch_instagram_profile_rows_page", fake_profile_rows_page)
     monkeypatch.setattr(
         social_repo,
         "_instagram_social_account_profile_dataset_rows",
-        lambda account_handle, *, search=None, comments_only=False, sort_by=None, sort_dir=None: (
-            [
-                {
-                    "id": "post-1",
-                    "source_id": "source-1",
-                    "posted_at": "2026-03-22T12:00:00Z",
-                    "caption": "BravoCon backstage with @andycohen",
-                    "show_name": "Watch What Happens Live",
-                    "season_number": 21,
-                    "hashtags": ["BravoCon"],
-                    "mentions": ["andycohen"],
-                    "source_account": "bravotv",
-                    "_profile_match_mode": "owner",
-                    "_profile_source_surface": "materialized",
-                }
-            ]
-            if account_handle == "bravotv" and search == "#BravoCon" and comments_only is False
-            else []
-        ),
+        lambda *_args, **_kwargs: pytest.fail("instagram posts should use the paginated SQL read path"),
     )
     monkeypatch.setattr(
         social_repo,
@@ -317,16 +347,30 @@ def test_get_social_account_profile_posts_filters_all_captions(monkeypatch: pyte
 
     assert payload["pagination"]["total"] == 1
     assert [item["id"] for item in payload["items"]] == ["post-1"]
+    assert captured == {
+        "account_handle": "bravotv",
+        "page": 1,
+        "page_size": 25,
+        "search": "#BravoCon",
+        "sort_by": "missing_comments",
+        "sort_dir": "desc",
+        "conn": summary_conn,
+    }
 
 
 def test_get_social_account_profile_posts_uses_instagram_collaborator_dataset_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    @contextmanager
+    def fake_read_conn(_label: str):
+        yield object()
+
+    monkeypatch.setattr(social_repo, "_social_account_profile_summary_connection", fake_read_conn)
     monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
-        social_repo,
-        "_instagram_social_account_profile_dataset_rows",
-        lambda account_handle, *, search=None, comments_only=False, sort_by=None, sort_dir=None: (
+        profile_common,
+        "_fetch_instagram_profile_rows_page_no_search_created",
+        lambda account_handle, **_kwargs: (
             [
                 {
                     "id": "catalog-post-1",
@@ -342,10 +386,16 @@ def test_get_social_account_profile_posts_uses_instagram_collaborator_dataset_ro
                     "_profile_match_mode": "collaborator",
                     "_profile_source_surface": "catalog",
                 }
-            ]
-            if account_handle == "bravodailydish" and search is None and comments_only is False
-            else []
-        ),
+            ],
+            1,
+        )
+        if account_handle == "bravodailydish"
+        else ([], 0),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_instagram_social_account_profile_dataset_rows",
+        lambda *_args, **_kwargs: pytest.fail("instagram posts should use the paginated SQL read path"),
     )
 
     payload = social_repo.get_social_account_profile_posts(
@@ -359,6 +409,59 @@ def test_get_social_account_profile_posts_uses_instagram_collaborator_dataset_ro
     assert payload["items"][0]["id"] == "catalog-post-1"
     assert payload["items"][0]["match_mode"] == "collaborator"
     assert payload["items"][0]["source_surface"] == "catalog"
+
+
+def test_get_social_account_profile_posts_exposes_missing_comments_sort_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @contextmanager
+    def fake_read_conn(_label: str):
+        yield object()
+
+    monkeypatch.setattr(social_repo, "_social_account_profile_summary_connection", fake_read_conn)
+    monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(profile_common, "_instagram_post_comment_rollups_available", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        profile_common,
+        "_fetch_instagram_profile_rows_page_no_search",
+        lambda account_handle, **_kwargs: (
+            [
+                {
+                    "id": "post-1",
+                    "source_id": "DZaAVVLiAog",
+                    "posted_at": "2026-06-10T15:01:45Z",
+                    "caption": "Bravo post",
+                    "source_account": account_handle,
+                    "comments_count": 400,
+                    "saved_comments": 10,
+                    "missing_comments": 390,
+                    "_profile_match_mode": "owner",
+                    "_profile_source_surface": "materialized",
+                }
+            ],
+            17172,
+        ),
+    )
+
+    payload = social_repo.get_social_account_profile_posts(
+        "instagram",
+        "bravotv",
+        page=1,
+        page_size=20,
+        sort_by="missing_comments",
+        sort_dir="desc",
+    )
+
+    assert payload["pagination"]["total"] == 17172
+    assert payload["sort_metadata"] == {
+        "sort_by": "missing_comments",
+        "sort_dir": "desc",
+        "rollup_table": "social.instagram_post_comment_rollups",
+        "rollup_available": False,
+        "mode": "bounded_page_score",
+        "exact": False,
+        "candidate_limit": 20,
+    }
 
 
 def test_get_social_account_profile_posts_search_comments_only_falls_back_to_instagram_dataset_rows(
@@ -584,6 +687,133 @@ def test_get_social_account_profile_posts_instagram_comments_only_sql_uses_index
     assert "page_ids as" not in normalized_page_sql
     assert "count(*) over ()::int as profile_total" not in normalized_page_sql
     assert "jsonb_array_elements" not in normalized_page_sql
+
+
+def test_get_social_account_profile_posts_instagram_normal_sql_pages_without_dataset_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(profile_common, "_comment_lifecycle_supported", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        profile_common,
+        "_instagram_catalog_collaborator_membership_available",
+        lambda **_kwargs: True,
+    )
+    monkeypatch.setattr(profile_common, "_instagram_post_comment_rollups_available", lambda **_kwargs: False)
+
+    def _fake_fetch_all(sql: str, params: list[Any]) -> list[dict[str, Any]]:
+        captured["page_sql"] = sql
+        captured["page_params"] = params
+        return [
+            {
+                "id": "post-1",
+                "source_id": "OWNER1",
+                "posted_at": datetime(2026, 4, 20, 12, 0, tzinfo=UTC),
+                "source_account": "bravotv",
+                "caption": "Owner post",
+                "comments_count": 4,
+                "saved_comments": 2,
+                "_total_count": 2,
+                "_profile_match_mode": "owner",
+                "_profile_source_surface": "materialized",
+            }
+        ]
+
+    monkeypatch.setattr(profile_common.pg, "fetch_all", _fake_fetch_all)
+    monkeypatch.setattr(
+        profile_common.pg,
+        "fetch_one",
+        lambda *_args, **_kwargs: pytest.fail("page count should use window total"),
+    )
+
+    rows, total = profile_common._fetch_instagram_profile_rows_page(
+        "BravoTV",
+        page=2,
+        page_size=3,
+        search="#BravoCon",
+        sort_by="missing_comments",
+        sort_dir="desc",
+    )
+
+    assert total == 2
+    assert rows[0]["_profile_match_mode"] == "owner"
+    assert captured["page_params"] == [
+        "bravotv",
+        "bravotv",
+        "bravotv",
+        "bravotv",
+        "bravocon",
+        3,
+        3,
+    ]
+    normalized_page_sql = " ".join(captured["page_sql"].split()).lower()
+    assert "owner_rows as materialized" in normalized_page_sql
+    assert "collaborator_rows as materialized" in normalized_page_sql
+    assert "deduped_rows as materialized" in normalized_page_sql
+    assert "saved_comment_counts as materialized" in normalized_page_sql
+    assert "select *, count(*) over()::int as _total_count" in normalized_page_sql
+    assert "limit %s offset %s" in normalized_page_sql
+    assert "social.instagram_account_catalog_post_collaborators m" in normalized_page_sql
+    assert "m.collaborator_handle = %s" in normalized_page_sql
+    assert "jsonb_array_elements_text(coalesce(filtered_rows.hashtags" in normalized_page_sql
+
+
+def test_get_social_account_profile_posts_instagram_missing_sort_uses_bounded_score_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(profile_common, "_comment_lifecycle_supported", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        profile_common,
+        "_instagram_catalog_collaborator_membership_available",
+        lambda **_kwargs: False,
+    )
+    monkeypatch.setattr(profile_common, "_instagram_post_comment_rollups_available", lambda **_kwargs: False)
+
+    def _fake_fetch_all(sql: str, params: list[Any]) -> list[dict[str, Any]]:
+        captured["page_sql"] = sql
+        captured["page_params"] = params
+        return [
+            {
+                "id": "post-1",
+                "source_id": "OWNER1",
+                "posted_at": datetime(2026, 4, 20, 12, 0, tzinfo=UTC),
+                "source_account": "bravotv",
+                "caption": "Owner post",
+                "comments_count": 400,
+                "saved_comments": 10,
+                "missing_comments": 390,
+                "_total_count": 17172,
+                "_profile_match_mode": "owner",
+                "_profile_source_surface": "materialized",
+            }
+        ]
+
+    monkeypatch.setattr(profile_common.pg, "fetch_all", _fake_fetch_all)
+    monkeypatch.setattr(
+        profile_common.pg,
+        "fetch_one",
+        lambda *_args, **_kwargs: pytest.fail("page count should use window total"),
+    )
+
+    rows, total = profile_common._fetch_instagram_profile_rows_page_no_search(
+        "BravoTV",
+        page=1,
+        page_size=20,
+        sort_by="missing_comments",
+        sort_dir="desc",
+    )
+
+    assert total == 17172
+    assert rows[0]["missing_comments"] == 390
+    normalized_page_sql = " ".join(captured["page_sql"].split()).lower()
+    assert "total_count as materialized" in normalized_page_sql
+    assert "score_source_rows as materialized" in normalized_page_sql
+    assert "order by comments_count desc nulls last" in normalized_page_sql
+    assert "join score_source_rows d" in normalized_page_sql
+    assert captured["page_params"] == ["bravotv", "bravotv", 20, 20, 0]
 
 
 def test_get_social_account_profile_posts_instagram_comments_only_incomplete_filter_uses_accounted_breakdown(
@@ -2457,16 +2687,26 @@ def test_default_targets_include_rhoslc_aliases() -> None:
     defaults = _default_targets(context)
     assert defaults
     assert {str(item.get("platform") or "") for item in defaults} == {
+        "facebook",
         "instagram",
+        "tiktok",
         "threads",
+        "twitter",
+        "youtube",
     }
-    assert {"instagram", "threads"} <= {str(item.get("platform") or "") for item in defaults}
+    assert {"facebook", "instagram", "tiktok", "threads", "twitter", "youtube"} <= {
+        str(item.get("platform") or "") for item in defaults
+    }
     accounts_by_platform = {
         str(item.get("platform") or ""): {str(account).lower() for account in item.get("accounts", [])}
         for item in defaults
     }
+    assert accounts_by_platform["facebook"] == {"bravo"}
     assert accounts_by_platform["instagram"] == {"bravotv", "bravodailydish", "bravowwhl"}
+    assert accounts_by_platform["tiktok"] == {"bravotv", "bravowwhl"}
     assert accounts_by_platform["threads"] == {"bravotv", "bravodailydish", "bravowwhl"}
+    assert accounts_by_platform["twitter"] == {"bravotv", "bravowwhl"}
+    assert accounts_by_platform["youtube"] == {"bravo"}
     hashtag_hit = False
     for target in defaults:
         hashtags = [str(item).lower().lstrip("#") for item in target.get("hashtags", [])]
@@ -3564,6 +3804,155 @@ def test_modal_instagram_comments_auth_probe_uses_comments_timeout(monkeypatch: 
     assert payload["status"] == "valid"
 
 
+def test_modal_remote_auth_probe_timeout_default_and_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TRR_MODAL_INSTAGRAM_REMOTE_AUTH_PROBE_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("TRR_MODAL_INSTAGRAM_AUTH_PROBE_TIMEOUT_SECONDS", raising=False)
+
+    assert (
+        social_repo._modal_instagram_auth_probe_timeout_seconds(
+            env_name="TRR_MODAL_INSTAGRAM_REMOTE_AUTH_PROBE_TIMEOUT_SECONDS",
+        )
+        == 8.0
+    )
+
+    monkeypatch.setenv("TRR_MODAL_INSTAGRAM_REMOTE_AUTH_PROBE_TIMEOUT_SECONDS", "120")
+    assert (
+        social_repo._modal_instagram_auth_probe_timeout_seconds(
+            env_name="TRR_MODAL_INSTAGRAM_REMOTE_AUTH_PROBE_TIMEOUT_SECONDS",
+        )
+        == 30.0
+    )
+
+    monkeypatch.setenv("TRR_MODAL_INSTAGRAM_REMOTE_AUTH_PROBE_TIMEOUT_SECONDS", "15")
+    assert (
+        social_repo._modal_instagram_auth_probe_timeout_seconds(
+            env_name="TRR_MODAL_INSTAGRAM_REMOTE_AUTH_PROBE_TIMEOUT_SECONDS",
+        )
+        == 15.0
+    )
+
+
+def test_invoke_modal_auth_probe_retries_once_then_raises_on_timeout() -> None:
+    calls = {"spawn": 0, "cancel": 0}
+
+    class _Call:
+        def get(self, timeout: float) -> None:
+            raise TimeoutError
+
+        def cancel(self) -> None:
+            calls["cancel"] += 1
+
+    class _Handle:
+        def spawn(self, *_args: Any) -> _Call:
+            calls["spawn"] += 1
+            return _Call()
+
+    with pytest.raises(TimeoutError):
+        social_repo._invoke_modal_auth_probe_with_timeout(_Handle(), "instagram", timeout_seconds=0.01)
+
+    assert calls["spawn"] == 2
+    assert calls["cancel"] == 2
+
+
+def test_invoke_modal_auth_probe_succeeds_on_retry_after_timeout() -> None:
+    calls = {"spawn": 0}
+
+    class _Call:
+        def __init__(self, attempt: int) -> None:
+            self.attempt = attempt
+
+        def get(self, timeout: float) -> dict[str, Any]:
+            if self.attempt == 1:
+                raise TimeoutError
+            return {"ready": True}
+
+        def cancel(self) -> None:
+            pass
+
+    class _Handle:
+        def spawn(self, *_args: Any) -> _Call:
+            calls["spawn"] += 1
+            return _Call(calls["spawn"])
+
+    payload = social_repo._invoke_modal_auth_probe_with_timeout(_Handle(), "instagram", timeout_seconds=0.01)
+
+    assert payload == {"ready": True}
+    assert calls["spawn"] == 2
+
+
+def test_probe_modal_remote_auth_health_caches_ready_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    social_repo._MODAL_REMOTE_AUTH_PROBE_CACHE.clear()
+    probe_calls: list[str] = []
+
+    monkeypatch.setattr(social_repo, "modal_app_name", lambda: "trr-backend-jobs")
+    monkeypatch.setattr(social_repo, "modal_environment_name", lambda: "main")
+    monkeypatch.setattr(social_repo, "_platform_requires_remote_auth", lambda _platform: True)
+    monkeypatch.setattr(
+        social_repo,
+        "_probe_modal_remote_auth_health_uncached",
+        lambda platform: probe_calls.append(platform)
+        or {"platform": platform, "ready": True, "reason": None, "detail": None},
+    )
+
+    first = social_repo._probe_modal_remote_auth_health("instagram")
+    second = social_repo._probe_modal_remote_auth_health("instagram")
+
+    assert first == second
+    assert first is not None and first["ready"] is True
+    assert probe_calls == ["instagram"]
+
+    social_repo._MODAL_REMOTE_AUTH_PROBE_CACHE.clear()
+
+
+def test_probe_modal_remote_auth_health_expires_failed_results_quickly(monkeypatch: pytest.MonkeyPatch) -> None:
+    social_repo._MODAL_REMOTE_AUTH_PROBE_CACHE.clear()
+    probe_calls: list[str] = []
+
+    monkeypatch.setattr(social_repo, "modal_app_name", lambda: "trr-backend-jobs")
+    monkeypatch.setattr(social_repo, "modal_environment_name", lambda: "main")
+    monkeypatch.setattr(social_repo, "_platform_requires_remote_auth", lambda _platform: True)
+    monkeypatch.setattr(
+        social_repo,
+        "_probe_modal_remote_auth_health_uncached",
+        lambda platform: probe_calls.append(platform)
+        or {"platform": platform, "ready": False, "reason": "probe_invocation_timeout", "detail": None},
+    )
+
+    first = social_repo._probe_modal_remote_auth_health("instagram")
+    second = social_repo._probe_modal_remote_auth_health("instagram")
+
+    assert first == second
+    assert first is not None and first["reason"] == "probe_invocation_timeout"
+    assert probe_calls == ["instagram"]
+    cache_key = ("instagram", "trr-backend-jobs", "main")
+    expires_at, _payload = social_repo._MODAL_REMOTE_AUTH_PROBE_CACHE[cache_key]
+    # Failed probes use the short failure TTL, not the ready-result TTL.
+    assert expires_at - social_repo.time_module.monotonic() <= float(
+        social_repo.SOCIAL_MODAL_REMOTE_AUTH_PROBE_FAILURE_CACHE_TTL_SECONDS
+    )
+
+    # Once expired, the next call re-probes.
+    social_repo._MODAL_REMOTE_AUTH_PROBE_CACHE[cache_key] = (
+        social_repo.time_module.monotonic() - 1.0,
+        dict(first),
+    )
+    social_repo._probe_modal_remote_auth_health("instagram")
+    assert probe_calls == ["instagram", "instagram"]
+
+    social_repo._MODAL_REMOTE_AUTH_PROBE_CACHE.clear()
+
+
+def test_shared_posts_frontier_max_attempts_default_and_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TRR_SOCIAL_SHARED_POSTS_FRONTIER_MAX_ATTEMPTS", raising=False)
+    assert social_repo._shared_posts_frontier_max_attempts() == 12
+
+    monkeypatch.setenv("TRR_SOCIAL_SHARED_POSTS_FRONTIER_MAX_ATTEMPTS", "20")
+    assert social_repo._shared_posts_frontier_max_attempts() == 20
+
+    monkeypatch.setenv("TRR_SOCIAL_SHARED_POSTS_FRONTIER_MAX_ATTEMPTS", "not-a-number")
+    assert social_repo._shared_posts_frontier_max_attempts() == 12
+
+
 def test_refresh_platform_cookies_interactive_uses_instagram_auth_repair(monkeypatch: pytest.MonkeyPatch) -> None:
     class _RepairModule:
         @staticmethod
@@ -3808,6 +4197,7 @@ def test_remote_auth_capability_from_workers_prefers_checkpoint_reason() -> None
 def test_probe_remote_auth_health_reports_instagram_structure_flags(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_SCRAPE_MODE", "authenticated")
     monkeypatch.setattr(
         social_repo,
         "_load_instagram_cookies_from_sources",
@@ -7357,7 +7747,7 @@ def test_instagram_comments_profile_shard_count_bounds(monkeypatch: pytest.Monke
     assert social_repo._instagram_comments_profile_shard_count(4874) == 8
 
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT", "999")
-    assert social_repo._instagram_comments_profile_shard_count(431) == 24
+    assert social_repo._instagram_comments_profile_shard_count(431) == 431
 
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT", "0")
     assert social_repo._instagram_comments_profile_shard_count(431) == 1
@@ -7893,6 +8283,113 @@ def test_start_social_account_comments_scrape_all_saved_posts_uses_uncapped_prof
     assert created_jobs[0]["max_comments_per_post"] == 0
 
 
+def test_start_social_account_comments_scrape_preserves_large_profile_post_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_helper: dict[str, Any] = {}
+    created_runs: list[dict[str, Any]] = []
+    created_jobs: list[dict[str, Any]] = []
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT", "1")
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(
+        social_repo.pg,
+        "db_cursor",
+        lambda conn=None, **_kwargs: nullcontext(SimpleNamespace(execute=lambda *_args, **_kwargs: None)),
+    )
+    monkeypatch.setattr(social_repo.pg, "fetch_one_with_cursor", lambda *_args, **_kwargs: {"locked": True})
+    monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: [{}])
+    monkeypatch.setattr(social_repo, "get_active_social_account_comments_run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(social_repo, "is_queue_enabled", lambda: False)
+    monkeypatch.setattr(
+        social_repo,
+        "_instagram_social_account_comment_target_shortcodes",
+        lambda account_handle, **kwargs: (
+            captured_helper.update({"account_handle": account_handle, **kwargs}) or ["C123"]
+        ),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_create_run",
+        lambda *_args, **kwargs: created_runs.append(dict(kwargs.get("config") or {})) or "comments-run-1",
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_create_job",
+        lambda *_args, **kwargs: created_jobs.append(dict(kwargs.get("config") or {})) or "comments-job-1",
+    )
+
+    payload = social_repo.start_social_account_comments_scrape(
+        "instagram",
+        "bravotv",
+        mode="profile",
+        refresh_policy="all_saved_posts",
+        max_posts=2_500,
+        max_comments_per_post=0,
+    )
+
+    assert payload["run_id"] == "comments-run-1"
+    assert captured_helper == {
+        "account_handle": "bravotv",
+        "limit": 2_500,
+        "refresh_policy": "all_saved_posts",
+    }
+    assert created_runs[0]["max_posts"] == 2_500
+    assert created_runs[0]["max_comments_per_post"] == 0
+    assert created_jobs[0]["max_posts"] == 2_500
+    assert created_jobs[0]["max_comments_per_post"] == 0
+
+
+def test_start_social_account_comments_scrape_batches_explicit_audit_cursor_targets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created_runs: list[dict[str, Any]] = []
+    created_jobs: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(
+        social_repo.pg,
+        "db_cursor",
+        lambda conn=None, **_kwargs: nullcontext(SimpleNamespace(execute=lambda *_args, **_kwargs: None)),
+    )
+    monkeypatch.setattr(social_repo.pg, "fetch_one_with_cursor", lambda *_args, **_kwargs: {"locked": True})
+    monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: [{}])
+    monkeypatch.setattr(social_repo, "get_active_social_account_comments_run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(social_repo, "is_queue_enabled", lambda: True)
+    monkeypatch.setattr(social_repo, "is_modal_remote_executor_enabled", lambda: True)
+    monkeypatch.setattr(social_repo, "assert_worker_available_when_queue_enabled", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_create_run",
+        lambda *_args, **kwargs: created_runs.append(dict(kwargs.get("config") or {})) or "comments-run-1",
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_create_job",
+        lambda *_args, **kwargs: created_jobs.append(dict(kwargs.get("config") or {})) or f"comments-job-{len(created_jobs) + 1}",
+    )
+    monkeypatch.setattr(social_repo, "_run_counter_columns_ready", lambda: False)
+    monkeypatch.setattr(social_repo, "dispatch_due_social_jobs", lambda **_kwargs: None)
+
+    payload = social_repo.start_social_account_comments_scrape(
+        "instagram",
+        "bravotv",
+        mode="profile",
+        refresh_policy="all_saved_posts",
+        target_source_ids=["SHORT1", "SHORT2", "SHORT3"],
+        max_comments_per_post=0,
+        comments_target_batch_size=1,
+        initiated_by="audit-cursor-cli",
+    )
+
+    assert payload["run_id"] == "comments-run-1"
+    assert created_runs[0]["comments_target_batch_size"] == 1
+    assert created_runs[0]["comments_shard_count"] == 3
+    assert [job["target_source_ids"] for job in created_jobs] == [["SHORT1"], ["SHORT2"], ["SHORT3"]]
+    assert {job["comments_target_batch_size"] for job in created_jobs} == {1}
+    assert {job["required_execution_backend"] for job in created_jobs} == {"modal"}
+
+
 def test_start_social_account_comments_scrape_incomplete_fill_uses_incomplete_targets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7945,11 +8442,11 @@ def test_start_social_account_comments_scrape_incomplete_fill_uses_incomplete_ta
     assert created_runs[0]["target_filter"] == "incomplete"
     assert created_runs[0]["incomplete_fill"] is True
     assert created_runs[0]["comments_max_attempts"] == 12
-    assert created_runs[0]["comments_auth_validation_mode"] == "schema_only"
+    assert created_runs[0]["comments_auth_validation_mode"] == "public_relay"
     assert created_jobs[0]["target_filter"] == "incomplete"
     assert created_jobs[0]["incomplete_fill"] is True
     assert created_jobs[0]["comments_max_attempts"] == 12
-    assert created_jobs[0]["comments_auth_validation_mode"] == "schema_only"
+    assert created_jobs[0]["comments_auth_validation_mode"] == "public_relay"
     assert created_jobs[0]["target_source_ids"] == ["GAP1", "GAP2"]
 
 
@@ -8266,6 +8763,12 @@ def test_start_social_account_comments_scrape_reuses_lock_connection_for_active_
         ],
     )
     monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: [{}])
+    monkeypatch.setattr(social_repo, "assert_worker_available_when_queue_enabled", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        instagram_comments_pipeline,
+        "assert_worker_available_when_queue_enabled",
+        lambda **_kwargs: None,
+    )
 
     with pytest.raises(social_repo.SocialIngestConflictError) as exc_info:
         social_repo.start_social_account_comments_scrape(
@@ -8273,6 +8776,7 @@ def test_start_social_account_comments_scrape_reuses_lock_connection_for_active_
             "bravotv",
             mode="profile",
             refresh_policy="all_saved_posts",
+            cancel_active_before_relaunch=False,
         )
 
     assert exc_info.value.code == "SOCIAL_ACCOUNT_COMMENTS_RUN_ALREADY_ACTIVE"
@@ -8303,6 +8807,12 @@ def test_start_social_account_comments_scrape_lock_contention_without_run_report
         lambda *_args, **_kwargs: [],
     )
     monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: [{}])
+    monkeypatch.setattr(social_repo, "assert_worker_available_when_queue_enabled", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        instagram_comments_pipeline,
+        "assert_worker_available_when_queue_enabled",
+        lambda **_kwargs: None,
+    )
 
     with pytest.raises(social_repo.SocialIngestConflictError) as exc_info:
         social_repo.start_social_account_comments_scrape(
@@ -8527,13 +9037,168 @@ def test_start_social_account_comments_scrape_shards_profile_targets(
     assert {job["config"]["target_source_ids_count"] for job in created_jobs} == {10}
     assert created_runs[0]["comments_shard_count"] == 4
     assert created_runs[0]["target_source_ids_count"] == 10
-    assert created_runs[0]["comments_proxy_shard_sessions"] is True
+    assert created_runs[0]["comments_proxy_shard_sessions"] is False
     assert created_runs[0]["comments_max_attempts"] == 12
     assert created_runs[0]["timing"]["target_source_ids_count"] == 10
     assert created_runs[0]["timing"]["target_enumeration_ms"] >= 0
     assert {job["max_attempts"] for job in created_jobs} == {12}
     assert payload["timing"]["target_source_ids_count"] == 10
     assert dispatch_calls == [{"run_id": "comments-run-1"}]
+
+
+def test_instagram_comments_batch_shards_are_not_clamped_to_24(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_MAX_SHARD_COUNT", raising=False)
+
+    shard_count = instagram_comments_pipeline._comments_shard_count_for_batch_size(
+        target_count=3134,
+        batch_size=5,
+    )
+
+    assert shard_count == 627
+
+
+def test_instagram_comments_batch_shards_respect_configurable_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_MAX_SHARD_COUNT", "100")
+
+    shard_count = instagram_comments_pipeline._comments_shard_count_for_batch_size(
+        target_count=3134,
+        batch_size=5,
+    )
+
+    assert shard_count == 100
+
+
+def test_start_social_account_comments_scrape_cancels_active_run_before_relaunch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cancelled_runs: list[dict[str, Any]] = []
+    created_runs: list[dict[str, Any]] = []
+    created_jobs: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None, **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_one_with_cursor",
+        lambda *_args, **kwargs: (
+            {"locked": True}
+            if "pg_try_advisory_lock" in (kwargs.get("query") or (_args[1] if len(_args) > 1 else ""))
+            else {"unlocked": True}
+        ),
+    )
+    monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: [{}])
+    monkeypatch.setattr(
+        social_repo,
+        "get_active_social_account_comments_run",
+        lambda *_args, **_kwargs: {"run_id": "active-run-1", "status": "running"},
+    )
+    monkeypatch.setattr(social_repo, "is_queue_enabled", lambda: False)
+    monkeypatch.setattr(
+        social_repo,
+        "_instagram_social_account_comment_target_shortcodes",
+        lambda *_args, **_kwargs: ["C123"],
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_create_run",
+        lambda *_args, **kwargs: created_runs.append(dict(kwargs.get("config") or {})) or "new-run-1",
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_create_job",
+        lambda *_args, **kwargs: created_jobs.append(dict(kwargs.get("config") or {})) or "comments-job-1",
+    )
+    monkeypatch.setattr(
+        instagram_comments_pipeline,
+        "cancel_social_account_comments_run",
+        lambda **kwargs: (
+            cancelled_runs.append(dict(kwargs))
+            or {"run_id": kwargs["run_id"], "status": "cancelled", "cancelled_jobs": 7}
+        ),
+    )
+
+    payload = social_repo.start_social_account_comments_scrape(
+        "instagram",
+        "bravotv",
+        mode="profile",
+        refresh_policy="all_saved_posts",
+    )
+
+    assert payload["run_id"] == "new-run-1"
+    assert cancelled_runs[0]["run_id"] == "active-run-1"
+    assert cancelled_runs[0]["cancelled_by"] == "comments_relaunch_guard"
+    assert payload["relaunch_guard"] == {
+        "cancel_active_before_relaunch": True,
+        "cancelled_previous_run_id": "active-run-1",
+        "cancelled_previous_job_count": 7,
+    }
+    assert created_runs[0]["relaunch_guard"] == payload["relaunch_guard"]
+    assert created_jobs[0]["target_source_ids"] == ["C123"]
+
+
+def test_create_instagram_comments_shard_jobs_uses_bulk_insert_for_large_queues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_BULK_INSERT_THRESHOLD", "2")
+    monkeypatch.setattr(instagram_comments_pipeline, "_scrape_jobs_features", lambda: {"has_queue_fields": True})
+    monkeypatch.setattr(
+        instagram_comments_pipeline,
+        "_resolve_runtime_version_stamp",
+        lambda: {"commit_sha": "local-test"},
+    )
+    monkeypatch.setattr(
+        instagram_comments_pipeline,
+        "_resolve_effective_runtime_version",
+        lambda **_kwargs: {"execution_backend": "modal", "label": "modal-test"},
+    )
+    monkeypatch.setattr(
+        instagram_comments_pipeline,
+        "_create_job",
+        lambda *_args, **_kwargs: pytest.fail("large comments queues should use bulk insert"),
+    )
+
+    def _fake_execute_values_returning(sql: str, rows: list[tuple[Any, ...]], *, conn: Any = None) -> list[dict[str, Any]]:
+        captured["sql"] = sql
+        captured["rows"] = rows
+        captured["conn"] = conn
+        return [{"id": f"job-{index}"} for index, _row in enumerate(rows, start=1)]
+
+    monkeypatch.setattr(instagram_comments_pipeline.pg, "execute_values_returning", _fake_execute_values_returning)
+
+    job_ids, mode = instagram_comments_pipeline._create_instagram_comments_shard_jobs(
+        run_id="11111111-1111-4111-8111-111111111111",
+        platform="instagram",
+        source_scope="network",
+        source_id=None,
+        account_handle="bravotv",
+        mode="profile",
+        run_config={"required_execution_backend": "modal", "comments_load_strategy": "public_relay"},
+        target_source_id_shards=[["A"], ["B"], ["C"]],
+        target_source_ids_count=3,
+        comments_shard_count=3,
+        initiated_by="test",
+        job_status="queued",
+        priority=105,
+        max_attempts=12,
+        required_worker_lane=None,
+        required_execution_backend="modal",
+        inline_worker_id=None,
+        conn=object(),
+    )
+
+    assert mode == "bulk"
+    assert job_ids == ["job-1", "job-2", "job-3"]
+    assert "from (values %s)" in captured["sql"].lower()
+    assert len(captured["rows"]) == 3
+    first_config = json.loads(captured["rows"][0][3])
+    assert first_config["target_source_ids"] == ["A"]
+    assert first_config["comments_shard_index"] == 1
+    assert first_config["comments_shard_count"] == 3
+    assert first_config["required_execution_backend"] == "modal"
 
 
 def test_start_social_account_comments_scrape_single_session_profile_uses_one_job(
@@ -9766,6 +10431,23 @@ def test_launch_social_account_catalog_backfill_instagram_starts_comments_after_
             "eligible_posts": 5,
             "missing_posts": 0,
             "stale_posts": 2,
+            },
+        )
+    monkeypatch.setattr(
+        social_repo,
+        "_instagram_materialization_state",
+        lambda *_args, **_kwargs: {
+            "platform": "instagram",
+            "account_handle": "bravotv",
+            "catalog_posts": 12,
+            "materialized_posts": 12,
+            "expected_total_posts": 12,
+            "completion_target_posts": 12,
+            "missing_catalog_posts": 0,
+            "missing_materialized_posts": 0,
+            "detail_gap_counts": _complete_instagram_detail_gap_counts(),
+            "details_complete": True,
+            "bootstrap_required": False,
         },
     )
     monkeypatch.setattr(
@@ -11735,6 +12417,192 @@ def test_launch_social_account_catalog_backfill_instagram_refreshes_existing_run
     assert merged_config_updates[-1]["effective_selected_tasks"] == ["post_details"]
 
 
+def _patch_instagram_partial_coverage_with_fast_state(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    materialized_posts: int,
+    catalog_posts: int,
+) -> None:
+    """Mock coverage so the fast path and the slow path disagree.
+
+    Fast path (uses ``_materialized_social_account_total_posts``) would treat the
+    account as fully covered (bootstrap_required=False). Slow path
+    (``_instagram_materialization_state``) reports a partial catalog that still
+    needs a discovery bootstrap. Only one is reachable per launch, so the
+    observed ``catalog_bootstrap_required`` proves which gate ran.
+    """
+    from trr_backend.socials.pipelines.account_catalog import launch as launch_mod
+
+    partial_coverage = {
+        "platform": "instagram",
+        "account_handle": "bravotv",
+        "catalog_posts": catalog_posts,
+        "materialized_posts": materialized_posts,
+        "expected_total_posts": catalog_posts,
+        "completion_target_posts": catalog_posts,
+        "missing_catalog_posts": 0,
+        "missing_materialized_posts": max(0, catalog_posts - materialized_posts),
+        "detail_gap_counts": _complete_instagram_detail_gap_counts(),
+        "details_complete": False,
+        "bootstrap_required": True,
+    }
+    for module in (social_repo, launch_mod):
+        monkeypatch.setattr(
+            module,
+            "_instagram_materialization_state",
+            lambda *_args, **_kwargs: dict(partial_coverage),
+        )
+        monkeypatch.setattr(
+            module,
+            "_materialized_social_account_total_posts",
+            lambda *_args, **_kwargs: materialized_posts,
+        )
+        monkeypatch.setattr(module, "_shared_catalog_total_posts", lambda *_args, **_kwargs: catalog_posts)
+        monkeypatch.setattr(module, "_shared_catalog_total_posts_for_window", lambda *_args, **_kwargs: catalog_posts)
+        monkeypatch.setattr(
+            module,
+            "_best_known_social_account_total_posts",
+            lambda *_args, **_kwargs: catalog_posts,
+        )
+        monkeypatch.setattr(
+            module,
+            "_instagram_materialized_detail_gap_counts",
+            _complete_instagram_detail_gap_counts,
+        )
+
+
+def test_launch_social_account_catalog_backfill_full_history_default_keeps_fast_launch_short_circuit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default behavior (no force flag): existing run + full_history + post_details takes the fast path."""
+    catalog_calls: list[dict[str, Any]] = []
+
+    monkeypatch.delenv("TRR_SOCIAL_FORCE_CATALOG_REDISCOVERY_ACCOUNTS", raising=False)
+    monkeypatch.setattr(social_repo, "uuid4", lambda: "launch-group-fast-default")
+    _patch_instagram_partial_coverage_with_fast_state(
+        monkeypatch,
+        materialized_posts=4945,
+        catalog_posts=16800,
+    )
+
+    def _instagram_state_must_not_run(*_args: Any, **_kwargs: Any) -> Any:
+        pytest.fail("fast launch path must not call _instagram_materialization_state")
+
+    from trr_backend.socials.pipelines.account_catalog import launch as launch_mod
+
+    monkeypatch.setattr(launch_mod, "_instagram_materialization_state", _instagram_state_must_not_run)
+    monkeypatch.setattr(social_repo, "_instagram_materialization_state", _instagram_state_must_not_run)
+    monkeypatch.setattr(
+        social_repo,
+        "start_social_account_catalog_backfill",
+        lambda platform, account_handle, **kwargs: (
+            catalog_calls.append({"platform": platform, "account_handle": account_handle, **kwargs})
+            or {"run_id": kwargs.get("existing_run_id"), "status": "queued"}
+        ),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_merge_catalog_run_config",
+        lambda *, run_id, metadata_updates: {"id": run_id, "status": "queued", "config": metadata_updates},
+    )
+
+    payload = social_repo.launch_social_account_catalog_backfill(
+        "instagram",
+        "bravotv",
+        source_scope="bravo",
+        selected_tasks=["post_details"],
+        existing_catalog_run_id="catalog-run-fast-default",
+        launch_group_id_override="launch-group-fast-default",
+    )
+
+    assert payload["catalog_bootstrap_required"] is False
+    assert catalog_calls[0]["social_account_post_details_only"] is True
+
+
+def test_launch_social_account_catalog_backfill_force_rediscovery_skips_fast_launch_and_bootstraps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """force_catalog_rediscovery=True: fast path skipped, partial coverage forces a discovery bootstrap."""
+    catalog_calls: list[dict[str, Any]] = []
+
+    monkeypatch.delenv("TRR_SOCIAL_FORCE_CATALOG_REDISCOVERY_ACCOUNTS", raising=False)
+    monkeypatch.setattr(social_repo, "uuid4", lambda: "launch-group-force-rediscovery")
+    _patch_instagram_partial_coverage_with_fast_state(
+        monkeypatch,
+        materialized_posts=4945,
+        catalog_posts=16800,
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "start_social_account_catalog_backfill",
+        lambda platform, account_handle, **kwargs: (
+            catalog_calls.append({"platform": platform, "account_handle": account_handle, **kwargs})
+            or {"run_id": kwargs.get("existing_run_id"), "status": "queued"}
+        ),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_merge_catalog_run_config",
+        lambda *, run_id, metadata_updates: {"id": run_id, "status": "queued", "config": metadata_updates},
+    )
+
+    payload = social_repo.launch_social_account_catalog_backfill(
+        "instagram",
+        "bravotv",
+        source_scope="bravo",
+        selected_tasks=["post_details"],
+        existing_catalog_run_id="catalog-run-force-rediscovery",
+        launch_group_id_override="launch-group-force-rediscovery",
+        force_catalog_rediscovery=True,
+    )
+
+    assert payload["catalog_bootstrap_required"] is True
+    assert catalog_calls[0]["social_account_post_details_only"] is False
+
+
+def test_launch_social_account_catalog_backfill_force_rediscovery_env_targets_named_handle_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ENV allowlist forces rediscovery for the named handle but leaves other handles on the fast path."""
+    monkeypatch.setenv("TRR_SOCIAL_FORCE_CATALOG_REDISCOVERY_ACCOUNTS", "bravotv")
+    monkeypatch.setattr(social_repo, "uuid4", lambda: "launch-group-env-force")
+    _patch_instagram_partial_coverage_with_fast_state(
+        monkeypatch,
+        materialized_posts=4945,
+        catalog_posts=16800,
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "start_social_account_catalog_backfill",
+        lambda platform, account_handle, **kwargs: {"run_id": kwargs.get("existing_run_id"), "status": "queued"},
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_merge_catalog_run_config",
+        lambda *, run_id, metadata_updates: {"id": run_id, "status": "queued", "config": metadata_updates},
+    )
+
+    forced_payload = social_repo.launch_social_account_catalog_backfill(
+        "instagram",
+        "bravotv",
+        source_scope="bravo",
+        selected_tasks=["post_details"],
+        existing_catalog_run_id="catalog-run-env-bravo",
+        launch_group_id_override="launch-group-env-force",
+    )
+    assert forced_payload["catalog_bootstrap_required"] is True
+
+    not_forced_payload = social_repo.launch_social_account_catalog_backfill(
+        "instagram",
+        "nbc",
+        source_scope="network",
+        selected_tasks=["post_details"],
+        existing_catalog_run_id="catalog-run-env-nbc",
+        launch_group_id_override="launch-group-env-force",
+    )
+    assert not_forced_payload["catalog_bootstrap_required"] is False
+
+
 def test_launch_social_account_catalog_backfill_reuses_active_comments_run_conflict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -11831,6 +12699,23 @@ def test_launch_social_account_catalog_backfill_tolerates_comments_launch_in_pro
     monkeypatch.setattr(social_repo, "_shared_catalog_total_posts_for_window", lambda *_args, **_kwargs: 12)
     monkeypatch.setattr(social_repo, "_materialized_social_account_total_posts", lambda *_args, **_kwargs: 12)
     monkeypatch.setattr(social_repo, "_instagram_materialized_detail_gap_counts", _complete_instagram_detail_gap_counts)
+    monkeypatch.setattr(
+        social_repo,
+        "_instagram_materialization_state",
+        lambda *_args, **_kwargs: {
+            "platform": "instagram",
+            "account_handle": "bravotv",
+            "catalog_posts": 12,
+            "materialized_posts": 12,
+            "expected_total_posts": 12,
+            "completion_target_posts": 12,
+            "missing_catalog_posts": 0,
+            "missing_materialized_posts": 0,
+            "detail_gap_counts": _complete_instagram_detail_gap_counts(),
+            "details_complete": True,
+            "bootstrap_required": False,
+        },
+    )
     monkeypatch.setattr(
         social_repo,
         "_instagram_social_account_comments_target_counts",
@@ -12462,6 +13347,7 @@ def test_start_social_account_catalog_backfill_requires_modal_executor(
         {
             "required_execution_backend": "modal",
             "platform": platform,
+            "account_handle": "bravotv",
         }
     ]
 
@@ -14124,9 +15010,9 @@ def test_target_accounts_by_platform_uses_direct_targets_query(monkeypatch) -> N
     assert "from social.season_targets" in str(captured["sql"]).lower()
     assert payload["youtube"] == {"bravo", "wwhl"}
     assert payload["instagram"] == {"bravotv", "bravodailydish", "bravowwhl"}
-    assert payload["tiktok"] == set()
-    assert payload["twitter"] == set()
-    assert payload["facebook"] == {"default_fb"}
+    assert payload["tiktok"] == {"bravotv", "bravowwhl"}
+    assert payload["twitter"] == {"bravotv", "bravowwhl"}
+    assert payload["facebook"] == {"bravo", "default_fb"}
     assert payload["threads"] == {"default_threads", "bravotv", "bravodailydish", "bravowwhl"}
 
 
@@ -14168,9 +15054,9 @@ def test_target_accounts_by_platform_does_not_override_explicit_platform_rows(mo
 
     assert payload["youtube"] == {"bravo"}
     assert payload["instagram"] == {"bravotv", "bravodailydish", "bravowwhl"}
-    assert payload["tiktok"] == set()
-    assert payload["twitter"] == set()
-    assert payload["facebook"] == set()
+    assert payload["tiktok"] == {"bravotv", "bravowwhl"}
+    assert payload["twitter"] == {"bravotv", "bravowwhl"}
+    assert payload["facebook"] == {"bravo"}
     assert payload["threads"] == {"default_threads", "bravotv", "bravodailydish", "bravowwhl"}
 
 
@@ -14204,7 +15090,7 @@ def test_target_accounts_by_platform_enforces_rhoslc_instagram_account_floor(mon
     payload = social_repo._target_accounts_by_platform(season_id, source_scope="bravo")
 
     assert payload["instagram"] == {"bravotv", "bravodailydish", "bravowwhl"}
-    assert payload["tiktok"] == set()
+    assert payload["tiktok"] == {"bravotv", "bravowwhl"}
     assert payload["twitter"] == {"bravotv", "bravowwhl"}
     assert payload["threads"] == {"bravotv", "bravodailydish", "bravowwhl"}
 
@@ -14249,7 +15135,7 @@ def test_put_targets_enforces_bravo_core_platform_accounts_on_write(monkeypatch:
     assert payload["targets"] == [{"platform": "tiktok"}]
     assert captured_calls
     stored_accounts = json.loads(str(captured_calls[0][5]))
-    assert stored_accounts == ["bravotv"]
+    assert stored_accounts == ["bravotv", "bravowwhl"]
 
 
 def test_get_social_account_profile_summary_includes_avatar_url(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -24326,6 +25212,7 @@ def test_batch_upsert_instagram_comments_persists_media_and_reply_metadata(
         conflict_col: list[str],
         conn: object | None = None,
         include_inserted_flag: bool = False,
+        coalesce_preserve_cols: object | None = None,
     ) -> list[dict[str, Any]]:
         captured_batches.append([dict(item) for item in batch])
         return [
@@ -24457,6 +25344,7 @@ def test_batch_upsert_instagram_comments_preserves_ranked_duplicate_metadata(
         conflict_col: list[str],
         conn: object | None = None,
         include_inserted_flag: bool = False,
+        coalesce_preserve_cols: object | None = None,
     ) -> list[dict[str, Any]]:
         captured_batches.append([dict(item) for item in batch])
         return [
@@ -24550,6 +25438,7 @@ def test_batch_upsert_instagram_comments_savepoints_media_enqueue_failure(
         conflict_col: list[str],
         conn: object | None = None,
         include_inserted_flag: bool = False,
+        coalesce_preserve_cols: object | None = None,
     ) -> list[dict[str, Any]]:
         return [
             {
@@ -25641,6 +26530,9 @@ def test_recover_stale_running_jobs_updates_worker_state_and_run_summaries(monke
     assert "dispatch,lease_expires_at" in sql_text
     assert "dispatch,remote_invocation_status" in sql_text
     assert "::timestamptz > now()" in sql_text
+    assert "terminal_modal_invocation" in sql_text
+    assert "NOT IN ('', 'pending', 'running', 'unknown')" in sql_text
+    assert "modal_invocation_terminal" in sql_text
     assert "post_classify_stale_heartbeat_retry_count" in sql_text
     assert "post_classify_stale_heartbeat_retry_limit" in sql_text
     assert "stale_jobs.should_retry" in sql_text
@@ -27789,7 +28681,7 @@ def test_modal_dispatch_stage_caps_follow_worker_pool_env(monkeypatch: pytest.Mo
     assert social_repo._modal_dispatch_stage_global_cap("posts") == 13
     assert social_repo._modal_dispatch_stage_global_cap("comments") == 11
     assert social_repo._modal_dispatch_stage_global_cap(social_repo.INSTAGRAM_COMMENTS_SCRAPLING_STAGE) == 11
-    assert social_repo._modal_dispatch_platform_cap(social_repo.INSTAGRAM_COMMENTS_SCRAPLING_STAGE, "instagram") == 8
+    assert social_repo._modal_dispatch_platform_cap(social_repo.INSTAGRAM_COMMENTS_SCRAPLING_STAGE, "instagram") == 10
     assert social_repo._modal_dispatch_stage_global_cap("media_mirror") == 7
     assert social_repo._modal_dispatch_stage_global_cap("comment_media_mirror") == 5
 
@@ -27838,7 +28730,7 @@ def test_dispatch_due_social_jobs_caps_comments_scrapling_as_comments(
         "_current_modal_dispatch_running_counts",
         lambda: (
             {"comments": 2},
-            {("comments", "instagram"): 8},
+            {("comments", "instagram"): 10},
             {"run-comments": 2},
             {},
             {("comments", "instagram"): {"thetraitorsus"}},
@@ -27956,12 +28848,14 @@ def test_recover_failed_instagram_comments_capacity_jobs_requeues_matching_failu
     assert captured_params[0] == [social_repo.INSTAGRAM_COMMENTS_SCRAPLING_STAGE, run_id, run_id, 3]
     assert "instagram_comments_warmup_transport_error" in captured_sql[0]
     assert "sslerror" in captured_sql[0]
+    assert "closedresourceerror" in captured_sql[0]
     assert "[ssl]" in captured_sql[0]
     assert "ssl.c" in captured_sql[0]
     assert "record layer failure" in captured_sql[0]
     assert "wrong version number" in captured_sql[0]
     assert "ssl connection" in captured_sql[0]
     assert "closed unexpectedly" in captured_sql[0]
+    assert "client has been closed" in captured_sql[0]
     assert "net::err_connection_closed" in captured_sql[0]
     assert "transport_recovered" in captured_sql[0]
     assert finalized == [(run_id, True)]
@@ -28054,7 +28948,7 @@ def test_assert_worker_available_when_queue_enabled_modal_returns_executor_paylo
     monkeypatch.setattr(
         social_repo,
         "_build_modal_executor_health_payload",
-        lambda *, reason=None, platform=None: {
+        lambda *, reason=None, platform=None, account_handle=None: {
             "healthy": True,
             "executor_backend": "modal",
             "reason": reason,
@@ -28081,7 +28975,7 @@ def test_assert_worker_available_when_queue_enabled_modal_blocks_when_platform_a
     monkeypatch.setattr(social_repo, "_modal_social_dispatch_ready", lambda: (True, None))
     monkeypatch.setattr(social_repo, "_touch_modal_social_dispatcher_heartbeat", lambda **kwargs: kwargs)
 
-    def _fake_payload(*, reason=None, platform=None):
+    def _fake_payload(*, reason=None, platform=None, account_handle=None):
         captured_platforms.append(platform)
         return {
             "healthy": True,
@@ -28470,6 +29364,16 @@ def test_build_modal_executor_health_payload_targets_platform_specific_auth_read
     monkeypatch.setattr(social_repo, "_oldest_queued_age_seconds", lambda: 0)
     monkeypatch.setattr(social_repo, "_stale_running_count", lambda: 0)
     monkeypatch.setattr(social_repo, "modal_dispatch_enabled", lambda: True)
+    monkeypatch.setattr(
+        social_repo,
+        "_probe_modal_remote_auth_health",
+        lambda platform: {
+            "platform": platform,
+            "ready": True,
+            "reason": None,
+            "detail": None,
+        },
+    )
 
     payload = social_repo._build_modal_executor_health_payload(reason="modal_executor_ready", platform="tiktok")
 
@@ -28548,7 +29452,84 @@ def test_build_modal_executor_health_payload_uses_remote_probe_when_worker_auth_
     assert payload["remote_auth_capabilities"]["instagram"]["probe_source"] == "modal_remote_auth_probe"
 
 
-def test_build_modal_executor_health_payload_treats_threads_auth_as_optional(
+def test_build_modal_executor_health_payload_uses_instagram_posts_probe_for_account_backfill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        social_repo,
+        "_query_worker_health",
+        lambda: {
+            "healthy": True,
+            "healthy_workers": 1,
+            "fresh_workers": 1,
+            "stale_workers": 0,
+            "stale_hidden_count": 0,
+            "active_workers": 0,
+            "total_workers": 1,
+            "workers": [
+                {
+                    "worker_id": social_repo._modal_social_dispatcher_worker_id(),
+                    "is_fresh": True,
+                    "metadata": {"dispatch_enabled": True, "active_invocations": 0},
+                }
+            ],
+            "remote_auth_capabilities": {
+                "instagram": {
+                    "required": True,
+                    "executor_backend": "modal",
+                    "ready": False,
+                    "reason": "checkpoint_required",
+                    "detail": {"phase": "graphql"},
+                    "missing_hints": ["SOCIAL_INSTAGRAM_COOKIES_JSON|SOCIAL_INSTAGRAM_COOKIES_FILE"],
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_modal_social_dispatch_resolution",
+        lambda: {"resolved": True, "reason": None, "function_name": "run_social_job"},
+    )
+    monkeypatch.setattr(social_repo, "_oldest_queued_age_seconds", lambda: 0)
+    monkeypatch.setattr(social_repo, "_stale_running_count", lambda: 0)
+    monkeypatch.setattr(social_repo, "modal_dispatch_enabled", lambda: True)
+    monkeypatch.setattr(
+        social_repo,
+        "_probe_modal_remote_auth_health",
+        lambda platform: {
+            "platform": platform,
+            "ready": False,
+            "reason": "checkpoint_required",
+            "detail": {"phase": "graphql"},
+        },
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "probe_modal_instagram_posts_auth_health",
+        lambda account_handle: {
+            "platform": "instagram",
+            "account_handle": account_handle,
+            "ready": True,
+            "posts_seen": 33,
+            "has_next_page": True,
+        },
+    )
+
+    payload = social_repo._build_modal_executor_health_payload(
+        reason="modal_executor_ready",
+        platform="instagram",
+        account_handle="BravoWWHL",
+    )
+
+    readiness = payload["shared_account_backfill_readiness"]
+    assert readiness["ready"] is True
+    assert readiness["platform_remote_auth_ready"] is True
+    assert readiness["platform_remote_auth_detail"]["phase"] == "posts_auth_probe"
+    assert readiness["platform_remote_auth_detail"]["account_handle"] == "bravowwhl"
+    assert payload["remote_auth_capabilities"]["instagram"]["probe_source"] == "modal_instagram_posts_auth_probe"
+
+
+def test_build_modal_executor_health_payload_requires_threads_auth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -28594,12 +29575,12 @@ def test_build_modal_executor_health_payload_treats_threads_auth_as_optional(
     payload = social_repo._build_modal_executor_health_payload(reason="modal_executor_ready", platform="threads")
 
     readiness = payload["shared_account_backfill_readiness"]
-    assert readiness["ready"] is True
-    assert readiness["reason"] is None
+    assert readiness["ready"] is False
+    assert readiness["reason"] == "login_prompt_detected"
     assert readiness["platform"] == "threads"
-    assert readiness["platform_remote_auth_ready"] is True
-    assert readiness["platform_remote_auth_detail"] is None
-    assert payload["remote_auth_capabilities"]["threads"] == {}
+    assert readiness["platform_remote_auth_ready"] is False
+    assert readiness["platform_remote_auth_detail"]["phase"] == "remote_probe"
+    assert payload["remote_auth_capabilities"]["threads"]["ready"] is False
 
 
 def test_build_worker_health_alerts_reports_dispatcher_and_auth_failures(
@@ -36610,6 +37591,26 @@ def test_social_account_comments_scrape_run_progress_aggregates_shards(
     )
 
     assert payload["run_status"] == "running"
+    assert payload["operational_state"] == "running"
+    assert payload["recommended_next_action"] == "mark_stale_jobs_terminal_or_retry"
+    assert payload["stale_comment_jobs"] == 1
+    assert payload["top_incomplete_reasons"] == {
+        "complete": 48,
+        "reply_tail_incomplete": 14,
+        "pagination_deadline_exceeded": 4,
+    }
+    assert payload["retry_progress"]["retry_target_count"] == 0
+    assert payload["retry_progress"]["retry_source_job_ids"] == []
+    assert payload["retry_progress"]["targeted_retry_target_count"] == 0
+    assert payload["retry_progress"]["network_stopped_target_count"] == 0
+    assert payload["retry_progress"]["network_stopped_target_source_ids"] == []
+    assert payload["retry_progress"]["largest_remaining_gaps"] == []
+    assert payload["retry_progress"]["top_incomplete_reasons"] == {
+        "complete": 48,
+        "reply_tail_incomplete": 14,
+        "pagination_deadline_exceeded": 4,
+    }
+    assert len(payload["retry_progress"]["target_progress_rows"]) == 2
     assert payload["post_progress"] == {
         "completed_posts": 66,
         "matched_posts": 66,
@@ -36630,7 +37631,13 @@ def test_social_account_comments_scrape_run_progress_aggregates_shards(
     assert payload["throughput"] == {
         "elapsed_seconds": 600,
         "posts_per_minute": 6.6,
+        "posts_per_second": 0.11,
         "comments_per_minute": 593.4,
+        "comments_per_second": 9.89,
+        "average_seconds_per_post": 9.09,
+        "average_seconds_per_comment": 0.1011,
+        "remaining_posts": 365,
+        "estimated_seconds_remaining": 3318,
     }
     assert payload["summary"]["comments_processed_total"] == 5934
     assert payload["summary"]["comments_upserted_total"] == 120
@@ -36678,6 +37685,7 @@ def test_social_account_comments_scrape_run_progress_aggregates_shards(
             "completion_reason_counts": {"complete": 40, "reply_tail_incomplete": 14},
             "remaining_target_count": 0,
             "retry_target_count": 0,
+            "coverage_state": "partial_reply_gap",
             "comments_processed": 4946,
             "comments_upserted": 100,
             "comments_inserted": 12,
@@ -36686,7 +37694,12 @@ def test_social_account_comments_scrape_run_progress_aggregates_shards(
             "new_comments": 12,
             "queue_wait_seconds": 60,
             "posts_per_minute": 5.4,
+            "posts_per_second": 0.09,
             "comments_per_minute": 494.6,
+            "comments_per_second": 8.2433,
+            "average_seconds_per_post": 11.11,
+            "average_seconds_per_comment": 0.1213,
+            "estimated_seconds_remaining": 0,
             "items_found_total": 5000,
             "error_message": None,
             "latest_failure_reason": None,
@@ -36712,6 +37725,7 @@ def test_social_account_comments_scrape_run_progress_aggregates_shards(
             "completion_reason_counts": {"complete": 8, "pagination_deadline_exceeded": 4},
             "remaining_target_count": 42,
             "retry_target_count": 0,
+            "coverage_state": "partial_parent_only",
             "comments_processed": 988,
             "comments_upserted": 20,
             "comments_inserted": 3,
@@ -36720,7 +37734,12 @@ def test_social_account_comments_scrape_run_progress_aggregates_shards(
             "new_comments": 3,
             "queue_wait_seconds": 120,
             "posts_per_minute": 1.33,
+            "posts_per_second": 0.0222,
             "comments_per_minute": 109.78,
+            "comments_per_second": 1.8296,
+            "average_seconds_per_post": 45.0,
+            "average_seconds_per_comment": 0.5466,
+            "estimated_seconds_remaining": 1890,
             "items_found_total": 1000,
             "error_message": None,
             "latest_failure_reason": None,
@@ -36907,7 +37926,11 @@ def test_social_account_comments_scrape_run_progress_recomputes_stale_summary_an
         "total_jobs": 2,
         "completed_jobs": 0,
         "failed_jobs": 0,
+        "cancelled_jobs": 0,
         "active_jobs": 2,
+        "running_jobs": 1,
+        "queued_jobs": 0,
+        "retrying_jobs": 1,
         "items_found_total": 30,
         "comments_processed_total": 26,
         "comments_upserted_total": 0,
@@ -37312,6 +38335,372 @@ def test_rebalance_slow_instagram_comments_shards_cancels_source_and_splits_rema
     assert {job["config"]["comments_slow_rebalance_source_job_id"] for job in created_jobs} == {"slow-job-1"}
     assert {job["config"]["comments_shard_count"] for job in created_jobs} == {7}
     assert dispatch_calls == [{"run_id": "run-1"}]
+
+
+def test_rebalance_slow_instagram_comments_shards_ignores_retry_cumulative_posts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created_jobs: list[dict[str, Any]] = []
+    targets = [f"P{i}" for i in range(1, 60)]
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_SLOW_SHARD_REBALANCE_ENABLED", "1")
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_all",
+        lambda *_args, **_kwargs: [
+            {
+                "run_id": "run-1",
+                "job_id": "retry-job-1",
+                "source_scope": "bravo",
+                "initiated_by": "test",
+                "started_at": datetime.now(UTC) - timedelta(minutes=70),
+                "config": {
+                    "account": "bravotv",
+                    "source_scope": "bravo",
+                    "stage": social_repo.INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+                    "comments_retry_rebalance": True,
+                    "comments_shard_count": 8,
+                    "comments_shard_index": 3,
+                    "target_source_ids": targets,
+                },
+                "metadata": {
+                    "activity": {"posts_checked": 8, "total_posts": 59},
+                    "stage_counters": {"posts": 8, "comments": 1205},
+                    "cumulative_counters": {"posts": 69, "comments": 9352},
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_one",
+        lambda *_args, **_kwargs: {"id": "retry-job-1"},
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_create_job",
+        lambda *_args, **kwargs: created_jobs.append(dict(kwargs)) or f"slow-retry-{len(created_jobs)}",
+    )
+    monkeypatch.setattr(social_repo, "dispatch_due_social_jobs", lambda **_kwargs: None)
+    monkeypatch.setattr(instagram_comments_pipeline, "uuid4", lambda: "slow-group-2")
+
+    payload = social_repo.rebalance_slow_instagram_comments_shards(
+        run_id="run-1",
+        slow_elapsed_seconds=60,
+        slow_posts_per_minute=0.25,
+        min_remaining_targets=12,
+        max_retry_shard_size=10,
+    )
+
+    assert payload["rebalanced_source_job_ids"] == ["retry-job-1"]
+    assert payload["created_job_ids"] == [
+        "slow-retry-1",
+        "slow-retry-2",
+        "slow-retry-3",
+        "slow-retry-4",
+        "slow-retry-5",
+        "slow-retry-6",
+    ]
+    assert [job["config"]["target_source_ids"] for job in created_jobs] == [
+        targets[8:17],
+        targets[17:26],
+        targets[26:35],
+        targets[35:43],
+        targets[43:51],
+        targets[51:],
+    ]
+
+
+def test_rebalance_slow_instagram_comments_shards_uses_claimed_at_for_running_age(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    targets = [f"P{i}" for i in range(1, 13)]
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_SLOW_SHARD_REBALANCE_ENABLED", "1")
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_all",
+        lambda *_args, **_kwargs: [
+            {
+                "run_id": "run-1",
+                "job_id": "fresh-retry-job",
+                "source_scope": "bravo",
+                "initiated_by": "test",
+                "claimed_at": datetime.now(UTC) - timedelta(minutes=2),
+                "started_at": datetime.now(UTC) - timedelta(minutes=90),
+                "created_at": datetime.now(UTC) - timedelta(hours=2),
+                "config": {
+                    "account": "bravotv",
+                    "source_scope": "bravo",
+                    "stage": social_repo.INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+                    "comments_retry_rebalance": True,
+                    "comments_shard_count": 8,
+                    "target_source_ids": targets,
+                },
+                "metadata": {
+                    "activity": {"posts_checked": 0, "total_posts": 12},
+                    "stage_counters": {"posts": 0, "comments": 0},
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_create_job",
+        lambda *_args, **_kwargs: pytest.fail("freshly claimed retry shards should not be split"),
+    )
+
+    payload = social_repo.rebalance_slow_instagram_comments_shards(
+        run_id="run-1",
+        slow_elapsed_seconds=3600,
+        slow_posts_per_minute=0.25,
+        min_remaining_targets=3,
+        max_retry_shard_size=3,
+        dispatch_immediately=False,
+    )
+
+    assert payload["created_job_ids"] == []
+    assert payload["created_job_count"] == 0
+
+
+def test_rebalance_slow_instagram_comments_shards_allows_bounded_second_split(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created_jobs: list[dict[str, Any]] = []
+    targets = [f"P{i}" for i in range(1, 13)]
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_SLOW_SHARD_REBALANCE_ENABLED", "1")
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_SLOW_SHARD_MAX_REBALANCE_DEPTH", raising=False)
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_all",
+        lambda *_args, **_kwargs: [
+            {
+                "run_id": "run-1",
+                "job_id": "slow-child-1",
+                "source_scope": "bravo",
+                "initiated_by": "test",
+                "started_at": datetime.now(UTC) - timedelta(minutes=70),
+                "config": {
+                    "account": "bravotv",
+                    "source_scope": "bravo",
+                    "stage": social_repo.INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+                    "comments_slow_rebalance": True,
+                    "comments_slow_rebalance_source_job_id": "slow-root-1",
+                    "comments_slow_rebalance_root_job_id": "slow-root-1",
+                    "comments_slow_rebalance_depth": 1,
+                    "comments_shard_count": 8,
+                    "comments_shard_index": 9,
+                    "target_source_ids": targets,
+                },
+                "metadata": {
+                    "activity": {"posts_checked": 6, "total_posts": 12},
+                    "stage_counters": {"posts": 6, "comments": 120},
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(social_repo.pg, "fetch_one", lambda *_args, **_kwargs: {"id": "slow-child-1"})
+    monkeypatch.setattr(
+        social_repo,
+        "_create_job",
+        lambda *_args, **kwargs: created_jobs.append(dict(kwargs)) or f"slow-retry-{len(created_jobs)}",
+    )
+    monkeypatch.setattr(social_repo, "dispatch_due_social_jobs", lambda **_kwargs: None)
+    monkeypatch.setattr(instagram_comments_pipeline, "uuid4", lambda: "slow-group-3")
+
+    payload = social_repo.rebalance_slow_instagram_comments_shards(
+        run_id="run-1",
+        slow_elapsed_seconds=60,
+        slow_posts_per_minute=0.25,
+        min_remaining_targets=3,
+        max_retry_shard_size=3,
+    )
+
+    assert payload["rebalanced_source_job_ids"] == ["slow-child-1"]
+    assert payload["created_job_ids"] == ["slow-retry-1", "slow-retry-2"]
+    assert [job["config"]["target_source_ids"] for job in created_jobs] == [targets[6:9], targets[9:]]
+    assert {job["config"]["comments_slow_rebalance_parent_job_id"] for job in created_jobs} == {"slow-child-1"}
+    assert {job["config"]["comments_slow_rebalance_root_job_id"] for job in created_jobs} == {"slow-root-1"}
+    assert {job["config"]["comments_slow_rebalance_depth"] for job in created_jobs} == {2}
+
+
+def test_rebalance_slow_instagram_comments_shards_respects_rebalance_depth_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    targets = [f"P{i}" for i in range(1, 13)]
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_SLOW_SHARD_REBALANCE_ENABLED", "1")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_SLOW_SHARD_MAX_REBALANCE_DEPTH", "2")
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_all",
+        lambda *_args, **_kwargs: [
+            {
+                "run_id": "run-1",
+                "job_id": "slow-depth-2",
+                "source_scope": "bravo",
+                "initiated_by": "test",
+                "started_at": datetime.now(UTC) - timedelta(minutes=70),
+                "config": {
+                    "account": "bravotv",
+                    "source_scope": "bravo",
+                    "stage": social_repo.INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+                    "comments_slow_rebalance": True,
+                    "comments_slow_rebalance_depth": 2,
+                    "comments_shard_count": 8,
+                    "target_source_ids": targets,
+                },
+                "metadata": {
+                    "activity": {"posts_checked": 2, "total_posts": 12},
+                    "stage_counters": {"posts": 2},
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_create_job",
+        lambda *_args, **_kwargs: pytest.fail("depth-capped shards should not be split again"),
+    )
+
+    payload = social_repo.rebalance_slow_instagram_comments_shards(
+        run_id="run-1",
+        slow_elapsed_seconds=60,
+        slow_posts_per_minute=0.25,
+        min_remaining_targets=3,
+        max_retry_shard_size=3,
+        dispatch_immediately=False,
+    )
+
+    assert payload["created_job_ids"] == []
+    assert payload["created_job_count"] == 0
+
+
+def test_rebalance_waiting_instagram_comments_shards_splits_oversized_queued_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created_jobs: list[dict[str, Any]] = []
+    update_calls: list[dict[str, Any]] = []
+    dispatch_calls: list[dict[str, Any]] = []
+    targets = [f"P{i}" for i in range(1, 26)]
+
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_all",
+        lambda *_args, **_kwargs: [
+            {
+                "run_id": "run-1",
+                "job_id": "queued-large-1",
+                "status": "queued",
+                "priority": 120,
+                "source_scope": "bravo",
+                "initiated_by": "test",
+                "items_found": 0,
+                "config": {
+                    "account": "bravotv",
+                    "source_scope": "bravo",
+                    "stage": social_repo.INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+                    "comments_shard_count": 8,
+                    "target_source_ids": targets,
+                },
+                "metadata": {},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_one",
+        lambda query, params=None, **_kwargs: update_calls.append({"query": query, "params": params})
+        or {"id": "queued-large-1"},
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_create_job",
+        lambda *_args, **kwargs: created_jobs.append(dict(kwargs)) or f"waiting-retry-{len(created_jobs)}",
+    )
+    monkeypatch.setattr(social_repo, "dispatch_due_social_jobs", lambda **kwargs: dispatch_calls.append(dict(kwargs)))
+    monkeypatch.setattr(instagram_comments_pipeline, "uuid4", lambda: "waiting-group-1")
+
+    payload = social_repo.rebalance_waiting_instagram_comments_shards(
+        run_id="run-1",
+        max_waiting_shard_size=10,
+        max_rebalanced_shards=4,
+    )
+
+    assert payload["rebalanced_source_job_ids"] == ["queued-large-1"]
+    assert payload["created_job_ids"] == ["waiting-retry-1", "waiting-retry-2", "waiting-retry-3"]
+    assert update_calls and update_calls[0]["params"][-1] == "queued-large-1"
+    assert [job["config"]["target_source_ids"] for job in created_jobs] == [
+        targets[:9],
+        targets[9:17],
+        targets[17:],
+    ]
+    assert {job["config"]["comments_waiting_rebalance_source_job_id"] for job in created_jobs} == {
+        "queued-large-1"
+    }
+    assert {job["priority"] for job in created_jobs} == {109}
+    assert dispatch_calls == [{"run_id": "run-1"}]
+
+
+def test_rebalance_waiting_instagram_comments_shards_skips_active_remote_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    targets = [f"P{i}" for i in range(1, 26)]
+
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_all",
+        lambda *_args, **_kwargs: [
+            {
+                "run_id": "run-1",
+                "job_id": "queued-dispatched-1",
+                "status": "queued",
+                "priority": 120,
+                "source_scope": "bravo",
+                "initiated_by": "test",
+                "items_found": 0,
+                "config": {
+                    "account": "bravotv",
+                    "source_scope": "bravo",
+                    "stage": social_repo.INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+                    "target_source_ids": targets,
+                },
+                "metadata": {
+                    "dispatch": {
+                        "remote_invocation_id": "fc-active",
+                        "remote_invocation_status": "pending",
+                    }
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_one",
+        lambda *_args, **_kwargs: pytest.fail("active remote jobs should not be cancelled"),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_create_job",
+        lambda *_args, **_kwargs: pytest.fail("active remote jobs should not be split"),
+    )
+
+    payload = social_repo.rebalance_waiting_instagram_comments_shards(
+        run_id="run-1",
+        max_waiting_shard_size=10,
+        dispatch_immediately=False,
+    )
+
+    assert payload["created_job_ids"] == []
+    assert payload["created_job_count"] == 0
+    assert payload["skipped_sources"] == [
+        {
+            "job_id": "queued-dispatched-1",
+            "reason": "remote_invocation_active",
+            "remote_invocation_status": "pending",
+        }
+    ]
 
 
 def test_cancel_social_account_comments_job_cancels_only_requested_active_job(
@@ -38877,6 +40266,55 @@ def test_shared_catalog_fetch_row_terminal_error_ignores_tiktok_recovered_discov
                 "retrieval_meta": {
                     "error_code": "tiktok_discovery_empty_first_page",
                     "error_class": "TikTokDiscoveryEmptyFirstPage",
+                },
+            },
+        }
+    )
+
+
+@pytest.mark.parametrize("status", ["queued", "pending", "retrying", "running", "cancelling"])
+def test_shared_catalog_fetch_row_terminal_error_ignores_active_fetch_states(status: str) -> None:
+    assert not social_repo._shared_catalog_fetch_row_has_terminal_error(
+        {
+            "status": status,
+            "last_error_code": "stale_heartbeat_timeout",
+            "error_message": "stale_heartbeat_timeout: no heartbeat for >= 900 seconds",
+            "metadata": {
+                "stage": social_repo.SHARED_ACCOUNT_POSTS_STAGE,
+                "error_code": "stale_heartbeat_timeout",
+                "error": "stale_heartbeat_timeout",
+            },
+        }
+    )
+
+
+def test_shared_catalog_fetch_row_terminal_error_ignores_completed_save_with_frontier() -> None:
+    assert not social_repo._shared_catalog_fetch_row_has_terminal_error(
+        {
+            "status": "completed",
+            "items_found": 33,
+            "last_error_code": None,
+            "error_message": None,
+            "metadata": {
+                "stage": social_repo.SHARED_ACCOUNT_DISCOVERY_STAGE,
+                "activity": {
+                    "saved_posts": 33,
+                    "matched_posts": 33,
+                    "posts_checked": 33,
+                },
+                "persist_counters": {
+                    "posts_upserted": 33,
+                },
+                "frontier": {
+                    "status": "queued",
+                    "posts_saved": 33,
+                    "next_cursor_present": True,
+                },
+                "frontier_job_id": "81aca0e9-d490-4ac6-a93b-ced5b6c908bf",
+                "retrieval_meta": {
+                    "error_code": "instagram_graphql_initial_request_failed",
+                    "error_class": "InstagramRequestFailure",
+                    "error_status_code": 401,
                 },
             },
         }
@@ -42074,6 +43512,7 @@ def test_run_shared_account_discovery_stage_bootstraps_frontier_and_enqueues_fet
     assert frontier_calls[0]["posts_saved"] == 1
     assert create_calls[0]["config"]["runner_strategy"] == social_repo.CATALOG_FULL_HISTORY_FRONTIER_STRATEGY
     assert create_calls[0]["config"]["partition_strategy"] == social_repo.CATALOG_FULL_HISTORY_FRONTIER_STRATEGY
+    assert create_calls[0]["max_attempts"] == 12
 
 
 def test_run_shared_account_frontier_posts_stage_continues_when_discovered_posts_are_already_saved(
@@ -42189,7 +43628,7 @@ def test_run_shared_account_frontier_posts_stage_continues_when_discovered_posts
     assert frontier_updates[-1]["metadata_updates"]["frontier_stop_reason"] == "source_exhausted"
 
 
-def test_run_shared_account_frontier_posts_stage_raises_when_oldest_stored_post_not_reached(
+def test_run_shared_account_frontier_posts_stage_completes_with_visible_gap_when_oldest_stored_post_not_reached(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(social_repo, "_emit_job_progress", lambda **_kwargs: None)
@@ -42263,38 +43702,144 @@ def test_run_shared_account_frontier_posts_stage_raises_when_oldest_stored_post_
             }
         ),
     )
-    monkeypatch.setattr(social_repo, "_release_shared_account_run_frontier", lambda **_kwargs: {})
+    frontier_releases: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        social_repo,
+        "_release_shared_account_run_frontier",
+        lambda **kwargs: frontier_releases.append(kwargs) or {},
+    )
     monkeypatch.setattr(
         social_repo,
         "_catalog_oldest_stored_post_at",
         lambda *_args, **_kwargs: datetime(2025, 1, 1, tzinfo=UTC),
     )
-
-    with pytest.raises(social_repo.SharedStageRuntimeError) as exc_info:
-        social_repo._run_shared_account_posts_stage(
-            run_id="run-1",
-            platform="instagram",
-            source_scope="bravo",
-            account_handle="bravotv",
-            config={
-                "stage": social_repo.SHARED_ACCOUNT_POSTS_STAGE,
-                "platform": "instagram",
-                "source_scope": "bravo",
-                "account": "bravotv",
-                "runner_strategy": social_repo.CATALOG_FULL_HISTORY_FRONTIER_STRATEGY,
-                "partition_strategy": social_repo.CATALOG_FULL_HISTORY_FRONTIER_STRATEGY,
-                "pipeline_ingest_mode": social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
-            },
-            job_id="job-1",
-            worker_id="modal:test",
-        )
-
-    assert exc_info.value.error_code == "catalog_incomplete"
-    assert (
-        exc_info.value.runtime_metadata["retrieval_meta"]["frontier_stop_reason"]
-        == "catalog_oldest_stored_post_not_reached"
+    monkeypatch.setattr(social_repo, "_touch_shared_account_source", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_shared_account_frontier_progress",
+        lambda **_kwargs: {"status": "completed", "exhausted": True},
     )
-    assert frontier_updates[-1]["metadata_updates"]["frontier_stop_reason"] == "catalog_oldest_stored_post_not_reached"
+
+    posts_count, comments_count, metadata = social_repo._run_shared_account_posts_stage(
+        run_id="run-1",
+        platform="instagram",
+        source_scope="bravo",
+        account_handle="bravotv",
+        config={
+            "stage": social_repo.SHARED_ACCOUNT_POSTS_STAGE,
+            "platform": "instagram",
+            "source_scope": "bravo",
+            "account": "bravotv",
+            "runner_strategy": social_repo.CATALOG_FULL_HISTORY_FRONTIER_STRATEGY,
+            "partition_strategy": social_repo.CATALOG_FULL_HISTORY_FRONTIER_STRATEGY,
+            "pipeline_ingest_mode": social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+        },
+        job_id="job-1",
+        worker_id="modal:test",
+    )
+
+    # An exhausted cursor walk must not schedule a cursor-less retry; the stage
+    # completes while keeping the gap operator-visible.
+    assert posts_count == 1
+    assert comments_count == 0
+    assert all(update.get("status") != "retrying" for update in frontier_updates)
+    gap_update = frontier_updates[-1]
+    assert gap_update["metadata_updates"]["completion_gap_reason"] == "catalog_oldest_stored_post_not_reached"
+    assert gap_update["metadata_updates"]["observed_posts_checked"] == 1
+    assert frontier_releases[0]["status"] == "completed"
+    assert metadata["retrieval_meta"]["completion_gap_reason"] == "catalog_oldest_stored_post_not_reached"
+    assert metadata["activity"]["completion_gap_reason"] == "catalog_oldest_stored_post_not_reached"
+
+
+def test_run_shared_account_frontier_posts_stage_completes_with_visible_gap_when_expected_total_not_reached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frontier_updates: list[dict[str, Any]] = []
+    frontier_releases: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(social_repo, "_emit_job_progress", lambda **_kwargs: None)
+    frontier_row = {
+        "status": "running",
+        "next_cursor": "cursor-1",
+        "pages_scanned": 0,
+        "posts_checked": 0,
+        "posts_saved": 0,
+        "total_posts": 17172,
+        "last_transport": "authenticated",
+        "retry_count": 0,
+        "metadata": {},
+        "exhausted": False,
+    }
+    monkeypatch.setattr(social_repo, "_get_shared_account_run_frontier", lambda **_kwargs: dict(frontier_row))
+    monkeypatch.setattr(social_repo, "_claim_shared_account_run_frontier", lambda **_kwargs: dict(frontier_row))
+    monkeypatch.setattr(
+        social_repo,
+        "_fetch_shared_instagram_graphql_posts_page",
+        lambda **_kwargs: (
+            [SimpleNamespace(shortcode="last-page", taken_at=1738454400)],
+            {"has_next_page": False, "end_cursor": None},
+            {"total_posts": 17172},
+            "authenticated",
+        ),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_persist_shared_catalog_posts_batch",
+        lambda **_kwargs: ([{"source_id": "last-page"}], ["last-page"]),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_update_shared_account_run_frontier",
+        lambda **kwargs: (
+            frontier_updates.append(kwargs)
+            or {
+                "status": kwargs.get("status"),
+                "next_cursor": kwargs.get("next_cursor"),
+                "retry_count": kwargs.get("retry_count", 0),
+                "metadata": kwargs.get("metadata_updates", {}),
+                "exhausted": kwargs.get("exhausted"),
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_release_shared_account_run_frontier",
+        lambda **kwargs: frontier_releases.append(kwargs) or {},
+    )
+    monkeypatch.setattr(social_repo, "_catalog_oldest_stored_post_at", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(social_repo, "_touch_shared_account_source", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_shared_account_frontier_progress",
+        lambda **_kwargs: {"status": "completed", "exhausted": True},
+    )
+
+    posts_count, _comments_count, metadata = social_repo._run_shared_account_posts_stage(
+        run_id="run-1",
+        platform="instagram",
+        source_scope="bravo",
+        account_handle="bravotv",
+        config={
+            "stage": social_repo.SHARED_ACCOUNT_POSTS_STAGE,
+            "platform": "instagram",
+            "source_scope": "bravo",
+            "account": "bravotv",
+            "runner_strategy": social_repo.CATALOG_FULL_HISTORY_FRONTIER_STRATEGY,
+            "partition_strategy": social_repo.CATALOG_FULL_HISTORY_FRONTIER_STRATEGY,
+            "pipeline_ingest_mode": social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+        },
+        job_id="job-1",
+        worker_id="modal:test",
+    )
+
+    assert posts_count == 1
+    assert all(update.get("status") != "retrying" for update in frontier_updates)
+    gap_update = frontier_updates[-1]
+    assert gap_update["metadata_updates"]["completion_gap_reason"] == "expected_total_not_reached"
+    assert gap_update["metadata_updates"]["expected_total_posts"] == 17172
+    assert gap_update["metadata_updates"]["observed_posts_checked"] == 1
+    assert frontier_releases[0]["status"] == "completed"
+    assert metadata["retrieval_meta"]["completion_gap_reason"] == "expected_total_not_reached"
 
 
 def test_run_shared_account_posts_stage_raises_for_incomplete_single_runner_fallback(
@@ -46796,3 +48341,91 @@ def test_batch_upsert_shared_catalog_instagram_posts_calls_pg_upsert_many(monkey
     assert captured_calls[0][2] == "source_id"
     assert len(captured_calls[0][1]) == 3
     assert len(rows) == 3
+
+
+def test_facebook_duplicate_cleanup_cancels_active_siblings_after_completed_save(monkeypatch):
+    captured: dict[str, Any] = {}
+    cleared: list[str] = []
+
+    def _fake_execute_returning(sql, params, **kwargs):  # noqa: ANN001
+        captured["sql"] = sql
+        captured["params"] = params
+        captured["kwargs"] = kwargs
+        return [{"id": "dup-1"}, {"id": "dup-2"}]
+
+    monkeypatch.setattr(social_repo.pg, "execute_returning", _fake_execute_returning)
+    monkeypatch.setattr(
+        social_repo,
+        "_clear_worker_heartbeat_for_job",
+        lambda *, job_id, **_kwargs: cleared.append(job_id),
+    )
+
+    cancelled = social_repo._cancel_duplicate_active_facebook_shared_post_jobs_after_completed_save(  # noqa: SLF001
+        job_id="job-1",
+        run_id="63a7be5d-0000-4000-8000-000000000001",
+        status="completed",
+        items_found=10,
+        metadata={
+            "platform": "facebook",
+            "stage": social_repo.SHARED_ACCOUNT_POSTS_STAGE,
+            "account": "bravotv",
+            "persist_counters": {"posts_upserted": 10},
+        },
+    )
+
+    assert cancelled == ["dup-1", "dup-2"]
+    assert cleared == ["dup-1", "dup-2"]
+    assert captured["params"][3] == social_repo.SHARED_ACCOUNT_POSTS_STAGE
+    assert captured["params"][4] == "bravotv"
+
+
+def test_social_account_catalog_save_proof_reports_job_and_table_counts(monkeypatch):
+    fetch_all_calls: list[str] = []
+    fetch_one_calls: list[str] = []
+
+    monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: None)
+
+    def _fake_fetch_all(sql, params, **_kwargs):  # noqa: ANN001
+        fetch_all_calls.append(str(sql))
+        assert params == ["threads", "bravotv", "63a7be5d-0000-4000-8000-000000000001"]
+        return [
+            {
+                "items_found": 3,
+                "metadata": {
+                    "stage_counters": {"posts": 3},
+                    "persist_counters": {
+                        "posts_upserted": 3,
+                        "materialized_posts_upserted": 3,
+                        "catalog_posts_upserted": 3,
+                    },
+                },
+            }
+        ]
+
+    def _fake_fetch_one(sql, params, **_kwargs):  # noqa: ANN001
+        fetch_one_calls.append(str(sql))
+        normalized = " ".join(str(sql).split()).lower()
+        if "from social.threads_account_catalog_posts" in normalized:
+            assert params == ["bravotv", "63a7be5d-0000-4000-8000-000000000001"]
+            return {"total": 3}
+        if "from social.meta_threads_posts" in normalized:
+            assert params == ["63a7be5d-0000-4000-8000-000000000001", "bravotv"]
+            return {"total": 3}
+        raise AssertionError(normalized)
+
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+    monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
+
+    proof = social_repo.get_social_account_catalog_save_proof(
+        "threads",
+        "BravoTV",
+        run_id="63a7be5d-0000-4000-8000-000000000001",
+    )
+
+    assert proof["fetched_count"] == 3
+    assert proof["upserted_count"] == 3
+    assert proof["catalog_rows"] == 3
+    assert proof["materialized_count"] == 3
+    assert proof["verified"] is True
+    assert len(fetch_all_calls) == 1
+    assert len(fetch_one_calls) == 2

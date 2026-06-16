@@ -242,7 +242,6 @@ async def require_internal_admin(request: Request) -> dict:
                 detail="Authentication service unavailable",
                 headers={"x-error-code": "AUTH_SERVICE_UNAVAILABLE"},
             ) from exc
-
     if current_user:
         raise HTTPException(status_code=403, detail="Allowlist admin access required")
     if attempted_internal_admin_verification:

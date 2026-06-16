@@ -1,6 +1,6 @@
 # Instagram Comments Scrapling Lane — Operator Runbook
 
-Last reviewed: 2026-04-22
+Last reviewed: 2026-06-12
 
 This document covers the standalone Instagram comments scraper built on
 [Scrapling](https://github.com/D4Vinci/Scrapling) v0.4+. It uses the
@@ -110,13 +110,13 @@ SOCIAL_INSTAGRAM_COMMENTS_PROXY_SHARD_SESSIONS=true
 SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS=600  # seconds; converts/clamps to whole minutes
 SOCIAL_INSTAGRAM_COMMENTS_LAUNCH_AUTH_CHECK=false        # worker validation remains enabled
 
-# Run caps (defense against runaway jobs)
-SOCIAL_INSTAGRAM_COMMENTS_MAX_POSTS_PER_RUN=50
-SOCIAL_INSTAGRAM_COMMENTS_MAX_COMMENTS_PER_POST=200
+# Run caps: 0 means uncapped.
+SOCIAL_INSTAGRAM_COMMENTS_MAX_POSTS_PER_RUN=0
+SOCIAL_INSTAGRAM_COMMENTS_MAX_COMMENTS_PER_POST=0
 SOCIAL_INSTAGRAM_COMMENT_DELAY_SEC=0.25         # pacing between direct API requests after warmup
-SOCIAL_INSTAGRAM_COMMENT_PAGINATION_MAX_PAGES=250
+SOCIAL_INSTAGRAM_COMMENT_PAGINATION_MAX_PAGES=0
 SOCIAL_INSTAGRAM_COMMENT_PAGINATION_MAX_SECONDS=180
-SOCIAL_INSTAGRAM_REPLY_PAGINATION_MAX_PAGES=100
+SOCIAL_INSTAGRAM_REPLY_PAGINATION_MAX_PAGES=0
 SOCIAL_INSTAGRAM_REPLY_PAGINATION_MAX_SECONDS=120
 SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_LOAD_ALL_ENABLED=false
 SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_RENDERED_CLICK_LIMIT=10
@@ -146,6 +146,46 @@ Proxy behavior:
 - Sticky-session support in this change is intentionally comments-lane-only; posts-lane parity is a separate decision.
 - `SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_LOAD_ALL_ENABLED=true` enables the opt-in `single_session_load_all` request strategy. It preserves API cursor pagination internally, falls back to bounded rendered post hydration only when needed, and forces profile comments runs to one shard by default.
 - The `SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_RENDERED_*` and `SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_MAX_IN_MEMORY_ROWS` values bound rendered hydration so a large post stops as retryable/incomplete instead of running unbounded.
+
+### Durable cursor resume for mega-posts
+
+When a large post stops because the per-post pagination deadline or page boundary is reached, the runner stores the latest top-level and reply checkpoints in `social.instagram_post_comments_audit.cursor_payload`. A later retry or incomplete-target job loads the latest eligible audit row for each target post and merges those checkpoints into the existing job metadata resume path before the fetcher starts.
+
+Operator impact:
+
+- retry jobs continue from the saved top-level cursor instead of restarting at page one;
+- reply checkpoints continue from the latest saved parent-comment cursor when available;
+- current job metadata wins over older audit rows;
+- terminal repeated-cursor states are ignored rather than replayed;
+- raw cursor values are not logged in progress metadata, but job metadata can contain checkpoint records for continuation.
+
+This resume behavior is separate from worker-pool scaling. Restore `SOCIAL_WORKER_POOL_MEDIA_MIRROR=6` only after the active Bravo posts lane completes.
+
+To build a focused retry from saved audit cursors without writing a new job:
+
+```bash
+cd TRR-Backend
+.venv/bin/python scripts/socials/instagram/enqueue_comments_audit_cursor_retries.py \
+  --account bravotv \
+  --limit 50 \
+  --batch-size 1 \
+  --json
+```
+
+To enqueue the retry after reviewing the dry-run target list:
+
+```bash
+cd TRR-Backend
+.venv/bin/python scripts/socials/instagram/enqueue_comments_audit_cursor_retries.py \
+  --account bravotv \
+  --limit 50 \
+  --batch-size 1 \
+  --enqueue \
+  --confirm-enqueue "ENQUEUE AUDIT CURSOR RETRIES" \
+  --json
+```
+
+`--batch-size` controls how many target posts are placed in each comments job. Use `--batch-size 1` for mega-post recovery so each job has a small resumable unit while the runner still resumes from `instagram_post_comments_audit.cursor_payload`.
 
 ---
 

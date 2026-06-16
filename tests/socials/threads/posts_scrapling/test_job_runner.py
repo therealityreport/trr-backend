@@ -99,6 +99,8 @@ def _install_common_fakes(
     )
     monkeypatch.setattr(jr, "select_threads_posts_proxy", lambda: None)
     monkeypatch.setattr(jr, "ThreadsPostsScraplingFetcher", lambda **_kwargs: fetcher)
+    monkeypatch.setattr(jr.auth_cooldown, "get_active_cooldown", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(jr.auth_cooldown, "clear_cooldown", lambda *_args, **_kwargs: True)
     if persist_result is not None:
         monkeypatch.setattr(jr, "persist_threads_posts", lambda **_kwargs: persist_result)
 
@@ -159,6 +161,86 @@ def test_threads_job_runner_defaults_scrapling_rollout_enabled(
         "default_enabled": True,
         "configured_value": None,
     }
+
+
+def test_threads_job_runner_blocks_on_active_auth_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_lifecycle: _FakeLifecycle,
+) -> None:
+    from trr_backend.socials.threads.posts_scrapling import job_runner as jr
+
+    class _Cooldown:
+        def to_metadata(self) -> dict[str, Any]:
+            return {
+                "platform": "threads",
+                "account_handle": "bravotv",
+                "last_error_code": "threads_login_prompt",
+                "cooldown_until": "2026-05-05T00:05:00+00:00",
+            }
+
+    monkeypatch.setattr(jr.auth_cooldown, "get_active_cooldown", lambda *_args, **_kwargs: _Cooldown())
+    monkeypatch.setattr(jr, "resolve_threads_posts_session", lambda: pytest.fail("session should not resolve"))
+    monkeypatch.setattr(jr.pg, "fetch_one", _running_status_or_final_row)
+
+    jr.run_threads_posts_scrapling_job(
+        {"id": "job-1", "run_id": "run-1", "config": {"account": "bravotv"}},
+        worker_id="worker-1",
+    )
+
+    finish = fake_lifecycle.finish_calls[-1]
+    assert finish["status"] == "failed"
+    assert finish["last_error_code"] == "threads_login_prompt"
+    assert finish["metadata"]["runtime_metadata"]["error"]["auth_cooldown_active"] is True
+
+
+def test_threads_job_runner_records_auth_cooldown_on_auth_failed_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_lifecycle: _FakeLifecycle,
+) -> None:
+    from trr_backend.socials.threads.posts_scrapling import job_runner as jr
+
+    class _FakeFetcher:
+        runtime_metadata = {"transport": "test", "request_count": 1, "complete": False}
+
+        async def warmup(self, _account_handle: str) -> None:
+            return None
+
+        async def fetch_posts(self, _account_handle: str, *, max_pages: int | None = None) -> Any:
+            del max_pages
+            return jr.ThreadsPostsFetchResult(
+                posts=[],
+                fetch_failed=True,
+                auth_failed=True,
+                retryable=True,
+                fetch_reason="threads_redirect_to_login",
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    class _Cooldown:
+        def to_metadata(self) -> dict[str, Any]:
+            return {"platform": "threads", "account_handle": "bravotv", "last_error_code": "threads_redirect_to_login"}
+
+    record_calls: list[tuple[str, str, str]] = []
+    _install_common_fakes(monkeypatch, jr, fetcher=_FakeFetcher())
+    monkeypatch.setattr(
+        jr.auth_cooldown,
+        "record_auth_block",
+        lambda platform, account, code: record_calls.append((platform, account, code)) or _Cooldown(),
+    )
+    monkeypatch.setattr(jr.pg, "fetch_one", _running_status_or_final_row)
+
+    jr.run_threads_posts_scrapling_job(
+        {"id": "job-1", "run_id": "run-1", "attempt_count": 1, "max_attempts": 2, "config": {"account": "bravotv"}},
+        worker_id="worker-1",
+    )
+
+    assert record_calls == [("threads", "bravotv", "threads_redirect_to_login")]
+    finish = fake_lifecycle.finish_calls[-1]
+    assert finish["status"] == "retrying"
+    assert finish["last_error_code"] == "threads_redirect_to_login"
+    assert finish["metadata"]["runtime_metadata"]["error"]["auth_cooldown_recorded"] is True
 
 
 def test_threads_job_runner_fails_safely_when_scrapling_rollout_disabled(
@@ -644,6 +726,8 @@ def test_threads_job_runner_records_terminal_runtime_metadata(
     assert metadata["stage_counters"] == {"posts": 1, "pages": 1}
     assert metadata["persist_counters"] == {
         "posts_upserted": 1,
+        "materialized_posts_upserted": 1,
+        "catalog_posts_upserted": 0,
         "posts_skipped": 2,
         "posts_skipped_by_reason": {"missing_post_id": 1, "upsert_failed": 1},
     }

@@ -9,6 +9,7 @@ import re
 import shutil
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -344,22 +345,23 @@ def open_cookie_refresh_context(
     timezone_id: str | None = None,
     extra_args: list[str] | None = None,
     enforce_rate_limit: bool = True,
+    require_profile: bool | None = None,
 ) -> CookieRefreshBrowserContext:
     if enforce_rate_limit:
         reserve_social_auth_refresh_attempt(platform)
 
     resolved_profile = resolve_social_auth_chrome_profile(platform, profile_name)
-    require_profile = social_auth_requires_chrome_profile(platform)
+    effective_require_profile = social_auth_requires_chrome_profile(platform) if require_profile is None else require_profile
     profile_selection: ChromeProfileSelection | None = None
     if resolved_profile:
         try:
             profile_selection = resolve_chrome_profile_selection(resolved_profile)
         except ChromeProfileNotAvailableError:
-            if require_profile:
+            if effective_require_profile:
                 raise
             logger.warning(
                 "[%s] Chrome profile %r unavailable; falling back to profile-less cookie refresh because "
-                "SOCIAL_COOKIE_REFRESH_REQUIRE_CHROME_PROFILE is disabled",
+                "Chrome profile requirement is disabled",
                 platform,
                 resolved_profile,
             )
@@ -405,7 +407,7 @@ def open_cookie_refresh_context(
             preferences_path=profile_selection.preferences_path,
         )
 
-    if require_profile:
+    if effective_require_profile:
         raise ChromeProfileNotAvailableError(
             f"{platform} cookie refresh requires Chrome profile {resolved_profile!r}; refusing profile-less launch"
         )
@@ -601,6 +603,7 @@ def refresh_simple_login_cookies(
     cookie_file: str | Path,
     headless: bool = True,
     timeout_seconds: int = 120,
+    validator: Callable[[dict[str, str]], tuple[bool, str | None]] | None = None,
 ) -> dict[str, str]:
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -631,8 +634,18 @@ def refresh_simple_login_cookies(
                 page,
                 spec=spec,
             ):
-                write_cookie_file(cookie_file, existing_cookies)
-                return existing_cookies
+                reuse_valid = True
+                if validator is not None:
+                    reuse_valid, reuse_reason = validator(existing_cookies)
+                    if not reuse_valid:
+                        logger.info(
+                            "%s Chrome-profile cookies failed in-protocol validation (%s); falling through to scripted login",
+                            spec.platform,
+                            reuse_reason or "unknown",
+                        )
+                if reuse_valid:
+                    write_cookie_file(cookie_file, existing_cookies)
+                    return existing_cookies
 
             page.goto(
                 spec.login_url,
@@ -700,5 +713,11 @@ def refresh_simple_login_cookies(
     )
     if not is_valid:
         raise RuntimeError(f"Cookie refresh produced an invalid authenticated session ({reason or 'unknown'})")
+    if validator is not None:
+        protocol_valid, protocol_reason = validator(refreshed_cookies)
+        if not protocol_valid:
+            raise RuntimeError(
+                f"Cookie refresh produced cookies that failed in-protocol validation ({protocol_reason or 'unknown'})"
+            )
     write_cookie_file(cookie_file, refreshed_cookies)
     return refreshed_cookies

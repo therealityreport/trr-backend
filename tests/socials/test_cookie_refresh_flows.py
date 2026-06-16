@@ -13,6 +13,7 @@ from trr_backend.socials.facebook import cookie_refresh as facebook_cookie_refre
 from trr_backend.socials.instagram import auth_runtime as instagram_auth_runtime
 from trr_backend.socials.instagram import cookie_refresh as instagram_cookie_refresh
 from trr_backend.socials.instagram.scraper import load_cookies_from_file
+from trr_backend.socials.socialblade import auth as socialblade_auth
 from trr_backend.socials.threads import cookie_refresh as threads_cookie_refresh
 from trr_backend.socials.tiktok import cookie_refresh as tiktok_cookie_refresh
 from trr_backend.socials.twitter import cookie_refresh as twitter_cookie_refresh
@@ -28,6 +29,36 @@ def test_tiktok_cookie_refresh_requires_authenticated_session_cookies() -> None:
     assert any(
         "Maximum number of attempts reached" in pattern for pattern in tiktok_cookie_refresh._SPEC.invalid_body_patterns
     )
+
+
+def test_socialblade_cookie_contract_requires_login_session() -> None:
+    assert socialblade_auth.SOCIALBLADE_REQUIRED_COOKIE_NAMES_ANY == ("cf_clearance",)
+    assert socialblade_auth.SOCIALBLADE_REQUIRED_COOKIE_NAMES_ALL == ("session",)
+
+    with pytest.raises(RuntimeError, match="missing_required_cookie:session"):
+        socialblade_auth.require_socialblade_authenticated_cookies(
+            {"cf_clearance": "cloudflare-only"},
+            source="SocialBlade test",
+        )
+
+
+def test_socialblade_cookie_loader_prefers_authenticated_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cookie_file = tmp_path / "socialblade-cookies.json"
+    cookie_file.write_text(
+        json.dumps({"cf_clearance": "from-file", "session": "logged-in"}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("SOCIALBLADE_COOKIES_JSON", json.dumps({"cf_clearance": "env-cloudflare-only"}))
+    monkeypatch.setenv("SOCIALBLADE_COOKIES_FILE", str(cookie_file))
+
+    assert socialblade_auth.load_socialblade_cookies_from_sources() == {
+        "cf_clearance": "from-file",
+        "session": "logged-in",
+    }
 
 
 def test_facebook_cookie_refresh_detects_verification_checkpoint() -> None:
@@ -367,6 +398,49 @@ def test_cookie_refresh_context_refuses_profileless_browser_by_default(
             headless=True,
             viewport={"width": 100, "height": 100},
         )
+
+
+def test_cookie_refresh_context_allows_profileless_browser_with_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    chrome_root = tmp_path / "Chrome"
+    captured: dict[str, object] = {}
+
+    class _FakeContext:
+        def close(self) -> None:
+            captured["context_closed"] = True
+
+    class _FakeBrowser:
+        def new_context(self, **kwargs: object) -> _FakeContext:
+            captured["context_kwargs"] = kwargs
+            return _FakeContext()
+
+        def close(self) -> None:
+            captured["browser_closed"] = True
+
+    class _FakeChromium:
+        def launch(self, **kwargs: object) -> _FakeBrowser:
+            captured["launch_kwargs"] = kwargs
+            return _FakeBrowser()
+
+        def launch_persistent_context(self, **_kwargs: object) -> object:
+            raise AssertionError("profile-less override should not launch a persistent Chrome profile")
+
+    monkeypatch.setattr(browser_cookie_refresh, "_chrome_profile_base_dir", lambda: chrome_root)
+
+    session = browser_cookie_refresh.open_cookie_refresh_context(
+        SimpleNamespace(chromium=_FakeChromium()),
+        platform="socialblade",
+        headless=True,
+        viewport={"width": 100, "height": 100},
+        require_profile=False,
+    )
+    session.close()
+
+    assert captured["launch_kwargs"]["headless"] is True
+    assert captured["context_kwargs"] == {"viewport": {"width": 100, "height": 100}}
+    assert captured["browser_closed"] is True
 
 
 def test_social_auth_refresh_rate_limit_blocks_repeated_attempts(
@@ -1057,3 +1131,72 @@ def test_refresh_twitter_cookies_does_not_retry_headed_by_default(
         )
 
     assert attempts == [True]
+
+
+def test_threads_validate_session_tokens_requires_graphql_tokens(monkeypatch) -> None:
+    from trr_backend.socials.threads.scraper import ThreadsScraper
+
+    scraper = ThreadsScraper(cookies={"sessionid": "s", "csrftoken": "c"})
+
+    token_html = '{"DTSGInitialData":{"token":"dtsg-1"},"LSD":{"token":"lsd-1"},"jazoest":"26474"}'
+    monkeypatch.setattr(scraper, "_fetch_html", lambda *a, **k: token_html)
+    assert scraper.validate_session_tokens() == (True, None)
+
+    monkeypatch.setattr(scraper, "_fetch_html", lambda *a, **k: "<html>Log in with your Instagram account</html>")
+    assert scraper.validate_session_tokens() == (False, "login_prompt_detected")
+
+    monkeypatch.setattr(scraper, "_fetch_html", lambda *a, **k: "<html>anonymous shell without tokens</html>")
+    assert scraper.validate_session_tokens() == (False, "graphql_tokens_missing")
+
+    def _boom(*a: object, **k: object) -> str:
+        raise TimeoutError("slow")
+
+    monkeypatch.setattr(scraper, "_fetch_html", _boom)
+    valid, reason = scraper.validate_session_tokens()
+    assert valid is False
+    assert reason.startswith("probe_fetch_failed:")
+
+
+def test_facebook_in_protocol_validator(monkeypatch) -> None:
+    from trr_backend.socials.facebook import cookie_refresh as facebook_cookie_refresh
+
+    validate = facebook_cookie_refresh._validate_facebook_cookies_in_protocol
+
+    assert validate({"c_user": "1"}) == (False, "missing_required_cookies")
+
+    class _Resp:
+        def __init__(self, url: str, text: str) -> None:
+            self.url = url
+            self.text = text
+
+    monkeypatch.setattr(
+        facebook_cookie_refresh.requests,
+        "get",
+        lambda *a, **k: _Resp("https://www.facebook.com/login/?next=me", "Log into Facebook"),
+    )
+    valid, reason = validate({"c_user": "1", "xs": "2"})
+    assert valid is False
+    assert reason.startswith("login_redirect:")
+
+    monkeypatch.setattr(
+        facebook_cookie_refresh.requests,
+        "get",
+        lambda *a, **k: _Resp("https://www.facebook.com/bravo", "<html>profile timeline</html>"),
+    )
+    assert validate({"c_user": "1", "xs": "2"}) == (True, None)
+
+
+def test_threads_refresh_passes_in_protocol_validator(monkeypatch, tmp_path) -> None:
+    from trr_backend.socials.threads import cookie_refresh as threads_cookie_refresh_mod
+
+    captured: dict[str, object] = {}
+
+    def _fake_refresh(*, spec: object, validator: object = None, **_: object) -> dict[str, str]:
+        captured["validator"] = validator
+        return {"sessionid": "s", "csrftoken": "c"}
+
+    monkeypatch.setattr(threads_cookie_refresh_mod, "refresh_simple_login_cookies", _fake_refresh)
+    threads_cookie_refresh_mod.refresh_threads_cookies(
+        username="u", password="p", cookie_file=str(tmp_path / "t.json")
+    )
+    assert captured["validator"] is threads_cookie_refresh_mod._validate_threads_cookies_in_protocol

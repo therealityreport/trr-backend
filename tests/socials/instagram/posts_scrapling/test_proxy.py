@@ -12,6 +12,17 @@ def test_select_posts_proxy_returns_none_when_no_env(monkeypatch):
     assert result is None
 
 
+def test_select_posts_proxy_public_mode_refuses_decodo(monkeypatch):
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_POSTS_PROXY_URLS", raising=False)
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_PROXY_PROVIDER", "decodo")
+    monkeypatch.setenv("DECODO_USERNAME", "user1")
+    monkeypatch.setenv("DECODO_PASSWORD", "p@ss!")
+    monkeypatch.setenv("DECODO_GATEWAY", "gate.decodo.com:7000")
+    from trr_backend.socials.instagram.posts_scrapling.proxy import select_posts_proxy
+
+    assert select_posts_proxy(public_mode=True) is None
+
+
 def test_select_posts_proxy_explicit_url(monkeypatch):
     """Explicit proxy URL takes precedence over DECODO."""
     monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_PROXY_URLS", "http://user:pass@proxy:8080")
@@ -23,6 +34,21 @@ def test_select_posts_proxy_explicit_url(monkeypatch):
     assert result is not None
     assert result.api_proxy_url == "http://user:pass@proxy:8080"
     assert result.fingerprint == "proxy:8080:explicit"
+
+
+def test_select_posts_proxy_decodo_plugin_proxy_url(monkeypatch):
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_POSTS_PROXY_URLS", raising=False)
+    monkeypatch.setenv("DECODO_PROXY_URL", "http://plugin-user:plugin-pass@proxy-plugin.test:7000")
+    monkeypatch.setenv("DECODO_USERNAME", "decodo_user")
+    monkeypatch.setenv("DECODO_PASSWORD", "decodo_pass")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_PROXY_PROVIDER", "none")
+    from trr_backend.socials.instagram.posts_scrapling.proxy import select_posts_proxy
+
+    result = select_posts_proxy()
+
+    assert result is not None
+    assert result.api_proxy_url == "http://plugin-user:plugin-pass@proxy-plugin.test:7000"
+    assert result.fingerprint == "proxy-plugin.test:7000:explicit"
 
 
 def test_select_posts_proxy_decodo(monkeypatch):

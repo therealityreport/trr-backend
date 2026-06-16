@@ -5,8 +5,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+from pathlib import Path
 from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.modal.deploy_backend import REQUIRED_MODAL_PROFILE  # noqa: E402
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -34,6 +42,9 @@ def verify_instagram_posts_auth(*, account: str, app_name: str, function_name: s
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Pin the Modal workspace before verify_instagram_posts_auth lazily imports
+    # the Modal SDK, which resolves MODAL_PROFILE at import time.
+    os.environ["MODAL_PROFILE"] = REQUIRED_MODAL_PROFILE
     args = parse_args(argv)
     payload = verify_instagram_posts_auth(
         account=args.account,

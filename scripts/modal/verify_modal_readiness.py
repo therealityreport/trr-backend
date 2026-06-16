@@ -72,8 +72,15 @@ def _maybe_reexec_with_repo_venv() -> None:
 if __name__ == "__main__":
     _maybe_reexec_with_repo_venv()
 
+from scripts.modal.deploy_backend import REQUIRED_MODAL_PROFILE, pinned_modal_env
+
+# Pin the Modal workspace before the trr_backend imports below load the Modal
+# SDK, which resolves MODAL_PROFILE at import time.
+os.environ["MODAL_PROFILE"] = REQUIRED_MODAL_PROFILE
+
 from scripts._workspace_runtime_env import apply_workspace_runtime_env
 from trr_backend.modal_dispatch import (
+    modal_social_comments_recovery_job_function_name,
     modal_social_comments_job_function_name,
     modal_social_job_function_name,
     modal_social_job_function_names,
@@ -226,6 +233,7 @@ def _run_modal_json(*args: str, modal_environment: str = "") -> Any:
             capture_output=True,
             text=True,
             timeout=modal_lookup_timeout_seconds(),
+            env=pinned_modal_env(),
         )
     except subprocess.TimeoutExpired as exc:
         raise ModalLookupTimeoutError(
@@ -278,6 +286,7 @@ def required_social_function_names(*, enabled: bool | None = None) -> tuple[str,
         modal_social_posts_job_function_name(),
         modal_social_media_job_function_name(),
         modal_social_comments_job_function_name(),
+        modal_social_comments_recovery_job_function_name(),
     )
 
 
@@ -515,6 +524,16 @@ def remote_probe_timeout_payload(
     if worker_family:
         payload["worker_family"] = worker_family
     return payload
+
+
+def _instagram_comments_probe_failure_is_advisory(probe: dict[str, Any]) -> bool:
+    status = str(probe.get("status") or probe.get("result") or "").strip().lower()
+    reason = str(probe.get("reason") or "").strip().lower()
+    if bool(probe.get("session_invalidated")):
+        return False
+    if reason in {BROWSER_SESSION_INVALIDATED_REASON, "checkpoint_required", "challenge_required", "login_required"}:
+        return False
+    return bool(probe.get("retryable")) and status == "transport_blocked"
 
 
 def invoke_modal_function_with_timeout(function_handle: Any, *args: Any, timeout_seconds: int) -> Any:
@@ -998,7 +1017,11 @@ def verify_modal_readiness(
             str(instagram_comments_auth_probe.get("reason") or "instagram_comments_auth_probe_failed").strip()
             or "instagram_comments_auth_probe_failed"
         )
-        blocking_probe_failures.append(comments_reason)
+        if _instagram_comments_probe_failure_is_advisory(instagram_comments_auth_probe):
+            instagram_comments_auth_probe["advisory_continue"] = True
+            advisory_probe_failures.append(comments_reason)
+        else:
+            blocking_probe_failures.append(comments_reason)
     if getty_remote_probe is not None and not bool(getty_remote_probe.get("ready")):
         advisory_probe_failures.append(
             str(getty_remote_probe.get("reason") or "getty_remote_probe_failed").strip() or "getty_remote_probe_failed"

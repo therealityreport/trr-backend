@@ -52,7 +52,7 @@ def test_fetch_comments_stops_on_repeated_cursor(monkeypatch) -> None:
     assert scraper.last_comment_fetch_reason == "pagination_repeated_cursor"
 
 
-def test_fetch_comment_replies_stops_on_page_cap(monkeypatch) -> None:
+def test_fetch_comment_replies_ignores_page_cap_env_until_terminal_page(monkeypatch) -> None:
     monkeypatch.setenv("SOCIAL_INSTAGRAM_REPLY_PAGINATION_MAX_PAGES", "1")
     scraper = InstagramScraper.__new__(InstagramScraper)
     scraper.last_comment_fetch_reason = None
@@ -76,8 +76,7 @@ def test_fetch_comment_replies_stops_on_page_cap(monkeypatch) -> None:
                 {
                     "status": "ok",
                     "child_comments": [{"id": "r2"}],
-                    "has_more_tail_child_comments": True,
-                    "next_min_child_cursor": "reply-3",
+                    "has_more_tail_child_comments": False,
                 }
             ),
         ]
@@ -92,5 +91,5 @@ def test_fetch_comment_replies_stops_on_page_cap(monkeypatch) -> None:
         delay=0,
     )
 
-    assert len(replies) == 1
-    assert scraper.last_comment_fetch_reason == "pagination_page_cap_reached"
+    assert len(replies) == 2
+    assert scraper.last_comment_fetch_reason is None

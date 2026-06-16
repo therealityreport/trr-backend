@@ -15,7 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RENDER_BLUEPRINT_PATH = REPO_ROOT / "render.yaml"
 RENDER_DOC_PATH = REPO_ROOT / "docs" / "deploy" / "render.md"
 SOURCE_ENV_PATH = REPO_ROOT / ".env"
-DECODO_TOKEN_KEYS = ("SCRAPER_API_TOKEN", "DECODO_AUTH_TOKEN", "DECODO_API_TOKEN")
+DECODO_USAGE_API_TOKEN_KEYS = ("DECODO_API_TOKEN", "DECODO_AUTH_TOKEN")
 
 
 def default_component(*, verify_only: bool) -> dict[str, Any]:
@@ -52,13 +52,15 @@ def _launchctl_has_env_value(key: str) -> bool:
     return completed.returncode == 0 and bool(completed.stdout.strip())
 
 
-def _configured_decodo_token_sources() -> list[str]:
+def _configured_decodo_usage_api_sources() -> list[str]:
     sources: list[str] = []
-    for key in DECODO_TOKEN_KEYS:
+    for key in DECODO_USAGE_API_TOKEN_KEYS:
         if _resolve_env_value(key):
             sources.append(f"env:{key}")
         elif _launchctl_has_env_value(key):
             sources.append(f"launchctl:{key}")
+    if _resolve_env_value("DECODO_API_USERNAME") and _resolve_env_value("DECODO_API_PASSWORD"):
+        sources.append("env:DECODO_API_USERNAME_PASSWORD")
     return sources
 
 
@@ -79,23 +81,35 @@ def verify_render_contract() -> dict[str, Any]:
 
 def verify_decodo_contract() -> dict[str, Any]:
     component = default_component(verify_only=True)
+    proxy_url = _resolve_env_value("DECODO_PROXY_URL")
+    proxy_url_launchctl_configured = not proxy_url and _launchctl_has_env_value("DECODO_PROXY_URL")
     username = _resolve_env_value("DECODO_USERNAME")
     password = _resolve_env_value("DECODO_PASSWORD")
-    gateway = _resolve_env_value("DECODO_GATEWAY") or "gate.decodo.com:7000"
-    token_sources = _configured_decodo_token_sources()
-    proxy_configured = bool(username and password)
-    mcp_configured = bool(token_sources)
-    if not proxy_configured and not mcp_configured:
+    gateway = _resolve_env_value("DECODO_GATEWAY") or "gate.decodo.com:10001"
+    usage_api_sources = _configured_decodo_usage_api_sources()
+    proxy_url_configured = bool(proxy_url or proxy_url_launchctl_configured)
+    credential_proxy_configured = bool(username and password)
+    proxy_configured = proxy_url_configured or credential_proxy_configured
+    if not proxy_configured:
         component["state"] = "advisory"
         component["reason"] = "decodo_unconfigured"
         component["remediation"] = (
-            "Configure SCRAPER_API_TOKEN for Decodo MCP/API lanes or DECODO_USERNAME and DECODO_PASSWORD "
-            "for proxy-backed hosted lanes."
+            "Configure DECODO_PROXY_URL or DECODO_USERNAME and DECODO_PASSWORD "
+            "for TRR custom scraper residential proxy lanes."
         )
     component["gateway"] = gateway
+    component["required_decodo_product"] = "residential_proxy"
+    component["web_scraping_api_required"] = False
+    component["custom_scraper_env"] = {
+        "preferred": "DECODO_PROXY_URL",
+        "fallback": ["DECODO_USERNAME", "DECODO_PASSWORD", "DECODO_GATEWAY"],
+        "not_required": ["SCRAPER_API_TOKEN"],
+    }
     component["proxy_configured"] = proxy_configured
-    component["mcp_token_configured"] = mcp_configured
-    component["token_sources"] = token_sources
+    component["proxy_url_configured"] = proxy_url_configured
+    component["credential_proxy_configured"] = credential_proxy_configured
+    component["usage_api_configured"] = bool(usage_api_sources)
+    component["usage_api_sources"] = usage_api_sources
     return component
 
 

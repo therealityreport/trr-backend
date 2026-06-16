@@ -75,7 +75,6 @@ def _fetch_open_social_jobs() -> list[dict[str, Any]]:
           claimed_at,
           heartbeat_at,
           created_at,
-          updated_at,
           last_error_code,
           error_message
         from social.scrape_jobs

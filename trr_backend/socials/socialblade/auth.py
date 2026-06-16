@@ -23,6 +23,7 @@ from trr_backend.socials.browser_cookie_refresh import (
 
 SOCIALBLADE_COOKIE_DOMAINS = (".socialblade.com", "socialblade.com")
 SOCIALBLADE_REQUIRED_COOKIE_NAMES_ANY = ("cf_clearance",)
+SOCIALBLADE_REQUIRED_COOKIE_NAMES_ALL = ("session",)
 SOCIALBLADE_ACCESS_DENIED_PATTERNS = (
     r"Access denied",
     r"Error reference number:\s*1020",
@@ -46,10 +47,20 @@ _FALLBACK_SHARED_CHROME_CDP_URLS = (
     "http://127.0.0.1:9422",
     "http://127.0.0.1:9222",
 )
+_RETIRED_CODEX_PROFILE_PREFIX = "codex" + "-agent"
+_LEGACY_MANAGED_CHROME_PROFILE_NAMES = frozenset(
+    {_RETIRED_CODEX_PROFILE_PREFIX, f"{_RETIRED_CODEX_PROFILE_PREFIX}-devtools"}
+)
+_MANAGED_CHROME_PROFILE_ENV_KEYS = (
+    "CODEX_CHROME_SEED_PROFILE_DIR",
+    "CODEX_CHROME_PROFILE_DIR",
+    "CHROME_AGENT_PROFILE_DIR",
+    "SOCIALBLADE_CHROME_PROFILE_DIR",
+)
 
 
 class VisibleManagedChromeProfileError(RuntimeError):
-    """Raised when the local visible managed Chrome is not the codex profile."""
+    """Raised when local SocialBlade Chrome profile routing is unsafe."""
 
 
 def _default_socialblade_cookie_file_path() -> Path:
@@ -78,6 +89,7 @@ def load_socialblade_cookies_from_sources() -> dict[str, str]:
         file_env_keys=("SOCIALBLADE_COOKIES_FILE",),
         default_path=_default_socialblade_cookie_file_path(),
         required_cookie_names_any=SOCIALBLADE_REQUIRED_COOKIE_NAMES_ANY,
+        required_cookie_names_all=SOCIALBLADE_REQUIRED_COOKIE_NAMES_ALL,
     )
 
 
@@ -93,8 +105,30 @@ def validate_socialblade_cookie_health(cookies: dict[str, str]) -> tuple[bool, s
         validation_url=_socialblade_validation_url(),
         cookie_domains=SOCIALBLADE_COOKIE_DOMAINS,
         required_cookie_names_any=SOCIALBLADE_REQUIRED_COOKIE_NAMES_ANY,
+        required_cookie_names_all=SOCIALBLADE_REQUIRED_COOKIE_NAMES_ALL,
         timeout_seconds=45,
     )
+
+
+def _missing_required_socialblade_cookie_reason(cookies: dict[str, str]) -> str | None:
+    missing_all = [
+        name for name in SOCIALBLADE_REQUIRED_COOKIE_NAMES_ALL if not str(cookies.get(name) or "").strip()
+    ]
+    if missing_all:
+        return f"missing_required_cookie:{','.join(missing_all)}"
+
+    has_any_required_cookie = any(
+        str(cookies.get(name) or "").strip() for name in SOCIALBLADE_REQUIRED_COOKIE_NAMES_ANY
+    )
+    if SOCIALBLADE_REQUIRED_COOKIE_NAMES_ANY and not has_any_required_cookie:
+        return f"missing_any_cookie:{','.join(SOCIALBLADE_REQUIRED_COOKIE_NAMES_ANY)}"
+    return None
+
+
+def require_socialblade_authenticated_cookies(cookies: dict[str, str], *, source: str) -> None:
+    reason = _missing_required_socialblade_cookie_reason(cookies)
+    if reason:
+        raise RuntimeError(f"{source} did not capture required SocialBlade authenticated cookies ({reason})")
 
 
 def _body_text_matches_access_denied(body_text: str) -> bool:
@@ -201,9 +235,42 @@ def _run_visible_managed_chrome_guard(cdp_url: str) -> bool:
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or str(exc)).strip()
         raise VisibleManagedChromeProfileError(
-            f"Visible shared Chrome is not using the expected codex@thereality.report profile. {detail}"
+            "Visible shared Chrome is not using the expected openai-agent managed clone. "
+            "If the user asks for the Codex profile, use the real codex@thereality.report Chrome profile, "
+            f"not the managed clone. {detail}"
         ) from exc
     return True
+
+
+def _legacy_managed_chrome_profile_name(raw_value: str) -> str | None:
+    rendered = str(raw_value or "").strip()
+    if not rendered:
+        return None
+    name = Path(rendered).expanduser().name
+    if name in _LEGACY_MANAGED_CHROME_PROFILE_NAMES or name.startswith(f"{_RETIRED_CODEX_PROFILE_PREFIX}-"):
+        return name
+    return None
+
+
+def preflight_socialblade_chrome_profile(*, require_visible_managed: bool = False) -> None:
+    """Fail before a SocialBlade run can use the retired managed profile."""
+    violations: list[str] = []
+    for env_key in _MANAGED_CHROME_PROFILE_ENV_KEYS:
+        env_value = str(os.getenv(env_key) or "").strip()
+        legacy_name = _legacy_managed_chrome_profile_name(env_value)
+        if legacy_name:
+            violations.append(f"{env_key}={env_value!r} uses retired profile {legacy_name!r}")
+
+    if violations:
+        raise VisibleManagedChromeProfileError(
+            "SocialBlade Chrome profile preflight failed: "
+            + "; ".join(violations)
+            + ". Use the openai-agent managed clone for automation. "
+            "When the user says Codex profile, use the real codex@thereality.report Chrome profile."
+        )
+
+    if require_visible_managed:
+        _ensure_visible_managed_chrome_available(_socialblade_visible_chrome_cdp_url())
 
 
 def _ensure_visible_managed_chrome_available(cdp_url: str) -> bool:
@@ -301,8 +368,7 @@ async def _export_socialblade_cookies_via_cdp_protocol_async(cdp_url: str) -> di
                 {"urls": [validation_url]},
             )
             cookies = cookie_payload(cookie_result.get("cookies") or [], domains=SOCIALBLADE_COOKIE_DOMAINS)
-            if not cookies.get("cf_clearance"):
-                raise RuntimeError("Managed Chrome does not have a usable SocialBlade Cloudflare clearance cookie")
+            require_socialblade_authenticated_cookies(cookies, source="Managed Chrome")
             write_cookie_file(socialblade_cookie_file_path(), cookies)
             return cookies
     finally:
@@ -370,10 +436,7 @@ def export_socialblade_cookies_from_shared_chrome(*, cdp_url: str | None = None)
                     if _body_text_matches_access_denied(body_text):
                         raise RuntimeError("Managed Chrome SocialBlade session is blocked by Cloudflare")
                     cookies = cookie_payload(context.cookies(), domains=SOCIALBLADE_COOKIE_DOMAINS)
-                    if not cookies.get("cf_clearance"):
-                        raise RuntimeError(
-                            "Managed Chrome does not have a usable SocialBlade Cloudflare clearance cookie"
-                        )
+                    require_socialblade_authenticated_cookies(cookies, source="Managed Chrome")
                     write_cookie_file(socialblade_cookie_file_path(), cookies)
                     return cookies
                 finally:
@@ -393,6 +456,7 @@ def refresh_socialblade_cookies(
     allow_headless_fallback: bool = True,
 ) -> dict[str, str]:
     del reason
+    preflight_socialblade_chrome_profile()
     visible_cdp_url = _socialblade_visible_chrome_cdp_url()
     auto_launched_visible_chrome = False
     try:
@@ -439,8 +503,7 @@ def refresh_socialblade_cookies(
             if _body_text_matches_access_denied(body_text):
                 raise RuntimeError("SocialBlade cookie refresh was blocked by Cloudflare")
             cookies = cookie_payload(context.cookies(), domains=SOCIALBLADE_COOKIE_DOMAINS)
-            if not cookies.get("cf_clearance"):
-                raise RuntimeError("SocialBlade cookie refresh did not capture cf_clearance")
+            require_socialblade_authenticated_cookies(cookies, source="SocialBlade cookie refresh")
             write_cookie_file(socialblade_cookie_file_path(), cookies)
             return cookies
         finally:

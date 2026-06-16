@@ -72,7 +72,13 @@ class TestSyncFromLists:
 
         mock_db = MagicMock()
         mock_candidates = [MagicMock(), MagicMock()]
-        mock_result = MagicMock(created=1, updated=2, skipped=3)
+        show_id = str(uuid4())
+        mock_result = MagicMock(
+            created=1,
+            updated=2,
+            skipped=3,
+            upserted_show_rows=[{"id": show_id, "name": "Summer House"}],
+        )
 
         with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
             with patch(
@@ -83,11 +89,18 @@ class TestSyncFromLists:
                     "api.routers.admin_show_sync.upsert_candidates_into_supabase",
                     return_value=mock_result,
                 ):
-                    response = client.post(
-                        "/api/v1/admin/shows/sync-from-lists",
-                        headers={"Authorization": f"Bearer {token}"},
-                        json={"imdb_lists": ["https://www.imdb.com/list/ls1234567890/"], "tmdb_lists": ["8301263"]},
-                    )
+                    with patch("api.routers.admin_show_sync.ShowRefreshOrchestrator") as orchestrator_cls:
+                        orchestrator = orchestrator_cls.return_value
+                        orchestrator.create_operations.return_value = ("operation-1", [{"id": "sub-1"}])
+                        orchestrator.get_waves.return_value = [[{"id": "sub-1", "request_payload": {}}]]
+                        response = client.post(
+                            "/api/v1/admin/shows/sync-from-lists",
+                            headers={"Authorization": f"Bearer {token}"},
+                            json={
+                                "imdb_lists": ["https://www.imdb.com/list/ls1234567890/"],
+                                "tmdb_lists": ["8301263"],
+                            },
+                        )
 
         assert response.status_code == 200
         data = response.json()
@@ -98,6 +111,45 @@ class TestSyncFromLists:
         assert data["imdb_lists_used"]
         assert data["tmdb_lists_used"]
         assert isinstance(data["duration_ms"], int)
+        assert data["auto_refresh_operations"] == [
+            {"show_id": show_id, "operation_id": "operation-1", "targets": ["show_core"]}
+        ]
+        assert data["auto_refresh_paused"] is False
+
+    def test_sync_from_lists_respects_global_auto_refresh_pause(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        monkeypatch.setenv("TMDB_API_KEY", "tmdb-key")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+        mock_db = MagicMock()
+        mock_candidates = [MagicMock()]
+        show_id = str(uuid4())
+        mock_result = MagicMock(
+            created=0,
+            updated=1,
+            skipped=0,
+            upserted_show_rows=[{"id": show_id, "name": "Summer House"}],
+        )
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch("api.routers.admin_show_sync.collect_candidates_from_lists", return_value=mock_candidates):
+                with patch("api.routers.admin_show_sync.upsert_candidates_into_supabase", return_value=mock_result):
+                    with patch(
+                        "api.routers.admin_show_sync.admin_runtime_settings.show_core_auto_refresh_paused",
+                        return_value=True,
+                    ):
+                        with patch("api.routers.admin_show_sync.ShowRefreshOrchestrator") as orchestrator_cls:
+                            response = client.post(
+                                "/api/v1/admin/shows/sync-from-lists",
+                                headers={"Authorization": f"Bearer {token}"},
+                                json={"tmdb_lists": ["8301263"]},
+                            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["auto_refresh_paused"] is True
+        assert data["auto_refresh_operations"] == []
+        orchestrator_cls.assert_not_called()
 
     def test_returns_500_json_detail_when_upsert_raises(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
@@ -130,7 +182,7 @@ class TestSyncFromLists:
 
         mock_db = MagicMock()
         mock_candidates = [MagicMock()]
-        mock_result = MagicMock(created=0, updated=1, skipped=0)
+        mock_result = MagicMock(created=0, updated=1, skipped=0, upserted_show_rows=[])
         with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
             with patch(
                 "api.routers.admin_show_sync.collect_candidates_from_lists",
@@ -154,6 +206,48 @@ class TestSyncFromLists:
         collect_kwargs = mock_collect.call_args.kwargs
         assert collect_kwargs["imdb_list_urls"] == []
         assert collect_kwargs["tmdb_lists"] == ["8301274"]
+
+
+def test_get_show_core_auto_refresh_settings(client, monkeypatch):
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=MagicMock()):
+        with patch(
+            "api.routers.admin_show_sync.admin_runtime_settings.get_show_core_auto_refresh_settings",
+            return_value={"paused": True, "updated_at": "2026-06-10T20:00:00+00:00", "updated_by": "admin"},
+        ):
+            response = client.get(
+                "/api/v1/admin/shows/settings/show-core-auto-refresh",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "paused": True,
+        "updated_at": "2026-06-10T20:00:00+00:00",
+        "updated_by": "admin",
+    }
+
+
+def test_update_show_core_auto_refresh_settings(client, monkeypatch):
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef", subject="admin-user")
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=MagicMock()):
+        with patch(
+            "api.routers.admin_show_sync.admin_runtime_settings.set_show_core_auto_refresh_paused",
+            return_value={"paused": True, "updated_at": "2026-06-10T20:00:00+00:00", "updated_by": "admin-user"},
+        ) as set_paused:
+            response = client.put(
+                "/api/v1/admin/shows/settings/show-core-auto-refresh",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"paused": True},
+            )
+
+    assert response.status_code == 200
+    assert response.json()["paused"] is True
+    assert set_paused.call_args.kwargs == {"paused": True, "updated_by": "service_role:unknown"}
 
 
 def test_refresh_show_bravo_target_disables_cast_matrix_sync_for_unified_refresh() -> None:
@@ -993,16 +1087,21 @@ class TestRefreshShow:
                             "api.routers.admin_show_sync.sync_seasons_episodes.reconcile_show_seasons_episodes",
                             return_value=1,
                         ) as reconcile:
-                            response = client.post(
-                                f"/api/v1/admin/shows/{show_id}/refresh",
-                                headers={"Authorization": f"Bearer {token}"},
-                                json={"targets": ["show_core"]},
-                            )
+                            with patch(
+                                "api.routers.admin_show_sync.sync_seasons_episodes.reconcile_missing_episode_imdb_ids",
+                                return_value=1,
+                            ) as reconcile_ids:
+                                response = client.post(
+                                    f"/api/v1/admin/shows/{show_id}/refresh",
+                                    headers={"Authorization": f"Bearer {token}"},
+                                    json={"targets": ["show_core"]},
+                                )
 
         assert response.status_code == 200
         payload = response.json()
         assert payload["results"]["show_core"]["status"] == "success"
         assert payload["results"]["show_core_reconcile"]["status"] == "success"
+        reconcile_ids.assert_called_once_with(mock_db, show_ids=[show_id], verbose=False)
         reconcile.assert_called_once_with(mock_db, show_ids=[show_id], verbose=False)
 
     def test_refresh_stream_emits_complete_event(self, client, monkeypatch):
@@ -1095,18 +1194,23 @@ class TestRefreshShow:
                     "api.routers.admin_show_sync.sync_seasons_episodes.reconcile_show_seasons_episodes",
                     return_value=1,
                 ) as reconcile:
-                    with client.stream(
-                        "POST",
-                        f"/api/v1/admin/shows/{show_id}/refresh/stream",
-                        headers={"Authorization": f"Bearer {token}"},
-                        json={"targets": ["seasons_episodes"]},
-                    ) as response:
-                        assert response.status_code == 200
-                        text = "\n".join(
-                            line.decode("utf-8") if isinstance(line, (bytes, bytearray)) else str(line)
-                            for line in response.iter_lines()
-                        )
+                    with patch(
+                        "api.routers.admin_show_sync.sync_seasons_episodes.reconcile_missing_episode_imdb_ids",
+                        return_value=1,
+                    ) as reconcile_ids:
+                        with client.stream(
+                            "POST",
+                            f"/api/v1/admin/shows/{show_id}/refresh/stream",
+                            headers={"Authorization": f"Bearer {token}"},
+                            json={"targets": ["seasons_episodes"]},
+                        ) as response:
+                            assert response.status_code == 200
+                            text = "\n".join(
+                                line.decode("utf-8") if isinstance(line, (bytes, bytearray)) else str(line)
+                                for line in response.iter_lines()
+                            )
 
+        reconcile_ids.assert_called_once_with(mock_db, show_ids=[show_id], verbose=False)
         reconcile.assert_called_once_with(mock_db, show_ids=[show_id], verbose=False)
         assert '"stage_key": "seasons_episodes_reconcile"' in text
 
@@ -1140,18 +1244,23 @@ class TestRefreshShow:
                         "api.routers.admin_show_sync.sync_seasons_episodes.reconcile_show_seasons_episodes",
                         return_value=1,
                     ) as reconcile:
-                        with client.stream(
-                            "POST",
-                            f"/api/v1/admin/shows/{show_id}/refresh/stream",
-                            headers={"Authorization": f"Bearer {token}"},
-                            json={"targets": ["show_core"]},
-                        ) as response:
-                            assert response.status_code == 200
-                            text = "\n".join(
-                                line.decode("utf-8") if isinstance(line, (bytes, bytearray)) else str(line)
-                                for line in response.iter_lines()
-                            )
+                        with patch(
+                            "api.routers.admin_show_sync.sync_seasons_episodes.reconcile_missing_episode_imdb_ids",
+                            return_value=1,
+                        ) as reconcile_ids:
+                            with client.stream(
+                                "POST",
+                                f"/api/v1/admin/shows/{show_id}/refresh/stream",
+                                headers={"Authorization": f"Bearer {token}"},
+                                json={"targets": ["show_core"]},
+                            ) as response:
+                                assert response.status_code == 200
+                                text = "\n".join(
+                                    line.decode("utf-8") if isinstance(line, (bytes, bytearray)) else str(line)
+                                    for line in response.iter_lines()
+                                )
 
+        reconcile_ids.assert_called_once_with(mock_db, show_ids=[show_id], verbose=False)
         reconcile.assert_called_once_with(mock_db, show_ids=[show_id], verbose=False)
         assert '"stage_key": "show_core_reconcile"' in text
 
@@ -1183,18 +1292,23 @@ class TestRefreshShow:
                     "api.routers.admin_show_sync.sync_seasons_episodes.reconcile_show_seasons_episodes",
                     return_value=1,
                 ) as reconcile:
-                    with client.stream(
-                        "POST",
-                        f"/api/v1/admin/shows/{show_id}/refresh/stream",
-                        headers={"Authorization": f"Bearer {token}"},
-                        json={"targets": ["seasons_episodes"]},
-                    ) as response:
-                        assert response.status_code == 200
-                        text = "\n".join(
-                            line.decode("utf-8") if isinstance(line, (bytes, bytearray)) else str(line)
-                            for line in response.iter_lines()
-                        )
+                    with patch(
+                        "api.routers.admin_show_sync.sync_seasons_episodes.reconcile_missing_episode_imdb_ids",
+                        return_value=1,
+                    ) as reconcile_ids:
+                        with client.stream(
+                            "POST",
+                            f"/api/v1/admin/shows/{show_id}/refresh/stream",
+                            headers={"Authorization": f"Bearer {token}"},
+                            json={"targets": ["seasons_episodes"]},
+                        ) as response:
+                            assert response.status_code == 200
+                            text = "\n".join(
+                                line.decode("utf-8") if isinstance(line, (bytes, bytearray)) else str(line)
+                                for line in response.iter_lines()
+                            )
 
+        reconcile_ids.assert_not_called()
         reconcile.assert_not_called()
         assert '"stage_key": "seasons_episodes_reconcile"' in text
         assert '"step_status": "skipped"' in text
@@ -1541,6 +1655,34 @@ class TestRefreshShow:
 
         assert response.status_code == 200
         assert start_operation.call_args.kwargs["allow_attach"] is False
+
+    def test_refresh_stream_blocks_automatic_show_core_when_global_pause_enabled(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+        mock_db = MagicMock()
+        show_id = str(uuid4())
+        show_resp = MagicMock()
+        show_resp.data = [{"id": show_id, "imdb_id": "tt1234567", "external_ids": {}}]
+        show_resp.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = show_resp
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch(
+                "api.routers.admin_show_sync.admin_runtime_settings.show_core_auto_refresh_paused",
+                return_value=True,
+            ):
+                with patch("api.routers.admin_show_sync.start_operation_for_stream") as start_operation:
+                    response = client.post(
+                        f"/api/v1/admin/shows/{show_id}/refresh/stream",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json={"targets": ["show_core"], "force_new_operation": True, "auto_refresh": True},
+                    )
+
+        assert response.status_code == 409
+        assert response.json()["detail"]["code"] == "SHOW_CORE_AUTO_REFRESH_PAUSED"
+        start_operation.assert_not_called()
 
     def test_refresh_stream_emits_heartbeat_and_request_id(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")

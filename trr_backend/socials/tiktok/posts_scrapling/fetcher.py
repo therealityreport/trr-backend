@@ -78,11 +78,6 @@ def _build_tiktok_headers(referer: str) -> dict[str, str]:
     }
 
 
-def _is_challenge_response(text: str) -> bool:
-    body = str(text or "").strip().lower()[:512]
-    return _classify_challenge_response(text) is not None
-
-
 def _classify_challenge_response(text: str) -> str | None:
     body = str(text or "").strip().lower()[:1024]
     if not body:

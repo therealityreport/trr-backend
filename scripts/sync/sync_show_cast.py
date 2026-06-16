@@ -17,13 +17,14 @@ from scripts._sync_common import (
 from trr_backend.ingestion.show_importer import parse_imdb_headers_json_env
 from trr_backend.integrations.imdb.fullcredits_cast_parser import (
     HttpImdbFullCreditsClient,
+    ImdbFullCreditsError,
+    fetch_fullcredits_cast_with_fallback,
     filter_self_cast_rows,
     parse_fullcredits_html,
 )
 from trr_backend.integrations.tmdb.client import TmdbClientError, find_by_imdb_id, resolve_api_key
 from trr_backend.repositories.credits import assert_core_credits_table_exists, insert_credits_ignore_conflicts
 from trr_backend.repositories.people import assert_core_people_table_exists, fetch_people_by_imdb_ids, insert_people
-from trr_backend.repositories.person_images import upsert_person_images
 from trr_backend.repositories.sync_state import (
     assert_core_sync_state_table_exists,
     mark_sync_state_failed,
@@ -168,21 +169,41 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             print(f"Fetching IMDb Full Credits for {imdb_id}...", flush=True)
-            client = HttpImdbFullCreditsClient(extra_headers=extra_headers)
-            html = client.fetch_fullcredits_page(imdb_id, verbose=bool(args.verbose))
-            parsed = parse_fullcredits_html(html, series_id=imdb_id)
+            source_type = "fullcredits_html"
+            try:
+                client = HttpImdbFullCreditsClient(extra_headers=extra_headers)
+                html = client.fetch_fullcredits_page(imdb_id, verbose=bool(args.verbose))
+                parsed = parse_fullcredits_html(html, series_id=imdb_id)
+                cast_rows = parsed.cast_rows
+                crew_rows = [row for row in parsed.crew_rows if row.credit_category in _IMDB_ALLOWLISTED_CREW_CATEGORIES]
+            except ImdbFullCreditsError as exc:
+                if not exc.is_blocked:
+                    raise
+                print(
+                    "IMDb Full Credits HTML blocked; falling back to cast-only IMDb GraphQL/API credits "
+                    f"for {imdb_id}.",
+                    flush=True,
+                )
+                cast_rows, source_type, _person_images = fetch_fullcredits_cast_with_fallback(
+                    imdb_id,
+                    extra_headers=extra_headers,
+                    verbose=bool(args.verbose),
+                    primary_source="graphql",
+                )
+                crew_rows = []
 
-            cast_rows_total += len(parsed.cast_rows)
-            self_rows = filter_self_cast_rows(parsed.cast_rows)
+            cast_rows_total += len(cast_rows)
+            self_rows = filter_self_cast_rows(cast_rows)
             cast_rows_self += len(self_rows)
-            crew_rows = [row for row in parsed.crew_rows if row.credit_category in _IMDB_ALLOWLISTED_CREW_CATEGORIES]
             crew_rows_total += len(crew_rows)
             print(
                 f"Parsed IMDb Full Credits: {len(self_rows)} cast rows and {len(crew_rows)} allowlisted crew rows.",
                 flush=True,
             )
-            source_type = "fullcredits_html"
-            person_images: list[dict[str, object]] = []
+            if not self_rows:
+                raise RuntimeError(
+                    "IMDb cast refresh returned zero usable Self rows; refusing to mark show_cast successful."
+                )
 
             credit_people = [*self_rows, *crew_rows]
             name_ids = [row.name_id.strip().lower() for row in credit_people if row.name_id]
@@ -258,13 +279,6 @@ def main(argv: list[str] | None = None) -> int:
                         imdb_value = str((row.get("external_ids") or {}).get("imdb") or "").strip().lower()
                         if imdb_value:
                             people_cache[imdb_value] = f"dry-run-{imdb_value}"
-
-            # Persist person images from GraphQL tier after ensuring people exist
-            if person_images and not args.dry_run:
-                if args.verbose:
-                    print(f"  Upserting {len(person_images)} person images...")
-                upserted_images = upsert_person_images(db, person_images, verbose=bool(args.verbose))
-                person_images_upserted += len(upserted_images)
 
             show_cast_rows: list[dict[str, object]] = []
             for row in self_rows:
@@ -350,6 +364,12 @@ def main(argv: list[str] | None = None) -> int:
                 credits_inserted += len(inserted)
             elif show_cast_rows or crew_credit_rows:
                 credits_inserted += len(show_cast_rows) + len(crew_credit_rows)
+
+            if source_type != "fullcredits_html":
+                raise RuntimeError(
+                    "IMDb cast refreshed with cast-only fallback source "
+                    f"{source_type}; allowlisted crew requires IMDb fullcredits HTML and was not refreshed."
+                )
 
             if not args.dry_run:
                 mark_sync_state_success(
