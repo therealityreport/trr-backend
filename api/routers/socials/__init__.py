@@ -244,10 +244,7 @@ def _landing_progress_cache_key(targets: list[tuple[str, str]]) -> tuple[Any, ..
 
 
 def _sql_json_text_non_negative_int(expr: str) -> str:
-    return (
-        "coalesce(nullif(regexp_replace(coalesce("
-        f"{expr}, ''), '[^0-9]', '', 'g'), '')::bigint, 0)"
-    )
+    return f"coalesce(nullif(regexp_replace(coalesce({expr}, ''), '[^0-9]', '', 'g'), '')::bigint, 0)"
 
 
 def _instagram_reported_comments_sql(alias: str) -> str:
@@ -4775,7 +4772,10 @@ def get_social_account_comments_audit_cursor_retries_route(
     if platform.strip().lower() != "instagram":
         raise HTTPException(
             status_code=400,
-            detail={"code": "SOCIAL_ACCOUNT_COMMENTS_UNSUPPORTED_PLATFORM", "message": "Audit cursor retries are Instagram-only."},
+            detail={
+                "code": "SOCIAL_ACCOUNT_COMMENTS_UNSUPPORTED_PLATFORM",
+                "message": "Audit cursor retries are Instagram-only.",
+            },
         )
     try:
         return get_instagram_comments_audit_cursor_recovery(
@@ -4806,7 +4806,10 @@ async def post_social_account_comments_audit_cursor_retries_route(
     if platform.strip().lower() != "instagram":
         raise HTTPException(
             status_code=400,
-            detail={"code": "SOCIAL_ACCOUNT_COMMENTS_UNSUPPORTED_PLATFORM", "message": "Audit cursor retries are Instagram-only."},
+            detail={
+                "code": "SOCIAL_ACCOUNT_COMMENTS_UNSUPPORTED_PLATFORM",
+                "message": "Audit cursor retries are Instagram-only.",
+            },
         )
     try:
         return await run_in_threadpool(
