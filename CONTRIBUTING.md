@@ -37,6 +37,10 @@ Hooks run `ruff`, `gitleaks`, and basic hygiene checks on staged files before
 each commit. They only touch files you actually change, so the existing
 lint/format backlog will not block unrelated commits.
 
+Note: the `ruff` / `ruff-format` and end-of-file/trailing-whitespace hooks
+**auto-fix in place**. When a hook rewrites a file, the commit is aborted so you
+can review and `git add` the changes, then commit again.
+
 ```bash
 uv tool install pre-commit   # or: pipx install pre-commit
 pre-commit install
