@@ -496,7 +496,9 @@ def post_social_landing_progress_rollup(
         cache_key,
     )
     if cached_payload is not None:
+        total_ms = int((perf_counter() - started_at) * 1000)
         cached_payload["cache_status"] = "hit"
+        cached_payload["timing"] = {"backend_ms": total_ms, "database_ms": 0, "total_ms": total_ms}
         return cached_payload
 
     instagram_reported_comments_sql = _instagram_reported_comments_sql("p")

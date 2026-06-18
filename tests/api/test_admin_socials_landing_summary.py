@@ -229,7 +229,9 @@ def test_social_landing_progress_rollup_uses_social_profile_pool_and_caches(monk
     assert first["timing"]["database_ms"] >= 0
     assert first["timing"]["backend_ms"] >= first["timing"]["database_ms"]
     assert first["timing"]["total_ms"] == first["timing"]["backend_ms"]
-    assert second["timing"] == first["timing"]
+    assert second["timing"]["database_ms"] == 0
+    assert second["timing"]["backend_ms"] >= 0
+    assert second["timing"]["total_ms"] == second["timing"]["backend_ms"]
     assert first["rows"][0] == {
         "platform": "instagram",
         "account_handle": "bravotv",
