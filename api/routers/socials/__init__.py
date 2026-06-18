@@ -244,10 +244,7 @@ def _landing_progress_cache_key(targets: list[tuple[str, str]]) -> tuple[Any, ..
 
 
 def _sql_json_text_non_negative_int(expr: str) -> str:
-    return (
-        "coalesce(nullif(regexp_replace(coalesce("
-        f"{expr}, ''), '[^0-9]', '', 'g'), '')::bigint, 0)"
-    )
+    return f"coalesce(nullif(regexp_replace(coalesce({expr}, ''), '[^0-9]', '', 'g'), '')::bigint, 0)"
 
 
 def _instagram_reported_comments_sql(alias: str) -> str:
@@ -481,12 +478,15 @@ def post_social_landing_progress_rollup(
 ) -> dict[str, Any]:
     from trr_backend.db import pg
 
+    started_at = perf_counter()
     targets = _normalize_landing_progress_targets(payload.platforms, payload.account_handles)
     if not targets:
+        total_ms = int((perf_counter() - started_at) * 1000)
         return {
             "rows": [],
             "cache_status": "bypass",
             "generated_at": datetime.now(tz=UTC).isoformat(),
+            "timing": {"backend_ms": total_ms, "database_ms": 0, "total_ms": total_ms},
         }
 
     cache_key = _landing_progress_cache_key(targets)
@@ -496,12 +496,14 @@ def post_social_landing_progress_rollup(
         cache_key,
     )
     if cached_payload is not None:
+        total_ms = int((perf_counter() - started_at) * 1000)
         cached_payload["cache_status"] = "hit"
+        cached_payload["timing"] = {"backend_ms": total_ms, "database_ms": 0, "total_ms": total_ms}
         return cached_payload
 
-    started_at = perf_counter()
     instagram_reported_comments_sql = _instagram_reported_comments_sql("p")
     try:
+        db_started_at = perf_counter()
         rows = pg.fetch_all(
             f"""
             WITH targets AS (
@@ -779,11 +781,14 @@ def post_social_landing_progress_rollup(
             [[platform for platform, _handle in targets], [handle for _platform, handle in targets]],
             pool_name="social_profile",
         )
+        db_ms = int((perf_counter() - db_started_at) * 1000)
+        total_ms = int((perf_counter() - started_at) * 1000)
         generated_at = datetime.now(tz=UTC).isoformat()
         payload_out = {
             "rows": jsonable_encoder(rows),
             "cache_status": "miss",
             "generated_at": generated_at,
+            "timing": {"backend_ms": total_ms, "database_ms": db_ms, "total_ms": total_ms},
         }
         _set_ttl_cached_payload(
             _SOCIAL_LANDING_PROGRESS_ROLLUP_CACHE,
@@ -794,10 +799,11 @@ def post_social_landing_progress_rollup(
             max_entries=SOCIAL_LANDING_PROGRESS_ROLLUP_CACHE_MAX_ENTRIES,
         )
         logger.info(
-            "Built social landing progress rollup targets=%s rows=%s elapsed_ms=%s cache_status=miss",
+            "Built social landing progress rollup targets=%s rows=%s elapsed_ms=%s db_ms=%s cache_status=miss",
             len(targets),
             len(rows),
-            int((perf_counter() - started_at) * 1000),
+            total_ms,
+            db_ms,
         )
         return payload_out
     except Exception as exc:  # noqa: BLE001
@@ -4768,7 +4774,10 @@ def get_social_account_comments_audit_cursor_retries_route(
     if platform.strip().lower() != "instagram":
         raise HTTPException(
             status_code=400,
-            detail={"code": "SOCIAL_ACCOUNT_COMMENTS_UNSUPPORTED_PLATFORM", "message": "Audit cursor retries are Instagram-only."},
+            detail={
+                "code": "SOCIAL_ACCOUNT_COMMENTS_UNSUPPORTED_PLATFORM",
+                "message": "Audit cursor retries are Instagram-only.",
+            },
         )
     try:
         return get_instagram_comments_audit_cursor_recovery(
@@ -4799,7 +4808,10 @@ async def post_social_account_comments_audit_cursor_retries_route(
     if platform.strip().lower() != "instagram":
         raise HTTPException(
             status_code=400,
-            detail={"code": "SOCIAL_ACCOUNT_COMMENTS_UNSUPPORTED_PLATFORM", "message": "Audit cursor retries are Instagram-only."},
+            detail={
+                "code": "SOCIAL_ACCOUNT_COMMENTS_UNSUPPORTED_PLATFORM",
+                "message": "Audit cursor retries are Instagram-only.",
+            },
         )
     try:
         return await run_in_threadpool(
