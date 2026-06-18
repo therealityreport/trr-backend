@@ -161,6 +161,9 @@ def test_social_landing_progress_rollup_returns_empty_rows_without_db(monkeypatc
     assert payload["rows"] == []
     assert payload["cache_status"] == "bypass"
     assert "generated_at" in payload
+    assert payload["timing"]["database_ms"] == 0
+    assert payload["timing"]["backend_ms"] >= 0
+    assert payload["timing"]["total_ms"] >= 0
 
 
 def test_social_landing_progress_rollup_rejects_mismatched_targets() -> None:
@@ -223,6 +226,10 @@ def test_social_landing_progress_rollup_uses_social_profile_pool_and_caches(monk
     assert "comment_counts AS" not in str(captured["query"])
     assert first["cache_status"] == "miss"
     assert second["cache_status"] == "hit"
+    assert first["timing"]["database_ms"] >= 0
+    assert first["timing"]["backend_ms"] >= first["timing"]["database_ms"]
+    assert first["timing"]["total_ms"] == first["timing"]["backend_ms"]
+    assert second["timing"] == first["timing"]
     assert first["rows"][0] == {
         "platform": "instagram",
         "account_handle": "bravotv",
