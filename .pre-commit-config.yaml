@@ -1,0 +1,36 @@
+# Pre-commit hooks for TRR-Backend.
+#
+# One-time setup:
+#   uv tool install pre-commit   # or: pipx install pre-commit
+#   pre-commit install
+#
+# Hooks run only on STAGED files by default, so the existing lint/format
+# backlog (legacy files) never blocks a commit that does not touch them.
+# To lint the whole tree on demand:  pre-commit run --all-files
+# To bump pinned hook versions:      pre-commit autoupdate
+#
+# ruff/ruff-format reuse ruff.toml; gitleaks auto-discovers .gitleaks.toml
+# and .gitleaksignore at the repo root.
+minimum_pre_commit_version: "3.5.0"
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.4
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-yaml
+        args: [--allow-multiple-documents]

@@ -48,9 +48,7 @@ jobs:
           diff -u /tmp/requirements.lock.before.txt requirements.lock.txt
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+        run: uv pip sync --system requirements.lock.txt
 
       - name: Import gate
         run: python -c "import api.main"
@@ -81,13 +79,142 @@ jobs:
       - name: Check repo hygiene
         run: python scripts/check_repo_hygiene.py
 
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.9.27"
+
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+        run: uv pip sync --system requirements.lock.txt
 
       - name: Import gate
         run: python -c "import api.main"
 
       - name: Run API smoke subset
         run: python -m pytest tests/api -q
+
+
+  lint:
+    name: Ruff (changed files, forward-only)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.9.27"
+
+      - name: Determine changed Python files
+        id: changed
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          if [ -z "$base" ] \
+            || [ "$base" = "0000000000000000000000000000000000000000" ] \
+            || ! git cat-file -e "$base" 2>/dev/null; then
+            base="$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)"
+          fi
+          files="$(git diff --name-only --diff-filter=ACM "$base"...HEAD -- '*.py' | tr '\n' ' ')"
+          echo "files=$files" >> "$GITHUB_OUTPUT"
+          echo "Changed Python files: ${files:-<none>}"
+
+      # Forward-only: lints only files touched by this change, so the existing
+      # backlog (186 lint findings / 80 unformatted files as of 2026-06) does
+      # not block CI. Burn the backlog down separately, then drop the diff scope.
+      - name: Ruff check (changed files only)
+        if: steps.changed.outputs.files != ''
+        run: uvx ruff@0.14.4 check ${{ steps.changed.outputs.files }}
+
+      - name: Ruff format check (changed files only)
+        if: steps.changed.outputs.files != ''
+        run: uvx ruff@0.14.4 format --check ${{ steps.changed.outputs.files }}
+
+
+  typecheck:
+    name: Pyright (non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.9"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.9.27"
+
+      - name: Install dependencies
+        run: |
+          uv pip sync --system requirements.lock.txt
+          uv pip install --system pyright
+
+      - name: Pyright
+        run: pyright
+
+
+  modal-locks:
+    name: Modal lockfile freshness (non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.9.27"
+
+      # Mirrors the base-lockfile freshness check for the three Modal lockfiles.
+      # Non-blocking until confirmed reproducible under the pinned uv version.
+      - name: Verify lean/browser/vision lockfile freshness
+        run: |
+          set -euo pipefail
+          recompile_and_diff() {
+            local infile="$1" lockfile="$2"; shift 2
+            cp "$lockfile" "/tmp/$(basename "$lockfile").before"
+            uv pip compile "$infile" "$@" -o "$lockfile"
+            diff -u "/tmp/$(basename "$lockfile").before" "$lockfile"
+          }
+          recompile_and_diff requirements.modal.lean.in requirements.modal.lean.lock.txt
+          recompile_and_diff requirements.modal.browser.in requirements.modal.browser.lock.txt \
+            --python-platform x86_64-manylinux_2_28
+          recompile_and_diff requirements.modal.vision.in requirements.modal.vision.lock.txt \
+            --python-platform x86_64-manylinux_2_28 --index-strategy unsafe-best-match
+
+
+  test-full:
+    name: Full pytest (non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.9"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.9.27"
+
+      - name: Install dependencies
+        run: uv pip sync --system requirements.lock.txt
+
+      - name: Run full suite (excluding browser/vision/live)
+        run: python -m pytest tests -q -m "not browser and not vision and not live"
