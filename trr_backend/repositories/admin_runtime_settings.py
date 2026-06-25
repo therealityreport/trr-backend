@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from trr_backend.db import pg
@@ -60,6 +61,49 @@ def get_show_core_auto_refresh_settings() -> dict[str, Any]:
 
 def show_core_auto_refresh_paused() -> bool:
     return bool(get_show_core_auto_refresh_settings()["paused"])
+
+
+def get_runtime_setting(key: str) -> dict[str, Any]:
+    _ensure_runtime_settings_table()
+    cleaned_key = str(key or "").strip()
+    if not cleaned_key:
+        return {}
+    row = pg.fetch_one(
+        """
+        select value
+        from core.admin_runtime_settings
+        where key = %s
+        limit 1
+        """,
+        [cleaned_key],
+    )
+    value = row.get("value") if row else {}
+    return value if isinstance(value, dict) else {}
+
+
+def set_runtime_setting(key: str, value: dict[str, Any], *, updated_by: str | None = None) -> dict[str, Any]:
+    _ensure_runtime_settings_table()
+    cleaned_key = str(key or "").strip()
+    if not cleaned_key:
+        raise ValueError("runtime setting key is required")
+    row = pg.fetch_one(
+        """
+        insert into core.admin_runtime_settings (key, value, updated_at, updated_by)
+        values (%s, %s::jsonb, now(), nullif(btrim(%s), ''))
+        on conflict (key) do update set
+          value = excluded.value,
+          updated_at = now(),
+          updated_by = excluded.updated_by
+        returning value
+        """,
+        [
+            cleaned_key,
+            json.dumps(value if isinstance(value, dict) else {}, ensure_ascii=True, default=str),
+            updated_by or "",
+        ],
+    )
+    saved = row.get("value") if row else {}
+    return saved if isinstance(saved, dict) else {}
 
 
 def set_show_core_auto_refresh_paused(*, paused: bool, updated_by: str | None = None) -> dict[str, Any]:

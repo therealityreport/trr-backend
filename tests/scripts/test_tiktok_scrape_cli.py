@@ -25,6 +25,7 @@ def test_smoke_posts_scrapling_direct_file_help_works() -> None:
     assert result.returncode == 0, result.stderr
     assert "--account" in result.stdout
     assert "--max-pages" in result.stdout
+    assert "--max-posts" not in result.stdout
 
 
 def test_smoke_posts_scrapling_loads_env_before_running(monkeypatch, capsys) -> None:
@@ -77,6 +78,7 @@ def test_run_posts_scrapling_smoke_uses_current_source_scope(monkeypatch) -> Non
     assert tiktok_ops.run_posts_scrapling_smoke(account="bravotv", max_pages=1)["status"] == "completed"
     assert captured["run"]["source_scope"] == "network"
     assert captured["job"]["source_scope"] == "network"
+    assert "max_posts" not in captured["job"]["config"]
 
 
 def test_proxy_label_redacts_schemeless_proxy_credentials() -> None:

@@ -88,17 +88,17 @@ crash-looping entries.
 <!-- modal-deploy-history:start -->
 ## Deploy History Stamp
 
-- Last stamped: `2026-06-11T23:22:58-04:00`
+- Last stamped: `2026-06-25T16:36:37-04:00`
 - Workspace: `admin-56995`
 - Profile: `admin-56995`
 - Canary: `https://admin-56995--trr-backend-api.modal.run/health` HTTP `200` on attempt `1`
 
 | Version | Deployed At | Deployed By | Commit | Client |
 | --- | --- | --- | --- | --- |
-| v456 | 2026-06-11 23:22:38-04:00 | admin-56995 | 9ca1486* | 1.4.0 |
-| v455 | 2026-06-11 23:22:02-04:00 | admin-56995 | 9ca1486* | 1.4.0 |
-| v454 | 2026-06-11 21:49:18-04:00 | admin-56995 | 9ca1486* | 1.4.0 |
-| v453 | 2026-06-11 21:42:34-04:00 | admin-56995 | 9ca1486* | 1.4.0 |
-| v452 | 2026-06-11 19:14:52-04:00 | admin-56995 | 9ca1486* | 1.4.0 |
+| v94 | 2026-06-25 16:36:11-04:00 | admin-56995 | 0d1a1b0* | 1.4.0 |
+| v93 | 2026-06-25 13:28:00-04:00 | admin-56995 | 0d1a1b0* | 1.4.0 |
+| v92 | 2026-06-25 13:18:08-04:00 | admin-56995 | 0d1a1b0* | 1.4.0 |
+| v91 | 2026-06-25 13:08:52-04:00 | admin-56995 | 0d1a1b0* | 1.4.0 |
+| v90 | 2026-06-25 12:54:44-04:00 | admin-56995 | 0d1a1b0* | 1.4.0 |
 
 <!-- modal-deploy-history:end -->

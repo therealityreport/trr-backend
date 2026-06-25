@@ -64,9 +64,9 @@ class TikTokPostsScraplingCancelledError(Exception):
 TikTokPostsScraplingCancelled = TikTokPostsScraplingCancelledError
 
 _OPERATION_TIMEOUT_SECONDS_DEFAULT = 240.0
+_CANONICAL_FALLBACK_TIMEOUT_SECONDS_DEFAULT = 0.0
 _OPERATION_HEARTBEAT_INTERVAL_SECONDS_DEFAULT = 30.0
 _CANONICAL_TIKTOK_FALLBACK_REASONS = frozenset({"non_json_response", "challenge_or_blocked"})
-_CANONICAL_TIKTOK_FALLBACK_MAX_POSTS_CAP = 250
 
 
 def _resolve_operation_timeout_seconds() -> float:
@@ -82,6 +82,19 @@ def _resolve_operation_timeout_seconds() -> float:
     return min(max(parsed, 5.0), 900.0)
 
 
+def _resolve_canonical_fallback_timeout_seconds() -> float:
+    raw_value = str(os.getenv("SOCIAL_TIKTOK_POSTS_CANONICAL_FALLBACK_TIMEOUT_SECONDS") or "").strip()
+    if not raw_value:
+        return _CANONICAL_FALLBACK_TIMEOUT_SECONDS_DEFAULT
+    try:
+        parsed = float(raw_value)
+    except (TypeError, ValueError):
+        return _CANONICAL_FALLBACK_TIMEOUT_SECONDS_DEFAULT
+    if parsed <= 0:
+        return 0.0
+    return min(max(parsed, 30.0), 86_400.0)
+
+
 def _resolve_operation_heartbeat_interval_seconds() -> float:
     raw_value = str(os.getenv("SOCIAL_TIKTOK_POSTS_SCRAPLING_HEARTBEAT_INTERVAL_SECONDS") or "").strip()
     if not raw_value:
@@ -95,14 +108,6 @@ def _resolve_operation_heartbeat_interval_seconds() -> float:
 
 def _should_use_canonical_tiktok_fallback(fetch_reason: Any) -> bool:
     return str(fetch_reason or "").strip().lower() in _CANONICAL_TIKTOK_FALLBACK_REASONS
-
-
-def _canonical_tiktok_fallback_max_posts(max_pages: int | None) -> int:
-    page_count = max(1, int(max_pages or 1))
-    return min(
-        _CANONICAL_TIKTOK_FALLBACK_MAX_POSTS_CAP,
-        page_count * tiktok_posts_scrapling_page_size(),
-    )
 
 
 def _canonical_tiktok_fallback_page_count(*, posts_found: int, max_pages: int | None) -> int:
@@ -124,22 +129,19 @@ def _scrape_canonical_tiktok_fallback_posts(
 ) -> tuple[list[Any], dict[str, Any]]:
     from trr_backend.socials.tiktok.scraper import TikTokScrapeConfig, TikTokScraper
 
-    max_posts = _canonical_tiktok_fallback_max_posts(max_pages)
     scraper = TikTokScraper(cookies=cookies)
     config = TikTokScrapeConfig(
         username=account_handle,
         fast_mode=True,
         max_pages=max(1, int(max_pages or 1)),
         scrape_mode="ytdlp",
-        ytdlp_max_videos_hint=max_posts,
     )
-    posts = scraper.scrape(config)
+    posts = scraper._scrape_via_ytdlp(config)  # noqa: SLF001 - canonical fallback must not fall through to direct API.
     metadata = dict(getattr(scraper, "last_retrieval_meta", {}) or {})
     metadata.update(
         {
             "used": True,
             "trigger_reason": str(trigger_reason or "").strip() or None,
-            "requested_max_posts": max_posts,
             "posts_found": len(posts),
         }
     )
@@ -297,7 +299,11 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
             nonlocal fetcher_metadata
             task = asyncio.create_task(awaitable)
             started_at = time.monotonic()
-            timeout_seconds = _resolve_operation_timeout_seconds()
+            timeout_seconds = (
+                _resolve_canonical_fallback_timeout_seconds()
+                if phase == "canonical_fallback"
+                else _resolve_operation_timeout_seconds()
+            )
             heartbeat_interval_seconds = _resolve_operation_heartbeat_interval_seconds()
             while True:
                 elapsed = time.monotonic() - started_at

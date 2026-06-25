@@ -3654,6 +3654,54 @@ def test_instagram_scrape_emits_progress_callback(monkeypatch: pytest.MonkeyPatc
     assert int(events[-1]["pages_scanned"]) == 1
 
 
+def test_instagram_graphql_progress_cancellation_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _CancelledProgress(RuntimeError):
+        error_code = "shared_account_posts_cancelled"
+        error_class = "SharedAccountStageCancelled"
+        runtime_metadata = {"cancelled": True}
+
+    scraper = InstagramScraper(cookies={"sessionid": "cookie"})
+    config = InstagramScrapeConfig(username="bravotv")
+    call_cursors: list[str | None] = []
+
+    monkeypatch.setattr(scraper, "fetch_profile_info", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        scraper,
+        "_parse_post_node",
+        lambda node, cfg: SimpleNamespace(shortcode="cancelled", date_time="2026-01-01"),
+    )
+
+    def _fake_fetch_posts_graphql(username: str, cursor: str | None = None, delay: float = 2.0, **_kw: object) -> dict:
+        del username, delay
+        call_cursors.append(cursor)
+        return {
+            "data": {
+                "xdt_api__v1__feed__user_timeline_graphql_connection": {
+                    "edges": [
+                        {
+                            "node": {
+                                "shortcode": "cancelled",
+                                "taken_at_timestamp": 1767225600,
+                                "edge_media_to_caption": {"edges": [{"node": {"text": "post"}}]},
+                            }
+                        }
+                    ],
+                    "page_info": {"has_next_page": True, "end_cursor": "cursor-1"},
+                }
+            }
+        }
+
+    monkeypatch.setattr(scraper, "fetch_posts_graphql", _fake_fetch_posts_graphql)
+
+    def _raise_cancelled(_payload: dict[str, object]) -> None:
+        raise _CancelledProgress()
+
+    with pytest.raises(_CancelledProgress):
+        scraper._scrape_graphql(config, progress_cb=_raise_cancelled)  # noqa: SLF001
+
+    assert call_cursors == [None]
+
+
 def test_instagram_graphql_stops_after_consecutive_no_match_pages(monkeypatch: pytest.MonkeyPatch) -> None:
     scraper = InstagramScraper(cookies={"sessionid": "cookie"})
     config = InstagramScrapeConfig(

@@ -65,6 +65,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Limit comment repair to a specific platform post/source id. Repeat for multiple anchors.",
     )
     parser.add_argument(
+        "--date-start",
+        help="Optional bounded-window backfill start, for example 2026-01-01T00:00:00Z.",
+    )
+    parser.add_argument(
+        "--date-end",
+        help="Optional bounded-window backfill end, for example 2026-12-31T23:59:59Z.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the planned catalog action without launching or executing any jobs.",
@@ -77,7 +85,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             f"{BRAVOTV_INSTAGRAM_BACKFILL_CONFIRMATION}"
         ),
     )
-    return parser.parse_args(argv if argv is not None else sys.argv[1:])
+    args = parser.parse_args(argv if argv is not None else sys.argv[1:])
+    if bool(str(args.date_start or "").strip()) != bool(str(args.date_end or "").strip()):
+        parser.error("--date-start and --date-end must be supplied together")
+    return args
 
 
 def apply_workspace_runtime_env(*, repo_root: Path) -> Any:
@@ -152,6 +163,14 @@ def _dry_run_payload(args: argparse.Namespace) -> dict[str, Any]:
         "selected_tasks": selected_tasks,
         "default_selected_tasks": ["post_details", "comments", "media"] if not selected_tasks else None,
         "comment_anchor_source_ids": _comment_anchor_source_ids(args),
+        "date_start": str(getattr(args, "date_start", "") or "").strip() or None,
+        "date_end": str(getattr(args, "date_end", "") or "").strip() or None,
+        "catalog_action_scope": (
+            "bounded_window"
+            if str(getattr(args, "date_start", "") or "").strip()
+            and str(getattr(args, "date_end", "") or "").strip()
+            else "full_history"
+        ),
         "confirmation_required": _is_bravotv_instagram_backfill(args),
         "required_confirmation": (
             BRAVOTV_INSTAGRAM_BACKFILL_CONFIRMATION if _is_bravotv_instagram_backfill(args) else None
@@ -395,14 +414,18 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.action == "backfill":
+            date_start = str(getattr(args, "date_start", "") or "").strip() or None
+            date_end = str(getattr(args, "date_end", "") or "").strip() or None
             payload = _start_backfill(
                 analytics_repo,
                 platform=args.platform,
                 account=args.account,
                 source_scope=args.source_scope,
                 worker_id=worker_id,
-                scope="full_history",
+                scope="bounded_window" if date_start and date_end else "full_history",
                 selected_tasks=_selected_tasks(args),
+                date_start=date_start,
+                date_end=date_end,
                 comment_anchor_source_ids=_comment_anchor_source_ids(args),
             )
         elif args.action == "sync_recent":

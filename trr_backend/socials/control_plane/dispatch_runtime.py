@@ -872,6 +872,24 @@ def recover_and_dispatch_due_social_jobs(*, limit: int | None = None) -> dict[st
         limit=safe_limit,
     )
     recovered_capacity = legacy.recover_failed_instagram_comments_capacity_jobs(limit=max(safe_limit, 25))
+    # bug-1: self-heal retryable deferred-comments-followup failures (gated off by
+    # default). Guarded so a failure here can never break the dispatch sweep.
+    followup_retry: dict[str, Any] = {"enabled": False}
+    try:
+        from trr_backend.socials.control_plane import run_lifecycle
+
+        followup_retry = run_lifecycle.recover_failed_deferred_comments_followups(limit=max(safe_limit, 25))
+    except Exception as exc:  # noqa: BLE001
+        legacy.logger.warning("[recover_and_dispatch] deferred followup retry sweep skipped: %s", exc)
+    # B3: re-finalize runs left non-terminal by a deferred/raised _finish_job finalize.
+    # Guarded so a failure here can never break the dispatch sweep.
+    unfinalized_recovery: dict[str, Any] = {"scanned": 0, "finalized": 0}
+    try:
+        from trr_backend.socials.control_plane import run_lifecycle
+
+        unfinalized_recovery = run_lifecycle.recover_unfinalized_terminal_runs(limit=max(safe_limit, 25))
+    except Exception as exc:  # noqa: BLE001
+        legacy.logger.warning("[recover_and_dispatch] unfinalized-terminal-run sweep skipped: %s", exc)
     dispatch_summary = _call_extracted_override("dispatch_due_social_jobs", dispatch_due_social_jobs, limit=limit)
     return {
         "reconciled_terminal_jobs": [
@@ -884,6 +902,8 @@ def recover_and_dispatch_due_social_jobs(*, limit: int | None = None) -> dict[st
         "recovered_capacity_jobs": [
             str(row.get("id") or "").strip() for row in recovered_capacity if str(row.get("id") or "").strip()
         ],
+        "deferred_comments_followup_retry": followup_retry,
+        "unfinalized_terminal_runs": unfinalized_recovery,
         **dispatch_summary,
     }
 

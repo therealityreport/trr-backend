@@ -61,3 +61,25 @@ def test_bravo_candidate_keeps_gallery_item_context() -> None:
     assert candidate.display_eligible is True
     assert candidate.bridge_keys["bravo_gallery_item_id"] == "123"
     assert candidate.bridge_keys["file_url"] == "https://www.bravotv.com/sites/bravo/files/example.jpg"
+
+
+def test_peacock_candidate_is_official_original_and_display_eligible() -> None:
+    candidate = candidate_from_normalized_record(
+        {
+            "source": "peacock",
+            "source_id": "peacock-blog:keyon",
+            "source_url": "https://www.peacocktv.com/sites/peacock/files/2026/06/keyon.jpg",
+            "source_page_url": "https://www.peacocktv.com/blog/love-island-usa-season-8-cast",
+            "caption": "Keyon Love Island USA Season 8 Casa Amor bombshell",
+            "people_names": ["Keyon Harry"],
+            "width": 1080,
+            "height": 1350,
+            "raw": {"source_image_id": "peacock-blog:keyon"},
+        }
+    )
+
+    assert candidate.source_role == "official_original"
+    assert candidate.display_eligible is True
+    assert candidate.source_asset_id == "peacock-blog:keyon"
+    assert candidate.width == 1080
+    assert candidate.height == 1350

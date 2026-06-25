@@ -133,7 +133,7 @@ def test_guarded_restart_cancels_old_and_starts_public_relay_with_original_windo
     assert start["date_start"] == "2025-03-01T00:00:00+00:00"
     assert start["date_end"] == "2025-09-01T00:00:00+00:00"
     assert start["target_filter"] == "incomplete"
-    assert start["comments_worker_count"] == 12
+    assert start["comments_worker_count"] == 4
     assert start["comments_target_batch_size"] == 10
     assert start["cancel_active_before_relaunch"] is False
 
@@ -151,7 +151,7 @@ def test_guarded_restart_cancels_old_and_starts_public_relay_with_original_windo
     assert result["public_only_proof"]["no_cookies"] is True
     assert result["public_only_proof"]["no_proxy"] is True
     assert result["public_only_proof"]["comments_load_strategy"] == "public_relay"
-    assert result["comments_worker_cap_start"] == 12
+    assert result["comments_worker_cap_start"] == 4
     assert result["comments_target_batch_size"] == 10
     assert result["date_window"]["date_start"] == "2025-03-01T00:00:00+00:00"
     assert result["date_window"]["date_end"] == "2025-09-01T00:00:00+00:00"

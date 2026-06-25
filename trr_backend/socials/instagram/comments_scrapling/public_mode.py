@@ -14,6 +14,7 @@ from typing import Any
 
 PUBLIC_COMMENTS_SCRAPE_MODE = "public_first"
 PUBLIC_COMMENTS_LOAD_STRATEGY = "public_relay"
+AUTHENTICATED_COMMENTS_CURSOR_LOAD_STRATEGY = "instagram_comments_endpoint_cursor"
 INSTAGRAM_SCRAPE_MODE_ENV = "SOCIAL_INSTAGRAM_SCRAPE_MODE"
 COMMENTS_PROXY_PROVIDER_ENV = "SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER"
 
@@ -57,7 +58,7 @@ def comments_public_mode_from_config(config: Mapping[str, Any] | None = None) ->
     load_strategy = _normalize_mode(data.get("comments_load_strategy"))
     if load_strategy == PUBLIC_COMMENTS_LOAD_STRATEGY:
         return True
-    if load_strategy == "single_session_load_all":
+    if load_strategy in {"cursor_api", AUTHENTICATED_COMMENTS_CURSOR_LOAD_STRATEGY, "single_session_load_all"}:
         return False
 
     explicit_mode = data.get("instagram_scrape_mode") or data.get("scrape_mode") or data.get("comments_scrape_mode")
@@ -75,7 +76,10 @@ def comments_load_strategy_for_mode(
     public_mode: bool,
 ) -> str:
     """Use the public relay fetcher whenever the comments job is public."""
-    return PUBLIC_COMMENTS_LOAD_STRATEGY if public_mode else _normalize_mode(requested_strategy or "cursor_api")
+    normalized = _normalize_mode(requested_strategy or AUTHENTICATED_COMMENTS_CURSOR_LOAD_STRATEGY)
+    if normalized == "cursor_api":
+        normalized = AUTHENTICATED_COMMENTS_CURSOR_LOAD_STRATEGY
+    return PUBLIC_COMMENTS_LOAD_STRATEGY if public_mode else normalized
 
 
 def comments_proxy_provider_disabled() -> bool:

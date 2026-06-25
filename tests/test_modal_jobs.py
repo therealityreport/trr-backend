@@ -211,15 +211,15 @@ def test_inject_modal_runtime_defaults_sets_canonical_modal_flags(
     assert os.environ["TRR_DB_POOL_ACQUIRE_ATTEMPTS"] == "30"
     assert os.environ["TRR_DB_POOL_ACQUIRE_SLEEP_MS"] == "200"
     assert os.environ["TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT"] == "8"
-    assert os.environ["TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT"] == "10"
-    assert os.environ["TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_CONCURRENCY_LIMIT"] == "10"
+    assert os.environ["TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT"] == "4"
+    assert os.environ["TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_CONCURRENCY_LIMIT"] == "4"
     assert os.environ["TRR_MODAL_SOCIAL_MEDIA_JOB_CONCURRENCY_LIMIT"] == "10"
     assert os.environ["TRR_MODAL_CAST_SCREENTIME_FUNCTION"] == "run_cast_screentime_analysis"
     assert os.environ["TRR_MODAL_CAST_SCREENTIME_CONCURRENCY_LIMIT"] == "2"
-    assert os.environ["SOCIAL_MODAL_DISPATCH_LIMIT"] == "25"
+    assert os.environ["SOCIAL_MODAL_DISPATCH_LIMIT"] == "12"
     assert os.environ["SOCIAL_INSTAGRAM_POSTS_USE_STICKY_PROXY"] == "true"
     assert os.environ["SOCIAL_INSTAGRAM_POSTS_ANONYMOUS_ENABLED"] == "false"
-    assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER"] == "none"
+    assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER"] == "decodo"
     assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY"] == "true"
     assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY"] == "false"
     assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS"] == "600"
@@ -227,18 +227,18 @@ def test_inject_modal_runtime_defaults_sets_canonical_modal_flags(
     assert os.environ["INSTAGRAM_BROWSER_BLOCK_STATIC_ASSETS"] == "true"
     assert os.environ["INSTAGRAM_BROWSER_DISABLE_EXTRA_RESOURCES"] == "true"
     assert os.environ["INSTAGRAM_BROWSER_NETWORK_POLICY_REPORT_ONLY"] == "false"
-    assert os.environ["SOCIAL_WORKER_POOL_COMMENTS"] == "10"
+    assert os.environ["SOCIAL_WORKER_POOL_COMMENTS"] == "4"
     assert os.environ["SOCIAL_WORKER_POOL_SHARED_ACCOUNT_DISCOVERY"] == "3"
     assert os.environ["SOCIAL_WORKER_POOL_SHARED_ACCOUNT_POSTS"] == "8"
     assert os.environ["SOCIAL_SHARED_ACCOUNT_POSTS_PLATFORM_CAP_INSTAGRAM"] == "2"
     assert os.environ["SOCIAL_WORKER_POOL_MEDIA_MIRROR"] == "10"
     assert os.environ["SOCIAL_MIRROR_PLATFORM_CAP"] == "10"
     assert os.environ["SOCIAL_CATALOG_RUN_IN_FLIGHT_CAP"] == "8"
-    assert os.environ["SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM"] == "10"
+    assert os.environ["SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM"] == "4"
     assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT"] == "8"
     assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_MAX_SHARD_COUNT"] == "1000"
     assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_GLOBAL_RATE_LIMIT_MODE"] == "advisory"
-    assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_PER_POST_CONCURRENCY"] == "2"
+    assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_PER_POST_CONCURRENCY"] == "1"
     assert os.environ["SOCIAL_THREADS_POSTS_SCRAPLING_ENABLED"] == "true"
     assert os.environ["SOCIAL_THREADS_POSTS_PROXY_PROVIDER"] == "decodo"
     assert "SOCIALBLADE_PROXY_PROVIDER" not in os.environ
@@ -441,8 +441,8 @@ def test_social_concurrency_limit_reads_env(monkeypatch: pytest.MonkeyPatch) -> 
     reloaded = importlib.reload(modal_jobs)
     try:
         assert reloaded._SOCIAL_CONCURRENCY_LIMIT == 17
-        assert reloaded._SOCIAL_COMMENTS_CONCURRENCY_LIMIT == 17
-        assert reloaded._SOCIAL_COMMENTS_RECOVERY_CONCURRENCY_LIMIT == 10
+        assert reloaded._SOCIAL_COMMENTS_CONCURRENCY_LIMIT == 4
+        assert reloaded._SOCIAL_COMMENTS_RECOVERY_CONCURRENCY_LIMIT == 4
     finally:
         monkeypatch.delenv("TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT", raising=False)
         importlib.reload(modal_jobs)
@@ -757,6 +757,7 @@ def test_modal_deploy_schedules_are_disabled_by_default(monkeypatch: pytest.Monk
     try:
         assert "schedule" not in reloaded.sweep_social_dispatch_queue._modal_function_options
         assert "schedule" not in reloaded.heartbeat_remote_executors._modal_function_options
+        assert "schedule" not in reloaded.sync_nbcumv_official_images._modal_function_options
         assert "schedule" not in reloaded.purge_stale_social_worker_heartbeats._modal_function_options
         assert reloaded.serve_backend_api._modal_function_options["min_containers"] == 0
         assert reloaded.run_admin_operation_v2._modal_function_options["min_containers"] == 0
@@ -774,9 +775,11 @@ def test_modal_deploy_schedules_can_be_enabled_explicitly(monkeypatch: pytest.Mo
     try:
         heartbeat_schedule = reloaded.heartbeat_remote_executors._modal_function_options["schedule"]
         social_recovery_schedule = reloaded.sweep_social_dispatch_queue._modal_function_options["schedule"]
+        nbcumv_schedule = reloaded.sync_nbcumv_official_images._modal_function_options["schedule"]
         cleanup_schedule = reloaded.purge_stale_social_worker_heartbeats._modal_function_options["schedule"]
         assert heartbeat_schedule.expression == "* * * * *"
         assert social_recovery_schedule.expression == "*/2 * * * *"
+        assert nbcumv_schedule.expression == "15 14 * * *"
         assert cleanup_schedule.expression == "17 4 * * *"
     finally:
         monkeypatch.delitem(sys.modules, "modal", raising=False)

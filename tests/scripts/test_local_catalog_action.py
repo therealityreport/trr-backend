@@ -35,6 +35,8 @@ def test_parse_args_defaults() -> None:
     assert args.action == "backfill"
     assert args.selected_tasks == []
     assert args.dry_run is False
+    assert args.date_start is None
+    assert args.date_end is None
     assert args.confirm_bravotv_instagram_backfill == ""
 
 
@@ -114,6 +116,22 @@ def test_parse_args_accepts_comment_anchor_source_ids() -> None:
     )
 
     assert args.comment_anchor_source_ids == ["2015151653134172554", "2014150059768652195"]
+
+
+def test_parse_args_requires_complete_date_window() -> None:
+    with pytest.raises(SystemExit):
+        cli.parse_args(
+            [
+                "--platform",
+                "twitter",
+                "--account",
+                "bravotv",
+                "--action",
+                "backfill",
+                "--date-start",
+                "2026-01-01T00:00:00Z",
+            ]
+        )
 
 
 def test_main_dispatches_backfill(monkeypatch, capsys) -> None:
@@ -231,6 +249,10 @@ def test_main_dry_run_prints_plan_without_loading_runtime(monkeypatch, capsys) -
                 "comments",
                 "--selected-task",
                 "media",
+                "--date-start",
+                "2026-01-01T00:00:00Z",
+                "--date-end",
+                "2026-12-31T23:59:59Z",
                 "--dry-run",
             ]
         )
@@ -243,6 +265,9 @@ def test_main_dry_run_prints_plan_without_loading_runtime(monkeypatch, capsys) -
     assert payload["confirmation_required"] is True
     assert payload["required_confirmation"] == cli.BRAVOTV_INSTAGRAM_BACKFILL_CONFIRMATION
     assert payload["selected_tasks"] == ["post_details", "comments", "media"]
+    assert payload["date_start"] == "2026-01-01T00:00:00Z"
+    assert payload["date_end"] == "2026-12-31T23:59:59Z"
+    assert payload["catalog_action_scope"] == "bounded_window"
 
 
 def test_main_blocks_bravotv_instagram_backfill_without_confirmation(monkeypatch, capsys) -> None:
@@ -425,6 +450,54 @@ def test_main_dispatches_targeted_twitter_comment_backfill(monkeypatch, capsys) 
     assert execute_calls[0]["platform"] == "twitter"
     assert execute_calls[0]["supported_platforms"] == ["twitter"]
     assert "catalog-run-twitter-comments" in capsys.readouterr().out
+
+
+def test_main_dispatches_bounded_selected_task_backfill(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "apply_workspace_runtime_env", lambda **kwargs: {})
+    monkeypatch.setattr(
+        cli,
+        "parse_args",
+        lambda argv=None: SimpleNamespace(
+            platform="twitter",
+            account="bravotv",
+            source_scope="network",
+            action="backfill",
+            selected_tasks=["post_details"],
+            comment_anchor_source_ids=[],
+            date_start="2026-01-01T00:00:00Z",
+            date_end="2026-12-31T23:59:59Z",
+            confirm_bravotv_instagram_backfill="",
+        ),
+    )
+
+    captured: dict[str, object] = {}
+
+    def _launch(*args, **kwargs):
+        captured.update(kwargs)
+        return {"run_id": "twitter-window-run-1", "catalog_run_id": "twitter-window-run-1"}
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "trr_backend.repositories.social_season_analytics",
+        SimpleNamespace(launch_social_account_catalog_backfill=_launch),
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "trr_backend.socials.control_plane",
+        SimpleNamespace(
+            execute_run_with_inline_worker_registration=lambda run_id, **kwargs: {
+                "run_id": run_id,
+                "status": "completed",
+            }
+        ),
+    )
+
+    assert cli.main() == 0
+    assert captured["date_start"] == "2026-01-01T00:00:00Z"
+    assert captured["date_end"] == "2026-12-31T23:59:59Z"
+    assert captured["selected_tasks"] == ["post_details"]
+    assert "twitter-window-run-1" in capsys.readouterr().out
 
 
 def test_main_dispatches_sync_newer(monkeypatch, capsys) -> None:

@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 import trr_backend.socials.social_season_analytics_impl as _core
+from trr_backend.socials.instagram.media_completion import build_media_completion_payload
 
 _RESERVED_CORE_EXPORTS = {
     "__builtins__",
@@ -32,6 +34,18 @@ _LOCAL_ROOM_NAMES: set[str] = set()
 _LOCAL_ROOM_FUNCTIONS: dict[str, Any] = {}
 _CORE_ROOM_WRAPPERS: dict[str, Any] = {}
 
+_SELECTED_STAGE_TASKS = {
+    "detail_refresh": "post_details",
+    "comments": "comments",
+    "media": "media",
+}
+
+_STAGE_JOB_NAMES = {
+    "detail_refresh": {"shared_account_posts"},
+    "comments": {"comments"},
+    "media": {"media_mirror"},
+}
+
 
 def _sync_core_overrides() -> None:
     for _name in _IMPORTED_CORE_NAMES - _LOCAL_ROOM_NAMES:
@@ -44,6 +58,136 @@ def _room_callable(name: str, local_impl: Any) -> Any:
     if callable(candidate) and candidate is not _CORE_ROOM_WRAPPERS.get(name):
         return candidate
     return local_impl
+
+
+def _budget_runbook_state(decision: Mapping[str, Any] | None, run_config: Mapping[str, Any]) -> dict[str, Any]:
+    decision_payload = _metadata_dict(decision)
+    stored = _metadata_dict(decision_payload.get("runbook_state")) or _metadata_dict(run_config.get("runbook_state"))
+    if stored:
+        return stored
+    try:
+        from trr_backend.socials.control_plane.budget import instagram_backfill_runbook_metadata
+    except Exception:  # noqa: BLE001 - progress must remain read-only and best-effort
+        return {}
+    return instagram_backfill_runbook_metadata()
+
+
+def _blocked_budget_progress_payload(run_config: Mapping[str, Any]) -> dict[str, Any]:
+    decision = _metadata_dict(run_config.get("budget_decision"))
+    state = str(decision.get("state") or "").strip().lower()
+    if state not in {"paused", "identity_blocked"}:
+        return {}
+    reasons = [
+        str(reason or "").strip()
+        for reason in list(decision.get("reasons") or [])
+        if str(reason or "").strip()
+    ]
+    blocked_budget = {
+        "state": state,
+        "reason": reasons[0] if reasons else state,
+        "reasons": reasons,
+        "lane": str(decision.get("lane") or "instagram_backfill").strip() or "instagram_backfill",
+        "account": str(decision.get("account") or "").strip() or None,
+        "runbook_state": _budget_runbook_state(decision, run_config),
+    }
+    return {
+        "budget_blocked": True,
+        "blocked_budget": blocked_budget,
+        "blocked_reason": blocked_budget["reason"],
+        "operational_state": "blocked_budget",
+    }
+
+
+def _selected_catalog_tasks(run_config: Mapping[str, Any]) -> set[str]:
+    effective = _normalize_optional_social_account_catalog_backfill_selected_tasks(
+        run_config.get("effective_selected_tasks")
+    )
+    selected = _normalize_optional_social_account_catalog_backfill_selected_tasks(run_config.get("selected_tasks"))
+    return set(effective or selected or [])
+
+
+def _stage_status_from_payload(
+    *,
+    stage_name: str,
+    stages_payload: Mapping[str, Any],
+    job_rows: Sequence[Mapping[str, Any]],
+) -> str | None:
+    stage_aliases = _STAGE_JOB_NAMES.get(stage_name, set())
+    if not stage_aliases:
+        return None
+    aggregate = {
+        "total": 0,
+        "completed": 0,
+        "failed": 0,
+        "cancelled": 0,
+        "active": 0,
+        "waiting": 0,
+    }
+    for raw_name, raw_stage in _metadata_dict(stages_payload).items():
+        if str(raw_name or "").strip() not in stage_aliases:
+            continue
+        stage = _metadata_dict(raw_stage)
+        aggregate["total"] += _normalize_non_negative_int(stage.get("jobs_total"))
+        aggregate["completed"] += _normalize_non_negative_int(stage.get("jobs_completed"))
+        aggregate["failed"] += _normalize_non_negative_int(stage.get("jobs_failed"))
+        aggregate["cancelled"] += _normalize_non_negative_int(stage.get("jobs_cancelled"))
+        aggregate["active"] += _normalize_non_negative_int(stage.get("jobs_active"))
+        aggregate["waiting"] += _normalize_non_negative_int(stage.get("jobs_waiting"))
+
+    row_statuses: list[str] = []
+    for row in job_rows:
+        row_stage = str(row.get("stage") or row.get("job_type") or "").strip()
+        if row_stage not in stage_aliases:
+            continue
+        row_statuses.append(str(row.get("status") or "").strip().lower())
+
+    if aggregate["failed"] > 0 or any(status == "failed" for status in row_statuses):
+        return "failed"
+    if aggregate["active"] > 0 or any(status == "running" for status in row_statuses):
+        return "running"
+    if aggregate["waiting"] > 0 or any(status in {"pending", "queued", "retrying"} for status in row_statuses):
+        return "queued"
+    terminal_total = aggregate["completed"] + aggregate["cancelled"]
+    if aggregate["total"] > 0 and terminal_total >= aggregate["total"]:
+        return "completed"
+    if row_statuses and all(status == "completed" for status in row_statuses):
+        return "completed"
+    return None
+
+
+def _selected_stage_graph_payload(
+    *,
+    run_config: Mapping[str, Any],
+    stage_graph: Mapping[str, Any],
+    stages_payload: Mapping[str, Any],
+    job_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    if not stage_graph:
+        return {}
+    selected_tasks = _selected_catalog_tasks(run_config)
+    sanitized = {str(stage): _metadata_dict(entry) for stage, entry in stage_graph.items()}
+    for stage_name, task_name in _SELECTED_STAGE_TASKS.items():
+        if task_name not in selected_tasks:
+            continue
+        entry = dict(_metadata_dict(sanitized.get(stage_name)))
+        normalized_status = str(entry.get("status") or "").strip().lower()
+        if normalized_status == "skipped" or not normalized_status:
+            entry["status"] = (
+                _stage_status_from_payload(
+                    stage_name=stage_name,
+                    stages_payload=stages_payload,
+                    job_rows=job_rows,
+                )
+                or "pending"
+            )
+        entry["selected"] = True
+        sanitized[stage_name] = entry
+    if selected_tasks & {"post_details", "comments", "media"}:
+        readiness = dict(_metadata_dict(sanitized.get("target_readiness")))
+        if readiness:
+            readiness["selected"] = True
+            sanitized["target_readiness"] = readiness
+    return sanitized
 
 
 def _catalog_progress_stage_graph_payload(
@@ -103,17 +247,310 @@ def _catalog_progress_stage_graph_payload(
 
     payload: dict[str, Any] = {}
     if stage_graph:
-        payload["stage_graph"] = stage_graph
+        payload["stage_graph"] = _selected_stage_graph_payload(
+            run_config=run_config,
+            stage_graph=stage_graph,
+            stages_payload=stages_payload,
+            job_rows=job_rows,
+        )
     if target_readiness:
         payload["target_readiness"] = target_readiness
     if timing:
         payload["stage_timing"] = timing
+        per_stage_ms = _metadata_dict(timing.get("per_stage_ms"))
+        if per_stage_ms:
+            payload["per_stage_timing_ms"] = per_stage_ms
+        worker_plan = _metadata_dict(timing.get("worker_plan"))
+        if worker_plan:
+            payload["adaptive_worker_plan"] = worker_plan
+    stored_worker_plan = _metadata_dict(run_config.get("adaptive_worker_plan"))
+    if stored_worker_plan and "adaptive_worker_plan" not in payload:
+        payload["adaptive_worker_plan"] = stored_worker_plan
     if queue_drain:
         payload["queue_drain_estimate"] = queue_drain
     if first_auth_failure_at is not None:
         payload["first_auth_failure_at"] = _iso(first_auth_failure_at)
         payload["first_auth_failure_code"] = first_auth_failure_code
+
+    # dg-3: surface a silently-failed deferred comments follow-up so operators can
+    # see WHY a completed catalog still has no comments work. The follow-up failure
+    # is recorded only in run_config metadata (run_lifecycle marks state="failed"),
+    # never in run.status, so without this the admin UI shows comments "pending"/
+    # "failed" with no cause. Presence-gated: the key is omitted entirely unless a
+    # failure is recorded, so strict-payload consumers/snapshots are unaffected.
+    followup = _metadata_dict(run_config.get("deferred_comments_followup"))
+    if str(followup.get("state") or "").strip().lower() == "failed":
+        failure_history = followup.get("failure_history")
+        payload["deferred_comments_followup_alert"] = {
+            "state": "failed",
+            "platform": str(followup.get("platform") or "").strip() or None,
+            "retryable": bool(followup.get("retryable")),
+            "retryable_reason": str(followup.get("retryable_reason") or "").strip() or None,
+            "error_message": str(followup.get("error_message") or "").strip() or None,
+            "failed_at": str(followup.get("failed_at") or "").strip() or None,
+            "target_filter": str(followup.get("target_filter") or "").strip() or None,
+            "comments_run_id": str(followup.get("comments_run_id") or "").strip() or None,
+            "failure_count": (len(failure_history) if isinstance(failure_history, list) else None),
+        }
     return payload
+
+
+def _catalog_completion_progress_payload(
+    *,
+    run_config: Mapping[str, Any],
+    stages_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    budget_decision = _metadata_dict(run_config.get("budget_decision"))
+    if budget_decision:
+        payload["budget_decision"] = budget_decision
+        runbook_state = _budget_runbook_state(budget_decision, run_config)
+        if runbook_state:
+            payload["runbook_state"] = runbook_state
+    adaptive_worker_plan = _metadata_dict(run_config.get("adaptive_worker_plan"))
+    if adaptive_worker_plan:
+        payload["adaptive_worker_plan"] = adaptive_worker_plan
+    requires_apply_confirmation = bool(run_config.get("requires_apply_confirmation"))
+    apply_required = bool(run_config.get("apply_required"))
+    apply_run_id = str(run_config.get("apply_run_id") or "").strip() or None
+    required_confirmation = str(run_config.get("required_confirmation") or "").strip() or None
+    if requires_apply_confirmation or apply_required or apply_run_id:
+        payload.update(
+            {
+                "requires_apply_confirmation": requires_apply_confirmation,
+                "apply_required": apply_required,
+                "apply_run_id": apply_run_id,
+                "required_confirmation": required_confirmation,
+            }
+        )
+    if run_config.get("enable_cap4_canary") is not None:
+        payload["enable_cap4_canary"] = bool(run_config.get("enable_cap4_canary"))
+    details_worker_count = _normalize_non_negative_int(run_config.get("details_refresh_worker_count"))
+    comments_worker_count = _normalize_non_negative_int(run_config.get("comments_worker_count"))
+    if details_worker_count:
+        payload["detail_worker_count"] = details_worker_count
+    if comments_worker_count:
+        payload["comments_worker_count"] = comments_worker_count
+    if run_config.get("comments_enable_media_followups") is not None:
+        payload["comments_enable_media_followups"] = bool(run_config.get("comments_enable_media_followups"))
+    timing = _metadata_dict(run_config.get("timing"))
+    per_stage_ms = _metadata_dict(timing.get("per_stage_ms"))
+    if per_stage_ms:
+        payload["per_stage_timing_ms"] = per_stage_ms
+    snapshot_completion = _metadata_dict(run_config.get("snapshot_completion_summary"))
+    if snapshot_completion:
+        payload["snapshot_completion_summary"] = snapshot_completion
+
+    selected_tasks = _selected_catalog_tasks(run_config)
+    stored_media_completion = _metadata_dict(run_config.get("media_completion"))
+    media_stage = _metadata_dict(stages_payload.get("media_mirror"))
+    comment_media_stage = _metadata_dict(stages_payload.get("comment_media_mirror"))
+    media_waiting = _normalize_non_negative_int(media_stage.get("jobs_waiting")) + _normalize_non_negative_int(
+        media_stage.get("jobs_active")
+    )
+    comment_media_waiting = _normalize_non_negative_int(
+        comment_media_stage.get("jobs_waiting")
+    ) + _normalize_non_negative_int(comment_media_stage.get("jobs_active"))
+    stale_claims = {
+        "total": media_waiting + comment_media_waiting,
+        "by_stage": {
+            "media_mirror": media_waiting,
+            "comment_media_mirror": comment_media_waiting,
+        },
+        "by_platform": {"instagram": media_waiting + comment_media_waiting},
+    }
+    if "media" in selected_tasks or stored_media_completion:
+        media_completion = build_media_completion_payload(
+            stale_media_claims=stale_claims if stale_claims["total"] > 0 else None,
+        )
+        media_completion.update(stored_media_completion)
+        media_completion["queue"] = {
+            "media_mirror": media_stage,
+            "comment_media_mirror": comment_media_stage,
+        }
+        if "media" not in selected_tasks and not stored_media_completion:
+            media_completion["status"] = "not_selected"
+            media_completion["completed"] = True
+        elif stale_claims["total"] > 0:
+            media_completion["status"] = "blocked"
+            media_completion["completed"] = False
+        payload["media_completion"] = media_completion
+    payload.update(_blocked_budget_progress_payload(run_config))
+    return payload
+
+
+def _catalog_stage_graph_diagnostics(
+    *,
+    run_config: Mapping[str, Any],
+    stages_payload: Mapping[str, Any],
+    job_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """dg-1/dg-2: read-only diagnostics that compare the RAW stored stage_graph
+    (verbatim from run_config) against the DERIVED/sanitized view the admin UI
+    renders, and surface the full deferred-comments-followup record.
+
+    This lets an operator distinguish *stale stored metadata* (raw says
+    "skipped"/"pending") from *work that genuinely never ran in the run*
+    (derived re-derived from job rows). Strictly read-only: it never writes
+    run_config. Returns {} when no stage_graph is stored.
+    """
+
+    raw_graph = _metadata_dict(run_config.get("stage_graph"))
+    if not raw_graph:
+        return {}
+    raw_stage_graph = copy.deepcopy(raw_graph)
+    derived_stage_graph = _selected_stage_graph_payload(
+        run_config=run_config,
+        stage_graph=raw_graph,
+        stages_payload=stages_payload,
+        job_rows=job_rows,
+    )
+
+    # Only the 'status' field is a meaningful mismatch. The derived view also adds
+    # a 'selected' flag (e.g. on target_readiness) that is not a real divergence.
+    mismatches: list[dict[str, Any]] = []
+    for stage_name in raw_stage_graph:
+        raw_status = str(_metadata_dict(raw_stage_graph.get(stage_name)).get("status") or "").strip().lower() or None
+        derived_status = (
+            str(_metadata_dict(derived_stage_graph.get(stage_name)).get("status") or "").strip().lower() or None
+        )
+        if raw_status != derived_status:
+            mismatches.append(
+                {"stage": str(stage_name), "raw_status": raw_status, "derived_status": derived_status}
+            )
+
+    diagnostics: dict[str, Any] = {
+        "raw_stage_graph": raw_stage_graph,
+        "derived_stage_graph": derived_stage_graph,
+        "stage_status_mismatches": mismatches,
+    }
+
+    followup = _metadata_dict(run_config.get("deferred_comments_followup"))
+    if followup:
+        failure_history = followup.get("failure_history")
+        diagnostics["deferred_comments_followup"] = {
+            "state": str(followup.get("state") or "").strip() or None,
+            "platform": str(followup.get("platform") or "").strip() or None,
+            "retryable": bool(followup.get("retryable")),
+            "retryable_reason": str(followup.get("retryable_reason") or "").strip() or None,
+            "error_message": str(followup.get("error_message") or "").strip() or None,
+            "failed_at": str(followup.get("failed_at") or "").strip() or None,
+            "target_filter": str(followup.get("target_filter") or "").strip() or None,
+            "account_handle": str(followup.get("account_handle") or "").strip() or None,
+            "source_scope": str(followup.get("source_scope") or "").strip() or None,
+            "comments_run_id": str(followup.get("comments_run_id") or "").strip() or None,
+            "launch_group_id": str(followup.get("launch_group_id") or "").strip() or None,
+            "failure_history": failure_history if isinstance(failure_history, list) else [],
+        }
+
+    return diagnostics
+
+
+def _load_linked_recovery_run_summary(run_id: str) -> dict[str, Any] | None:
+    """Load a compact summary of a linked recovery comments run by PRIMARY KEY.
+
+    Uses _load_catalog_run_row_by_id (a PK lookup) rather than a launch_group_id
+    jsonb scan, which is unindexed and could trip statement_timeout while live
+    runs hold connections. Returns None if the linked run cannot be loaded.
+    """
+
+    try:
+        row = _load_catalog_run_row_by_id(run_id)
+    except (LookupError, ValueError):
+        return None
+    if not row:
+        return None
+    summary = _metadata_dict(row.get("summary"))
+    created_at = _coerce_dt(row.get("created_at"))
+    return {
+        "run_id": str(row.get("run_id") or row.get("id") or run_id),
+        "status": str(row.get("status") or "").strip().lower() or None,
+        "total_jobs": _normalize_non_negative_int(summary.get("total_jobs")),
+        "completed_jobs": _normalize_non_negative_int(summary.get("completed_jobs")),
+        "failed_jobs": _normalize_non_negative_int(summary.get("failed_jobs")),
+        "active_jobs": _normalize_non_negative_int(summary.get("active_jobs")),
+        "created_at": _iso(created_at) if created_at is not None else None,
+    }
+
+
+def get_social_account_catalog_run_diagnostics(
+    platform: str,
+    account_handle: str,
+    run_id: str,
+) -> dict[str, Any]:
+    """dg-4: lazy, read-only diagnostics for a catalog run.
+
+    Returns the RAW stored stage_graph vs the DERIVED view, the per-stage status
+    mismatches, the full deferred-comments-followup failure record, and the linked
+    recovery comments run (looked up by PRIMARY KEY). Kept separate from the
+    frequently-polled progress route so this heavier payload never bloats it.
+    Reads on pool 'default' (NOT the maxconn=1 social_progress pool the fast
+    poller uses).
+    """
+
+    _sync_core_overrides()
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    if normalized_platform not in set(CATALOG_SUPPORTED_PLATFORMS):
+        raise ValueError("Catalog backfill is not supported for this platform.")
+    if not _relation_exists("social.scrape_runs") or not _relation_exists("social.scrape_jobs"):
+        raise ValueError("social_ingest_queue_schema_missing")
+    features = _scrape_jobs_features()
+    if not bool(features.get("has_run_id")):
+        raise ValueError("run_progress_requires_scrape_jobs_run_id")
+
+    try:
+        run_row = _load_social_account_catalog_run_row(
+            platform=normalized_platform,
+            account_handle=normalized_account,
+            run_id=run_id,
+            verify_account=True,
+            pool_name="default",
+        )
+        job_rows = _load_social_account_catalog_jobs(
+            run_id=run_id,
+            platform=normalized_platform,
+            account_handle=normalized_account,
+            features=features,
+            pool_name="default",
+        )
+    except LookupError as exc:
+        raise ValueError("run_not_found") from exc
+
+    run_config = _metadata_dict(run_row.get("config"))
+    configured_platforms = {
+        _normalize_platform_name(value)
+        for value in _as_text_list(run_config.get("platforms") or [])
+        if _normalize_platform_name(value)
+    }
+    configured_accounts = {
+        _normalize_social_account_profile_handle(value)
+        for value in _as_text_list(run_config.get("accounts_override") or [])
+        if _normalize_social_account_profile_handle(value)
+    }
+    if configured_platforms and normalized_platform not in configured_platforms:
+        raise ValueError("run_not_found")
+    if configured_accounts and normalized_account not in configured_accounts:
+        raise ValueError("run_not_found")
+
+    # Derived view comes straight from ground-truth job rows (empty stages_payload),
+    # so this avoids re-running the heavy progress-snapshot aggregation.
+    diagnostics = _catalog_stage_graph_diagnostics(
+        run_config=run_config,
+        stages_payload={},
+        job_rows=job_rows,
+    )
+    diagnostics["run_id"] = str(run_row.get("run_id") or run_row.get("id") or run_id)
+    diagnostics["run_status"] = str(run_row.get("status") or "").strip().lower() or None
+
+    followup = diagnostics.get("deferred_comments_followup") or {}
+    comments_run_id = followup.get("comments_run_id") or (
+        str(run_config.get("comments_run_id") or "").strip() or None
+    )
+    if comments_run_id and comments_run_id != diagnostics["run_id"]:
+        diagnostics["linked_recovery_run"] = _load_linked_recovery_run_summary(comments_run_id)
+
+    return diagnostics
 
 
 def _catalog_posts_runtime_additive_payload(
@@ -301,6 +738,12 @@ def _build_catalog_terminal_progress_payload(
         )
     )
     payload.update(
+        _catalog_completion_progress_payload(
+            run_config=run_config,
+            stages_payload=payload.get("stages") or {},
+        )
+    )
+    payload.update(
         _catalog_posts_runtime_additive_payload(
             platform=platform,
             account_handle=account_handle,
@@ -364,6 +807,7 @@ def _build_catalog_terminal_progress_payload(
             "last_error_code": diagnostics.get("last_error_code") or repairable_reason,
             "last_error_message": diagnostics.get("last_error_message"),
         }
+    payload.update(_blocked_budget_progress_payload(run_config))
     return payload
 
 
@@ -608,6 +1052,12 @@ def get_social_account_catalog_run_progress(
             run_config=run_config,
             stages_payload=payload.get("stages") or {},
             job_rows=job_rows,
+        )
+    )
+    payload.update(
+        _catalog_completion_progress_payload(
+            run_config=run_config,
+            stages_payload=payload.get("stages") or {},
         )
     )
     payload["launch_group_id"] = str(run_config.get("launch_group_id") or "").strip() or None
@@ -968,6 +1418,7 @@ def get_social_account_catalog_run_progress(
         "replacement_run_id": replacement_run_id,
         "auto_requeue_status": auto_requeue_status,
     }
+    payload.update(_blocked_budget_progress_payload(run_config))
     return payload
 
 

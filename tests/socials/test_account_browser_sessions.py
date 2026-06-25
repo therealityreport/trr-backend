@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import json
+import threading
 
-from trr_backend.socials.account_browser_sessions import AccountBrowserSessionManager
+import pytest
+
+from trr_backend.socials.account_browser_sessions import (
+    AccountBrowserSessionManager,
+    BrowserSessionExecutionLockTimeout,
+)
 from trr_backend.socials.instagram.scraper import InstagramScraper
 
 
@@ -55,6 +61,31 @@ def test_account_browser_session_manager_reset_account_context_removes_files(tmp
     assert reset_paths == paths
     assert not paths.storage_state_path.exists()
     assert not paths.cookie_file_path.exists()
+
+
+def test_account_browser_session_manager_execution_lock_times_out(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("SOCIAL_BROWSER_SESSION_DIR", str(tmp_path))
+    manager = AccountBrowserSessionManager(platform="instagram", cookie_domains=(".instagram.com",))
+    ready = threading.Event()
+    release = threading.Event()
+
+    def _hold_lock() -> None:
+        with manager.execution_lock("bravotv"):
+            ready.set()
+            release.wait(timeout=2)
+
+    thread = threading.Thread(target=_hold_lock)
+    thread.start()
+    assert ready.wait(timeout=1)
+    try:
+        with pytest.raises(BrowserSessionExecutionLockTimeout) as exc_info:
+            with manager.execution_lock("bravotv", timeout_seconds=0.01):
+                pass
+        assert exc_info.value.platform == "instagram"
+        assert exc_info.value.account_id == "bravotv"
+    finally:
+        release.set()
+        thread.join(timeout=1)
 
 
 def test_instagram_scraper_resolves_explicit_browser_account_id() -> None:

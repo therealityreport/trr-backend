@@ -109,6 +109,44 @@ def test_merge_chart_data_keeps_older_history_when_fresh_window_starts_later() -
     assert merged_points[-1] == {"date": "2026-04-07", "followers": 687613}
 
 
+def test_merge_chart_data_preserves_first_saved_historical_chart_date_across_later_syncs() -> None:
+    existing = {
+        "scraped_at": "2026-03-18T05:30:00Z",
+        "stats_refreshed": True,
+        "profile_stats": {"followers": 685081},
+        "rankings": {"grade": "B+"},
+        "daily_channel_metrics_60day": {"row_count": 60},
+        "daily_total_followers_chart": {
+            "date_range": {"from": "2021-09-01", "to": "2026-03-18"},
+            "data": [
+                {"date": "2021-09-01", "followers": 120000},
+                {"date": "2026-03-18", "followers": 685081},
+            ],
+        },
+    }
+    fresh = {
+        "scraped_at": "2026-04-07T08:30:00Z",
+        "stats_refreshed": True,
+        "profile_stats": {"followers": 687613},
+        "rankings": {"grade": "A-"},
+        "daily_channel_metrics_60day": {"row_count": 60},
+        "daily_total_followers_chart": {
+            "date_range": {"from": "2026-04-01", "to": "2026-04-07"},
+            "data": [
+                {"date": "2026-04-01", "followers": 686900},
+                {"date": "2026-04-07", "followers": 687613},
+            ],
+        },
+    }
+
+    merged = merge_chart_data(existing, fresh)
+    merged_chart = merged["daily_total_followers_chart"]
+
+    assert merged_chart["date_range"]["from"] == "2021-09-01"
+    assert merged_chart["data"][0] == {"date": "2021-09-01", "followers": 120000}
+    assert merged_chart["data"][-1] == {"date": "2026-04-07", "followers": 687613}
+
+
 def test_merge_chart_data_stores_previous_run_snapshot_on_full_refresh() -> None:
     existing = {
         "scraped_at": "2026-03-18T05:30:00Z",

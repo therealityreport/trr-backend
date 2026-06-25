@@ -117,6 +117,24 @@ _COMMENT_PAGINATION_MAX_PAGES_DEFAULT = 0
 _REPLY_PAGINATION_MAX_PAGES_DEFAULT = 0
 _COMMENT_PAGINATION_MAX_SECONDS_DEFAULT = 30.0
 _REPLY_PAGINATION_MAX_SECONDS_DEFAULT = 20.0
+_PROGRESS_CANCELLATION_ERROR_CODES = {
+    "shared_account_stage_cancelled",
+    "shared_account_posts_cancelled",
+}
+_PROGRESS_CANCELLATION_ERROR_CLASSES = {
+    "sharedaccountstagecancelled",
+}
+
+
+def _is_progress_cancellation_exception(exc: Exception) -> bool:
+    error_code = str(getattr(exc, "error_code", "") or "").strip().lower()
+    if error_code in _PROGRESS_CANCELLATION_ERROR_CODES:
+        return True
+    error_class = str(getattr(exc, "error_class", "") or "").strip().lower()
+    if error_class in _PROGRESS_CANCELLATION_ERROR_CLASSES:
+        return True
+    runtime_metadata = getattr(exc, "runtime_metadata", None)
+    return isinstance(runtime_metadata, Mapping) and runtime_metadata.get("cancelled") is True
 
 
 @dataclass
@@ -4462,7 +4480,9 @@ class InstagramScraper:
             if total_posts is not None:
                 payload["total_posts"] = max(0, int(total_posts))
             progress_cb(payload)
-        except Exception:
+        except Exception as exc:
+            if _is_progress_cancellation_exception(exc):
+                raise
             logger.debug("Instagram scrape progress callback raised", exc_info=True)
 
     def _metrics_entry_from_node(self, node: dict[str, Any]) -> dict[str, Any]:
@@ -5240,11 +5260,14 @@ class InstagramScraper:
                                 self._emit_progress(
                                     progress_cb,
                                     phase="browser_intercept_batch",
+                                    pages_scanned=scroll_count,
                                     posts_checked=len(seen_pks),
                                     matched_posts=len(posts),
                                     total_posts=total_posts,
                                 )
-                        except Exception:  # noqa: BLE001
+                        except Exception as exc:  # noqa: BLE001
+                            if _is_progress_cancellation_exception(exc):
+                                raise
                             logger.debug("browser_intercept: failed to parse GraphQL response", exc_info=True)
 
                     page.on("response", _handle_graphql_response)

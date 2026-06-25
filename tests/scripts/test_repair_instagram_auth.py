@@ -784,6 +784,7 @@ def test_run_repair_verifies_instagram_posts_endpoint_when_account_is_supplied(
     assert verify_commands
     assert "--probe-instagram-posts-auth" in verify_commands[-1]
     assert "--probe-instagram-comments-auth" in verify_commands[-1]
+    assert "--strict-instagram-comments-auth" in verify_commands[-1]
     assert "thetraitorsus" in verify_commands[-1]
     assert summary["ok"] is False
     assert summary["failure_reason"] == "instagram_posts_transport_probe_failed"
@@ -858,6 +859,7 @@ def test_run_repair_blocks_browser_session_invalidated_comments_probe(
     verify_commands = [command for command in commands if "verify_modal_readiness.py" in " ".join(command)]
     assert verify_commands
     assert "--probe-instagram-comments-auth" in verify_commands[-1]
+    assert "--strict-instagram-comments-auth" in verify_commands[-1]
     assert summary["ok"] is False
     assert summary["failure_reason"] == cli.MANUAL_AUTH_REQUIRED_REASON
     assert summary["next_action"] == cli.MANUAL_AUTH_NEXT_ACTION

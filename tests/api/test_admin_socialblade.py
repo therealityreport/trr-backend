@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -207,8 +209,10 @@ def test_person_page_scrape_uses_visible_browser_retry_without_headless_login(
 
 
 def test_batch_refresh_dedupes_and_skips_fresh_rows(monkeypatch: pytest.MonkeyPatch) -> None:
-    import api.routers.admin_socialblade as router_module
+    import trr_backend.modal_dispatch as modal_dispatch_module
     import trr_backend.socials.socialblade.service as service_module
+
+    dispatch_calls: list[dict[str, object]] = []
 
     monkeypatch.setattr(service_module, "socialblade_auto_refresh_enabled", lambda: True)
 
@@ -226,20 +230,12 @@ def test_batch_refresh_dedupes_and_skips_fresh_rows(monkeypatch: pytest.MonkeyPa
         return ("accepted", None, None)
 
     monkeypatch.setattr(service_module, "queue_refresh_decision", fake_queue_refresh_decision)
-    monkeypatch.setattr(
-        service_module,
-        "refresh_and_persist_socialblade",
-        lambda **kwargs: {
-            "username": kwargs["handle"],
-            "scraped_at": "2026-03-18T04:10:25Z",
-            "refresh_status": "refreshed",
-        },
-    )
-    monkeypatch.setattr(
-        router_module,
-        "_scrape_socialblade_person_page",
-        lambda handle: {"username": handle, "scraped_at": "2026-03-18T04:10:25Z"},
-    )
+
+    def fake_dispatch_socialblade_scrape(**kwargs):
+        dispatch_calls.append(kwargs)
+        return {"dispatched": True, "call_id": "fc-cast-1"}
+
+    monkeypatch.setattr(modal_dispatch_module, "dispatch_socialblade_scrape", fake_dispatch_socialblade_scrape)
 
     client = TestClient(app)
     response = client.post(
@@ -260,8 +256,7 @@ def test_batch_refresh_dedupes_and_skips_fresh_rows(monkeypatch: pytest.MonkeyPa
         {
             "personId": "person-1",
             "handle": "lisabarlow14",
-            "refreshStatus": "refreshed",
-            "scrapedAt": "2026-03-18T04:10:25Z",
+            "callId": "fc-cast-1",
         }
     ]
     assert payload["skipped"] == [
@@ -275,45 +270,35 @@ def test_batch_refresh_dedupes_and_skips_fresh_rows(monkeypatch: pytest.MonkeyPa
         },
     ]
     assert payload["errors"] == []
+    assert dispatch_calls == [
+        {
+            "person_id": "person-1",
+            "handle": "lisabarlow14",
+            "source": "cast_comparison",
+            "force": False,
+            "platform": "instagram",
+            "scrape_following": True,
+            "source_scope": "network",
+        }
+    ]
 
 
-def test_batch_refresh_cast_comparison_passes_source_scope_to_local_sidecar(
+def test_batch_refresh_cast_comparison_dispatches_modal_and_returns_call_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import api.routers.admin_socialblade as router_module
+    import trr_backend.modal_dispatch as modal_dispatch_module
     import trr_backend.socials.socialblade.service as service_module
 
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(service_module, "socialblade_auto_refresh_enabled", lambda: True)
     monkeypatch.setattr(service_module, "queue_refresh_decision", lambda **kwargs: ("accepted", None, None))
-    monkeypatch.setattr(
-        router_module,
-        "_scrape_socialblade_person_page",
-        lambda handle: {"username": handle, "stats_refreshed": True},
-    )
 
-    def fake_refresh_and_persist_socialblade(**kwargs):
-        captured["refresh_kwargs"] = kwargs
-        return {
-            **kwargs["scraper"](kwargs["handle"]),
-            "refresh_status": "refreshed",
-            "scraped_at": "2026-05-13T08:00:00Z",
-        }
+    def fake_dispatch_socialblade_scrape(**kwargs):
+        captured.update(kwargs)
+        return {"dispatched": True, "call_id": "fc-cast-creator"}
 
-    def fake_attach(payload, *, handle: str, platform: str, source: str, source_scope: str, enabled: bool):
-        captured["sidecar"] = {
-            "payload": payload,
-            "handle": handle,
-            "platform": platform,
-            "source": source,
-            "source_scope": source_scope,
-            "enabled": enabled,
-        }
-        return {**payload, "instagram_following_scrape": {"status": "completed", "source_scope": source_scope}}
-
-    monkeypatch.setattr(service_module, "refresh_and_persist_socialblade", fake_refresh_and_persist_socialblade)
-    monkeypatch.setattr(service_module, "attach_instagram_following_scrape", fake_attach)
+    monkeypatch.setattr(modal_dispatch_module, "dispatch_socialblade_scrape", fake_dispatch_socialblade_scrape)
 
     client = TestClient(app)
     response = client.post(
@@ -331,18 +316,266 @@ def test_batch_refresh_cast_comparison_passes_source_scope_to_local_sidecar(
         {
             "personId": "person-1",
             "handle": "networkofficial",
-            "refreshStatus": "refreshed",
-            "scrapedAt": "2026-05-13T08:00:00Z",
+            "callId": "fc-cast-creator",
         }
     ]
-    assert captured["sidecar"] == {
-        "payload": {"username": "networkofficial", "stats_refreshed": True},
+    assert response.json()["skipped"] == []
+    assert response.json()["errors"] == []
+    assert captured == {
+        "person_id": "person-1",
         "handle": "networkofficial",
-        "platform": "instagram",
         "source": "cast_comparison",
+        "force": True,
+        "platform": "instagram",
+        "scrape_following": True,
         "source_scope": "creator",
-        "enabled": True,
     }
+
+
+def test_batch_refresh_cast_comparison_dispatch_failure_returns_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    import trr_backend.modal_dispatch as modal_dispatch_module
+    import trr_backend.socials.socialblade.service as service_module
+
+    monkeypatch.setattr(service_module, "socialblade_auto_refresh_enabled", lambda: True)
+    monkeypatch.setattr(service_module, "queue_refresh_decision", lambda **kwargs: ("accepted", None, None))
+    monkeypatch.setattr(
+        modal_dispatch_module,
+        "dispatch_socialblade_scrape",
+        lambda **kwargs: {"dispatched": False, "reason": "modal_resolution_failed"},
+    )
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/admin/people/socialblade/refresh-batch",
+        json={
+            "source": "cast_comparison",
+            "items": [{"personId": "person-1", "handle": "NetworkOfficial"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "accepted": [],
+        "skipped": [],
+        "errors": [
+            {
+                "personId": "person-1",
+                "handle": "networkofficial",
+                "reason": "modal_resolution_failed",
+            }
+        ],
+    }
+
+
+def test_socialblade_modal_call_status_returns_completed_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    import trr_backend.modal_dispatch as modal_dispatch_module
+
+    def fake_inspect_modal_function_call(call_id: str):
+        assert call_id == "fc-ok"
+        return {
+            "function_call_id": call_id,
+            "status": "completed",
+            "raw_status": "success",
+            "task_id": "ta-123",
+            "terminal": True,
+            "nonterminal": False,
+            "checked_at": "2026-06-19T14:10:00Z",
+        }
+
+    monkeypatch.setattr(modal_dispatch_module, "inspect_modal_function_call", fake_inspect_modal_function_call)
+
+    client = TestClient(app)
+    response = client.get("/api/v1/admin/people/socialblade/calls/fc-ok")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "callId": "fc-ok",
+        "status": "completed",
+        "rawStatus": "success",
+        "taskId": "ta-123",
+        "finished": True,
+        "terminal": True,
+        "reason": None,
+        "error": None,
+        "checkedAt": "2026-06-19T14:10:00Z",
+    }
+
+
+def test_socialblade_modal_call_status_returns_failed_modal_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    import trr_backend.modal_dispatch as modal_dispatch_module
+
+    monkeypatch.setattr(
+        modal_dispatch_module,
+        "inspect_modal_function_call",
+        lambda call_id: {
+            "function_call_id": call_id,
+            "status": "failed",
+            "raw_status": "failure",
+            "task_id": None,
+            "terminal": True,
+            "nonterminal": False,
+            "reason": "modal_failure",
+            "checked_at": "2026-06-19T14:12:00Z",
+        },
+    )
+
+    client = TestClient(app)
+    response = client.get("/api/v1/admin/people/socialblade/calls/fc-failed")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["callId"] == "fc-failed"
+    assert payload["status"] == "failed"
+    assert payload["rawStatus"] == "failure"
+    assert payload["finished"] is True
+    assert payload["terminal"] is True
+    assert payload["reason"] == "modal_failure"
+
+
+def test_socialblade_modal_call_status_returns_inspection_error_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    import trr_backend.modal_dispatch as modal_dispatch_module
+
+    monkeypatch.setattr(
+        modal_dispatch_module,
+        "inspect_modal_function_call",
+        lambda call_id: {
+            "function_call_id": call_id,
+            "status": "unknown",
+            "raw_status": None,
+            "task_id": None,
+            "terminal": False,
+            "nonterminal": False,
+            "reason": "modal_call_inspection_failed",
+            "error": "boom",
+            "checked_at": "2026-06-19T14:14:00Z",
+        },
+    )
+
+    client = TestClient(app)
+    response = client.get("/api/v1/admin/people/socialblade/calls/fc-broken")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["callId"] == "fc-broken"
+    assert payload["status"] == "unknown"
+    assert payload["finished"] is False
+    assert payload["terminal"] is False
+    assert payload["reason"] == "modal_call_inspection_failed"
+    assert payload["error"] == "boom"
+
+
+def test_socialblade_modal_call_status_rejects_blank_call_id() -> None:
+    client = TestClient(app)
+    response = client.get("/api/v1/admin/people/socialblade/calls/%20")
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Invalid Modal call id"}
+
+
+def test_socialblade_history_returns_snapshot_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    import trr_backend.repositories.socialblade_growth as growth_module
+    from trr_backend.db import pg as pg_module
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(growth_module, "socialblade_growth_snapshots_table_exists", lambda: True)
+
+    def fake_fetch_all(sql, params):
+        captured["sql"] = sql
+        captured["params"] = params
+        return [
+            {
+                "id": "snap-1",
+                "person_id": "person-1",
+                "platform": "instagram",
+                "account_handle": "lisabarlow14",
+                "instagram_handle": "lisabarlow14",
+                "scraped_at": datetime(2026, 6, 19, 14, 5, tzinfo=UTC),
+                "stats_refreshed": True,
+                "snapshot_source": "cast_comparison",
+                "refresh_source": "cast_comparison",
+                "refresh_forced": True,
+                "raw_response": {},
+            },
+            {
+                "id": "snap-2",
+                "person_id": None,
+                "platform": "instagram",
+                "account_handle": "freshalready",
+                "instagram_handle": "freshalready",
+                "scraped_at": "2026-06-18T10:00:00Z",
+                "stats_refreshed": False,
+                "snapshot_source": "season_run",
+                "refresh_source": "season_run",
+                "refresh_forced": False,
+                "raw_response": {
+                    "last_attempt_error": "challenge_required",
+                    "last_attempt_history_source": "selenium",
+                },
+            },
+        ]
+
+    monkeypatch.setattr(pg_module, "fetch_all", fake_fetch_all)
+
+    client = TestClient(app)
+    response = client.get(
+        "/api/v1/admin/people/socialblade/history"
+        "?personId=person-1&personId=person-2&handle=@LisaBarlow14&platform=Instagram&limit=5"
+    )
+
+    assert response.status_code == 200
+    assert "pipeline.socialblade_growth_snapshots" in str(captured["sql"])
+    assert captured["params"] == ["instagram", ["person-1", "person-2"], ["lisabarlow14"], 5]
+    payload = response.json()
+    assert payload["count"] == 2
+    assert payload["source"] == "socialblade_growth_snapshots"
+    assert payload["filters"] == {
+        "personIds": ["person-1", "person-2"],
+        "handles": ["lisabarlow14"],
+        "platform": "instagram",
+        "limit": 5,
+    }
+    assert payload["items"] == [
+        {
+            "snapshotId": "snap-1",
+            "personId": "person-1",
+            "handle": "lisabarlow14",
+            "platform": "instagram",
+            "scrapedAt": "2026-06-19T14:05:00Z",
+            "status": "completed",
+            "statsRefreshed": True,
+            "source": "cast_comparison",
+            "snapshotSource": "cast_comparison",
+            "refreshSource": "cast_comparison",
+            "forced": True,
+            "reason": None,
+            "error": None,
+        },
+        {
+            "snapshotId": "snap-2",
+            "personId": None,
+            "handle": "freshalready",
+            "platform": "instagram",
+            "scrapedAt": "2026-06-18T10:00:00Z",
+            "status": "failed",
+            "statsRefreshed": False,
+            "source": "season_run",
+            "snapshotSource": "season_run",
+            "refreshSource": "season_run",
+            "forced": False,
+            "reason": "selenium",
+            "error": "challenge_required",
+        },
+    ]
+    assert payload["checkedAt"]
+
+
+def test_socialblade_history_requires_member_filter() -> None:
+    client = TestClient(app)
+    response = client.get("/api/v1/admin/people/socialblade/history")
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "At least one personId or handle is required"}
 
 
 def test_account_socialblade_read_route_uses_platform_handle_lookup(monkeypatch: pytest.MonkeyPatch) -> None:

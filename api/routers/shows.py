@@ -357,9 +357,14 @@ def list_shows_with_alternative_names() -> list[dict[str, Any]]:
     """List shows with alternative names for lightweight app-side selection UIs."""
     rows = pg.fetch_all(
         """
-        SELECT id::text AS id, name, COALESCE(alternative_names, ARRAY[]::text[]) AS alternative_names
-        FROM core.shows
-        ORDER BY name ASC
+        SELECT
+          s.id::text AS id,
+          COALESCE(NULLIF(cs.show_name, ''), s.name) AS name,
+          COALESCE(s.alternative_names, ARRAY[]::text[]) AS alternative_names
+        FROM admin.covered_shows AS cs
+        JOIN core.shows AS s
+          ON s.id = cs.trr_show_id
+        ORDER BY COALESCE(NULLIF(cs.show_name, ''), s.name) ASC
         """
     )
     return rows

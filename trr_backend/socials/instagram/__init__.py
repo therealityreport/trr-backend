@@ -20,6 +20,16 @@ from .auth_resolver import (
 )
 from .cookie_refresh import refresh_instagram_cookies
 from .crawlee_adapter import run_stage_with_crawlee
+from .media_completion import (
+    AuthorAvatarEvidence,
+    CommentMediaEvidence,
+    HostedMediaEvidence,
+    MediaGateResult,
+    build_media_completion_payload,
+    classify_author_avatar_gate,
+    classify_comment_media_gate,
+    classify_hosted_media_gate,
+)
 from .permalink_metadata import (
     InstagramFacebookCrosspostMetadata,
     InstagramMediaResolution,
@@ -38,6 +48,13 @@ from .scraper import (
     ScrapeConfig,
     load_cookies_from_file,
 )
+from .snapshot_completion import (
+    SnapshotCompletionSummary,
+    SnapshotPartCompletion,
+    SnapshotRetryTarget,
+    SnapshotSourceUnavailableEvidence,
+    build_snapshot_completion_summary,
+)
 
 __all__ = [
     "InstagramScraper",
@@ -46,6 +63,14 @@ __all__ = [
     "InstagramUserDetail",
     "InstagramAuthSession",
     "ScrapeConfig",
+    "AuthorAvatarEvidence",
+    "CommentMediaEvidence",
+    "HostedMediaEvidence",
+    "MediaGateResult",
+    "SnapshotCompletionSummary",
+    "SnapshotPartCompletion",
+    "SnapshotRetryTarget",
+    "SnapshotSourceUnavailableEvidence",
     "load_cookies_from_file",
     "resolve_instagram_auth_session",
     "resolve_instagram_comments_auth_session",
@@ -66,4 +91,9 @@ __all__ = [
     "parse_permalink_metadata",
     "resolve_instagram_media",
     "run_stage_with_crawlee",
+    "build_media_completion_payload",
+    "classify_author_avatar_gate",
+    "classify_comment_media_gate",
+    "classify_hosted_media_gate",
+    "build_snapshot_completion_summary",
 ]

@@ -27,6 +27,19 @@ _SESSION_LOCKS_GUARD = threading.Lock()
 _DEFAULT_BROWSER_SESSION_DIR_NAME = "social-browser-sessions"
 
 
+class BrowserSessionExecutionLockTimeout(TimeoutError):
+    """Raised when an account-scoped browser session lock cannot be acquired."""
+
+    def __init__(self, *, platform: str, account_id: str, timeout_seconds: float) -> None:
+        self.platform = platform
+        self.account_id = account_id
+        self.timeout_seconds = timeout_seconds
+        super().__init__(
+            f"Timed out acquiring {platform} browser-session lock for {account_id} "
+            f"after {timeout_seconds:.1f}s"
+        )
+
+
 def _slugify(value: str) -> str:
     normalized = re.sub(r"[^a-zA-Z0-9._-]+", "-", str(value or "").strip().lower())
     normalized = normalized.strip("._-")
@@ -110,10 +123,27 @@ class AccountBrowserSessionManager:
         account_id: str | None = None,
         *,
         fallback_account_id: str | None = None,
+        timeout_seconds: float | None = None,
     ) -> Iterator[BrowserAccountSessionPaths]:
         paths = self.session_paths(account_id, fallback_account_id=fallback_account_id)
-        with self._lock_for(paths.account_id):
+        lock = self._lock_for(paths.account_id)
+        if timeout_seconds is None:
+            with lock:
+                yield paths
+            return
+
+        bounded_timeout = max(0.0, float(timeout_seconds))
+        acquired = lock.acquire(timeout=bounded_timeout)
+        if not acquired:
+            raise BrowserSessionExecutionLockTimeout(
+                platform=self.platform,
+                account_id=paths.account_id,
+                timeout_seconds=bounded_timeout,
+            )
+        try:
             yield paths
+        finally:
+            lock.release()
 
     def reset_account_context(
         self,

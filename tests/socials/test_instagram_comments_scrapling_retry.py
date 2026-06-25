@@ -2877,7 +2877,7 @@ def test_single_session_load_all_merges_rendered_hydration_after_api_gap(monkeyp
     assert result.fetch_reason == "single_session_rendered_hydration_recovered"
     assert result.diagnostic_metadata["strategy_decision"]["selected_strategy"] == "single_session_load_all"
     assert result.diagnostic_metadata["fallback_trigger"] == "api_complete_expected_gap"
-    assert result.diagnostic_metadata["lane_order"] == ["cursor_api", "rendered_hydration"]
+    assert result.diagnostic_metadata["lane_order"] == ["instagram_comments_endpoint_cursor", "rendered_hydration"]
     assert result.diagnostic_metadata["api_pages_loaded"] == 1
     assert result.diagnostic_metadata["rendered_load_attempts"] == 1
     assert result.diagnostic_metadata["rendered_rows_seen"] == 3
@@ -4189,6 +4189,60 @@ def test_retryable_incomplete_targets_keep_retry_path_when_db_saturated() -> Non
     assert skipped == []
 
 
+def test_auto_auth_fallback_target_selection_is_flagged_and_gap_gated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+
+    targets = jr._select_auto_auth_fallback_targets(
+        config={},
+        retryable_incomplete_targets=["SMALL", "BIG"],
+        expected_comment_counts_by_shortcode={"SMALL": 25, "BIG": 6274},
+    )
+
+    assert targets == []
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_AUTO_AUTH_FALLBACK", "1")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_AUTO_AUTH_FALLBACK_MIN_GAP", "100")
+
+    targets = jr._select_auto_auth_fallback_targets(
+        config={"auth_fallback_escalated_source_ids": ["DONE"]},
+        retryable_incomplete_targets=["SMALL", "BIG", "DONE"],
+        expected_comment_counts_by_shortcode={"SMALL": 25, "BIG": 6274, "DONE": 8000},
+    )
+
+    assert targets == ["BIG"]
+
+
+def test_auto_auth_fallback_enqueue_payload_coercion_is_defined() -> None:
+    """Regression: the public-comments auto-auth fallback completion branch
+    referenced an undefined ``_metadata_dict``, raising NameError and failing
+    every public comments shard that finished with incomplete targets (live run
+    812dbbea: 6/6 shards, last_error_class=NameError). Guard the helper and the
+    exact call-site expression so this cannot regress silently again."""
+
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+
+    # The helper must exist and coerce arbitrary values to a plain dict.
+    assert jr._metadata_dict({"performed": True}) == {"performed": True}
+    assert jr._metadata_dict(None) == {}
+    assert jr._metadata_dict("not-a-dict") == {}
+
+    # Reproduce the crashed call site for the escalated branch (must not raise).
+    auto_fallback_result: dict | None = {
+        "enqueue": {"performed": True},
+        "created_target_job_count": 2,
+    }
+    enqueue_payload = jr._metadata_dict((auto_fallback_result or {}).get("enqueue"))
+    assert bool(enqueue_payload.get("performed")) is True
+
+    # And the no-result branch must degrade to an empty dict, not NameError.
+    auto_fallback_result = None
+    enqueue_payload = jr._metadata_dict((auto_fallback_result or {}).get("enqueue"))
+    assert enqueue_payload == {}
+    assert not enqueue_payload.get("performed")
+
+
 def test_incomplete_retry_stall_stops_repeated_subset_of_prior_retry_targets() -> None:
     from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
 
@@ -4405,6 +4459,10 @@ def test_job_runner_aborts_queued_sibling_shards_after_run_level_auth_failure(
             {"id": "sibling-2", "items_found": 3},
         ],
     )
+    # Blast-radius threshold: 1 other shard already failed run-fatally + this one = 2,
+    # meeting the default SOCIAL_INSTAGRAM_COMMENTS_SIBLING_ABORT_MIN_FAILED=2, so the
+    # cascade fires.
+    monkeypatch.setattr(jr.pg, "fetch_one", lambda *_args, **_kwargs: {"failed_count": 1})
 
     aborted = jr._abort_queued_sibling_shards_after_run_fatal_error(
         repo=_FakeRepo,
@@ -4425,6 +4483,45 @@ def test_job_runner_aborts_queued_sibling_shards_after_run_level_auth_failure(
     assert {call["last_error_code"] for call in finish_calls} == {"instagram_comments_auth_failed"}
     assert finish_calls[0]["metadata"]["aborted_by_sibling_job_id"] == "22222222-2222-2222-2222-222222222222"
     assert finish_calls[0]["metadata"]["account"] == "thetraitorsus"
+
+
+def test_job_runner_defers_sibling_abort_below_blast_radius_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+
+    finish_calls: list[dict[str, Any]] = []
+
+    class _FakeRepo:
+        @staticmethod
+        def _finish_job(job_id: str, **kwargs: Any) -> None:
+            finish_calls.append({"job_id": job_id, **kwargs})
+
+    # No other shard has failed run-fatally yet, so this is the FIRST failure
+    # (effective failed = 1 < default threshold 2) -> the abort is deferred and the
+    # queued siblings keep running to tolerate a transient auth/proxy blip.
+    monkeypatch.setattr(jr.pg, "fetch_one", lambda *_args, **_kwargs: {"failed_count": 0})
+
+    def _unexpected_fetch_all(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("sibling query must not run when the abort is deferred")
+
+    monkeypatch.setattr(jr.pg, "fetch_all", _unexpected_fetch_all)
+
+    aborted = jr._abort_queued_sibling_shards_after_run_fatal_error(
+        repo=_FakeRepo,
+        run_id="11111111-1111-1111-1111-111111111111",
+        failed_job_id="22222222-2222-2222-2222-222222222222",
+        stage="comments_scrapling",
+        account_handle="thetraitorsus",
+        mode="profile",
+        source_scope="bravo",
+        error_code="instagram_comments_auth_failed",
+        error_class="CommentsScraplingRuntimeError",
+        error_message="Instagram auth failed while fetching comments.",
+    )
+
+    assert aborted == 0
+    assert finish_calls == []
 
 
 def test_job_runner_tracks_isolated_post_auth_failure_for_retry(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4919,6 +5016,112 @@ def test_comments_job_runner_continues_after_endpoint_probe_auth_blocked(
     assert metadata["comments_endpoint_probe"]["advisory_continue"] is True
     assert metadata["comments_endpoint_probe"]["advisory_reason"] == "redirect_to_login"
     assert metadata["persist_counters"]["comments_inserted"] == 2
+
+
+def test_comments_job_runner_skips_duplicate_public_replay_after_auth_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+
+    finish_calls: list[dict[str, Any]] = []
+    captured_config_updates: list[dict[str, Any]] = []
+    probe = {
+        "mode": "comments_endpoint",
+        "shortcode": "SHORT1",
+        "status": "auth_blocked",
+        "result": "auth_blocked",
+        "reason": "redirect_to_login",
+        "transport": "httpx_after_browser_warmup",
+    }
+
+    class _FakeFetcher:
+        @property
+        def runtime_metadata(self) -> dict[str, Any]:
+            return {
+                "transport": "httpx_after_browser_warmup",
+                "request_count": 1,
+                "comments_auth_validation": dict(probe),
+            }
+
+        async def warmup(self) -> None:
+            return None
+
+        async def validate_comments_endpoint(self, shortcode: str, *, mode: str) -> dict[str, Any]:
+            probe["shortcode"] = shortcode
+            probe["mode"] = mode
+            return dict(probe)
+
+        async def fetch_comments_for_shortcode(self, shortcode: str, **_kwargs: Any) -> InstagramCommentsFetchResult:
+            raise AssertionError(f"duplicate public replay was not skipped for {shortcode}")
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
+    monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: _fake_comments_session())
+    monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
+    monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {"SHORT1": 171})
+    monkeypatch.setattr(jr, "_load_comment_target_metadata", lambda **_kwargs: {})
+    monkeypatch.setattr(jr, "_load_instagram_comments_audit_cursor_resume_metadata", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        jr,
+        "_load_public_replay_guard_rows",
+        lambda **_kwargs: {
+            "SHORT1": {
+                "saved_comment_count": 124,
+                "prior_public_fetched_comment_count": 71,
+                "materialized_post_count": 1,
+                "prior_public_audit_at": "2026-06-22T12:00:00+00:00",
+            }
+        },
+    )
+
+    def fake_update_job_config(_job_id: str, *, config_updates: dict[str, Any]) -> None:
+        captured_config_updates.append(dict(config_updates))
+
+    monkeypatch.setattr(repo, "_instagram_filter_incomplete_comment_targets", lambda _account, targets: list(targets))
+    monkeypatch.setattr(repo, "_update_job_config", fake_update_job_config)
+    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: True)
+
+    job = {
+        "id": "job-1",
+        "run_id": "run-1",
+        "config": {
+            "mode": "profile",
+            "account": "bravotv",
+            "target_source_ids": ["SHORT1"],
+            "max_comments_per_post": 0,
+            "fetch_replies": False,
+        },
+        "attempt_count": 1,
+        "max_attempts": 3,
+    }
+
+    with patch(
+        "trr_backend.socials.instagram.comments_scrapling.job_runner.pg.fetch_one",
+        side_effect=_active_comments_job_fetch_one("retrying"),
+    ):
+        payload = jr.run_instagram_comments_scrapling_job(job, worker_id="test-worker")
+
+    assert payload["status"] == "retrying"
+    assert captured_config_updates[-1]["target_source_ids"] == ["SHORT1"]
+    finish_kwargs = finish_calls[-1]
+    assert finish_kwargs["status"] == "retrying"
+    metadata = finish_kwargs["metadata"]
+    assert metadata["fetch_counters"]["comments_fetched"] == 0
+    assert metadata["public_replay_guard"]["skipped_target_source_ids"] == ["SHORT1"]
+    assert metadata["auth_failed_fetch_reasons"] == {
+        "SHORT1": jr._PUBLIC_REPLAY_GUARD_FETCH_REASON,
+    }
+    assert metadata["post_latency"]["samples"][0]["completion_reason"] == (
+        "auth_blocked_existing_public_coverage_skipped"
+    )
+    assert metadata["post_latency"]["samples"][0]["public_replay_guard"]["saved_comment_count"] == 124
 
 
 def test_comments_job_runner_blocks_browser_session_invalidation_before_rendered_fallback(
@@ -6113,7 +6316,7 @@ def test_job_runner_passes_top_level_resume_cursor_from_prior_metadata(
             "max_comments": 0,
             "fetch_replies": False,
             "expected_comment_count": None,
-            "load_strategy": "cursor_api",
+            "load_strategy": "instagram_comments_endpoint_cursor",
             "top_level_cursor": "cursor-2",
             "top_level_cursor_param": "max_id",
         }
@@ -6205,7 +6408,7 @@ def test_job_runner_passes_coauthor_target_metadata_to_fetcher(monkeypatch: pyte
             "max_comments": 0,
             "fetch_replies": False,
             "expected_comment_count": 149,
-            "load_strategy": "cursor_api",
+            "load_strategy": "instagram_comments_endpoint_cursor",
             "target_metadata": target_metadata,
         }
     ]
@@ -6427,7 +6630,7 @@ def test_job_runner_passes_reply_resume_cursors_from_prior_metadata(
             "max_comments": 0,
             "fetch_replies": True,
             "expected_comment_count": None,
-            "load_strategy": "cursor_api",
+            "load_strategy": "instagram_comments_endpoint_cursor",
             "reply_resume_cursors": {"parent-1": "reply-cursor-2"},
             "reply_resume_cursor_params": {"parent-1": "max_id"},
         }
@@ -6536,7 +6739,7 @@ def test_job_runner_passes_top_level_resume_cursor_from_audit_payload(
             "max_comments": 0,
             "fetch_replies": False,
             "expected_comment_count": None,
-            "load_strategy": "cursor_api",
+            "load_strategy": "instagram_comments_endpoint_cursor",
             "target_metadata": {
                 "source_id": "SHORT1",
                 "materialized_post_id": "00000000-0000-0000-0000-000000000001",
@@ -6642,7 +6845,7 @@ def test_job_runner_passes_reply_resume_cursor_from_audit_payload(
             "max_comments": 0,
             "fetch_replies": True,
             "expected_comment_count": None,
-            "load_strategy": "cursor_api",
+            "load_strategy": "instagram_comments_endpoint_cursor",
             "reply_resume_cursors": {"parent-1": "audit-reply-cursor-2"},
             "reply_resume_cursor_params": {"parent-1": "max_id"},
         }
@@ -6866,7 +7069,7 @@ def test_job_runner_uses_reply_only_retry_for_persisted_missing_reply_parents(
             "max_comments": 0,
             "fetch_replies": True,
             "expected_comment_count": None,
-            "load_strategy": "cursor_api",
+            "load_strategy": "instagram_comments_endpoint_cursor",
             "persisted_top_level_comments": [persisted_parent],
             "reply_only": True,
         }
@@ -6958,8 +7161,8 @@ def test_job_runner_reports_actual_comments_posts_checked(monkeypatch: pytest.Mo
         "comments_shard_index": 1,
         "comments_shard_count": 1,
         "comments_shard_target_count": 2,
-        "comments_load_strategy": "cursor_api",
-        "comments_session_scope": "cursor_api_worker",
+        "comments_load_strategy": "instagram_comments_endpoint_cursor",
+        "comments_session_scope": "instagram_comments_endpoint_cursor_worker",
         "comments_per_post_concurrency": 1,
         "instagram_scrape_mode": None,
         "auth_state": "authenticated",
@@ -6975,8 +7178,8 @@ def test_job_runner_reports_actual_comments_posts_checked(monkeypatch: pytest.Mo
         "comments_shard_index": 1,
         "comments_shard_count": 1,
         "comments_shard_target_count": 2,
-        "comments_load_strategy": "cursor_api",
-        "comments_session_scope": "cursor_api_worker",
+        "comments_load_strategy": "instagram_comments_endpoint_cursor",
+        "comments_session_scope": "instagram_comments_endpoint_cursor_worker",
         "comments_per_post_concurrency": 1,
         "instagram_scrape_mode": None,
         "auth_state": "authenticated",

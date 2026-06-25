@@ -52,7 +52,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--comments-worker-count", type=int, help="Optional worker/shard count override.")
     parser.add_argument("--max-comments-per-post", type=int, default=0, help="0 means uncapped.")
-    parser.add_argument("--comments-load-strategy", default="cursor_api")
+    parser.add_argument("--comments-load-strategy", default="instagram_comments_endpoint_cursor")
     parser.add_argument("--skip-launch-auth-probe", action="store_true")
     parser.add_argument(
         "--no-attach-active-run",
@@ -112,7 +112,7 @@ def _build_payload(args: argparse.Namespace) -> dict[str, Any]:
         batch_size=max(1, int(args.batch_size or 1)),
         comments_worker_count=args.comments_worker_count,
         max_comments_per_post=max(0, int(args.max_comments_per_post or 0)),
-        comments_load_strategy=str(args.comments_load_strategy or "cursor_api"),
+        comments_load_strategy=str(args.comments_load_strategy or "instagram_comments_endpoint_cursor"),
         skip_launch_auth_probe=bool(args.skip_launch_auth_probe),
         dry_run=not bool(args.enqueue),
         attach_to_active_run=not bool(args.no_attach_active_run),

@@ -30,6 +30,7 @@ DEFAULT_VISION_RUNTIME_PROBE_FUNCTION = "probe_admin_vision_runtime"
 DEFAULT_SOCIALBLADE_RUNTIME_PROBE_FUNCTION = "probe_socialblade_runtime"
 BROWSER_SESSION_INVALIDATED_REASON = "browser_session_invalidated"
 DEFAULT_MODAL_LOOKUP_TIMEOUT_SECONDS = 30
+DEFAULT_INSTAGRAM_COMMENTS_AUTH_RATE_LIMIT_COOLDOWN_SECONDS = 300
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
@@ -164,6 +165,14 @@ def _parse_args() -> argparse.Namespace:
         default="",
         metavar="SHORTCODE",
         help="Optional shortcode for --probe-instagram-comments-auth; defaults to a recent commentable saved post.",
+    )
+    parser.add_argument(
+        "--strict-instagram-comments-auth",
+        action="store_true",
+        help=(
+            "Require the Instagram comments probe to validate authenticated endpoint access; "
+            "public-first readiness alone is not accepted."
+        ),
     )
     parser.add_argument(
         "--probe-getty-remote-access",
@@ -369,6 +378,23 @@ def instagram_comments_auth_probe_function_name() -> str:
     )
 
 
+def instagram_comments_auth_rate_limit_cooldown_seconds() -> int:
+    raw = str(os.getenv("TRR_MODAL_INSTAGRAM_COMMENTS_AUTH_RATE_LIMIT_CACHE_SECONDS") or "").strip()
+    if not raw:
+        return DEFAULT_INSTAGRAM_COMMENTS_AUTH_RATE_LIMIT_COOLDOWN_SECONDS
+    try:
+        value = int(float(raw))
+    except ValueError:
+        return DEFAULT_INSTAGRAM_COMMENTS_AUTH_RATE_LIMIT_COOLDOWN_SECONDS
+    return min(max(value, 1), 1_800)
+
+
+def instagram_comments_auth_probe_is_rate_limited(payload: dict[str, Any]) -> bool:
+    reason = str(payload.get("reason") or payload.get("comments_auth_blocker") or "").strip().lower()
+    status = str(payload.get("status") or payload.get("result") or "").strip().lower()
+    return bool(payload.get("rate_limited")) or reason in {"http_429", "rate_limited"} or "429" in reason or status == "rate_limited"
+
+
 def getty_remote_probe_function_name() -> str:
     return (
         str(os.getenv("TRR_MODAL_GETTY_REMOTE_PROBE_FUNCTION") or DEFAULT_GETTY_REMOTE_PROBE_FUNCTION).strip()
@@ -536,13 +562,13 @@ def _instagram_comments_probe_failure_is_advisory(probe: dict[str, Any]) -> bool
     return bool(probe.get("retryable")) and status == "transport_blocked"
 
 
-def invoke_modal_function_with_timeout(function_handle: Any, *args: Any, timeout_seconds: int) -> Any:
+def invoke_modal_function_with_timeout(function_handle: Any, *args: Any, timeout_seconds: int, **kwargs: Any) -> Any:
     timeout_seconds = max(1, int(timeout_seconds or DEFAULT_REMOTE_PROBE_TIMEOUT_SECONDS))
     spawn = getattr(function_handle, "spawn", None)
     if callable(spawn):
         function_call = None
         try:
-            function_call = spawn(*args)
+            function_call = spawn(*args, **kwargs)
             return function_call.get(timeout=timeout_seconds)
         except TimeoutError as exc:
             if function_call is not None:
@@ -553,7 +579,7 @@ def invoke_modal_function_with_timeout(function_handle: Any, *args: Any, timeout
             raise RemoteProbeTimeoutError(f"Remote probe timed out after {timeout_seconds} seconds") from exc
 
     with remote_probe_timeout(timeout_seconds):
-        return function_handle.remote(*args)
+        return function_handle.remote(*args, **kwargs)
 
 
 def invoke_remote_auth_probe(
@@ -711,6 +737,7 @@ def verify_modal_readiness(
     probe_instagram_posts_auth_handle: str | None = None,
     probe_instagram_comments_auth_handle: str | None = None,
     probe_instagram_comments_auth_shortcode: str | None = None,
+    strict_instagram_comments_auth: bool = False,
     probe_getty_remote_access: bool = False,
     probe_core_workers: bool = False,
     remote_probe_timeout_seconds: int = DEFAULT_REMOTE_PROBE_TIMEOUT_SECONDS,
@@ -892,10 +919,14 @@ def verify_modal_readiness(
             }
         else:
             try:
+                probe_args = (
+                    (probe_instagram_comments_auth_handle, probe_shortcode, True)
+                    if strict_instagram_comments_auth
+                    else (probe_instagram_comments_auth_handle, probe_shortcode)
+                )
                 payload = invoke_modal_function_with_timeout(
                     probe_handle,
-                    probe_instagram_comments_auth_handle,
-                    probe_shortcode,
+                    *probe_args,
                     timeout_seconds=remote_probe_timeout_seconds,
                 )
             except RemoteProbeTimeoutError:
@@ -934,6 +965,16 @@ def verify_modal_readiness(
                         "execution_backend": "modal",
                     }
                 )
+                if strict_instagram_comments_auth:
+                    instagram_comments_auth_probe["strict_authenticated"] = True
+                if instagram_comments_auth_probe_is_rate_limited(instagram_comments_auth_probe):
+                    cooldown_seconds = instagram_comments_auth_rate_limit_cooldown_seconds()
+                    instagram_comments_auth_probe["rate_limited"] = True
+                    instagram_comments_auth_probe["cooldown_recommended_seconds"] = cooldown_seconds
+                    instagram_comments_auth_probe["operator_action"] = (
+                        "Instagram comments auth probe is rate-limited. "
+                        f"Wait at least {cooldown_seconds} seconds, then rerun the strict comments auth probe."
+                    )
 
     getty_remote_probe: dict[str, Any] | None = None
     if probe_getty_remote_access:
@@ -1017,7 +1058,10 @@ def verify_modal_readiness(
             str(instagram_comments_auth_probe.get("reason") or "instagram_comments_auth_probe_failed").strip()
             or "instagram_comments_auth_probe_failed"
         )
-        if _instagram_comments_probe_failure_is_advisory(instagram_comments_auth_probe):
+        if (
+            not strict_instagram_comments_auth
+            and _instagram_comments_probe_failure_is_advisory(instagram_comments_auth_probe)
+        ):
             instagram_comments_auth_probe["advisory_continue"] = True
             advisory_probe_failures.append(comments_reason)
         else:
@@ -1156,6 +1200,7 @@ def main() -> int:
         probe_instagram_posts_auth_handle=str(args.probe_instagram_posts_auth or "").strip() or None,
         probe_instagram_comments_auth_handle=str(args.probe_instagram_comments_auth or "").strip() or None,
         probe_instagram_comments_auth_shortcode=str(args.probe_instagram_comments_shortcode or "").strip() or None,
+        strict_instagram_comments_auth=bool(getattr(args, "strict_instagram_comments_auth", False)),
         probe_getty_remote_access=bool(args.probe_getty_remote_access),
         probe_core_workers=bool(args.probe_core_workers),
         remote_probe_timeout_seconds=int(

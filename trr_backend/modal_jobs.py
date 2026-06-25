@@ -111,14 +111,11 @@ _API_MAX_CONTAINERS = max(1, int(os.getenv("TRR_MODAL_API_MAX_CONTAINERS", "8"))
 _SOCIAL_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT", "8")))
 _SOCIAL_COMMENTS_CONCURRENCY_LIMIT = max(
     1,
-    int(
-        os.getenv("TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT")
-        or os.getenv("TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT", "8")
-    ),
+    int(os.getenv("TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT", "4")),
 )
 _SOCIAL_COMMENTS_RECOVERY_CONCURRENCY_LIMIT = max(
     1,
-    int(os.getenv("TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_CONCURRENCY_LIMIT", "10")),
+    int(os.getenv("TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_CONCURRENCY_LIMIT", "4")),
 )
 _SOCIAL_MEDIA_CONCURRENCY_LIMIT = max(
     1,
@@ -264,18 +261,18 @@ _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "TRR_MODAL_SOCIALBLADE_FUNCTION": "run_socialblade_scrape",
     "TRR_MODAL_STALE_WORKER_CLEANUP_FUNCTION": "purge_stale_social_worker_heartbeats",
     "TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT": "8",
-    "TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT": "10",
-    "TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_CONCURRENCY_LIMIT": "10",
+    "TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT": "4",
+    "TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_CONCURRENCY_LIMIT": "4",
     "TRR_MODAL_SOCIAL_MEDIA_JOB_CONCURRENCY_LIMIT": "10",
     "TRR_MODAL_GOOGLE_NEWS_CONCURRENCY_LIMIT": "4",
     "TRR_MODAL_REDDIT_REFRESH_CONCURRENCY_LIMIT": "2",
     "TRR_MODAL_VISION_CONCURRENCY_LIMIT": "4",
     "TRR_MODAL_CAST_SCREENTIME_CONCURRENCY_LIMIT": "2",
     "TRR_MODAL_SOCIALBLADE_CONCURRENCY_LIMIT": "3",
-    "SOCIAL_MODAL_DISPATCH_LIMIT": "25",
+    "SOCIAL_MODAL_DISPATCH_LIMIT": "12",
     "SOCIAL_INSTAGRAM_POSTS_USE_STICKY_PROXY": "true",
     "SOCIAL_INSTAGRAM_POSTS_ANONYMOUS_ENABLED": "false",
-    "SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER": "none",
+    "SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER": "decodo",
     "SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY": "true",
     "SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY": "false",
     "SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS": "600",
@@ -283,7 +280,7 @@ _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "INSTAGRAM_BROWSER_BLOCK_STATIC_ASSETS": "true",
     "INSTAGRAM_BROWSER_DISABLE_EXTRA_RESOURCES": "true",
     "INSTAGRAM_BROWSER_NETWORK_POLICY_REPORT_ONLY": "false",
-    "SOCIAL_WORKER_POOL_COMMENTS": "10",
+    "SOCIAL_WORKER_POOL_COMMENTS": "4",
     "SOCIAL_WORKER_POOL_SHARED_ACCOUNT_DISCOVERY": "3",
     "SOCIAL_WORKER_POOL_SHARED_ACCOUNT_POSTS": "8",
     "SOCIAL_SHARED_ACCOUNT_POSTS_PLATFORM_CAP_INSTAGRAM": "2",
@@ -291,11 +288,17 @@ _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "SOCIAL_WORKER_POOL_COMMENT_MEDIA_MIRROR": "1",
     "SOCIAL_MIRROR_PLATFORM_CAP": "10",
     "SOCIAL_CATALOG_RUN_IN_FLIGHT_CAP": "8",
-    "SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM": "10",
+    "SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM": "4",
     "SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT": "8",
     "SOCIAL_INSTAGRAM_COMMENTS_MAX_SHARD_COUNT": "1000",
     "SOCIAL_INSTAGRAM_COMMENTS_GLOBAL_RATE_LIMIT_MODE": "advisory",
-    "SOCIAL_INSTAGRAM_COMMENTS_PER_POST_CONCURRENCY": "2",
+    "SOCIAL_INSTAGRAM_COMMENTS_PER_POST_CONCURRENCY": "1",
+    # Escalate substantial public-incomplete comment targets (expected gap >=
+    # MIN_GAP, default 100) to authenticated/proxy fallback instead of failing the
+    # shard with "require approval". Maximizes comment completeness; MIN_GAP keeps
+    # auth/proxy cost bounded to high-value posts. See comments_scrapling.job_runner
+    # _select_auto_auth_fallback_targets.
+    "SOCIAL_INSTAGRAM_COMMENTS_AUTO_AUTH_FALLBACK": "1",
     "SOCIAL_THREADS_POSTS_SCRAPLING_ENABLED": "true",
     "SOCIAL_THREADS_POSTS_PROXY_PROVIDER": "decodo",
     "SOCIAL_TIKTOK_COMMENT_FETCH_TIMEOUT_SECONDS": "180",
@@ -381,7 +384,10 @@ _image = _build_lean_image_base()
 _vision_image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("libgl1", "libglib2.0-0")
-    .pip_install_from_requirements(str(_MODAL_VISION_REQUIREMENTS))
+    .pip_install_from_requirements(
+        str(_MODAL_VISION_REQUIREMENTS),
+        extra_index_url="https://download.pytorch.org/whl/cpu",
+    )
     .add_local_python_source("api", "trr_backend")
 )
 
@@ -403,6 +409,7 @@ _FUNCTION_IMAGE_BINDINGS: Final[dict[str, object]] = {
     "run_socialblade_scrape": _browser_image,
     "probe_socialblade_runtime": _browser_image,
     "heartbeat_remote_executors": _image,
+    "sync_nbcumv_official_images": _image,
     "purge_stale_social_worker_heartbeats": _image,
     "run_admin_vision": _vision_image,
     "run_cast_screentime_analysis": _vision_image,
@@ -1003,13 +1010,20 @@ def probe_instagram_posts_auth(account_handle: str) -> dict[str, object]:
     retries=0,
     timeout=5 * 60,
 )
-def probe_instagram_comments_auth(account_handle: str, shortcode: str) -> dict[str, object]:
-    if _instagram_public_first_mode_enabled():
+def probe_instagram_comments_auth(
+    account_handle: str,
+    shortcode: str,
+    strict_authenticated: bool = False,
+) -> dict[str, object]:
+    strict_authenticated = bool(strict_authenticated)
+    if _instagram_public_first_mode_enabled() and not strict_authenticated:
         return {
             "platform": "instagram",
             "account_handle": str(account_handle or "").strip().lower().lstrip("@"),
             "shortcode": str(shortcode or "").strip(),
             "ready": True,
+            "public_ready": True,
+            "authenticated_ready": False,
             "execution_backend": "modal",
             "status": "public",
             "result": "public",
@@ -1017,6 +1031,9 @@ def probe_instagram_comments_auth(account_handle: str, shortcode: str) -> dict[s
             "auth_state": "public",
             "proxy_state": "none",
             "auth_probe_skipped": True,
+            "auth_required_for_hidden_comments": True,
+            "comments_auth_blocker": "strict_authenticated_probe_not_requested",
+            "operator_action": "Run a strict Instagram comments auth probe before launching hidden-comments recovery.",
             "fallback_policy": {
                 "auth_fallback": "requires_approval",
                 "proxy_fallback": "requires_approval",
@@ -1031,12 +1048,38 @@ def probe_instagram_comments_auth(account_handle: str, shortcode: str) -> dict[s
         )
     )
     status = str(payload.get("status") or payload.get("result") or "").strip().lower()
+    authenticated_ready = status == "valid"
+    reason = str(payload.get("reason") or "").strip().lower()
+    rate_limited = reason in {"http_429", "rate_limited"} or "429" in reason or status == "rate_limited"
+    try:
+        cooldown_seconds = int(float(os.getenv("TRR_MODAL_INSTAGRAM_COMMENTS_AUTH_RATE_LIMIT_CACHE_SECONDS") or "300"))
+    except ValueError:
+        cooldown_seconds = 300
+    cooldown_seconds = min(max(cooldown_seconds, 1), 1_800)
     payload.update(
         {
             "platform": "instagram",
             "account_handle": account_handle,
-            "ready": status == "valid",
+            "ready": authenticated_ready,
+            "public_ready": True,
+            "authenticated_ready": authenticated_ready,
             "execution_backend": "modal",
+            "auth_probe_skipped": False,
+            "auth_required_for_hidden_comments": not authenticated_ready,
+            "comments_auth_blocker": None
+            if authenticated_ready
+            else str(payload.get("reason") or status or "comments_auth_probe_failed").strip()
+            or "comments_auth_probe_failed",
+            "rate_limited": rate_limited,
+            "cooldown_recommended_seconds": cooldown_seconds if rate_limited else None,
+            "operator_action": None
+            if authenticated_ready
+            else (
+                f"Instagram comments auth probe is rate-limited. Wait at least {cooldown_seconds} seconds, "
+                "then rerun the strict comments auth probe before launching hidden-comments recovery."
+                if rate_limited
+                else "Repair Instagram comments auth, then rerun the strict comments auth probe."
+            ),
         }
     )
     return payload
@@ -1067,9 +1110,9 @@ def probe_instagram_public_history(
     output_file: str | None = None,
     scrub_public_env: bool = True,
 ) -> dict[str, object]:
+    import json
     from dataclasses import asdict
     from datetime import date
-    import json
     from pathlib import Path
 
     from trr_backend.socials.instagram.public_probe import (
@@ -1386,6 +1429,41 @@ def poll_decodo_proxy_usage() -> dict[str, object]:
         # Defensive: poll_decodo_usage is already fail-open, but never let the cron crash.
         _worker_failed("decodo_usage", started_at, failure_class=type(exc).__name__)
         return {"status": "error", "reason": type(exc).__name__, "alert": False}
+
+
+@app.function(
+    image=_FUNCTION_IMAGE_BINDINGS["sync_nbcumv_official_images"],
+    secrets=_secrets,
+    retries=0,
+    timeout=15 * 60,
+    max_containers=1,
+    # Daily at 14:15 in the configured TRR timezone.
+    **_modal_cron_schedule_kwargs("15 14 * * *"),
+)
+def sync_nbcumv_official_images() -> dict[str, object]:
+    from api.routers.admin_show_sync import run_official_images_auto_sync
+
+    started_at = _worker_started(
+        "nbcumv_official_images",
+        function_name="sync_nbcumv_official_images",
+    )
+    try:
+        result = run_official_images_auto_sync()
+        _worker_finished(
+            "nbcumv_official_images",
+            started_at,
+            result_status=str(result.get("status") or "completed"),
+            scanned=result.get("scanned"),
+            changed=result.get("changed"),
+            skipped=result.get("skipped"),
+            failed=result.get("failed"),
+        )
+        return result
+    except Exception as exc:
+        _worker_failed("nbcumv_official_images", started_at, failure_class=type(exc).__name__)
+        raise
+    finally:
+        _close_db_pools_after_worker("nbcumv_official_images")
 
 
 @app.function(

@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import json
 import types
 
+from trr_backend.integrations.bravo_jsonapi import extract_gallery_assets_from_html
+from trr_backend.media.bravotv import get_images_pipeline
 from trr_backend.media.bravotv.get_images_pipeline import (
+    _collect_getty_person,
     _extract_bravo_image_people_names,
     _extract_people_from_text,
-    _collect_getty_person,
     _normalize_external_ids,
     _normalize_getty_record,
     _normalize_nup_key,
+    _normalize_sources,
     _refreshed_artifacts,
     _selected_source_families,
     _split_caption_people,
@@ -16,13 +20,15 @@ from trr_backend.media.bravotv.get_images_pipeline import (
     build_bridge_and_catalog,
     run_get_images_pipeline,
 )
-from trr_backend.media.bravotv import get_images_pipeline
-from trr_backend.integrations.bravo_jsonapi import extract_gallery_assets_from_html
 
 
 def test_selected_source_families_expand_all_for_person_mode() -> None:
-    assert _selected_source_families(["all"], mode="person") == ["getty", "imdb", "tmdb", "fandom"]
+    assert _selected_source_families(["all"], mode="person") == ["getty", "peacock", "imdb", "tmdb", "fandom"]
     assert _refreshed_artifacts(["getty"], mode="person") == ["getty", "nbcumv", "bravo"]
+    assert _normalize_sources(["nbcumv"], mode="person") == ["nbcumv"]
+    assert _selected_source_families(["nbcumv"], mode="person") == ["nbcumv"]
+    assert _refreshed_artifacts(["nbcumv"], mode="person") == ["nbcumv"]
+    assert _refreshed_artifacts(["peacock"], mode="person") == ["peacock"]
     assert _refreshed_artifacts(["fandom"], mode="person") == ["fandom"]
 
 
@@ -186,6 +192,42 @@ def test_collect_nbcumv_person_falls_back_to_show_name_text_when_show_id_caption
         "search_show_id_caption_probe",
         "search_show_name_person_text",
     ]
+
+
+def test_collect_nbcumv_person_rejects_photographer_name_false_positive(monkeypatch) -> None:
+    monkeypatch.setattr(
+        get_images_pipeline.nbcumv,
+        "resolve_show_by_title",
+        lambda title: {"id": "show-uuid", "title": title},
+    )
+
+    def fake_search_images(filters, **_kwargs):
+        if filters.show_name and filters.search_text == "Kyle Greene":
+            return [
+                {
+                    "lbx_id": "false-positive",
+                    "lbx_filename": "NUP_1_0001.JPG",
+                    "lbx_showTitle": "Love Island USA",
+                    "lbx_caption": "Pictured: Tom Green at an event. Photo by Kyle Dubiel.",
+                    "lbx_headline": "Love Island USA - Season 8",
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(get_images_pipeline.nbcumv, "search_images", fake_search_images)
+    diagnostics: list[dict[str, object]] = []
+
+    rows = get_images_pipeline._collect_nbcumv_person(
+        "Kyle Greene",
+        show_name="Love Island USA",
+        limit=10,
+        diagnostics=diagnostics,
+    )
+
+    assert rows == []
+    show_name_stage = next(item for item in diagnostics if item.get("stage") == "search_show_name_person_text")
+    assert show_name_stage["result_count"] == 1
+    assert show_name_stage["filtered_count"] == 0
 
 
 def test_collect_getty_person_runs_bravo_then_name_without_overlap(monkeypatch) -> None:
@@ -392,6 +434,57 @@ def test_acquire_best_image_uploads_getty_large_and_thumb(monkeypatch) -> None:
     assert acquisition["source_page_url"] == "https://www.gettyimages.com/detail/news-photo/example/928663262"
 
 
+def test_acquire_best_image_uploads_peacock_original(monkeypatch) -> None:
+    mirrored_urls: list[str] = []
+
+    def fake_mirror(url: str):  # noqa: ANN001
+        mirrored_urls.append(url)
+        return types.SimpleNamespace(
+            status="mirrored",
+            hosted_url="https://cdn.example.com/keyon.jpg",
+            hosted_key="shared-media/keyon.jpg",
+            sha256="sha-keyon",
+            content_type="image/jpeg",
+            size_bytes=521506,
+            error=None,
+        )
+
+    monkeypatch.setattr(
+        "trr_backend.media.bravotv.get_images_pipeline.mirror_url_to_s3",
+        lambda url: fake_mirror(url),
+    )
+
+    record = {
+        "id": "group-1",
+        "per_source": {
+            "peacock": {
+                "source_url": (
+                    "https://www.peacocktv.com/sites/peacock/files/2026/06/"
+                    "pea_lis8_casaamor_characterportrait_titlesocial_1080x1350_keyon.jpg"
+                ),
+                "preview_image_url": (
+                    "https://www.peacocktv.com/sites/peacock/files/styles/scale_600/public/2026/06/"
+                    "pea_lis8_casaamor_characterportrait_titlesocial_1080x1350_keyon.jpg"
+                ),
+                "source_page_url": "https://www.peacocktv.com/blog/love-island-usa-season-8-cast",
+            }
+        },
+    }
+
+    acquisition = acquire_best_image(record)
+
+    assert mirrored_urls == [
+        "https://www.peacocktv.com/sites/peacock/files/2026/06/"
+        "pea_lis8_casaamor_characterportrait_titlesocial_1080x1350_keyon.jpg"
+    ]
+    assert acquisition["status"] == "mirrored"
+    assert acquisition["source"] == "peacock_blog"
+    assert acquisition["source_url"] == mirrored_urls[0]
+    assert acquisition["preview_source_url"].endswith(
+        "/styles/scale_600/public/2026/06/pea_lis8_casaamor_characterportrait_titlesocial_1080x1350_keyon.jpg"
+    )
+
+
 def test_run_get_images_pipeline_uses_prefetched_getty_assets_without_live_collect(monkeypatch, tmp_path) -> None:
     prefetched_assets = [
         {
@@ -411,9 +504,15 @@ def test_run_get_images_pipeline_uses_prefetched_getty_assets_without_live_colle
         "trr_backend.media.bravotv.get_images_pipeline._collect_getty_person",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("live Getty collection should be skipped")),
     )
-    monkeypatch.setattr("trr_backend.media.bravotv.get_images_pipeline._collect_nbcumv_person", lambda *args, **kwargs: [])
-    monkeypatch.setattr("trr_backend.media.bravotv.get_images_pipeline._collect_bravo_person", lambda *args, **kwargs: [])
-    monkeypatch.setattr("trr_backend.media.bravotv.get_images_pipeline.nbcumv.fetch_image_by_identity", lambda **kwargs: None)
+    monkeypatch.setattr(
+        "trr_backend.media.bravotv.get_images_pipeline._collect_nbcumv_person", lambda *args, **kwargs: []
+    )
+    monkeypatch.setattr(
+        "trr_backend.media.bravotv.get_images_pipeline._collect_bravo_person", lambda *args, **kwargs: []
+    )
+    monkeypatch.setattr(
+        "trr_backend.media.bravotv.get_images_pipeline.nbcumv.fetch_image_by_identity", lambda **kwargs: None
+    )
     monkeypatch.setattr(
         "trr_backend.media.bravotv.get_images_pipeline.mirror_url_to_s3",
         lambda url: types.SimpleNamespace(
@@ -445,6 +544,112 @@ def test_run_get_images_pipeline_uses_prefetched_getty_assets_without_live_colle
     assert "hosted_thumb_url" in merged_catalog
 
 
+def test_run_get_images_pipeline_collects_peacock_as_official_source(monkeypatch, tmp_path) -> None:
+    original_url = (
+        "https://www.peacocktv.com/sites/peacock/files/2026/06/"
+        "pea_lis8_casaamor_characterportrait_titlesocial_1080x1350_keyon.jpg"
+    )
+    preview_url = (
+        "https://www.peacocktv.com/sites/peacock/files/styles/scale_600/public/2026/06/"
+        "pea_lis8_casaamor_characterportrait_titlesocial_1080x1350_keyon.jpg"
+    )
+
+    monkeypatch.setattr(
+        "trr_backend.media.bravotv.get_images_pipeline._collect_peacock_person",
+        lambda *args, **kwargs: [
+            {
+                "source_image_id": "peacock-blog:keyon",
+                "image_url": original_url,
+                "original_image_url": original_url,
+                "preview_image_url": preview_url,
+                "source_url": original_url,
+                "source_page_url": "https://www.peacocktv.com/blog/love-island-usa-season-8-cast",
+                "file_name": "pea_lis8_casaamor_characterportrait_titlesocial_1080x1350_keyon.jpg",
+                "caption": "Keyon Love Island USA Season 8 Casa Amor bombshell",
+                "alt_text": "Keyon Love Island USA Season 8 Casa Amor bombshell",
+                "people_names": ["Keyon Harry"],
+                "show_name": "Love Island USA",
+                "season_number": 8,
+                "source_label": "Peacock Blog",
+                "source_variant": "peacock_cast_page",
+                "width": 1080,
+                "height": 1350,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "trr_backend.media.bravotv.get_images_pipeline.mirror_url_to_s3",
+        lambda url: types.SimpleNamespace(
+            status="mirrored",
+            hosted_url="https://cdn.example.com/keyon.jpg",
+            hosted_key="shared-media/keyon.jpg",
+            sha256="sha-keyon",
+            content_type="image/jpeg",
+            size_bytes=521506,
+            error=None,
+        ),
+    )
+
+    result = run_get_images_pipeline(
+        person_name="Keyon Harry",
+        show_name="Love Island USA",
+        season=8,
+        output_dir=tmp_path,
+        sources=["peacock"],
+    )
+
+    manifest = result["manifest"]
+    merged_catalog = json.loads((tmp_path / "merged_catalog.json").read_text())
+    source_distribution = json.loads((tmp_path / "reports" / "source_distribution.json").read_text())
+
+    assert manifest["counts"]["peacock"] == 1
+    assert merged_catalog[0]["per_source"]["peacock"]["source_url"] == original_url
+    assert "/styles/scale_600/public/" not in merged_catalog[0]["acquisition"]["source_url"]
+    assert merged_catalog[0]["source_provenance"]["peacock"]["label"] == "Peacock Blog"
+    assert source_distribution["sources"] == {"peacock": 1}
+
+
+def test_run_get_images_pipeline_collects_nbcumv_without_expanding_to_all(monkeypatch, tmp_path) -> None:
+    def _unexpected_source(*_args, **_kwargs):
+        raise AssertionError("nbcumv-only run should not collect other sources")
+
+    monkeypatch.setattr("trr_backend.media.bravotv.get_images_pipeline._collect_getty_person", _unexpected_source)
+    monkeypatch.setattr("trr_backend.media.bravotv.get_images_pipeline._collect_bravo_person", _unexpected_source)
+    monkeypatch.setattr("trr_backend.media.bravotv.get_images_pipeline._collect_peacock_person", _unexpected_source)
+    monkeypatch.setattr(
+        "trr_backend.media.bravotv.get_images_pipeline._collect_person_supplemental_sources",
+        _unexpected_source,
+    )
+    monkeypatch.setattr(
+        "trr_backend.media.bravotv.get_images_pipeline._collect_nbcumv_person",
+        lambda *args, **kwargs: [
+            {
+                "lbx_id": "70761487",
+                "lbx_filename": "NUP_181952_5.JPG",
+                "lbx_caption": "Pictured: Andy Cohen",
+                "lbx_showTitle": "Watch What Happens Live",
+                "location": "https://nbcumv.example/5.jpg",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "trr_backend.media.bravotv.get_images_pipeline.acquire_best_image",
+        lambda record: {"status": "skipped", "source": "test"},
+    )
+
+    result = run_get_images_pipeline(person_name="Andy Cohen", output_dir=tmp_path, sources=["nbcumv"])
+
+    manifest = result["manifest"]
+    merged_catalog = json.loads((tmp_path / "merged_catalog.json").read_text())
+
+    assert manifest["selected_sources"] == ["nbcumv"]
+    assert manifest["selected_source_families"] == ["nbcumv"]
+    assert manifest["counts"]["nbcumv"] == 1
+    assert not (tmp_path / "raw" / "getty.json").exists()
+    assert not (tmp_path / "raw" / "bravo.json").exists()
+    assert merged_catalog[0]["sources"] == ["nbcumv"]
+
+
 def test_run_get_images_pipeline_backfills_nbcumv_from_getty_nup(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         "trr_backend.media.bravotv.get_images_pipeline._collect_getty_person",
@@ -458,8 +663,12 @@ def test_run_get_images_pipeline_backfills_nbcumv_from_getty_nup(monkeypatch, tm
             }
         ],
     )
-    monkeypatch.setattr("trr_backend.media.bravotv.get_images_pipeline._collect_nbcumv_person", lambda *args, **kwargs: [])
-    monkeypatch.setattr("trr_backend.media.bravotv.get_images_pipeline._collect_bravo_person", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        "trr_backend.media.bravotv.get_images_pipeline._collect_nbcumv_person", lambda *args, **kwargs: []
+    )
+    monkeypatch.setattr(
+        "trr_backend.media.bravotv.get_images_pipeline._collect_bravo_person", lambda *args, **kwargs: []
+    )
     monkeypatch.setattr(
         "trr_backend.media.bravotv.get_images_pipeline.nbcumv.fetch_image_by_identity",
         lambda **kwargs: {
@@ -489,8 +698,12 @@ def test_run_get_images_pipeline_backfills_nbcumv_from_getty_nup(monkeypatch, tm
 
 
 def test_run_get_images_pipeline_backfills_getty_metadata_for_bravo_nup(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr("trr_backend.media.bravotv.get_images_pipeline._collect_getty_person", lambda *args, **kwargs: [])
-    monkeypatch.setattr("trr_backend.media.bravotv.get_images_pipeline._collect_nbcumv_person", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        "trr_backend.media.bravotv.get_images_pipeline._collect_getty_person", lambda *args, **kwargs: []
+    )
+    monkeypatch.setattr(
+        "trr_backend.media.bravotv.get_images_pipeline._collect_nbcumv_person", lambda *args, **kwargs: []
+    )
     monkeypatch.setattr(
         "trr_backend.media.bravotv.get_images_pipeline._collect_bravo_person",
         lambda *args, **kwargs: [

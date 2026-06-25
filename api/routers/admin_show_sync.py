@@ -49,11 +49,13 @@ from api.routers import (
     admin_show_roles,
 )
 from trr_backend.db import pg
+from trr_backend.db.admin import create_supabase_admin_client
 from trr_backend.ingestion.show_importer import (
     collect_candidates_from_lists,
     parse_imdb_headers_json_env,
     upsert_candidates_into_supabase,
 )
+from trr_backend.integrations import nbcumv
 from trr_backend.integrations.tmdb.client import resolve_api_key
 from trr_backend.job_plane import is_remote_job_plane_enabled
 from trr_backend.media.s3_mirror import (
@@ -80,8 +82,7 @@ from trr_backend.pipeline.show_refresh_orchestrator import (
     build_show_refresh_sub_operation_request_payload,
 )
 from trr_backend.repositories import admin_operations as admin_operations_repo
-from trr_backend.repositories import admin_runtime_settings
-from trr_backend.repositories import brand_families
+from trr_backend.repositories import admin_runtime_settings, brand_families
 from trr_backend.repositories.media_assets import update_asset_with_mirror_result
 from trr_backend.repositories.web_scrape_images import (
     create_media_asset_from_scrape,
@@ -93,7 +94,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin/shows", tags=["admin-show-sync"])
 STREAM_HEARTBEAT_INTERVAL_SECONDS = 10
-VALID_REFRESH_TARGETS = frozenset({"show_core", "links", "bravo", "cast_profiles", "cast_media"})
+VALID_REFRESH_TARGETS = frozenset({"show_core", "links", "bravo", "cast_profiles", "cast_media", "official_images"})
+NBCUMV_OFFICIAL_IMAGES_SETTING_PREFIX = "nbcumv_official_images"
+NBCU_OFFICIAL_IMAGE_TERMS = frozenset({"bravo", "peacock", "nbc", "nbcu", "nbcuniversal", "nbc universal"})
 
 
 def _admin_actor(admin: InternalAdminUser | None) -> str:
@@ -108,7 +111,7 @@ def _show_core_auto_refresh_paused() -> bool:
         return False
 
 
-def _raise_if_show_core_auto_refresh_paused(payload: "ShowRefreshRequest", targets: list[str]) -> None:
+def _raise_if_show_core_auto_refresh_paused(payload: ShowRefreshRequest, targets: list[str]) -> None:
     if not payload.auto_refresh or "show_core" not in targets:
         return
     if not _show_core_auto_refresh_paused():
@@ -442,8 +445,10 @@ class SyncFromListsRequest(BaseModel):
         default=True,
         description="Start the show_core refresh pipeline for shows touched by this list sync.",
     )
-    auto_refresh_targets: list[Literal["show_core", "links", "bravo", "cast_profiles", "cast_media"]] = Field(
-        default_factory=lambda: ["show_core"],
+    auto_refresh_targets: list[
+        Literal["show_core", "links", "bravo", "cast_profiles", "cast_media", "official_images"]
+    ] = Field(
+        default_factory=lambda: ["show_core", "official_images"],
         description="Refresh targets to enqueue after shows are inserted or updated.",
     )
 
@@ -474,9 +479,9 @@ def _enqueue_show_core_refreshes_for_list_sync(
     db: SupabaseAdminClient,
     initiated_by: str,
 ) -> tuple[list[SyncFromListsAutoRefreshOperation], list[str]]:
-    normalized_targets = [target for target in targets if target in VALID_REFRESH_TARGETS]
-    if not normalized_targets:
-        normalized_targets = ["show_core"]
+    base_targets = [target for target in targets if target in VALID_REFRESH_TARGETS]
+    if not base_targets:
+        base_targets = ["show_core"]
 
     operations: list[SyncFromListsAutoRefreshOperation] = []
     errors: list[str] = []
@@ -487,6 +492,10 @@ def _enqueue_show_core_refreshes_for_list_sync(
         if not show_id or show_id in seen_show_ids:
             continue
         seen_show_ids.add(show_id)
+        show_row = _hydrate_show_official_images_context(show_id=show_id, show_row=row, db=db)
+        normalized_targets = _targets_for_show_row(base_targets, show_row=show_row)
+        if not normalized_targets:
+            continue
 
         request_id = f"sync-from-lists:{show_id}:{int(time.time())}"
         payload_data = {
@@ -2405,6 +2414,7 @@ ShowRefreshTarget = Literal[
     "bravo",
     "cast_profiles",
     "cast_media",
+    "official_images",
 ]
 
 
@@ -2722,6 +2732,350 @@ def _show_is_bravo(show_row: dict[str, Any] | None) -> bool:
     if not isinstance(show_row, dict):
         return False
     return any(network.strip().lower() == "bravo" for network in _normalize_text_list(show_row.get("networks")))
+
+
+def _brand_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def _show_is_nbcumv_official_images_eligible(show_row: dict[str, Any] | None) -> bool:
+    if not isinstance(show_row, dict):
+        return False
+    values = [
+        *_normalize_text_list(show_row.get("networks")),
+        *_normalize_text_list(show_row.get("streaming_providers")),
+        *_normalize_text_list(show_row.get("listed_on")),
+    ]
+    term_keys = {_brand_key(term) for term in NBCU_OFFICIAL_IMAGE_TERMS}
+    for value in values:
+        key = _brand_key(value)
+        if key in term_keys or "nbcuniversal" in key:
+            return True
+    return False
+
+
+def _hydrate_show_official_images_context(
+    *,
+    show_id: str,
+    show_row: dict[str, Any] | None,
+    db: SupabaseAdminClient,
+) -> dict[str, Any]:
+    row = dict(show_row or {})
+    if {"networks", "streaming_providers", "listed_on"}.issubset(row.keys()):
+        return row
+    try:
+        response = (
+            db.schema("core")
+            .table("shows")
+            .select("id,name,networks,streaming_providers,listed_on,imdb_id,external_ids")
+            .eq("id", show_id)
+            .limit(1)
+            .execute()
+        )
+        rows = response.data if isinstance(getattr(response, "data", None), list) else []
+    except Exception:  # noqa: BLE001
+        return row
+    if rows and isinstance(rows[0], dict):
+        hydrated = dict(rows[0])
+        hydrated.update({key: value for key, value in row.items() if value is not None})
+        return hydrated
+    return row
+
+
+def _targets_for_show_row(targets: list[str], *, show_row: dict[str, Any] | None) -> list[str]:
+    filtered: list[str] = []
+    for target in targets:
+        if target == "official_images" and not _show_is_nbcumv_official_images_eligible(show_row):
+            continue
+        filtered.append(target)
+    return filtered
+
+
+def _nbcumv_official_images_state_key(show_id: str) -> str:
+    return f"{NBCUMV_OFFICIAL_IMAGES_SETTING_PREFIX}:{show_id}"
+
+
+def _nbcumv_catalog_fingerprint(images: list[dict[str, Any]]) -> dict[str, Any]:
+    identifiers = sorted(
+        {
+            str(image.get("lbx_id") or image.get("id") or image.get("lbx_filename") or "").strip()
+            for image in images
+            if str(image.get("lbx_id") or image.get("id") or image.get("lbx_filename") or "").strip()
+        }
+    )
+    digest = hashlib.sha256(json.dumps(identifiers, ensure_ascii=True).encode("utf-8")).hexdigest()
+    return {
+        "fingerprint": digest,
+        "asset_count": len(identifiers),
+        "sample_asset_ids": identifiers[:10],
+    }
+
+
+def _resolve_nbcumv_show_catalog(show_name: str) -> dict[str, Any]:
+    resolved = nbcumv.resolve_show_by_title(show_name)
+    if not resolved:
+        return {"matched": False, "show_name": show_name, "images": []}
+    nbcumv_show_id = str(resolved.get("id") or "").strip()
+    if not nbcumv_show_id:
+        return {"matched": False, "show_name": show_name, "resolved": resolved, "images": []}
+    images = nbcumv.list_show_images(nbcumv_show_id, limit=5000)
+    fingerprint = _nbcumv_catalog_fingerprint([image for image in images if isinstance(image, dict)])
+    return {
+        "matched": True,
+        "show_name": show_name,
+        "nbcumv_show_id": nbcumv_show_id,
+        "nbcumv_show_title": str(resolved.get("title") or "").strip() or show_name,
+        "images": images,
+        **fingerprint,
+    }
+
+
+def _enqueue_bravotv_nbcumv_image_run(
+    *,
+    mode: Literal["show", "person"],
+    show_id: str | None,
+    person_id: str | None,
+    season: int | None = None,
+    episode: int | None = None,
+    force_all: bool = False,
+    initiated_by: str | None = None,
+    request_id: str | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "mode": mode,
+        "show_id": show_id,
+        "person_id": person_id,
+        "season": season,
+        "episode": episode,
+        "sources": ["nbcumv"],
+        "nbcumv_limit": 1000,
+        "force_all": bool(force_all),
+    }
+    request_payload = {
+        "mode": mode,
+        "show_id": show_id,
+        "person_id": person_id,
+        "payload": payload,
+        "request_id": request_id,
+        "initiated_by": initiated_by,
+        "source": "nbcumv_official_images_auto_sync",
+    }
+    operation, attached = admin_operations_repo.create_or_attach_operation(
+        operation_type="admin_bravotv_image_run",
+        request_payload=request_payload,
+        initiated_by=initiated_by,
+        request_id=request_id,
+        allow_attach=False,
+    )
+    operation_id = str(operation.get("id") or "").strip()
+    dispatched = False
+    if operation_id and supports_admin_operation("admin_bravotv_image_run"):
+        dispatched = dispatch_admin_operation(operation_id=operation_id, operation_type="admin_bravotv_image_run")
+    if operation_id:
+        admin_operations_repo.append_operation_event(
+            operation_id,
+            event_type="operation",
+            event_payload={
+                "operation_id": operation_id,
+                "status": str(operation.get("status") or "pending"),
+                "attached": bool(attached),
+                "request_id": request_id,
+                "source": "nbcumv_official_images_auto_sync",
+                "modal_dispatched": dispatched,
+            },
+        )
+        if dispatched:
+            admin_operations_repo.append_operation_event(
+                operation_id,
+                event_type="dispatched_to_modal",
+                event_payload={"operation_id": operation_id, "request_id": request_id},
+            )
+    return {
+        "operation_id": operation_id,
+        "mode": mode,
+        "show_id": show_id,
+        "person_id": person_id,
+        "dispatched": dispatched,
+    }
+
+
+def _run_official_images_refresh_stage(
+    *,
+    show_id: str,
+    show_row: dict[str, Any] | None,
+    db: SupabaseAdminClient,
+    admin_user: InternalAdminUser | dict[str, Any] | None,
+    force_all: bool = False,
+) -> RefreshStepResult:
+    started = time.perf_counter()
+    if not _show_is_nbcumv_official_images_eligible(show_row):
+        return RefreshStepResult(
+            status="skipped",
+            duration_ms=0,
+            exit_code=0,
+            skip_reason="Show is not Peacock/Bravo/NBCUniversal eligible.",
+            error="Show is not Peacock/Bravo/NBCUniversal eligible.",
+        )
+    show_name = str((show_row or {}).get("name") or "").strip()
+    if not show_name:
+        return RefreshStepResult(
+            status="skipped",
+            duration_ms=0,
+            exit_code=0,
+            skip_reason="Show is missing name.",
+            error="Show is missing name.",
+        )
+
+    catalog = _resolve_nbcumv_show_catalog(show_name)
+    if not catalog.get("matched"):
+        return RefreshStepResult(
+            status="skipped",
+            duration_ms=int((time.perf_counter() - started) * 1000),
+            exit_code=0,
+            skip_reason="NBCUMV show catalog not found.",
+            error="NBCUMV show catalog not found.",
+            output=json.dumps({"show_name": show_name}, ensure_ascii=True),
+        )
+
+    state_key = _nbcumv_official_images_state_key(show_id)
+    previous = admin_runtime_settings.get_runtime_setting(state_key)
+    fingerprint = str(catalog.get("fingerprint") or "").strip()
+    previous_fingerprint = str(previous.get("fingerprint") or "").strip()
+    if fingerprint and previous_fingerprint == fingerprint and not force_all:
+        return RefreshStepResult(
+            status="skipped",
+            duration_ms=int((time.perf_counter() - started) * 1000),
+            exit_code=0,
+            skip_reason="NBCUMV catalog unchanged.",
+            output=json.dumps(
+                {
+                    "show_id": show_id,
+                    "show_name": show_name,
+                    "nbcumv_show_id": catalog.get("nbcumv_show_id"),
+                    "asset_count": catalog.get("asset_count"),
+                    "fingerprint": fingerprint,
+                },
+                ensure_ascii=True,
+            ),
+        )
+
+    actor = str((admin_user or {}).get("email") or (admin_user or {}).get("id") or "admin")
+    request_seed = f"nbcumv-official-images:{show_id}:{int(time.time())}"
+    enqueued = [
+        _enqueue_bravotv_nbcumv_image_run(
+            mode="show",
+            show_id=show_id,
+            person_id=None,
+            force_all=force_all,
+            initiated_by=actor,
+            request_id=request_seed,
+        )
+    ]
+    for member in _list_refresh_cast_members(show_id=show_id, db=db):
+        person_id = str(member.get("person_id") or "").strip()
+        if not person_id:
+            continue
+        enqueued.append(
+            _enqueue_bravotv_nbcumv_image_run(
+                mode="person",
+                show_id=show_id,
+                person_id=person_id,
+                force_all=force_all,
+                initiated_by=actor,
+                request_id=f"{request_seed}:{person_id}",
+            )
+        )
+
+    admin_runtime_settings.set_runtime_setting(
+        state_key,
+        {
+            "fingerprint": fingerprint,
+            "asset_count": catalog.get("asset_count"),
+            "sample_asset_ids": catalog.get("sample_asset_ids") or [],
+            "nbcumv_show_id": catalog.get("nbcumv_show_id"),
+            "nbcumv_show_title": catalog.get("nbcumv_show_title"),
+            "last_enqueued_at": datetime.now(UTC).isoformat(),
+            "operation_ids": [item.get("operation_id") for item in enqueued if item.get("operation_id")],
+        },
+        updated_by=actor,
+    )
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    return RefreshStepResult(
+        status="success",
+        duration_ms=duration_ms,
+        exit_code=0,
+        output=json.dumps(
+            {
+                "show_id": show_id,
+                "show_name": show_name,
+                "nbcumv_show_id": catalog.get("nbcumv_show_id"),
+                "asset_count": catalog.get("asset_count"),
+                "fingerprint": fingerprint,
+                "enqueued": len(enqueued),
+                "operation_ids": [item.get("operation_id") for item in enqueued if item.get("operation_id")],
+            },
+            ensure_ascii=True,
+        ),
+    )
+
+
+def list_official_images_auto_sync_show_rows(*, limit: int = 100) -> list[dict[str, Any]]:
+    rows = pg.fetch_all(
+        """
+        select
+          id::text,
+          name,
+          networks,
+          streaming_providers,
+          listed_on,
+          imdb_id,
+          external_ids
+        from core.shows
+        where exists (
+          select 1
+          from unnest(
+            coalesce(networks, array[]::text[])
+            || coalesce(streaming_providers, array[]::text[])
+            || coalesce(listed_on, array[]::text[])
+          ) as value
+          where regexp_replace(lower(value), '[^a-z0-9]+', '', 'g') = any(%s::text[])
+        )
+        order by updated_at desc nulls last, name asc
+        limit %s
+        """,
+        [sorted({_brand_key(term) for term in NBCU_OFFICIAL_IMAGE_TERMS}), max(1, min(int(limit or 100), 500))],
+    )
+    return [dict(row) for row in rows if isinstance(row, dict)]
+
+
+def run_official_images_auto_sync(*, limit: int = 100, force_all: bool = False) -> dict[str, Any]:
+    db = create_supabase_admin_client()
+    rows = list_official_images_auto_sync_show_rows(limit=limit)
+    results: list[dict[str, Any]] = []
+    for row in rows:
+        show_id = str(row.get("id") or "").strip()
+        if not show_id:
+            continue
+        try:
+            result = _run_official_images_refresh_stage(
+                show_id=show_id,
+                show_row=row,
+                db=db,
+                admin_user={"id": "nbcumv_official_images_auto_sync"},
+                force_all=force_all,
+            )
+            results.append({"show_id": show_id, "status": result.status, "output": result.output})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("NBCUMV official image auto-sync failed for show_id=%s: %s", show_id, exc)
+            results.append({"show_id": show_id, "status": "failed", "error": str(exc)})
+    return {
+        "status": "completed",
+        "scanned": len(rows),
+        "changed": sum(1 for item in results if item.get("status") == "success"),
+        "skipped": sum(1 for item in results if item.get("status") == "skipped"),
+        "failed": sum(1 for item in results if item.get("status") == "failed"),
+        "results": results,
+    }
 
 
 def _resolve_show_official_page_url(show_id: str, *, show_row: dict[str, Any] | None) -> str | None:
@@ -3316,7 +3670,7 @@ def refresh_show(
     show_resp = (
         db.schema("core")
         .table("shows")
-        .select("id,name,networks,imdb_id,external_ids")
+        .select("id,name,networks,streaming_providers,listed_on,imdb_id,external_ids")
         .eq("id", show_id_str)
         .limit(1)
         .execute()
@@ -3584,6 +3938,18 @@ def refresh_show(
             results["cast_media"] = cast_media_result
             continue
 
+        if target == "official_images":
+            official_images_result = _run_official_images_refresh_stage(
+                show_id=show_id_str,
+                show_row=show_row,
+                db=db,
+                admin_user=_,
+                force_all=bool(payload.force_new_operation),
+            )
+            results["official_images_sync"] = official_images_result
+            results["official_images"] = official_images_result
+            continue
+
         raise HTTPException(status_code=400, detail=f"Unknown refresh target: {target}")
 
     return ShowRefreshResponse(show_id=show_id_str, targets=ordered, results=results)
@@ -3608,7 +3974,7 @@ def refresh_show_stream(
     show_resp = (
         db.schema("core")
         .table("shows")
-        .select("id,name,networks,imdb_id,external_ids")
+        .select("id,name,networks,streaming_providers,listed_on,imdb_id,external_ids")
         .eq("id", show_id_str)
         .limit(1)
         .execute()
@@ -4170,6 +4536,27 @@ def refresh_show_stream(
             )
             continue
 
+        if target == "official_images":
+            steps.append(
+                (
+                    "official_images",
+                    "official_images_sync",
+                    lambda sid=show_id_str, row=show_row, local_db=db, local_admin=admin: (
+                        _run_official_images_refresh_stage(
+                            show_id=sid,
+                            show_row=row,
+                            db=local_db,
+                            admin_user=local_admin,
+                            force_all=bool(payload.force_new_operation),
+                        )
+                    ),
+                    "media",
+                    "nbcumv",
+                    "official_images",
+                )
+            )
+            continue
+
         raise HTTPException(status_code=400, detail=f"Unknown refresh target: {target}")
 
     total_steps = len(steps)
@@ -4492,6 +4879,10 @@ def refresh_show_stream(
 
                 if target == "cast_media":
                     results["cast_media"] = results["cast_media_sync"]
+                    continue
+
+                if target == "official_images":
+                    results["official_images"] = results["official_images_sync"]
                     continue
 
             out = ShowRefreshResponse(show_id=show_id_str, targets=ordered, results=results)

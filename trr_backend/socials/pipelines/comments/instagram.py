@@ -15,6 +15,7 @@ from typing import Any, Sequence
 
 import trr_backend.socials.social_season_analytics_impl as _core
 from trr_backend.socials.instagram.comments_scrapling.public_mode import (
+    PUBLIC_COMMENTS_LOAD_STRATEGY,
     PUBLIC_COMMENTS_SCRAPE_MODE,
     comments_load_strategy_for_mode,
     comments_public_mode_from_config,
@@ -62,10 +63,10 @@ INSTAGRAM_COMMENTS_AUDIT_CURSOR_RETRY_STOP_REASONS = (
 # the number of batch-size-10 shard jobs. The run config carries a current cap
 # that the dispatcher honors when claiming jobs for the run, and a ramp helper
 # raises or lowers that cap based on the live public-blocked ratio.
-_PUBLIC_COMMENTS_WORKER_CAP_FLOOR = 6
-_PUBLIC_COMMENTS_WORKER_CAP_START = 12
-_PUBLIC_COMMENTS_WORKER_CAP_STEPS = (15, 20)
-_PUBLIC_COMMENTS_WORKER_CAP_CEILING = 20
+_PUBLIC_COMMENTS_WORKER_CAP_FLOOR = 2
+_PUBLIC_COMMENTS_WORKER_CAP_START = 2
+_PUBLIC_COMMENTS_WORKER_CAP_STEPS = (3, 4)
+_PUBLIC_COMMENTS_WORKER_CAP_CEILING = 4
 # Ramp up only while the public-blocked ratio stays below this fraction.
 _PUBLIC_COMMENTS_WORKER_CAP_RAMP_UP_MAX_RATIO = 0.20
 # Back down to the floor once the public-blocked ratio reaches this fraction.
@@ -401,7 +402,18 @@ def _instagram_comments_target_priority(refresh_policy: str) -> str:
     return "missing_first_recent"
 
 
-_INSTAGRAM_COMMENTS_LOAD_STRATEGIES = {"cursor_api", "single_session_load_all", "public_relay"}
+_INSTAGRAM_COMMENTS_ENDPOINT_CURSOR_STRATEGY = "instagram_comments_endpoint_cursor"
+_INSTAGRAM_COMMENTS_ENDPOINT_CURSOR_SESSION_SCOPE = "instagram_comments_endpoint_cursor_worker"
+_INSTAGRAM_COMMENTS_LOAD_STRATEGY_ALIASES = {"cursor_api": _INSTAGRAM_COMMENTS_ENDPOINT_CURSOR_STRATEGY}
+_INSTAGRAM_COMMENTS_SESSION_SCOPE_ALIASES = {
+    "cursor_api": _INSTAGRAM_COMMENTS_ENDPOINT_CURSOR_SESSION_SCOPE,
+    "cursor_api_worker": _INSTAGRAM_COMMENTS_ENDPOINT_CURSOR_SESSION_SCOPE,
+}
+_INSTAGRAM_COMMENTS_LOAD_STRATEGIES = {
+    _INSTAGRAM_COMMENTS_ENDPOINT_CURSOR_STRATEGY,
+    "single_session_load_all",
+    "public_relay",
+}
 _INSTAGRAM_COMMENTS_SINGLE_SESSION_ENV = "SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_LOAD_ALL_ENABLED"
 _BROWSER_SESSION_INVALIDATED_REASON = "browser_session_invalidated"
 
@@ -425,7 +437,8 @@ def _instagram_comments_single_session_load_all_enabled() -> bool:
 
 
 def _normalize_instagram_comments_load_strategy(value: str | None) -> str:
-    normalized = str(value or "cursor_api").strip().lower() or "cursor_api"
+    normalized = str(value or _INSTAGRAM_COMMENTS_ENDPOINT_CURSOR_STRATEGY).strip().lower()
+    normalized = _INSTAGRAM_COMMENTS_LOAD_STRATEGY_ALIASES.get(normalized, normalized)
     if normalized not in _INSTAGRAM_COMMENTS_LOAD_STRATEGIES:
         allowed = ", ".join(sorted(_INSTAGRAM_COMMENTS_LOAD_STRATEGIES))
         raise SocialIngestValidationError(
@@ -433,6 +446,20 @@ def _normalize_instagram_comments_load_strategy(value: str | None) -> str:
             f"Unsupported comments_load_strategy: {normalized}. Allowed values: {allowed}.",
         )
     return normalized
+
+
+def _canonicalize_instagram_comments_config_metadata(config: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Rename legacy comments strategy metadata without changing other config."""
+
+    canonical = dict(config or {})
+    raw_strategy = str(canonical.get("comments_load_strategy") or "").strip().lower()
+    if raw_strategy in _INSTAGRAM_COMMENTS_LOAD_STRATEGY_ALIASES:
+        canonical["comments_load_strategy"] = _INSTAGRAM_COMMENTS_LOAD_STRATEGY_ALIASES[raw_strategy]
+    if canonical.get("comments_load_strategy") == _INSTAGRAM_COMMENTS_ENDPOINT_CURSOR_STRATEGY:
+        raw_scope = str(canonical.get("comments_session_scope") or "").strip().lower()
+        if not raw_scope or raw_scope in _INSTAGRAM_COMMENTS_SESSION_SCOPE_ALIASES:
+            canonical["comments_session_scope"] = _INSTAGRAM_COMMENTS_ENDPOINT_CURSOR_SESSION_SCOPE
+    return canonical
 
 
 def _assert_instagram_comments_load_strategy_enabled(load_strategy: str) -> None:
@@ -465,7 +492,7 @@ def _instagram_comments_load_strategy_metadata(
     elif single_session:
         session_scope = "post_continuous" if mode == "single_post" else "profile_single_worker"
     else:
-        session_scope = "cursor_api_worker"
+        session_scope = _INSTAGRAM_COMMENTS_ENDPOINT_CURSOR_SESSION_SCOPE
     return {
         "comments_load_strategy": load_strategy,
         "comments_session_scope": session_scope,
@@ -494,7 +521,7 @@ def _public_comments_config_overlay(config: Mapping[str, Any] | None) -> dict[st
             }
         )
     normalized["instagram_access_proof"] = _instagram_comments_access_proof(public_mode=public_comments_mode)
-    return normalized
+    return _canonicalize_instagram_comments_config_metadata(normalized)
 
 
 def _instagram_comments_access_proof(*, public_mode: bool) -> dict[str, Any]:
@@ -2030,13 +2057,10 @@ def start_social_account_comments_scrape(
     window_start, window_end = _normalize_comment_date_window(date_start, date_end)
     normalized_date_start = window_start.isoformat() if window_start is not None else None
     normalized_date_end = window_end.isoformat() if window_end is not None else None
-    public_comments_mode = comments_public_mode_from_config(
-        {
-            "comments_load_strategy": comments_load_strategy,
-        }
-    )
+    requested_load_strategy = _normalize_instagram_comments_load_strategy(comments_load_strategy)
+    public_comments_mode = requested_load_strategy == PUBLIC_COMMENTS_LOAD_STRATEGY
     effective_comments_load_strategy = comments_load_strategy_for_mode(
-        comments_load_strategy,
+        requested_load_strategy,
         public_mode=public_comments_mode,
     )
     normalized_load_strategy = _normalize_instagram_comments_load_strategy(effective_comments_load_strategy)
@@ -2327,7 +2351,7 @@ def start_social_account_comments_scrape(
                     else normalized_max_comments_per_post
                 ),
                 "comments_enable_media_followups": bool(comments_enable_media_followups),
-                "instagram_scrape_mode": PUBLIC_COMMENTS_SCRAPE_MODE if public_comments_mode else None,
+                "instagram_scrape_mode": PUBLIC_COMMENTS_SCRAPE_MODE if public_comments_mode else "authenticated",
                 "comments_worker_count": requested_comments_worker_count,
                 "comments_target_batch_size": effective_comments_target_batch_size,
                 **_instagram_comments_worker_cap_launch_config(
@@ -2555,7 +2579,7 @@ def _load_instagram_comments_audit_cursor_rows(
 ) -> list[dict[str, Any]]:
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     safe_limit = max(1, min(int(limit or 1), 500))
-    audit_row_limit = min(max(safe_limit * 50, safe_limit), 10_000)
+    audit_row_limit = safe_limit
     normalized_shortcodes = _normalize_instagram_comments_audit_retry_shortcodes(shortcodes)
     normalized_stop_reasons = _normalize_instagram_comments_audit_retry_stop_reasons(stop_reasons)
     normalized_show_ids = _normalize_instagram_comments_show_filter_values(show_ids)
@@ -2690,11 +2714,19 @@ def _instagram_comments_audit_cursor_counts_by_shortcode(
             p.shortcode,
             p.id::text as post_id,
             coalesce(p.comments_count, 0)::int as reported_comment_count,
-            count(c.id) filter (where coalesce(c.is_missing, false) = false)::int as saved_comment_count
+            -- Prefer the maintained rollup (fast). Fall back to a live COUNT only for
+            -- posts without a rollup row yet, so they don't render a false "0 saved"
+            -- (the rollup does not yet cover every post).
+            coalesce(
+              r.active_comment_count,
+              count(c.id) filter (where coalesce(c.is_missing, false) = false)
+            )::int as saved_comment_count
           from social.instagram_posts p
-          left join social.instagram_comments c on c.post_id = p.id
+          left join social.instagram_post_comment_rollups r on r.post_id = p.id
+          left join social.instagram_comments c
+            on c.post_id = p.id and r.post_id is null
           where p.shortcode = any(%s::text[])
-          group by p.shortcode, p.id, p.comments_count
+          group by p.shortcode, p.id, p.comments_count, r.active_comment_count
         ),
         active_jobs as (
           select
@@ -3219,6 +3251,7 @@ def enqueue_instagram_comments_audit_cursor_retries(
             comments_target_batch_size=safe_batch_size,
             skip_launch_auth_probe=skip_launch_auth_probe,
             dispatch_immediately=dispatch_immediately,
+            cancel_active_before_relaunch=False if attach_to_active_run else None,
         )
         payload["enqueue"] = {"requested": True, "performed": True, "mode": "new_run", "result": result}
         return payload
@@ -3232,6 +3265,263 @@ def enqueue_instagram_comments_audit_cursor_retries(
         if not attach_to_active_run or not active_run_id:
             raise
         return _attach_targets_to_active_run(active_run_id, active_run_detail=getattr(exc, "detail", {}) or {})
+
+
+def _retry_target_text(target: Mapping[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = str(target.get(key) or "").strip()
+        if value:
+            return value
+    return None
+
+
+def _completion_retry_target_already_complete(target: Mapping[str, Any]) -> bool:
+    state = (
+        str(target.get("state") or target.get("completion_state") or target.get("status") or "")
+        .strip()
+        .lower()
+    )
+    if bool(target.get("completed") or target.get("complete")):
+        return True
+    return state in {"captured", "complete", "completed", "source_unavailable", "not_applicable"}
+
+
+def _completion_retry_target_priority(target: Mapping[str, Any]) -> tuple[int, int, int]:
+    stage = str(target.get("stage") or target.get("target_type") or "").strip().lower()
+    stage_weight = {
+        "comment_text_reply": 300,
+        "comments": 300,
+        "replies": 300,
+        "comment_media_mirror": 200,
+        "comment_media": 200,
+        "media_mirror": 100,
+        "hosted_media": 100,
+        "author_avatar": 50,
+    }.get(stage, 0)
+    missing_count = max(
+        _normalize_non_negative_int(target.get("missing_count")),
+        _normalize_non_negative_int(target.get("missing_comment_count")),
+        _normalize_non_negative_int(target.get("missing_media_count")),
+        _normalize_non_negative_int(target.get("target_count")),
+    )
+    impact_score = max(
+        _normalize_non_negative_int(target.get("impact_score")),
+        _normalize_non_negative_int(target.get("source_count")),
+        _normalize_non_negative_int(target.get("reported_comment_count")),
+        _normalize_non_negative_int(target.get("reported_comments")),
+    )
+    return (stage_weight, missing_count, impact_score)
+
+
+def _load_instagram_post_for_completion_retry(
+    target: Mapping[str, Any],
+    *,
+    conn: Any | None = None,
+) -> dict[str, Any] | None:
+    post_id = _retry_target_text(target, "post_id")
+    source_id = _retry_target_text(target, "source_id", "shortcode")
+    row = pg.fetch_one(
+        """
+        select *
+        from social.instagram_posts
+        where (
+            %s <> ''
+            and %s ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+            and id = %s::uuid
+          )
+          or (%s <> '' and shortcode = %s)
+        order by created_at desc nulls last
+        limit 1
+        """,
+        [post_id or "", post_id or "", post_id or "", source_id or "", source_id or ""],
+        conn=conn,
+    )
+    return dict(row) if row else None
+
+
+def _load_instagram_comment_for_completion_retry(
+    target: Mapping[str, Any],
+    *,
+    conn: Any | None = None,
+) -> dict[str, Any] | None:
+    comment_id = _retry_target_text(target, "comment_id")
+    post_id = _retry_target_text(target, "post_id")
+    row = pg.fetch_one(
+        """
+        select *
+        from social.instagram_comments
+        where (
+            %s <> ''
+            and %s ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+            and id = %s::uuid
+          )
+          or (
+            %s <> ''
+            and (
+              %s = ''
+              or (
+                %s ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                and post_id = %s::uuid
+              )
+            )
+            and comment_id = %s
+          )
+        order by created_at desc nulls last
+        limit 1
+        """,
+        [
+            comment_id or "",
+            comment_id or "",
+            comment_id or "",
+            comment_id or "",
+            post_id or "",
+            post_id or "",
+            post_id or "",
+            comment_id or "",
+        ],
+        conn=conn,
+    )
+    return dict(row) if row else None
+
+
+def enqueue_instagram_completion_retry_targets(
+    *,
+    account_handle: str,
+    retry_targets: Mapping[str, Any] | Sequence[Mapping[str, Any]] | None,
+    run_id: str | None = None,
+    source_scope: str = "network",
+    comments_load_strategy: str = "public_relay",
+    comments_worker_count: int | None = None,
+    dispatch_immediately: bool = True,
+    dry_run: bool = False,
+    initiated_by: str | None = None,
+) -> dict[str, Any]:
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    if isinstance(retry_targets, Mapping):
+        raw_targets = []
+        for key in ("media_mirror", "comment_media_mirror", "comment_text_reply"):
+            raw_targets.extend([item for item in retry_targets.get(key) or [] if isinstance(item, Mapping)])
+    else:
+        raw_targets = [item for item in retry_targets or [] if isinstance(item, Mapping)]
+
+    media_targets: list[Mapping[str, Any]] = []
+    comment_media_targets: list[Mapping[str, Any]] = []
+    comment_text_targets: list[Mapping[str, Any]] = []
+    skipped_targets: list[dict[str, Any]] = []
+    for target in raw_targets:
+        if _completion_retry_target_already_complete(target):
+            skipped_targets.append({"target": dict(target), "reason": "already_complete"})
+            continue
+        stage = str(target.get("stage") or target.get("target_type") or "").strip().lower()
+        if stage in {"media_mirror", "hosted_media", "author_avatar"}:
+            media_targets.append(target)
+        elif stage in {"comment_media_mirror", "comment_media"}:
+            comment_media_targets.append(target)
+        elif stage in {"comment_text_reply", "comments", "replies"}:
+            comment_text_targets.append(target)
+    media_targets.sort(key=_completion_retry_target_priority, reverse=True)
+    comment_media_targets.sort(key=_completion_retry_target_priority, reverse=True)
+    comment_text_targets.sort(key=_completion_retry_target_priority, reverse=True)
+    comment_text_source_ids = list(
+        dict.fromkeys(
+            source_id
+            for source_id in (_retry_target_text(target, "source_id", "shortcode") for target in comment_text_targets)
+            if source_id
+        )
+    )
+
+    payload: dict[str, Any] = {
+        "mode": "dry_run" if dry_run else "enqueue",
+        "account_handle": normalized_account,
+        "run_id": str(run_id or "").strip() or None,
+        "requested_target_count": len(raw_targets),
+        "effective_target_count": len(media_targets) + len(comment_media_targets) + len(comment_text_source_ids),
+        "media_mirror_target_count": len(media_targets),
+        "comment_media_mirror_target_count": len(comment_media_targets),
+        "comment_text_reply_target_count": len(comment_text_source_ids),
+        "retry_priority": {
+            "strategy": "missing_media_comment_impact",
+            "media_mirror": [dict(target) for target in media_targets[:10]],
+            "comment_media_mirror": [dict(target) for target in comment_media_targets[:10]],
+            "comment_text_reply_source_ids": comment_text_source_ids[:10],
+        },
+        "created_media_mirror_job_ids": [],
+        "created_comment_media_mirror_job_ids": [],
+        "comment_text_reply_enqueue": None,
+        "skipped_targets": skipped_targets,
+    }
+    if dry_run:
+        return payload
+
+    normalized_run_id = str(run_id or "").strip() or None
+    for target in media_targets:
+        post_row = _load_instagram_post_for_completion_retry(target)
+        if not post_row:
+            payload["skipped_targets"].append({"target": dict(target), "reason": "post_not_found"})
+            continue
+        job_id = _enqueue_instagram_media_mirror_job(
+            None,
+            run_id=normalized_run_id,
+            source_scope=source_scope,
+            account=normalized_account,
+            post_row=post_row,
+            week_index=None,
+            parent_job_id=None,
+        )
+        if job_id:
+            payload["created_media_mirror_job_ids"].append(str(job_id))
+
+    for target in comment_media_targets:
+        comment_row = _load_instagram_comment_for_completion_retry(target)
+        if not comment_row:
+            payload["skipped_targets"].append({"target": dict(target), "reason": "comment_not_found"})
+            continue
+        context = _resolve_media_mirror_stage_context(
+            "instagram",
+            stage=COMMENT_MEDIA_MIRROR_STAGE,
+            config={
+                "source_scope": source_scope,
+                "account": normalized_account,
+                "comment_id": comment_row.get("comment_id"),
+                "comment_db_id": comment_row.get("id"),
+                "post_id": comment_row.get("post_id"),
+            },
+        )
+        job_id = _enqueue_platform_comment_media_mirror_job(
+            context,
+            platform="instagram",
+            run_id=normalized_run_id,
+            source_scope=source_scope,
+            account=normalized_account,
+            comment_row=comment_row,
+            parent_job_id=None,
+        )
+        if job_id:
+            payload["created_comment_media_mirror_job_ids"].append(str(job_id))
+
+    if comment_text_source_ids:
+        payload["comment_text_reply_enqueue"] = enqueue_instagram_comments_audit_cursor_retries(
+            account_handle=normalized_account,
+            shortcodes=comment_text_source_ids,
+            limit=max(1, len(comment_text_source_ids)),
+            comments_worker_count=comments_worker_count,
+            comments_load_strategy=comments_load_strategy,
+            skip_launch_auth_probe=True,
+            dry_run=False,
+            attach_to_active_run=True,
+            dispatch_immediately=dispatch_immediately,
+            force_rerun_existing=False,
+            initiated_by=initiated_by or "completion-retry-targets",
+        )
+
+    if dispatch_immediately and normalized_run_id:
+        dispatch_due_social_jobs(run_id=normalized_run_id)
+    payload["created_media_mirror_job_count"] = len(payload["created_media_mirror_job_ids"])
+    payload["created_comment_media_mirror_job_count"] = len(payload["created_comment_media_mirror_job_ids"])
+    payload["created_job_count"] = (
+        payload["created_media_mirror_job_count"] + payload["created_comment_media_mirror_job_count"]
+    )
+    return payload
 
 
 def preview_social_account_comments_scrape(
@@ -3395,7 +3685,7 @@ def rebalance_failed_instagram_comments_shard(
     )
     if not row:
         return {"created_job_ids": [], "reason": "failed_job_not_found"}
-    config = _metadata_dict(row.get("config"))
+    config = _canonicalize_instagram_comments_config_metadata(_metadata_dict(row.get("config")))
     metadata = _metadata_dict(row.get("metadata"))
     retry_rebalance = _metadata_dict(metadata.get("retry_rebalance"))
     remaining_targets = [
@@ -3497,7 +3787,7 @@ def rebalance_waiting_instagram_comments_shards(
     skipped_sources: list[dict[str, Any]] = []
     rebalance_group_id = str(uuid4())
     for row in rows:
-        config = _metadata_dict(row.get("config"))
+        config = _canonicalize_instagram_comments_config_metadata(_metadata_dict(row.get("config")))
         metadata = _metadata_dict(row.get("metadata"))
         dispatch = _metadata_dict(metadata.get("dispatch"))
         remote_invocation_id = str(dispatch.get("remote_invocation_id") or "").strip()
@@ -3720,7 +4010,7 @@ def repair_instagram_comments_scrape_run_target_gaps(
         status = str(row.get("status") or "").strip().lower()
         if status not in {"queued", "pending", "retrying", "running"}:
             continue
-        config = _metadata_dict(row.get("config"))
+        config = _canonicalize_instagram_comments_config_metadata(_metadata_dict(row.get("config")))
         for target in config.get("target_source_ids") or []:
             normalized_target = str(target or "").strip()
             if normalized_target:
@@ -4179,7 +4469,7 @@ def rebalance_slow_instagram_comments_shards(
     for row in rows:
         if len(rebalanced_sources) >= safe_max_rebalanced_shards:
             break
-        config = _metadata_dict(row.get("config"))
+        config = _canonicalize_instagram_comments_config_metadata(_metadata_dict(row.get("config")))
         metadata = _metadata_dict(row.get("metadata"))
         rebalance_depth = _normalize_non_negative_int(config.get("comments_slow_rebalance_depth"))
         if config.get("comments_slow_rebalance") and rebalance_depth <= 0:
@@ -4619,6 +4909,8 @@ def _comments_progress_recommended_next_action(
     stale_shards: int,
     incomplete_posts_total: int,
     network_stopped_targets: int = 0,
+    cursor_recovery_targets: int = 0,
+    public_approval_targets: int = 0,
 ) -> str:
     if operational_state == "blocked_auth":
         return "repair_auth_then_retry"
@@ -4628,6 +4920,10 @@ def _comments_progress_recommended_next_action(
         return "mark_stale_jobs_terminal_or_retry"
     if network_stopped_targets > 0:
         return "retry_network_stopped_targets"
+    if cursor_recovery_targets > 0:
+        return "retry_cursor_deadline_targets"
+    if public_approval_targets > 0:
+        return "approve_comments_auth_or_proxy_fallback"
     if failed_remaining_targets > 0:
         return "retry_largest_gaps"
     if failed_jobs > 0:
@@ -4642,6 +4938,7 @@ def _build_comments_scrape_run_progress_payload(
     rows: Sequence[Mapping[str, Any]],
     platform: str,
     account_handle: str,
+    target_count_rows: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     first = _metadata_dict(rows[0]) if rows else {}
     run_config = _metadata_dict(first.get("run_config"))
@@ -4691,6 +4988,8 @@ def _build_comments_scrape_run_progress_payload(
     network_policy_modes_total: Counter[str] = Counter()
     target_progress_by_source: dict[str, dict[str, Any]] = {}
     network_stopped_target_source_ids: list[str] = []
+    cursor_recovery_target_source_ids: list[str] = []
+    public_approval_target_source_ids: list[str] = []
 
     for row in rows:
         config = _metadata_dict(row.get("config"))
@@ -5047,6 +5346,13 @@ def _build_comments_scrape_run_progress_payload(
             if source_id in auth_failed_target_source_ids:
                 target_row["auth_failed"] = True
                 target_row["remaining"] = True
+            if shard_error_code == "instagram_comments_public_requires_approval" or reason in {
+                "public_comments_partial_requires_approval",
+                "public_comments_blocked_requires_approval",
+            }:
+                target_row["public_comments_approval_required"] = True
+                target_row["remaining"] = True
+                public_approval_target_source_ids.append(source_id)
             if row_has_network_stop_reason and (
                 reason in _INSTAGRAM_COMMENTS_NETWORK_STOP_REASONS
                 or source_id in remaining_targets
@@ -5107,8 +5413,23 @@ def _build_comments_scrape_run_progress_payload(
                 target_row["cursor_stop_reason"] = checkpoint.get("stop_reason")
                 if checkpoint.get("pages_seen") is not None:
                     target_row["pages_seen"] = _normalize_non_negative_int(checkpoint.get("pages_seen"))
+                checkpoint_reason = str(checkpoint.get("stop_reason") or "").strip().lower()
+                if checkpoint_reason in INSTAGRAM_COMMENTS_AUDIT_CURSOR_RETRY_STOP_REASONS:
+                    target_row["retryable"] = True
+                    target_row["cursor_recovery_available"] = True
+                    cursor_recovery_target_source_ids.append(source_id)
             if reply_resume_counts_by_source.get(source_id):
                 target_row["reply_resume_count"] = int(reply_resume_counts_by_source[source_id])
+                target_row["retryable"] = True
+                target_row["cursor_recovery_available"] = True
+                cursor_recovery_target_source_ids.append(source_id)
+            if (
+                reason in INSTAGRAM_COMMENTS_AUDIT_CURSOR_RETRY_STOP_REASONS
+                or latest_stop_reason in INSTAGRAM_COMMENTS_AUDIT_CURSOR_RETRY_STOP_REASONS
+            ):
+                target_row["retryable"] = True
+                target_row["cursor_recovery_available"] = True
+                cursor_recovery_target_source_ids.append(source_id)
         coverage_state = _comments_progress_coverage_state(
             status=status,
             row_incomplete_posts=row_incomplete_posts,
@@ -5273,6 +5594,12 @@ def _build_comments_scrape_run_progress_payload(
             0,
         )
     network_stopped_target_source_ids = list(dict.fromkeys(network_stopped_target_source_ids))
+    cursor_recovery_target_source_ids = list(dict.fromkeys(cursor_recovery_target_source_ids))
+    target_progress_count_rows = {
+        str(source_id or "").strip(): _metadata_dict(count_row)
+        for source_id, count_row in (target_count_rows or {}).items()
+        if str(source_id or "").strip()
+    }
     target_progress_rows = list(target_progress_by_source.values())
     for target_row in target_progress_rows:
         job_ids = [str(item or "").strip() for item in target_row.get("job_ids") or [] if str(item or "").strip()]
@@ -5280,6 +5607,21 @@ def _build_comments_scrape_run_progress_payload(
             target_row["job_ids"] = job_ids[-5:]
         else:
             target_row.pop("job_ids", None)
+        target_source = str(target_row.get("shortcode") or target_row.get("source_id") or "").strip()
+        count_row = target_progress_count_rows.get(target_source, {})
+        db_reported_count = _normalize_non_negative_int(count_row.get("reported_comment_count"))
+        db_saved_count = _normalize_non_negative_int(count_row.get("saved_comment_count"))
+        existing_reported_count = _normalize_non_negative_int(target_row.get("reported_comment_count"))
+        existing_saved_count = _normalize_non_negative_int(target_row.get("saved_comment_count"))
+        if db_reported_count > existing_reported_count:
+            target_row["reported_comment_count"] = db_reported_count
+            existing_reported_count = db_reported_count
+        if db_saved_count > existing_saved_count or (db_saved_count > 0 and existing_saved_count <= 0):
+            target_row["saved_comment_count"] = db_saved_count
+            target_row["saved_comment_count_source"] = "database"
+            existing_saved_count = db_saved_count
+        if existing_reported_count or existing_saved_count:
+            target_row["missing_comment_gap"] = max(existing_reported_count - existing_saved_count, 0)
         if not target_row.get("latest_reason") and target_row.get("network_stopped"):
             target_row["latest_reason"] = "network_stopped"
         target_row.setdefault("remaining", False)
@@ -5360,6 +5702,8 @@ def _build_comments_scrape_run_progress_payload(
         stale_shards=stale_shards,
         incomplete_posts_total=incomplete_posts_total,
         network_stopped_targets=len(network_stopped_target_source_ids),
+        cursor_recovery_targets=len(cursor_recovery_target_source_ids),
+        public_approval_targets=len(public_approval_target_source_ids),
     )
     proxy_session_state = {
         key: value
@@ -5462,10 +5806,18 @@ def _build_comments_scrape_run_progress_payload(
             "targeted_retry_target_count": len(dict.fromkeys(targeted_retry_targets)),
             "network_stopped_target_count": len(network_stopped_target_source_ids),
             "network_stopped_target_source_ids": network_stopped_target_source_ids[:50],
+            "audit_cursor_recovery_target_count": len(cursor_recovery_target_source_ids),
+            "audit_cursor_recovery_target_source_ids": cursor_recovery_target_source_ids[:50],
+            "public_comments_approval_required_target_count": len(public_approval_target_source_ids),
+            "public_comments_approval_required_target_source_ids": public_approval_target_source_ids[:50],
             "largest_remaining_gaps": largest_remaining_gaps[:10],
             "target_progress_rows": target_progress_rows[:50],
             "top_incomplete_reasons": dict(completion_reason_counts_total or fetch_reason_counts_total),
         },
+        "audit_cursor_recovery_target_count": len(cursor_recovery_target_source_ids),
+        "audit_cursor_recovery_target_source_ids": cursor_recovery_target_source_ids[:50],
+        "public_comments_approval_required_target_count": len(public_approval_target_source_ids),
+        "public_comments_approval_required_target_source_ids": public_approval_target_source_ids[:50],
         "target_progress_rows": target_progress_rows[:50],
         "target_progress": target_progress_rows[:50],
         "largest_remaining_gaps": largest_remaining_gaps[:10],
@@ -5557,10 +5909,21 @@ def get_social_account_comments_scrape_run_progress(
     )
     if not rows:
         raise LookupError("Comments scrape run not found.")
+    target_source_ids_for_counts = [
+        str(source_id or "").strip()
+        for row in rows
+        for source_id in (_metadata_dict(row.get("config")).get("target_source_ids") or [])
+        if str(source_id or "").strip()
+    ]
+    target_count_rows = _instagram_comments_audit_cursor_counts_by_shortcode(
+        shortcodes=list(dict.fromkeys(target_source_ids_for_counts)),
+        active_run_id=run_id,
+    )
     payload = _build_comments_scrape_run_progress_payload(
         rows=rows,
         platform=normalized_platform,
         account_handle=normalized_account,
+        target_count_rows=target_count_rows,
     )
     if auto_rebalance_payload:
         payload["auto_rebalance"] = auto_rebalance_payload
@@ -5691,14 +6054,225 @@ def resume_social_account_comments_run(
     return payload
 
 
+_COMMENTS_RUN_AUTH_REPAIR_STATUS_KEY = "comments_auth_repair_status"
+_COMMENTS_RUN_AUTH_REPAIR_LAST_REQUESTED_AT_KEY = "comments_auth_repair_last_requested_at"
+_COMMENTS_RUN_AUTH_REPAIR_LAST_REQUESTED_BY_KEY = "comments_auth_repair_last_requested_by"
+_COMMENTS_RUN_AUTH_REPAIR_STARTED_AT_KEY = "comments_auth_repair_started_at"
+_COMMENTS_RUN_AUTH_REPAIR_COMPLETED_AT_KEY = "comments_auth_repair_completed_at"
+_COMMENTS_RUN_AUTH_REPAIR_FAILURE_REASON_KEY = "comments_auth_repair_failure_reason"
+_COMMENTS_RUN_AUTH_REPAIR_RESULT_KEY = "comments_auth_repair_result"
+_COMMENTS_RUN_AUTH_REPAIR_RESUME_RESULT_KEY = "comments_auth_repair_resume_result"
+
+
+def _merge_comments_run_config(
+    *,
+    run_id: str,
+    metadata_updates: Mapping[str, Any],
+    conn: Any | None = None,
+) -> dict[str, Any]:
+    row = pg.fetch_one(
+        """
+        update social.scrape_runs
+        set config = coalesce(config, '{}'::jsonb) || %s::jsonb
+        where id = %s::uuid
+        returning id::text as id, status, config
+        """,
+        [json.dumps(dict(metadata_updates)), str(run_id or "").strip()],
+        conn=conn,
+    )
+    return _metadata_dict(row) if row else {}
+
+
+def _comments_repair_run_auth_probe_shortcode(run_row: Mapping[str, Any]) -> str | None:
+    run_config = _metadata_dict(run_row.get("config"))
+    for value in run_config.get("target_source_ids") or []:
+        shortcode = str(value or "").strip()
+        if shortcode:
+            return shortcode
+    return None
+
+
+def request_social_account_comments_run_auth_repair(
+    *,
+    platform: str,
+    account_handle: str,
+    run_id: str,
+    initiated_by: str | None = None,
+) -> dict[str, Any]:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    normalized_run_id = str(run_id or "").strip()
+    if normalized_platform != "instagram":
+        raise SocialIngestValidationError(
+            "SOCIAL_ACCOUNT_COMMENTS_UNSUPPORTED_PLATFORM",
+            "Standalone comments auth repair is currently only supported for Instagram.",
+        )
+    run_row = _load_social_account_comments_run_row(
+        platform=normalized_platform,
+        account_handle=normalized_account,
+        run_id=normalized_run_id,
+    )
+    progress = get_social_account_comments_scrape_run_progress(
+        platform=normalized_platform,
+        account_handle=normalized_account,
+        run_id=normalized_run_id,
+    )
+    operational_state = str(progress.get("operational_state") or "").strip().lower()
+    recommended_action = str(progress.get("recommended_next_action") or progress.get("operator_next_action") or "").strip().lower()
+    if operational_state != "blocked_auth" and recommended_action != "repair_auth_then_retry":
+        raise SocialIngestValidationError(
+            "SOCIAL_ACCOUNT_COMMENTS_AUTH_REPAIR_NOT_AVAILABLE",
+            "This comments run is not blocked on a repairable comments auth failure.",
+        )
+    requested_at = _iso(_now_utc())
+    _merge_comments_run_config(
+        run_id=normalized_run_id,
+        metadata_updates={
+            _COMMENTS_RUN_AUTH_REPAIR_STATUS_KEY: "running",
+            _COMMENTS_RUN_AUTH_REPAIR_LAST_REQUESTED_AT_KEY: requested_at,
+            _COMMENTS_RUN_AUTH_REPAIR_LAST_REQUESTED_BY_KEY: initiated_by,
+            _COMMENTS_RUN_AUTH_REPAIR_STARTED_AT_KEY: requested_at,
+            _COMMENTS_RUN_AUTH_REPAIR_COMPLETED_AT_KEY: None,
+            _COMMENTS_RUN_AUTH_REPAIR_FAILURE_REASON_KEY: None,
+            _COMMENTS_RUN_AUTH_REPAIR_RESULT_KEY: None,
+            _COMMENTS_RUN_AUTH_REPAIR_RESUME_RESULT_KEY: None,
+        },
+    )
+    _invalidate_queue_status_cache()
+    return {
+        "run_id": str(run_row.get("id") or normalized_run_id),
+        "status": "accepted",
+        "operational_state": "blocked_auth",
+        "repair_status": "running",
+        "repair_action": "instagram_auth_repair",
+        "recommended_next_action": "repair_auth_then_retry",
+        "auto_resume_pending": True,
+    }
+
+
+def execute_social_account_comments_run_auth_repair(
+    *,
+    platform: str,
+    account_handle: str,
+    run_id: str,
+    initiated_by: str | None = None,
+    allow_cookie_refresh: bool = False,
+) -> dict[str, Any]:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    normalized_run_id = str(run_id or "").strip()
+    run_row = _load_social_account_comments_run_row(
+        platform=normalized_platform,
+        account_handle=normalized_account,
+        run_id=normalized_run_id,
+    )
+    representative_shortcode = _comments_repair_run_auth_probe_shortcode(run_row)
+    refresh_result = refresh_platform_cookies_interactive(
+        "instagram",
+        headless=True,
+        timeout_seconds=300,
+        account_handle=normalized_account,
+        allow_cookie_refresh=bool(allow_cookie_refresh),
+    )
+    refresh_payload = _metadata_dict(refresh_result)
+    if not bool(refresh_payload.get("success")):
+        failure_reason = str(refresh_payload.get("reason") or "instagram_auth_repair_failed").strip().lower()
+        _merge_comments_run_config(
+            run_id=normalized_run_id,
+            metadata_updates={
+                _COMMENTS_RUN_AUTH_REPAIR_STATUS_KEY: "failed",
+                _COMMENTS_RUN_AUTH_REPAIR_COMPLETED_AT_KEY: _iso(_now_utc()),
+                _COMMENTS_RUN_AUTH_REPAIR_FAILURE_REASON_KEY: failure_reason,
+                _COMMENTS_RUN_AUTH_REPAIR_RESULT_KEY: refresh_payload,
+            },
+        )
+        return {
+            "ok": False,
+            "run_id": normalized_run_id,
+            "repair_status": "failed",
+            "failure_reason": failure_reason,
+            "recommended_next_action": "repair_auth_then_retry",
+        }
+
+    probe_payload = (
+        _probe_instagram_comments_endpoint_for_launch(
+            account_handle=normalized_account,
+            shortcode=representative_shortcode,
+        )
+        if representative_shortcode
+        else {"status": "fetch_blocked", "result": "fetch_blocked", "reason": "comments_probe_shortcode_unavailable"}
+    )
+    probe_status = str(probe_payload.get("status") or probe_payload.get("result") or "").strip().lower()
+    if probe_status != "valid":
+        failure_reason = str(probe_payload.get("reason") or probe_status or "comments_auth_probe_failed").strip().lower()
+        repair_result = {
+            "refresh_result": refresh_payload,
+            "comments_auth_probe": probe_payload,
+        }
+        _merge_comments_run_config(
+            run_id=normalized_run_id,
+            metadata_updates={
+                _COMMENTS_RUN_AUTH_REPAIR_STATUS_KEY: "failed",
+                _COMMENTS_RUN_AUTH_REPAIR_COMPLETED_AT_KEY: _iso(_now_utc()),
+                _COMMENTS_RUN_AUTH_REPAIR_FAILURE_REASON_KEY: failure_reason,
+                _COMMENTS_RUN_AUTH_REPAIR_RESULT_KEY: repair_result,
+            },
+        )
+        return {
+            "ok": False,
+            "run_id": normalized_run_id,
+            "repair_status": "failed",
+            "failure_reason": failure_reason,
+            "comments_auth_probe": probe_payload,
+            "recommended_next_action": "repair_auth_then_retry",
+        }
+
+    resume_result = resume_social_account_comments_run(
+        platform=normalized_platform,
+        account_handle=normalized_account,
+        run_id=normalized_run_id,
+        initiated_by=initiated_by or "comments_auth_repair",
+    )
+    resumed_count = _normalize_non_negative_int(resume_result.get("remaining_target_source_ids_count"))
+    repair_result = {
+        "refresh_result": refresh_payload,
+        "comments_auth_probe": probe_payload,
+        "resume_result": resume_result,
+    }
+    _merge_comments_run_config(
+        run_id=normalized_run_id,
+        metadata_updates={
+            _COMMENTS_RUN_AUTH_REPAIR_STATUS_KEY: "succeeded",
+            _COMMENTS_RUN_AUTH_REPAIR_COMPLETED_AT_KEY: _iso(_now_utc()),
+            _COMMENTS_RUN_AUTH_REPAIR_FAILURE_REASON_KEY: None,
+            _COMMENTS_RUN_AUTH_REPAIR_RESULT_KEY: repair_result,
+            _COMMENTS_RUN_AUTH_REPAIR_RESUME_RESULT_KEY: {
+                "run_id": resume_result.get("run_id"),
+                "status": resume_result.get("status"),
+                "resumed_target_count": resumed_count,
+            },
+        },
+    )
+    _invalidate_queue_status_cache()
+    return {
+        "ok": True,
+        "run_id": normalized_run_id,
+        "repair_status": "succeeded",
+        "comments_auth_probe": probe_payload,
+        "resume_result": resume_result,
+        "resumed_target_count": resumed_count,
+        "new_run_id": resume_result.get("run_id"),
+    }
+
+
 # Default BRAVOTV public-comments proof window, applied only when the guarded
 # restart request explicitly asks for proof defaults and the original run did
 # not carry an explicit date window.
 _GUARDED_RESTART_PROOF_DATE_START = "2025-01-01T00:00:00+00:00"
 _GUARDED_RESTART_PROOF_DATE_END = "2027-01-01T00:00:00+00:00"
-# Public-only relaunch shape (REVISED §5 Backend): ramp starts at 12 workers
+# Public-only relaunch shape (REVISED §5 Backend): ramp starts at 4 workers
 # with batch-size-10 shards.
-_GUARDED_RESTART_WORKER_CAP_START = 12
+_GUARDED_RESTART_WORKER_CAP_START = 4
 _GUARDED_RESTART_TARGET_BATCH_SIZE = 10
 
 
@@ -5761,7 +6335,7 @@ def guarded_restart_social_account_comments_run(
 
     REVISED §5 (Backend): the relaunch is public-relay only (no auth probe, no
     cookies, no proxy/Decodo). The original date window and target filter are
-    preserved; the worker cap starts at 12 and shards use batch size 10.
+    preserved; the worker cap starts at 4 and shards use batch size 10.
     """
     normalized_platform = _normalize_social_account_profile_platform(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
@@ -6068,6 +6642,7 @@ _LOCAL_ROOM_NAMES = {
     "_select_instagram_comments_audit_cursor_retry_targets",
     "get_instagram_comments_audit_cursor_recovery",
     "enqueue_instagram_comments_audit_cursor_retries",
+    "enqueue_instagram_completion_retry_targets",
     "_instagram_social_account_comments_target_counts",
     "get_active_social_account_comments_run",
     "_instagram_social_account_comment_target_shortcodes",
@@ -6092,6 +6667,8 @@ _LOCAL_ROOM_NAMES = {
     "_build_comments_scrape_run_progress_payload",
     "get_social_account_comments_scrape_run_progress",
     "resume_social_account_comments_run",
+    "request_social_account_comments_run_auth_repair",
+    "execute_social_account_comments_run_auth_repair",
     "guarded_restart_social_account_comments_run",
     "cancel_social_account_comments_run",
     "cancel_social_account_comments_job",
@@ -6116,6 +6693,7 @@ __all__ = [
     "_select_instagram_comments_audit_cursor_retry_targets",
     "get_instagram_comments_audit_cursor_recovery",
     "enqueue_instagram_comments_audit_cursor_retries",
+    "enqueue_instagram_completion_retry_targets",
     "_instagram_social_account_comments_target_counts",
     "get_active_social_account_comments_run",
     "_instagram_social_account_comment_target_shortcodes",
@@ -6140,6 +6718,8 @@ __all__ = [
     "_build_comments_scrape_run_progress_payload",
     "get_social_account_comments_scrape_run_progress",
     "resume_social_account_comments_run",
+    "request_social_account_comments_run_auth_repair",
+    "execute_social_account_comments_run_auth_repair",
     "guarded_restart_social_account_comments_run",
     "cancel_social_account_comments_run",
     "cancel_social_account_comments_job",

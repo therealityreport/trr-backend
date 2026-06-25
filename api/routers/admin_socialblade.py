@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -63,6 +64,184 @@ class SocialBladeBatchRefreshRequest(BaseModel):
     source: str
     force: bool = False
     source_scope: str = Field(default="network", alias="sourceScope")
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
+
+
+def _to_iso_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        rendered = value.isoformat()
+    else:
+        rendered = str(value or "").strip()
+    if not rendered:
+        return None
+    return rendered.replace("+00:00", "Z")
+
+
+def _dedupe_nonempty_strings(values: list[str] | None) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values or []:
+        rendered = str(value or "").strip()
+        if not rendered or rendered in seen:
+            continue
+        seen.add(rendered)
+        deduped.append(rendered)
+    return deduped
+
+
+def _modal_call_status_response(inspection: dict[str, Any], *, call_id: str) -> dict[str, Any]:
+    status = str(inspection.get("status") or "unknown").strip().lower() or "unknown"
+    terminal = bool(inspection.get("terminal")) or status in {"completed", "failed", "cancelled"}
+    raw_status = str(inspection.get("raw_status") or "").strip().lower() or None
+    task_id = str(inspection.get("task_id") or "").strip() or None
+    reason = str(inspection.get("reason") or "").strip() or None
+    error = str(inspection.get("error") or "").strip() or None
+    checked_at = _to_iso_string(inspection.get("checked_at")) or _utcnow_iso()
+    return {
+        "callId": str(inspection.get("function_call_id") or call_id).strip(),
+        "status": status,
+        "rawStatus": raw_status,
+        "taskId": task_id,
+        "finished": terminal,
+        "terminal": terminal,
+        "reason": reason,
+        "error": error,
+        "checkedAt": checked_at,
+    }
+
+
+def _snapshot_history_status(row: dict[str, Any], raw_response: dict[str, Any]) -> str:
+    if bool(row.get("stats_refreshed")):
+        return "completed"
+    if str(raw_response.get("last_attempt_error") or raw_response.get("error") or "").strip():
+        return "failed"
+    return "attempted"
+
+
+def _snapshot_history_item(row: dict[str, Any]) -> dict[str, Any]:
+    raw_response = row.get("raw_response") if isinstance(row.get("raw_response"), dict) else {}
+    error = str(raw_response.get("last_attempt_error") or raw_response.get("error") or "").strip() or None
+    reason = str(raw_response.get("reason") or raw_response.get("last_attempt_history_source") or "").strip() or None
+    return {
+        "snapshotId": str(row.get("id") or "").strip() or None,
+        "personId": str(row.get("person_id") or "").strip() or None,
+        "handle": str(row.get("account_handle") or row.get("instagram_handle") or "").strip() or None,
+        "platform": str(row.get("platform") or "instagram").strip().lower() or "instagram",
+        "scrapedAt": _to_iso_string(row.get("scraped_at")),
+        "status": _snapshot_history_status(row, raw_response),
+        "statsRefreshed": bool(row.get("stats_refreshed")),
+        "source": str(row.get("refresh_source") or row.get("snapshot_source") or "").strip() or None,
+        "snapshotSource": str(row.get("snapshot_source") or "").strip() or None,
+        "refreshSource": str(row.get("refresh_source") or "").strip() or None,
+        "forced": bool(row.get("refresh_forced")),
+        "reason": reason,
+        "error": error,
+    }
+
+
+@router.get("/socialblade/calls/{call_id}")
+async def get_socialblade_modal_call_status(
+    call_id: str,
+    _admin: InternalAdminUser = None,
+) -> dict[str, Any]:
+    """Inspect the live Modal function-call status for a SocialBlade scrape."""
+    safe_call_id = str(call_id or "").strip()
+    if not safe_call_id:
+        raise HTTPException(status_code=400, detail="Invalid Modal call id")
+
+    from trr_backend.modal_dispatch import inspect_modal_function_call
+
+    inspection = await run_in_threadpool(inspect_modal_function_call, safe_call_id)
+    return _modal_call_status_response(inspection, call_id=safe_call_id)
+
+
+@router.get("/socialblade/history")
+async def get_socialblade_history(
+    person_ids: list[str] | None = Query(default=None, alias="personId"),
+    handles: list[str] | None = Query(default=None, alias="handle"),
+    platform: str = Query(default="instagram", min_length=1),
+    limit: int = Query(default=25, ge=1, le=100),
+    _admin: InternalAdminUser = None,
+) -> dict[str, Any]:
+    """Return compact SocialBlade snapshot history for a cast/member set."""
+    from trr_backend.db import pg
+    from trr_backend.repositories.socialblade_growth import (
+        normalize_socialblade_account_handle,
+        normalize_socialblade_platform,
+        socialblade_growth_snapshots_table_exists,
+    )
+
+    normalized_platform = normalize_socialblade_platform(platform)
+    safe_person_ids = _dedupe_nonempty_strings(person_ids)
+    safe_handles = _dedupe_nonempty_strings(
+        [
+            normalize_socialblade_account_handle(handle, platform=normalized_platform)
+            for handle in handles or []
+        ]
+    )
+    if not safe_person_ids and not safe_handles:
+        raise HTTPException(status_code=400, detail="At least one personId or handle is required")
+
+    checked_at = _utcnow_iso()
+    if not socialblade_growth_snapshots_table_exists():
+        return {
+            "items": [],
+            "count": 0,
+            "source": "socialblade_growth_snapshots",
+            "reason": "socialblade_growth_snapshots_missing",
+            "checkedAt": checked_at,
+        }
+
+    filters: list[str] = []
+    params: list[Any] = [normalized_platform]
+    if safe_person_ids:
+        filters.append("person_id::text = any(%s)")
+        params.append(safe_person_ids)
+    if safe_handles:
+        filters.append("account_handle = any(%s)")
+        params.append(safe_handles)
+    params.append(limit)
+
+    rows = pg.fetch_all(
+        f"""
+        select
+          id::text as id,
+          person_id::text as person_id,
+          platform,
+          account_handle,
+          instagram_handle,
+          scraped_at,
+          stats_refreshed,
+          snapshot_source,
+          refresh_source,
+          refresh_forced,
+          raw_response
+        from pipeline.socialblade_growth_snapshots
+        where platform = %s
+          and ({" or ".join(filters)})
+        order by scraped_at desc nulls last, id desc
+        limit %s
+        """,
+        params,
+    )
+    items = [_snapshot_history_item(row) for row in rows]
+    return {
+        "items": items,
+        "count": len(items),
+        "source": "socialblade_growth_snapshots",
+        "filters": {
+            "personIds": safe_person_ids,
+            "handles": safe_handles,
+            "platform": normalized_platform,
+            "limit": limit,
+        },
+        "checkedAt": checked_at,
+    }
 
 
 @router.get("/{person_id}/socialblade")
@@ -143,12 +322,9 @@ async def refresh_socialblade_data_batch(
     """Refresh SocialBlade rows for multiple cast members."""
     from trr_backend.modal_dispatch import dispatch_socialblade_scrape
     from trr_backend.socials.socialblade.service import (
-        SocialBladeRefreshError,
         normalize_socialblade_source_scope,
         queue_refresh_decision,
-        refresh_and_persist_socialblade,
         sanitize_socialblade_handle,
-        scrape_socialblade_then_following,
         socialblade_auto_refresh_enabled,
     )
 
@@ -231,43 +407,6 @@ async def refresh_socialblade_data_batch(
             )
             continue
 
-        if source == "cast_comparison":
-            try:
-                refreshed = await run_in_threadpool(
-                    refresh_and_persist_socialblade,
-                    person_id=item.person_id,
-                    handle=safe_handle,
-                    scraper=lambda normalized_handle: scrape_socialblade_then_following(
-                        _scrape_socialblade_person_page,
-                        normalized_handle,
-                        source=source,
-                        source_scope=source_scope,
-                        platform="instagram",
-                    ),
-                    source=source,
-                    force=body.force,
-                    platform="instagram",
-                )
-            except SocialBladeRefreshError as exc:
-                errors.append(
-                    {
-                        "personId": item.person_id,
-                        "handle": safe_handle,
-                        "reason": str(exc),
-                    }
-                )
-                continue
-
-            accepted.append(
-                {
-                    "personId": item.person_id,
-                    "handle": safe_handle,
-                    "refreshStatus": refreshed.get("refresh_status"),
-                    "scrapedAt": refreshed.get("scraped_at"),
-                }
-            )
-            continue
-
         dispatch_result = dispatch_socialblade_scrape(
             person_id=item.person_id,
             handle=safe_handle,
@@ -282,7 +421,7 @@ async def refresh_socialblade_data_batch(
                 {
                     "personId": item.person_id,
                     "handle": safe_handle,
-                    "reason": dispatch_result.get("reason") or "dispatch_failed",
+                    "reason": dispatch_result.get("reason") or dispatch_result.get("error") or "dispatch_failed",
                 }
             )
             continue

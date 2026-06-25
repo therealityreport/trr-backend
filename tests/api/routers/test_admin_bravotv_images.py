@@ -11,6 +11,7 @@ import pytest
 from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
 
+from api.routers import admin_bravotv_images
 from api.main import app
 from trr_backend.media.getty_replacement import ResolvedPublicReplacement
 
@@ -117,6 +118,21 @@ def test_start_bravotv_person_run_starts_shared_admin_operation(
     assert kwargs["request_payload"]["person_id"] == person_id
     assert kwargs["request_payload"]["payload"]["sources"] == ["getty"]
     response_mock.assert_called_once_with(operation_id, request=ANY)
+
+
+def test_bravotv_nbcumv_only_run_does_not_need_getty_prefetch() -> None:
+    assert (
+        admin_bravotv_images._bravotv_request_needs_getty_prefetch(
+            admin_bravotv_images.BravotvImageRunRequest(mode="person", sources=["nbcumv"])
+        )
+        is False
+    )
+    assert (
+        admin_bravotv_images._bravotv_request_needs_getty_prefetch(
+            admin_bravotv_images.BravotvImageRunRequest(mode="person", sources=["getty"])
+        )
+        is True
+    )
 
 
 def test_start_bravotv_person_run_preserves_getty_prefetch_payload(

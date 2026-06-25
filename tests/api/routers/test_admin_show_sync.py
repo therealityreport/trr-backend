@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 from datetime import UTC, datetime, timedelta
@@ -332,6 +333,98 @@ def test_cast_media_refresh_uses_only_allowed_show_level_sources() -> None:
     assert result.status == "success"
     request = images_mock.call_args.kwargs["request"]
     assert request.sources == ["imdb", "tmdb", "nbcumv"]
+
+
+def test_official_images_target_filters_to_nbc_family_shows() -> None:
+    from api.routers.admin_show_sync import _targets_for_show_row
+
+    targets = ["show_core", "official_images"]
+
+    assert _targets_for_show_row(targets, show_row={"networks": ["Bravo"]}) == ["show_core", "official_images"]
+    assert _targets_for_show_row(targets, show_row={"streaming_providers": ["Peacock"]}) == [
+        "show_core",
+        "official_images",
+    ]
+    assert _targets_for_show_row(targets, show_row={"networks": ["Netflix"]}) == ["show_core"]
+
+
+def test_official_images_refresh_enqueues_show_and_cast_nbcumv_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    from api.routers import admin_show_sync
+
+    show_id = str(uuid4())
+    person_id = str(uuid4())
+    enqueued: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        admin_show_sync,
+        "_resolve_nbcumv_show_catalog",
+        lambda _show_name: {
+            "matched": True,
+            "nbcumv_show_id": "nbc-show-1",
+            "asset_count": 2,
+            "fingerprint": "fingerprint-1",
+            "sample_asset_ids": ["asset-1", "asset-2"],
+        },
+    )
+    monkeypatch.setattr(admin_show_sync.admin_runtime_settings, "get_runtime_setting", lambda _key: {})
+    monkeypatch.setattr(admin_show_sync.admin_runtime_settings, "set_runtime_setting", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        admin_show_sync,
+        "_list_refresh_cast_members",
+        lambda *, show_id, db: [{"person_id": person_id, "person_name": "Cast Member"}],
+    )
+
+    def fake_enqueue(**kwargs):
+        enqueued.append(dict(kwargs))
+        return {"operation_id": f"op-{len(enqueued)}", "mode": kwargs["mode"], "person_id": kwargs.get("person_id")}
+
+    monkeypatch.setattr(admin_show_sync, "_enqueue_bravotv_nbcumv_image_run", fake_enqueue)
+
+    result = admin_show_sync._run_official_images_refresh_stage(
+        show_id=show_id,
+        show_row={"id": show_id, "name": "Love Island USA", "streaming_providers": ["Peacock"]},
+        db=MagicMock(),
+        admin_user={"id": "admin"},
+    )
+
+    assert result.status == "success"
+    assert [item["mode"] for item in enqueued] == ["show", "person"]
+    assert enqueued[0]["show_id"] == show_id
+    assert enqueued[1]["person_id"] == person_id
+    assert json.loads(result.output or "{}")["enqueued"] == 2
+
+
+def test_official_images_refresh_skips_unchanged_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    from api.routers import admin_show_sync
+
+    monkeypatch.setattr(
+        admin_show_sync,
+        "_resolve_nbcumv_show_catalog",
+        lambda _show_name: {
+            "matched": True,
+            "nbcumv_show_id": "nbc-show-1",
+            "asset_count": 2,
+            "fingerprint": "same-fingerprint",
+        },
+    )
+    monkeypatch.setattr(
+        admin_show_sync.admin_runtime_settings,
+        "get_runtime_setting",
+        lambda _key: {"fingerprint": "same-fingerprint"},
+    )
+    enqueue_mock = MagicMock()
+    monkeypatch.setattr(admin_show_sync, "_enqueue_bravotv_nbcumv_image_run", enqueue_mock)
+
+    result = admin_show_sync._run_official_images_refresh_stage(
+        show_id=str(uuid4()),
+        show_row={"name": "Love Island USA", "streaming_providers": ["Peacock"]},
+        db=MagicMock(),
+        admin_user={"id": "admin"},
+    )
+
+    assert result.status == "skipped"
+    assert result.skip_reason == "NBCUMV catalog unchanged."
+    enqueue_mock.assert_not_called()
 
 
 class TestSyncNetworksStreaming:

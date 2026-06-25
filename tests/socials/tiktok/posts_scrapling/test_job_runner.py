@@ -94,6 +94,54 @@ def test_tiktok_job_runner_rejects_missing_account():
         run_tiktok_posts_scrapling_job(job)
 
 
+def test_canonical_fallback_timeout_is_unbounded_unless_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.socials.tiktok.posts_scrapling import job_runner as jr
+
+    monkeypatch.delenv("SOCIAL_TIKTOK_POSTS_CANONICAL_FALLBACK_TIMEOUT_SECONDS", raising=False)
+    assert jr._resolve_canonical_fallback_timeout_seconds() == 0.0  # noqa: SLF001
+
+    monkeypatch.setenv("SOCIAL_TIKTOK_POSTS_CANONICAL_FALLBACK_TIMEOUT_SECONDS", "1200")
+    assert jr._resolve_canonical_fallback_timeout_seconds() == 1200.0  # noqa: SLF001
+
+
+def test_canonical_fallback_uses_ytdlp_without_api_fallthrough(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.socials.tiktok.posts_scrapling import job_runner as jr
+
+    class _FakeScraper:
+        def __init__(self, *, cookies: dict[str, Any]) -> None:
+            assert cookies == {"sessionid": "raw-session-secret"}
+            self.last_retrieval_meta = {}
+
+        def scrape(self, _config: Any) -> list[Any]:
+            raise AssertionError("canonical fallback must not call scrape()")
+
+        def _scrape_via_ytdlp(self, config: Any) -> list[Any]:
+            assert config.username == "bravotv"
+            self.last_retrieval_meta = {
+                "retrieval_mode": "ytdlp",
+                "fallback_chain": ["yt_dlp"],
+                "ytdlp_posts_found": 1,
+            }
+            return [SimpleNamespace(video_id="tiktok-1")]
+
+    from trr_backend.socials.tiktok import scraper as scraper_module
+
+    monkeypatch.setattr(scraper_module, "TikTokScraper", _FakeScraper)
+
+    posts, metadata = jr._scrape_canonical_tiktok_fallback_posts(  # noqa: SLF001
+        account_handle="bravotv",
+        cookies={"sessionid": "raw-session-secret"},
+        max_pages=None,
+        trigger_reason="non_json_response",
+    )
+
+    assert len(posts) == 1
+    assert metadata["retrieval_mode"] == "ytdlp"
+    assert metadata["fallback_chain"] == ["yt_dlp"]
+    assert metadata["used"] is True
+    assert metadata["trigger_reason"] == "non_json_response"
+
+
 def test_tiktok_job_runner_records_progress_and_completion_metadata(
     monkeypatch: pytest.MonkeyPatch,
     fake_lifecycle: _FakeLifecycle,

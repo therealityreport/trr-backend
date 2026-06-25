@@ -258,39 +258,49 @@ def _sleep_until_reserved_start(result: dict[str, Any]) -> dict[str, Any]:
 
 def _try_advisory_lock_pace(*, key: str, delay_seconds: float) -> dict[str, Any]:
     delay = max(0.0, float(delay_seconds or 0))
-    namespace, lock_key = _advisory_lock_keys_for(key)
     started_at = time.monotonic()
+    cooldown_path = _global_rate_cooldown_path(key)
+    with open(cooldown_path, "a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            cooldown_until = _read_monotonic_timestamp(handle)
+            cooldown_remaining = cooldown_until - time.monotonic()
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    if cooldown_remaining > 0:
+        time.sleep(cooldown_remaining)
     try:
         from trr_backend.db import pg
     except Exception as exc:  # noqa: BLE001
         return _pacing_result(acquired=False, paced=True, error=f"pg_import_failed:{exc}")
+    remaining_seconds = 0.0
     try:
-        with pg.db_connection(label="instagram-posts-rate-limit-advisory", pool_name="social_control") as conn:
+        with pg.db_connection(label="instagram-posts-rate-limit-pace", pool_name="social_control") as conn:
             with pg.db_cursor(conn=conn) as cur:
-                cur.execute("select pg_advisory_lock(%s::int, %s::int)", (namespace, lock_key))
-                lock_acquired_at = time.monotonic()
-                result: dict[str, Any] | None = None
-                try:
-                    path = _global_rate_limit_path(key)
-                    with open(path, "a+", encoding="utf-8") as handle:
-                        scheduled_at, reservation_lag_seconds = _reserve_rate_limit_slot(
-                            handle,
-                            delay_seconds=delay,
-                        )
-                    result = _pacing_result(
-                        acquired=True,
-                        paced=True,
-                        lock_wait_seconds=lock_acquired_at - started_at,
-                        scheduled_at=scheduled_at,
-                        reservation_lag_seconds=reservation_lag_seconds,
-                    )
-                finally:
-                    cur.execute("select pg_advisory_unlock(%s::int, %s::int)", (namespace, lock_key))
-                    if result is not None:
-                        result["lock_held_ms"] = _milliseconds(time.monotonic() - lock_acquired_at)
-                return _sleep_until_reserved_start(result)
+                cur.execute(
+                    """
+                    insert into social.ig_posts_rate_pace as p (rate_key, last_start)
+                    values (%s, now())
+                    on conflict (rate_key) do update
+                       set last_start = greatest(p.last_start + make_interval(secs => %s), now())
+                    returning extract(epoch from (last_start - now()))::float8
+                    """,
+                    (str(key or "instagram-posts"), delay),
+                )
+                row = cur.fetchone()
+                if row and row[0] is not None:
+                    remaining_seconds = max(0.0, float(row[0]))
     except Exception as exc:  # noqa: BLE001
         return _pacing_result(acquired=False, paced=True, error=str(exc))
+    scheduled_at = time.monotonic() + remaining_seconds
+    result = _pacing_result(
+        acquired=True,
+        paced=True,
+        lock_wait_seconds=time.monotonic() - started_at,
+        scheduled_at=scheduled_at,
+        reservation_lag_seconds=remaining_seconds,
+    )
+    return _sleep_until_reserved_start(result)
 
 
 def _pace_global_api_request(*, key: str, delay_seconds: float) -> dict[str, Any]:
