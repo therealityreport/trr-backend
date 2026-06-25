@@ -109,6 +109,14 @@ def get_queue_status(
         "dispatch_blocked_by_reason": {},
         "waiting_for_claim_jobs_total": 0,
         "retrying_dispatch_jobs_total": 0,
+        "media_stale_claims": {
+            "total": 0,
+            "by_stage": {},
+            "by_platform": {},
+            "stale_after_seconds": 900,
+        },
+        "media_runs": [],
+        "media_queued_jobs": [],
         "stale_claims": {
             "total": 0,
             "by_reason": {},
@@ -212,6 +220,253 @@ def get_queue_status(
     except Exception as exc:  # noqa: BLE001
         repo.logger.warning("Queue status aggregate query failed: %s", exc)
         errors.append(f"queue_aggregate_query_failed: {exc}")
+
+    try:
+        media_stale_after_seconds = repo._resolve_positive_int_env(
+            "SOCIAL_MEDIA_QUEUE_STALE_AFTER_SECONDS",
+            900,
+            minimum=30,
+        )
+        with repo.pg.db_connection(label="queue-status:media-stale-claims", pool_name=SOCIAL_CONTROL_POOL_NAME) as conn:
+            with repo.pg.db_cursor(conn=conn) as cur:
+                cur.execute("set local statement_timeout = %s", [str(safe_statement_timeout_ms)])
+                media_stale_rows = repo.pg.fetch_all_with_cursor(
+                    cur,
+                    """
+                    select
+                      coalesce(j.platform, 'unknown') as platform,
+                      lower(
+                        coalesce(
+                          nullif(j.config->>'stage', ''),
+                          nullif(j.metadata->>'stage', ''),
+                          nullif(j.job_type, ''),
+                          'unknown'
+                        )
+                      ) as stage,
+                      count(*)::bigint as total
+                    from social.scrape_jobs j
+                    where j.status = 'running'
+                      and lower(
+                        coalesce(
+                          nullif(j.config->>'stage', ''),
+                          nullif(j.metadata->>'stage', ''),
+                          nullif(j.job_type, ''),
+                          'unknown'
+                        )
+                      ) = any(%s::text[])
+                      and coalesce(j.heartbeat_at, j.started_at, j.claimed_at, j.created_at)
+                        < now() - (%s * interval '1 second')
+                    group by 1, 2
+                    """,
+                    [["media_mirror", "comment_media_mirror"], media_stale_after_seconds],
+                )
+        media_stale_total = 0
+        media_stale_by_stage: dict[str, int] = {}
+        media_stale_by_platform: dict[str, int] = {}
+        for row in media_stale_rows:
+            stage = repo._normalize_social_job_stage_for_stale(row.get("stage")) or "unknown"
+            platform = str(row.get("platform") or "unknown").strip().lower() or "unknown"
+            total = int(row.get("total") or 0)
+            media_stale_total += total
+            media_stale_by_stage[stage] = int(media_stale_by_stage.get(stage) or 0) + total
+            media_stale_by_platform[platform] = int(media_stale_by_platform.get(platform) or 0) + total
+        queue_payload["media_stale_claims"] = {
+            "total": media_stale_total,
+            "by_stage": media_stale_by_stage,
+            "by_platform": media_stale_by_platform,
+            "stale_after_seconds": media_stale_after_seconds,
+        }
+    except Exception as exc:  # noqa: BLE001
+        repo.logger.warning("Queue status media stale claims query failed: %s", exc)
+        errors.append(f"queue_media_stale_claims_query_failed: {exc}")
+
+    try:
+        media_stale_after_seconds = repo._resolve_positive_int_env(
+            "SOCIAL_MEDIA_QUEUE_STALE_AFTER_SECONDS",
+            900,
+            minimum=30,
+        )
+        with repo.pg.db_connection(label="queue-status:media-runs", pool_name=SOCIAL_CONTROL_POOL_NAME) as conn:
+            with repo.pg.db_cursor(conn=conn) as cur:
+                cur.execute("set local statement_timeout = %s", [str(safe_statement_timeout_ms)])
+                media_run_rows = repo.pg.fetch_all_with_cursor(
+                    cur,
+                    """
+                    with media_jobs as (
+                      select
+                        j.run_id,
+                        coalesce(r.status, 'unknown') as run_status,
+                        lower(
+                          coalesce(
+                            nullif(j.config->>'stage', ''),
+                            nullif(j.metadata->>'stage', ''),
+                            nullif(j.job_type, ''),
+                            'unknown'
+                          )
+                        ) as stage,
+                        coalesce(j.status, 'unknown') as job_status,
+                        coalesce(j.heartbeat_at, j.started_at, j.claimed_at, j.created_at) as activity_at,
+                        j.created_at
+                      from social.scrape_jobs j
+                      left join social.scrape_runs r on r.id = j.run_id
+                      where j.platform = 'instagram'
+                        and j.run_id is not null
+                        and lower(
+                          coalesce(
+                            nullif(j.config->>'stage', ''),
+                            nullif(j.metadata->>'stage', ''),
+                            nullif(j.job_type, ''),
+                            'unknown'
+                          )
+                        ) = any(%s::text[])
+                        and (
+                          j.status = any(%s::text[])
+                          or coalesce(j.completed_at, j.heartbeat_at, j.started_at, j.created_at)
+                            >= now() - interval '7 days'
+                        )
+                    ),
+                    recent_runs as (
+                      select
+                        run_id,
+                        max(coalesce(activity_at, created_at)) as latest_job_at,
+                        bool_or(
+                          job_status = 'running'
+                          and coalesce(activity_at, created_at) < now() - (%s * interval '1 second')
+                        ) as has_stale_jobs
+                      from media_jobs
+                      group by 1
+                      order by max(coalesce(activity_at, created_at)) desc
+                      limit 20
+                    )
+                    select
+                      m.run_id::text as run_id,
+                      m.run_status,
+                      m.stage,
+                      m.job_status,
+                      count(*)::bigint as total,
+                      min(m.created_at) as oldest_job_created_at,
+                      max(coalesce(m.activity_at, m.created_at)) as latest_job_at,
+                      bool_or(rr.has_stale_jobs) as has_stale_jobs
+                    from media_jobs m
+                    join recent_runs rr on rr.run_id = m.run_id
+                    group by 1, 2, 3, 4
+                    order by max(coalesce(m.activity_at, m.created_at)) desc
+                    """,
+                    [
+                        ["media_mirror", "comment_media_mirror"],
+                        list(repo._RUN_PROGRESS_ACTIVE_JOB_STATUSES),
+                        media_stale_after_seconds,
+                    ],
+                )
+        media_runs_by_id: dict[str, dict[str, Any]] = {}
+        media_run_order: list[str] = []
+        for row in media_run_rows:
+            run_id = str(row.get("run_id") or "").strip()
+            if not run_id:
+                continue
+            stage = repo._normalize_social_job_stage_for_stale(row.get("stage")) or "unknown"
+            status = str(row.get("job_status") or "unknown").strip().lower() or "unknown"
+            total = int(row.get("total") or 0)
+            run_payload = media_runs_by_id.get(run_id)
+            if run_payload is None:
+                run_payload = {
+                    "run_id": run_id,
+                    "status": str(row.get("run_status") or "unknown").strip().lower() or "unknown",
+                    "oldest_job_created_at": repo._iso(repo._coerce_dt(row.get("oldest_job_created_at"))),
+                    "latest_job_at": repo._iso(repo._coerce_dt(row.get("latest_job_at"))),
+                    "active": 0,
+                    "stale": bool(row.get("has_stale_jobs")),
+                    "stages": {},
+                }
+                media_runs_by_id[run_id] = run_payload
+                media_run_order.append(run_id)
+            else:
+                latest_job_at = repo._iso(repo._coerce_dt(row.get("latest_job_at")))
+                if latest_job_at and (
+                    not run_payload.get("latest_job_at") or latest_job_at > str(run_payload["latest_job_at"])
+                ):
+                    run_payload["latest_job_at"] = latest_job_at
+                run_payload["stale"] = bool(run_payload.get("stale")) or bool(row.get("has_stale_jobs"))
+            stage_bucket = run_payload["stages"].setdefault(stage, {})
+            stage_bucket[status] = int(stage_bucket.get(status) or 0) + total
+            if status in repo._RUN_PROGRESS_ACTIVE_JOB_STATUSES:
+                run_payload["active"] = int(run_payload.get("active") or 0) + total
+        queue_payload["media_runs"] = [media_runs_by_id[run_id] for run_id in media_run_order]
+    except Exception as exc:  # noqa: BLE001
+        repo.logger.warning("Queue status media-runs query failed: %s", exc)
+        errors.append(f"queue_media_runs_query_failed: {exc}")
+
+    try:
+        media_queued_stale_after_seconds = repo._resolve_positive_int_env(
+            "SOCIAL_MEDIA_QUEUE_QUEUED_STALE_AFTER_SECONDS",
+            900,
+            minimum=30,
+        )
+        with repo.pg.db_connection(label="queue-status:media-queued-jobs", pool_name=SOCIAL_CONTROL_POOL_NAME) as conn:
+            with repo.pg.db_cursor(conn=conn) as cur:
+                cur.execute("set local statement_timeout = %s", [str(safe_statement_timeout_ms)])
+                media_queued_rows = repo.pg.fetch_all_with_cursor(
+                    cur,
+                    """
+                    select
+                      j.id::text as id,
+                      j.run_id::text as run_id,
+                      coalesce(j.platform, 'unknown') as platform,
+                      coalesce(j.status, 'unknown') as status,
+                      lower(
+                        coalesce(
+                          nullif(j.config->>'stage', ''),
+                          nullif(j.metadata->>'stage', ''),
+                          nullif(j.job_type, ''),
+                          'unknown'
+                        )
+                      ) as stage,
+                      nullif(coalesce(j.config->>'account', j.metadata->>'account', ''), '') as account_handle,
+                      nullif(coalesce(j.config->>'source_id', j.config->>'shortcode', ''), '') as source_id,
+                      nullif(j.config->>'post_id', '') as post_id,
+                      j.created_at,
+                      j.available_at,
+                      extract(epoch from (now() - coalesce(j.available_at, j.created_at)))::int as queued_age_seconds,
+                      coalesce(j.config->'required_runtime_version', j.metadata->'runtime_version') as runtime_version
+                    from social.scrape_jobs j
+                    where j.platform = 'instagram'
+                      and j.status in ('queued', 'pending', 'retrying')
+                      and lower(
+                        coalesce(
+                          nullif(j.config->>'stage', ''),
+                          nullif(j.metadata->>'stage', ''),
+                          nullif(j.job_type, ''),
+                          'unknown'
+                        )
+                      ) = any(%s::text[])
+                    order by coalesce(j.available_at, j.created_at) asc, j.created_at asc
+                    limit 25
+                    """,
+                    [["media_mirror", "comment_media_mirror"]],
+                )
+        queue_payload["media_queued_jobs"] = [
+            {
+                "id": str(row.get("id") or ""),
+                "run_id": str(row.get("run_id") or "").strip() or None,
+                "platform": str(row.get("platform") or "").strip().lower() or "unknown",
+                "status": str(row.get("status") or "").strip().lower() or "unknown",
+                "stage": repo._normalize_social_job_stage_for_stale(row.get("stage")) or "unknown",
+                "account_handle": str(row.get("account_handle") or "").strip().lstrip("@") or None,
+                "source_id": str(row.get("source_id") or "").strip() or None,
+                "post_id": str(row.get("post_id") or "").strip() or None,
+                "created_at": repo._iso(repo._coerce_dt(row.get("created_at"))),
+                "available_at": repo._iso(repo._coerce_dt(row.get("available_at"))),
+                "queued_age_seconds": max(0, repo._normalize_non_negative_int(row.get("queued_age_seconds"))),
+                "stale": repo._normalize_non_negative_int(row.get("queued_age_seconds"))
+                >= media_queued_stale_after_seconds,
+                "runtime_version": row.get("runtime_version") if isinstance(row.get("runtime_version"), dict) else None,
+            }
+            for row in media_queued_rows
+        ]
+        queue_payload["media_queued_jobs_stale_after_seconds"] = media_queued_stale_after_seconds
+    except Exception as exc:  # noqa: BLE001
+        repo.logger.warning("Queue status media queued jobs query failed: %s", exc)
+        errors.append(f"queue_media_queued_jobs_query_failed: {exc}")
 
     if not safe_summary_only:
         try:

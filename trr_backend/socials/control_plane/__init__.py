@@ -49,6 +49,14 @@ from trr_backend.socials.control_plane.analytics import (
     sentiment_for_text,
 )
 from trr_backend.socials.control_plane.background_tasks import background_task_snapshot, submit_named_background_task
+from trr_backend.socials.control_plane.budget import (
+    STATE_IDENTITY_BLOCKED,
+    STATE_NORMAL,
+    STATE_PAUSED,
+    STATE_REDUCED,
+    build_budget_decision,
+    get_budget_decision,
+)
 from trr_backend.socials.control_plane.dispatch import (
     SOCIAL_CATALOG_GAP_ANALYSIS_OPERATION_TYPE,
     build_social_account_catalog_gap_analysis_operation_producer,
@@ -166,6 +174,10 @@ __all__ = [
     "SOCIAL_CATALOG_GAP_ANALYSIS_OPERATION_TYPE",
     "SeasonContext",
     "SentimentAnalyzerContext",
+    "STATE_IDENTITY_BLOCKED",
+    "STATE_NORMAL",
+    "STATE_PAUSED",
+    "STATE_REDUCED",
     "SocialIngestConflictError",
     "SocialIngestValidationError",
     "SocialWorkerUnavailableError",
@@ -203,6 +215,7 @@ __all__ = [
     "_youtube_video_matches_show_terms",
     "assert_worker_available_when_queue_enabled",
     "background_task_snapshot",
+    "build_budget_decision",
     "build_csv",
     "build_pdf",
     "build_social_account_catalog_gap_analysis_operation_producer",
@@ -224,6 +237,7 @@ __all__ = [
     "execute_run_with_inline_worker_registration",
     "execute_social_account_catalog_run_auth_repair",
     "get_analytics",
+    "get_budget_decision",
     "get_comments_coverage",
     "get_mirror_coverage",
     "get_post_comments",

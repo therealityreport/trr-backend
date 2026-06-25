@@ -2392,3 +2392,49 @@ def test_sync_bravo_video_thumbnails_endpoint_updates_snapshot(
     sync_mock.assert_called_once()
     normalized_payload = upsert_mock.call_args.kwargs["payload"]["normalized"]
     assert normalized_payload["video_thumbnail_sync"]["forced"] is False
+
+
+def test_sync_bravo_video_thumbnails_imports_promo_not_logo(monkeypatch: pytest.MonkeyPatch) -> None:
+    from api.routers import admin_scrape, admin_show_bravo
+    from api.routers.admin_scrape import ImportResponse, MediaAssetSummary
+
+    show_id = str(uuid4())
+    normalized = {
+        "videos_show": [
+            {
+                "title": "Bravo Clip",
+                "clip_url": "https://www.bravotv.com/the-valley/videos/clip",
+                "image_url": "https://www.bravotv.com/images/thumb.jpg",
+            }
+        ],
+        "videos_person": [],
+    }
+    requests: list[admin_scrape.ImportRequest] = []
+
+    def fake_import_images(request: admin_scrape.ImportRequest, *_args: object) -> ImportResponse:
+        requests.append(request)
+        return ImportResponse(
+            imported=1,
+            skipped_duplicates=0,
+            errors=[],
+            assets=[
+                MediaAssetSummary(
+                    id="asset-1",
+                    hosted_url="https://cdn.example.com/thumb.jpg",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(admin_show_bravo, "resolve_page_featured_image_url", lambda _url: None)
+    monkeypatch.setattr(admin_scrape, "import_images", fake_import_images)
+
+    result = admin_show_bravo._sync_bravo_video_thumbnails(
+        db=MagicMock(),
+        admin_user=MagicMock(),
+        show_id=show_id,
+        normalized=normalized,
+    )
+
+    assert result["synced"] == 1
+    assert requests[0].images[0].kind == "promo"
+    assert requests[0].images[0].source_logo is None

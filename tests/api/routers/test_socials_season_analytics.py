@@ -1146,6 +1146,149 @@ def test_post_social_account_catalog_backfill_forwards_selected_tasks(
     assert mocked_finalize.call_args.kwargs["comments_enable_media_followups"] is True
 
 
+def test_post_social_account_catalog_backfill_2025_requires_live_apply_confirmation(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    run_id = "11111111-1111-4111-8111-111111111111"
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+        with patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            return_value=None,
+        ):
+            with patch(
+                "trr_backend.repositories.social_season_analytics.begin_social_account_catalog_backfill_launch",
+                return_value={
+                    "run_id": run_id,
+                    "status": "queued",
+                    "launch_group_id": "launch-group-2025",
+                    "selected_tasks": ["post_details", "comments", "media"],
+                    "catalog_run_id": run_id,
+                    "launch_state": "pending",
+                    "launch_task_resolution_pending": True,
+                },
+            ):
+                with patch(
+                    "trr_backend.repositories.social_season_analytics._merge_catalog_run_config",
+                    return_value={"id": run_id, "status": "queued", "config": {}},
+                ) as mocked_merge:
+                    with patch(
+                        "api.routers.socials._queue_catalog_backfill_finalize_task",
+                        return_value=None,
+                    ) as mocked_finalize:
+                        response = client.post(
+                            "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/backfill",
+                            headers={"Authorization": f"Bearer {token}"},
+                            json={
+                                "backfill_scope": "bounded_window",
+                                "date_start": "2025-01-01T00:00:00Z",
+                                "date_end": "2025-12-31T23:59:59Z",
+                                "selected_tasks": ["post_details", "comments", "media"],
+                                "comments_worker_count": 2,
+                            },
+                        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["requires_apply_confirmation"] is True
+    assert body["apply_required"] is True
+    assert body["apply_run_id"] == run_id
+    assert body["required_confirmation"] == f"APPLY INSTAGRAM 2025 BACKFILL {run_id}"
+    assert body["launch_state"] == "pending_apply_confirmation"
+    assert body["runbook_state"]["current_comments_cap"] == 2
+    assert mocked_merge.call_args.kwargs["run_id"] == run_id
+    assert mocked_merge.call_args.kwargs["metadata_updates"]["required_confirmation"] == (
+        f"APPLY INSTAGRAM 2025 BACKFILL {run_id}"
+    )
+    mocked_finalize.assert_not_called()
+
+
+def test_post_social_account_catalog_backfill_2025_rejects_bad_live_apply_confirmation(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    run_id = "11111111-1111-4111-8111-111111111111"
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+        with patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            return_value=None,
+        ):
+            with patch(
+                "api.routers.socials._queue_catalog_backfill_finalize_task",
+                return_value=None,
+            ) as mocked_finalize:
+                response = client.post(
+                    "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/backfill",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={
+                        "backfill_scope": "bounded_window",
+                        "date_start": "2025-01-01T00:00:00Z",
+                        "date_end": "2025-12-31T23:59:59Z",
+                        "selected_tasks": ["post_details", "comments"],
+                        "apply_run_id": run_id,
+                        "operator_confirmation": "APPLY",
+                    },
+                )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["detail"]["code"] == "INSTAGRAM_2025_BACKFILL_APPLY_CONFIRMATION_REQUIRED"
+    assert body["detail"]["required_confirmation"] == f"APPLY INSTAGRAM 2025 BACKFILL {run_id}"
+    mocked_finalize.assert_not_called()
+
+
+def test_post_social_account_catalog_backfill_2025_live_apply_queues_finalize_task(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    run_id = "11111111-1111-4111-8111-111111111111"
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+        with patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            return_value=None,
+        ):
+            with patch(
+                "trr_backend.repositories.social_season_analytics.begin_social_account_catalog_backfill_launch",
+                side_effect=AssertionError("apply confirmation should not reserve a second run"),
+            ):
+                with patch(
+                    "api.routers.socials._queue_catalog_backfill_finalize_task",
+                    return_value=None,
+                ) as mocked_finalize:
+                    response = client.post(
+                        "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/backfill",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json={
+                            "backfill_scope": "bounded_window",
+                            "date_start": "2025-01-01T00:00:00Z",
+                            "date_end": "2025-12-31T23:59:59Z",
+                            "selected_tasks": ["post_details", "comments", "media"],
+                            "comments_worker_count": 2,
+                            "apply_run_id": run_id,
+                            "operator_confirmation": f"APPLY INSTAGRAM 2025 BACKFILL {run_id}",
+                        },
+                    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["run_id"] == run_id
+    assert body["apply_required"] is False
+    assert body["runbook_state"]["state"] == "applied"
+    assert mocked_finalize.call_args.kwargs["run_id"] == run_id
+    assert mocked_finalize.call_args.kwargs["selected_tasks"] == ["post_details", "comments", "media"]
+    assert mocked_finalize.call_args.kwargs["comments_worker_count"] == 2
+    assert mocked_finalize.call_args.kwargs["launch_group_id"] is None
+
+
 def test_post_social_account_catalog_backfill_without_comments_uses_async_kickoff(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -1263,6 +1406,7 @@ def test_queue_catalog_backfill_finalize_task_runs_finalize_and_clears_caches(
             "comments_enable_media_followups": True,
             "launch_group_id": "launch-group-1",
             "force_catalog_rediscovery": False,
+            "enable_cap4_canary": False,
         }
     ]
     assert cleared == ["cleared"]
@@ -2554,6 +2698,16 @@ def test_get_social_account_cookie_health_marks_comments_auth_blocked_unhealthy(
         "account_handle": "thetraitorsus",
         "shortcode": "DSfwXnYAaEs",
         "ready": False,
+        "public_ready": False,
+        "authenticated_ready": False,
+        "auth_probe_skipped": False,
+        "auth_required_for_hidden_comments": True,
+        "comments_auth_blocker": None,
+        "operator_action": None,
+        "rate_limited": False,
+        "cooldown_recommended_seconds": None,
+        "cache_hit": False,
+        "cache_ttl_seconds": None,
         "status": "auth_blocked",
         "category": "auth",
         "reason": "html_challenge_or_auth_required",
@@ -2567,6 +2721,138 @@ def test_get_social_account_cookie_health_marks_comments_auth_blocked_unhealthy(
     assert body["comments_auth_probe"]["probe_source"] == "cookie_health"
     assert body["comments_auth_probe"]["repair_action"] is None
     assert body["comments_auth_probe"]["repair_available"] is False
+
+
+def test_get_social_account_cookie_health_does_not_treat_public_comments_probe_as_auth_ready(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with (
+        patch(
+            "trr_backend.repositories.social_season_analytics.check_platform_cookie_health",
+            return_value={
+                "platform": "instagram",
+                "required": True,
+                "healthy": True,
+                "reason": None,
+                "refresh_supported": True,
+                "refresh_available": True,
+                "refresh_action": "instagram_auth_repair",
+                "refresh_label": "Manual Instagram Auth",
+                "source_kind": "default_file",
+                "source_path": "/tmp/instagram_cookies.json",
+            },
+        ),
+        patch(
+            "trr_backend.repositories.social_season_analytics.probe_modal_instagram_posts_auth_health",
+            return_value={"platform": "instagram", "account_handle": "thetraitorsus", "ready": True, "status": "valid"},
+        ),
+        patch(
+            "trr_backend.repositories.social_season_analytics.probe_modal_instagram_comments_auth_health",
+            return_value={
+                "platform": "instagram",
+                "account_handle": "thetraitorsus",
+                "shortcode": "DSfwXnYAaEs",
+                "ready": True,
+                "public_ready": True,
+                "authenticated_ready": False,
+                "auth_probe_skipped": True,
+                "auth_required_for_hidden_comments": True,
+                "comments_auth_blocker": "strict_authenticated_probe_not_requested",
+                "operator_action": "Run a strict Instagram comments auth probe before launching hidden-comments recovery.",
+                "status": "public",
+                "result": "public",
+                "execution_backend": "modal",
+            },
+        ) as comments_probe,
+    ):
+        response = client.get(
+            "/api/v1/admin/socials/profiles/instagram/thetraitorsus/cookies/health?posts_auth=true&comments_auth=true",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    comments_probe.assert_called_once_with("thetraitorsus", strict_authenticated=True)
+    body = response.json()
+    assert body["healthy"] is False
+    assert body["reason"] == "comments_auth_public_only"
+    assert body["comments_auth_health"]["ready"] is False
+    assert body["comments_auth_health"]["public_ready"] is True
+    assert body["comments_auth_health"]["authenticated_ready"] is False
+    assert body["comments_auth_health"]["auth_probe_skipped"] is True
+    assert body["comments_auth_health"]["category"] == "public"
+    assert body["comments_auth_health"]["rate_limited"] is False
+
+
+def test_get_social_account_cookie_health_marks_comments_auth_rate_limited_unhealthy(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with (
+        patch(
+            "trr_backend.repositories.social_season_analytics.check_platform_cookie_health",
+            return_value={
+                "platform": "instagram",
+                "required": True,
+                "healthy": True,
+                "reason": None,
+                "refresh_supported": True,
+                "refresh_available": True,
+                "refresh_action": "instagram_auth_repair",
+                "refresh_label": "Manual Instagram Auth",
+                "source_kind": "default_file",
+                "source_path": "/tmp/instagram_cookies.json",
+            },
+        ),
+        patch(
+            "trr_backend.repositories.social_season_analytics.probe_modal_instagram_posts_auth_health",
+            return_value={"platform": "instagram", "account_handle": "thetraitorsus", "ready": True, "status": "valid"},
+        ),
+        patch(
+            "trr_backend.repositories.social_season_analytics.probe_modal_instagram_comments_auth_health",
+            return_value={
+                "platform": "instagram",
+                "account_handle": "thetraitorsus",
+                "shortcode": "DSfwXnYAaEs",
+                "ready": False,
+                "public_ready": True,
+                "authenticated_ready": False,
+                "auth_probe_skipped": False,
+                "auth_required_for_hidden_comments": True,
+                "comments_auth_blocker": "http_429",
+                "operator_action": "Instagram comments auth probe is rate-limited. Wait at least 300 seconds.",
+                "status": "transport_blocked",
+                "result": "transport_blocked",
+                "reason": "http_429",
+                "rate_limited": True,
+                "cooldown_recommended_seconds": 300,
+                "cache_hit": True,
+                "cache_ttl_seconds": 240,
+                "execution_backend": "modal",
+            },
+        ),
+    ):
+        response = client.get(
+            "/api/v1/admin/socials/profiles/instagram/thetraitorsus/cookies/health?posts_auth=true&comments_auth=true",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["healthy"] is False
+    assert body["reason"] == "comments_auth_rate_limited"
+    assert body["auth_surface_blocked"] is True
+    assert body["comments_auth_health"]["category"] == "rate_limited"
+    assert body["comments_auth_health"]["rate_limited"] is True
+    assert body["comments_auth_health"]["cooldown_recommended_seconds"] == 300
+    assert body["comments_auth_health"]["cache_hit"] is True
+    assert body["comments_auth_health"]["cache_ttl_seconds"] == 240
 
 
 def test_post_social_account_cookie_refresh_route_defaults_allow_cookie_refresh_and_returns_instagram_auth_repair_summary(
@@ -3058,7 +3344,7 @@ def test_post_social_account_comments_run_guarded_restart(
             "comments_load_strategy": "public_relay",
         },
         "comments_load_strategy": "public_relay",
-        "comments_worker_cap_start": 12,
+        "comments_worker_cap_start": 4,
         "comments_target_batch_size": 10,
     }
 
@@ -6938,7 +7224,14 @@ def test_get_social_account_catalog_run_progress_forwards_fast_flag(
         )
 
     assert response.status_code == 200
-    assert response.json() == expected
+    # The route returns the base progress payload and additively enriches it with
+    # comments-skip transparency fields (derive_comments_skip_reason); the enrichment
+    # itself is covered by test_catalog_backfill_wiring. This test's contract is that
+    # the base payload passes through and the fast flag is forwarded, so assert the
+    # base fields rather than strict equality.
+    body = response.json()
+    assert body["run_id"] == expected["run_id"]
+    assert body["run_status"] == expected["run_status"]
     mocked.assert_called_once_with(
         platform="instagram",
         account_handle="bravotv",
@@ -7138,6 +7431,177 @@ def test_get_queue_status_endpoint_allows_explicit_summary_refresh(
     assert mocked.call_args.kwargs["fresh"] is True
     assert mocked.call_args.kwargs["summary_only"] is True
     assert mocked.call_args.kwargs["include_recent_failures"] is False
+
+
+def test_recover_stale_media_mirror_endpoint_recovers_and_dispatches(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    run_id = str(uuid4())
+    recover_calls: list[dict[str, Any]] = []
+    dispatch_calls: list[dict[str, Any]] = []
+
+    def _recover(**kwargs: Any) -> list[dict[str, Any]]:
+        recover_calls.append(kwargs)
+        return [{"id": f"job-{len(recover_calls)}"}]
+
+    def _dispatch(**kwargs: Any) -> dict[str, Any]:
+        dispatch_calls.append(kwargs)
+        return {"dispatched_job_ids": ["job-dispatched"], "dispatch_attempts": 1}
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.recover_stale_running_jobs",
+        side_effect=_recover,
+    ):
+        with patch(
+            "trr_backend.repositories.social_season_analytics.dispatch_due_social_jobs",
+            side_effect=_dispatch,
+        ):
+            response = client.post(
+                "/api/v1/admin/socials/ingest/media-mirror/recover-stale",
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "run_id": run_id,
+                    "stage": "all",
+                    "confirm_recovery": "RECOVER MEDIA MIRROR JOBS",
+                },
+            )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["recovered_count"] == 2
+    assert body["recovered_by_stage"] == {
+        "media_mirror": ["job-1"],
+        "comment_media_mirror": ["job-2"],
+    }
+    assert recover_calls == [
+        {
+            "run_id": run_id,
+            "stage": "media_mirror",
+            "platform": "instagram",
+            "stale_after_seconds": 900,
+            "limit": 5,
+        },
+        {
+            "run_id": run_id,
+            "stage": "comment_media_mirror",
+            "platform": "instagram",
+            "stale_after_seconds": 900,
+            "limit": 5,
+        },
+    ]
+    assert dispatch_calls == [{"run_id": run_id, "limit": 8}]
+
+
+def test_recover_stale_media_mirror_endpoint_requires_confirmation(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch("trr_backend.repositories.social_season_analytics.recover_stale_running_jobs") as mocked:
+        response = client.post(
+            "/api/v1/admin/socials/ingest/media-mirror/recover-stale",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "run_id": str(uuid4()),
+                "stage": "media_mirror",
+                "confirm_recovery": "wrong",
+            },
+        )
+
+    assert response.status_code == 400
+    assert "confirm_recovery" in response.json()["detail"]
+    mocked.assert_not_called()
+
+
+def test_drain_media_mirror_account_endpoint_forwards_account_scope(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    run_id = str(uuid4())
+    drain_calls: list[dict[str, Any]] = []
+
+    def _drain(**kwargs: Any) -> dict[str, Any]:
+        drain_calls.append(kwargs)
+        return {
+            "ok": True,
+            "dry_run": False,
+            "run_id": kwargs["run_id"],
+            "account_handle": kwargs["account_handle"],
+            "stage": kwargs["stage"],
+            "before": {"remaining_count": 4},
+            "after": {"remaining_count": 2},
+            "recovered_job_ids": ["job-recovered"],
+            "dispatched_job_ids": ["job-dispatched"],
+            "dispatch_attempts": 1,
+            "stop_reason": None,
+            "next_recommended_action": "run_next_batch",
+        }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.drain_media_mirror_account_jobs",
+        side_effect=_drain,
+    ):
+        response = client.post(
+            "/api/v1/admin/socials/ingest/media-mirror/drain-account",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "run_id": run_id,
+                "account_handle": "@bravotv",
+                "stage": "all",
+                "recover_limit": 25,
+                "dispatch_limit": 8,
+                "confirm_drain": "DRAIN BRAVO MEDIA",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["account_handle"] == "bravotv"
+    assert body["dispatched_job_ids"] == ["job-dispatched"]
+    assert drain_calls == [
+        {
+            "run_id": run_id,
+            "account_handle": "bravotv",
+            "stage": "all",
+            "stale_after_seconds": 900,
+            "recover_limit": 25,
+            "dispatch_limit": 8,
+            "dry_run": False,
+        }
+    ]
+
+
+def test_drain_media_mirror_account_endpoint_requires_confirmation(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch("trr_backend.repositories.social_season_analytics.drain_media_mirror_account_jobs") as mocked:
+        response = client.post(
+            "/api/v1/admin/socials/ingest/media-mirror/drain-account",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "run_id": str(uuid4()),
+                "account_handle": "bravotv",
+                "stage": "media_mirror",
+                "confirm_drain": "wrong",
+            },
+        )
+
+    assert response.status_code == 400
+    assert "confirm_drain" in response.json()["detail"]
+    mocked.assert_not_called()
 
 
 def test_get_queue_status_endpoint_returns_500_on_unhandled_error(

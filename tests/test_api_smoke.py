@@ -167,6 +167,36 @@ class TestShowsEndpoints:
         assert response.status_code == 200
         assert response.json() == []
 
+    def test_list_shows_with_alternative_names_returns_covered_shows(self, client: TestClient):
+        """Lightweight show list endpoint returns curated covered shows."""
+        captured_query = ""
+
+        def _fetch_covered_shows(query: str, *args, **kwargs):  # noqa: ANN001
+            nonlocal captured_query
+            captured_query = query
+            return [
+                {
+                    "id": "11111111-1111-1111-1111-111111111111",
+                    "name": "The Real Housewives of Rhode Island",
+                    "alternative_names": ["RHORI", "Real Housewives of Rhode Island"],
+                }
+            ]
+
+        shows_router.pg.fetch_all = _fetch_covered_shows
+
+        response = client.get("/api/v1/shows/list")
+
+        assert response.status_code == 200
+        assert "admin.covered_shows" in captured_query
+        assert "JOIN core.shows" in captured_query
+        assert response.json() == [
+            {
+                "id": "11111111-1111-1111-1111-111111111111",
+                "name": "The Real Housewives of Rhode Island",
+                "alternative_names": ["RHORI", "Real Housewives of Rhode Island"],
+            }
+        ]
+
     def test_get_show_returns_404_when_not_found(self, client: TestClient):
         """Get show endpoint returns 404 for non-existent show."""
         response = client.get("/api/v1/shows/00000000-0000-0000-0000-000000000000")

@@ -38,6 +38,16 @@ class _StubFunctionHandle:
         return dict(self._remote_payload or {})
 
 
+class _RecordingFunctionHandle(_StubFunctionHandle):
+    def __init__(self, *, remote_payload: dict[str, object], calls: list[dict[str, object]]) -> None:
+        super().__init__(remote_payload=remote_payload)
+        self._calls = calls
+
+    def remote(self, *args: object, **kwargs: object) -> dict[str, object]:
+        self._calls.append({"args": args, "kwargs": kwargs})
+        return super().remote(*args, **kwargs)
+
+
 class _SlowFunctionHandle(_StubFunctionHandle):
     def remote(self, *_args: object, **_kwargs: object) -> dict[str, object]:
         time.sleep(5)
@@ -323,6 +333,139 @@ def test_verify_modal_readiness_passes_when_all_resources_exist(monkeypatch: pyt
         "admin_vision",
         "socialblade",
     ]
+
+
+def test_verify_modal_readiness_passes_strict_instagram_comments_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        cli,
+        "list_secret_names",
+        lambda *, modal_environment="": {"trr-backend-runtime", "trr-social-auth"},
+    )
+    monkeypatch.setattr(cli, "list_app_descriptions", lambda *, modal_environment="": {"trr-backend-jobs"})
+    monkeypatch.setattr(
+        cli,
+        "get_app_function_handles",
+        lambda *, app_name, modal_environment="": {
+            "serve_backend_api": _StubFunctionHandle(web_url="https://workspace--trr-backend-api.modal.run"),
+            "run_social_job": _StubFunctionHandle(),
+            "run_social_posts_job": _StubFunctionHandle(),
+            "run_social_media_job": _StubFunctionHandle(),
+            "run_social_comments_job": _StubFunctionHandle(),
+            "run_social_comments_recovery_job": _StubFunctionHandle(),
+            "run_socialblade_scrape": _StubFunctionHandle(),
+            "probe_social_remote_auth": _StubFunctionHandle(remote_payload={"platform": "instagram", "ready": True}),
+            "probe_instagram_posts_auth": _StubFunctionHandle(remote_payload={"status": "valid", "ready": True}),
+            "probe_instagram_comments_auth": _RecordingFunctionHandle(
+                remote_payload={
+                    "platform": "instagram",
+                    "account_handle": "thetraitorsus",
+                    "shortcode": "DSfwXnYAaEs",
+                    "status": "valid",
+                    "ready": True,
+                    "authenticated_ready": True,
+                },
+                calls=calls,
+            ),
+        },
+    )
+
+    summary = cli.verify_modal_readiness(
+        app_name="trr-backend-jobs",
+        runtime_secret_name="trr-backend-runtime",
+        social_secret_name="trr-social-auth",
+        function_names=(
+            "serve_backend_api",
+            "run_social_job",
+            "run_social_posts_job",
+            "run_social_media_job",
+            "run_social_comments_job",
+            "run_social_comments_recovery_job",
+            "run_socialblade_scrape",
+            "probe_social_remote_auth",
+            "probe_instagram_posts_auth",
+            "probe_instagram_comments_auth",
+        ),
+        probe_instagram_comments_auth_handle="thetraitorsus",
+        probe_instagram_comments_auth_shortcode="DSfwXnYAaEs",
+        strict_instagram_comments_auth=True,
+    )
+
+    assert summary["instagram_comments_auth_probe"]["strict_authenticated"] is True
+    assert calls == [
+        {
+            "args": ("thetraitorsus", "DSfwXnYAaEs", True),
+            "kwargs": {},
+        }
+    ]
+
+
+def test_verify_modal_readiness_blocks_retryable_transport_in_strict_instagram_comments_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "list_secret_names",
+        lambda *, modal_environment="": {"trr-backend-runtime", "trr-social-auth"},
+    )
+    monkeypatch.setattr(cli, "list_app_descriptions", lambda *, modal_environment="": {"trr-backend-jobs"})
+    monkeypatch.setattr(
+        cli,
+        "get_app_function_handles",
+        lambda *, app_name, modal_environment="": {
+            "serve_backend_api": _StubFunctionHandle(web_url="https://workspace--trr-backend-api.modal.run"),
+            "run_social_job": _StubFunctionHandle(),
+            "run_social_posts_job": _StubFunctionHandle(),
+            "run_social_media_job": _StubFunctionHandle(),
+            "run_social_comments_job": _StubFunctionHandle(),
+            "run_social_comments_recovery_job": _StubFunctionHandle(),
+            "run_socialblade_scrape": _StubFunctionHandle(),
+            "probe_social_remote_auth": _StubFunctionHandle(remote_payload={"platform": "instagram", "ready": True}),
+            "probe_instagram_posts_auth": _StubFunctionHandle(remote_payload={"status": "valid", "ready": True}),
+            "probe_instagram_comments_auth": _StubFunctionHandle(
+                remote_payload={
+                    "platform": "instagram",
+                    "account_handle": "thetraitorsus",
+                    "shortcode": "DSfwXnYAaEs",
+                    "status": "transport_blocked",
+                    "result": "transport_blocked",
+                    "reason": "http_429",
+                    "retryable": True,
+                    "ready": False,
+                    "authenticated_ready": False,
+                },
+            ),
+        },
+    )
+
+    summary = cli.verify_modal_readiness(
+        app_name="trr-backend-jobs",
+        runtime_secret_name="trr-backend-runtime",
+        social_secret_name="trr-social-auth",
+        function_names=(
+            "serve_backend_api",
+            "run_social_job",
+            "run_social_posts_job",
+            "run_social_media_job",
+            "run_social_comments_job",
+            "run_social_comments_recovery_job",
+            "run_socialblade_scrape",
+            "probe_social_remote_auth",
+            "probe_instagram_posts_auth",
+            "probe_instagram_comments_auth",
+        ),
+        probe_instagram_comments_auth_handle="thetraitorsus",
+        probe_instagram_comments_auth_shortcode="DSfwXnYAaEs",
+        strict_instagram_comments_auth=True,
+    )
+
+    assert summary["ok"] is False
+    assert summary["blocking_probe_failures"] == ["http_429"]
+    assert summary["advisory_probe_failures"] == []
+    assert summary["instagram_comments_auth_probe"].get("advisory_continue") is None
+    assert summary["instagram_comments_auth_probe"]["rate_limited"] is True
+    assert summary["instagram_comments_auth_probe"]["cooldown_recommended_seconds"] == 300
+    assert "rate-limited" in summary["instagram_comments_auth_probe"]["operator_action"]
 
 
 def test_verify_modal_readiness_blocks_failed_core_runtime_probe(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
-from typing import Any, Mapping
+from typing import Any
 
 
 def _clean_str(value: Any) -> str | None:
@@ -41,6 +42,8 @@ def _nup_set(value: Any) -> str | None:
 def _default_source_role(source: str) -> str:
     if source == "nbcumv":
         return "original"
+    if source == "peacock":
+        return "official_original"
     if source == "bravo":
         return "editorial_context"
     if source == "getty":
@@ -52,6 +55,8 @@ def _default_display_eligible(source: str, record: Mapping[str, Any]) -> bool:
     if source == "getty":
         return False
     if source == "nbcumv":
+        return bool(_clean_str(record.get("source_url")) or _clean_str(record.get("hosted_url")))
+    if source == "peacock":
         return bool(_clean_str(record.get("source_url")) or _clean_str(record.get("hosted_url")))
     if source == "bravo":
         return bool(_clean_str(record.get("source_url")) or _clean_str(record.get("hosted_url")))
@@ -66,7 +71,8 @@ def _build_bridge_keys(record: Mapping[str, Any]) -> dict[str, Any]:
             "nup_filename": nup_filename,
             "nup_set": _clean_str(record.get("nup_set")) or _nup_set(nup_filename),
             "getty_editorial_id": _clean_str(record.get("getty_editorial_id")),
-            "lbx_id": _clean_str(raw.get("lbx_id")) or (_clean_str(record.get("source_id")) if record.get("source") == "nbcumv" else None),
+            "lbx_id": _clean_str(raw.get("lbx_id"))
+            or (_clean_str(record.get("source_id")) if record.get("source") == "nbcumv" else None),
             "bravo_gallery_item_id": _clean_str(raw.get("gallery_item_id")),
             "file_url": _clean_str(raw.get("file_url")) or _clean_str(record.get("source_url")),
             "source_page_url": _clean_str(record.get("source_page_url")),

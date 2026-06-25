@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 
 from trr_backend.socials.instagram.comments_scrapling.fetcher import normalize_comments_load_strategy
-from trr_backend.socials.instagram.comments_scrapling.job_runner import _config_public_comments_mode
+from trr_backend.socials.instagram.comments_scrapling.job_runner import (
+    _config_public_comments_mode,
+    _normalize_comments_session_scope,
+)
 from trr_backend.socials.instagram.comments_scrapling.proxy import select_comments_proxy
 from trr_backend.socials.instagram.posts_scrapling.job_runner import (
     _public_graphql_page_posts,
@@ -35,16 +38,25 @@ def test_public_comments_mode_selects_public_relay():
     assert normalize_comments_load_strategy("public_relay") == "public_relay"
 
 
-def test_public_comments_mode_defaults_public_without_job_scrape_mode(monkeypatch):
+def test_cursor_api_comments_mode_stays_authenticated_without_job_scrape_mode(monkeypatch):
     monkeypatch.delenv("SOCIAL_INSTAGRAM_SCRAPE_MODE", raising=False)
 
-    assert _config_public_comments_mode({"comments_load_strategy": "cursor_api"}) is True
+    assert _config_public_comments_mode({"comments_load_strategy": "cursor_api"}) is False
 
 
 def test_public_comments_mode_can_be_explicitly_authenticated(monkeypatch):
     monkeypatch.setenv("SOCIAL_INSTAGRAM_SCRAPE_MODE", "authenticated")
 
     assert _config_public_comments_mode({"comments_load_strategy": "cursor_api"}) is False
+
+
+def test_legacy_cursor_api_session_scope_canonicalizes_for_metadata():
+    assert (
+        _normalize_comments_session_scope("cursor_api_worker", default="fallback")
+        == "instagram_comments_endpoint_cursor_worker"
+    )
+    assert _normalize_comments_session_scope("cursor_api", default="fallback") == "instagram_comments_endpoint_cursor_worker"
+    assert _normalize_comments_session_scope(None, default="fallback") == "fallback"
 
 
 def test_public_posts_graphql_page_helpers_return_posts_and_metadata():

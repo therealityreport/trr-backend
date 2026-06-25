@@ -1127,7 +1127,7 @@ def test_single_session_load_all_uses_rendered_hydration_only_after_api_gap(monk
     assert result.retryable is False
     assert result.fetch_reason == "single_session_rendered_hydration_recovered"
     assert result.diagnostic_metadata["fallback_trigger"] == "api_complete_expected_gap"
-    assert result.diagnostic_metadata["lane_order"] == ["cursor_api", "rendered_hydration"]
+    assert result.diagnostic_metadata["lane_order"] == ["instagram_comments_endpoint_cursor", "rendered_hydration"]
     assert result.diagnostic_metadata["api_rows_seen"] == 1
     assert result.diagnostic_metadata["rendered_load_attempts"] == 1
     assert result.diagnostic_metadata["rendered_rows_seen"] == 2

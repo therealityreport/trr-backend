@@ -131,6 +131,49 @@ def _shared_instagram_catalog_graphql_page_size() -> int:
     return 50
 
 
+def _shared_instagram_catalog_graphql_request_timeout() -> tuple[int, int]:
+    def _read_timeout_env(name: str, *, default: int, minimum: int, maximum: int) -> int:
+        raw = (os.getenv(name) or "").strip()
+        if raw:
+            try:
+                value = int(float(raw))
+            except ValueError:
+                value = default
+        else:
+            value = default
+        return max(minimum, min(maximum, value))
+
+    connect_timeout = _read_timeout_env(
+        "SOCIAL_INSTAGRAM_CATALOG_GRAPHQL_CONNECT_TIMEOUT_SECONDS",
+        default=5,
+        minimum=2,
+        maximum=15,
+    )
+    read_timeout = _read_timeout_env(
+        "SOCIAL_INSTAGRAM_CATALOG_GRAPHQL_READ_TIMEOUT_SECONDS",
+        default=12,
+        minimum=5,
+        maximum=30,
+    )
+    return connect_timeout, read_timeout
+
+
+def _shared_instagram_browser_session_lock_timeout_seconds() -> float:
+    raw = (
+        os.getenv("SOCIAL_INSTAGRAM_CATALOG_BROWSER_SESSION_LOCK_TIMEOUT_SECONDS")
+        or os.getenv("SOCIAL_BROWSER_SESSION_LOCK_TIMEOUT_SECONDS")
+        or ""
+    ).strip()
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            value = 30.0
+    else:
+        value = 30.0
+    return max(5.0, min(300.0, value))
+
+
 def _shared_instagram_catalog_delay_seconds(
     *,
     base_delay: float,
@@ -848,6 +891,7 @@ def _fetch_shared_instagram_graphql_page(
         }
         if page_size is not None:
             fetch_kwargs["page_size"] = page_size
+        fetch_kwargs["request_timeout"] = _shared_instagram_catalog_graphql_request_timeout()
         data = scraper.fetch_posts_graphql(account_handle, cursor, delay_seconds, **fetch_kwargs)
         if data and _shared_instagram_graphql_page_has_posts(data):
             meta = dict(getattr(scraper, "last_retrieval_meta", {}) or {})
@@ -1135,7 +1179,10 @@ def _fetch_shared_instagram_graphql_posts_page(
     auth_allowed: bool,
 ) -> tuple[list[Any], dict[str, Any], dict[str, Any], str | None]:
     _sync_core_overrides()
-    from trr_backend.socials.account_browser_sessions import AccountBrowserSessionManager
+    from trr_backend.socials.account_browser_sessions import (
+        AccountBrowserSessionManager,
+        BrowserSessionExecutionLockTimeout,
+    )
     from trr_backend.socials.instagram import ScrapeConfig
 
     build_scraper = _room_callable("_build_shared_instagram_scraper", _build_shared_instagram_scraper)
@@ -1144,18 +1191,38 @@ def _fetch_shared_instagram_graphql_posts_page(
         _fetch_shared_instagram_graphql_page,
     )
     browser_sessions = AccountBrowserSessionManager(platform="instagram", cookie_domains=(".instagram.com",))
-    with browser_sessions.execution_lock(account_handle):
-        public_scraper = build_scraper(browser_account_id=account_handle)
-        auth_scraper = build_scraper(authenticated=True, browser_account_id=account_handle) if auth_allowed else None
-        scrape_config = ScrapeConfig(username=account_handle, hashtags=[], delay_seconds=delay_seconds, max_pages=None)
-        data, page_meta, selected_transport = fetch_graphql_page(
-            account_handle=account_handle,
-            cursor=cursor,
-            delay_seconds=delay_seconds,
-            public_scraper=public_scraper,
-            auth_scraper=auth_scraper,
-            preferred_transport=preferred_transport,
-            allow_public_fallback=allow_public_fallback,
+    try:
+        with browser_sessions.execution_lock(
+            account_handle,
+            timeout_seconds=_shared_instagram_browser_session_lock_timeout_seconds(),
+        ):
+            public_scraper = build_scraper(browser_account_id=account_handle)
+            auth_scraper = build_scraper(authenticated=True, browser_account_id=account_handle) if auth_allowed else None
+            scrape_config = ScrapeConfig(username=account_handle, hashtags=[], delay_seconds=delay_seconds, max_pages=None)
+            data, page_meta, selected_transport = fetch_graphql_page(
+                account_handle=account_handle,
+                cursor=cursor,
+                delay_seconds=delay_seconds,
+                public_scraper=public_scraper,
+                auth_scraper=auth_scraper,
+                preferred_transport=preferred_transport,
+                allow_public_fallback=allow_public_fallback,
+            )
+    except BrowserSessionExecutionLockTimeout as exc:
+        selected_transport = str(preferred_transport or "").strip().lower() or None
+        return (
+            [],
+            {},
+            {
+                "error_code": "instagram_browser_session_lock_timeout",
+                "error_class": exc.__class__.__name__,
+                "error_message": str(exc),
+                "retryable": True,
+                "graphql_cursor": str(cursor or "").strip() or None,
+                "transport": selected_transport,
+                "lock_timeout_seconds": exc.timeout_seconds,
+            },
+            selected_transport,
         )
     if not data:
         return [], {}, dict(page_meta or {}), selected_transport
@@ -2342,6 +2409,9 @@ def _scrape_shared_instagram_posts(
             posts = public_scraper.scrape(scrape_config, progress_cb=progress_cb)
             scraper = public_scraper
     retrieval_meta = dict(getattr(scraper, "last_retrieval_meta", {}) or {})
+    oldest_posted_at_seen, newest_posted_at_seen = _shared_instagram_posted_at_bounds(posts)
+    retrieval_meta["oldest_posted_at_seen"] = _iso(oldest_posted_at_seen)
+    retrieval_meta["newest_posted_at_seen"] = _iso(newest_posted_at_seen)
     rows: list[dict[str, Any]] = []
     if _shared_catalog_mode(config):
         progress_interval = _shared_catalog_progress_interval_posts()
@@ -2368,33 +2438,25 @@ def _scrape_shared_instagram_posts(
             progress_cb(payload)
 
         _emit_persist_progress(0, force=True)
-        for index, post in enumerate(posts, start=1):
-            _upsert_shared_catalog_post(
+        rows, _source_ids, persist_meta = _normalize_shared_catalog_posts_batch_result(
+            _persist_shared_catalog_posts_batch(
                 platform="instagram",
                 run_id=run_id,
                 account_handle=account_handle,
-                post=post,
+                posts=posts,
+                job_id=job_id,
+                source_scope=str(config.get("source_scope") or "network"),
+                enable_media_followups=not bool(config.get("details_refresh_skip_media_followups")),
             )
-            row = upsert_instagram_post(None, job_id=job_id, account=account_handle, post=post)
-            if row:
-                rows.append(row)
-                if not bool(config.get("details_refresh_skip_media_followups")) and _platform_post_needs_media_mirror(
-                    "instagram", row
-                ):
-                    mirror_job_id = _enqueue_instagram_media_mirror_job(
-                        None,
-                        run_id=run_id,
-                        source_scope=str(config.get("source_scope") or "network"),
-                        account=account_handle,
-                        post_row=dict(row),
-                        week_index=None,
-                        parent_job_id=job_id,
-                    )
-                    if mirror_job_id:
-                        media_mirror_jobs_enqueued += 1
-            _emit_persist_progress(len(rows), force=index == len(posts))
+        )
+        media_mirror_jobs_enqueued = _normalize_non_negative_int(persist_meta.get("media_mirror_jobs_enqueued"))
+        _emit_persist_progress(len(rows), force=True)
+        catalog_posts_upserted = persist_meta.get("catalog_posts_upserted")
+        if catalog_posts_upserted is None:
+            catalog_posts_upserted = len(rows)
         retrieval_meta["persist_counters"] = {
             "posts_upserted": len(rows),
+            "catalog_posts_upserted": _normalize_non_negative_int(catalog_posts_upserted),
             "comments_upserted": 0,
         }
         if media_mirror_jobs_enqueued:

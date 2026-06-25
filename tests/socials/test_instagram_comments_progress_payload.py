@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from trr_backend.socials.pipelines.comments.instagram import (
     SocialWorkerUnavailableError,
     _build_comments_scrape_run_progress_payload,
+    _instagram_comments_audit_cursor_counts_by_shortcode,
     _load_instagram_comments_audit_cursor_rows,
     _normalize_instagram_comments_audit_retry_stop_reasons,
     _split_instagram_comments_audit_cursor_targets_into_active_run,
@@ -105,6 +106,192 @@ def test_comments_progress_payload_surfaces_network_spend_and_target_rows() -> N
     assert target_row["network_stopped"] is True
     assert target_row["has_top_level_cursor"] is True
     assert target_row["reply_resume_count"] == 1
+
+
+def test_comments_progress_payload_classifies_pagination_deadline_as_cursor_recovery() -> None:
+    now = datetime(2026, 6, 22, tzinfo=timezone.utc)
+    payload = _build_comments_scrape_run_progress_payload(
+        platform="instagram",
+        account_handle="bravotv",
+        rows=[
+            {
+                "run_id": "11111111-1111-1111-1111-111111111111",
+                "run_status": "failed",
+                "created_at": now,
+                "started_at": now,
+                "completed_at": now,
+                "run_config": {"target_source_ids_count": 1, "comments_shard_count": 1},
+                "job_id": "22222222-2222-2222-2222-222222222222",
+                "job_status": "failed",
+                "items_found": 1121,
+                "job_created_at": now,
+                "job_started_at": now,
+                "job_completed_at": now,
+                "last_error_code": "instagram_comments_incomplete_retryable",
+                "config": {
+                    "target_source_ids": ["DPU4Pw6FU7N"],
+                    "comments_shard_index": 1,
+                    "comments_shard_count": 1,
+                    "comments_shard_target_count": 1,
+                },
+                "metadata": {
+                    "retry_rebalance": {"remaining_target_source_ids": ["DPU4Pw6FU7N"]},
+                    "incomplete_fetch_reasons": {"DPU4Pw6FU7N": "pagination_deadline_exceeded"},
+                    "comment_capture": {
+                        "latest": {"stop_reason": "pagination_deadline_exceeded"},
+                        "samples": [
+                            {
+                                "shortcode": "DPU4Pw6FU7N",
+                                "stop_reason": "pagination_deadline_exceeded",
+                            }
+                        ],
+                    },
+                    "post_latency": {
+                        "samples": [
+                            {
+                                "shortcode": "DPU4Pw6FU7N",
+                                "reported_comment_count": 1851,
+                                "stored_total_comments": 1121,
+                                "observed_comment_count": 1121,
+                            }
+                        ]
+                    },
+                    "top_level_checkpoint_summary": {
+                        "items": [
+                            {
+                                "target_shortcode": "DPU4Pw6FU7N",
+                                "stop_reason": "pagination_deadline_exceeded",
+                                "pages_seen": 18,
+                            }
+                        ]
+                    },
+                },
+            }
+        ],
+    )
+
+    assert payload["recommended_next_action"] == "retry_cursor_deadline_targets"
+    assert payload["audit_cursor_recovery_target_count"] == 1
+    assert payload["retry_progress"]["audit_cursor_recovery_target_source_ids"] == ["DPU4Pw6FU7N"]
+    target_row = payload["target_progress_rows"][0]
+    assert target_row["cursor_recovery_available"] is True
+    assert target_row["retryable"] is True
+    assert target_row["missing_comment_gap"] == 730
+
+
+def test_comments_progress_payload_uses_database_counts_for_auth_blocked_target_rows() -> None:
+    now = datetime(2026, 6, 22, tzinfo=timezone.utc)
+    payload = _build_comments_scrape_run_progress_payload(
+        platform="instagram",
+        account_handle="bravotv",
+        target_count_rows={
+            "DNvplU4WKFt": {
+                "reported_comment_count": 171,
+                "saved_comment_count": 124,
+                "missing_comment_gap": 47,
+            }
+        },
+        rows=[
+            {
+                "run_id": "11111111-1111-1111-1111-111111111111",
+                "run_status": "completed",
+                "created_at": now,
+                "started_at": now,
+                "completed_at": now,
+                "run_config": {"target_source_ids_count": 1, "comments_shard_count": 1},
+                "job_id": "22222222-2222-2222-2222-222222222222",
+                "job_status": "completed",
+                "items_found": 73,
+                "job_created_at": now,
+                "job_started_at": now,
+                "job_completed_at": now,
+                "config": {
+                    "target_source_ids": ["DNvplU4WKFt"],
+                    "comments_shard_index": 1,
+                    "comments_shard_count": 1,
+                    "comments_shard_target_count": 1,
+                },
+                "metadata": {
+                    "retry_rebalance": {"remaining_target_source_ids": ["DNvplU4WKFt"]},
+                    "post_auth_failures": {
+                        "target_source_ids": ["DNvplU4WKFt"],
+                        "fetch_reasons": {"DNvplU4WKFt": "html_challenge_or_auth_required"},
+                    },
+                    "fetcher_runtime": {
+                        "comments_auth_validation": {
+                            "mode": "comments_endpoint",
+                            "status": "auth_blocked",
+                            "result": "auth_blocked",
+                            "reason": "html_challenge_or_auth_required",
+                            "retryable": False,
+                        },
+                    },
+                    "comment_completeness": {
+                        "complete_posts": 0,
+                        "incomplete_posts": 1,
+                        "completion_reasons": {"post_auth_failed_skipped": 1},
+                    },
+                    "post_latency": {
+                        "samples": [
+                            {
+                                "shortcode": "DNvplU4WKFt",
+                                "reported_comment_count": 171,
+                                "saved_comment_count": 0,
+                                "observed_comment_count": 0,
+                            }
+                        ]
+                    },
+                    "current_target_fetch": {
+                        "shortcode": "DNvplU4WKFt",
+                        "phase": "fetched",
+                        "auth_failed": True,
+                        "reported_comment_count": 171,
+                        "observed_comment_count": 0,
+                    },
+                },
+            }
+        ],
+    )
+
+    assert payload["operational_state"] == "blocked_auth"
+    target_row = payload["target_progress_rows"][0]
+    assert target_row["saved_comment_count"] == 124
+    assert target_row["saved_comment_count_source"] == "database"
+    assert target_row["reported_comment_count"] == 171
+    assert target_row["missing_comment_gap"] == 47
+    assert target_row["auth_failed"] is True
+
+
+def test_comments_progress_counts_use_rollup_not_live_comment_count(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def _fetch_all(query, params=None, **_kwargs):
+        calls.append({"query": query, "params": params})
+        return [
+            {
+                "shortcode": "DVMdEy8AbLL",
+                "post_id": "post-1",
+                "reported_comment_count": 6274,
+                "saved_comment_count": 1501,
+                "missing_comment_gap": 4773,
+            }
+        ]
+
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram.pg.fetch_all",
+        _fetch_all,
+    )
+
+    rows = _instagram_comments_audit_cursor_counts_by_shortcode(
+        shortcodes=["DVMdEy8AbLL"],
+        active_run_id="11111111-1111-1111-1111-111111111111",
+    )
+
+    query = str(calls[0]["query"])
+    assert "social.instagram_post_comment_rollups" in query
+    assert "social.instagram_comments c" not in query
+    assert rows["DVMdEy8AbLL"]["saved_comment_count"] == 1501
+    assert rows["DVMdEy8AbLL"]["missing_comment_gap"] == 4773
 
 
 def test_audit_cursor_retry_defaults_include_network_stops() -> None:
@@ -228,6 +415,8 @@ def test_audit_cursor_split_creates_standalone_target_job_without_source_job(mon
                 "account": "bravotv",
                 "source_scope": "network",
                 "mode": "profile",
+                "comments_load_strategy": "cursor_api",
+                "comments_session_scope": "cursor_api_worker",
                 "comments_shard_count": 3,
                 "required_execution_backend": "modal",
             },
@@ -264,6 +453,8 @@ def test_audit_cursor_split_creates_standalone_target_job_without_source_job(mon
     assert created_config["target_source_ids"] == ["DTgXh94kXyo"]
     assert created_config["comments_audit_cursor_retry"] is True
     assert created_config["comments_audit_cursor_retry_standalone"] is True
+    assert created_config["comments_load_strategy"] == "instagram_comments_endpoint_cursor"
+    assert created_config["comments_session_scope"] == "instagram_comments_endpoint_cursor_worker"
     assert created_config["comments_target_batch_size"] == 1
     assert created_config["max_comments_per_post"] == 0
 
@@ -289,6 +480,8 @@ def test_audit_cursor_split_force_rerun_replaces_existing_one_target_job(monkeyp
                     "account": "bravotv",
                     "source_scope": "network",
                     "target_source_ids": ["DTgXh94kXyo"],
+                    "comments_load_strategy": "cursor_api",
+                    "comments_session_scope": "cursor_api_worker",
                     "comments_audit_cursor_retry": True,
                 },
                 "metadata": {
@@ -338,4 +531,6 @@ def test_audit_cursor_split_force_rerun_replaces_existing_one_target_job(monkeyp
     assert payload["force_rerun_existing"] is True
     assert created_jobs[0]["priority"] == 104
     assert created_jobs[0]["config"]["comments_audit_cursor_retry_force_rerun"] is True
+    assert created_jobs[0]["config"]["comments_load_strategy"] == "instagram_comments_endpoint_cursor"
+    assert created_jobs[0]["config"]["comments_session_scope"] == "instagram_comments_endpoint_cursor_worker"
     assert any(call["params"] and call["params"][-2] is True for call in fetch_one_calls)

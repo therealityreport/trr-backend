@@ -73,9 +73,23 @@ begin
   elsif tg_op = 'UPDATE' then
     perform social.refresh_instagram_post_comment_rollup(changed.post_id)
     from (
-      select post_id from new_rows where post_id is not null
+      select n.post_id
+      from new_rows n
+      join old_rows o using (id)
+      where n.post_id is not null
+        and (
+          n.post_id is distinct from o.post_id
+          or coalesce(n.is_missing, false) is distinct from coalesce(o.is_missing, false)
+        )
       union
-      select post_id from old_rows where post_id is not null
+      select o.post_id
+      from old_rows o
+      join new_rows n using (id)
+      where o.post_id is not null
+        and (
+          n.post_id is distinct from o.post_id
+          or coalesce(n.is_missing, false) is distinct from coalesce(o.is_missing, false)
+        )
     ) changed;
   elsif tg_op = 'DELETE' then
     perform social.refresh_instagram_post_comment_rollup(changed.post_id)

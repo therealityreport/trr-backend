@@ -143,6 +143,24 @@ def retry_backoff_seconds(attempt_count: int) -> int:
     return int(legacy._retry_backoff_seconds(attempt_count))
 
 
+_VALID_CATALOG_SOURCE_SCOPES = ("network", "creator", "community", "news")
+
+
+def _normalize_run_source_scope(value: str | None, *, default: str = "network") -> str:
+    """Validate/normalize a scrape-run source_scope before it is persisted.
+
+    Mirrors api.normalize_source_scope_param and launch._normalize_catalog_source_scope so
+    no lifecycle caller (e.g. a deferred comments follow-up) can insert an unvalidated scope
+    such as a raw "bravo" that would split rows from the canonical "network" value.
+    """
+    normalized = str(value or default).strip().lower() or default
+    if normalized == "bravo":
+        return "network"
+    if normalized in _VALID_CATALOG_SOURCE_SCOPES:
+        return normalized
+    raise ValueError(f"Unsupported source scope: {value!r}")
+
+
 def _create_run(
     context: legacy.SeasonContext | None,
     *,
@@ -152,6 +170,7 @@ def _create_run(
     status: str,
     conn: Any | None = None,
 ) -> str:
+    source_scope = _normalize_run_source_scope(source_scope)
     status = _normalize_scrape_run_status(status)
     initial_summary = _build_run_summary_payload(
         total_jobs=0,
@@ -300,16 +319,16 @@ def _maybe_start_deferred_comments_followup(
     run_config: dict[str, Any],
     summary: dict[str, Any],
     conn: Any | None = None,
-) -> None:
-    if str(run_status or "").strip().lower() != "completed":
-        return
+) -> dict[str, Any] | None:
+    if str(run_status or "").strip().lower() not in {"completed", "queued", "running"}:
+        return None
     if not legacy._shared_account_catalog_scrape_complete(run_config=run_config, summary=summary, conn=conn):
-        return
+        return None
     followup = legacy._metadata_dict(run_config.get("deferred_comments_followup"))
     if str(followup.get("state") or "").strip().lower() != "pending":
-        return
+        return None
     if str(followup.get("platform") or "").strip().lower() != "instagram":
-        return
+        return None
 
     attached_followups = legacy._normalize_attached_followups(run_config.get("attached_followups"))
     now_iso = legacy._iso(legacy._now_utc())
@@ -328,6 +347,10 @@ def _maybe_start_deferred_comments_followup(
                 initiated_by="catalog_completion_followup",
                 allow_local_dev_inline_bypass=bool(followup.get("allow_local_dev_inline_bypass")),
                 comments_enable_media_followups=bool(followup.get("comments_enable_media_followups")),
+                # bug-3: honor an operator-requested comments parallelism on the
+                # deferred follow-up instead of always defaulting. None preserves the
+                # launcher's default. Signature verified to accept comments_worker_count.
+                comments_worker_count=legacy._normalize_non_negative_int(followup.get("comments_worker_count")) or None,
                 launch_group_id=str(followup.get("launch_group_id") or "").strip() or None,
             )
         except legacy.SocialIngestConflictError as exc:
@@ -338,34 +361,32 @@ def _maybe_start_deferred_comments_followup(
                 "status": str(exc.detail.get("status") or "running").strip().lower() or "running",
             }
             comments_source = "reused_run"
-        _merge_run_config(
-            run_id,
-            config_updates={
-                "attached_followups": {
-                    **attached_followups,
-                    "comments": legacy._build_attached_comments_followup(
-                        run_id=str((comments_result or {}).get("run_id") or "").strip() or None,
-                        status=str((comments_result or {}).get("status") or "").strip().lower() or "pending",
-                        source=comments_source,
-                    ),
-                },
-                "deferred_comments_followup": {
-                    **followup,
-                    "state": "started",
-                    "started_at": now_iso,
-                    "comments_run_id": str((comments_result or {}).get("run_id") or "").strip() or None,
-                    "runtime_version": legacy._metadata_dict((comments_result or {}).get("runtime_version"))
-                    or legacy._metadata_dict(followup.get("runtime_version"))
-                    or dict(legacy._resolve_runtime_version_stamp()),
-                    "created_by_runtime_version": legacy._metadata_dict(
-                        (comments_result or {}).get("created_by_runtime_version")
-                    )
-                    or legacy._metadata_dict(followup.get("created_by_runtime_version"))
-                    or dict(legacy._resolve_runtime_version_stamp()),
-                },
+        config_updates = {
+            "attached_followups": {
+                **attached_followups,
+                "comments": legacy._build_attached_comments_followup(
+                    run_id=str((comments_result or {}).get("run_id") or "").strip() or None,
+                    status=str((comments_result or {}).get("status") or "").strip().lower() or "pending",
+                    source=comments_source,
+                ),
             },
-            conn=conn,
-        )
+            "deferred_comments_followup": {
+                **followup,
+                "state": "started",
+                "started_at": now_iso,
+                "comments_run_id": str((comments_result or {}).get("run_id") or "").strip() or None,
+                "runtime_version": legacy._metadata_dict((comments_result or {}).get("runtime_version"))
+                or legacy._metadata_dict(followup.get("runtime_version"))
+                or dict(legacy._resolve_runtime_version_stamp()),
+                "created_by_runtime_version": legacy._metadata_dict(
+                    (comments_result or {}).get("created_by_runtime_version")
+                )
+                or legacy._metadata_dict(followup.get("created_by_runtime_version"))
+                or dict(legacy._resolve_runtime_version_stamp()),
+            },
+        }
+        _merge_run_config(run_id, config_updates=config_updates, conn=conn)
+        return config_updates
     except Exception as exc:  # noqa: BLE001
         error_message = str(exc)
         retryable_reason = _deferred_comments_followup_retryable_reason(exc)
@@ -379,37 +400,253 @@ def _maybe_start_deferred_comments_followup(
                 "retryable_reason": retryable_reason,
             }
         )
-        _merge_run_config(
-            run_id,
-            config_updates={
-                "attached_followups": {
-                    **attached_followups,
-                    "comments": legacy._build_attached_comments_followup(
-                        run_id=str(followup.get("comments_run_id") or "").strip() or None,
-                        status="failed",
-                        source="deferred_after_catalog",
-                        state="failed",
-                        error_message=error_message,
-                        failed_at=now_iso,
-                        retryable=retryable,
-                    ),
-                },
-                "deferred_comments_followup": {
-                    **followup,
-                    "state": "failed",
-                    "failed_at": now_iso,
-                    "error_message": error_message,
-                    "retryable": retryable,
-                    "retryable_reason": retryable_reason,
-                    "failure_history": prior_failures[-5:],
-                },
+        config_updates = {
+            "attached_followups": {
+                **attached_followups,
+                "comments": legacy._build_attached_comments_followup(
+                    run_id=str(followup.get("comments_run_id") or "").strip() or None,
+                    status="failed",
+                    source="deferred_after_catalog",
+                    state="failed",
+                    error_message=error_message,
+                    failed_at=now_iso,
+                    retryable=retryable,
+                ),
             },
-            conn=conn,
-        )
+            "deferred_comments_followup": {
+                **followup,
+                "state": "failed",
+                "failed_at": now_iso,
+                "error_message": error_message,
+                "retryable": retryable,
+                "retryable_reason": retryable_reason,
+                "failure_history": prior_failures[-5:],
+            },
+        }
+        _merge_run_config(run_id, config_updates=config_updates, conn=conn)
         legacy.logger.exception(
             "Failed to auto-start deferred Instagram comments followup after run finalization: run=%s",
             run_id,
         )
+        return config_updates
+
+
+# bug-1: self-healing retry of deferred-comments-followup launches that failed
+# transiently (e.g. DB pool saturation). A COMPLETED catalog run is never
+# re-finalized, so a failed followup (state="failed", retryable=true) would
+# otherwise never retry — silently skipping the comments backfill. This is a
+# dedicated sweep (NOT an in-finalizer retry, which would be dead code).
+# Disabled by default; enable via the env flag once the diagnostics (dg-3/dg-4)
+# confirm it acts only on genuinely-stuck runs.
+_DEFERRED_FOLLOWUP_RETRY_ENABLED_ENV = "SOCIAL_DEFERRED_COMMENTS_FOLLOWUP_RETRY_ENABLED"
+_DEFERRED_FOLLOWUP_RETRY_MAX_ATTEMPTS = 5
+_DEFERRED_FOLLOWUP_RETRY_BACKOFF_SECONDS = 600
+
+
+def _deferred_comments_followup_retry_enabled() -> bool:
+    return bool(legacy._env_truthy(_DEFERRED_FOLLOWUP_RETRY_ENABLED_ENV, default=False))
+
+
+def _retry_deferred_comments_followup_locked(*, run_id: str) -> str:
+    """Re-pend and re-attempt one failed followup under the run-finalize lock.
+
+    Returns "retried", "exhausted", or "skipped". Uses the SAME advisory lock key
+    as _finalize_run_status so a concurrent finalize cannot clobber the jsonb
+    config write, and re-checks state under the lock to avoid double-firing.
+    """
+
+    lock_key = int(legacy.hashlib.md5(run_id.encode()).hexdigest()[:15], 16) % (2**31)
+    try:
+        with legacy.pg.advisory_session_lock(
+            lock_key,
+            label="run-finalize-lock",
+            pool_name=SOCIAL_CONTROL_POOL_NAME,
+        ) as lock_conn:
+            run_row = legacy.pg.fetch_one(
+                "select id::text as run_id, status, config, summary from social.scrape_runs where id = %s",
+                [run_id],
+                pool_name=SOCIAL_CONTROL_POOL_NAME,
+            )
+            if not run_row:
+                return "skipped"
+            run_status = str(run_row.get("status") or "").strip().lower()
+            run_config = legacy._metadata_dict(run_row.get("config"))
+            summary = legacy._metadata_dict(run_row.get("summary"))
+            followup = legacy._metadata_dict(run_config.get("deferred_comments_followup"))
+            # Re-check under the lock — another worker may have already retried it.
+            if str(followup.get("state") or "").strip().lower() != "failed":
+                return "skipped"
+            attempts = legacy._normalize_non_negative_int(followup.get("retry_attempts")) or 0
+            if attempts >= _DEFERRED_FOLLOWUP_RETRY_MAX_ATTEMPTS:
+                _merge_run_config(
+                    run_id,
+                    config_updates={"deferred_comments_followup": {**followup, "state": "failed_exhausted"}},
+                    conn=lock_conn,
+                )
+                return "exhausted"
+            repended = {
+                **followup,
+                "state": "pending",
+                "retry_attempts": attempts + 1,
+                "last_retry_at": legacy._iso(legacy._now_utc()),
+                # Clear stale failure fields so the new attempt starts clean. Shallow
+                # merge keeps failure_history intact for the audit trail.
+                "error_message": None,
+                "failed_at": None,
+                "retryable_reason": None,
+            }
+            _merge_run_config(
+                run_id,
+                config_updates={"deferred_comments_followup": repended},
+                conn=lock_conn,
+            )
+            run_config["deferred_comments_followup"] = repended
+            result = _maybe_start_deferred_comments_followup(
+                run_id=run_id,
+                run_status=run_status,
+                run_config=run_config,
+                summary=summary,
+                conn=lock_conn,
+            )
+            return "retried" if result is not None else "skipped"
+    except legacy.pg.AdvisoryLockUnavailable:
+        return "skipped"
+    except (legacy.pg.DatabaseServiceUnavailableError, InterfaceError, OperationalError, PoolError):
+        return "skipped"
+
+
+def recover_failed_deferred_comments_followups(*, limit: int = 25) -> dict[str, Any]:
+    """bug-1 sweep: re-attempt deferred-comments-followup launches that failed
+    with a retryable error and have not exhausted their retry budget.
+
+    Disabled by default behind _DEFERRED_FOLLOWUP_RETRY_ENABLED_ENV. Enforces a
+    mandatory backoff (via failed_at) and a hard retry_attempts cap so it cannot
+    hammer the database under sustained pool saturation. ALREADY_ACTIVE reuse in
+    the launcher makes a double-fire reuse the existing comments run rather than
+    duplicate it.
+    """
+
+    if not _deferred_comments_followup_retry_enabled():
+        return {"enabled": False, "scanned": 0, "retried": 0, "exhausted": 0, "skipped": 0}
+
+    try:
+        candidates = (
+            legacy.pg.fetch_all(
+                """
+                select id::text as run_id, config
+                from social.scrape_runs
+                where status = 'completed'
+                  and config->'deferred_comments_followup'->>'state' = 'failed'
+                  and coalesce((config->'deferred_comments_followup'->>'retryable')::boolean, false) = true
+                order by completed_at desc nulls last
+                limit %s
+                """,
+                [max(1, int(limit))],
+                pool_name=SOCIAL_CONTROL_POOL_NAME,
+            )
+            or []
+        )
+    except (legacy.pg.DatabaseServiceUnavailableError, InterfaceError, OperationalError, PoolError) as exc:
+        legacy.logger.warning("[deferred_followup_retry] candidate scan deferred: %s", exc)
+        return {"enabled": True, "scanned": 0, "retried": 0, "exhausted": 0, "skipped": 0, "deferred": True}
+
+    retried = 0
+    exhausted = 0
+    skipped = 0
+    now = legacy._now_utc()
+    for row in candidates:
+        run_id = str(row.get("run_id") or "").strip()
+        if not run_id:
+            continue
+        followup = legacy._metadata_dict(legacy._metadata_dict(row.get("config")).get("deferred_comments_followup"))
+        # Mandatory backoff: skip runs whose last failure is too recent so the
+        # sweep cannot worsen pool pressure by re-launching every tick.
+        last_failed = legacy._coerce_dt(followup.get("failed_at"))
+        if last_failed is not None and (now - last_failed).total_seconds() < _DEFERRED_FOLLOWUP_RETRY_BACKOFF_SECONDS:
+            skipped += 1
+            continue
+        outcome = _retry_deferred_comments_followup_locked(run_id=run_id)
+        if outcome == "retried":
+            retried += 1
+        elif outcome == "exhausted":
+            exhausted += 1
+        else:
+            skipped += 1
+    return {
+        "enabled": True,
+        "scanned": len(candidates),
+        "retried": retried,
+        "exhausted": exhausted,
+        "skipped": skipped,
+    }
+
+
+def _clear_run_finalize_pending_marker(run_id: str) -> None:
+    """B3: clear the finalize_pending marker once a stuck run has been re-finalized."""
+    normalized = str(run_id or "").strip()
+    if not normalized:
+        return
+    try:
+        _merge_run_config(
+            normalized,
+            config_updates={
+                "finalize_pending": False,
+                "finalize_cleared_at": legacy._iso(legacy._now_utc()),
+            },
+        )
+    except Exception:  # noqa: BLE001
+        legacy.logger.debug("[unfinalized_terminal_runs] could not clear finalize_pending run=%s", normalized[:8])
+
+
+def recover_unfinalized_terminal_runs(*, limit: int = 25) -> dict[str, Any]:
+    """B3 sweep: re-finalize runs whose jobs are all terminal but whose run status is
+    still active. Closes the gap where _finish_job's finalize raised or deferred (e.g.
+    under DB pool saturation) and left the parent run non-terminal indefinitely.
+
+    Structural detector — does NOT depend on the finalize_pending marker (which may be
+    absent if the marker write itself failed): run status active, at least one job, and
+    no job still in an active state. _finalize_run_status is idempotent, so re-running it
+    on an already-correct run is harmless.
+    """
+    try:
+        candidates = (
+            legacy.pg.fetch_all(
+                """
+                select r.id::text as run_id, r.status
+                from social.scrape_runs r
+                where r.status in ('queued', 'pending', 'retrying', 'running')
+                  and exists (select 1 from social.scrape_jobs j where j.run_id = r.id)
+                  and not exists (
+                    select 1
+                    from social.scrape_jobs j
+                    where j.run_id = r.id
+                      and j.status in ('queued', 'pending', 'retrying', 'running', 'cancelling')
+                  )
+                order by r.started_at desc nulls last
+                limit %s
+                """,
+                [max(1, int(limit))],
+                pool_name=SOCIAL_CONTROL_POOL_NAME,
+            )
+            or []
+        )
+    except (legacy.pg.DatabaseServiceUnavailableError, InterfaceError, OperationalError, PoolError) as exc:
+        legacy.logger.warning("[unfinalized_terminal_runs] candidate scan deferred: %s", exc)
+        return {"scanned": 0, "finalized": 0, "deferred": True}
+
+    finalized = 0
+    for row in candidates:
+        run_id = str(row.get("run_id") or "").strip()
+        if not run_id:
+            continue
+        try:
+            _finalize_run_status(run_id, force_recompute=True)
+        except Exception:  # noqa: BLE001
+            legacy.logger.exception("[unfinalized_terminal_runs] re-finalize failed run=%s", run_id)
+            continue
+        finalized += 1
+        _clear_run_finalize_pending_marker(run_id)
+    return {"scanned": len(candidates), "finalized": finalized}
 
 
 def _status_is_active(status: str | None) -> bool:
@@ -448,11 +685,17 @@ _PROTECTED_RUN_SUMMARY_FIELDS = (
     "cancelled_by",
     "cancel_requested_at",
     "cancel_reason",
+    "comments_followup",
+    "comments_deferred_until_catalog_complete",
+    "deferred_comments_followup",
+    "attached_followups",
     "guarded_restart",
     "guarded_restart_from_run_id",
     "guarded_restart_to_run_id",
     "public_blocked_pause",
     "dispatch_control",
+    "stalled_frontier_recovery",
+    "stalled_frontier_recoveries",
 )
 
 
@@ -501,6 +744,62 @@ def _build_run_summary_payload(
     }
 
 
+def _comments_followup_summary_from_config(config: Any) -> dict[str, Any] | None:
+    run_config = legacy._metadata_dict(config)
+    attached_followups = legacy._metadata_dict(run_config.get("attached_followups"))
+    attached_comments = legacy._metadata_dict(attached_followups.get("comments"))
+    deferred = legacy._metadata_dict(run_config.get("deferred_comments_followup"))
+    if attached_comments:
+        payload = dict(attached_comments)
+        if deferred:
+            deferred_state = str(deferred.get("state") or "").strip().lower() or None
+            if deferred_state == "pending":
+                payload.setdefault("deferred_until", "catalog_complete")
+            else:
+                payload.pop("deferred_until", None)
+            payload.setdefault("deferred_state", deferred_state)
+            payload.setdefault("account_handle", deferred.get("account_handle"))
+            payload.setdefault("platform", deferred.get("platform"))
+        return payload
+    if not deferred:
+        return None
+    state = str(deferred.get("state") or "pending").strip().lower() or "pending"
+    return {
+        "state": state,
+        "status": "deferred" if state == "pending" else state,
+        "source": "deferred_after_catalog",
+        "deferred_until": "catalog_complete",
+        "platform": str(deferred.get("platform") or "").strip().lower() or None,
+        "account_handle": str(deferred.get("account_handle") or "").strip().lower().lstrip("@") or None,
+        "source_scope": str(deferred.get("source_scope") or "").strip().lower() or None,
+        "refresh_policy": str(deferred.get("refresh_policy") or "").strip() or None,
+        "target_filter": str(deferred.get("target_filter") or "").strip() or None,
+        "comments_run_id": str(deferred.get("comments_run_id") or "").strip() or None,
+        "comments_enable_media_followups": bool(deferred.get("comments_enable_media_followups")),
+        "pending_reason": "waiting_for_catalog_completion" if state == "pending" else None,
+    }
+
+
+def _apply_run_config_summary_fields(summary: dict[str, Any], config: Any) -> dict[str, Any]:
+    run_config = legacy._metadata_dict(config)
+    comments_followup = _comments_followup_summary_from_config(run_config)
+    if comments_followup:
+        deferred = legacy._metadata_dict(run_config.get("deferred_comments_followup"))
+        deferred_state = str(deferred.get("state") or comments_followup.get("deferred_state") or "").strip().lower()
+        summary["comments_followup"] = comments_followup
+        summary["comments_deferred_until_catalog_complete"] = (
+            str(comments_followup.get("deferred_until") or "").strip().lower() == "catalog_complete"
+            and deferred_state == "pending"
+        )
+    if run_config.get("deferred_comments_followup") is not None:
+        summary["deferred_comments_followup"] = legacy._metadata_dict(run_config.get("deferred_comments_followup"))
+    if run_config.get("attached_followups") is not None:
+        summary["attached_followups"] = legacy._metadata_dict(run_config.get("attached_followups"))
+    if run_config.get("dispatch_control") is not None:
+        summary["dispatch_control"] = legacy._metadata_dict(run_config.get("dispatch_control"))
+    return summary
+
+
 def _persist_run_counters_and_summary(
     *,
     conn: Any,
@@ -528,11 +827,12 @@ def _persist_run_counters_and_summary(
         existing_row = (
             legacy.pg.fetch_one_with_cursor(
                 cur,
-                "select summary from social.scrape_runs where id = %s",
+                "select summary, config from social.scrape_runs where id = %s",
                 [run_id],
             )
             or {}
         )
+        _apply_run_config_summary_fields(summary, existing_row.get("config"))
         _preserve_protected_run_summary_fields(summary, existing_row.get("summary"))
         legacy.pg.fetch_one_with_cursor(
             cur,
@@ -585,6 +885,26 @@ def _increment_run_counters_on_job_create(
     status: str,
     conn: Any | None = None,
 ) -> None:
+    _increment_run_counters_on_job_create_batch(
+        run_id=run_id,
+        stage=stage,
+        status=status,
+        count=1,
+        conn=conn,
+    )
+
+
+def _increment_run_counters_on_job_create_batch(
+    *,
+    run_id: str,
+    stage: str,
+    status: str,
+    count: int,
+    conn: Any | None = None,
+) -> None:
+    count = legacy._normalize_non_negative_int(count)
+    if count <= 0:
+        return
     if not run_id or not legacy._run_counter_columns_ready():
         return
     stage_key = str(stage or "unknown").strip() or "unknown"
@@ -615,6 +935,7 @@ def _increment_run_counters_on_job_create(
                 row=row,
                 stage_key=stage_key,
                 status=status,
+                count=count,
             )
         return
     with legacy.pg.db_connection() as write_conn:
@@ -644,6 +965,7 @@ def _increment_run_counters_on_job_create(
                 row=row,
                 stage_key=stage_key,
                 status=status,
+                count=count,
             )
 
 
@@ -654,18 +976,22 @@ def _persist_incremented_run_create_counters(
     row: dict[str, Any],
     stage_key: str,
     status: str,
+    count: int = 1,
 ) -> None:
     if not row:
         return
-    total_jobs = legacy._normalize_non_negative_int(row.get("total_jobs")) + 1
+    count = max(1, legacy._normalize_non_negative_int(count))
+    total_jobs = legacy._normalize_non_negative_int(row.get("total_jobs")) + count
     completed_jobs = legacy._normalize_non_negative_int(row.get("completed_jobs"))
     failed_jobs = legacy._normalize_non_negative_int(row.get("failed_jobs"))
-    active_jobs = legacy._normalize_non_negative_int(row.get("active_jobs")) + (1 if _status_is_active(status) else 0)
+    active_jobs = legacy._normalize_non_negative_int(row.get("active_jobs")) + (
+        count if _status_is_active(status) else 0
+    )
     items_found_total = legacy._normalize_non_negative_int(row.get("items_found_total"))
     stage_counts = _normalize_stage_counts(row.get("stage_counts"))
-    stage_counts = _increment_stage_counter(stage_counts, stage=stage_key, key="total", delta=1)
+    stage_counts = _increment_stage_counter(stage_counts, stage=stage_key, key="total", delta=count)
     if _status_is_active(status):
-        stage_counts = _increment_stage_counter(stage_counts, stage=stage_key, key="active", delta=1)
+        stage_counts = _increment_stage_counter(stage_counts, stage=stage_key, key="active", delta=count)
     _persist_run_counters_and_summary(
         conn=conn,
         run_id=run_id,
@@ -995,7 +1321,7 @@ def _finalize_run_status(run_id: str, *, force_recompute: bool = False) -> dict[
             label="run-finalize-lock",
             pool_name=SOCIAL_CONTROL_POOL_NAME,
         ) as lock_conn:
-            return _finalize_run_status_locked(run_id, lock_conn, force_recompute=force_recompute)
+            locked_result = _finalize_run_status_locked(run_id, lock_conn, force_recompute=force_recompute)
     except legacy.pg.AdvisoryLockUnavailable:
         legacy.logger.debug("[finalize_run_status] skipped — another worker is finalizing run=%s", run_id[:8])
         current = (
@@ -1019,6 +1345,10 @@ def _finalize_run_status(run_id: str, *, force_recompute: bool = False) -> dict[
             exc,
         )
         return {"status": "finalize_deferred", "finalize_deferred": True, "error": str(exc)}
+    # B1: advisory lock released above — run deferred-comments followup + sync-session
+    # eval here, with fresh connections, so we never hold the run-finalize lock across
+    # nested launches that acquire their own advisory locks.
+    return _run_post_finalize_followups(run_id, locked_result)
 
 
 def finalize_run_status(run_id: str, *, force_recompute: bool = False) -> dict[str, Any]:
@@ -1043,7 +1373,7 @@ def _finalize_run_status_locked(
         or {}
     )
     if str(current.get("status")) == "cancelled":
-        return summary
+        return {"summary": summary, "skip_followups": True}
     current_config = legacy._metadata_dict(current.get("config"))
     stage_counts = _normalize_stage_counts(legacy._metadata_dict(summary).get("stage_counts"))
     classify_stage = legacy._metadata_dict(stage_counts.get(legacy.POST_CLASSIFY_STAGE))
@@ -1091,19 +1421,52 @@ def _finalize_run_status_locked(
     else:
         next_status = "completed"
     _set_run_status(run_id, next_status, conn=lock_conn)
-    _maybe_start_deferred_comments_followup(
+    # B1: do NOT run the deferred-comments followup or sync-session evaluation while
+    # holding the run-finalize advisory lock + lock_conn. Both launch nested work that
+    # acquires its own advisory locks / pooled connections; running them under this lock
+    # is the stall class that pinned runs in "finalizing". The caller runs them via
+    # _run_post_finalize_followups after releasing the lock, with fresh connections.
+    return {
+        "summary": summary,
+        "next_status": next_status,
+        "run_config": current_config,
+    }
+
+
+def _run_post_finalize_followups(
+    run_id: str,
+    locked_result: dict[str, Any],
+) -> dict[str, Any]:
+    """Run the deferred-comments followup and sync-session evaluation AFTER the
+    run-finalize advisory lock has been released (B1).
+
+    Uses fresh connections (conn=None) so a nested launch that takes its own advisory
+    lock can never deadlock against the run-finalize lock or starve the social_control
+    pool. Preserves the original ordering: comments followup first, then sync eval.
+    """
+    summary = locked_result.get("summary") or {}
+    if locked_result.get("skip_followups"):
+        return summary
+    next_status = str(locked_result.get("next_status") or "")
+    current_config = legacy._metadata_dict(locked_result.get("run_config"))
+    followup_updates = _maybe_start_deferred_comments_followup(
         run_id=run_id,
         run_status=next_status,
         run_config=current_config,
         summary=summary,
-        conn=lock_conn,
+        conn=None,
     )
-    if _call_with_optional_conn(legacy._column_exists, "social", "scrape_runs", "sync_session_id", conn=lock_conn):
+    if followup_updates:
+        summary = _update_run_summary(run_id, force_recompute=True, conn=None)
+        refreshed_config = dict(current_config)
+        refreshed_config.update(followup_updates)
+        _apply_run_config_summary_fields(summary, refreshed_config)
+    if _call_with_optional_conn(legacy._column_exists, "social", "scrape_runs", "sync_session_id", conn=None):
         run_row = (
             legacy.pg.fetch_one(
                 "select sync_session_id::text as sync_session_id from social.scrape_runs where id = %s::uuid",
                 [run_id],
-                conn=lock_conn,
+                pool_name=SOCIAL_CONTROL_POOL_NAME,
             )
             or {}
         )

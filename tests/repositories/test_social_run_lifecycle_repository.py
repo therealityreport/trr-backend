@@ -427,11 +427,14 @@ def test_update_run_summary_force_recompute_preserves_audit_fields(monkeypatch: 
             },
         }
 
-    # _persist_run_counters_and_summary reads existing summary + writes via cursor.
+    # _persist_run_counters_and_summary reads existing summary (+ config) and writes
+    # via cursor. Match the read by intent (a select from social.scrape_runs), not an
+    # exact column list, so adding columns like ``config`` to the query does not stop
+    # the mock from returning the row — which is what production Postgres would do.
     def _fake_fetch_one_with_cursor(cur: object, sql: str, params: list[object]):  # noqa: ARG001
         normalized = " ".join(sql.lower().split())
-        if "select summary from social.scrape_runs" in normalized:
-            return {"summary": existing_summary}
+        if normalized.startswith("select") and "summary" in normalized and "from social.scrape_runs" in normalized:
+            return {"summary": existing_summary, "config": None}
         if "update social.scrape_runs" in normalized:
             captured["written_summary"] = social_repo.json.loads(params[-2])
             return {"id": str(params[-1])}
@@ -515,6 +518,146 @@ def test_finalize_run_status_reuses_lock_connection_for_all_reads(
 
     assert seen_fetch_conns == [lock_conn]
     assert seen_lock_pools == ["social_control"]
+
+
+def test_recover_failed_deferred_comments_followups_disabled_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # bug-1: the sweep is gated off unless the env flag is set, and must not touch
+    # the DB when disabled.
+    monkeypatch.delenv("SOCIAL_DEFERRED_COMMENTS_FOLLOWUP_RETRY_ENABLED", raising=False)
+
+    def _boom(*_a, **_k):
+        raise AssertionError("fetch_all must not run when the sweep is disabled")
+
+    monkeypatch.setattr(run_lifecycle.legacy.pg, "fetch_all", _boom)
+    result = run_lifecycle.recover_failed_deferred_comments_followups()
+    assert result == {"enabled": False, "scanned": 0, "retried": 0, "exhausted": 0, "skipped": 0}
+
+
+def test_recover_failed_deferred_comments_followups_repends_and_relaunches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # bug-1: a failed+retryable followup past its backoff is re-pended (stale error
+    # cleared, retry_attempts bumped) under the run-finalize lock, then relaunched.
+    monkeypatch.setenv("SOCIAL_DEFERRED_COMMENTS_FOLLOWUP_RETRY_ENABLED", "1")
+    lock_conn = object()
+    candidate_config = {
+        "deferred_comments_followup": {
+            "state": "failed",
+            "retryable": True,
+            "failed_at": "2020-01-01T00:00:00+00:00",  # well past the backoff window
+            "platform": "instagram",
+            "error_message": "connection pool exhausted",
+            "retry_attempts": 0,
+        }
+    }
+    monkeypatch.setattr(
+        run_lifecycle.legacy.pg,
+        "fetch_all",
+        lambda *_a, **_k: [{"run_id": "run-x", "config": candidate_config}],
+    )
+
+    @contextmanager
+    def fake_advisory_lock(lock_key, *, label, pool_name="default"):
+        del lock_key, label, pool_name
+        yield lock_conn
+
+    monkeypatch.setattr(run_lifecycle.legacy.pg, "advisory_session_lock", fake_advisory_lock)
+    monkeypatch.setattr(
+        run_lifecycle.legacy.pg,
+        "fetch_one",
+        lambda *_a, **_k: {"run_id": "run-x", "status": "completed", "config": candidate_config, "summary": {}},
+    )
+    monkeypatch.setattr(run_lifecycle, "_merge_run_config", lambda *_a, **_k: None)
+
+    launched: list[dict] = []
+
+    def _fake_launch(*, run_id, run_status, run_config, summary, conn=None):
+        del run_id, run_status, summary, conn
+        launched.append(dict(run_config.get("deferred_comments_followup") or {}))
+        return {"started": True}
+
+    monkeypatch.setattr(run_lifecycle, "_maybe_start_deferred_comments_followup", _fake_launch)
+
+    result = run_lifecycle.recover_failed_deferred_comments_followups()
+
+    assert result["enabled"] is True
+    assert result["retried"] == 1
+    assert launched and launched[0]["state"] == "pending"
+    assert launched[0]["retry_attempts"] == 1
+    assert launched[0]["error_message"] is None
+    assert launched[0]["failed_at"] is None
+
+
+def test_recover_failed_deferred_comments_followups_respects_backoff_and_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # bug-1: a too-recent failure is skipped (backoff); a followup at the attempt
+    # cap is marked failed_exhausted and never relaunched.
+    monkeypatch.setenv("SOCIAL_DEFERRED_COMMENTS_FOLLOWUP_RETRY_ENABLED", "1")
+    recent_iso = run_lifecycle.legacy._iso(run_lifecycle.legacy._now_utc())
+    backoff_candidate = {
+        "deferred_comments_followup": {"state": "failed", "retryable": True, "failed_at": recent_iso}
+    }
+    monkeypatch.setattr(
+        run_lifecycle.legacy.pg,
+        "fetch_all",
+        lambda *_a, **_k: [{"run_id": "run-backoff", "config": backoff_candidate}],
+    )
+
+    def _no_lock(*_a, **_k):
+        raise AssertionError("locked retry must not run for a backed-off candidate")
+
+    monkeypatch.setattr(run_lifecycle.legacy.pg, "advisory_session_lock", _no_lock)
+    backoff_result = run_lifecycle.recover_failed_deferred_comments_followups()
+    assert backoff_result["retried"] == 0
+    assert backoff_result["skipped"] == 1
+
+    # Cap path: failure is past backoff but attempts are at the cap.
+    lock_conn = object()
+    capped_config = {
+        "deferred_comments_followup": {
+            "state": "failed",
+            "retryable": True,
+            "failed_at": "2020-01-01T00:00:00+00:00",
+            "retry_attempts": run_lifecycle._DEFERRED_FOLLOWUP_RETRY_MAX_ATTEMPTS,
+        }
+    }
+    monkeypatch.setattr(
+        run_lifecycle.legacy.pg,
+        "fetch_all",
+        lambda *_a, **_k: [{"run_id": "run-capped", "config": capped_config}],
+    )
+
+    @contextmanager
+    def fake_advisory_lock(lock_key, *, label, pool_name="default"):
+        del lock_key, label, pool_name
+        yield lock_conn
+
+    monkeypatch.setattr(run_lifecycle.legacy.pg, "advisory_session_lock", fake_advisory_lock)
+    monkeypatch.setattr(
+        run_lifecycle.legacy.pg,
+        "fetch_one",
+        lambda *_a, **_k: {"run_id": "run-capped", "status": "completed", "config": capped_config, "summary": {}},
+    )
+    exhausted_writes: list[dict] = []
+    monkeypatch.setattr(
+        run_lifecycle,
+        "_merge_run_config",
+        lambda run_id, *, config_updates, conn=None: exhausted_writes.append(config_updates),
+    )
+
+    def _no_relaunch(**_k):
+        raise AssertionError("must not relaunch a capped followup")
+
+    monkeypatch.setattr(run_lifecycle, "_maybe_start_deferred_comments_followup", _no_relaunch)
+
+    cap_result = run_lifecycle.recover_failed_deferred_comments_followups()
+    assert cap_result["exhausted"] == 1
+    assert cap_result["retried"] == 0
+    assert exhausted_writes
+    assert exhausted_writes[0]["deferred_comments_followup"]["state"] == "failed_exhausted"
 
 
 def test_finalize_run_status_force_recomputes_before_failed_terminal_status(
@@ -610,3 +753,146 @@ def test_finalize_run_status_defers_connection_failures(monkeypatch: pytest.Monk
     assert payload["status"] == "finalize_deferred"
     assert payload["finalize_deferred"] is True
     assert "server closed the connection unexpectedly" in str(payload["error"])
+
+
+def test_finalize_run_status_runs_followup_after_lock_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # B1: the deferred-comments followup must launch AFTER the run-finalize advisory
+    # lock is released, with its own connection (conn=None) — not nested under the lock
+    # where it would deadlock against the comments-launch advisory lock / starve the
+    # social_control pool.
+    events: list[str] = []
+    lock_conn = object()
+
+    @contextmanager
+    def fake_advisory_lock(lock_key, *, label, pool_name="default"):
+        del lock_key, label, pool_name
+        events.append("lock_enter")
+        try:
+            yield lock_conn
+        finally:
+            events.append("lock_exit")
+
+    def fake_fetch_one(sql: str, params=None, *, conn=None, **_kwargs):
+        del params, conn
+        normalized = " ".join(sql.split()).lower()
+        if "select status, config from social.scrape_runs" in normalized:
+            return {"status": "running", "config": {"pipeline_ingest_mode": "manual"}}
+        return {}
+
+    monkeypatch.setattr(run_lifecycle.legacy.pg, "advisory_session_lock", fake_advisory_lock)
+    monkeypatch.setattr(run_lifecycle.legacy.pg, "fetch_one", fake_fetch_one)
+    monkeypatch.setattr(
+        run_lifecycle,
+        "_update_run_summary",
+        lambda *_args, **_kwargs: {"active_jobs": 0, "failed_jobs": 0, "stage_counts": {}},
+    )
+    monkeypatch.setattr(
+        run_lifecycle,
+        "_run_job_status_breakdown",
+        lambda *_args, **_kwargs: {"running_jobs": 0, "queued_jobs": 0, "cancelling_jobs": 0},
+    )
+    monkeypatch.setattr(run_lifecycle, "_set_run_status", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(run_lifecycle.legacy, "_resolve_pipeline_ingest_mode", lambda value: value)
+    monkeypatch.setattr(
+        run_lifecycle.legacy,
+        "_maybe_enqueue_shared_catalog_classify_jobs_after_fetch",
+        lambda *_args, **_kwargs: 0,
+    )
+    monkeypatch.setattr(
+        run_lifecycle.legacy,
+        "_shared_catalog_fetch_has_terminal_error",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(run_lifecycle.legacy, "_column_exists", lambda *_args, **_kwargs: False)
+
+    followup_conns: list[object] = []
+
+    def _fake_followup(*, run_id, run_status, run_config, summary, conn=None):
+        del run_id, run_status, run_config, summary
+        events.append("followup")
+        followup_conns.append(conn)
+        return None
+
+    monkeypatch.setattr(run_lifecycle, "_maybe_start_deferred_comments_followup", _fake_followup)
+
+    run_lifecycle._finalize_run_status("run-1")
+
+    assert events == ["lock_enter", "lock_exit", "followup"]
+    assert followup_conns == [None]
+
+
+def test_finalize_run_status_cancelled_skips_followup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # B1: a cancelled run short-circuits with skip_followups and must never launch the
+    # deferred-comments followup.
+    lock_conn = object()
+
+    @contextmanager
+    def fake_advisory_lock(lock_key, *, label, pool_name="default"):
+        del lock_key, label, pool_name
+        yield lock_conn
+
+    monkeypatch.setattr(run_lifecycle.legacy.pg, "advisory_session_lock", fake_advisory_lock)
+    monkeypatch.setattr(
+        run_lifecycle.legacy.pg,
+        "fetch_one",
+        lambda *_a, **_k: {"status": "cancelled", "config": {}},
+    )
+    monkeypatch.setattr(
+        run_lifecycle,
+        "_update_run_summary",
+        lambda *_args, **_kwargs: {"active_jobs": 0, "failed_jobs": 0, "stage_counts": {}},
+    )
+
+    def _boom_followup(**_kwargs):
+        raise AssertionError("followup must not run for a cancelled run")
+
+    monkeypatch.setattr(run_lifecycle, "_maybe_start_deferred_comments_followup", _boom_followup)
+
+    payload = run_lifecycle._finalize_run_status("run-1")
+
+    assert payload == {"active_jobs": 0, "failed_jobs": 0, "stage_counts": {}}
+
+
+def test_recover_unfinalized_terminal_runs_refinalizes_stuck_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # B3: a run still "running" but with all jobs terminal is re-finalized by the sweep,
+    # closing the gap where _finish_job's finalize raised/deferred and left it stuck.
+    monkeypatch.setattr(
+        run_lifecycle.legacy.pg,
+        "fetch_all",
+        lambda *_a, **_k: [{"run_id": "run-stuck", "status": "running"}],
+    )
+
+    finalized: list[str] = []
+
+    def _fake_finalize(run_id, *, force_recompute=False):
+        del force_recompute
+        finalized.append(run_id)
+        return {"status": "completed"}
+
+    monkeypatch.setattr(run_lifecycle, "_finalize_run_status", _fake_finalize)
+
+    cleared: list[str] = []
+    monkeypatch.setattr(
+        run_lifecycle,
+        "_merge_run_config",
+        lambda run_id, *, config_updates, conn=None: cleared.append(run_id) or {},
+    )
+
+    result = run_lifecycle.recover_unfinalized_terminal_runs()
+
+    assert result == {"scanned": 1, "finalized": 1}
+    assert finalized == ["run-stuck"]
+    assert cleared == ["run-stuck"]
+
+
+def test_recover_unfinalized_terminal_runs_handles_no_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(run_lifecycle.legacy.pg, "fetch_all", lambda *_a, **_k: [])
+    assert run_lifecycle.recover_unfinalized_terminal_runs() == {"scanned": 0, "finalized": 0}

@@ -33,6 +33,9 @@ class TestTargetDependencyGraph:
     def test_cast_media_depends_on_cast_profiles(self):
         assert TARGET_DEPENDENCY_GRAPH["cast_media"] == ["cast_profiles"]
 
+    def test_official_images_depends_on_bravo_and_cast_profiles(self):
+        assert TARGET_DEPENDENCY_GRAPH["official_images"] == ["bravo", "cast_profiles"]
+
 
 # ---------------------------------------------------------------------------
 # execution_waves tests
@@ -40,13 +43,13 @@ class TestTargetDependencyGraph:
 
 
 class TestExecutionWaves:
-    def test_full_five_targets_produce_three_waves(self):
-        targets = ["show_core", "links", "bravo", "cast_profiles", "cast_media"]
+    def test_full_targets_produce_three_waves(self):
+        targets = ["show_core", "links", "bravo", "cast_profiles", "cast_media", "official_images"]
         waves = execution_waves(targets)
         assert len(waves) == 3
         assert waves[0] == ["show_core"]
         assert waves[1] == ["bravo", "cast_profiles", "links"]  # sorted alphabetically
-        assert waves[2] == ["cast_media"]
+        assert waves[2] == ["cast_media", "official_images"]
 
     def test_single_target_produces_one_wave(self):
         waves = execution_waves(["show_core"])
@@ -77,6 +80,10 @@ class TestExecutionWaves:
         assert len(waves) == 2
         assert waves[0] == ["cast_profiles"]
         assert waves[1] == ["cast_media"]
+
+    def test_official_images_after_bravo_and_cast_profiles(self):
+        waves = execution_waves(["show_core", "bravo", "cast_profiles", "official_images"])
+        assert waves == [["show_core"], ["bravo", "cast_profiles"], ["official_images"]]
 
     def test_order_independence(self):
         """Input order should not affect wave grouping."""

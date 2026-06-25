@@ -16,6 +16,7 @@ def test_help_mentions_dry_run_and_run_modes(capsys: pytest.CaptureFixture[str])
     assert "--dry-run" in output
     assert "--run" in output
     assert "remote-auth-tiktok" in output
+    assert "twitter-posts" in output
     assert "youtube-posts" in output
 
 
@@ -40,9 +41,13 @@ def test_dry_run_prints_commands_without_execution(
 
     assert exit_code == 0
     output = capsys.readouterr().out
-    assert "TikTok/YouTube posts smoke checks (DRY RUN)" in output
+    assert "TikTok/Twitter/YouTube posts smoke checks (DRY RUN)" in output
     assert "python scripts/modal/verify_modal_readiness.py --probe-remote-auth tiktok --json" in output
     assert "python -m scripts.socials.tiktok.smoke_posts_scrapling --account bravotv --max-pages 1" in output
+    assert (
+        "python -m scripts.socials.twitter.scrape --query from:BravoTV "
+        "--start 2026-04-01 --end 2026-05-05 --max-pages 2"
+    ) in output
     assert (
         "python -m scripts.socials.youtube.scrape --channel bravo --keywords Bravo "
         "--start 2026-04-01 --end 2026-05-05 --max-results 5 --max-pages 2 --no-ytdlp-supplement"
@@ -65,7 +70,7 @@ def test_run_executes_selected_command_with_current_interpreter(
         [
             "--run",
             "--only",
-            "youtube-posts",
+            "twitter-posts",
             "--youtube-start",
             "2026-04-01",
             "--youtube-end",
@@ -81,19 +86,14 @@ def test_run_executes_selected_command_with_current_interpreter(
     assert isinstance(argv, tuple)
     assert argv[1:] == (
         "-m",
-        "scripts.socials.youtube.scrape",
-        "--channel",
-        "bravo",
-        "--keywords",
-        "Bravo",
+        "scripts.socials.twitter.scrape",
+        "--query",
+        "from:BravoTV",
         "--start",
         "2026-04-01",
         "--end",
         "2026-05-05",
-        "--max-results",
-        "5",
         "--max-pages",
         "2",
-        "--no-ytdlp-supplement",
     )
-    assert "Running youtube-posts" in capsys.readouterr().out
+    assert "Running twitter-posts" in capsys.readouterr().out

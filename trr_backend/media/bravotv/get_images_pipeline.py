@@ -13,22 +13,22 @@ from urllib.parse import quote, urlparse
 
 import httpx
 
-from trr_backend.media.bravotv.media_candidate import candidate_from_normalized_record
 from trr_backend.db.admin import create_supabase_admin_client
 from trr_backend.ingestion.cast_photo_sources import (
     fetch_fandom_gallery_cast_photos,
     fetch_imdb_cast_photos,
     fetch_tmdb_cast_photos,
 )
-from trr_backend.integrations import getty, nbcumv
+from trr_backend.integrations import getty, nbcumv, peacock_blog
 from trr_backend.integrations.bravo_jsonapi import (
     fetch_gallery_assets,
-    fetch_person_image_assets,
     fetch_person_galleries,
+    fetch_person_image_assets,
     fetch_show_galleries,
     find_person_uuid,
     find_show_node,
 )
+from trr_backend.media.bravotv.media_candidate import candidate_from_normalized_record
 from trr_backend.media.s3_mirror import (
     build_hosted_url,
     build_shared_media_s3_key,
@@ -43,8 +43,10 @@ SourceSelection = str
 ProgressCallback = Callable[[str], None]
 
 GETTY_FAMILY_ARTIFACTS = ("getty", "nbcumv", "bravo")
-PERSON_SOURCE_FAMILIES = ("getty", "imdb", "tmdb", "fandom")
-SHOW_SOURCE_FAMILIES = ("getty",)
+OFFICIAL_IMAGE_ARTIFACTS = (*GETTY_FAMILY_ARTIFACTS, "peacock")
+PERSON_SOURCE_FAMILIES = ("getty", "peacock", "imdb", "tmdb", "fandom")
+SHOW_SOURCE_FAMILIES = ("getty", "peacock")
+DIRECT_GETTY_FAMILY_ARTIFACTS = ("nbcumv", "bravo")
 ACTION_STOP_WORDS = {
     "a",
     "an",
@@ -115,7 +117,11 @@ def _normalize_sources(sources: Sequence[str] | str | None, *, mode: str) -> lis
     if not raw_items:
         raw_items = ["all"]
 
-    allowed = set(PERSON_SOURCE_FAMILIES if mode == "person" else SHOW_SOURCE_FAMILIES) | {"all"}
+    allowed = (
+        set(PERSON_SOURCE_FAMILIES if mode == "person" else SHOW_SOURCE_FAMILIES)
+        | set(DIRECT_GETTY_FAMILY_ARTIFACTS)
+        | {"all"}
+    )
     normalized: list[str] = []
     for item in raw_items:
         if item in allowed and item not in normalized:
@@ -124,9 +130,10 @@ def _normalize_sources(sources: Sequence[str] | str | None, *, mode: str) -> lis
 
 
 def _selected_source_families(selection: Sequence[str], *, mode: str) -> list[str]:
-    allowed = list(PERSON_SOURCE_FAMILIES if mode == "person" else SHOW_SOURCE_FAMILIES)
+    base_allowed = list(PERSON_SOURCE_FAMILIES if mode == "person" else SHOW_SOURCE_FAMILIES)
     if "all" in selection:
-        return allowed
+        return base_allowed
+    allowed = base_allowed + list(DIRECT_GETTY_FAMILY_ARTIFACTS)
     return [item for item in selection if item in allowed]
 
 
@@ -405,6 +412,15 @@ def _collect_known_people_names(raw_payloads: Mapping[str, Any]) -> list[str]:
                 if name and name.casefold() not in seen:
                     seen.add(name.casefold())
                     names.append(name)
+    peacock_rows = raw_payloads.get("peacock") if isinstance(raw_payloads.get("peacock"), list) else []
+    for asset in peacock_rows:
+        people_names = asset.get("people_names") if isinstance(asset, dict) else None
+        if isinstance(people_names, list):
+            for candidate in people_names:
+                name = str(candidate).strip()
+                if name and name.casefold() not in seen:
+                    seen.add(name.casefold())
+                    names.append(name)
     return names
 
 
@@ -635,6 +651,9 @@ def _normalize_nbcumv_record(asset: dict[str, Any], *, known_people: Sequence[st
         "nbcumv_query_rank": asset.get("nbcumv_query_rank"),
         "source_url": _best_text(asset.get("location")),
         "source_page_url": None,
+        "source_provider": "NBCUniversal Media Village",
+        "source_label": "NBCUMV CloudSearch",
+        "source_variant": _best_text(asset.get("nbcumv_query_branch"), "nbcumv_cloudsearch"),
         "width": asset.get("lbx_width") or asset.get("lbx_resolutionX"),
         "height": asset.get("lbx_height") or asset.get("lbx_resolutionY"),
         "raw": asset,
@@ -669,6 +688,44 @@ def _normalize_bravo_record(asset: dict[str, Any], *, known_people: Sequence[str
     }
 
 
+def _normalize_peacock_record(asset: dict[str, Any], *, known_people: Sequence[str]) -> dict[str, Any]:
+    original_url = _best_text(asset.get("original_image_url"), asset.get("image_url"), asset.get("source_url"))
+    preview_url = _best_text(asset.get("preview_image_url"), original_url)
+    file_name = _best_text(asset.get("file_name"), _file_name_from_url(original_url))
+    caption = _best_text(asset.get("caption"), asset.get("alt_text"))
+    people_names = [str(value).strip() for value in (asset.get("people_names") or []) if str(value).strip()]
+    if not people_names:
+        people_names = _extract_people_from_text(caption, known_people=known_people)
+    bridge_key = _normalize_nup_key(file_name)
+    return {
+        "source": "peacock",
+        "source_id": _best_text(asset.get("source_image_id"), file_name, original_url),
+        "bridge_key": bridge_key if _is_nup_key(bridge_key) else None,
+        "nup_filename": file_name if bridge_key and _is_nup_key(bridge_key) else None,
+        "nup_set": _nup_set_from_key(bridge_key),
+        "getty_editorial_id": None,
+        "caption": caption,
+        "bravo_caption": None,
+        "people_names": people_names,
+        "photographer": _best_text(asset.get("photographer"), asset.get("credit"), asset.get("source_provider")),
+        "show_name": _best_text(asset.get("show_name")),
+        "season_number": asset.get("season_number"),
+        "episode_title": None,
+        "air_date": _parse_iso_date(_best_text(asset.get("published_at"), asset.get("modified_at"))),
+        "keywords": [],
+        "source_url": original_url,
+        "preview_image_url": preview_url,
+        "peacock_original_image_url": original_url,
+        "source_page_url": _best_text(asset.get("source_page_url")),
+        "source_provider": _best_text(asset.get("source_provider"), "Peacock"),
+        "source_label": _best_text(asset.get("source_label"), "Peacock Blog"),
+        "source_variant": _best_text(asset.get("source_variant"), "peacock_cast_page"),
+        "width": asset.get("width"),
+        "height": asset.get("height"),
+        "raw": asset,
+    }
+
+
 def _normalize_candidate_records(raw_payloads: Mapping[str, Any]) -> list[dict[str, Any]]:
     known_people = _collect_known_people_names(raw_payloads)
     normalized: list[dict[str, Any]] = []
@@ -693,6 +750,15 @@ def _normalize_candidate_records(raw_payloads: Mapping[str, Any]) -> list[dict[s
     for asset in raw_payloads.get("bravo") if isinstance(raw_payloads.get("bravo"), list) else []:
         if isinstance(asset, dict):
             record = _normalize_bravo_record(asset, known_people=known_people)
+            candidate = candidate_from_normalized_record(record).to_dict()
+            record["candidate"] = candidate
+            record["source_role"] = candidate["source_role"]
+            record["display_eligible"] = candidate["display_eligible"]
+            record["bridge_keys"] = candidate["bridge_keys"]
+            normalized.append(record)
+    for asset in raw_payloads.get("peacock") if isinstance(raw_payloads.get("peacock"), list) else []:
+        if isinstance(asset, dict):
+            record = _normalize_peacock_record(asset, known_people=known_people)
             candidate = candidate_from_normalized_record(record).to_dict()
             record["candidate"] = candidate
             record["source_role"] = candidate["source_role"]
@@ -727,15 +793,43 @@ def _caption_match_score(left: dict[str, Any], right: dict[str, Any], *, known_p
     return score
 
 
+def _source_provenance(records: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    provenance: dict[str, dict[str, Any]] = {}
+    for record in records:
+        source = str(record.get("source") or "").strip()
+        if not source:
+            continue
+        label = _best_text(record.get("source_label"))
+        if not label and source == "nbcumv":
+            label = "NBCUMV CloudSearch"
+        elif not label and source == "peacock":
+            label = "Peacock Blog"
+        elif not label:
+            label = source.upper() if source == "nbcumv" else source.title()
+        provenance[source] = {
+            key: value
+            for key, value in {
+                "label": label,
+                "variant": _best_text(record.get("source_variant"), record.get("nbcumv_query_branch")),
+                "source_page_url": _best_text(record.get("source_page_url")),
+                "source_url": _best_text(record.get("source_url")),
+            }.items()
+            if value
+        }
+    return provenance
+
+
 def _merge_group_records(group_id: str, records: list[dict[str, Any]]) -> dict[str, Any]:
     per_source = {record["source"]: record for record in records}
     getty_record = per_source.get("getty", {})
     nbcumv_record = per_source.get("nbcumv", {})
     bravo_record = per_source.get("bravo", {})
+    peacock_record = per_source.get("peacock", {})
     persons = (
         list(getty_record.get("people_names") or [])
         or list(nbcumv_record.get("people_names") or [])
         or list(bravo_record.get("people_names") or [])
+        or list(peacock_record.get("people_names") or [])
     )
     keywords = []
     for record in records:
@@ -766,24 +860,42 @@ def _merge_group_records(group_id: str, records: list[dict[str, Any]]) -> dict[s
             getty_record.get("photographer"),
             bravo_record.get("photographer"),
             nbcumv_record.get("photographer"),
+            peacock_record.get("photographer"),
         ),
-        "caption": _best_text(getty_record.get("caption"), nbcumv_record.get("caption"), bravo_record.get("caption")),
+        "caption": _best_text(
+            getty_record.get("caption"),
+            nbcumv_record.get("caption"),
+            bravo_record.get("caption"),
+            peacock_record.get("caption"),
+        ),
         "bravo_caption": _best_text(bravo_record.get("bravo_caption")),
         "episode_title": _best_text(nbcumv_record.get("episode_title"), bravo_record.get("episode_title")),
         "season_number": nbcumv_record.get("season_number")
         or bravo_record.get("season_number")
+        or peacock_record.get("season_number")
         or getty_record.get("season_number"),
         "air_date": _best_text(
             nbcumv_record.get("air_date"),
             getty_record.get("air_date"),
             bravo_record.get("air_date"),
+            peacock_record.get("air_date"),
         ),
         "show_name": _best_text(
             nbcumv_record.get("show_name"),
             bravo_record.get("show_name"),
+            peacock_record.get("show_name"),
             getty_record.get("show_name"),
         ),
+        "width": nbcumv_record.get("width")
+        or peacock_record.get("width")
+        or bravo_record.get("width")
+        or getty_record.get("width"),
+        "height": nbcumv_record.get("height")
+        or peacock_record.get("height")
+        or bravo_record.get("height")
+        or getty_record.get("height"),
         "keywords": keywords,
+        "source_provenance": _source_provenance(records),
     }
 
 
@@ -980,6 +1092,30 @@ def acquire_best_image(record: dict[str, Any]) -> dict[str, Any]:
                     "watermarked": False,
                     "error": str(exc),
                 }
+
+    peacock_record = per_source.get("peacock") if isinstance(per_source, dict) else None
+    if isinstance(peacock_record, dict):
+        source_url = str(
+            peacock_record.get("peacock_original_image_url") or peacock_record.get("source_url") or ""
+        ).strip()
+        preview_url = str(peacock_record.get("preview_image_url") or "").strip() or source_url
+        source_page_url = peacock_record.get("source_page_url")
+        if source_url:
+            result = mirror_url_to_s3(source_url)
+            return {
+                "status": result.status,
+                "source": "peacock_blog",
+                "watermarked": False,
+                "source_url": source_url,
+                "preview_source_url": preview_url,
+                "source_page_url": source_page_url,
+                "hosted_url": result.hosted_url,
+                "hosted_key": result.hosted_key,
+                "hosted_sha256": result.sha256,
+                "hosted_content_type": result.content_type,
+                "hosted_bytes": result.size_bytes,
+                "error": result.error,
+            }
 
     bravo_record = per_source.get("bravo") if isinstance(per_source, dict) else None
     if isinstance(bravo_record, dict):
@@ -1242,6 +1378,32 @@ def _text_contains(value: Any, needle: str | None) -> bool:
     return cleaned_needle in str(value or "").casefold()
 
 
+def _iter_text_values(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [text for item in value for text in _iter_text_values(item)]
+    if isinstance(value, dict):
+        return [text for item in value.values() for text in _iter_text_values(item)]
+    text = str(value or "").strip()
+    return [text] if text else []
+
+
+def _text_contains_person_name(value: Any, person_name: str | None) -> bool:
+    tokens = _name_tokens(person_name)
+    if not tokens:
+        return True
+    exact_phrase = " ".join(tokens)
+    slug_phrase = "-".join(tokens)
+    for text in _iter_text_values(value):
+        normalized_text = " ".join(_name_tokens(text))
+        if exact_phrase and exact_phrase in normalized_text:
+            return True
+        if slug_phrase and slug_phrase in _name_slug(text):
+            return True
+        if len(tokens) == 1 and re.search(rf"\b{re.escape(tokens[0])}\b", normalized_text):
+            return True
+    return False
+
+
 def _nbcumv_asset_matches_scope(
     asset: dict[str, Any],
     *,
@@ -1261,7 +1423,7 @@ def _nbcumv_asset_matches_scope(
         asset.get("lbx_keywords"),
         *(asset.get("keywords") if isinstance(asset.get("keywords"), list) else []),
     ]
-    return any(_text_contains(value, person_name) for value in person_values)
+    return any(_text_contains_person_name(value, person_name) for value in person_values)
 
 
 def _collect_nbcumv_person(
@@ -1396,9 +1558,7 @@ def _collect_nbcumv_person(
         if len(results) >= normalized_limit:
             return results[:normalized_limit]
 
-        assets = nbcumv.search_images(
-            nbcumv.SearchFilters(search_text=f"{person_name} {show_name}", limit=fetch_limit)
-        )
+        assets = nbcumv.search_images(nbcumv.SearchFilters(search_text=f"{person_name} {show_name}", limit=fetch_limit))
         _append_assets(
             assets,
             stage="search_person_show_text",
@@ -1553,7 +1713,9 @@ def _collect_bravo_person(person_name: str, *, limit: int, show_name: str | None
         person_gallery_keys = {
             str(gallery.get("uuid") or gallery.get("path") or gallery.get("nid") or gallery.get("title") or "").strip()
             for gallery in galleries
-            if str(gallery.get("uuid") or gallery.get("path") or gallery.get("nid") or gallery.get("title") or "").strip()
+            if str(
+                gallery.get("uuid") or gallery.get("path") or gallery.get("nid") or gallery.get("title") or ""
+            ).strip()
         }
         if show_name:
             show = find_show_node(show_name, client=client)
@@ -1564,7 +1726,9 @@ def _collect_bravo_person(person_name: str, *, limit: int, show_name: str | None
         seen_gallery_keys: set[str] = set()
         unique_galleries: list[dict[str, Any]] = []
         for gallery in galleries:
-            gallery_key = str(gallery.get("uuid") or gallery.get("path") or gallery.get("nid") or gallery.get("title") or "").strip()
+            gallery_key = str(
+                gallery.get("uuid") or gallery.get("path") or gallery.get("nid") or gallery.get("title") or ""
+            ).strip()
             if gallery_key and gallery_key in seen_gallery_keys:
                 continue
             if gallery_key:
@@ -1611,7 +1775,9 @@ def _collect_bravo_person(person_name: str, *, limit: int, show_name: str | None
 
         for gallery in unique_galleries:
             gallery_rows = fetch_gallery_assets(gallery, client=client)
-            gallery_key = str(gallery.get("uuid") or gallery.get("path") or gallery.get("nid") or gallery.get("title") or "").strip()
+            gallery_key = str(
+                gallery.get("uuid") or gallery.get("path") or gallery.get("nid") or gallery.get("title") or ""
+            ).strip()
             _append_rows(
                 gallery_rows,
                 source_branch="media_gallery",
@@ -1648,6 +1814,59 @@ def _collect_bravo_show(show_name: str, *, season: int | None, limit: int) -> li
         return rows[:limit]
     finally:
         client.close()
+
+
+def _collect_peacock_person(
+    person_name: str,
+    *,
+    show_name: str | None,
+    season: int | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    if not show_name:
+        return []
+    rows = peacock_blog.collect_cast_images(
+        show_name=show_name,
+        season=season,
+        person_name=person_name,
+        limit=limit,
+    )
+    for index, row in enumerate(rows):
+        row["show_name"] = show_name
+        row["season_number"] = season
+        row["peacock_query_branch"] = "cast_page_person"
+        row["peacock_query"] = {
+            "show_name": show_name,
+            "season": season,
+            "person_name": person_name,
+            "source_page_url": row.get("source_page_url"),
+        }
+        row["peacock_query_rank"] = index
+    return rows
+
+
+def _collect_peacock_show(
+    show_name: str,
+    *,
+    season: int | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    rows = peacock_blog.collect_cast_images(
+        show_name=show_name,
+        season=season,
+        limit=limit,
+    )
+    for index, row in enumerate(rows):
+        row["show_name"] = show_name
+        row["season_number"] = season
+        row["peacock_query_branch"] = "cast_page_show"
+        row["peacock_query"] = {
+            "show_name": show_name,
+            "season": season,
+            "source_page_url": row.get("source_page_url"),
+        }
+        row["peacock_query_rank"] = index
+    return rows
 
 
 def _collect_person_supplemental_sources(
@@ -1871,24 +2090,26 @@ def run_get_images_pipeline(
         manifest["counts"][name] = len(payload) if isinstance(payload, list) else 0
         return payload
 
-    if "getty" in selected_families:
-        if isinstance(getty_prefetched_events, list):
+    official_artifacts_requested = set(GETTY_FAMILY_ARTIFACTS) & set(selected_families)
+    if official_artifacts_requested:
+        getty_requested = "getty" in official_artifacts_requested
+        nbcumv_requested = bool({"getty", "nbcumv"} & official_artifacts_requested)
+        bravo_requested = bool({"getty", "bravo"} & official_artifacts_requested)
+        if getty_requested and isinstance(getty_prefetched_events, list):
             _write_json(raw_dir / "getty_prefetched_events.json", getty_prefetched_events)
             manifest["counts"]["getty_prefetched_events"] = len(getty_prefetched_events)
-        if isinstance(getty_prefetched_queries, list):
+        if getty_requested and isinstance(getty_prefetched_queries, list):
             _write_json(raw_dir / "getty_prefetched_queries.json", getty_prefetched_queries)
             manifest["counts"]["getty_prefetched_queries"] = len(getty_prefetched_queries)
-            getty_query_summaries.extend(
-                dict(item) for item in getty_prefetched_queries if isinstance(item, dict)
-            )
+            getty_query_summaries.extend(dict(item) for item in getty_prefetched_queries if isinstance(item, dict))
         if mode == "person":
-            if isinstance(getty_prefetched_assets, list):
+            if getty_requested and isinstance(getty_prefetched_assets, list):
                 prefetch_mode_label = normalized_getty_prefetch_mode or "full"
                 manifest["notes"].append(
                     f"getty_prefetched_assets supplied; skipping live Getty search ({prefetch_mode_label})."
                 )
                 _load_or_collect("getty", lambda: list(getty_prefetched_assets))
-            else:
+            elif getty_requested:
                 _load_or_collect(
                     "getty",
                     lambda: _collect_getty_person(
@@ -1897,27 +2118,29 @@ def run_get_images_pipeline(
                         query_summaries=getty_query_summaries,
                     ),
                 )
-            _load_or_collect(
-                "nbcumv",
-                lambda: _collect_nbcumv_person(
-                    person_name or "",
-                    show_name=show_name,
-                    limit=nbcumv_limit,
-                    diagnostics=nbcumv_query_diagnostics,
-                ),
-            )
-            _load_or_collect(
-                "bravo",
-                lambda: _collect_bravo_person(person_name or "", limit=bravo_limit, show_name=show_name),
-            )
+            if nbcumv_requested:
+                _load_or_collect(
+                    "nbcumv",
+                    lambda: _collect_nbcumv_person(
+                        person_name or "",
+                        show_name=show_name,
+                        limit=nbcumv_limit,
+                        diagnostics=nbcumv_query_diagnostics,
+                    ),
+                )
+            if bravo_requested:
+                _load_or_collect(
+                    "bravo",
+                    lambda: _collect_bravo_person(person_name or "", limit=bravo_limit, show_name=show_name),
+                )
         else:
-            if isinstance(getty_prefetched_assets, list):
+            if getty_requested and isinstance(getty_prefetched_assets, list):
                 prefetch_mode_label = normalized_getty_prefetch_mode or "full"
                 manifest["notes"].append(
                     f"getty_prefetched_assets supplied; skipping live Getty search ({prefetch_mode_label})."
                 )
                 _load_or_collect("getty", lambda: list(getty_prefetched_assets))
-            else:
+            elif getty_requested:
                 _load_or_collect(
                     "getty",
                     lambda: _collect_getty_show(
@@ -1928,17 +2151,43 @@ def run_get_images_pipeline(
                         query_summaries=getty_query_summaries,
                     ),
                 )
+            if nbcumv_requested:
+                _load_or_collect(
+                    "nbcumv",
+                    lambda: _collect_nbcumv_show(
+                        show_name or "",
+                        season=season,
+                        episode=episode,
+                        limit=nbcumv_limit,
+                        diagnostics=nbcumv_query_diagnostics,
+                    ),
+                )
+            if bravo_requested:
+                _load_or_collect(
+                    "bravo",
+                    lambda: _collect_bravo_show(show_name or "", season=season, limit=bravo_limit),
+                )
+
+    if "peacock" in selected_families:
+        if mode == "person":
             _load_or_collect(
-                "nbcumv",
-                lambda: _collect_nbcumv_show(
-                    show_name or "",
+                "peacock",
+                lambda: _collect_peacock_person(
+                    person_name or "",
+                    show_name=show_name,
                     season=season,
-                    episode=episode,
-                    limit=nbcumv_limit,
-                    diagnostics=nbcumv_query_diagnostics,
+                    limit=bravo_limit,
                 ),
             )
-            _load_or_collect("bravo", lambda: _collect_bravo_show(show_name or "", season=season, limit=bravo_limit))
+        else:
+            _load_or_collect(
+                "peacock",
+                lambda: _collect_peacock_show(
+                    show_name or "",
+                    season=season,
+                    limit=bravo_limit,
+                ),
+            )
 
     if mode == "person":
         if "imdb" in selected_families:
@@ -2032,7 +2281,7 @@ def run_get_images_pipeline(
 
     bridge_rows: list[dict[str, Any]] = []
     merged_catalog: list[dict[str, Any]] = []
-    if any(name in raw_payloads for name in GETTY_FAMILY_ARTIFACTS):
+    if any(name in raw_payloads for name in OFFICIAL_IMAGE_ARTIFACTS):
         bridge_rows, merged_catalog = build_bridge_and_catalog(raw_payloads)
         for record in merged_catalog:
             record["acquisition"] = acquire_best_image(record)

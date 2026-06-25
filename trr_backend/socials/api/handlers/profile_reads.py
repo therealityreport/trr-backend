@@ -172,6 +172,34 @@ def get_catalog_run_progress(
     )
 
 
+def get_catalog_budget_decision(*, platform: str, account_handle: str) -> dict[str, Any]:
+    from trr_backend.socials.control_plane.budget import build_budget_decision
+
+    return build_budget_decision(
+        lane=f"{str(platform or '').strip().lower() or 'instagram'}_backfill",
+        platform=platform,
+        account=account_handle,
+    )
+
+
+def get_catalog_run_diagnostics(
+    *,
+    platform: str,
+    account_handle: str,
+    run_id: str,
+) -> dict[str, Any]:
+    # Import the canonical owner directly (no core-wrapper indirection needed).
+    from trr_backend.socials.pipelines.account_catalog.progress import (
+        get_social_account_catalog_run_diagnostics,
+    )
+
+    return get_social_account_catalog_run_diagnostics(
+        platform=platform,
+        account_handle=account_handle,
+        run_id=run_id,
+    )
+
+
 def get_catalog_verification(*, platform: str, account_handle: str, run_id: str | None) -> dict[str, Any]:
     import trr_backend.socials.social_season_analytics_impl as social_core
 

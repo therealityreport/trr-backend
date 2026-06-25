@@ -16,7 +16,7 @@ import asyncio
 import json
 import logging
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from threading import Lock, Thread
@@ -992,6 +992,7 @@ def _finalize_catalog_backfill_launch_task(
     comments_enable_media_followups: bool | None,
     launch_group_id: str | None,
     force_catalog_rediscovery: bool = False,
+    enable_cap4_canary: bool = False,
 ) -> None:
     from trr_backend.repositories.social_season_analytics import (
         INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
@@ -1038,6 +1039,7 @@ def _finalize_catalog_backfill_launch_task(
             comments_enable_media_followups=comments_enable_media_followups,
             launch_group_id=normalized_launch_group_id,
             force_catalog_rediscovery=force_catalog_rediscovery,
+            enable_cap4_canary=enable_cap4_canary,
         )
         if allow_local_dev_inline_bypass or not is_queue_enabled():
             catalog_run_id = str((result or {}).get("catalog_run_id") or (result or {}).get("run_id") or "").strip()
@@ -1308,6 +1310,7 @@ def _queue_catalog_backfill_finalize_task(
     comments_enable_media_followups: bool | None,
     launch_group_id: str | None,
     force_catalog_rediscovery: bool = False,
+    enable_cap4_canary: bool = False,
 ) -> None:
     if not str(run_id or "").strip():
         return
@@ -1330,6 +1333,7 @@ def _queue_catalog_backfill_finalize_task(
             "comments_enable_media_followups": comments_enable_media_followups,
             "launch_group_id": launch_group_id,
             "force_catalog_rediscovery": force_catalog_rediscovery,
+            "enable_cap4_canary": enable_cap4_canary,
         },
         name=f"catalog-backfill-finalize:{platform}:{account_handle}:{run_id}",
         daemon=True,
@@ -1803,6 +1807,80 @@ def _resolve_social_account_comments_route_execution(
     }
 
 
+def _build_catalog_worker_cap_transparency(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Surface the honest worker-cap truth from the adaptive worker plan.
+
+    Reads the ``adaptive_worker_plan`` recorded on the launch result and exposes:
+    - ``requested_details_worker_count``: what the operator asked for (pre-cap).
+    - ``details_refresh_worker_count``: what was actually applied after the binding cap.
+    - ``live_apply_binding_cap``: the v4 Live APPLY binding cap (``runbook_state.binding_cap``).
+    - ``worker_cap_note``: a human-readable explanation of the request-vs-applied delta.
+
+    Also surfaces the idempotency outcome (``deduped``) when the reservation reused an
+    existing run rather than inserting a fresh one. Defensive against missing keys; never
+    raises. Returns an empty dict only when no plan and no dedupe signal are present.
+    """
+
+    plan = result.get("adaptive_worker_plan")
+    plan_map: Mapping[str, Any] = plan if isinstance(plan, Mapping) else {}
+    runbook_state = plan_map.get("runbook_state")
+    runbook_map: Mapping[str, Any] = runbook_state if isinstance(runbook_state, Mapping) else {}
+
+    requested = plan_map.get("requested_details_worker_count")
+    applied = plan_map.get("details_refresh_worker_count")
+    binding_cap = runbook_map.get("binding_cap")
+    if binding_cap is None:
+        # Fall back to the budget decision's binding-cap signal when the plan's
+        # runbook_state does not carry it (e.g. older or partial plan payloads).
+        budget_decision = result.get("budget_decision")
+        budget_map: Mapping[str, Any] = budget_decision if isinstance(budget_decision, Mapping) else {}
+        budget_limits = budget_map.get("limits")
+        limits_map: Mapping[str, Any] = budget_limits if isinstance(budget_limits, Mapping) else {}
+        binding_cap = budget_map.get("live_apply_binding_cap")
+        if binding_cap is None:
+            binding_cap = limits_map.get("live_apply_binding_cap")
+
+    transparency: dict[str, Any] = {}
+    if plan_map:
+        transparency["requested_details_worker_count"] = requested
+        transparency["details_refresh_worker_count"] = applied
+        transparency["live_apply_binding_cap"] = binding_cap
+        requested_label = requested if requested is not None else "auto"
+        applied_label = applied if applied is not None else "auto"
+        cap_label = binding_cap if binding_cap is not None else "n/a"
+        transparency["worker_cap_note"] = (
+            f"requested {requested_label}, applied {applied_label} "
+            f"(v4 binding cap {cap_label}; set enable_cap4_canary for 4)"
+        )
+
+    # Idempotency outcome from the reservation (deduped == True means an existing run was
+    # reused). Only surfaced when the launch result carries the additive key.
+    if "deduped" in result:
+        transparency["deduped"] = bool(result.get("deduped"))
+
+    return transparency
+
+
+def _build_catalog_comments_skip_transparency(run_config: Mapping[str, Any]) -> dict[str, Any]:
+    """Surface the precise, run-config-driven reason the comments stage was skipped.
+
+    Delegates to the canonical ``derive_comments_skip_reason`` helper so the dashboard shows
+    the exact reason instead of any hardcoded narrative. Defensive against missing keys; never
+    raises (the helper itself is safe to call with ``{}``).
+    """
+
+    from trr_backend.socials.pipelines.account_catalog.launch import (
+        derive_comments_skip_reason,
+    )
+
+    skip = derive_comments_skip_reason(run_config or {})
+    return {
+        "comments_skip_reason": skip.get("reason"),
+        "comments_skip_detail": skip.get("detail"),
+        "comments_operator_action": skip.get("operator_action"),
+    }
+
+
 def _finalize_social_account_catalog_route_response(
     *,
     result: Mapping[str, Any],
@@ -1859,6 +1937,11 @@ def _finalize_social_account_catalog_route_response(
         "execution_mode_canonical": execution_mode_canonical,
         "execution_mode_legacy": execution_mode_legacy,
         "deprecations": [_social_execution_mode_deprecation_payload()],
+        # Honest operator-facing transparency: worker-cap truth (requested vs applied vs
+        # binding cap) and the precise comments-skip reason. Both degrade gracefully when
+        # the launch result lacks the underlying metadata.
+        **_build_catalog_worker_cap_transparency(result),
+        **_build_catalog_comments_skip_transparency(result),
     }
 
 
@@ -3152,6 +3235,9 @@ class CatalogBackfillRequest(SourceScopedRequest):
     comments_worker_count: int | None = Field(default=None, ge=1, le=24)
     comments_enable_media_followups: bool | None = Field(default=None)
     force_catalog_rediscovery: bool = Field(default=False)
+    enable_cap4_canary: bool = Field(default=False)
+    apply_run_id: UUID | None = Field(default=None)
+    operator_confirmation: str | None = Field(default=None)
 
     @model_validator(mode="after")
     def validate_selected_tasks(self) -> CatalogBackfillRequest:
@@ -3166,6 +3252,65 @@ class CatalogBackfillRequest(SourceScopedRequest):
                 deduped.append(task)
         self.selected_tasks = deduped
         return self
+
+
+def _instagram_2025_backfill_apply_confirmation(run_id: str) -> str:
+    return f"APPLY INSTAGRAM 2025 BACKFILL {run_id}"
+
+
+def _instagram_2025_backfill_apply_pending_metadata(run_id: str) -> dict[str, Any]:
+    confirmation = _instagram_2025_backfill_apply_confirmation(run_id)
+    return {
+        "launch_state": "pending_apply_confirmation",
+        "launch_task_resolution_pending": True,
+        "requires_apply_confirmation": True,
+        "apply_required": True,
+        "apply_run_id": run_id,
+        "required_confirmation": confirmation,
+        "runbook_state": {
+            "phase": "live_apply",
+            "state": "pending_apply_confirmation",
+            "mandatory": True,
+            "current_comments_cap": 2,
+            "speed_canary_optional": True,
+            "speed_canary_cap": 4,
+            "minimum_completed_comments_jobs": 25,
+            "message": "Live APPLY at cap 2 must be confirmed before catalog jobs are created.",
+        },
+    }
+
+
+def _instagram_backfill_requires_apply_confirmation(
+    *,
+    platform: str,
+    date_start: datetime | None,
+    date_end: datetime | None,
+    selected_tasks: Sequence[str],
+) -> bool:
+    normalized_platform = str(platform or "").strip().lower()
+    if normalized_platform != "instagram":
+        return False
+    if not ({"post_details", "comments", "media"} & set(selected_tasks)):
+        return False
+    if date_start is None and date_end is None:
+        return False
+    start_year = date_start.year if date_start else None
+    end_year = date_end.year if date_end else None
+    if start_year is not None and end_year is not None:
+        return start_year <= 2025 <= end_year
+    return start_year == 2025 or end_year == 2025
+
+
+def _attach_instagram_apply_metadata(result: Mapping[str, Any]) -> dict[str, Any]:
+    run_id = str(result.get("run_id") or result.get("catalog_run_id") or "").strip()
+    apply_metadata = _instagram_2025_backfill_apply_pending_metadata(run_id) if run_id else {}
+    return {
+        **dict(result),
+        **apply_metadata,
+        "requires_apply_confirmation": True,
+        "apply_required": True,
+        "apply_run_id": run_id or None,
+    }
 
 
 class CatalogSyncRecentRequest(SourceScopedRequest):
@@ -3217,6 +3362,14 @@ class PostCommentRefreshRequest(BaseModel):
     fetch_replies: bool = Field(default=True)
 
 
+InstagramCommentsLoadStrategy = Literal[
+    "instagram_comments_endpoint_cursor",
+    "cursor_api",
+    "single_session_load_all",
+    "public_relay",
+]
+
+
 class SocialAccountCommentsScrapeRequest(SourceScopedRequest):
     mode: Literal["profile", "single_post"] = Field(default="profile")
     source_scope: Literal["bravo", "network", "creator", "community", "news"] = Field(default="network")
@@ -3225,9 +3378,7 @@ class SocialAccountCommentsScrapeRequest(SourceScopedRequest):
     max_comments_per_post: int | None = Field(default=None, ge=0)
     refresh_policy: Literal["stale_or_missing", "all_saved_posts"] = Field(default="stale_or_missing")
     target_filter: Literal["incomplete"] | None = Field(default=None)
-    comments_load_strategy: Literal["cursor_api", "single_session_load_all", "public_relay"] = Field(
-        default="public_relay"
-    )
+    comments_load_strategy: InstagramCommentsLoadStrategy = Field(default="public_relay")
     comments_worker_count: int | None = Field(default=None, ge=1, le=24)
     comments_target_batch_size: int | None = Field(default=None, ge=1, le=500)
     date_start: str | None = Field(default=None, max_length=64)
@@ -3266,9 +3417,7 @@ class SocialAccountCommentsAuditCursorRetryRequest(BaseModel):
     batch_size: int = Field(default=1, ge=1, le=25)
     comments_worker_count: int | None = Field(default=None, ge=1, le=24)
     max_comments_per_post: int = Field(default=0, ge=0)
-    comments_load_strategy: Literal["cursor_api", "single_session_load_all", "public_relay"] = Field(
-        default="public_relay"
-    )
+    comments_load_strategy: InstagramCommentsLoadStrategy = Field(default="public_relay")
     skip_launch_auth_probe: bool = Field(default=False)
     attach_to_active_run: bool = Field(default=True)
     dispatch_immediately: bool = Field(default=True)
@@ -3276,8 +3425,60 @@ class SocialAccountCommentsAuditCursorRetryRequest(BaseModel):
     dry_run: bool = Field(default=False)
 
 
+class SocialAccountCompletionRetryTargetsRequest(BaseModel):
+    run_id: UUID | None = None
+    retry_targets: dict[str, list[dict[str, Any]]] | list[dict[str, Any]] = Field(default_factory=dict)
+    source_scope: str = Field(default="network", max_length=64)
+    comments_load_strategy: InstagramCommentsLoadStrategy = Field(default="public_relay")
+    comments_worker_count: int | None = Field(default=None, ge=1, le=24)
+    dispatch_immediately: bool = Field(default=True)
+    dry_run: bool = Field(default=False)
+
+
 class CancelStuckJobsRequest(BaseModel):
     job_ids: list[UUID] | None = Field(default=None, max_length=500)
+
+
+class RecoverStaleMediaMirrorJobsRequest(BaseModel):
+    run_id: UUID
+    stage: Literal["media_mirror", "comment_media_mirror", "all"] = Field(default="media_mirror")
+    stale_after_seconds: int = Field(default=900, ge=30, le=86_400)
+    recover_limit: int = Field(default=5, ge=1, le=250)
+    dispatch_limit: int = Field(default=8, ge=1, le=250)
+    skip_dispatch: bool = Field(default=False)
+    confirm_recovery: str
+
+
+class DrainMediaMirrorAccountRequest(BaseModel):
+    run_id: UUID
+    account_handle: str = Field(min_length=1, max_length=128)
+    stage: Literal["media_mirror", "comment_media_mirror", "all"] = Field(default="media_mirror")
+    stale_after_seconds: int = Field(default=900, ge=30, le=86_400)
+    recover_limit: int = Field(default=25, ge=1, le=250)
+    dispatch_limit: int = Field(default=8, ge=1, le=250)
+    dry_run: bool = Field(default=False)
+    confirm_drain: str
+
+
+def _enqueue_instagram_comments_audit_cursor_retries_background(**kwargs: Any) -> None:
+    from trr_backend.socials.pipelines.comments.instagram import enqueue_instagram_comments_audit_cursor_retries
+
+    try:
+        result = enqueue_instagram_comments_audit_cursor_retries(**kwargs)
+        logger.info(
+            "Auto-attached audit cursor recovery targets for @%s: performed=%s mode=%s selected=%s",
+            kwargs.get("account_handle"),
+            (result.get("enqueue") or {}).get("performed") if isinstance(result, dict) else None,
+            (result.get("enqueue") or {}).get("mode") if isinstance(result, dict) else None,
+            result.get("selected_target_source_ids_count") if isinstance(result, dict) else None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Failed to auto-attach audit cursor recovery targets for @%s: %s",
+            kwargs.get("account_handle"),
+            exc,
+            exc_info=True,
+        )
 
 
 class DismissRecentFailuresRequest(BaseModel):
@@ -4849,6 +5050,49 @@ async def post_social_account_comments_audit_cursor_retries_route(
         ) from exc
 
 
+@router.post("/profiles/{platform}/{account_handle}/catalog/retry-targets")
+async def post_social_account_catalog_retry_targets_route(
+    platform: str,
+    account_handle: str,
+    payload: SocialAccountCompletionRetryTargetsRequest,
+    user: InternalAdminUser,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import SocialIngestConflictError, SocialIngestValidationError
+    from trr_backend.socials.pipelines.comments.instagram import enqueue_instagram_completion_retry_targets
+
+    if platform.strip().lower() != "instagram":
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "SOCIAL_ACCOUNT_COMPLETION_RETRIES_UNSUPPORTED_PLATFORM",
+                "message": "Completion retry targets are Instagram-only.",
+            },
+        )
+    try:
+        return await run_in_threadpool(
+            enqueue_instagram_completion_retry_targets,
+            account_handle=account_handle,
+            retry_targets=payload.retry_targets,
+            run_id=str(payload.run_id) if payload.run_id else None,
+            source_scope=payload.source_scope,
+            comments_load_strategy=payload.comments_load_strategy,
+            comments_worker_count=payload.comments_worker_count,
+            dispatch_immediately=payload.dispatch_immediately,
+            dry_run=payload.dry_run,
+            initiated_by=(user or {}).get("email"),
+        )
+    except SocialIngestConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": exc.code, "message": str(exc), **jsonable_encoder(exc.detail)},
+        ) from exc
+    except SocialIngestValidationError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": exc.code, "message": str(exc), **jsonable_encoder(getattr(exc, "detail", {}) or {})},
+        ) from exc
+
+
 @router.post("/profiles/{platform}/{account_handle}/comments/scrape")
 async def post_social_account_comments_scrape_route(
     platform: str,
@@ -4866,10 +5110,7 @@ async def post_social_account_comments_scrape_route(
         SocialWorkerUnavailableError,
         _dispatch_due_social_jobs_in_background,
     )
-    from trr_backend.socials.pipelines.comments.instagram import (
-        preview_social_account_comments_scrape,
-        start_social_account_comments_scrape,
-    )
+    from trr_backend.socials.pipelines.comments.instagram import preview_social_account_comments_scrape, start_social_account_comments_scrape
 
     if dry_run or payload.dry_run:
         try:
@@ -4919,6 +5160,32 @@ async def post_social_account_comments_scrape_route(
             allow_local_dev_inline_bypass=used_inline_fallback,
             dispatch_immediately=not queue_enabled,
         )
+        if (
+            queue_enabled
+            and result.get("run_id")
+            and str(payload.mode or "").strip().lower() == "profile"
+            and str(payload.target_filter or "").strip().lower() == "incomplete"
+        ):
+            background_tasks.add_task(
+                _enqueue_instagram_comments_audit_cursor_retries_background,
+                account_handle=account_handle,
+                limit=50,
+                batch_size=1,
+                max_comments_per_post=0,
+                comments_load_strategy=payload.comments_load_strategy,
+                skip_launch_auth_probe=True,
+                dry_run=False,
+                attach_to_active_run=True,
+                dispatch_immediately=True,
+                force_rerun_existing=False,
+                initiated_by=(user or {}).get("email") or "comments-incomplete-fill-auto-cursor-recovery",
+            )
+            result["auto_audit_cursor_recovery"] = {
+                "requested": True,
+                "mode": "background_attach_to_active_run",
+                "limit": 50,
+                "batch_size": 1,
+            }
         _clear_account_profile_caches()
         if queue_enabled and result.get("run_id"):
             background_tasks.add_task(_dispatch_due_social_jobs_in_background, run_id=str(result["run_id"]))
@@ -5068,6 +5335,47 @@ def post_social_account_comments_run_resume_route(
                 "worker_health": _worker_health_detail(exc.worker_health),
             },
         ) from exc
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+
+
+@router.post("/profiles/{platform}/{account_handle}/comments/runs/{run_id}/repair-auth")
+async def post_social_account_comments_run_repair_auth_route(
+    platform: str,
+    account_handle: str,
+    run_id: UUID,
+    payload: CatalogRepairAuthRequest,
+    background_tasks: BackgroundTasks,
+    user: InternalAdminUser,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import SocialIngestValidationError
+    from trr_backend.socials.pipelines.comments.instagram import (
+        execute_social_account_comments_run_auth_repair,
+        request_social_account_comments_run_auth_repair,
+    )
+
+    try:
+        _require_instagram_auth_refresh_confirmation(platform, payload.operator_confirmation)
+        result = request_social_account_comments_run_auth_repair(
+            platform=platform,
+            account_handle=account_handle,
+            run_id=str(run_id),
+            initiated_by=(user or {}).get("email"),
+        )
+        background_tasks.add_task(
+            execute_social_account_comments_run_auth_repair,
+            platform=platform,
+            account_handle=account_handle,
+            run_id=str(run_id),
+            initiated_by=(user or {}).get("email"),
+            allow_cookie_refresh=bool(payload.allow_cookie_refresh),
+        )
+        _clear_account_profile_caches()
+        return result
+    except SocialIngestValidationError as exc:
+        raise HTTPException(status_code=400, detail={"code": exc.code, "message": str(exc)}) from exc
     except ValueError as exc:
         raise _value_error_to_bad_request(exc) from exc
     except LookupError as exc:
@@ -5378,7 +5686,7 @@ def get_social_account_catalog_run_progress_route(
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     try:
-        return _resolve_account_profile_catalog_run_progress(
+        progress_payload = _resolve_account_profile_catalog_run_progress(
             platform=platform,
             account_handle=account_handle,
             run_id=str(run_id),
@@ -5386,6 +5694,17 @@ def get_social_account_catalog_run_progress_route(
             fast=fast,
             loader=social_profile_reads.get_catalog_run_progress,
         )
+        # Surface the precise, run-config-driven comments-skip reason so the dashboard
+        # shows the exact cause instead of any hardcoded narrative. The progress payload
+        # already exposes effective_selected_tasks / stage_graph / target_readiness, which
+        # is exactly what the helper reads; it is fully defensive against missing keys.
+        if isinstance(progress_payload, Mapping):
+            return {
+                **progress_payload,
+                **_build_catalog_worker_cap_transparency(progress_payload),
+                **_build_catalog_comments_skip_transparency(progress_payload),
+            }
+        return progress_payload
     except ValueError as exc:
         raise _value_error_to_bad_request(exc) from exc
     except LookupError as exc:
@@ -5393,6 +5712,57 @@ def get_social_account_catalog_run_progress_route(
     except Exception as exc:  # noqa: BLE001
         logger.exception(
             "Failed to fetch social account catalog run progress: platform=%s account=%s run_id=%s",
+            platform,
+            account_handle,
+            run_id,
+        )
+        raise _to_social_read_http_exception(exc) from exc
+
+
+@router.get("/profiles/{platform}/{account_handle}/catalog/budget")
+def get_social_account_catalog_budget_decision_route(
+    platform: str,
+    account_handle: str,
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    try:
+        return social_profile_reads.get_catalog_budget_decision(
+            platform=platform,
+            account_handle=account_handle,
+        )
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to fetch social account catalog budget decision: platform=%s account=%s",
+            platform,
+            account_handle,
+        )
+        raise _to_social_read_http_exception(exc) from exc
+
+
+@router.get("/profiles/{platform}/{account_handle}/catalog/runs/{run_id}/diagnostics")
+def get_social_account_catalog_run_diagnostics_route(
+    platform: str,
+    account_handle: str,
+    run_id: UUID,
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    try:
+        return social_profile_reads.get_catalog_run_diagnostics(
+            platform=platform,
+            account_handle=account_handle,
+            run_id=str(run_id),
+        )
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to fetch social account catalog run diagnostics: platform=%s account=%s run_id=%s",
             platform,
             account_handle,
             run_id,
@@ -5705,6 +6075,7 @@ async def post_social_account_catalog_backfill_route(
         SocialWorkerUnavailableError,
         _normalize_catalog_backfill_window,
         _normalize_social_account_catalog_backfill_selected_tasks,
+        _merge_catalog_run_config,
         begin_social_account_catalog_backfill_launch,
         launch_social_account_catalog_backfill,
     )
@@ -5732,14 +6103,84 @@ async def post_social_account_catalog_backfill_route(
         )
         request_selected_tasks = payload.selected_tasks
         if request_selected_tasks is None:
-            request_selected_tasks = (
-                ["post_details"]
-                if normalized_platform == "instagram"
-                else _normalize_social_account_catalog_backfill_selected_tasks(None)
-            )
+            # Defense in depth: an omitted selected_tasks runs ALL lanes
+            # (post_details + comments + media) for every platform, so a backfill
+            # can never silently drop comments/media (the Finding-1 gap). The app
+            # always sends explicit tasks; this only governs API callers that omit them.
+            request_selected_tasks = _normalize_social_account_catalog_backfill_selected_tasks(None)
         normalized_selected_tasks = _normalize_social_account_catalog_backfill_selected_tasks(request_selected_tasks)
+        requires_apply_confirmation = _instagram_backfill_requires_apply_confirmation(
+            platform=normalized_platform,
+            date_start=date_start,
+            date_end=date_end,
+            selected_tasks=normalized_selected_tasks,
+        )
         use_async_catalog_kickoff = queue_enabled or (used_inline_fallback and normalized_platform == "instagram")
-        if use_async_catalog_kickoff:
+        if payload.apply_run_id is not None:
+            if not requires_apply_confirmation:
+                raise ValueError("apply_run_id is only supported for Instagram 2025 backfill apply.")
+            apply_run_id = str(payload.apply_run_id)
+            required_confirmation = _instagram_2025_backfill_apply_confirmation(apply_run_id)
+            if str(payload.operator_confirmation or "").strip() != required_confirmation:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "INSTAGRAM_2025_BACKFILL_APPLY_CONFIRMATION_REQUIRED",
+                        "message": "Confirm Live APPLY before catalog jobs are created.",
+                        "run_id": apply_run_id,
+                        "required_confirmation": required_confirmation,
+                    },
+                )
+            result = {
+                "run_id": apply_run_id,
+                "status": "queued",
+                "platform": normalized_platform,
+                "account_handle": account_handle,
+                "selected_tasks": normalized_selected_tasks,
+                "effective_selected_tasks": normalized_selected_tasks,
+                "catalog_run_id": apply_run_id,
+                "comments_run_id": None,
+                "catalog_status": "queued",
+                "comments_status": None,
+                "catalog_action": "backfill",
+                "catalog_action_scope": payload.backfill_scope,
+                "launch_state": "finalizing",
+                "launch_task_resolution_pending": True,
+                "requires_apply_confirmation": False,
+                "apply_required": False,
+                "apply_run_id": apply_run_id,
+                "enable_cap4_canary": bool(payload.enable_cap4_canary),
+                "runbook_state": {
+                    "phase": "live_apply",
+                    "state": "applied",
+                    "mandatory": True,
+                    "current_comments_cap": 2,
+                    "speed_canary_optional": True,
+                    "speed_canary_cap": 4,
+                    "minimum_completed_comments_jobs": 25,
+                    "message": "Live APPLY accepted at cap 2. Catalog jobs can now be finalized.",
+                },
+            }
+            _queue_catalog_backfill_finalize_task(
+                background_tasks=background_tasks,
+                platform=platform,
+                account_handle=account_handle,
+                run_id=apply_run_id,
+                source_scope=payload.source_scope,
+                date_start=date_start,
+                date_end=date_end,
+                initiated_by=(user or {}).get("email"),
+                allow_local_dev_inline_bypass=used_inline_fallback,
+                execution_preference=payload.execution_preference,
+                selected_tasks=normalized_selected_tasks,
+                details_refresh_worker_count=payload.detail_worker_count,
+                comments_worker_count=payload.comments_worker_count,
+                comments_enable_media_followups=payload.comments_enable_media_followups,
+                launch_group_id=None,
+                force_catalog_rediscovery=payload.force_catalog_rediscovery,
+                enable_cap4_canary=payload.enable_cap4_canary,
+            )
+        elif use_async_catalog_kickoff:
             result = await run_in_threadpool(
                 begin_social_account_catalog_backfill_launch,
                 platform=platform,
@@ -5755,25 +6196,37 @@ async def post_social_account_catalog_backfill_route(
                 comments_worker_count=payload.comments_worker_count,
                 comments_enable_media_followups=payload.comments_enable_media_followups,
                 force_catalog_rediscovery=payload.force_catalog_rediscovery,
+                enable_cap4_canary=payload.enable_cap4_canary,
             )
-            _queue_catalog_backfill_finalize_task(
-                background_tasks=background_tasks,
-                platform=platform,
-                account_handle=account_handle,
-                run_id=str(result.get("run_id") or ""),
-                source_scope=payload.source_scope,
-                date_start=date_start,
-                date_end=date_end,
-                initiated_by=(user or {}).get("email"),
-                allow_local_dev_inline_bypass=used_inline_fallback,
-                execution_preference=payload.execution_preference,
-                selected_tasks=normalized_selected_tasks,
-                details_refresh_worker_count=payload.detail_worker_count,
-                comments_worker_count=payload.comments_worker_count,
-                comments_enable_media_followups=payload.comments_enable_media_followups,
-                launch_group_id=str(result.get("launch_group_id") or ""),
-                force_catalog_rediscovery=payload.force_catalog_rediscovery,
-            )
+            if requires_apply_confirmation:
+                result = _attach_instagram_apply_metadata(result)
+                apply_run_id = str(result.get("apply_run_id") or "").strip()
+                if apply_run_id:
+                    await run_in_threadpool(
+                        _merge_catalog_run_config,
+                        run_id=apply_run_id,
+                        metadata_updates=_instagram_2025_backfill_apply_pending_metadata(apply_run_id),
+                    )
+            else:
+                _queue_catalog_backfill_finalize_task(
+                    background_tasks=background_tasks,
+                    platform=platform,
+                    account_handle=account_handle,
+                    run_id=str(result.get("run_id") or ""),
+                    source_scope=payload.source_scope,
+                    date_start=date_start,
+                    date_end=date_end,
+                    initiated_by=(user or {}).get("email"),
+                    allow_local_dev_inline_bypass=used_inline_fallback,
+                    execution_preference=payload.execution_preference,
+                    selected_tasks=normalized_selected_tasks,
+                    details_refresh_worker_count=payload.detail_worker_count,
+                    comments_worker_count=payload.comments_worker_count,
+                    comments_enable_media_followups=payload.comments_enable_media_followups,
+                    launch_group_id=str(result.get("launch_group_id") or ""),
+                    force_catalog_rediscovery=payload.force_catalog_rediscovery,
+                    enable_cap4_canary=payload.enable_cap4_canary,
+                )
         else:
             result = await run_in_threadpool(
                 launch_social_account_catalog_backfill,
@@ -5791,6 +6244,7 @@ async def post_social_account_catalog_backfill_route(
                 comments_worker_count=payload.comments_worker_count,
                 comments_enable_media_followups=payload.comments_enable_media_followups,
                 force_catalog_rediscovery=payload.force_catalog_rediscovery,
+                enable_cap4_canary=payload.enable_cap4_canary,
             )
         _clear_account_profile_caches()
     except SocialIngestConflictError as exc:
@@ -6162,6 +6616,12 @@ def _cookie_health_auth_probe_metadata(payload: Mapping[str, Any]) -> dict[str, 
     }
 
 
+def _instagram_comments_auth_probe_is_rate_limited(payload: Mapping[str, Any]) -> bool:
+    reason = str(payload.get("reason") or payload.get("comments_auth_blocker") or "").strip().lower()
+    status = str(payload.get("status") or payload.get("result") or "").strip().lower()
+    return bool(payload.get("rate_limited")) or reason in {"http_429", "rate_limited"} or "429" in reason or status == "rate_limited"
+
+
 @router.get("/profiles/{platform}/{account_handle}/cookies/health")
 def get_cookie_health_route(
     platform: str,
@@ -6228,7 +6688,9 @@ def get_cookie_health_route(
             auth_probe_blocked = True
             auth_probe_reason = posts_reason or "posts_auth_blocked"
     if comments_auth and str(platform or "").strip().lower() == "instagram":
-        comments_probe = _cookie_health_auth_probe_metadata(probe_modal_instagram_comments_auth_health(account_handle))
+        comments_probe = _cookie_health_auth_probe_metadata(
+            probe_modal_instagram_comments_auth_health(account_handle, strict_authenticated=True)
+        )
         comments_cookie_fingerprint = str(comments_probe.get("cookie_fingerprint") or "").strip() or None
         comments_status = (
             str(
@@ -6240,9 +6702,18 @@ def get_cookie_health_route(
             .lower()
         )
         comments_reason = str(comments_probe.get("reason") or "").strip() or None
+        comments_public_ready = bool(comments_probe.get("public_ready")) or comments_status == "public"
+        comments_authenticated_ready = bool(comments_probe.get("authenticated_ready")) or (
+            comments_status == "valid" and not bool(comments_probe.get("auth_probe_skipped"))
+        )
+        comments_rate_limited = _instagram_comments_auth_probe_is_rate_limited(comments_probe)
         comments_category = (
             "ready"
-            if bool(comments_probe.get("ready")) or comments_status == "valid"
+            if comments_authenticated_ready
+            else "rate_limited"
+            if comments_rate_limited
+            else "public"
+            if comments_public_ready
             else "transport"
             if comments_status == "transport_blocked"
             else "auth"
@@ -6255,7 +6726,20 @@ def get_cookie_health_route(
             "platform": "instagram",
             "account_handle": str(comments_probe.get("account_handle") or account_handle).strip() or account_handle,
             "shortcode": str(comments_probe.get("shortcode") or "").strip() or None,
-            "ready": bool(comments_probe.get("ready")),
+            "ready": comments_authenticated_ready,
+            "public_ready": comments_public_ready,
+            "authenticated_ready": comments_authenticated_ready,
+            "auth_probe_skipped": bool(comments_probe.get("auth_probe_skipped")),
+            "auth_required_for_hidden_comments": bool(
+                comments_probe.get("auth_required_for_hidden_comments")
+            )
+            or not comments_authenticated_ready,
+            "comments_auth_blocker": str(comments_probe.get("comments_auth_blocker") or "").strip() or None,
+            "operator_action": str(comments_probe.get("operator_action") or "").strip() or None,
+            "rate_limited": comments_rate_limited,
+            "cooldown_recommended_seconds": comments_probe.get("cooldown_recommended_seconds"),
+            "cache_hit": bool(comments_probe.get("cache_hit")),
+            "cache_ttl_seconds": comments_probe.get("cache_ttl_seconds"),
             "status": comments_status or None,
             "category": comments_category,
             "reason": comments_reason,
@@ -6274,9 +6758,14 @@ def get_cookie_health_route(
             "comments_auth_health": comments_auth_health,
             "comments_auth_probe": comments_probe,
         }
-        if comments_category == "auth":
+        if comments_category in {"auth", "public", "rate_limited"}:
             auth_probe_blocked = True
-            auth_probe_reason = comments_reason or "comments_auth_blocked"
+            auth_probe_reason = (
+                "comments_auth_rate_limited"
+                if comments_category == "rate_limited"
+                else comments_reason
+                or ("comments_auth_public_only" if comments_category == "public" else "comments_auth_blocked")
+            )
     if auth_probe_blocked:
         health = {
             **health,
@@ -6712,6 +7201,109 @@ def cancel_social_ingest_stuck_jobs(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to cancel stuck social ingest jobs")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/ingest/media-mirror/recover-stale")
+def recover_stale_social_media_mirror_jobs(
+    payload: RecoverStaleMediaMirrorJobsRequest,
+    user: InternalAdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import (
+        dispatch_due_social_jobs,
+        recover_stale_running_jobs,
+    )
+
+    confirm_required = "RECOVER MEDIA MIRROR JOBS"
+    if payload.confirm_recovery != confirm_required:
+        raise HTTPException(
+            status_code=400,
+            detail=f"confirm_recovery must equal {confirm_required!r}",
+        )
+
+    try:
+        stages = (
+            ["media_mirror", "comment_media_mirror"]
+            if payload.stage == "all"
+            else [payload.stage]
+        )
+        recovered_by_stage: dict[str, list[str]] = {}
+        recovered_job_ids: list[str] = []
+        for stage in stages:
+            recovered = recover_stale_running_jobs(
+                run_id=str(payload.run_id),
+                stage=stage,
+                platform="instagram",
+                stale_after_seconds=payload.stale_after_seconds,
+                limit=payload.recover_limit,
+            )
+            stage_job_ids = [
+                str(row.get("id") or "").strip()
+                for row in recovered
+                if str(row.get("id") or "").strip()
+            ]
+            recovered_by_stage[stage] = stage_job_ids
+            recovered_job_ids.extend(stage_job_ids)
+
+        dispatch = (
+            {"dispatched_job_ids": [], "dispatch_attempts": 0, "skipped": True}
+            if payload.skip_dispatch
+            else dispatch_due_social_jobs(run_id=str(payload.run_id), limit=payload.dispatch_limit)
+        )
+        return {
+            "ok": True,
+            "run_id": str(payload.run_id),
+            "stage": payload.stage,
+            "stages": stages,
+            "stale_after_seconds": payload.stale_after_seconds,
+            "recover_limit": payload.recover_limit,
+            "dispatch_limit": payload.dispatch_limit,
+            "recovered_job_ids": recovered_job_ids,
+            "recovered_by_stage": recovered_by_stage,
+            "recovered_count": len(recovered_job_ids),
+            "dispatch": dispatch,
+            "initiated_by": (user or {}).get("email"),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to recover stale social media mirror jobs")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/ingest/media-mirror/drain-account")
+def drain_social_media_mirror_account_jobs(
+    payload: DrainMediaMirrorAccountRequest,
+    user: InternalAdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import drain_media_mirror_account_jobs
+
+    confirm_required = "DRAIN BRAVO MEDIA"
+    if payload.confirm_drain != confirm_required:
+        raise HTTPException(
+            status_code=400,
+            detail=f"confirm_drain must equal {confirm_required!r}",
+        )
+    normalized_account = payload.account_handle.strip().lower().lstrip("@")
+    if not normalized_account:
+        raise HTTPException(status_code=400, detail="account_handle is required")
+
+    try:
+        result = drain_media_mirror_account_jobs(
+            run_id=str(payload.run_id),
+            account_handle=normalized_account,
+            stage=payload.stage,
+            stale_after_seconds=payload.stale_after_seconds,
+            recover_limit=payload.recover_limit,
+            dispatch_limit=payload.dispatch_limit,
+            dry_run=payload.dry_run,
+        )
+        result["initiated_by"] = (user or {}).get("email")
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to drain social media mirror account jobs")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 

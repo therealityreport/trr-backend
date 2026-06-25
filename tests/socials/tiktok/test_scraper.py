@@ -157,6 +157,30 @@ def test_ytdlp_explicit_hint_caps_playlist_when_no_date_range(monkeypatch) -> No
     assert captured_cmd[captured_cmd.index("--playlist-end") + 1] == "30"
 
 
+def test_ytdlp_full_history_omits_playlist_cap_without_explicit_hint(monkeypatch) -> None:
+    from trr_backend.socials.tiktok import scraper as scraper_module
+
+    scraper = TikTokScraper(cookies={"sessionid": "cookie"})
+    captured_cmd: list[str] = []
+
+    def _fake_run(cmd, **_kwargs):
+        captured_cmd.extend(cmd)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(scraper, "_has_ytdlp", lambda: True)
+    monkeypatch.setattr(scraper, "_find_ytdlp_cookie_file", lambda: None)
+    monkeypatch.setattr(scraper_module.subprocess, "run", _fake_run)
+
+    scraper._scrape_via_ytdlp(  # noqa: SLF001
+        TikTokScrapeConfig(
+            username="bravotv",
+            scrape_mode="ytdlp",
+        )
+    )
+
+    assert "--playlist-end" not in captured_cmd
+
+
 def test_browser_intercept_zero_posts_classifies_target_drift() -> None:
     scraper = TikTokScraper(cookies={"sessionid": "cookie"})
 

@@ -1006,7 +1006,7 @@ class TikTokScraper:
 
         # Estimate how many videos to fetch based on date range.
         # @bravotv posts ~16 videos/day across all shows; use 22/day for buffer.
-        max_videos = 500
+        max_videos: int | None = None
         start_dt = _coerce_utc_datetime(config.date_start)
         end_dt = _coerce_utc_datetime(config.date_end)
         if start_dt:
@@ -1025,7 +1025,7 @@ class TikTokScraper:
         if max_videos_hint is not None and max_videos_hint > 0:
             if start_dt is None and max_posts_hint is not None:
                 max_videos = min(25_000, max_videos_hint)
-            elif max_videos_hint > max_videos:
+            elif max_videos is None or max_videos_hint > max_videos:
                 max_videos = min(25_000, max_videos_hint)
 
         url = f"https://www.tiktok.com/@{config.username}"
@@ -1033,9 +1033,9 @@ class TikTokScraper:
             "yt-dlp",
             "--flat-playlist",
             "--dump-json",
-            "--playlist-end",
-            str(max_videos),
         ]
+        if max_videos is not None:
+            cmd.extend(["--playlist-end", str(max_videos)])
 
         # Pass cookies if a Netscape-format file exists
         cookie_file = self._find_ytdlp_cookie_file()
@@ -1046,13 +1046,14 @@ class TikTokScraper:
 
         cmd.append(url)
 
-        logger.info(f"yt-dlp bulk listing @{config.username} (up to {max_videos} videos)...")
+        listing_scope = f"up to {max_videos} videos" if max_videos is not None else "entire playlist"
+        logger.info("yt-dlp bulk listing @%s (%s)...", config.username, listing_scope)
         try:
             proc = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=max(120, max_videos // 3),
+                timeout=max(120, max_videos // 3) if max_videos is not None else 900,
             )
         except subprocess.TimeoutExpired:
             logger.warning("yt-dlp bulk listing timed out")

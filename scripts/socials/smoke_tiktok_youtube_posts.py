@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""List or run TikTok/YouTube posts smoke checks.
+"""List or run TikTok/Twitter/YouTube posts smoke checks.
 
 Dry-run is safe for local tests: it prints the commands without importing
 backend modules, opening network connections, or requiring credentials.
@@ -17,7 +17,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
-SMOKE_KEYS = ("remote-auth-tiktok", "tiktok-posts", "youtube-posts")
+SMOKE_KEYS = ("remote-auth-tiktok", "tiktok-posts", "twitter-posts", "youtube-posts")
 
 
 @dataclass(frozen=True)
@@ -51,8 +51,25 @@ def _resolve_youtube_window(parser: argparse.ArgumentParser, args: argparse.Name
     return start.isoformat(), end.isoformat()
 
 
+def _resolve_twitter_window(parser: argparse.ArgumentParser, args: argparse.Namespace) -> tuple[str, str]:
+    start = (
+        _parse_iso_date(parser, args.twitter_start, option="--twitter-start")
+        if args.twitter_start
+        else None
+    )
+    end = _parse_iso_date(parser, args.twitter_end, option="--twitter-end") if args.twitter_end else None
+    if start is None and end is None:
+        return _resolve_youtube_window(parser, args)
+    if start is None or end is None:
+        parser.error("--twitter-start and --twitter-end must be supplied together")
+    if start > end:
+        parser.error("--twitter-start must be on or before --twitter-end")
+    return start.isoformat(), end.isoformat()
+
+
 def build_smoke_commands(args: argparse.Namespace, parser: argparse.ArgumentParser) -> list[SmokeCommand]:
     youtube_start, youtube_end = _resolve_youtube_window(parser, args)
+    twitter_start, twitter_end = _resolve_twitter_window(parser, args)
     youtube_keywords_arg = args.youtube_keyword or ["Bravo"]
     youtube_keywords = tuple(keyword.strip() for keyword in youtube_keywords_arg if keyword.strip())
     if not youtube_keywords:
@@ -71,6 +88,18 @@ def build_smoke_commands(args: argparse.Namespace, parser: argparse.ArgumentPars
         args.tiktok_account.strip().lstrip("@"),
         "--max-pages",
         str(args.tiktok_max_pages),
+    )
+    twitter = (
+        "-m",
+        "scripts.socials.twitter.scrape",
+        "--query",
+        args.twitter_query.strip() or f"from:{args.twitter_account.strip().lstrip('@')}",
+        "--start",
+        twitter_start,
+        "--end",
+        twitter_end,
+        "--max-pages",
+        str(args.twitter_max_pages),
     )
     youtube = (
         "-m",
@@ -104,6 +133,12 @@ def build_smoke_commands(args: argparse.Namespace, parser: argparse.ArgumentPars
             run_argv=(sys.executable, *tiktok),
         ),
         SmokeCommand(
+            key="twitter-posts",
+            description="Run a bounded Twitter/X account posts search.",
+            display_argv=("python", *twitter),
+            run_argv=(sys.executable, *twitter),
+        ),
+        SmokeCommand(
             key="youtube-posts",
             description="Run a bounded YouTube channel posts scrape without comments mode.",
             display_argv=("python", *youtube),
@@ -121,7 +156,7 @@ def _selected_commands(commands: Sequence[SmokeCommand], selected_keys: Sequence
 
 def _print_commands(commands: Sequence[SmokeCommand], *, dry_run: bool) -> None:
     label = "DRY RUN" if dry_run else "RUN"
-    print(f"TikTok/YouTube posts smoke checks ({label})")
+    print(f"TikTok/Twitter/YouTube posts smoke checks ({label})")
     print(f"Working directory: {BACKEND_ROOT}")
     for index, command in enumerate(commands, start=1):
         print()
@@ -142,7 +177,7 @@ def _run_commands(commands: Sequence[SmokeCommand]) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="List or run TikTok and YouTube posts smoke checks.",
+        description="List or run TikTok, Twitter/X, and YouTube posts smoke checks.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     mode = parser.add_mutually_exclusive_group()
@@ -156,6 +191,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--tiktok-account", default="bravotv", help="TikTok account handle for the smoke job.")
     parser.add_argument("--tiktok-max-pages", type=int, default=1, help="Max TikTok pages for the smoke job.")
+    parser.add_argument("--twitter-account", default="BravoTV", help="Twitter/X account handle for the posts search.")
+    parser.add_argument(
+        "--twitter-query",
+        default="from:BravoTV",
+        help="Twitter/X search query for the posts smoke.",
+    )
+    parser.add_argument("--twitter-start", help="Twitter/X scrape start date, YYYY-MM-DD. Defaults to YouTube window.")
+    parser.add_argument("--twitter-end", help="Twitter/X scrape end date, YYYY-MM-DD. Defaults to YouTube window.")
+    parser.add_argument("--twitter-max-pages", type=int, default=2, help="Max Twitter/X search pages.")
     parser.add_argument("--youtube-channel", default="bravo", help="YouTube channel handle for the smoke scrape.")
     parser.add_argument(
         "--youtube-keyword",

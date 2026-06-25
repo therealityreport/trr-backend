@@ -9,6 +9,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from trr_backend.db.admin import create_supabase_admin_client
+from trr_backend.integrations.picdetective import ReverseImageCandidate
+from trr_backend.job_plane import execution_backend_canonical
 from trr_backend.media.bravotv.get_images_pipeline import (
     _normalize_sources,
     _selected_source_families,
@@ -16,9 +19,6 @@ from trr_backend.media.bravotv.get_images_pipeline import (
     run_get_images_pipeline,
 )
 from trr_backend.media.bravotv.run_review import build_run_review_from_dir
-from trr_backend.db.admin import create_supabase_admin_client
-from trr_backend.integrations.picdetective import ReverseImageCandidate
-from trr_backend.job_plane import execution_backend_canonical
 from trr_backend.media.getty_replacement import (
     resolve_best_public_replacement,
     search_public_replacement_candidates,
@@ -308,14 +308,7 @@ def _record_reused_asset_run_attribution(db: Any, *, asset_id: str, asset_payloa
     if not run_id:
         return
     try:
-        response = (
-            db.schema("core")
-            .table("media_assets")
-            .select("metadata")
-            .eq("id", asset_id)
-            .limit(1)
-            .execute()
-        )
+        response = db.schema("core").table("media_assets").select("metadata").eq("id", asset_id).limit(1).execute()
         rows = response.data if isinstance(getattr(response, "data", None), list) else []
         existing_metadata = _safe_json((rows[0] or {}).get("metadata")) if rows else {}
         updated_metadata = _add_run_history_to_metadata(existing_metadata, run_id)
@@ -372,6 +365,10 @@ def _canonical_asset_identity(record: dict[str, Any]) -> tuple[str, str | None, 
     nbcumv_source_id = str(nbcumv.get("source_id") or "").strip()
     if nbcumv_source_id:
         return "nbcumv", nbcumv_source_id, str(nbcumv.get("source_url") or "").strip() or None
+    peacock = _safe_json(per_source.get("peacock"))
+    peacock_source_id = str(peacock.get("source_id") or "").strip()
+    if peacock_source_id:
+        return "peacock", peacock_source_id, str(peacock.get("source_url") or "").strip() or None
     bravo = _safe_json(per_source.get("bravo"))
     bravo_source_id = str(bravo.get("source_id") or "").strip()
     return (
@@ -404,11 +401,15 @@ def _build_asset_payload(record: dict[str, Any], *, run_id: str) -> tuple[dict[s
         }
     )
     getty_source = _safe_json(_safe_json(record.get("per_source")).get("getty"))
+    peacock_source = _safe_json(_safe_json(record.get("per_source")).get("peacock"))
+    nbcumv_source = _safe_json(_safe_json(record.get("per_source")).get("nbcumv"))
+    bravo_source = _safe_json(_safe_json(record.get("per_source")).get("bravo"))
     metadata = {
         "run_id": run_id,
         "bridge_strategy": record.get("bridge_strategy"),
         "match_confidence": record.get("match_confidence"),
         "per_source": record.get("per_source"),
+        "source_provenance": record.get("source_provenance"),
         "persons_pictured": record.get("persons_pictured") or [],
         "keywords": record.get("keywords") or [],
         "photographer": record.get("photographer"),
@@ -421,7 +422,9 @@ def _build_asset_payload(record: dict[str, Any], *, run_id: str) -> tuple[dict[s
         "google_reverse_image_search_url": acquisition.get("google_reverse_image_search_url"),
         "source_page_url": acquisition.get("source_page_url")
         or getty_source.get("source_page_url")
-        or _safe_json(_safe_json(record.get("per_source")).get("bravo")).get("source_page_url"),
+        or peacock_source.get("source_page_url")
+        or bravo_source.get("source_page_url")
+        or nbcumv_source.get("source_page_url"),
     }
     getty_metadata = {
         "getty_original_image_url": getty_source.get("getty_original_image_url")
@@ -435,14 +438,21 @@ def _build_asset_payload(record: dict[str, Any], *, run_id: str) -> tuple[dict[s
         "hosted_thumb_sha256": acquisition.get("hosted_thumb_sha256"),
     }
     metadata.update({key: value for key, value in getty_metadata.items() if value is not None})
+    peacock_metadata = {
+        "peacock_original_image_url": peacock_source.get("peacock_original_image_url")
+        or peacock_source.get("source_url"),
+        "peacock_preview_image_url": peacock_source.get("preview_image_url"),
+        "peacock_source_page_url": peacock_source.get("source_page_url"),
+    }
+    metadata.update({key: value for key, value in peacock_metadata.items() if value is not None})
     payload = {
         "id": str(asset_id),
         "media_type": "image",
         "source": source,
         "source_asset_id": source_asset_id,
         "source_url": source_url,
-        "width": record.get("width") or _safe_json(_safe_json(record.get("per_source")).get("getty")).get("width"),
-        "height": record.get("height") or _safe_json(_safe_json(record.get("per_source")).get("getty")).get("height"),
+        "width": record.get("width") or getty_source.get("width") or peacock_source.get("width"),
+        "height": record.get("height") or getty_source.get("height") or peacock_source.get("height"),
         "caption": record.get("caption"),
         "alt_text": record.get("caption"),
         "metadata": {key: value for key, value in metadata.items() if value is not None},

@@ -68,7 +68,13 @@ def test_get_queue_status_uses_cache_ttl_and_skips_recent_failures_when_disabled
         del params
         normalized = " ".join(sql.split()).lower()
         query_calls.append(normalized)
+        if "with media_jobs as" in normalized:
+            return []
+        if "queued_age_seconds" in normalized:
+            return []
         if "post_persist_truthfulness" in normalized:
+            return []
+        if "j.claimed_at" in normalized and "%s * interval '1 second'" in normalized:
             return []
         return [
             {"platform": "instagram", "job_type": "posts", "status": "running", "total": 2},
@@ -93,10 +99,15 @@ def test_get_queue_status_uses_cache_ttl_and_skips_recent_failures_when_disabled
     )
 
     assert payload["queue"]["by_status"]["running"] == 2
+    assert payload["queue"]["media_stale_claims"]["total"] == 0
+    assert payload["queue"]["media_runs"] == []
     assert payload["queue"]["recent_failures"] == []
     assert payload["queue"]["silent_drop_warnings"] == []
-    assert len(query_calls) == 2
-    assert "post_persist_truthfulness" in query_calls[1]
+    assert len(query_calls) == 5
+    assert "j.claimed_at" in query_calls[1]
+    assert "with media_jobs as" in query_calls[2]
+    assert "queued_age_seconds" in query_calls[3]
+    assert "post_persist_truthfulness" in query_calls[4]
     assert social_repo.SOCIAL_QUEUE_STATUS_CACHE_TTL_SECONDS_DEFAULT == 20
 
 
@@ -110,7 +121,14 @@ def test_get_queue_status_fresh_true_bypasses_cache(monkeypatch: pytest.MonkeyPa
     def _fake_fetch_all_with_cursor(_cur: object, sql: str, params: list[object] | None = None):
         del params
         query_counter["count"] += 1
-        if "post_persist_truthfulness" in " ".join(sql.split()).lower():
+        normalized = " ".join(sql.split()).lower()
+        if "with media_jobs as" in normalized:
+            return []
+        if "queued_age_seconds" in normalized:
+            return []
+        if "post_persist_truthfulness" in normalized:
+            return []
+        if "j.claimed_at" in normalized and "%s * interval '1 second'" in normalized:
             return []
         return [{"platform": "instagram", "job_type": "posts", "status": "running", "total": 1}]
 
@@ -186,7 +204,7 @@ def test_get_queue_status_fresh_true_bypasses_cache(monkeypatch: pytest.MonkeyPa
 
     assert cached["queue"]["by_status"]["running"] == 9
     assert count_after_cached == 0
-    assert query_counter["count"] == 2
+    assert query_counter["count"] == 5
     assert fresh["queue"]["by_status"]["running"] == 1
 
 
@@ -203,7 +221,13 @@ def test_get_queue_status_summary_only_skips_expensive_side_effects(
         del params
         normalized_sql = " ".join(sql.split()).lower()
         query_calls.append(normalized_sql)
+        if "with media_jobs as" in normalized_sql:
+            return []
+        if "queued_age_seconds" in normalized_sql:
+            return []
         if "post_persist_truthfulness" in normalized_sql:
+            return []
+        if "j.claimed_at" in normalized_sql and "%s * interval '1 second'" in normalized_sql:
             return []
         if "from social.scrape_jobs" in normalized_sql and "error_message" in normalized_sql:
             return [
@@ -254,7 +278,159 @@ def test_get_queue_status_summary_only_skips_expensive_side_effects(
     assert payload["queue"]["silent_drop_warnings"] == []
     assert payload["queue"]["stuck_jobs"] == []
     assert payload["queue"]["running_jobs"] == []
-    assert len(query_calls) == 3
+    assert payload["queue"]["media_queued_jobs"] == []
+    assert len(query_calls) == 6
+
+
+def test_get_queue_status_summary_includes_media_stale_claims(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Cursor:
+        def execute(self, _sql: str, _params: list[object] | None = None) -> None:
+            return None
+
+    def _fake_fetch_all_with_cursor(_cur: object, sql: str, params: list[object] | None = None):
+        normalized_sql = " ".join(sql.split()).lower()
+        if "with media_jobs as" in normalized_sql:
+            return []
+        if "queued_age_seconds" in normalized_sql:
+            return []
+        if "j.claimed_at" in normalized_sql and "%s * interval '1 second'" in normalized_sql:
+            assert params == [["media_mirror", "comment_media_mirror"], 1200]
+            return [
+                {"platform": "instagram", "stage": "media_mirror", "total": 2},
+                {"platform": "instagram", "stage": "comment_media_mirror", "total": 1},
+            ]
+        if "post_persist_truthfulness" in normalized_sql:
+            return []
+        return [{"platform": "instagram", "job_type": "posts", "status": "running", "total": 1}]
+
+    monkeypatch.setenv("SOCIAL_QUEUE_STATUS_CACHE_TTL_SECONDS", "0")
+    monkeypatch.setenv("SOCIAL_MEDIA_QUEUE_STALE_AFTER_SECONDS", "1200")
+    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name, **_kwargs: True)
+    monkeypatch.setattr(social_repo, "get_worker_health", lambda: {"healthy": True, "healthy_workers": 1})
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None, **_kwargs: nullcontext(_Cursor()))
+    monkeypatch.setattr(social_repo.pg, "fetch_all_with_cursor", _fake_fetch_all_with_cursor)
+    monkeypatch.setattr(social_repo.pg, "fetch_all", lambda *_args, **_kwargs: [])
+
+    payload = social_repo.get_queue_status(
+        include_recent_failures=False,
+        include_stuck_jobs=False,
+        include_runs_summary=False,
+        summary_only=True,
+    )
+
+    assert payload["queue"]["media_stale_claims"] == {
+        "total": 3,
+        "by_stage": {"media_mirror": 2, "comment_media_mirror": 1},
+        "by_platform": {"instagram": 3},
+        "stale_after_seconds": 1200,
+    }
+
+
+def test_get_queue_status_summary_includes_recent_media_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Cursor:
+        def execute(self, _sql: str, _params: list[object] | None = None) -> None:
+            return None
+
+    def _fake_fetch_all_with_cursor(_cur: object, sql: str, params: list[object] | None = None):
+        normalized_sql = " ".join(sql.split()).lower()
+        if "with media_jobs as" in normalized_sql:
+            assert params is not None
+            assert params[0] == ["media_mirror", "comment_media_mirror"]
+            assert set(params[1]) == set(social_repo._RUN_PROGRESS_ACTIVE_JOB_STATUSES)
+            assert params[2] == 900
+            return [
+                {
+                    "run_id": "77f85ad9-0b32-4607-8ff4-999261bab84c",
+                    "run_status": "running",
+                    "stage": "media_mirror",
+                    "job_status": "queued",
+                    "total": 3,
+                    "oldest_job_created_at": datetime(2026, 6, 22, 13, 0, tzinfo=UTC),
+                    "latest_job_at": datetime(2026, 6, 22, 14, 30, tzinfo=UTC),
+                    "has_stale_jobs": True,
+                },
+                {
+                    "run_id": "77f85ad9-0b32-4607-8ff4-999261bab84c",
+                    "run_status": "running",
+                    "stage": "comment_media_mirror",
+                    "job_status": "running",
+                    "total": 2,
+                    "oldest_job_created_at": datetime(2026, 6, 22, 13, 5, tzinfo=UTC),
+                    "latest_job_at": datetime(2026, 6, 22, 14, 35, tzinfo=UTC),
+                    "has_stale_jobs": True,
+                },
+            ]
+        if "queued_age_seconds" in normalized_sql:
+            assert params == [["media_mirror", "comment_media_mirror"]]
+            return [
+                {
+                    "id": "job-oldest",
+                    "run_id": "77f85ad9-0b32-4607-8ff4-999261bab84c",
+                    "platform": "instagram",
+                    "status": "queued",
+                    "stage": "media_mirror",
+                    "account_handle": "bravotv",
+                    "source_id": "DGk_hLXhy56",
+                    "post_id": "post-1",
+                    "created_at": datetime(2026, 6, 22, 13, 0, tzinfo=UTC),
+                    "available_at": datetime(2026, 6, 22, 13, 0, tzinfo=UTC),
+                    "queued_age_seconds": 3600,
+                    "runtime_version": {"modal_function": "run_social_media_job"},
+                }
+            ]
+        if "j.claimed_at" in normalized_sql and "%s * interval '1 second'" in normalized_sql:
+            return []
+        if "post_persist_truthfulness" in normalized_sql:
+            return []
+        return [{"platform": "instagram", "job_type": "posts", "status": "running", "total": 1}]
+
+    monkeypatch.setenv("SOCIAL_QUEUE_STATUS_CACHE_TTL_SECONDS", "0")
+    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name, **_kwargs: True)
+    monkeypatch.setattr(social_repo, "get_worker_health", lambda: {"healthy": True, "healthy_workers": 1})
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None, **_kwargs: nullcontext(_Cursor()))
+    monkeypatch.setattr(social_repo.pg, "fetch_all_with_cursor", _fake_fetch_all_with_cursor)
+    monkeypatch.setattr(social_repo.pg, "fetch_all", lambda *_args, **_kwargs: [])
+
+    payload = social_repo.get_queue_status(
+        include_recent_failures=False,
+        include_stuck_jobs=False,
+        include_runs_summary=False,
+        summary_only=True,
+    )
+
+    assert payload["queue"]["media_runs"] == [
+        {
+            "run_id": "77f85ad9-0b32-4607-8ff4-999261bab84c",
+            "status": "running",
+            "oldest_job_created_at": "2026-06-22T13:00:00+00:00",
+            "latest_job_at": "2026-06-22T14:35:00+00:00",
+            "active": 5,
+            "stale": True,
+            "stages": {
+                "media_mirror": {"queued": 3},
+                "comment_media_mirror": {"running": 2},
+            },
+        }
+    ]
+    assert payload["queue"]["media_queued_jobs"] == [
+        {
+            "id": "job-oldest",
+            "run_id": "77f85ad9-0b32-4607-8ff4-999261bab84c",
+            "platform": "instagram",
+            "status": "queued",
+            "stage": "media_mirror",
+            "account_handle": "bravotv",
+            "source_id": "DGk_hLXhy56",
+            "post_id": "post-1",
+            "created_at": "2026-06-22T13:00:00+00:00",
+            "available_at": "2026-06-22T13:00:00+00:00",
+            "queued_age_seconds": 3600,
+            "stale": True,
+            "runtime_version": {"modal_function": "run_social_media_job"},
+        }
+    ]
 
 
 def test_get_queue_status_returns_stale_last_good_on_query_failure(monkeypatch: pytest.MonkeyPatch) -> None:

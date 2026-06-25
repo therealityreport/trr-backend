@@ -12,6 +12,7 @@ def test_stage_claim_candidates_do_not_let_comments_workers_borrow_posts() -> No
     assert repo._stage_claim_candidates("comments_scrapling") == ("comments_scrapling",)  # noqa: SLF001
     assert repo._stage_claim_candidates("shared_account_posts") == (  # noqa: SLF001
         "shared_account_posts",
+        "tiktok_posts_scrapling",
         "threads_posts_scrapling",
     )
 
@@ -79,3 +80,28 @@ def test_comments_scrapling_completion_uses_flattened_reply_count() -> None:
     )
 
     assert comments_job_runner._comments_scrape_is_complete(result=result, max_comments_per_post=0) is True  # noqa: SLF001
+
+
+def test_inline_fallback_followup_worker_id_keeps_modal_followups_queue_owned() -> None:
+    # Regression guard for the preclaim fix: a Modal-dispatched discovery worker must
+    # NOT preclaim the follow-up posts job. Returning None here is exactly what makes
+    # _create_job(worker_id=None, preclaim=False), leaving the job queue-owned so Modal
+    # dispatch can assign a fresh container instead of it being phantom-claimed.
+    assert (
+        repo._inline_fallback_followup_worker_id(  # noqa: SLF001
+            {"allow_local_dev_inline_bypass": True},
+            worker_id="modal:social-posts:modal:2:abc123",
+        )
+        is None
+    )
+    # No local-dev bypass flag → never preclaim, regardless of worker id.
+    assert repo._inline_fallback_followup_worker_id({}, worker_id="local-worker-1") is None  # noqa: SLF001
+    # Local-dev inline bypass with a non-Modal worker → preclaim that worker so a local
+    # inline runner can process the whole pipeline end-to-end without Modal dispatch.
+    assert (
+        repo._inline_fallback_followup_worker_id(  # noqa: SLF001
+            {"allow_local_dev_inline_bypass": True},
+            worker_id="local-worker-1",
+        )
+        == "local-worker-1"
+    )

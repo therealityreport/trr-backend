@@ -147,10 +147,15 @@ def test_advisory_api_pacing_uses_social_control_pool(monkeypatch):
     from trr_backend.socials.instagram.posts_scrapling.fetcher import _try_advisory_lock_pace
 
     calls: list[tuple[str, str]] = []
+    queries: list[str] = []
 
     class FakeCursor:
-        def execute(self, _sql: str, _params: Any = None) -> None:
+        def execute(self, sql: str, _params: Any = None) -> None:
+            queries.append(sql)
             return None
+
+        def fetchone(self) -> list[float]:
+            return [0.0]
 
     @contextmanager
     def fake_db_connection(*, label: str, pool_name: str = "default"):
@@ -170,7 +175,9 @@ def test_advisory_api_pacing_uses_social_control_pool(monkeypatch):
     assert result["acquired"] is True
     assert result["paced"] is True
     assert result["error"] is None
-    assert calls == [("instagram-posts-rate-limit-advisory", "social_control")]
+    assert calls == [("instagram-posts-rate-limit-pace", "social_control")]
+    assert any("social.ig_posts_rate_pace" in query for query in queries)
+    assert not any("pg_advisory_lock" in query for query in queries)
 
 
 def test_file_lock_pacing_reserves_scheduled_starts_without_holding_sleep(monkeypatch, tmp_path):
@@ -211,7 +218,7 @@ def test_file_lock_pacing_reserves_scheduled_starts_without_holding_sleep(monkey
     assert results[2]["lock_held_ms"] < results[2]["scheduled_sleep_ms"]
 
 
-def test_advisory_pacing_releases_lock_before_scheduled_sleep(monkeypatch, tmp_path):
+def test_advisory_pacing_returns_connection_before_scheduled_sleep(monkeypatch, tmp_path):
     import trr_backend.socials.instagram.posts_scrapling.fetcher as fetcher_module
     from trr_backend.db import pg
 
@@ -228,18 +235,24 @@ def test_advisory_pacing_releases_lock_before_scheduled_sleep(monkeypatch, tmp_p
 
     events: list[tuple[str, float, float | None]] = []
     clock = FakeClock()
+    remaining_by_call = [0.0, 0.3]
 
     class FakeCursor:
         def execute(self, sql: str, _params: Any = None) -> None:
-            if "pg_advisory_lock" in sql:
-                events.append(("lock", clock.current, None))
-            if "pg_advisory_unlock" in sql:
-                events.append(("unlock", clock.current, None))
+            assert "social.ig_posts_rate_pace" in sql
+            assert "pg_advisory_lock" not in sql
+
+        def fetchone(self) -> list[float]:
+            return [remaining_by_call.pop(0)]
 
     @contextmanager
     def fake_db_connection(*, label: str, pool_name: str = "default"):
-        assert (label, pool_name) == ("instagram-posts-rate-limit-advisory", "social_control")
-        yield object()
+        assert (label, pool_name) == ("instagram-posts-rate-limit-pace", "social_control")
+        events.append(("connect_enter", clock.current, None))
+        try:
+            yield object()
+        finally:
+            events.append(("connect_exit", clock.current, None))
 
     @contextmanager
     def fake_db_cursor(*, conn: Any = None, label: str = "write-cursor"):
@@ -258,7 +271,13 @@ def test_advisory_pacing_releases_lock_before_scheduled_sleep(monkeypatch, tmp_p
     assert first["acquired"] is True
     assert second["scheduled_sleep_ms"] >= 250
     assert second["lock_held_ms"] < second["scheduled_sleep_ms"]
-    assert [event[0] for event in events] == ["lock", "unlock", "lock", "unlock", "sleep"]
+    assert [event[0] for event in events] == [
+        "connect_enter",
+        "connect_exit",
+        "connect_enter",
+        "connect_exit",
+        "sleep",
+    ]
 
 
 def test_build_graphql_headers():

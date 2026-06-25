@@ -407,6 +407,7 @@ def _verify_remote_auth_command(
     if normalized_account:
         command.extend(["--probe-instagram-posts-auth", normalized_account])
         command.extend(["--probe-instagram-comments-auth", normalized_account])
+        command.append("--strict-instagram-comments-auth")
     if modal_environment:
         command.extend(["--env", modal_environment])
     return command

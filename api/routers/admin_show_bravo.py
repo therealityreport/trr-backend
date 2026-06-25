@@ -2452,7 +2452,6 @@ def _sync_bravo_video_thumbnails(
                             kind="promo",
                             context_section=_BRAVO_VIDEO_THUMBNAIL_CONTEXT_SECTION,
                             context_type=_BRAVO_VIDEO_THUMBNAIL_CONTEXT_TYPE,
-                            source_logo="bravo",
                             asset_name=_BRAVO_VIDEO_THUMBNAIL_ASSET_NAME,
                         )
                     ],

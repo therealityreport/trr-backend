@@ -24,6 +24,7 @@ TARGET_DEPENDENCY_GRAPH: dict[str, list[str]] = {
     "bravo": ["show_core"],
     "cast_profiles": ["show_core"],
     "cast_media": ["cast_profiles"],
+    "official_images": ["bravo", "cast_profiles"],
 }
 
 

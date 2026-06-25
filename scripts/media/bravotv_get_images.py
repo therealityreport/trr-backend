@@ -29,7 +29,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--sources",
         type=str,
         default="all",
-        help="Comma-separated source families. Person mode supports all,getty,imdb,tmdb. Show mode supports all,getty.",
+        help=(
+            "Comma-separated sources. Person mode supports all,getty,nbcumv,bravo,peacock,imdb,tmdb,fandom. "
+            "Show mode supports all,getty,nbcumv,bravo,peacock."
+        ),
     )
     parser.add_argument("--getty-limit", type=int, default=200, help="Max Getty assets to collect.")
     parser.add_argument("--nbcumv-limit", type=int, default=300, help="Max NBCUMV assets to collect.")

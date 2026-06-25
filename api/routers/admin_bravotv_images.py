@@ -81,7 +81,7 @@ def _bravotv_request_needs_getty_prefetch(payload: BravotvImageRunRequest) -> bo
     requested_sources = {
         str(source or "").strip().lower() for source in (payload.sources or ["all"]) if str(source or "").strip()
     }
-    return bool(requested_sources & {"all", "getty", "nbcumv"})
+    return bool(requested_sources & {"all", "getty"})
 
 
 def _fetch_person_full_name(person_id: UUID) -> str:
