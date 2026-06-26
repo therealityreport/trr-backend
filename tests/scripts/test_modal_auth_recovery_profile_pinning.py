@@ -39,7 +39,12 @@ def test_chrome_cookie_refresh_deploy_uses_pinned_wrapper(monkeypatch: pytest.Mo
 
     assert ok is True
     assert message == "modal app deployed"
-    assert "deploy_backend.py" in " ".join(calls[0]["command"])
+    command = calls[0]["command"]
+    assert command[:2] == ["python", "-m"]
+    assert "modal" in command
+    assert "deploy" in command
+    assert "trr_backend.modal_jobs" in command
+    assert "deploy_backend.py" not in " ".join(command)
     assert calls[0]["env"]["MODAL_PROFILE"] == "admin-56995"
 
 

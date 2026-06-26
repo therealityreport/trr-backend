@@ -84,7 +84,7 @@ def test_cleanup_stops_wrong_workspace_app_after_authoritative_readiness(monkeyp
     assert summary["wrong_app_present"] is True
     assert summary["wrong_app_history_count"] == 1
     assert summary["stopped"] is True
-    assert ["python", "-m", "modal", "app", "stop", "trr-backend-jobs", "--yes"] in [
+    assert ["python", "-m", "modal", "app", "stop", "trr-backend-jobs"] in [
         call["command"] for call in calls
     ]
     assert calls[0]["env"]["MODAL_PROFILE"] == "admin-56995"

@@ -19,6 +19,15 @@ import pytest
 from unittest.mock import MagicMock
 
 
+@pytest.fixture(autouse=True)
+def _pin_authenticated_scrape_mode(monkeypatch):
+    """The default scrape mode flipped to ``public_first``, which skips the
+    authenticated-fetch / rotate-on-block path these tests exercise. Pin the
+    authenticated mode so the auth-block handler and cooldown seams run.
+    """
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_SCRAPE_MODE", "authenticated")
+
+
 @pytest.fixture
 def _mock_scrapling(monkeypatch):
     """Prevent real Scrapling import (mirrors test_fetcher.py)."""
@@ -241,6 +250,9 @@ def test_auth_block_rotates_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> No
     captured: dict[str, Any] = {}
     _patch_repo(monkeypatch, captured)
     _patch_session_and_proxy(monkeypatch)
+    # Authenticated mode defaults to a rotate-on-block budget of 0; allow exactly
+    # one bounded rotate-on-block retry so the retried cursor can succeed.
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_ROTATE_ON_BLOCK_MAX_RETRIES", "1")
     monkeypatch.setattr(jr, "InstagramPostsScraplingFetcher", _FakeFetcher)
     monkeypatch.setattr(jr, "persist_instagram_posts", lambda **_k: PersistedInstagramPosts(1, 0, {}))
     monkeypatch.setattr(jr, "_raise_if_auth_cooldown_active", lambda **_k: None)
@@ -430,14 +442,15 @@ def test_active_cooldown_soft_stops_and_requeues(monkeypatch: pytest.MonkeyPatch
 
 
 def test_dispatch_guard_defers_spawn_while_cooldown_active(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A4.5: _enqueue_shared_posts_job returns "" (no spawn) when a cooldown is
-    active for the account."""
+    """A4.5: _enqueue_shared_posts_job returns a deferred-by-cooldown result (no
+    spawn) when a cooldown is active for the account."""
     from trr_backend.socials import social_season_analytics_impl as impl
 
+    cooldown = {"blocker_kind": "auth", "cooldown_until": "2026-06-07T13:00:00+00:00"}
     monkeypatch.setattr(
         impl,
         "_active_posts_auth_cooldown",
-        lambda _platform, _account: {"blocker_kind": "auth", "cooldown_until": "2026-06-07T13:00:00+00:00"},
+        lambda _platform, _account: cooldown,
     )
     created: list[Any] = []
     monkeypatch.setattr(impl, "_create_job", lambda *a, **k: created.append((a, k)) or "job-x")
@@ -452,5 +465,11 @@ def test_dispatch_guard_defers_spawn_while_cooldown_active(monkeypatch: pytest.M
         runner_count=1,
     )
 
-    assert result == ""
+    # _enqueue_shared_posts_job now returns a _SharedPostsEnqueueResult dataclass
+    # instead of a plain job-id string. A deferred spawn is the cooldown branch.
+    assert isinstance(result, impl._SharedPostsEnqueueResult)
+    assert result.status == "deferred_by_cooldown"
+    assert result.queued is False
+    assert result.job_id is None
+    assert result.cooldown == cooldown
     assert created == []  # spawn was deferred

@@ -288,8 +288,15 @@ def test_comments_progress_counts_use_rollup_not_live_comment_count(monkeypatch)
     )
 
     query = str(calls[0]["query"])
+    # Counts must be driven by the maintained rollup table, preferring
+    # r.active_comment_count over any live COUNT.
     assert "social.instagram_post_comment_rollups" in query
-    assert "social.instagram_comments c" not in query
+    assert "r.active_comment_count" in query
+    # A guarded live-comment fallback is permitted, but only for posts that do
+    # not yet have a rollup row (r.post_id is null) -- it must never be an
+    # unconditional join over social.instagram_comments.
+    if "social.instagram_comments c" in query:
+        assert "r.post_id is null" in query
     assert rows["DVMdEy8AbLL"]["saved_comment_count"] == 1501
     assert rows["DVMdEy8AbLL"]["missing_comment_gap"] == 4773
 

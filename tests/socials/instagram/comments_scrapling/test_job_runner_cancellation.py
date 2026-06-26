@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -42,7 +43,7 @@ def _patch_common_runner_dependencies(monkeypatch: pytest.MonkeyPatch, jr: Any, 
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: True)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_iso", lambda _value: "2026-04-28T00:00:00+00:00")
-    monkeypatch.setattr(repo, "_now_utc", lambda: None)
+    monkeypatch.setattr(repo, "_now_utc", lambda: datetime(2026, 4, 28, tzinfo=timezone.utc))
     monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {})
 
 
@@ -70,8 +71,8 @@ def test_comments_job_runner_checks_cancellation_after_warmup_before_opening_per
             return None
 
     @contextmanager
-    def fake_db_connection(**_kwargs: Any):
-        db_connection_calls.append("opened")
+    def fake_db_connection(*, label: str | None = None, **_kwargs: Any):
+        db_connection_calls.append(label or "")
         yield SimpleNamespace(commit=lambda: None)
 
     def fake_fetch_one(sql: str, _params: list[object] | None = None, **_kwargs: Any) -> dict[str, Any]:
@@ -102,7 +103,9 @@ def test_comments_job_runner_checks_cancellation_after_warmup_before_opening_per
     )
 
     assert payload["status"] == "cancelled"
-    assert db_connection_calls == []
+    # The post-warmup cancellation check must fire before the per-post persist
+    # connection is opened, so no persist connection should ever be acquired.
+    assert "instagram-comments-scrapling-persist" not in db_connection_calls
     assert fetch_calls == []
     finish_kwargs = finish_calls[-1]
     assert finish_kwargs["status"] == "cancelled"

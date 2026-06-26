@@ -343,7 +343,16 @@ def test_parse_permalink_metadata_prefers_highest_width_media_candidates() -> No
     assert metadata.thumbnail_url == "https://cdn.test/thumb-high.jpg"
 
 
-def test_resolve_instagram_media_uses_graphql_shortcode_fallback_when_api_fails() -> None:
+def test_resolve_instagram_media_uses_graphql_shortcode_fallback_when_api_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Disable the new highest-priority public_app_json path so the intended
+    # graphql_shortcode fallback is exercised (and no live network is hit).
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.permalink_metadata.fetch_public_post_html",
+        lambda *_args, **_kwargs: (None, None),
+    )
+
     class _FakeResponse:
         def __init__(self, payload: dict[str, object]):
             self._payload = payload
@@ -380,13 +389,26 @@ def test_resolve_instagram_media_uses_graphql_shortcode_fallback_when_api_fails(
     assert resolution.source == "graphql_shortcode"
     assert resolution.media_urls == ["https://cdn.test/graphql-video.mp4"]
     assert resolution.thumbnail_url == "https://cdn.test/graphql-thumb.jpg"
-    assert resolution.attempts[0]["source"] == "api_media_info"
+    # public_app_json is the new highest-priority path; with it disabled it
+    # records a failed attempt first, then api_media_info, then graphql.
+    assert resolution.attempts[0]["source"] == "public_app_json"
     assert resolution.attempts[0]["success"] is False
-    assert resolution.attempts[1]["source"] == "graphql_shortcode"
-    assert resolution.attempts[1]["success"] is True
+    assert resolution.attempts[1]["source"] == "api_media_info"
+    assert resolution.attempts[1]["success"] is False
+    assert resolution.attempts[2]["source"] == "graphql_shortcode"
+    assert resolution.attempts[2]["success"] is True
 
 
-def test_resolve_instagram_media_falls_back_to_og_when_other_sources_fail() -> None:
+def test_resolve_instagram_media_falls_back_to_og_when_other_sources_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Disable the new highest-priority public_app_json path so the intended
+    # og_fallback path is exercised (and no live network is hit).
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.permalink_metadata.fetch_public_post_html",
+        lambda *_args, **_kwargs: (None, None),
+    )
+
     html = """
     <html>
       <head>
@@ -639,9 +661,18 @@ def test_empty_tags_from_metadata_are_not_none() -> None:
     assert metadata.collaborators is not None
 
 
-def test_graphql_fallback_preserves_tags_and_collaborators() -> None:
+def test_graphql_fallback_preserves_tags_and_collaborators(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """When API path fails and GraphQL fallback succeeds, tags and collaborators
     should still be extracted (Bug 1 regression)."""
+
+    # Disable the new highest-priority public_app_json path so the intended
+    # graphql_shortcode fallback is exercised (and no live network is hit).
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.permalink_metadata.fetch_public_post_html",
+        lambda *_args, **_kwargs: (None, None),
+    )
 
     class _FakeResponse:
         def __init__(self, payload: dict[str, object]):
@@ -690,9 +721,17 @@ def test_graphql_fallback_preserves_tags_and_collaborators() -> None:
     assert len(resolution.metadata.collaborators_detail) == 1
 
 
-def test_og_fallback_has_none_detail_objects() -> None:
+def test_og_fallback_has_none_detail_objects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """When resolution falls through to OG fallback, detail objects should be
     None (not extracted), so enrichment preserves scraper data."""
+    # Disable the new highest-priority public_app_json path so the intended
+    # og_fallback path is exercised (and no live network is hit).
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.permalink_metadata.fetch_public_post_html",
+        lambda *_args, **_kwargs: (None, None),
+    )
     html = """
     <html>
       <head>
