@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -43,7 +43,7 @@ def _patch_common_runner_dependencies(monkeypatch: pytest.MonkeyPatch, jr: Any, 
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: True)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_iso", lambda _value: "2026-04-28T00:00:00+00:00")
-    monkeypatch.setattr(repo, "_now_utc", lambda: datetime(2026, 4, 28, tzinfo=timezone.utc))
+    monkeypatch.setattr(repo, "_now_utc", lambda: datetime(2026, 4, 28, tzinfo=UTC))
     monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {})
 
 
