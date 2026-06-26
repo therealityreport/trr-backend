@@ -32130,9 +32130,6 @@ def _cached_live_profile_snapshot(platform: str, account_handle: str) -> dict[st
                         len(html_items),
                     )
         elif normalized_platform == "twitter":
-            from twikit import Client as TwikitClient
-            from twikit.guest import GuestClient as TwikitGuestClient
-
             twitter_cookies, _twitter_bearer = _load_twitter_auth_from_sources()
             credentials = _load_twikit_credentials(twitter_cookies)
             scraper = TwitterScraper(
@@ -32143,6 +32140,11 @@ def _cached_live_profile_snapshot(platform: str, account_handle: str) -> dict[st
             snapshot = scraper.fetch_user_profile_summary(normalized_account, delay=0.0) or {}
 
             if not snapshot:
+                # twikit is an optional dependency only required by the cookie/guest fallback
+                # below. Import it lazily so the GraphQL-first happy path above still resolves a
+                # snapshot in environments where twikit is not installed.
+                from twikit import Client as TwikitClient
+                from twikit.guest import GuestClient as TwikitGuestClient
 
                 async def _load_snapshot() -> dict[str, Any]:
                     client: Any | None = None

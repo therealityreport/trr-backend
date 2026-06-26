@@ -7886,7 +7886,8 @@ def test_ingest_shared_accounts_tiktok_full_history_prefer_local_inline_seeds_di
     assert captured_run_configs[0]["execution_preference"] == "prefer_local_inline"
     assert captured_run_configs[0]["expected_total_posts_by_account"]["tiktok:bravowwhl"] == 3277
     assert len(created_jobs) == 1
-    assert created_jobs[0]["config"]["stage"] == social_repo.SHARED_ACCOUNT_POSTS_STAGE
+    assert created_jobs[0]["config"]["stage"] == "tiktok_posts_scrapling"
+    assert created_jobs[0]["config"]["shared_account_stage"] == social_repo.SHARED_ACCOUNT_POSTS_STAGE
     assert created_jobs[0]["config"]["runner_strategy"] == "single_runner_fallback"
     assert created_jobs[0]["config"]["runner_count"] == 1
     assert created_jobs[0]["config"]["partition_strategy"] is None
@@ -8839,7 +8840,13 @@ def test_preview_social_account_comments_scrape_incomplete_fill_targets_only_inc
     with social_repo._INSTAGRAM_COMMENTS_TARGET_PREVIEW_CACHE_LOCK:
         social_repo._INSTAGRAM_COMMENTS_TARGET_PREVIEW_CACHE.clear()
 
-    def _fake_incomplete_targets(account_handle: str, *, limit: int | None) -> list[str]:
+    def _fake_incomplete_targets(
+        account_handle: str,
+        *,
+        limit: int | None,
+        date_start: str | None = None,
+        date_end: str | None = None,
+    ) -> list[str]:
         captured.update({"account_handle": account_handle, "limit": limit})
         return ["GAP1", "GAP2", "GAP3"]
 
@@ -8917,6 +8924,8 @@ def test_start_social_account_comments_scrape_all_saved_posts_uses_uncapped_prof
         "account_handle": "bravotv",
         "limit": None,
         "refresh_policy": "all_saved_posts",
+        "date_start": None,
+        "date_end": None,
     }
     assert created_runs[0]["refresh_policy"] == "all_saved_posts"
     assert created_runs[0]["max_posts"] is None
@@ -8978,6 +8987,8 @@ def test_start_social_account_comments_scrape_preserves_large_profile_post_limit
         "account_handle": "bravotv",
         "limit": 2_500,
         "refresh_policy": "all_saved_posts",
+        "date_start": None,
+        "date_end": None,
     }
     assert created_runs[0]["max_posts"] == 2_500
     assert created_runs[0]["max_comments_per_post"] == 0
@@ -9090,7 +9101,12 @@ def test_start_social_account_comments_scrape_incomplete_fill_uses_incomplete_ta
     )
 
     assert payload["run_id"] == "comments-run-1"
-    assert captured_helper == {"account_handle": "bravotv", "limit": 25}
+    assert captured_helper == {
+        "account_handle": "bravotv",
+        "limit": 25,
+        "date_start": None,
+        "date_end": None,
+    }
     assert payload["target_filter"] == "incomplete"
     assert payload["incomplete_fill"] is True
     assert created_runs[0]["target_filter"] == "incomplete"
@@ -14516,6 +14532,11 @@ def test_remediate_social_account_catalog_runtime_supersession_is_single_fire(
             "source_scope": "bravo",
             "initiated_by": "codex@test",
             "selected_tasks": ["post_details", "comments", "media"],
+            "details_refresh_worker_count": None,
+            "comments_worker_count": None,
+            "comments_enable_media_followups": None,
+            "catalog_action": None,
+            "catalog_action_scope": None,
         }
     ]
     assert run_state["run-stale-1"]["supersession_handled"] is True
@@ -14613,6 +14634,11 @@ def test_remediate_social_account_catalog_runtime_supersession_preserves_bounded
             "source_scope": "network",
             "initiated_by": "runtime-supersession",
             "selected_tasks": ["post_details", "comments", "media"],
+            "details_refresh_worker_count": None,
+            "comments_worker_count": None,
+            "comments_enable_media_followups": None,
+            "catalog_action": None,
+            "catalog_action_scope": "bounded_window",
             "date_start": datetime(2025, 5, 12, 1, 21, 53, 980000, tzinfo=UTC),
             "date_end": datetime(2026, 5, 12, 1, 21, 53, 980000, tzinfo=UTC),
         }
@@ -27288,7 +27314,7 @@ def test_recover_stale_running_jobs_updates_worker_state_and_run_summaries(monke
     assert "::timestamptz > now()" in sql_text
     assert "stale_worker_claim" in sql_text
     assert "from social.scrape_workers owning_worker" in sql_text
-    assert params[:5] == [61, 61, 300, 61, 61]
+    assert params[:5] == [300, 300, 300, 300, 300]
     assert "terminal_modal_invocation" in sql_text
     assert "NOT IN ('', 'pending', 'running', 'unknown')" in sql_text
     assert "modal_invocation_terminal" in sql_text
@@ -27374,8 +27400,6 @@ def test_set_job_running_clears_stale_error_fields(monkeypatch: pytest.MonkeyPat
     assert "error_message = null" in sql_text
     assert "last_error_code = null" in sql_text
     assert "last_error_class = null" in sql_text
-    assert "parallel_detail_refresh" in sql_text
-    assert "details_refresh_shard_count" in sql_text
     assert captured_sql["params"] == ["worker-1", "job-1"]
 
 
@@ -28003,9 +28027,9 @@ def test_claim_next_jobs_uses_batch_limit_and_run_fairness(monkeypatch: pytest.M
     assert "error_message = null" in sql_text
     assert "last_error_code = null" in sql_text
     assert "last_error_class = null" in sql_text
-    assert params[-3] == 4  # run in-flight cap
-    assert params[-2] == 25  # capped batch limit
-    assert params[-1] == "worker-1"
+    assert params[-11] == 4  # run in-flight cap
+    assert params[-10] == 25  # capped batch limit
+    assert params[-9] == "worker-1"
 
 
 def test_claim_next_queued_jobs_treats_empty_platform_filter_as_none(
@@ -30211,7 +30235,11 @@ def test_get_worker_health_exposes_remote_instagram_auth_summary(
     assert payload["remote_auth_capabilities"]["tiktok"]["ready"] is False
     assert payload["remote_auth_capabilities"]["twitter"]["ready"] is False
     assert payload["remote_auth_capabilities"]["facebook"]["ready"] is False
-    assert "threads" not in payload["remote_auth_capabilities"]
+    assert payload["remote_auth_capabilities"]["threads"]["ready"] is False
+    assert (
+        payload["remote_auth_capabilities"]["threads"]["reason"]
+        == "no_remote_authenticated_threads_workers"
+    )
     assert payload["remote_auth_capabilities"]["tiktok"]["missing_hints"] == [
         "SOCIAL_TIKTOK_COOKIES_JSON|SOCIAL_TIKTOK_COOKIES_FILE|TIKTOK_COOKIES_JSON|TIKTOK_COOKIES_FILE"
     ]
@@ -30566,6 +30594,11 @@ def test_build_modal_executor_health_payload_uses_remote_probe_when_worker_auth_
 def test_build_modal_executor_health_payload_uses_instagram_posts_probe_for_account_backfill(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        social_repo,
+        "_instagram_public_first_scrape_mode_enabled",
+        lambda *_a, **_k: False,
+    )
     monkeypatch.setattr(
         social_repo,
         "_query_worker_health",
@@ -35924,6 +35957,11 @@ def _job_execute_test_harness(monkeypatch: pytest.MonkeyPatch) -> dict[str, obje
 
     monkeypatch.setattr(
         social_repo,
+        "_instagram_public_first_scrape_mode_enabled",
+        lambda *_a, **_k: False,
+    )
+    monkeypatch.setattr(
+        social_repo,
         "get_season_context",
         lambda _season_id: SeasonContext(
             season_id="season-1",
@@ -37868,7 +37906,8 @@ def test_upsert_facebook_post_falls_back_to_scraped_at_when_posted_at_missing(
     monkeypatch.setattr(
         social_repo,
         "_platform_posts_has_column",
-        lambda platform, column: platform == "facebook" and column in {"hashtags", "mentions", "user_avatar_url"},
+        lambda platform, column, *, conn=None: platform == "facebook"
+        and column in {"hashtags", "mentions", "user_avatar_url"},
     )
 
     def _fake_pg_upsert(table: str, payload: dict[str, object], conflict_col: str, conn=None):  # noqa: ANN001
@@ -37931,7 +37970,8 @@ def test_upsert_threads_post_falls_back_to_scraped_at_when_posted_at_missing(
     monkeypatch.setattr(
         social_repo,
         "_platform_posts_has_column",
-        lambda platform, column: platform == "threads" and column in {"hashtags", "mentions", "user_avatar_url"},
+        lambda platform, column, *, conn=None: platform == "threads"
+        and column in {"hashtags", "mentions", "user_avatar_url"},
     )
 
     def _fake_pg_upsert(table: str, payload: dict[str, object], conflict_col: str, conn=None):  # noqa: ANN001
@@ -50333,8 +50373,8 @@ def test_claim_next_jobs_caps_youtube_when_other_platforms_are_ready(monkeypatch
     assert "run_platform_in_flight" in sql
     assert "j.platform <> 'youtube'" in sql
     assert "other.platform <> 'youtube'" in sql
-    assert params[-4] == 4
-    assert params[-3] == 12
+    assert params[-12] == 4
+    assert params[-11] == 12
 
 
 def test_claim_next_jobs_returns_empty_without_worker_id(monkeypatch: pytest.MonkeyPatch) -> None:
