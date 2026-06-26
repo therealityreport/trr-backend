@@ -100,6 +100,8 @@ def main() -> int:
 
     if args.push_to_modal:
         print("\nPushing to Modal secrets…")
+        from scripts.modal.deploy_backend import pinned_modal_env
+
         source_env = REPO_ROOT / ".env"
         cmd = [
             sys.executable,
@@ -109,7 +111,7 @@ def main() -> int:
             "--apply",
         ]
         try:
-            subprocess.run(cmd, check=True, timeout=120)
+            subprocess.run(cmd, check=True, timeout=120, env=pinned_modal_env())
             print("Modal secrets updated.")
         except Exception as exc:
             print(f"Modal push failed: {exc}", file=sys.stderr)
