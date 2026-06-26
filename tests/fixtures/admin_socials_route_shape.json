@@ -45,6 +45,16 @@
     "name": "debug_social_ingest_job"
   },
   {
+    "method": "POST",
+    "path": "/admin/socials/ingest/media-mirror/drain-account",
+    "name": "drain_social_media_mirror_account_jobs"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/ingest/media-mirror/recover-stale",
+    "name": "recover_stale_social_media_mirror_jobs"
+  },
+  {
     "method": "GET",
     "path": "/admin/socials/ingest/queue-status",
     "name": "get_social_ingest_queue_status"
@@ -140,6 +150,11 @@
     "name": "post_social_account_catalog_backfill_route"
   },
   {
+    "method": "GET",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/budget",
+    "name": "get_social_account_catalog_budget_decision_route"
+  },
+  {
     "method": "POST",
     "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/freshness",
     "name": "post_social_account_catalog_freshness_route"
@@ -175,6 +190,11 @@
     "name": "post_social_account_catalog_resume_tail_route"
   },
   {
+    "method": "POST",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/retry-targets",
+    "name": "post_social_account_catalog_retry_targets_route"
+  },
+  {
     "method": "GET",
     "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/review-queue",
     "name": "get_social_account_catalog_review_queue_route"
@@ -190,19 +210,24 @@
     "name": "post_social_account_catalog_run_cancel_route"
   },
   {
+    "method": "GET",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/runs/{run_id}/diagnostics",
+    "name": "get_social_account_catalog_run_diagnostics_route"
+  },
+  {
     "method": "POST",
     "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/runs/{run_id}/dismiss",
     "name": "post_social_account_catalog_run_dismiss_route"
   },
   {
-    "method": "GET",
-    "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/runs/{run_id}/progress",
-    "name": "get_social_account_catalog_run_progress_route"
-  },
-  {
     "method": "POST",
     "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/runs/{run_id}/manual-auth",
     "name": "post_social_account_catalog_run_repair_auth_route"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/runs/{run_id}/progress",
+    "name": "get_social_account_catalog_run_progress_route"
   },
   {
     "method": "POST",
@@ -268,6 +293,11 @@
     "method": "POST",
     "path": "/admin/socials/profiles/{platform}/{account_handle}/comments/runs/{run_id}/rebalance",
     "name": "post_social_account_comments_run_rebalance_route"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/comments/runs/{run_id}/repair-auth",
+    "name": "post_social_account_comments_run_repair_auth_route"
   },
   {
     "method": "POST",

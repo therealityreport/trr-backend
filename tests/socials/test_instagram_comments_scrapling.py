@@ -381,6 +381,7 @@ def test_job_runner_uses_resolved_browser_account_id_as_proxy_session_key(monkey
                 "account": "bravotv",
                 "stage": "comments_scrapling",
                 "mode": "profile",
+                "instagram_scrape_mode": "authenticated",
                 "source_scope": "bravo",
                 "target_source_ids": ["ABC12345"],
             },

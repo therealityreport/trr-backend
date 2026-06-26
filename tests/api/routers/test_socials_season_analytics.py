@@ -1073,8 +1073,8 @@ def test_post_social_account_catalog_backfill(client: TestClient, monkeypatch: p
     )
     assert mocked_begin.call_args.kwargs["platform"] == "instagram"
     assert mocked_begin.call_args.kwargs["account_handle"] == "bravotv"
-    assert mocked_begin.call_args.kwargs["selected_tasks"] == ["post_details"]
-    assert mocked_finalize.call_args.kwargs["selected_tasks"] == ["post_details"]
+    assert mocked_begin.call_args.kwargs["selected_tasks"] == ["post_details", "comments", "media"]
+    assert mocked_finalize.call_args.kwargs["selected_tasks"] == ["post_details", "comments", "media"]
 
 
 def test_post_social_account_catalog_apify_backfill_route_is_retired(
