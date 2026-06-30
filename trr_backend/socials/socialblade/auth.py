@@ -7,6 +7,7 @@ import json
 import os
 import socket
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
@@ -17,7 +18,8 @@ from trr_backend.socials.browser_cookie_refresh import (
     _body_text,
     cookie_payload,
     open_cookie_refresh_context,
-    validate_browser_cookie_session,
+    resolve_chrome_profile_selection,
+    resolve_social_auth_chrome_profile,
     write_cookie_file,
 )
 
@@ -40,7 +42,7 @@ Object.defineProperty(navigator, "platform", { get: () => "MacIntel" });
 Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
 window.chrome = window.chrome || { runtime: {} };
 """
-_DEFAULT_SOCIALBLADE_VALIDATION_HANDLE = "socialblade"
+_DEFAULT_SOCIALBLADE_VALIDATION_HANDLE = "bravotv"
 _DEFAULT_SHARED_CHROME_CDP_URL = "http://127.0.0.1:9422"
 _DEFAULT_VISIBLE_CHROME_CDP_URL = "http://127.0.0.1:9222"
 _FALLBACK_SHARED_CHROME_CDP_URLS = (
@@ -74,20 +76,100 @@ def socialblade_cookie_file_path() -> Path:
     )
 
 
-def _socialblade_validation_url() -> str:
+def _normalize_socialblade_validation_handle(handle: str | None = None) -> str:
     handle = (
-        str(os.getenv("SOCIALBLADE_VALIDATION_HANDLE") or _DEFAULT_SOCIALBLADE_VALIDATION_HANDLE).strip()
+        str(handle or os.getenv("SOCIALBLADE_VALIDATION_HANDLE") or _DEFAULT_SOCIALBLADE_VALIDATION_HANDLE).strip()
         or _DEFAULT_SOCIALBLADE_VALIDATION_HANDLE
     )
-    return f"https://socialblade.com/instagram/user/{handle}"
+    return handle.lstrip("@").lower()
+
+
+def _socialblade_validation_url(handle: str | None = None) -> str:
+    return f"https://socialblade.com/instagram/user/{_normalize_socialblade_validation_handle(handle)}"
+
+
+def _coerce_socialblade_cookie_map(raw_payload: Any) -> dict[str, str]:
+    """Coerce SocialBlade cookies without dropping browser-signaling underscore cookies."""
+    cookies: dict[str, str] = {}
+    if isinstance(raw_payload, dict):
+        nested = raw_payload.get("cookies")
+        if isinstance(nested, list):
+            return _coerce_socialblade_cookie_map(nested)
+
+        name = raw_payload.get("name")
+        value = raw_payload.get("value")
+        if name is not None and value is not None:
+            name_str = str(name).strip()
+            value_str = str(value)
+            return {name_str: value_str} if name_str and value_str else {}
+
+        for key, value in raw_payload.items():
+            if value is None:
+                continue
+            key_str = str(key).strip()
+            if not key_str:
+                continue
+            if isinstance(value, (str, int, float, bool)):
+                value_str = str(value)
+                if value_str:
+                    cookies[key_str] = value_str
+        return cookies
+
+    if isinstance(raw_payload, list):
+        for item in raw_payload:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            value = str(item.get("value") or "")
+            if name and value:
+                cookies[name] = value
+    return cookies
+
+
+def _parse_socialblade_cookie_header(raw: str) -> dict[str, str]:
+    cookies: dict[str, str] = {}
+    value = str(raw or "").strip()
+    if not value:
+        return cookies
+    if value.lower().startswith("cookie:"):
+        value = value.split(":", 1)[1].strip()
+    for token in value.split(";"):
+        pair = token.strip()
+        if not pair or "=" not in pair:
+            continue
+        key, val = pair.split("=", 1)
+        key = key.strip()
+        if key:
+            cookies[key] = val.strip()
+    return cookies
 
 
 def load_socialblade_cookies_from_sources() -> dict[str, str]:
-    return social_repo._load_cookie_map_from_json_or_file(  # noqa: SLF001
-        label="socialblade",
-        raw_json_env_keys=("SOCIALBLADE_COOKIES_JSON",),
-        file_env_keys=("SOCIALBLADE_COOKIES_FILE",),
-        default_path=_default_socialblade_cookie_file_path(),
+    candidates: list[dict[str, str]] = []
+    raw_json = str(os.getenv("SOCIALBLADE_COOKIES_JSON") or "").strip()
+    if raw_json:
+        try:
+            cookies = _coerce_socialblade_cookie_map(json.loads(raw_json))
+        except json.JSONDecodeError:
+            cookies = _parse_socialblade_cookie_header(raw_json)
+        if cookies:
+            candidates.append(cookies)
+
+    for path in social_repo._platform_cookie_file_candidates(  # noqa: SLF001
+        _default_socialblade_cookie_file_path(),
+        "SOCIALBLADE_COOKIES_FILE",
+    ):
+        if not path.is_file():
+            continue
+        try:
+            cookies = _coerce_socialblade_cookie_map(json.loads(path.read_text(encoding="utf-8")))
+        except Exception:  # noqa: BLE001
+            cookies = {}
+        if cookies:
+            candidates.append(cookies)
+
+    return social_repo._select_preferred_cookie_candidate(  # noqa: SLF001
+        candidates,
         required_cookie_names_any=SOCIALBLADE_REQUIRED_COOKIE_NAMES_ANY,
         required_cookie_names_all=SOCIALBLADE_REQUIRED_COOKIE_NAMES_ALL,
     )
@@ -97,17 +179,167 @@ def load_socialblade_cookies() -> dict[str, str]:
     return load_socialblade_cookies_from_sources()
 
 
-def validate_socialblade_cookie_health(cookies: dict[str, str]) -> tuple[bool, str | None]:
+def validate_socialblade_cookie_health(
+    cookies: dict[str, str],
+    *,
+    validation_handle: str | None = None,
+) -> tuple[bool, str | None]:
     if not cookies:
         return False, "no_cookies_loaded"
-    return validate_browser_cookie_session(
-        cookies=cookies,
-        validation_url=_socialblade_validation_url(),
-        cookie_domains=SOCIALBLADE_COOKIE_DOMAINS,
-        required_cookie_names_any=SOCIALBLADE_REQUIRED_COOKIE_NAMES_ANY,
-        required_cookie_names_all=SOCIALBLADE_REQUIRED_COOKIE_NAMES_ALL,
-        timeout_seconds=45,
+    reason = _missing_required_socialblade_cookie_reason(cookies)
+    if reason:
+        return False, reason
+
+    handle = _normalize_socialblade_validation_handle(validation_handle)
+    try:
+        from trr_backend.socials.socialblade.scraper import scrape_socialblade
+
+        payload = scrape_socialblade(
+            handle,
+            cookies,
+            platform="instagram",
+            allow_login_fallback=False,
+            allow_visible_browser_retry=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return False, f"validation_scrape_failed:{str(exc) or type(exc).__name__}"
+
+    username = str(payload.get("username") or "").strip().lstrip("@").lower() if isinstance(payload, dict) else ""
+    if username and username != handle:
+        return False, f"validation_username_mismatch:{username}"
+    profile_stats = payload.get("profile_stats") if isinstance(payload, dict) else None
+    if not isinstance(profile_stats, dict):
+        return False, "validation_missing_profile_stats"
+    followers = profile_stats.get("followers")
+    try:
+        if int(followers or 0) <= 0:
+            return False, "validation_missing_followers"
+    except (TypeError, ValueError):
+        return False, "validation_missing_followers"
+    return True, None
+
+
+def _utc_iso_from_timestamp(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp, tz=UTC).isoformat().replace("+00:00", "Z")
+
+
+def _cookie_names_from_payload(raw_payload: Any) -> set[str]:
+    if isinstance(raw_payload, dict):
+        return {str(name).strip() for name, value in raw_payload.items() if str(name).strip() and value}
+    if isinstance(raw_payload, list):
+        names: set[str] = set()
+        for item in raw_payload:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            value = item.get("value")
+            if name and value:
+                names.add(name)
+        return names
+    if isinstance(raw_payload, str):
+        return {
+            part.split("=", 1)[0].strip()
+            for part in raw_payload.split(";")
+            if "=" in part and part.split("=", 1)[0].strip()
+        }
+    return set()
+
+
+def _cookie_file_metadata(path: Path) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "path": str(path),
+        "exists": path.is_file(),
+        "modifiedAt": None,
+    }
+    if path.is_file():
+        metadata["modifiedAt"] = _utc_iso_from_timestamp(path.stat().st_mtime)
+    return metadata
+
+
+def socialblade_cookie_health_report(
+    *,
+    validate: bool = True,
+    validation_handle: str | None = None,
+) -> dict[str, Any]:
+    """Return redacted SocialBlade cookie health for admin/operator preflight."""
+    cookie_file = socialblade_cookie_file_path()
+    loaded_cookies: dict[str, str] = {}
+    load_error: str | None = None
+    cookie_names: set[str] = set()
+
+    try:
+        loaded_cookies = load_socialblade_cookies_from_sources()
+        cookie_names = set(loaded_cookies)
+    except Exception as exc:  # noqa: BLE001
+        load_error = str(exc) or type(exc).__name__
+        if cookie_file.is_file():
+            try:
+                cookie_names = _cookie_names_from_payload(json.loads(cookie_file.read_text(encoding="utf-8")))
+            except Exception:  # noqa: BLE001
+                cookie_names = set()
+
+    missing_all = [name for name in SOCIALBLADE_REQUIRED_COOKIE_NAMES_ALL if name not in cookie_names]
+    has_any = any(name in cookie_names for name in SOCIALBLADE_REQUIRED_COOKIE_NAMES_ANY)
+    missing_any = (
+        []
+        if has_any or not SOCIALBLADE_REQUIRED_COOKIE_NAMES_ANY
+        else list(SOCIALBLADE_REQUIRED_COOKIE_NAMES_ANY)
     )
+    schema_reason = None
+    if load_error:
+        schema_reason = load_error
+    elif missing_all:
+        schema_reason = f"missing_required_cookie:{','.join(missing_all)}"
+    elif missing_any:
+        schema_reason = f"missing_any_cookie:{','.join(missing_any)}"
+
+    validation_checked = False
+    validation_ok: bool | None = None
+    validation_reason: str | None = None
+    if validate and not schema_reason:
+        validation_checked = True
+        validation_ok, validation_reason = validate_socialblade_cookie_health(
+            loaded_cookies,
+            validation_handle=validation_handle,
+        )
+
+    healthy = schema_reason is None and (validation_ok is not False)
+    reason = schema_reason or validation_reason
+    return {
+        "platform": "socialblade",
+        "healthy": healthy,
+        "status": "healthy" if healthy else "unhealthy",
+        "reason": reason,
+        "retryable": not healthy,
+        "cookieNames": sorted(cookie_names),
+        "requiredCookies": {
+            "any": list(SOCIALBLADE_REQUIRED_COOKIE_NAMES_ANY),
+            "all": list(SOCIALBLADE_REQUIRED_COOKIE_NAMES_ALL),
+            "missingAny": missing_any,
+            "missingAll": missing_all,
+        },
+        "cookieFile": _cookie_file_metadata(cookie_file),
+        "validation": {
+            "checked": validation_checked,
+            "healthy": validation_ok,
+            "reason": validation_reason,
+            "handle": _normalize_socialblade_validation_handle(validation_handle) if validation_checked else None,
+            "url": _socialblade_validation_url(validation_handle) if validation_checked else None,
+        },
+        "checkedAt": datetime.now(tz=UTC).isoformat().replace("+00:00", "Z"),
+    }
+
+
+def require_socialblade_cookie_health(
+    *,
+    source: str = "SocialBlade",
+    validation_handle: str | None = None,
+) -> dict[str, Any]:
+    health = socialblade_cookie_health_report(validate=True, validation_handle=validation_handle)
+    if not bool(health.get("healthy")):
+        reason = str(health.get("reason") or "unknown").strip()
+        raise RuntimeError(f"{source} session preflight failed ({reason})")
+    return health
 
 
 def _missing_required_socialblade_cookie_reason(cookies: dict[str, str]) -> str | None:
@@ -129,6 +361,48 @@ def require_socialblade_authenticated_cookies(cookies: dict[str, str], *, source
     reason = _missing_required_socialblade_cookie_reason(cookies)
     if reason:
         raise RuntimeError(f"{source} did not capture required SocialBlade authenticated cookies ({reason})")
+
+
+def require_socialblade_usable_cookies(
+    cookies: dict[str, str],
+    *,
+    source: str,
+    validation_handle: str | None = None,
+) -> None:
+    require_socialblade_authenticated_cookies(cookies, source=source)
+    healthy, reason = validate_socialblade_cookie_health(cookies, validation_handle=validation_handle)
+    if not healthy:
+        raise RuntimeError(f"{source} captured SocialBlade cookies failed validation ({reason or 'unknown'})")
+
+
+def extract_socialblade_cookies_from_chrome_profile(
+    *,
+    chrome_profile: str | None = None,
+    validation_handle: str | None = None,
+) -> dict[str, str]:
+    """Extract and validate SocialBlade cookies from the real Chrome auth profile."""
+    try:
+        from pycookiecheat import chrome_cookies
+    except ImportError as exc:  # pragma: no cover - dependency failure is environment-specific
+        raise RuntimeError("SocialBlade Chrome cookie extraction requires pycookiecheat") from exc
+
+    resolved_profile = resolve_social_auth_chrome_profile("socialblade", chrome_profile)
+    selection = resolve_chrome_profile_selection(resolved_profile)
+    cookie_file = selection.profile_path / "Cookies"
+    if not cookie_file.is_file():
+        raise FileNotFoundError(f"Cookie database not found at {cookie_file}")
+
+    validation_url = _socialblade_validation_url(validation_handle)
+    extracted = chrome_cookies(validation_url, cookie_file=str(cookie_file))
+    cookies = {str(name): str(value) for name, value in dict(extracted or {}).items() if name and value}
+    require_socialblade_authenticated_cookies(cookies, source=f"Chrome profile {selection.display_name}")
+    healthy, reason = validate_socialblade_cookie_health(cookies, validation_handle=validation_handle)
+    if not healthy:
+        raise RuntimeError(
+            f"Chrome profile {selection.display_name} SocialBlade cookies failed validation ({reason or 'unknown'})"
+        )
+    write_cookie_file(socialblade_cookie_file_path(), cookies)
+    return cookies
 
 
 def _body_text_matches_access_denied(body_text: str) -> bool:
@@ -369,6 +643,11 @@ async def _export_socialblade_cookies_via_cdp_protocol_async(cdp_url: str) -> di
             )
             cookies = cookie_payload(cookie_result.get("cookies") or [], domains=SOCIALBLADE_COOKIE_DOMAINS)
             require_socialblade_authenticated_cookies(cookies, source="Managed Chrome")
+            healthy, reason = await asyncio.to_thread(validate_socialblade_cookie_health, cookies)
+            if not healthy:
+                raise RuntimeError(
+                    f"Managed Chrome captured SocialBlade cookies failed validation ({reason or 'unknown'})"
+                )
             write_cookie_file(socialblade_cookie_file_path(), cookies)
             return cookies
     finally:
@@ -436,7 +715,7 @@ def export_socialblade_cookies_from_shared_chrome(*, cdp_url: str | None = None)
                     if _body_text_matches_access_denied(body_text):
                         raise RuntimeError("Managed Chrome SocialBlade session is blocked by Cloudflare")
                     cookies = cookie_payload(context.cookies(), domains=SOCIALBLADE_COOKIE_DOMAINS)
-                    require_socialblade_authenticated_cookies(cookies, source="Managed Chrome")
+                    require_socialblade_usable_cookies(cookies, source="Managed Chrome")
                     write_cookie_file(socialblade_cookie_file_path(), cookies)
                     return cookies
                 finally:

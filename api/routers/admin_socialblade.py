@@ -244,6 +244,24 @@ async def get_socialblade_history(
     }
 
 
+@router.get("/socialblade/cookies/health")
+async def get_socialblade_cookie_health(
+    validate: bool = Query(default=True),
+    handle: str | None = Query(default=None),
+    _admin: InternalAdminUser = None,
+) -> dict[str, Any]:
+    """Return redacted SocialBlade cookie health for admin preflight panels."""
+    from trr_backend.socials.socialblade.auth import socialblade_cookie_health_report
+    from trr_backend.socials.socialblade.service import sanitize_socialblade_handle
+
+    validation_handle = sanitize_socialblade_handle(handle or "") or None
+    return await run_in_threadpool(
+        socialblade_cookie_health_report,
+        validate=validate,
+        validation_handle=validation_handle,
+    )
+
+
 @router.get("/{person_id}/socialblade")
 async def get_socialblade_data(
     person_id: str,
@@ -321,6 +339,7 @@ async def refresh_socialblade_data_batch(
 ) -> dict[str, Any]:
     """Refresh SocialBlade rows for multiple cast members."""
     from trr_backend.modal_dispatch import dispatch_socialblade_scrape
+    from trr_backend.socials.socialblade.auth import socialblade_cookie_health_report
     from trr_backend.socials.socialblade.service import (
         normalize_socialblade_source_scope,
         queue_refresh_decision,
@@ -355,6 +374,7 @@ async def refresh_socialblade_data_batch(
     skipped: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
+    pending_dispatch: list[tuple[SocialBladeBatchRefreshItem, str]] = []
 
     for item in body.items:
         safe_handle = sanitize_socialblade_handle(item.handle)
@@ -407,6 +427,29 @@ async def refresh_socialblade_data_batch(
             )
             continue
 
+        pending_dispatch.append((item, safe_handle))
+
+    if pending_dispatch:
+        validation_handle = pending_dispatch[0][1]
+        cookie_health = await run_in_threadpool(
+            socialblade_cookie_health_report,
+            validate=True,
+            validation_handle=validation_handle,
+        )
+        if not bool(cookie_health.get("healthy")):
+            reason = str(cookie_health.get("reason") or "unknown").strip()
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": f"SocialBlade session preflight failed before batch dispatch: {reason}",
+                    "code": "SOCIALBLADE_SESSION_PREFLIGHT_FAILED",
+                    "reason": reason,
+                    "retryable": True,
+                    "cookieHealth": cookie_health,
+                },
+            )
+
+    for item, safe_handle in pending_dispatch:
         dispatch_result = dispatch_socialblade_scrape(
             person_id=item.person_id,
             handle=safe_handle,

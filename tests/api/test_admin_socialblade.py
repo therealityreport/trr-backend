@@ -209,11 +209,17 @@ def test_person_page_scrape_uses_visible_browser_retry_without_headless_login(
 
 
 def test_batch_refresh_dedupes_and_skips_fresh_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    import trr_backend.socials.socialblade.auth as auth_module
     import trr_backend.modal_dispatch as modal_dispatch_module
     import trr_backend.socials.socialblade.service as service_module
 
     dispatch_calls: list[dict[str, object]] = []
 
+    monkeypatch.setattr(
+        auth_module,
+        "socialblade_cookie_health_report",
+        lambda *, validate=True, validation_handle=None: {"healthy": True},
+    )
     monkeypatch.setattr(service_module, "socialblade_auto_refresh_enabled", lambda: True)
 
     def fake_queue_refresh_decision(*, person_id: str, handle: str, force: bool = False, platform: str = "instagram"):
@@ -286,11 +292,17 @@ def test_batch_refresh_dedupes_and_skips_fresh_rows(monkeypatch: pytest.MonkeyPa
 def test_batch_refresh_cast_comparison_dispatches_modal_and_returns_call_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import trr_backend.socials.socialblade.auth as auth_module
     import trr_backend.modal_dispatch as modal_dispatch_module
     import trr_backend.socials.socialblade.service as service_module
 
     captured: dict[str, object] = {}
 
+    monkeypatch.setattr(
+        auth_module,
+        "socialblade_cookie_health_report",
+        lambda *, validate=True, validation_handle=None: {"healthy": True},
+    )
     monkeypatch.setattr(service_module, "socialblade_auto_refresh_enabled", lambda: True)
     monkeypatch.setattr(service_module, "queue_refresh_decision", lambda **kwargs: ("accepted", None, None))
 
@@ -333,9 +345,15 @@ def test_batch_refresh_cast_comparison_dispatches_modal_and_returns_call_id(
 
 
 def test_batch_refresh_cast_comparison_dispatch_failure_returns_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    import trr_backend.socials.socialblade.auth as auth_module
     import trr_backend.modal_dispatch as modal_dispatch_module
     import trr_backend.socials.socialblade.service as service_module
 
+    monkeypatch.setattr(
+        auth_module,
+        "socialblade_cookie_health_report",
+        lambda *, validate=True, validation_handle=None: {"healthy": True},
+    )
     monkeypatch.setattr(service_module, "socialblade_auto_refresh_enabled", lambda: True)
     monkeypatch.setattr(service_module, "queue_refresh_decision", lambda **kwargs: ("accepted", None, None))
     monkeypatch.setattr(
@@ -851,11 +869,17 @@ def test_batch_refresh_respects_season_run_kill_switch(monkeypatch: pytest.Monke
 
 
 def test_batch_refresh_season_run_dispatches_following_sidecar(monkeypatch: pytest.MonkeyPatch) -> None:
+    import trr_backend.socials.socialblade.auth as auth_module
     import trr_backend.modal_dispatch as modal_dispatch_module
     import trr_backend.socials.socialblade.service as service_module
 
     captured: dict[str, object] = {}
 
+    monkeypatch.setattr(
+        auth_module,
+        "socialblade_cookie_health_report",
+        lambda *, validate=True, validation_handle=None: {"healthy": True},
+    )
     monkeypatch.setattr(service_module, "socialblade_auto_refresh_enabled", lambda: True)
     monkeypatch.setattr(
         service_module,
@@ -891,3 +915,42 @@ def test_batch_refresh_season_run_dispatches_following_sidecar(monkeypatch: pyte
         "scrape_following": True,
         "source_scope": "creator",
     }
+
+
+def test_batch_refresh_stops_before_dispatch_when_socialblade_session_unhealthy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import trr_backend.socials.socialblade.auth as auth_module
+    import trr_backend.modal_dispatch as modal_dispatch_module
+    import trr_backend.socials.socialblade.service as service_module
+
+    monkeypatch.setattr(service_module, "socialblade_auto_refresh_enabled", lambda: True)
+    monkeypatch.setattr(service_module, "queue_refresh_decision", lambda **_kwargs: ("accepted", None, None))
+    monkeypatch.setattr(
+        auth_module,
+        "socialblade_cookie_health_report",
+        lambda *, validate=True, validation_handle=None: {
+            "healthy": False,
+            "reason": "missing_required_cookie:session",
+            "retryable": True,
+        },
+    )
+    monkeypatch.setattr(
+        modal_dispatch_module,
+        "dispatch_socialblade_scrape",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not dispatch")),
+    )
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/admin/people/socialblade/refresh-batch",
+        json={
+            "source": "season_run",
+            "items": [{"personId": "person-1", "handle": "NetworkOfficial"}],
+        },
+    )
+
+    assert response.status_code == 409
+    payload = response.json()["detail"]
+    assert payload["code"] == "SOCIALBLADE_SESSION_PREFLIGHT_FAILED"
+    assert payload["reason"] == "missing_required_cookie:session"

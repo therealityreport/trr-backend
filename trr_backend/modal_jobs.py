@@ -1820,9 +1820,18 @@ def run_socialblade_scrape(
         normalized_source_scope = normalize_socialblade_source_scope(source_scope)
         cookies = load_socialblade_cookies_from_sources()
 
+        def _scrape_primary(normalized_handle: str) -> dict[str, object]:
+            return scrape_socialblade(
+                normalized_handle,
+                cookies,
+                platform=normalized_platform,
+                allow_login_fallback=False,
+                allow_visible_browser_retry=False,
+            )
+
         def _scrape_with_following_sidecar(safe_handle: str) -> dict[str, object]:
             return scrape_socialblade_then_following(
-                lambda normalized_handle: scrape_socialblade(normalized_handle, cookies, platform=normalized_platform),
+                _scrape_primary,
                 handle=safe_handle,
                 platform=normalized_platform,
                 source=source,
