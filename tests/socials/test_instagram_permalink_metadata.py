@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from urllib.parse import quote
 
 import pytest
@@ -15,6 +16,16 @@ from trr_backend.socials.instagram.permalink_metadata import (
     parse_permalink_metadata,
     resolve_instagram_media,
 )
+
+_FIXTURE_DIR = Path(__file__).parents[1] / "fixtures" / "instagram" / "scrapling"
+
+
+def _fixture_json(name: str) -> dict[str, object]:
+    return json.loads((_FIXTURE_DIR / name).read_text(encoding="utf-8"))
+
+
+def _data_sjs_html(payload: dict[str, object]) -> str:
+    return f'<html><body><script type="application/json" data-sjs>{json.dumps(payload)}</script></body></html>'
 
 
 def test_fetch_permalink_media_item_parses_data_sjs_payload(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -33,6 +44,7 @@ def test_fetch_permalink_media_item_parses_data_sjs_payload(monkeypatch: pytest.
     html = f'<html><body><script type="application/json" data-sjs>{json.dumps(payload)}</script></body></html>'
 
     class _FakeResponse:
+        status_code = 200
         text = html
 
         def raise_for_status(self) -> None:
@@ -46,6 +58,110 @@ def test_fetch_permalink_media_item_parses_data_sjs_payload(monkeypatch: pytest.
     assert found is not None
     assert found["id"] == "media-1"
     assert found["product_type"] == "clips"
+
+
+def test_fetch_permalink_media_item_supports_fetch_xdt_media_dict_fixture() -> None:
+    payload = _fixture_json("post_fetch_xdt_media_dict.json")
+    html = _data_sjs_html(payload)
+
+    class _FakeResponse:
+        status_code = 200
+        text = html
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class _FakeSession:
+        def get(self, *_args, **_kwargs):
+            return _FakeResponse()
+
+        def post(self, *_args, **_kwargs):
+            raise AssertionError("inline fetch__XDTMediaDict should avoid a second GraphQL POST")
+
+    found = fetch_permalink_media_item("DXKD0wtAHRz", session=_FakeSession())  # type: ignore[arg-type]
+    assert found is not None
+    assert found["pk"] == "3875927249152668787"
+    assert found["id"] == "3875927249152668787_2554414"
+    assert found["code"] == "DXKD0wtAHRz"
+    assert found["product_type"] == "clips"
+    assert found["user"]["pk"] == "2554414"
+    assert found["comment_count"] == 2295
+    assert found["comments_disabled"] is False
+    assert found["commenting_disabled_for_viewer"] is False
+
+    parsed = parse_permalink_metadata(found)
+    assert parsed.post_format == "reel"
+    assert parsed.media_type == "2"
+    assert parsed.raw_media["pk"] == "3875927249152668787"
+    assert parsed.raw_media["crosspost_metadata"] == {
+        "post_id": "fb-post-1",
+        "permalink_url": "https://www.facebook.com/bravo/posts/fb-post-1",
+    }
+    assert parsed.hashtags == ["RHOSLC"]
+    assert parsed.mentions == ["@bravotv"]
+
+    crosspost = fetch_instagram_facebook_crosspost_metadata(
+        "DXKD0wtAHRz",
+        session=_FakeSession(),  # type: ignore[arg-type]
+    )
+    assert crosspost is not None
+    assert crosspost.comments_count == 742
+    assert crosspost.raw_media["id"] == "3875927249152668787_2554414"
+    assert crosspost.facebook_post_id == "fb-post-1"
+    assert crosspost.facebook_post_id != "3875927249152668787"
+    assert crosspost.facebook_post_id != "3875927249152668787_2554414"
+
+
+def test_fetch_instagram_facebook_crosspost_metadata_ignores_fetch_xdt_null_fb_count() -> None:
+    payload = _fixture_json("post_fetch_xdt_media_dict_null_fb.json")
+    html = _data_sjs_html(payload)
+
+    class _FakeResponse:
+        status_code = 200
+        text = html
+
+        def __init__(self, response_payload: dict[str, object] | None = None):
+            self._payload = response_payload or payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self._payload
+
+    class _FakeSession:
+        def get(self, *_args, **_kwargs):
+            return _FakeResponse()
+
+        def post(self, *_args, **_kwargs):
+            return _FakeResponse(payload)
+
+    assert fetch_instagram_facebook_crosspost_metadata("DXKD0wtAHR0", session=_FakeSession()) is None  # type: ignore[arg-type]
+
+
+def test_post_detail_excludes_ig_direct_badge_count_query() -> None:
+    payload = _fixture_json("ig_direct_badge_count_off_msys.json")
+    html = _data_sjs_html(payload)
+
+    class _FakeResponse:
+        status_code = 200
+        text = html
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return payload
+
+    class _FakeSession:
+        def get(self, *_args, **_kwargs):
+            return _FakeResponse()
+
+        def post(self, *_args, **_kwargs):
+            return _FakeResponse()
+
+    assert fetch_permalink_media_item("DXKD0wtAHRz", session=_FakeSession()) is None  # type: ignore[arg-type]
+    assert fetch_instagram_facebook_crosspost_metadata("DXKD0wtAHRz", session=_FakeSession()) is None  # type: ignore[arg-type]
 
 
 def test_fetch_permalink_media_item_supports_wrapped_data_sjs_payload() -> None:

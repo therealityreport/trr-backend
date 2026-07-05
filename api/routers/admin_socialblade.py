@@ -179,10 +179,7 @@ async def get_socialblade_history(
     normalized_platform = normalize_socialblade_platform(platform)
     safe_person_ids = _dedupe_nonempty_strings(person_ids)
     safe_handles = _dedupe_nonempty_strings(
-        [
-            normalize_socialblade_account_handle(handle, platform=normalized_platform)
-            for handle in handles or []
-        ]
+        [normalize_socialblade_account_handle(handle, platform=normalized_platform) for handle in handles or []]
     )
     if not safe_person_ids and not safe_handles:
         raise HTTPException(status_code=400, detail="At least one personId or handle is required")

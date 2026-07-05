@@ -508,7 +508,10 @@ def _resolve_max_pages(
         return None
     if full_history_requested:
         return deps.shared_stage_post_limit(config, default=0)
-    return min(deps.shared_stage_post_limit(config, default=10) or 10, 20)
+    page_limit = deps.shared_stage_post_limit(config, default=10)
+    if page_limit is None:
+        return None
+    return min(page_limit, 20)
 
 
 def _persist_shared_catalog_posts(

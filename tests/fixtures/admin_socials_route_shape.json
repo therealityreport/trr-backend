@@ -271,6 +271,11 @@
   },
   {
     "method": "POST",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/comments/runs/{run_id}/authenticated-followup",
+    "name": "post_social_account_comments_run_authenticated_followup_route"
+  },
+  {
+    "method": "POST",
     "path": "/admin/socials/profiles/{platform}/{account_handle}/comments/runs/{run_id}/cancel",
     "name": "post_social_account_comments_run_cancel_route"
   },
@@ -288,6 +293,11 @@
     "method": "GET",
     "path": "/admin/socials/profiles/{platform}/{account_handle}/comments/runs/{run_id}/progress",
     "name": "get_social_account_comments_scrape_progress_route"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/comments/runs/{run_id}/public-recovery",
+    "name": "post_social_account_comments_run_public_recovery_route"
   },
   {
     "method": "POST",
@@ -333,6 +343,11 @@
     "method": "PUT",
     "path": "/admin/socials/profiles/{platform}/{account_handle}/hashtags",
     "name": "put_social_account_profile_hashtags_route"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/hashtags/conflicts",
+    "name": "get_social_account_profile_hashtag_conflicts_route"
   },
   {
     "method": "GET",

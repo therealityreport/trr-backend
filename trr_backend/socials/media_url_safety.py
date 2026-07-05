@@ -44,13 +44,13 @@ _PLATFORM_ALLOWED_HOST_SUFFIXES: dict[str, tuple[str, ...]] = {
         "fbcdn.net",
         "fbsbx.com",
     ),
-        "tiktok": (
-            "tiktok.com",
-            "tiktokcdn.com",
-            "tiktokcdn-us.com",
-            "tiktokv.com",
-            "byteoversea.com",
-            "tikwm.com",
+    "tiktok": (
+        "tiktok.com",
+        "tiktokcdn.com",
+        "tiktokcdn-us.com",
+        "tiktokv.com",
+        "byteoversea.com",
+        "tikwm.com",
     ),
     "twitter": (
         "twitter.com",
@@ -60,6 +60,7 @@ _PLATFORM_ALLOWED_HOST_SUFFIXES: dict[str, tuple[str, ...]] = {
     "youtube": (
         "youtube.com",
         "youtu.be",
+        "ggpht.com",
         "googlevideo.com",
         "ytimg.com",
     ),
@@ -198,9 +199,11 @@ def safe_requests_request(
     request_method = getattr(client, method.lower(), None)
     request = getattr(client, "request", None)
     if callable(request_method):
+
         def _send(target_url: str, *, allow_redirects: bool) -> Any:
             return request_method(target_url, allow_redirects=allow_redirects, **kwargs)
     elif callable(request):
+
         def _send(target_url: str, *, allow_redirects: bool) -> Any:
             return request(method, target_url, allow_redirects=allow_redirects, **kwargs)
     else:

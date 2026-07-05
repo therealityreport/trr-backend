@@ -43,6 +43,9 @@ def _patch_common_runner_dependencies(monkeypatch: pytest.MonkeyPatch, jr: Any, 
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: True)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_iso", lambda _value: "2026-04-28T00:00:00+00:00")
+    # The runner now derives shard elapsed-time from ``lifecycle.now_utc()`` (which
+    # delegates to ``repo._now_utc``) in its throughput/terminal metadata, so the
+    # stub must return a real UTC datetime rather than ``None``.
     monkeypatch.setattr(repo, "_now_utc", lambda: datetime(2026, 4, 28, tzinfo=UTC))
     monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {})
 
@@ -85,6 +88,11 @@ def test_comments_job_runner_checks_cancellation_after_warmup_before_opening_per
 
     _patch_common_runner_dependencies(monkeypatch, jr, repo)
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_kwargs: _FakeFetcher())
+    # The runner now eagerly loads audit-cursor-resume metadata during setup, which
+    # opens a short-lived read connection. Stub it (as the sibling resume tests do)
+    # so the only connection this test could observe is the persist connection — the
+    # invariant under test is that cancellation lands before any persist conn opens.
+    monkeypatch.setattr(jr, "_load_instagram_comments_audit_cursor_resume_metadata", lambda **_kwargs: {})
     monkeypatch.setattr(jr.pg, "fetch_one", fake_fetch_one)
     monkeypatch.setattr(jr.pg, "db_connection", fake_db_connection)
     monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))

@@ -104,8 +104,9 @@ def _fetch_frontiers(run_id: str) -> list[dict[str, Any]]:
 
 
 def _fetch_catalog_counts(run_id: str) -> dict[str, Any]:
-    return pg.fetch_one(
-        """
+    return (
+        pg.fetch_one(
+            """
         select
           count(*)::int as rows,
           count(distinct source_id)::int as distinct_source_ids,
@@ -116,13 +117,16 @@ def _fetch_catalog_counts(run_id: str) -> dict[str, Any]:
         from social.instagram_account_catalog_posts
         where last_backfill_run_id = %s::uuid
         """,
-        [run_id],
-    ) or {}
+            [run_id],
+        )
+        or {}
+    )
 
 
 def _fetch_detail_counts(run_id: str) -> dict[str, Any]:
-    return pg.fetch_one(
-        """
+    return (
+        pg.fetch_one(
+            """
         with run_catalog as (
           select
             source_id,
@@ -170,14 +174,17 @@ def _fetch_detail_counts(run_id: str) -> dict[str, Any]:
         left join social.instagram_posts ip on ip.shortcode = run_catalog.source_id
         left join social.social_posts sp on sp.platform = 'instagram' and sp.source_id = run_catalog.source_id
         """,
-        [run_id],
-    ) or {}
+            [run_id],
+        )
+        or {}
+    )
 
 
 def _fetch_comment_counts(run_id: str) -> dict[str, Any]:
     sample_limit = min(_env_int("SOCIAL_INSTAGRAM_PROGRESS_COMMENT_SAMPLE_LIMIT", 250), 1000)
-    return pg.fetch_one(
-        """
+    return (
+        pg.fetch_one(
+            """
         with run_catalog as (
           select distinct source_id
           from social.instagram_account_catalog_posts
@@ -244,8 +251,10 @@ def _fetch_comment_counts(run_id: str) -> dict[str, Any]:
         cross join rollup_totals
         cross join comment_media_sample
         """,
-        [run_id, sample_limit, sample_limit],
-    ) or {}
+            [run_id, sample_limit, sample_limit],
+        )
+        or {}
+    )
 
 
 def _fetch_media_status_counts(run_id: str) -> list[dict[str, Any]]:
@@ -300,9 +309,116 @@ def _fetch_job_counts(run_id: str) -> list[dict[str, Any]]:
     )
 
 
+def _fetch_comments_recovery_summary(run_id: str) -> dict[str, Any]:
+    row = (
+        pg.fetch_one(
+            """
+        with comments_jobs as (
+          select
+            status,
+            last_error_code,
+            case
+              when jsonb_typeof(coalesce(config->'target_source_ids', metadata->'target_source_ids')) = 'array'
+              then jsonb_array_length(coalesce(config->'target_source_ids', metadata->'target_source_ids'))
+              when nullif(coalesce(config->>'shortcode', metadata->>'shortcode', ''), '') is not null
+              then 1
+              else 0
+            end as target_count
+          from social.scrape_jobs
+          where run_id = %s::uuid
+            and platform = 'instagram'
+            and coalesce(config->>'stage', metadata->>'stage', job_type, 'unknown') = 'comments_scrapling'
+        )
+        select
+          count(*) filter (where status = 'queued')::int as queued_jobs,
+          count(*) filter (where status = 'pending')::int as pending_jobs,
+          count(*) filter (where status = 'retrying')::int as retrying_jobs,
+          count(*) filter (where status = 'running')::int as running_jobs,
+          count(*) filter (where status = 'completed')::int as completed_jobs,
+          count(*) filter (where status = 'failed')::int as failed_jobs,
+          count(*) filter (
+            where status in ('failed', 'retrying')
+              and lower(coalesce(last_error_code, '')) in (
+                'instagram_comments_public_recovery_pending',
+                'instagram_comments_public_requires_approval'
+              )
+          )::int as public_recovery_jobs,
+          coalesce(sum(target_count) filter (
+            where status in ('failed', 'retrying')
+              and lower(coalesce(last_error_code, '')) in (
+                'instagram_comments_public_recovery_pending',
+                'instagram_comments_public_requires_approval'
+              )
+          ), 0)::int as public_recovery_target_source_ids_count,
+          count(*) filter (
+            where status in ('failed', 'retrying')
+              and lower(coalesce(last_error_code, '')) in (
+                'instagram_comments_endpoint_auth_blocked',
+                'instagram_comments_auth_failed',
+                'instagram_comments_browser_session_invalidated',
+                'instagram_comments_warmup_auth_failed',
+                'instagram_comments_warmup_no_cookies',
+                'checkpoint_required'
+              )
+          )::int as authenticated_followup_jobs,
+          coalesce(sum(target_count) filter (
+            where status in ('failed', 'retrying')
+              and lower(coalesce(last_error_code, '')) in (
+                'instagram_comments_endpoint_auth_blocked',
+                'instagram_comments_auth_failed',
+                'instagram_comments_browser_session_invalidated',
+                'instagram_comments_warmup_auth_failed',
+                'instagram_comments_warmup_no_cookies',
+                'checkpoint_required'
+              )
+          ), 0)::int as authenticated_followup_target_source_ids_count
+        from comments_jobs
+        """,
+            [run_id],
+        )
+        or {}
+    )
+    public_targets = _fmt_count(row.get("public_recovery_target_source_ids_count"))
+    auth_targets = _fmt_count(row.get("authenticated_followup_target_source_ids_count"))
+    return {
+        **row,
+        "public_recovery_bucket": {
+            "name": "public_recovery",
+            "source_error_codes": [
+                "instagram_comments_public_recovery_pending",
+                "instagram_comments_public_requires_approval",
+            ],
+            "target_load_strategy": "public_relay",
+            "target_scrape_mode": "public_first",
+            "target_auth_validation_mode": "public_relay",
+            "target_source_ids_count": public_targets,
+            "source_job_count": _fmt_count(row.get("public_recovery_jobs")),
+            "status": "ready" if public_targets else "empty",
+        },
+        "authenticated_followup_bucket": {
+            "name": "authenticated_followup",
+            "source_error_codes": [
+                "instagram_comments_endpoint_auth_blocked",
+                "instagram_comments_auth_failed",
+                "instagram_comments_browser_session_invalidated",
+                "instagram_comments_warmup_auth_failed",
+                "instagram_comments_warmup_no_cookies",
+                "checkpoint_required",
+            ],
+            "target_load_strategy": "instagram_comments_endpoint_cursor",
+            "target_scrape_mode": "authenticated",
+            "target_auth_validation_mode": "comments_endpoint",
+            "target_source_ids_count": auth_targets,
+            "source_job_count": _fmt_count(row.get("authenticated_followup_jobs")),
+            "status": "ready" if auth_targets else "empty",
+        },
+    }
+
+
 def _fetch_media_completion_rates(run_id: str) -> dict[str, Any]:
-    return pg.fetch_one(
-        """
+    return (
+        pg.fetch_one(
+            """
         select
           count(*) filter (
             where coalesce(config->>'stage', metadata->>'stage', job_type, 'unknown') = 'media_mirror'
@@ -326,8 +442,10 @@ def _fetch_media_completion_rates(run_id: str) -> dict[str, Any]:
         from social.scrape_jobs
         where run_id = %s::uuid
         """,
-        [run_id],
-    ) or {}
+            [run_id],
+        )
+        or {}
+    )
 
 
 def _fetch_latest_jobs(run_id: str) -> list[dict[str, Any]]:
@@ -394,12 +512,7 @@ def _comments_followup_payload(summary: dict[str, Any], config: dict[str, Any]) 
     deferred = _metadata(config.get("deferred_comments_followup"))
     attached = _metadata(_metadata(summary.get("attached_followups")).get("comments"))
     config_attached = _metadata(_metadata(config.get("attached_followups")).get("comments"))
-    payload = (
-        config_attached
-        or deferred
-        or attached
-        or _metadata(summary.get("comments_followup"))
-    )
+    payload = config_attached or deferred or attached or _metadata(summary.get("comments_followup"))
     if not payload:
         return None
     payload = dict(payload)
@@ -445,6 +558,7 @@ def build_progress(run_id: str) -> dict[str, Any]:
         "latest_jobs": _fetch_latest_jobs(run_id),
         "auth_cooldown": _fetch_auth_cooldown(platform or "instagram", account),
         "comments_followup": _comments_followup_payload(summary, config),
+        "comments_recovery_summary": _fetch_comments_recovery_summary(run_id),
         "dispatch_control": summary.get("dispatch_control") or config.get("dispatch_control"),
     }
     progress["speed"] = _speed_summary(progress)
@@ -616,6 +730,9 @@ def print_compact(progress: dict[str, Any]) -> None:
     latest_jobs = list(progress.get("latest_jobs") or [])
     cooldown = _metadata(progress.get("auth_cooldown"))
     comments_followup = _metadata(progress.get("comments_followup"))
+    comments_recovery = _metadata(progress.get("comments_recovery_summary"))
+    public_recovery_bucket = _metadata(comments_recovery.get("public_recovery_bucket"))
+    authenticated_bucket = _metadata(comments_recovery.get("authenticated_followup_bucket"))
     dispatch_control = _metadata(progress.get("dispatch_control"))
     speed = _speed_summary(progress)
 
@@ -640,7 +757,10 @@ def print_compact(progress: dict[str, Any]) -> None:
         )
     )
     print(
-        "details instagram_posts={posts}/{catalog} canonical={canonical}/{catalog} hosted_media={hosted} canonical_metric_mismatches={mismatches}".format(
+        (
+            "details instagram_posts={posts}/{catalog} canonical={canonical}/{catalog} "
+            "hosted_media={hosted} canonical_metric_mismatches={mismatches}"
+        ).format(
             posts=_fmt_count(details.get("instagram_posts_rows")),
             catalog=_fmt_count(details.get("catalog_rows")),
             canonical=_fmt_count(details.get("canonical_social_posts_rows")),
@@ -649,7 +769,13 @@ def print_compact(progress: dict[str, Any]) -> None:
         )
     )
     print(
-        "comments reported={reported} saved_rows={rows} posts_with_comments={posts} posts_reporting={reporting} reporting_without_saved={missing} saved_source={source} comment_media_pending={media_pending} comment_media_mirrored={media_mirrored} comment_media_failed={media_failed} comment_media_sample={sample_checked}/{sample_limit} followup_state={state} deferred_until={until}".format(
+        (
+            "comments reported={reported} saved_rows={rows} posts_with_comments={posts} "
+            "posts_reporting={reporting} reporting_without_saved={missing} saved_source={source} "
+            "comment_media_pending={media_pending} comment_media_mirrored={media_mirrored} "
+            "comment_media_failed={media_failed} comment_media_sample={sample_checked}/{sample_limit} "
+            "followup_state={state} deferred_until={until}"
+        ).format(
             reported=_fmt_count(comments.get("reported_from_post_details")),
             rows=_fmt_count(comments.get("rows")),
             posts=_fmt_count(comments.get("posts_with_comments")),
@@ -665,12 +791,36 @@ def print_compact(progress: dict[str, Any]) -> None:
             until=comments_followup.get("deferred_until") or "none",
         )
     )
+    print(
+        (
+            "comments_recovery running={running} retrying={retrying} queued={queued} failed={failed} "
+            "completed={completed} public_recovery={public_status} public_jobs={public_jobs} "
+            "public_targets={public_targets} auth_followup={auth_status} auth_targets={auth_targets}"
+        ).format(
+            running=_fmt_count(comments_recovery.get("running_jobs")),
+            retrying=_fmt_count(comments_recovery.get("retrying_jobs")),
+            queued=_fmt_count(comments_recovery.get("queued_jobs")) + _fmt_count(comments_recovery.get("pending_jobs")),
+            failed=_fmt_count(comments_recovery.get("failed_jobs")),
+            completed=_fmt_count(comments_recovery.get("completed_jobs")),
+            public_status=public_recovery_bucket.get("status") or "empty",
+            public_jobs=_fmt_count(comments_recovery.get("public_recovery_jobs")),
+            public_targets=_fmt_count(public_recovery_bucket.get("target_source_ids_count")),
+            auth_status=authenticated_bucket.get("status") or "empty",
+            auth_targets=_fmt_count(authenticated_bucket.get("target_source_ids_count")),
+        )
+    )
     media_counts = ", ".join(
         f"{row.get('status')}={_fmt_count(row.get('rows'))}" for row in progress.get("media_mirror_status_counts") or []
     )
     print(f"media_mirror {media_counts or 'none'}")
     print(
-        "speed account=@{account} posts_per_min={posts_rate} pages_per_hour={page_rate} media_per_hour={media_rate} media_completed_15m={media_15m} media_completed_1h={media_1h} media_completed_6h={media_6h} media_eta={media_eta} media_running={media_running} media_queued={media_queued} latest_media_completed_at={latest_media_completed_at}".format(
+        (
+            "speed account=@{account} posts_per_min={posts_rate} pages_per_hour={page_rate} "
+            "media_per_hour={media_rate} media_completed_15m={media_15m} "
+            "media_completed_1h={media_1h} media_completed_6h={media_6h} media_eta={media_eta} "
+            "media_running={media_running} media_queued={media_queued} "
+            "latest_media_completed_at={latest_media_completed_at}"
+        ).format(
             account=speed.get("account_handle") or "unknown",
             posts_rate=_fmt_rate(speed.get("posts_per_minute"), ""),
             page_rate=_fmt_rate(speed.get("pages_per_hour"), ""),
@@ -691,7 +841,11 @@ def print_compact(progress: dict[str, Any]) -> None:
     for frontier in frontiers[:2]:
         metadata = _metadata(frontier.get("metadata"))
         print(
-            "frontier account=@{account} status={status} pages={pages} checked={checked} saved={saved} cursor={cursor} transport={transport} retry_at={retry_at} last_page_completed_at={last_page_completed_at} last_error={error}".format(
+            (
+                "frontier account=@{account} status={status} pages={pages} checked={checked} "
+                "saved={saved} cursor={cursor} transport={transport} retry_at={retry_at} "
+                "last_page_completed_at={last_page_completed_at} last_error={error}"
+            ).format(
                 account=frontier.get("account_handle"),
                 status=frontier.get("status"),
                 pages=_fmt_count(frontier.get("pages_scanned")),
@@ -709,7 +863,10 @@ def print_compact(progress: dict[str, Any]) -> None:
             )
         )
         print(
-            "frontier_health account=@{account} updated_age={updated_age} lease_owner={lease_owner} lease_expires_in={lease_expires_in}".format(
+            (
+                "frontier_health account=@{account} updated_age={updated_age} "
+                "lease_owner={lease_owner} lease_expires_in={lease_expires_in}"
+            ).format(
                 account=frontier.get("account_handle"),
                 updated_age=_fmt_seconds(frontier.get("updated_age_seconds")),
                 lease_owner=frontier.get("lease_owner") or "none",
@@ -740,7 +897,12 @@ def print_compact(progress: dict[str, Any]) -> None:
     if latest_jobs:
         latest = latest_jobs[0]
         print(
-            "latest_job id={id} stage={stage} status={status} attempts={attempt}/{max_attempts} worker={worker} heartbeat_age={heartbeat_age} progress_age={progress_age} available_at={available_at} error={error}".format(
+            (
+                "latest_job id={id} stage={stage} status={status} "
+                "attempts={attempt}/{max_attempts} worker={worker} "
+                "heartbeat_age={heartbeat_age} progress_age={progress_age} "
+                "available_at={available_at} error={error}"
+            ).format(
                 id=latest.get("id"),
                 stage=latest.get("stage"),
                 status=latest.get("status"),

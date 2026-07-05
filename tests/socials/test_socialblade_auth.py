@@ -219,7 +219,7 @@ def test_socialblade_cookie_health_report_redacts_values(monkeypatch, tmp_path) 
     monkeypatch.setattr(
         auth_module,
         "validate_socialblade_cookie_health",
-        lambda _cookies, *, validation_handle=None: (True, None),
+        lambda _cookies, *, validation_handle=None, allow_visible_browser_retry=False: (True, None),
     )
 
     report = auth_module.socialblade_cookie_health_report(validate=True)

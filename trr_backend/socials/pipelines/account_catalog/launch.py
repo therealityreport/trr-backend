@@ -185,9 +185,7 @@ def _budget_blocked_metadata(decision: Mapping[str, Any] | None) -> dict[str, An
     if state not in {"paused", "identity_blocked"}:
         return {}
     reasons = [
-        str(reason or "").strip()
-        for reason in list(decision_payload.get("reasons") or [])
-        if str(reason or "").strip()
+        str(reason or "").strip() for reason in list(decision_payload.get("reasons") or []) if str(reason or "").strip()
     ]
     return {
         "state": state,
@@ -359,8 +357,7 @@ def _initial_instagram_completion_metadata(
     snapshot_summary = build_snapshot_completion_summary(
         expected_parts=expected_parts,
         deferred_parts={
-            part: {"reason": "pending_backfill_dispatch", "account_handle": account_handle}
-            for part in expected_parts
+            part: {"reason": "pending_backfill_dispatch", "account_handle": account_handle} for part in expected_parts
         },
         account_handle=account_handle,
         target_metadata={"selected_tasks": selected_tasks},
@@ -881,7 +878,40 @@ def derive_comments_skip_reason(run_config: Mapping[str, Any]) -> dict[str, Any]
             ),
         }
 
-    # 3. No eligible comment targets were available.
+    # 3. A deferred comments follow-up is the owner of comments launch. Surface
+    # that state before generic target-readiness blockers so operators do not
+    # see "no targets" while a catalog-completion follow-up is pending/retryable.
+    deferred_followup = _metadata_dict(config.get("deferred_comments_followup"))
+    deferred_state = str(deferred_followup.get("state") or "").strip().lower()
+    if (
+        deferred_state in {"pending", "failed", "failed_exhausted"}
+        or "comments_deferred_pending_discovery" in comments_blocker_reasons
+        or "comments_deferred_pending_catalog_targets" in comments_blocker_reasons
+    ):
+        retryable = bool(deferred_followup.get("retryable"))
+        if deferred_state == "failed_exhausted":
+            return {
+                "reason": "deferred_comments_followup_failed_exhausted",
+                "detail": str(deferred_followup.get("error_message") or "retry budget exhausted").strip(),
+                "operator_action": "Relaunch comments manually after checking the saved catalog targets.",
+            }
+        if deferred_state == "failed":
+            return {
+                "reason": "deferred_comments_followup_failed",
+                "detail": str(deferred_followup.get("error_message") or "deferred follow-up launch failed").strip(),
+                "operator_action": (
+                    "Wait for the retry sweep or relaunch comments manually."
+                    if retryable
+                    else "Relaunch comments manually after fixing the recorded follow-up failure."
+                ),
+            }
+        return {
+            "reason": "comments_deferred_until_catalog_complete",
+            "detail": "catalog completion follow-up owns comments launch",
+            "operator_action": "Wait for catalog completion to start the deferred comments run.",
+        }
+
+    # 4. No eligible comment targets were available.
     can_start_comments = bool(target_readiness.get("can_start_comments"))
     commentable_target_count = _normalize_non_negative_int(target_readiness.get("commentable_target_count"))
     if not can_start_comments or commentable_target_count == 0:
@@ -891,7 +921,7 @@ def derive_comments_skip_reason(run_config: Mapping[str, Any]) -> dict[str, Any]
             "operator_action": "Backfill posts first so commentable targets exist, then relaunch comments.",
         }
 
-    # 4. Public-first lane is healthy; an authenticated probe was not requested.
+    # 5. Public-first lane is healthy; an authenticated probe was not requested.
     if "strict_authenticated_probe_not_requested" in comments_blocker_reasons:
         return {
             "reason": "authenticated_comments_not_requested",
@@ -902,7 +932,7 @@ def derive_comments_skip_reason(run_config: Mapping[str, Any]) -> dict[str, Any]
             ),
         }
 
-    # 5. Default: nothing is blocking; comments are running or already complete.
+    # 6. Default: nothing is blocking; comments are running or already complete.
     return {
         "reason": "comments_running_or_complete",
         "detail": "comments stage running or already complete",
@@ -1437,7 +1467,7 @@ def begin_social_account_catalog_backfill_launch(
     }
 
 
-class CatalogLaunchTimeout(Exception):
+class CatalogLaunchTimeout(Exception):  # noqa: N818
     """Raised when catalog launch finalization exceeds its umbrella timeout (B2).
 
     Recoverable by design: callers leave the run in launch_state="finalizing" so the
@@ -1486,9 +1516,7 @@ def _run_catalog_launch_with_timeout(fn: Any, *, timeout_seconds: float) -> Any:
     """
     if not timeout_seconds or timeout_seconds <= 0:
         return fn()
-    executor = concurrent.futures.ThreadPoolExecutor(
-        max_workers=1, thread_name_prefix="catalog-finalize-launch"
-    )
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="catalog-finalize-launch")
     future = executor.submit(fn)
     try:
         return future.result(timeout=timeout_seconds)
@@ -2062,12 +2090,20 @@ def launch_social_account_catalog_backfill(
                     },
                     "timing_ms": coverage_ms,
                 }
-            elif requires_catalog_bootstrap:
-                # Discovery/bootstrap mode: the catalog is about to be (re)walked, so
-                # comments are deferred until catalog completion anyway. Computing the
-                # comment-target preview now is premature and runs an expensive coverage
-                # query that can exceed statement_timeout and abort the whole launch.
-                # Emit a lightweight deferred-readiness placeholder instead.
+            elif requires_catalog_bootstrap or (
+                normalized_catalog_action == "backfill"
+                and bounded_window_scope == "bounded_window"
+                and not instagram_targeted_comment_source_ids
+                and any(task in effective_selected_tasks for task in ("post_details", "media"))
+            ):
+                # Catalog-backed launches will stream or attach comment work after
+                # post targets exist. Avoid the full comments preview here; on large
+                # accounts it can consume the launch timeout before any jobs are queued.
+                deferred_reason = (
+                    "comments_deferred_pending_discovery"
+                    if requires_catalog_bootstrap
+                    else "comments_deferred_pending_catalog_targets"
+                )
                 target_readiness = {
                     "status": "deferred_until_catalog_complete",
                     "account_handle": normalized_account,
@@ -2082,7 +2118,7 @@ def launch_social_account_catalog_backfill(
                     "detail_gap_count": 0,
                     "can_start_comments": False,
                     "blocker_reasons": [],
-                    "comments_blocker_reasons": ["comments_deferred_pending_discovery"],
+                    "comments_blocker_reasons": [deferred_reason],
                     "refresh_policy": "stale_or_missing",
                     "comments_preview": {},
                     "timing_ms": coverage_ms,
@@ -2148,6 +2184,7 @@ def launch_social_account_catalog_backfill(
     catalog_selected = bool(catalog_tasks)
     catalog_details_refresh_only = catalog_selected and not requires_catalog_bootstrap
     comments_deferred_until_catalog_complete = False
+    catalog_comments_streaming_enabled = False
     media_attachment_id = _catalog_media_attachment_id(launch_group_id) if "media" in effective_selected_tasks else None
     force_detail_fetch = (
         "post_details" in effective_selected_tasks and _instagram_catalog_backfill_force_detail_fetch_enabled()
@@ -2272,16 +2309,15 @@ def launch_social_account_catalog_backfill(
 
     if "comments" in effective_selected_tasks:
         comments_launch_started_at = time_module.perf_counter()
-        can_start_comments_from_targets = bool(
-            normalized_platform == "instagram" and _metadata_dict(target_readiness).get("can_start_comments")
+        catalog_comments_streaming_enabled = bool(
+            catalog_result is not None
+            and normalized_platform == "instagram"
+            and not bool(allow_local_dev_inline_bypass)
+            and normalized_execution_preference != "prefer_local_inline"
         )
         defer_comments_until_catalog_complete = bool(
             catalog_result is not None
-            and (
-                not can_start_comments_from_targets
-                or bool(allow_local_dev_inline_bypass)
-                or normalized_execution_preference == "prefer_local_inline"
-            )
+            and (bool(allow_local_dev_inline_bypass) or normalized_execution_preference == "prefer_local_inline")
         )
         if defer_comments_until_catalog_complete:
             comments_deferred_until_catalog_complete = True
@@ -2355,6 +2391,13 @@ def launch_social_account_catalog_backfill(
                         ),
                     },
                 )
+        elif catalog_comments_streaming_enabled:
+            attached_followups["comments"] = _build_attached_comments_followup(
+                run_id=None,
+                status="pending",
+                source="catalog_streaming",
+                state="pending",
+            )
         else:
             comments_source = "new_run"
             try:
@@ -2378,6 +2421,7 @@ def launch_social_account_catalog_backfill(
                     skip_launch_auth_probe=bool(instagram_targeted_comment_source_ids),
                     target_source_ids=instagram_targeted_comment_source_ids or None,
                     comments_worker_count=effective_comments_worker_count,
+                    cancel_active_before_relaunch=False,
                 )
             except SocialIngestConflictError as exc:
                 if exc.code == "SOCIAL_ACCOUNT_COMMENTS_LAUNCH_IN_PROGRESS":
@@ -2493,6 +2537,24 @@ def launch_social_account_catalog_backfill(
             catalog_metadata_updates.update(comments_auth_metadata)
         if attached_followups:
             catalog_metadata_updates["attached_followups"] = attached_followups
+        if catalog_comments_streaming_enabled:
+            catalog_metadata_updates.update(
+                {
+                    "comments_streaming_enabled": True,
+                    "comments_streaming_state": "started",
+                    "comments_streaming_source": "catalog_batch_persist",
+                    "comments_streaming_account_handle": normalized_account,
+                    "comments_streaming_source_scope": source_scope,
+                    "comments_streaming_launch_group_id": launch_group_id,
+                    "comments_streaming_worker_count": effective_comments_worker_count,
+                    "comments_streaming_enable_media_followups": effective_comments_enable_media_followups,
+                    "comments_streaming_targets_seen": 0,
+                    "comments_streaming_targets_enqueued": 0,
+                    "comments_streaming_targets_skipped_duplicate": 0,
+                    "comments_streaming_append_failures": 0,
+                    "deferred_comments_followup": None,
+                }
+            )
         catalog_metadata_updates.update(
             _catalog_stage_graph_metadata(
                 selected_tasks=normalized_selected_tasks,
@@ -2565,6 +2627,9 @@ def launch_social_account_catalog_backfill(
         "catalog_action_scope": normalized_catalog_action_scope,
         "catalog_bootstrap_required": requires_catalog_bootstrap if catalog_selected else False,
         "comments_deferred_until_catalog_complete": comments_deferred_until_catalog_complete,
+        "comments_streaming_enabled": catalog_comments_streaming_enabled,
+        "comments_streaming_state": "started" if catalog_comments_streaming_enabled else None,
+        "comments_streaming_source": "catalog_batch_persist" if catalog_comments_streaming_enabled else None,
         "attached_followups": attached_followups,
         "comments_started_before_detail_complete": comments_started_before_detail_complete,
         "enable_cap4_canary": bool(enable_cap4_canary),

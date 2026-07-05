@@ -44,6 +44,7 @@ def test_validate_startup_config_requires_deployed_only_secrets_for_deployed_run
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _clear_runtime_env(monkeypatch)
+    monkeypatch.setenv("TRR_MODAL_RUNTIME_SCHEDULER_ENABLED", "1")
     monkeypatch.setattr(api_main, "log_database_resolution_summary", lambda: None)
     monkeypatch.setattr(
         api_main,
@@ -63,6 +64,7 @@ def test_validate_startup_config_does_not_require_retired_screenalytics_envs_for
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _clear_runtime_env(monkeypatch)
+    monkeypatch.setenv("TRR_MODAL_RUNTIME_SCHEDULER_ENABLED", "1")
     monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret")
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "jwt-secret")
     monkeypatch.setattr(api_main, "log_database_resolution_summary", lambda: None)
@@ -116,6 +118,34 @@ def test_modal_runtime_scheduler_startup_rejects_no_maintenance_owner(monkeypatc
     assert "TRR_MODAL_RUNTIME_SCHEDULER_ENABLED=1" in message
     assert "TRR_MODAL_MAINTENANCE_OWNER_REQUIRED=1" in message
     assert "scripts/modal/prepare_named_secrets.py --apply" in message
+
+
+def test_modal_runtime_scheduler_startup_fails_closed_without_required_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_runtime_env(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="no active owner"):
+        api_main._validate_modal_maintenance_owner_config()
+
+
+def test_modal_runtime_scheduler_startup_fails_closed_when_disabled_outside_local(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_runtime_env(monkeypatch)
+    monkeypatch.setenv("TRR_MODAL_MAINTENANCE_OWNER_REQUIRED", "0")
+
+    with pytest.raises(RuntimeError, match="no active owner"):
+        api_main._validate_modal_maintenance_owner_config()
+
+
+def test_modal_runtime_scheduler_startup_allows_explicit_local_dev_bypass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_runtime_env(monkeypatch)
+    monkeypatch.setenv("TRR_LOCAL_DEV", "1")
+
+    assert api_main._validate_modal_maintenance_owner_config() is None
 
 
 def test_modal_runtime_scheduler_startup_rejects_duplicate_maintenance_owners(

@@ -1,0 +1,29 @@
+{
+  "data": {
+    "fetch__XDTMediaDict": {
+      "__typename": "XDTMediaDict",
+      "pk": "3875927249152668788",
+      "id": "3875927249152668788_2554414",
+      "code": "DXKD0wtAHR0",
+      "product_type": "clips",
+      "media_type": 2,
+      "taken_at": 1776272483,
+      "comment_count": 17,
+      "comments_disabled": false,
+      "commenting_disabled_for_viewer": true,
+      "fb_comment_count": null,
+      "fb_like_count": null,
+      "is_shared_to_fb": null,
+      "crosspost_metadata": null,
+      "social_context": null,
+      "user": {
+        "pk": "2554414",
+        "id": "2554414",
+        "username": "bravotv"
+      },
+      "caption": {
+        "text": "No Facebook count here"
+      }
+    }
+  }
+}
