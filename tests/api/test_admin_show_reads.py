@@ -34,7 +34,9 @@ def test_search_returns_contract_and_caches(monkeypatch: pytest.MonkeyPatch) -> 
             {
                 "query": query,
                 "pagination": {"per_type_limit": limit},
-                "shows": [{"id": "00000000-0000-0000-0000-0000000000a1", "name": "The Traitors", "slug": "the-traitors-us"}],
+                "shows": [
+                    {"id": "00000000-0000-0000-0000-0000000000a1", "name": "The Traitors", "slug": "the-traitors-us"}
+                ],
                 "people": [
                     {
                         "id": "person-1",
@@ -194,7 +196,9 @@ def test_show_detail_and_seasons_contracts(monkeypatch: pytest.MonkeyPatch) -> N
 
     client = TestClient(app)
     detail = client.get("/api/v1/admin/trr-api/shows/00000000-0000-0000-0000-0000000000a1")
-    seasons = client.get("/api/v1/admin/trr-api/shows/00000000-0000-0000-0000-0000000000a1/seasons?include_episode_signal=true")
+    seasons = client.get(
+        "/api/v1/admin/trr-api/shows/00000000-0000-0000-0000-0000000000a1/seasons?include_episode_signal=true"
+    )
 
     assert detail.status_code == 200
     assert detail.json()["show"]["canonical_slug"] == "the-traitors-us"
@@ -247,7 +251,9 @@ def test_show_assets_route_returns_default_gallery_contract(monkeypatch: pytest.
     monkeypatch.setattr(router_module.show_reads_repo, "get_show_assets", fake_get_show_assets)
 
     client = TestClient(app)
-    response = client.get("/api/v1/admin/trr-api/shows/00000000-0000-0000-0000-0000000000a1/assets?limit=48&offset=5&sources=tmdb,bravo.com")
+    response = client.get(
+        "/api/v1/admin/trr-api/shows/00000000-0000-0000-0000-0000000000a1/assets?limit=48&offset=5&sources=tmdb,bravo.com"
+    )
 
     assert response.status_code == 200
     assert response.json() == {
@@ -294,7 +300,9 @@ def test_show_assets_route_decodes_cursor_and_exposes_next_cursor(monkeypatch: p
     monkeypatch.setattr(router_module.show_reads_repo, "get_show_assets", fake_get_show_assets)
 
     client = TestClient(app)
-    response = client.get("/api/v1/admin/trr-api/shows/00000000-0000-0000-0000-0000000000a1/assets?limit=2&cursor=b2Zmc2V0OjU=")
+    response = client.get(
+        "/api/v1/admin/trr-api/shows/00000000-0000-0000-0000-0000000000a1/assets?limit=2&cursor=b2Zmc2V0OjU="
+    )
 
     assert response.status_code == 200
     assert response.json()["pagination"] == {
@@ -452,7 +460,9 @@ def test_season_assets_route_decodes_cursor_and_exposes_next_cursor(monkeypatch:
     monkeypatch.setattr(router_module.show_reads_repo, "get_show_season_assets", fake_get_show_season_assets)
 
     client = TestClient(app)
-    response = client.get("/api/v1/admin/trr-api/shows/00000000-0000-0000-0000-0000000000a1/seasons/6/assets?limit=2&cursor=b2Zmc2V0Ojg=")
+    response = client.get(
+        "/api/v1/admin/trr-api/shows/00000000-0000-0000-0000-0000000000a1/seasons/6/assets?limit=2&cursor=b2Zmc2V0Ojg="
+    )
 
     assert response.status_code == 200
     assert response.json()["pagination"] == {
@@ -601,7 +611,9 @@ def test_show_cast_returns_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     client = TestClient(app)
-    response = client.get("/api/v1/admin/trr-api/shows/00000000-0000-0000-0000-0000000000a1/cast?limit=25&offset=0&minEpisodes=2")
+    response = client.get(
+        "/api/v1/admin/trr-api/shows/00000000-0000-0000-0000-0000000000a1/cast?limit=25&offset=0&minEpisodes=2"
+    )
 
     assert response.status_code == 200
     payload = response.json()
@@ -629,7 +641,9 @@ def test_show_cast_forwards_include_photos_flag(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(router_module.show_reads_repo, "get_show_cast", fake_get_show_cast)
 
     client = TestClient(app)
-    response = client.get("/api/v1/admin/trr-api/shows/00000000-0000-0000-0000-0000000000a1/cast?limit=500&include_photos=false")
+    response = client.get(
+        "/api/v1/admin/trr-api/shows/00000000-0000-0000-0000-0000000000a1/cast?limit=500&include_photos=false"
+    )
 
     assert response.status_code == 200
     assert recorded["show_id"] == "00000000-0000-0000-0000-0000000000a1"

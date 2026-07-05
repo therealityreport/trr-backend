@@ -63,7 +63,11 @@ async def test_get_show_images_stream_runs_import_in_threadpool(monkeypatch: pyt
     monkeypatch.setattr(
         admin_show_images,
         "_fetch_show",
-        lambda _db, _show_id: {"id": str(show_id), "name": "The Real Housewives of Salt Lake City", "networks": ["Bravo"]},
+        lambda _db, _show_id: {
+            "id": str(show_id),
+            "name": "The Real Housewives of Salt Lake City",
+            "networks": ["Bravo"],
+        },
     )
 
     async def _fake_to_thread(func, /, *args, **kwargs):

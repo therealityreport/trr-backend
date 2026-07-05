@@ -426,9 +426,7 @@ def test_get_show_detail_adds_ignored_season_zero_metric_warning(
         {
             "code": "episodes_tmdb_season_zero_ignored_specials",
             "severity": "info",
-            "message": (
-                "16 TMDb season 0 specials are ignored unless IMDb lists them in a numbered season."
-            ),
+            "message": ("16 TMDb season 0 specials are ignored unless IMDb lists them in a numbered season."),
             "count": 16,
         }
     ]

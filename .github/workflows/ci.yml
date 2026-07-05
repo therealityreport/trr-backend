@@ -202,7 +202,8 @@ jobs:
             uv pip compile "$infile" "$@" -o "$lockfile"
             diff -u "/tmp/$(basename "$lockfile").before" "$lockfile"
           }
-          recompile_and_diff requirements.modal.lean.in requirements.modal.lean.lock.txt
+          recompile_and_diff requirements.modal.lean.in requirements.modal.lean.lock.txt \
+            --python-platform x86_64-manylinux_2_28
           recompile_and_diff requirements.modal.browser.in requirements.modal.browser.lock.txt \
             --python-platform x86_64-manylinux_2_28
           recompile_and_diff requirements.modal.vision.in requirements.modal.vision.lock.txt \

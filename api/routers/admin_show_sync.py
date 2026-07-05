@@ -18,7 +18,6 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
-from contextlib import redirect_stderr, redirect_stdout
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock, Thread, current_thread
@@ -1470,12 +1469,9 @@ def _run_script_step_with_metrics(
         if module:
             code, stdout, stderr = _run_script_module_step(module, argv, on_output_line=None)
         else:
-            stdout_buffer = io.StringIO()
-            stderr_buffer = io.StringIO()
-            with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
-                code = fn(list(argv))
-            stdout = stdout_buffer.getvalue()
-            stderr = stderr_buffer.getvalue()
+            code = fn(list(argv))
+            stdout = ""
+            stderr = ""
     except BaseException as exc:  # noqa: BLE001
         duration_ms = int((time.perf_counter() - started) * 1000)
         logger.exception("admin sync step failed: %s", name)
@@ -4402,7 +4398,11 @@ def refresh_show_stream(
                         "credits_pipeline",
                         "media_ingest",
                         (
-                            lambda sid=show_id_str, row=show_row, local_db=db, local_admin=admin, operation_id=operation_id_header: (  # noqa: E501
+                            lambda sid=show_id_str,
+                            row=show_row,
+                            local_db=db,
+                            local_admin=admin,
+                            operation_id=operation_id_header: (  # noqa: E501
                                 _run_media_ingest_phase(
                                     show_id_str=sid,
                                     show_row=row,

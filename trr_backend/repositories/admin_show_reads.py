@@ -6,12 +6,13 @@ import math
 import re
 import time
 import unicodedata
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Mapping
+from typing import Any
 
 from psycopg2.extras import RealDictCursor
 
@@ -297,9 +298,7 @@ def _normalize_show_row(row: dict[str, Any]) -> dict[str, Any]:
 def _build_show_sync_warnings(row: Mapping[str, Any]) -> list[dict[str, Any]]:
     warnings: list[dict[str, Any]] = []
     missing_count = _normalize_int(row.get("tmdb_episode_missing_imdb_count"))
-    ignored_season_zero_count = _normalize_int(
-        row.get("tmdb_episode_ignored_season_zero_missing_imdb_count")
-    )
+    ignored_season_zero_count = _normalize_int(row.get("tmdb_episode_ignored_season_zero_missing_imdb_count"))
     if missing_count > 0:
         samples = row.get("tmdb_episode_missing_imdb_samples")
         sample_rows = samples[:5] if isinstance(samples, list) else []
@@ -323,7 +322,8 @@ def _build_show_sync_warnings(row: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "severity": "info",
                 "message": (
                     f"{ignored_season_zero_count} TMDb season 0 special"
-                    f"{'' if ignored_season_zero_count == 1 else 's'} are ignored unless IMDb lists them in a numbered season."
+                    f"{'' if ignored_season_zero_count == 1 else 's'} are ignored unless IMDb lists them in a "
+                    "numbered season."
                 ),
                 "count": ignored_season_zero_count,
             }
@@ -968,7 +968,9 @@ def _get_show_assets_impl(
                     "id": row.get("asset_id") or row.get("media_asset_id"),
                     "type": "show",
                     "origin_table": "media_assets",
-                    "source": _normalize_scrape_source(str(row.get("source") or "unknown"), source_url, merged_metadata),
+                    "source": _normalize_scrape_source(
+                        str(row.get("source") or "unknown"), source_url, merged_metadata
+                    ),
                     "source_url": source_url,
                     "kind": row.get("link_kind") or "other",
                     "hosted_url": hosted_url,
@@ -985,7 +987,9 @@ def _get_show_assets_impl(
                     "context_section": context.get("context_section")
                     if isinstance(context.get("context_section"), str)
                     else None,
-                    "context_type": context.get("context_type") if isinstance(context.get("context_type"), str) else None,
+                    "context_type": context.get("context_type")
+                    if isinstance(context.get("context_type"), str)
+                    else None,
                     "fetched_at": row.get("fetched_at"),
                     "created_at": row.get("created_at"),
                     "metadata": merged_metadata,
@@ -2220,7 +2224,10 @@ def get_show_detail(show_id: str) -> tuple[dict[str, Any] | None, int]:
             watch.watch_provider_regions,
             COALESCE(ep_id_health.tmdb_episode_missing_imdb_count, 0) AS tmdb_episode_missing_imdb_count,
             COALESCE(ep_id_health.tmdb_episode_missing_imdb_samples, '[]'::jsonb) AS tmdb_episode_missing_imdb_samples,
-            COALESCE(ep_id_health.tmdb_episode_ignored_season_zero_missing_imdb_count, 0) AS tmdb_episode_ignored_season_zero_missing_imdb_count,
+            COALESCE(
+              ep_id_health.tmdb_episode_ignored_season_zero_missing_imdb_count,
+              0
+            ) AS tmdb_episode_ignored_season_zero_missing_imdb_count,
             COALESCE(s.tags, ARRAY[]::text[]) AS tags,
             s.primary_poster_image_id,
             s.primary_backdrop_image_id,

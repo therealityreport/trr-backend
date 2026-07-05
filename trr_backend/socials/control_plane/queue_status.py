@@ -569,7 +569,9 @@ def get_queue_status(
             errors.append(f"queue_recent_failures_query_failed: {exc}")
 
     try:
-        with repo.pg.db_connection(label="queue-status:silent-drop-warnings", pool_name=SOCIAL_CONTROL_POOL_NAME) as conn:
+        with repo.pg.db_connection(
+            label="queue-status:silent-drop-warnings", pool_name=SOCIAL_CONTROL_POOL_NAME
+        ) as conn:
             with repo.pg.db_cursor(conn=conn) as cur:
                 cur.execute("set local statement_timeout = %s", [str(safe_statement_timeout_ms)])
                 silent_drop_warnings = repo.pg.fetch_all_with_cursor(
@@ -600,7 +602,8 @@ def get_queue_status(
                       j.status,
                       j.metadata->'diagnostics'->'post_persist_truthfulness'->>'posts_checked' as posts_checked,
                       j.metadata->'diagnostics'->'post_persist_truthfulness'->>'posts_upserted' as posts_upserted,
-                      j.metadata->'diagnostics'->'post_persist_truthfulness'->>'media_assets_persisted' as media_assets_persisted,
+                      j.metadata->'diagnostics'->'post_persist_truthfulness'->>'media_assets_persisted'
+                        as media_assets_persisted,
                       coalesce(j.completed_at, j.created_at) as observed_at
                     from social.scrape_jobs j
                     where coalesce(
