@@ -202,6 +202,12 @@ def test_incomplete_fill_uses_reply_only_when_persisted_reply_gap_exists(
                 "target_filter": "incomplete",
                 "fetch_replies": True,
                 "instagram_scrape_mode": "authenticated",
+                # The reply-only fast path only runs on the authenticated cursor
+                # lane (``if fetch_replies and not public_comments_mode``). Pin the
+                # cursor strategy so the job is not treated as public-first (which
+                # is the default when no strategy/mode is supplied) and the
+                # persisted-reply-gap reply-only retry is actually exercised.
+                "comments_load_strategy": "instagram_comments_endpoint_cursor",
             },
         },
         worker_id="worker-1",

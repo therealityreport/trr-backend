@@ -8,6 +8,10 @@ This document covers the standalone Instagram comments scraper built on
 switch to Modal when the remote executor is enabled. All paths write to the
 shared `social.instagram_comments` table. No schema forks, no second scheduler.
 
+For shared Scrapling process rules and redaction-safe metadata expectations
+across social lanes, see
+[Scrapling Social Jobs](/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/workspace/scrapling-social-jobs.md).
+
 ---
 
 ## Architecture at a glance

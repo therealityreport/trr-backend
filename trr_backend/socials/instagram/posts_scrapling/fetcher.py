@@ -71,7 +71,13 @@ from trr_backend.socials.instagram.posts_scrapling.proxy import (
     build_posts_proxy_identity,
     posts_proxy_feature_flags,
 )
-from trr_backend.socials.scrapling_transport import build_stealthy_fetcher, scrapling_runtime_metadata
+from trr_backend.socials.scrapling_transport import (
+    build_stealthy_fetcher,
+    resolve_scrapling_fetcher_options,
+    safe_scrapling_proxy_metadata,
+    scrapling_fetcher_metadata,
+    scrapling_runtime_metadata,
+)
 
 logger = logging.getLogger("socials.instagram.posts_scrapling.fetcher")
 
@@ -87,6 +93,26 @@ _USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/131.0.0.0 Safari/537.36"
+)
+_POSTS_SCRAPLING_OPTION_KEYS = frozenset(
+    {
+        "additional_args",
+        "ai_targeted",
+        "allow_webgl",
+        "block_ads",
+        "block_webrtc",
+        "blocked_domains",
+        "dns_over_https",
+        "google_search",
+        "hide_canvas",
+        "init_script",
+        "real_chrome",
+        "selector_config",
+        "solve_cloudflare",
+        "useragent",
+        "wait_selector",
+        "wait_selector_state",
+    }
 )
 
 # Regex patterns for extracting runtime tokens from profile HTML.
@@ -888,6 +914,15 @@ class InstagramPostsScraplingFetcher:
         self._requests_fallback_scraper: Any | None = None
 
         self._scrapling_runtime_metadata = scrapling_runtime_metadata()
+        self._scrapling_fetcher_options = resolve_scrapling_fetcher_options(
+            "SOCIAL_INSTAGRAM_POSTS_SCRAPLING",
+            allowed_keys=_POSTS_SCRAPLING_OPTION_KEYS,
+        )
+        self._scrapling_fetcher_metadata = scrapling_fetcher_metadata(
+            "StealthyFetcher",
+            self._scrapling_fetcher_options.metadata,
+            safe_scrapling_proxy_metadata(),
+        )
         self._fetcher = build_stealthy_fetcher()
 
         # httpx client (for GraphQL POSTs). Created lazily after warmup bridges cookies.
@@ -908,6 +943,7 @@ class InstagramPostsScraplingFetcher:
         )
         return {
             "scrapling_runtime": dict(self._scrapling_runtime_metadata),
+            **self._scrapling_fetcher_metadata,
             "auth_state": self._auth_state,
             "http_client": "httpx",
             "impersonate": None,
@@ -1725,18 +1761,22 @@ class InstagramPostsScraplingFetcher:
         profile HTML comes back with the runtime tokens intact.
         """
         self._request_count += 1
+        fetch_kwargs = {
+            **self._scrapling_fetcher_options.kwargs,
+            "headless": self._headless,
+            "network_idle": False,
+            "load_dom": False,
+            "cookies": self._cookies,
+            "proxy_rotator": self._proxy_rotator,
+            "extra_headers": _build_nav_headers(referer),
+            "timeout": self._timeout_ms,
+            "retries": 1,
+            "retry_delay": 1.0,
+            **instagram_scrapling_network_kwargs(policy=self._network_policy),
+        }
         response = await self._fetcher.async_fetch(
             url,
-            headless=self._headless,
-            network_idle=False,
-            load_dom=False,
-            cookies=self._cookies,
-            proxy_rotator=self._proxy_rotator,
-            extra_headers=_build_nav_headers(referer),
-            timeout=self._timeout_ms,
-            retries=1,
-            retry_delay=1.0,
-            **instagram_scrapling_network_kwargs(policy=self._network_policy),
+            **fetch_kwargs,
         )
         self._record_response_bytes(response)
         return response

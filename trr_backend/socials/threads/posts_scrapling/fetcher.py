@@ -15,7 +15,10 @@ from trr_backend.socials._scrapling_http_utils import (
 from trr_backend.socials.scrapling_transport import (
     build_stealthy_fetcher,
     merge_response_cookies,
+    resolve_scrapling_fetcher_options,
     safe_cookie_metadata,
+    safe_scrapling_proxy_metadata,
+    scrapling_fetcher_metadata,
     scrapling_runtime_metadata,
 )
 from trr_backend.socials.threads.scraper import ThreadsPost, ThreadsScrapeConfig, ThreadsScraper
@@ -23,6 +26,26 @@ from trr_backend.socials.threads.scraper import ThreadsPost, ThreadsScrapeConfig
 from .proxy import ThreadsPostsProxyConfig
 
 logger = logging.getLogger("socials.threads.posts_scrapling.fetcher")
+_THREADS_SCRAPLING_OPTION_KEYS = frozenset(
+    {
+        "additional_args",
+        "ai_targeted",
+        "allow_webgl",
+        "block_ads",
+        "block_webrtc",
+        "blocked_domains",
+        "dns_over_https",
+        "google_search",
+        "hide_canvas",
+        "init_script",
+        "real_chrome",
+        "selector_config",
+        "solve_cloudflare",
+        "useragent",
+        "wait_selector",
+        "wait_selector_state",
+    }
+)
 
 
 @dataclass(slots=True)
@@ -75,6 +98,15 @@ class ThreadsPostsScraplingFetcher:
         self._scrapling_warmup_failed_reason: str | None = None
         self._selected_proxy_fingerprint = proxy_config.fingerprint if proxy_config else "none"
         self._scrapling_runtime_metadata = scrapling_runtime_metadata()
+        self._scrapling_fetcher_options = resolve_scrapling_fetcher_options(
+            "SOCIAL_THREADS_POSTS_SCRAPLING",
+            allowed_keys=_THREADS_SCRAPLING_OPTION_KEYS,
+        )
+        self._scrapling_fetcher_metadata = scrapling_fetcher_metadata(
+            "StealthyFetcher",
+            self._scrapling_fetcher_options.metadata,
+            safe_scrapling_proxy_metadata(),
+        )
 
     @property
     def runtime_metadata(self) -> dict[str, Any]:
@@ -85,6 +117,7 @@ class ThreadsPostsScraplingFetcher:
         )
         return {
             "scrapling_runtime": dict(self._scrapling_runtime_metadata),
+            **self._scrapling_fetcher_metadata,
             "request_count": self._request_count + int(getattr(self._scraper, "_request_count", 0) or 0),
             "transport": str(self._last_transport or "not_started"),
             "fallback_chain": list(self._fallback_chain),
@@ -224,6 +257,7 @@ class ThreadsPostsScraplingFetcher:
         self._request_count += 1
         return await self._fetcher.async_fetch(
             url,
+            **self._scrapling_fetcher_options.kwargs,
             headless=self._headless,
             network_idle=False,
             load_dom=True,

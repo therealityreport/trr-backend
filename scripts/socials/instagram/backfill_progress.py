@@ -300,6 +300,109 @@ def _fetch_job_counts(run_id: str) -> list[dict[str, Any]]:
     )
 
 
+def _fetch_comments_recovery_summary(run_id: str) -> dict[str, Any]:
+    row = pg.fetch_one(
+        """
+        with comments_jobs as (
+          select
+            status,
+            last_error_code,
+            case
+              when jsonb_typeof(coalesce(config->'target_source_ids', metadata->'target_source_ids')) = 'array'
+              then jsonb_array_length(coalesce(config->'target_source_ids', metadata->'target_source_ids'))
+              when nullif(coalesce(config->>'shortcode', metadata->>'shortcode', ''), '') is not null
+              then 1
+              else 0
+            end as target_count
+          from social.scrape_jobs
+          where run_id = %s::uuid
+            and platform = 'instagram'
+            and coalesce(config->>'stage', metadata->>'stage', job_type, 'unknown') = 'comments_scrapling'
+        )
+        select
+          count(*) filter (where status = 'queued')::int as queued_jobs,
+          count(*) filter (where status = 'pending')::int as pending_jobs,
+          count(*) filter (where status = 'retrying')::int as retrying_jobs,
+          count(*) filter (where status = 'running')::int as running_jobs,
+          count(*) filter (where status = 'completed')::int as completed_jobs,
+          count(*) filter (where status = 'failed')::int as failed_jobs,
+          count(*) filter (
+            where status in ('failed', 'retrying')
+              and lower(coalesce(last_error_code, '')) in (
+                'instagram_comments_public_recovery_pending',
+                'instagram_comments_public_requires_approval'
+              )
+          )::int as public_recovery_jobs,
+          coalesce(sum(target_count) filter (
+            where status in ('failed', 'retrying')
+              and lower(coalesce(last_error_code, '')) in (
+                'instagram_comments_public_recovery_pending',
+                'instagram_comments_public_requires_approval'
+              )
+          ), 0)::int as public_recovery_target_source_ids_count,
+          count(*) filter (
+            where status in ('failed', 'retrying')
+              and lower(coalesce(last_error_code, '')) in (
+                'instagram_comments_endpoint_auth_blocked',
+                'instagram_comments_auth_failed',
+                'instagram_comments_browser_session_invalidated',
+                'instagram_comments_warmup_auth_failed',
+                'instagram_comments_warmup_no_cookies',
+                'checkpoint_required'
+              )
+          )::int as authenticated_followup_jobs,
+          coalesce(sum(target_count) filter (
+            where status in ('failed', 'retrying')
+              and lower(coalesce(last_error_code, '')) in (
+                'instagram_comments_endpoint_auth_blocked',
+                'instagram_comments_auth_failed',
+                'instagram_comments_browser_session_invalidated',
+                'instagram_comments_warmup_auth_failed',
+                'instagram_comments_warmup_no_cookies',
+                'checkpoint_required'
+              )
+          ), 0)::int as authenticated_followup_target_source_ids_count
+        from comments_jobs
+        """,
+        [run_id],
+    ) or {}
+    public_targets = _fmt_count(row.get("public_recovery_target_source_ids_count"))
+    auth_targets = _fmt_count(row.get("authenticated_followup_target_source_ids_count"))
+    return {
+        **row,
+        "public_recovery_bucket": {
+            "name": "public_recovery",
+            "source_error_codes": [
+                "instagram_comments_public_recovery_pending",
+                "instagram_comments_public_requires_approval",
+            ],
+            "target_load_strategy": "public_relay",
+            "target_scrape_mode": "public_first",
+            "target_auth_validation_mode": "public_relay",
+            "target_source_ids_count": public_targets,
+            "source_job_count": _fmt_count(row.get("public_recovery_jobs")),
+            "status": "ready" if public_targets else "empty",
+        },
+        "authenticated_followup_bucket": {
+            "name": "authenticated_followup",
+            "source_error_codes": [
+                "instagram_comments_endpoint_auth_blocked",
+                "instagram_comments_auth_failed",
+                "instagram_comments_browser_session_invalidated",
+                "instagram_comments_warmup_auth_failed",
+                "instagram_comments_warmup_no_cookies",
+                "checkpoint_required",
+            ],
+            "target_load_strategy": "instagram_comments_endpoint_cursor",
+            "target_scrape_mode": "authenticated",
+            "target_auth_validation_mode": "comments_endpoint",
+            "target_source_ids_count": auth_targets,
+            "source_job_count": _fmt_count(row.get("authenticated_followup_jobs")),
+            "status": "ready" if auth_targets else "empty",
+        },
+    }
+
+
 def _fetch_media_completion_rates(run_id: str) -> dict[str, Any]:
     return pg.fetch_one(
         """
@@ -445,6 +548,7 @@ def build_progress(run_id: str) -> dict[str, Any]:
         "latest_jobs": _fetch_latest_jobs(run_id),
         "auth_cooldown": _fetch_auth_cooldown(platform or "instagram", account),
         "comments_followup": _comments_followup_payload(summary, config),
+        "comments_recovery_summary": _fetch_comments_recovery_summary(run_id),
         "dispatch_control": summary.get("dispatch_control") or config.get("dispatch_control"),
     }
     progress["speed"] = _speed_summary(progress)
@@ -616,6 +720,9 @@ def print_compact(progress: dict[str, Any]) -> None:
     latest_jobs = list(progress.get("latest_jobs") or [])
     cooldown = _metadata(progress.get("auth_cooldown"))
     comments_followup = _metadata(progress.get("comments_followup"))
+    comments_recovery = _metadata(progress.get("comments_recovery_summary"))
+    public_recovery_bucket = _metadata(comments_recovery.get("public_recovery_bucket"))
+    authenticated_bucket = _metadata(comments_recovery.get("authenticated_followup_bucket"))
     dispatch_control = _metadata(progress.get("dispatch_control"))
     speed = _speed_summary(progress)
 
@@ -663,6 +770,24 @@ def print_compact(progress: dict[str, Any]) -> None:
             sample_limit=_fmt_count(comments.get("comment_media_sample_limit")),
             state=comments_followup.get("state") or comments_followup.get("status") or "none",
             until=comments_followup.get("deferred_until") or "none",
+        )
+    )
+    print(
+        (
+            "comments_recovery running={running} retrying={retrying} queued={queued} failed={failed} "
+            "completed={completed} public_recovery={public_status} public_jobs={public_jobs} "
+            "public_targets={public_targets} auth_followup={auth_status} auth_targets={auth_targets}"
+        ).format(
+            running=_fmt_count(comments_recovery.get("running_jobs")),
+            retrying=_fmt_count(comments_recovery.get("retrying_jobs")),
+            queued=_fmt_count(comments_recovery.get("queued_jobs")) + _fmt_count(comments_recovery.get("pending_jobs")),
+            failed=_fmt_count(comments_recovery.get("failed_jobs")),
+            completed=_fmt_count(comments_recovery.get("completed_jobs")),
+            public_status=public_recovery_bucket.get("status") or "empty",
+            public_jobs=_fmt_count(comments_recovery.get("public_recovery_jobs")),
+            public_targets=_fmt_count(public_recovery_bucket.get("target_source_ids_count")),
+            auth_status=authenticated_bucket.get("status") or "empty",
+            auth_targets=_fmt_count(authenticated_bucket.get("target_source_ids_count")),
         )
     )
     media_counts = ", ".join(

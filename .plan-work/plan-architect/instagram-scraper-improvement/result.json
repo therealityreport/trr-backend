@@ -1,0 +1,118 @@
+{
+  "sourcePath": "/Users/thomashulihan/Projects/TRR/TRR-Backend/.plan-work/plan-architect/instagram-scraper-improvement/REVISED_PLAN.v2.md",
+  "initialPlanPath": "/Users/thomashulihan/Projects/TRR/TRR-Backend/.plan-work/plan-architect/instagram-scraper-improvement/REVISED_PLAN.v2.md",
+  "artifactDirectory": "/Users/thomashulihan/Projects/TRR/TRR-Backend/.plan-work/plan-architect/instagram-scraper-improvement",
+  "runVersion": 3,
+  "artifactVersionSuffix": ".v3",
+  "artifactPaths": {
+    "revisedPlan": "/Users/thomashulihan/Projects/TRR/TRR-Backend/.plan-work/plan-architect/instagram-scraper-improvement/REVISED_PLAN.v3.md",
+    "scorecard": "/Users/thomashulihan/Projects/TRR/TRR-Backend/.plan-work/plan-architect/instagram-scraper-improvement/SCORECARD.v3.md",
+    "validation": "/Users/thomashulihan/Projects/TRR/TRR-Backend/.plan-work/plan-architect/instagram-scraper-improvement/VALIDATION.v3.md",
+    "handoff": "/Users/thomashulihan/Projects/TRR/TRR-Backend/.plan-work/plan-architect/instagram-scraper-improvement/HANDOFF.v3.md",
+    "patches": "/Users/thomashulihan/Projects/TRR/TRR-Backend/.plan-work/plan-architect/instagram-scraper-improvement/PATCHES.v3.md"
+  },
+  "validationPath": "/Users/thomashulihan/Projects/TRR/TRR-Backend/.plan-work/plan-architect/instagram-scraper-improvement/VALIDATION.v3.md",
+  "handoffPath": "/Users/thomashulihan/Projects/TRR/TRR-Backend/.plan-work/plan-architect/instagram-scraper-improvement/HANDOFF.v3.md",
+  "scores": {
+    "initial": 96,
+    "revised": 98,
+    "delta": 2,
+    "initialRaw": 96,
+    "initialReadiness": 94,
+    "revisedRaw": 98,
+    "revisedReadiness": 98,
+    "rawDelta": 2,
+    "readinessDelta": 4,
+    "target": 97,
+    "evidenceGrade": 3,
+    "evidenceChecked": true,
+    "openImplementationGaps": 0,
+    "architectureFit": "strong",
+    "cleanupRefactoringRequired": "bounded",
+    "sourceCacheParity": "not_applicable",
+    "iterations": 1,
+    "versionHistory": [
+      {
+        "runVersion": 1,
+        "artifactVersionSuffix": "",
+        "initialReadiness": 78,
+        "revisedReadiness": 97
+      },
+      {
+        "runVersion": 2,
+        "artifactVersionSuffix": ".v2",
+        "initialReadiness": 92,
+        "revisedReadiness": 98
+      },
+      {
+        "runVersion": 3,
+        "artifactVersionSuffix": ".v3",
+        "initialReadiness": 94,
+        "revisedReadiness": 98
+      }
+    ],
+    "stopReason": "target_met",
+    "appliedCaps": [],
+    "gateFindings": []
+  },
+  "recommendedNextExecutionSkill": "orchestrate-subagents",
+  "pipelineStagesRun": [
+    "direct_revise_plan",
+    "reality_verification",
+    "revised_plan",
+    "validation",
+    "scorecard",
+    "handoff",
+    "patches",
+    "result_json"
+  ],
+  "triggerMode": "existing_plan_rewrite_requested",
+  "executionMode": "orchestrate-subagents",
+  "ownershipScopes": [
+    "Budget worker",
+    "Completion worker",
+    "Media gate worker"
+  ],
+  "capabilityInventory": [
+    "Plan Architect revise-plan",
+    "Subagents",
+    "TRR Backend tests",
+    "Modal readiness tooling",
+    "Repo-local DB helpers"
+  ],
+  "docsLookups": [],
+  "realityVerification": {
+    "status": "pass",
+    "checkedClaims": 7,
+    "verifiedClaims": 5,
+    "unverifiedClaims": 1,
+    "contradictedClaims": 0,
+    "staleClaims": 0,
+    "missingEvidenceClaims": 0,
+    "proofSources": [
+      "REVISED_PLAN.v2.md",
+      "trr_backend/socials/control_plane/backfill_health.py",
+      "tests/repositories/test_social_queue_status.py",
+      "trr_backend/socials/instagram/comments_scrapling/persistence.py",
+      "scripts/socials/media_queue_guard.py",
+      "git status --short --branch"
+    ],
+    "readinessImpact": "No active cap. Unknown production thresholds stay conservative until benchmark evidence exists.",
+    "claims": [
+      {
+        "claim": "Exact production thresholds remain unproven.",
+        "evidence": "No threshold table verified during this revise-plan pass.",
+        "status": "unverified_inference",
+        "contradictionCheck": "Plan uses conservative defaults and benchmark-scoped overrides.",
+        "planConsequence": "Budget defaults start cautious and observable."
+      }
+    ]
+  },
+  "userDecisionRequests": [],
+  "uiSystemDecision": {
+    "selectedDefault": "none",
+    "reason": "Backend-only work unless API changes require app follow-through."
+  },
+  "threadFileConflictSummary": "Backend worktree is dirty with unrelated modified and untracked files; subagents must preserve unrelated changes.",
+  "readyForHandoff": true
+}

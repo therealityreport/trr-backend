@@ -84,6 +84,7 @@ def get_profile_hashtags(
     platform: str,
     account_handle: str,
     window: Literal["all", "30d", "365d"] | None,
+    assignment_status: Literal["all", "assigned", "unassigned"] | None,
 ) -> dict[str, Any]:
     import trr_backend.socials.social_season_analytics_impl as social_core
 
@@ -91,6 +92,7 @@ def get_profile_hashtags(
         platform=platform,
         account_handle=account_handle,
         window=window,
+        assignment_status=assignment_status,
     )
 
 

@@ -213,7 +213,8 @@ def test_inject_modal_runtime_defaults_sets_canonical_modal_flags(
     assert os.environ["TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT"] == "8"
     assert os.environ["TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT"] == "4"
     assert os.environ["TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_CONCURRENCY_LIMIT"] == "4"
-    assert os.environ["TRR_MODAL_SOCIAL_MEDIA_JOB_CONCURRENCY_LIMIT"] == "10"
+    assert os.environ["TRR_MODAL_SOCIAL_MEDIA_JOB_CONCURRENCY_LIMIT"] == "1"
+    assert os.environ["TRR_MODAL_SOCIAL_RECOVERY_CONCURRENCY_LIMIT"] == "1"
     assert os.environ["TRR_MODAL_CAST_SCREENTIME_FUNCTION"] == "run_cast_screentime_analysis"
     assert os.environ["TRR_MODAL_CAST_SCREENTIME_CONCURRENCY_LIMIT"] == "2"
     assert os.environ["SOCIAL_MODAL_DISPATCH_LIMIT"] == "12"
@@ -223,6 +224,10 @@ def test_inject_modal_runtime_defaults_sets_canonical_modal_flags(
     assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY"] == "true"
     assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY"] == "false"
     assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS"] == "600"
+    # Throughput Phase 1: public-relay GraphQL page size pinned to the clamp
+    # ceiling (downgrade-protected in the fetcher).
+    assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_COAUTHOR_GRAPHQL_PAGE_SIZE"] == "50"
+    assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_COAUTHOR_GRAPHQL_CHILD_PAGE_SIZE"] == "50"
     assert os.environ["INSTAGRAM_BROWSER_NETWORK_POLICY_ENABLED"] == "true"
     assert os.environ["INSTAGRAM_BROWSER_BLOCK_STATIC_ASSETS"] == "true"
     assert os.environ["INSTAGRAM_BROWSER_DISABLE_EXTRA_RESOURCES"] == "true"
@@ -231,8 +236,8 @@ def test_inject_modal_runtime_defaults_sets_canonical_modal_flags(
     assert os.environ["SOCIAL_WORKER_POOL_SHARED_ACCOUNT_DISCOVERY"] == "3"
     assert os.environ["SOCIAL_WORKER_POOL_SHARED_ACCOUNT_POSTS"] == "8"
     assert os.environ["SOCIAL_SHARED_ACCOUNT_POSTS_PLATFORM_CAP_INSTAGRAM"] == "2"
-    assert os.environ["SOCIAL_WORKER_POOL_MEDIA_MIRROR"] == "10"
-    assert os.environ["SOCIAL_MIRROR_PLATFORM_CAP"] == "10"
+    assert os.environ["SOCIAL_WORKER_POOL_MEDIA_MIRROR"] == "1"
+    assert os.environ["SOCIAL_MIRROR_PLATFORM_CAP"] == "1"
     assert os.environ["SOCIAL_CATALOG_RUN_IN_FLIGHT_CAP"] == "8"
     assert os.environ["SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM"] == "4"
     assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT"] == "8"
@@ -241,9 +246,10 @@ def test_inject_modal_runtime_defaults_sets_canonical_modal_flags(
     assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_PER_POST_CONCURRENCY"] == "1"
     assert os.environ["SOCIAL_THREADS_POSTS_SCRAPLING_ENABLED"] == "true"
     assert os.environ["SOCIAL_THREADS_POSTS_PROXY_PROVIDER"] == "decodo"
-    assert "SOCIALBLADE_PROXY_PROVIDER" not in os.environ
-    assert "SOCIALBLADE_USE_STICKY_PROXY" not in os.environ
-    assert "SOCIALBLADE_PROXY_SESSION_TTL_SECONDS" not in os.environ
+    assert os.environ["SOCIALBLADE_PROXY_PROVIDER"] == "decodo"
+    assert os.environ["SOCIALBLADE_USE_STICKY_PROXY"] == "false"
+    assert os.environ["SOCIALBLADE_PROXY_SESSION_TTL_SECONDS"] == "600"
+    assert os.environ["SOCIALBLADE_SCRAPLING_SOLVE_CLOUDFLARE"] == "true"
     assert os.environ["SOCIAL_TIKTOK_COMMENT_FETCH_TIMEOUT_SECONDS"] == "180"
     assert os.environ["SOCIAL_QUEUE_ENABLED"] == "true"
 
@@ -331,11 +337,14 @@ def test_probe_instagram_public_history_scrubs_auth_proxy_and_decodo_env(
     monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_PROXY_PROVIDER", "decodo")
 
     def fake_run_public_probe(config):
-        assert public_probe.validate_public_environment(
-            strict_public=config.strict_public,
-            fail_if_cookies=config.fail_if_cookies,
-            fail_if_decodo=config.fail_if_decodo,
-        ) == []
+        assert (
+            public_probe.validate_public_environment(
+                strict_public=config.strict_public,
+                fail_if_cookies=config.fail_if_cookies,
+                fail_if_decodo=config.fail_if_decodo,
+            )
+            == []
+        )
         assert config.target_years == (2025, 2026)
         assert config.continue_after_boundary is True
         return public_probe.PublicProbeResult(
@@ -770,6 +779,7 @@ def test_modal_deploy_schedules_can_be_enabled_explicitly(monkeypatch: pytest.Mo
     partial_modal = types.ModuleType("modal")
     monkeypatch.setitem(sys.modules, "modal", partial_modal)
     monkeypatch.setenv("TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED", "1")
+    monkeypatch.delenv("TRR_MODAL_RUNTIME_SCHEDULER_ENABLED", raising=False)
 
     reloaded = importlib.reload(modal_jobs)
     try:
@@ -894,8 +904,21 @@ def test_run_socialblade_scrape_persists_payload_with_following_sidecar(
 
     monkeypatch.setattr(auth_module, "load_socialblade_cookies_from_sources", lambda: {"cf_clearance": "token"})
 
-    def fake_scrape_socialblade(handle: str, cookies, *, platform: str = "instagram"):
-        captured["scrape"] = {"handle": handle, "cookies": cookies, "platform": platform}
+    def fake_scrape_socialblade(
+        handle: str,
+        cookies,
+        *,
+        platform: str = "instagram",
+        allow_login_fallback: bool = True,
+        allow_visible_browser_retry: bool = True,
+    ):
+        captured["scrape"] = {
+            "handle": handle,
+            "cookies": cookies,
+            "platform": platform,
+            "allow_login_fallback": allow_login_fallback,
+            "allow_visible_browser_retry": allow_visible_browser_retry,
+        }
         return {"username": handle, "platform": platform, "stats_refreshed": True}
 
     def fake_attach(payload, *, handle: str, platform: str, source: str, source_scope: str, enabled: bool):
@@ -940,6 +963,8 @@ def test_run_socialblade_scrape_persists_payload_with_following_sidecar(
         "handle": "networkofficial",
         "cookies": {"cf_clearance": "token"},
         "platform": "instagram",
+        "allow_login_fallback": False,
+        "allow_visible_browser_retry": False,
     }
     assert captured["sidecar"] == {
         "handle": "networkofficial",
@@ -1161,3 +1186,24 @@ def test_reload_falls_back_to_stub_when_modal_module_is_partial(
     finally:
         monkeypatch.delitem(sys.modules, "modal", raising=False)
         importlib.reload(modal_jobs)
+
+
+def test_comments_db_session_budget_status(monkeypatch):
+    # Default container caps: comments(4) + recovery(4) = 8 workers; per-worker
+    # sessions = default pool(2) + social_control(1) = 3; demand = 24.
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_DB_SESSION_BUDGET", raising=False)
+    status = modal_jobs.comments_db_session_budget_status()
+    assert status["sessions_per_worker"] == 3
+    assert status["demand"] == status["worker_cap"] * status["sessions_per_worker"]
+    # Budget 0/unset disables the check.
+    assert status["within_budget"] is True
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_DB_SESSION_BUDGET", str(status["demand"] - 1))
+    assert modal_jobs.comments_db_session_budget_status()["within_budget"] is False
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_DB_SESSION_BUDGET", str(status["demand"]))
+    assert modal_jobs.comments_db_session_budget_status()["within_budget"] is True
+
+    # Garbage budget is treated as disabled.
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_DB_SESSION_BUDGET", "not-a-number")
+    assert modal_jobs.comments_db_session_budget_status()["within_budget"] is True

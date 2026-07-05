@@ -141,6 +141,20 @@ def _youtube_source_config(account_handle: str, config: Mapping[str, Any] | None
     }
 
 
+def _youtube_requested_surfaces(config: Mapping[str, Any] | None) -> Any:
+    if not config:
+        return ("videos", "shorts", "posts")
+    metadata = _source_metadata(config)
+    for key in ("youtube_surfaces", "youtube_surface", "surfaces", "surface"):
+        value = config.get(key)
+        if value:
+            return value
+        value = metadata.get(key)
+        if value:
+            return value
+    return ("videos", "shorts", "posts")
+
+
 def _platform_profile_url_for_handle(platform: str, handle: Any) -> str | None:
     normalized_handle = _normalize_account_handle(handle)
     if not normalized_handle:
@@ -454,6 +468,7 @@ def scrape_shared_youtube_posts(
         source_type=source_config["source_type"],
         playlist_id=source_config["playlist_id"],
         playlist_url=source_config["playlist_url"],
+        surfaces=_youtube_requested_surfaces(config),
     )
     api_identity = (
         _resolve_channel_identity(youtube_api, account_handle) if source_config["source_type"] == "account" else None
@@ -462,6 +477,7 @@ def scrape_shared_youtube_posts(
 
     ytdlp_available = bool(deps.ytdlp_available())
     retrieval_meta = dict(getattr(scraper, "last_retrieval_meta", {}) or {})
+    retrieval_meta["requested_surfaces"] = list(getattr(scrape_config, "surfaces", ()) or [])
     retrieval_meta["ytdlp_available"] = ytdlp_available
     if not ytdlp_available:
         logger.warning(
@@ -480,6 +496,7 @@ def scrape_shared_youtube_posts(
         or account_handle
     )
     profile_snapshot = deps.merge_social_profile_snapshots(
+        deps.metadata_dict(config.get("profile_snapshot")),
         deps.youtube_profile_snapshot_from_api_identity(api_identity, account_handle=canonical_handle),
         {
             "username": canonical_handle,
@@ -537,7 +554,10 @@ def scrape_shared_youtube_posts(
         if _bounded_window_no_hit_completed(retrieval_meta):
             retrieval_meta["empty_result_reason"] = "bounded_window_no_hits"
             retrieval_meta["retryable"] = False
-        elif not first_page_counts.get("videos") and not first_page_counts.get("shorts"):
+        elif not any(
+            _normalize_non_negative_int(first_page_counts.get(surface)) > 0
+            for surface in ("videos", "shorts", "posts")
+        ):
             retrieval_meta["error_code"] = "youtube_empty_channel_page"
             retrieval_meta["retryable"] = True
             retrieval_meta["error_class"] = "YouTubeEmptyChannelPage"

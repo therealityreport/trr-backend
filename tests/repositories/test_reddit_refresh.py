@@ -32,6 +32,29 @@ def _listing_row(
     }
 
 
+def test_sanitize_reddit_media_url_decodes_html_and_strips_anchor_tail() -> None:
+    raw_url = (
+        "https://preview.redd.it/example.jpeg?width=321&amp;format=pjpg"
+        "&amp;auto=webp&amp;s=abc123</a"
+    )
+
+    assert reddit_refresh._sanitize_reddit_media_url(raw_url) == (  # noqa: SLF001
+        "https://preview.redd.it/example.jpeg?width=321&format=pjpg&auto=webp&s=abc123"
+    )
+
+
+def test_extract_reddit_media_urls_uses_clean_href_values_without_tag_tail() -> None:
+    body_html = (
+        '<a href="https://preview.redd.it/example.jpeg?width=321&amp;format=pjpg'
+        '&amp;auto=webp&amp;s=abc123">https://preview.redd.it/example.jpeg?width=321'
+        "&amp;format=pjpg&amp;auto=webp&amp;s=abc123</a>"
+    )
+
+    assert reddit_refresh._extract_reddit_media_urls(body_html) == [  # noqa: SLF001
+        ("https://preview.redd.it/example.jpeg?width=321&format=pjpg&auto=webp&s=abc123", "image")
+    ]
+
+
 def test_build_reddit_refresh_save_proof_counts_saved_rows(monkeypatch) -> None:
     def _fake_fetch_one(query, params=None, **_kwargs):  # noqa: ANN001
         del params

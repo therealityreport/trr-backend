@@ -92,6 +92,17 @@ def comments_proxy_provider_name() -> str:
     return _normalize_mode(os.getenv(COMMENTS_PROXY_PROVIDER_ENV))
 
 
+PUBLIC_PROXY_ENABLED_ENV = "SOCIAL_INSTAGRAM_COMMENTS_PUBLIC_PROXY_ENABLED"
+_TRUTHY_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def public_proxy_enabled() -> bool:
+    """Return True only when budgeted public-comments proxy fan-out is explicitly
+    opted in. This relaxes ONLY the proxy clause of the public isolation guard;
+    cookies and authenticated fallback remain forbidden on the public lane."""
+    return _normalize_mode(os.getenv(PUBLIC_PROXY_ENABLED_ENV)) in _TRUTHY_VALUES
+
+
 class PublicCommentsModeViolation(RuntimeError):
     """Raised when a public comments job would touch a proxy, cookies, or auth.
 
@@ -119,22 +130,33 @@ def assert_public_comments_isolation(
     proxy_config: Any,
     session: Any,
     account_handle: str | None = None,
+    allow_proxy: bool = False,
 ) -> dict[str, Any]:
-    """Hard guard: a public comments job must run with no proxy, cookies, or auth.
+    """Hard guard for the public comments lane, split into two invariants:
+
+    - **Invariant A (always enforced, fail-closed):** never cookies, never an
+      authenticated fallback. This preserves the logged-out guarantee.
+    - **Invariant B (relaxable):** a proxy is forbidden UNLESS ``allow_proxy`` is
+      True (resolved from :func:`public_proxy_enabled` + a budget check). This is
+      what permits budgeted sticky-Decodo per-egress fan-out on the public lane.
 
     Returns an ``instagram_access_proof`` dict on success; raises
-    :class:`PublicCommentsModeViolation` if any proxy/cookie/auth state leaked
-    into a public run. Call this at the point where the public session and proxy
-    config have been resolved, immediately before constructing the fetcher.
+    :class:`PublicCommentsModeViolation` if any forbidden state leaked. Call this
+    once the public session and proxy config are resolved, immediately before
+    constructing the fetcher. With ``allow_proxy=False`` (default) behavior is
+    identical to the prior no-proxy guard.
     """
     violations: list[str] = []
 
-    if proxy_config is not None:
+    proxy_in_use = proxy_config is not None
+    # Invariant B: proxy only permitted under the explicit opt-in.
+    if proxy_in_use and not allow_proxy:
         fingerprint = getattr(proxy_config, "fingerprint", None)
         violations.append(f"proxy_config is set (fingerprint={fingerprint!r})")
         if getattr(proxy_config, "api_proxy_url", None):
             violations.append("proxy_config.api_proxy_url is set")
 
+    # Invariant A: cookies / authenticated fallback are NEVER allowed here.
     if getattr(session, "cookies", None):
         violations.append("session.cookies is non-empty")
 
@@ -149,11 +171,12 @@ def assert_public_comments_isolation(
     if violations:
         raise PublicCommentsModeViolation(violations)
 
+    proxy_active = proxy_in_use and allow_proxy
     return {
         "no_cookies": True,
-        "no_proxy": True,
+        "no_proxy": not proxy_active,
         "no_auth_fallback": True,
-        "proxy_state": "none",
+        "proxy_state": "budgeted_public_proxy" if proxy_active else "none",
         "auth_state": "public",
         "proxy_provider_disabled": comments_proxy_provider_disabled(),
     }

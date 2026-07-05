@@ -230,6 +230,7 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
     max_pages_raw = config.get("max_pages")
     max_pages: int | None = int(max_pages_raw) if max_pages_raw not in (None, 0, "") else None
     season_id = str(config.get("season_id") or "").strip() or None
+    pipeline_ingest_mode = str(config.get("pipeline_ingest_mode") or "").strip().lower()
 
     if not account_handle:
         raise TikTokPostsScraplingRuntimeError(
@@ -241,6 +242,7 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
     progress_state = lifecycle.new_job_progress_state()
     posts_fetched = 0
     posts_upserted = 0
+    catalog_posts_upserted = 0
     posts_skipped = 0
     posts_skipped_by_reason: dict[str, int] = {}
     pages_fetched = 0
@@ -275,12 +277,13 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
     def _persist_counters() -> dict[str, Any]:
         return {
             "posts_upserted": posts_upserted,
+            "catalog_posts_upserted": catalog_posts_upserted,
             "posts_skipped": posts_skipped,
             "posts_skipped_by_reason": dict(posts_skipped_by_reason),
         }
 
     async def _run_job() -> dict[str, Any]:
-        nonlocal posts_fetched, posts_upserted, posts_skipped, pages_fetched
+        nonlocal posts_fetched, posts_upserted, catalog_posts_upserted, posts_skipped, pages_fetched
         nonlocal fetcher_metadata, last_cursor, stop_reason
 
         session = resolve_tiktok_posts_session()
@@ -335,7 +338,7 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
                 _raise_if_cancelled(job_id=job_id, run_id=run_id, runtime_metadata=fetcher_metadata)
 
         async def _run_canonical_fallback(trigger_reason: Any) -> bool:
-            nonlocal posts_fetched, posts_upserted, posts_skipped, pages_fetched
+            nonlocal posts_fetched, posts_upserted, catalog_posts_upserted, posts_skipped, pages_fetched
             nonlocal fetcher_metadata, stop_reason, canonical_fallback_metadata
 
             cookies = dict(session.raw_cookies or session.cookies or {})
@@ -364,9 +367,11 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
                 run_id=run_id or None,
                 job_id=job_id,
                 season_id=season_id,
+                pipeline_ingest_mode=pipeline_ingest_mode,
             )
             posts_fetched += len(fallback_posts)
             posts_upserted += persisted.posts_upserted
+            catalog_posts_upserted += int(getattr(persisted, "catalog_posts_upserted", 0) or 0)
             posts_skipped += persisted.posts_skipped
             _merge_skipped_reasons(dict(getattr(persisted, "posts_skipped_by_reason", {}) or {}))
             pages_fetched += _canonical_tiktok_fallback_page_count(
@@ -470,9 +475,11 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
                         run_id=run_id or None,
                         job_id=job_id,
                         season_id=season_id,
+                        pipeline_ingest_mode=pipeline_ingest_mode,
                     )
                     posts_fetched += len(result.posts)
                     posts_upserted += persisted.posts_upserted
+                    catalog_posts_upserted += int(getattr(persisted, "catalog_posts_upserted", 0) or 0)
                     posts_skipped += persisted.posts_skipped
                     _merge_skipped_reasons(dict(getattr(persisted, "posts_skipped_by_reason", {}) or {}))
                     persisted_page = True
@@ -526,6 +533,7 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
             "stage": stage,
             "platform": "tiktok",
             "account": account_handle,
+            "pipeline_ingest_mode": pipeline_ingest_mode or None,
             "stage_counters": _stage_counters(),
             "persist_counters": _persist_counters(),
             "listing_progress": _listing_progress(partial=stop_reason not in {None, "completed"}),
@@ -568,6 +576,7 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
                 "stage": stage,
                 "platform": "tiktok",
                 "account": account_handle,
+                "pipeline_ingest_mode": pipeline_ingest_mode or None,
                 "cancelled": True,
                 "cancel_scope": exc.cancel_scope,
                 "job_status_at_cancel": exc.job_status,
@@ -609,6 +618,7 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
                 "stage": stage,
                 "platform": "tiktok",
                 "account": account_handle,
+                "pipeline_ingest_mode": pipeline_ingest_mode or None,
                 "error_code": error_code,
                 "error_class": error_class,
                 "activity": {"phase": "failed", "last_progress_at": lifecycle.format_time(lifecycle.now_utc())},
@@ -677,6 +687,7 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
                 "stage": stage,
                 "platform": "tiktok",
                 "account": account_handle,
+                "pipeline_ingest_mode": pipeline_ingest_mode or None,
                 "stage_counters": _stage_counters(),
                 "persist_counters": _persist_counters(),
                 "listing_progress": _listing_progress(partial=terminal_status != "completed"),

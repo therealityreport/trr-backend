@@ -108,7 +108,7 @@ class SocialBladeScraplingFetcher:
         self._seed_cookie_names = sorted(self._raw_cookies.keys())
         self._platform = str(platform or "instagram").strip().lower() or "instagram"
         self._proxy_config = proxy_config
-        self._proxy_rotator = proxy_config.proxy_rotator if proxy_config else None
+        self._browser_proxy = proxy_config.browser_proxy if proxy_config else None
         self._api_proxy_url = proxy_config.api_proxy_url if proxy_config else None
         self._selected_proxy_fingerprint = proxy_config.fingerprint if proxy_config else "none"
         self._proxy_session_mode = proxy_config.session_mode if proxy_config else "none"
@@ -385,7 +385,7 @@ class SocialBladeScraplingFetcher:
             load_dom=self._platform in _TRPC_CAPTURE_PLATFORMS,
             disable_resources=False,
             cookies=self._cookies,
-            proxy_rotator=self._proxy_rotator,
+            proxy=self._browser_proxy,
             extra_headers=_build_nav_headers(url),
             page_action=self._capture_platform_page_trpc if self._platform in _TRPC_CAPTURE_PLATFORMS else None,
             capture_xhr=r"/api/trpc/",

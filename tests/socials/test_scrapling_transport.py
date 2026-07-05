@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from types import ModuleType
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -218,9 +219,105 @@ def test_proxy_conflict_guard_rejects_mixed_proxy_modes() -> None:
             session_proxy="http://session-proxy.example",
             request_proxy="http://request-proxy.example",
         )
-
     with pytest.raises(ValueError, match=SCRAPLING_PROXY_CONFLICT_REASON):
         assert_no_conflicting_scrapling_proxies(
             session_proxy="http://session-proxy.example",
             request_proxies={"http": "http://request-proxy.example"},
         )
+
+
+def test_resolve_scrapling_fetcher_options_returns_empty_without_env() -> None:
+    from trr_backend.socials.scrapling_transport import resolve_scrapling_fetcher_options
+
+    resolved = resolve_scrapling_fetcher_options("SOCIAL_TEST", allowed_keys={"headless", "additional_args"})
+
+    assert resolved.kwargs == {}
+    assert resolved.metadata == {"configured_options": [], "invalid_options": []}
+
+
+def test_resolve_scrapling_fetcher_options_parses_allowed_shapes(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.socials.scrapling_transport import resolve_scrapling_fetcher_options
+
+    monkeypatch.setenv("SOCIAL_TEST_HEADLESS", "false")
+    monkeypatch.setenv("SOCIAL_TEST_ADDITIONAL_ARGS", '["--disable-gpu", "--lang=en-US"]')
+    monkeypatch.setenv("SOCIAL_TEST_EXTRA_HEADERS", '{"x-test": "1"}')
+
+    resolved = resolve_scrapling_fetcher_options(
+        "SOCIAL_TEST",
+        allowed_keys={"headless", "additional_args", "extra_headers"},
+    )
+
+    assert resolved.kwargs == {
+        "additional_args": ["--disable-gpu", "--lang=en-US"],
+        "extra_headers": {"x-test": "1"},
+        "headless": False,
+    }
+    assert resolved.metadata["configured_options"] == ["additional_args", "extra_headers", "headless"]
+    assert resolved.metadata["additional_args"] == {"count": 2, "values": ["--disable-gpu", "--lang=en-US"]}
+    assert resolved.metadata["extra_headers"] == {"keys": ["x-test"]}
+
+
+def test_resolve_scrapling_fetcher_options_uses_bundle_and_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.socials.scrapling_transport import resolve_scrapling_fetcher_options
+
+    monkeypatch.setenv(
+        "SOCIAL_TEST_SCRAPLING_FETCHER_OPTIONS",
+        '{"network_idle": true, "additional_args": {"bad": true}, "unknown": true}',
+    )
+
+    resolved = resolve_scrapling_fetcher_options(
+        "SOCIAL_TEST",
+        allowed_keys={"network_idle", "additional_args", "unknown"},
+    )
+
+    assert resolved.kwargs == {"network_idle": True}
+    assert resolved.metadata["invalid_options"] == ["additional_args", "unknown"]
+
+
+def test_safe_scrapling_proxy_metadata_redacts_response_and_stats_proxies() -> None:
+    from trr_backend.socials.scrapling_transport import safe_scrapling_proxy_metadata
+
+    response = SimpleNamespace(meta={"proxy": "http://user:secret@proxy-one.example:7000"})
+    stats = SimpleNamespace(
+        proxies=[
+            "http://session-abc123:pw@proxy-two.example:8000",
+            {"server": "https://proxy-three.example:9000", "username": "hidden", "password": "hidden"},
+        ]
+    )
+    proxy_config = SimpleNamespace(fingerprint="session-abc123", session_mode="sticky")
+
+    metadata = safe_scrapling_proxy_metadata(response=response, stats=stats, proxy_config=proxy_config)
+
+    assert metadata == {
+        "proxy_session_mode": "sticky",
+        "scrapling_observed_proxy_count": 3,
+        "scrapling_observed_proxy_labels": [
+            "http://proxy-one.example:7000",
+            "http://proxy-two.example:8000",
+            "https://proxy-three.example:9000",
+        ],
+        "selected_proxy_fingerprint": "session-redacted",
+    }
+    assert "secret" not in repr(metadata)
+    assert "abc123" not in repr(metadata)
+    assert "hidden" not in repr(metadata)
+
+
+def test_scrapling_fetcher_metadata_is_json_safe() -> None:
+    from trr_backend.socials.scrapling_transport import scrapling_fetcher_metadata
+
+    class FakeFetcher:
+        pass
+
+    metadata = scrapling_fetcher_metadata(
+        FakeFetcher,
+        options_metadata={"configured_options": {"not": "a-list"}, "object": FakeFetcher()},
+        observed_proxy_metadata={"scrapling_observed_proxy_count": 0},
+    )
+
+    assert metadata["scrapling_fetcher_class"] == "FakeFetcher"
+    assert metadata["scrapling_browser_tuning"]["configured_options"] == {"not": "a-list"}
+    assert isinstance(metadata["scrapling_browser_tuning"]["object"], str)
+    assert metadata["scrapling_observed_proxy_count"] == 0

@@ -48,6 +48,157 @@ def _instagram_public_comments_worker_cap(
     return cap
 
 
+def _terminal_frontier_continuation_next_available_at(cooldown: dict[str, Any] | None) -> Any:
+    cooldown_until = legacy._coerce_dt(legacy._metadata_dict(cooldown).get("cooldown_until"))
+    if cooldown_until is not None:
+        return cooldown_until
+    return legacy._now_utc() + timedelta(seconds=max(5, legacy._modal_dispatch_retry_delay_seconds()))
+
+
+def _reconcile_terminal_frontier_modal_call(
+    row: dict[str, Any],
+    *,
+    inspection: dict[str, Any],
+    now_utc: Any,
+) -> dict[str, Any] | None:
+    job_id = str(row.get("id") or "").strip()
+    run_id = str(row.get("run_id") or "").strip()
+    platform = legacy._normalize_platform_name(row.get("platform")) or ""
+    config = legacy._metadata_dict(row.get("config"))
+    account_handle = legacy._resolve_dispatch_account_handle(config)
+    if not job_id or not run_id or not platform or not account_handle:
+        return None
+    if legacy._job_stage_from_row(row) != legacy.SHARED_ACCOUNT_POSTS_STAGE:
+        return None
+    if not legacy._shared_account_uses_frontier_strategy(config, platform=platform):
+        return None
+    frontier = legacy._get_shared_account_run_frontier(
+        run_id=run_id,
+        platform=platform,
+        account_handle=account_handle,
+    )
+    if not frontier or bool(frontier.get("exhausted")):
+        return None
+    frontier_status = str(frontier.get("status") or "").strip().lower()
+    if frontier_status in {"completed", "failed", "cancelled"}:
+        return None
+    if not str(frontier.get("next_cursor") or "").strip():
+        return None
+    lease_owner = str(frontier.get("lease_owner") or "").strip()
+    worker_id = str(row.get("worker_id") or "").strip()
+    if lease_owner and lease_owner not in {job_id, worker_id}:
+        return None
+
+    enqueue_result = legacy._coerce_shared_posts_enqueue_result(
+        legacy._enqueue_shared_posts_job(
+            run_id=run_id,
+            platform=platform,
+            source_scope=str(config.get("source_scope") or row.get("source_scope") or "network"),
+            account_handle=account_handle,
+            shared_account_source_id=config.get("shared_account_source_id"),
+            pipeline_ingest_mode=str(
+                config.get("pipeline_ingest_mode") or legacy.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE
+            ),
+            runner_count=legacy._normalize_non_negative_int(config.get("runner_count"))
+            or legacy.CATALOG_BACKFILL_FULL_HISTORY_RUNNER_COUNT,
+            expected_total_posts=legacy._normalize_non_negative_int(frontier.get("total_posts"))
+            or legacy._normalize_non_negative_int(config.get("expected_total_posts"))
+            or None,
+            runner_strategy=legacy.CATALOG_FULL_HISTORY_FRONTIER_STRATEGY,
+            partition_strategy=legacy.CATALOG_FULL_HISTORY_FRONTIER_STRATEGY,
+            required_worker_lane=str(config.get("required_worker_lane") or "").strip().lower() or None,
+            required_execution_backend=str(config.get("required_execution_backend") or "").strip().lower() or None,
+            allow_local_dev_inline_bypass=bool(config.get("allow_local_dev_inline_bypass")),
+            frontier_auth_allowed=config.get("frontier_auth_allowed"),
+            frontier_auth_reason=str(config.get("frontier_auth_reason") or "").strip().lower() or None,
+            frontier_transport=(
+                str(frontier.get("last_transport") or config.get("frontier_transport") or "").strip().lower()
+                or None
+            ),
+            transport_preference=str(config.get("transport_preference") or "").strip().lower() or None,
+            allow_public_transport_fallback=config.get("allow_public_transport_fallback"),
+            selected_tasks=config.get("selected_tasks"),
+            effective_selected_tasks=config.get("effective_selected_tasks"),
+            details_refresh_skip_detail_fetch=config.get("details_refresh_skip_detail_fetch"),
+            details_refresh_force_detail_fetch=config.get("details_refresh_force_detail_fetch"),
+            details_refresh_worker_count=legacy._normalize_non_negative_int(config.get("details_refresh_worker_count"))
+            or None,
+            comments_worker_count=legacy._normalize_non_negative_int(config.get("comments_worker_count")) or None,
+            details_refresh_skip_media_followups=config.get("details_refresh_skip_media_followups"),
+            tiktok_comments_in_posts_stage=bool(config.get("tiktok_comments_in_posts_stage")),
+            tiktok_direct_comment_api_override=bool(config.get("tiktok_direct_comment_api_override")),
+            twitter_comments_in_posts_stage=bool(config.get("twitter_comments_in_posts_stage")),
+            initiated_by="terminal_modal_frontier_reconciliation",
+            priority=legacy._normalize_non_negative_int(row.get("priority")) or 101,
+        )
+    )
+    if enqueue_result.status == "failed":
+        release_status = "retrying"
+        old_job_status = "retrying"
+        error_code = "terminal_modal_frontier_requeue_failed"
+        next_available_at = legacy._now_utc() + timedelta(seconds=max(5, legacy._modal_dispatch_retry_delay_seconds()))
+    elif enqueue_result.status == "deferred_by_cooldown":
+        release_status = "retrying"
+        old_job_status = "retrying"
+        error_code = "terminal_modal_frontier_deferred_by_cooldown"
+        next_available_at = _terminal_frontier_continuation_next_available_at(enqueue_result.cooldown)
+    else:
+        release_status = "queued"
+        old_job_status = "cancelled"
+        error_code = "terminal_modal_frontier_requeued"
+        next_available_at = None
+
+    legacy._release_shared_account_run_frontier(
+        run_id=run_id,
+        platform=platform,
+        account_handle=account_handle,
+        lease_owner=lease_owner or None,
+        status=release_status,
+    )
+    dispatch = legacy._job_dispatch_metadata(row)
+    metadata_updates = dict(row.get("metadata") or {})
+    metadata_updates["dispatch"] = {
+        **dispatch,
+        "remote_invocation_status": str(inspection.get("status") or "").strip().lower() or None,
+        "remote_invocation_checked_at": inspection.get("checked_at") or legacy._iso(now_utc),
+        "remote_task_id": str(inspection.get("task_id") or "").strip() or None,
+        "remote_blocked_reason": str(inspection.get("reason") or "").strip() or None,
+        "lease_expires_at": None,
+    }
+    metadata_updates["terminal_modal_frontier_reconciliation"] = {
+        "source": "reconcile_terminal_modal_running_jobs",
+        "remote_status": str(inspection.get("status") or "").strip().lower() or None,
+        "function_call_id": str(dispatch.get("remote_invocation_id") or "").strip() or None,
+        "status": enqueue_result.status,
+        "continuation_job_id": enqueue_result.job_id,
+        "frontier_release_status": release_status,
+        "cooldown": enqueue_result.cooldown,
+        "error": enqueue_result.error,
+        "reconciled_at": legacy._iso(now_utc),
+    }
+    metadata_updates["retryable"] = old_job_status == "retrying"
+    legacy._finish_job(
+        job_id,
+        status=old_job_status,
+        items_found=legacy._normalize_non_negative_int(row.get("items_found")),
+        error_message="Terminal Modal invocation reconciled for unfinished shared-account frontier.",
+        metadata=metadata_updates,
+        last_error_code=error_code,
+        last_error_class="ModalFrontierTerminalReconciliation",
+        next_available_at=next_available_at,
+    )
+    return {
+        "id": job_id,
+        "run_id": run_id,
+        "platform": platform,
+        "status": old_job_status,
+        "remote_invocation_id": str(dispatch.get("remote_invocation_id") or "").strip() or None,
+        "frontier_status": release_status,
+        "continuation_job_id": enqueue_result.job_id,
+        "deferred_by_cooldown": enqueue_result.status == "deferred_by_cooldown",
+    }
+
+
 def recover_dispatch_blocked_no_progress_jobs(*, limit: int = 100) -> list[dict[str, Any]]:
     safe_limit = max(1, min(int(limit), 500))
     blocked_rows, _ = legacy._list_dispatch_blocked_jobs(limit=safe_limit)
@@ -196,10 +347,13 @@ def reconcile_terminal_modal_running_jobs(
           id::text as id,
           run_id::text as run_id,
           platform,
+          source_scope,
           status,
+          priority,
           items_found,
           attempt_count,
           max_attempts,
+          worker_id,
           started_at,
           claimed_at,
           heartbeat_at,
@@ -246,6 +400,16 @@ def reconcile_terminal_modal_running_jobs(
         inspection = legacy._refresh_remote_modal_invocation_state(row, lease_expires_at=None)
         inspection_status = str(inspection.get("status") or "").strip().lower()
         if inspection_status != "completed":
+            if inspection_status and inspection_status != "unknown" and not legacy._modal_invocation_is_nonterminal(
+                inspection_status
+            ):
+                frontier_result = _reconcile_terminal_frontier_modal_call(
+                    row,
+                    inspection=inspection,
+                    now_utc=now_utc,
+                )
+                if frontier_result is not None:
+                    reconciled_rows.append(frontier_result)
             continue
 
         metadata_updates = dict(row.get("metadata") or {})
@@ -437,6 +601,11 @@ def recover_stale_unclaimed_dispatched_jobs(
 
 
 def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = None) -> dict[str, Any]:
+    # Worker C handoff: this extracted dispatcher now carries the legacy parity
+    # fixes for auth cooldowns, remote function stamping, run-scoped comments
+    # capacity recovery, and capacity-stage accounting. The legacy body remains
+    # as a compatibility/reference surface; do not flip additional direct callers
+    # without a fresh whole-body parity diff.
     safe_limit = max(1, min(int(limit or legacy._modal_dispatch_limit()), legacy.SOCIAL_JOB_CLAIM_BATCH_SIZE_MAX))
     if not legacy.is_queue_enabled():
         return {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": "queue_disabled"}
@@ -452,9 +621,13 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
             }
         )
         return {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": "pause_after_current"}
-    recovered_capacity = legacy.recover_failed_instagram_comments_capacity_jobs(
-        run_id=run_id,
-        limit=max(safe_limit, 25),
+    recovered_capacity = (
+        legacy.recover_failed_instagram_comments_capacity_jobs(
+            run_id=run_id,
+            limit=max(safe_limit, 25),
+        )
+        if run_id
+        else []
     )
     recovered_blocked = _call_extracted_override(
         "recover_dispatch_blocked_no_progress_jobs",
@@ -531,6 +704,8 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
         platform = legacy._normalize_platform_name(job.get("platform")) or "unknown"
         status = str(job.get("status") or "").strip().lower()
         job_run_id = str(job.get("run_id") or "").strip()
+        if job_run_id and legacy._run_pause_after_current_requested(job_run_id):
+            continue
         job_config = legacy._metadata_dict(job.get("config"))
         job_dispatch = legacy._job_dispatch_metadata(job)
         job_ingest_mode = legacy._resolve_pipeline_ingest_mode(job_config.get("pipeline_ingest_mode"))
@@ -538,6 +713,8 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
         priority_recovery_override_allowed = (
             priority_recovery_job and priority_recovery_running_count < priority_recovery_override_slots
         )
+        if legacy._job_blocked_by_posts_auth_cooldown(job) is not None:
+            continue
         if legacy._job_required_lane_blocks_modal_dispatch(job_config, platform=platform):
             continue
         existing_remote_invocation_id = str(job_dispatch.get("remote_invocation_id") or "").strip()
@@ -649,7 +826,7 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
         if job_ingest_mode == legacy.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE and job_run_id:
             if running_by_run.get(job_run_id, 0) >= legacy._resolve_catalog_run_in_flight_cap():
                 continue
-            if stage == legacy.SHARED_ACCOUNT_POSTS_STAGE:
+            if capacity_stage == legacy.SHARED_ACCOUNT_POSTS_STAGE:
                 platform_run_cap = legacy._modal_dispatch_effective_platform_cap(
                     stage,
                     platform,
@@ -710,7 +887,7 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
             dispatch_blocked_first_seen_at=None,
         )
         dispatch_kwargs: dict[str, Any] = {"job_id": job_id, "stage": stage}
-        if priority_recovery_job:
+        if priority_recovery_override_allowed:
             dispatch_kwargs["priority_recovery"] = True
         dispatch_result = legacy.dispatch_social_job(**dispatch_kwargs)
         if dispatch_result.get("dispatched"):
@@ -720,6 +897,7 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
                 dispatch_requested_at=legacy._now_utc(),
                 dispatch_attempt_count=dispatch_attempt_count,
                 remote_invocation_id=str(dispatch_result.get("call_id") or "").strip() or None,
+                remote_function_name=str(dispatch_result.get("function_name") or "").strip() or None,
                 lease_expires_at=lease_expires_at,
                 last_dispatch_error=None,
                 last_dispatch_error_code=None,
@@ -744,7 +922,7 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
                 if job_ingest_mode == legacy.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE:
                     key = (job_run_id, capacity_stage, platform)
                     running_by_run_stage_platform[key] = running_by_run_stage_platform.get(key, 0) + 1
-            if priority_recovery_job:
+            if priority_recovery_override_allowed:
                 priority_recovery_running_count += 1
         else:
             dispatch_reason = str(dispatch_result.get("reason") or "dispatch_failed")
@@ -871,7 +1049,7 @@ def recover_and_dispatch_due_social_jobs(*, limit: int | None = None) -> dict[st
         recover_stale_unclaimed_dispatched_jobs,
         limit=safe_limit,
     )
-    recovered_capacity = legacy.recover_failed_instagram_comments_capacity_jobs(limit=max(safe_limit, 25))
+    recovered_capacity: list[dict[str, Any]] = []
     # bug-1: self-heal retryable deferred-comments-followup failures (gated off by
     # default). Guarded so a failure here can never break the dispatch sweep.
     followup_retry: dict[str, Any] = {"enabled": False}

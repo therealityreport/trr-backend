@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+from collections.abc import Mapping
 from typing import Any
 
 import trr_backend.socials.social_season_analytics_impl as _core
@@ -98,6 +99,117 @@ def _blocked_budget_progress_payload(run_config: Mapping[str, Any]) -> dict[str,
     }
 
 
+def _catalog_comments_streaming_progress_payload(run_config: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Expose catalog-to-comments streaming metadata in a compact UI shape."""
+
+    config = _metadata_dict(run_config)
+    if not (
+        config.get("comments_streaming_enabled") is not None
+        or config.get("comments_streaming_state") is not None
+        or config.get("comments_run_id") is not None
+    ):
+        return None
+
+    attempt_count = _normalize_non_negative_int(config.get("comments_streaming_enqueue_attempt_count"))
+    total_lag_ms = _normalize_non_negative_int(config.get("comments_streaming_total_enqueue_lag_ms"))
+    average_lag_ms = round(total_lag_ms / attempt_count, 1) if attempt_count > 0 else None
+    comments_run_id = str(config.get("comments_run_id") or "").strip() or None
+    state = str(config.get("comments_streaming_state") or "").strip().lower() or None
+    targets_seen = _normalize_non_negative_int(config.get("comments_streaming_targets_seen"))
+    targets_enqueued = _normalize_non_negative_int(config.get("comments_streaming_targets_enqueued"))
+    skipped_duplicate = _normalize_non_negative_int(config.get("comments_streaming_targets_skipped_duplicate"))
+    append_failures = _normalize_non_negative_int(config.get("comments_streaming_append_failures"))
+    last_error = str(config.get("comments_streaming_last_error") or "").strip() or None
+    if last_error or state == "failed" or append_failures > 0:
+        next_action = {
+            "code": "inspect_streaming_append_failure",
+            "label": "Inspect failed append",
+            "detail": (
+                "A saved catalog batch could not be added to the comments run. "
+                "Check the last streaming error before launching another backfill."
+            ),
+        }
+    elif state == "completed":
+        next_action = {
+            "code": "watch_comments_run",
+            "label": "Watch comments run",
+            "detail": "Catalog reconciliation finished; remaining movement now belongs to the attached comments run.",
+        }
+    elif comments_run_id and targets_enqueued > 0:
+        next_action = {
+            "code": "workers_processing_streamed_posts",
+            "label": "Workers processing streamed posts",
+            "detail": (
+                "Saved catalog posts have been queued to public-first comments workers. "
+                "Keep the catalog run open while new batches arrive."
+            ),
+        }
+    elif comments_run_id and skipped_duplicate > 0:
+        next_action = {
+            "code": "all_seen_posts_already_represented",
+            "label": "Seen posts already represented",
+            "detail": "The latest catalog posts were already queued or completed in the attached comments run.",
+        }
+    else:
+        next_action = {
+            "code": "waiting_for_saved_catalog_batch",
+            "label": "Waiting for saved catalog batch",
+            "detail": "The comments lane will start as soon as the next catalog batch is durably saved.",
+        }
+    history: list[dict[str, Any]] = []
+    raw_history = config.get("comments_streaming_history")
+    if isinstance(raw_history, list):
+        for item in raw_history[-8:]:
+            entry = _metadata_dict(item)
+            if entry:
+                history.append(entry)
+    payload: dict[str, Any] = {
+        "enabled": bool(config.get("comments_streaming_enabled")),
+        "state": state,
+        "source": str(config.get("comments_streaming_source") or "").strip().lower() or None,
+        "comments_run_id": comments_run_id,
+        "account_handle": str(config.get("comments_streaming_account_handle") or "").strip() or None,
+        "source_scope": str(config.get("comments_streaming_source_scope") or "").strip() or None,
+        "launch_group_id": str(config.get("comments_streaming_launch_group_id") or "").strip() or None,
+        "worker_count": _normalize_non_negative_int(config.get("comments_streaming_worker_count")) or None,
+        "enable_media_followups": bool(config.get("comments_streaming_enable_media_followups")),
+        "targets_seen": targets_seen,
+        "targets_enqueued": targets_enqueued,
+        "targets_skipped_duplicate": skipped_duplicate,
+        "append_failures": append_failures,
+        "reconciled_source_ids": _normalize_non_negative_int(config.get("comments_streaming_reconciled_source_ids")),
+        "last_updated_at": str(config.get("comments_streaming_last_updated_at") or "").strip() or None,
+        "started_at": str(config.get("comments_streaming_started_at") or "").strip() or None,
+        "completed_at": str(config.get("comments_streaming_completed_at") or "").strip() or None,
+        "last_enqueue_targets_seen": _normalize_non_negative_int(
+            config.get("comments_streaming_last_enqueue_targets_seen")
+        ),
+        "last_enqueue_targets_enqueued": _normalize_non_negative_int(
+            config.get("comments_streaming_last_enqueue_targets_enqueued")
+        ),
+        "last_enqueue_requested_at": str(config.get("comments_streaming_last_enqueue_requested_at") or "").strip()
+        or None,
+        "last_enqueue_completed_at": str(config.get("comments_streaming_last_enqueue_completed_at") or "").strip()
+        or None,
+        "last_enqueue_lag_ms": _normalize_non_negative_int(config.get("comments_streaming_last_enqueue_lag_ms"))
+        or None,
+        "max_enqueue_lag_ms": _normalize_non_negative_int(config.get("comments_streaming_max_enqueue_lag_ms"))
+        or None,
+        "average_enqueue_lag_ms": average_lag_ms,
+        "enqueue_attempt_count": attempt_count,
+        "last_batch_source_ids_count": _normalize_non_negative_int(
+            config.get("comments_streaming_last_batch_source_ids_count")
+        ),
+        "last_append_result": _metadata_dict(config.get("comments_streaming_last_append_result")) or None,
+        "last_reconcile_result": _metadata_dict(config.get("comments_streaming_last_reconcile_result")) or None,
+        "last_error": last_error,
+        "last_conflict": str(config.get("comments_streaming_last_conflict") or "").strip() or None,
+        "next_action": next_action,
+        "history": history,
+    }
+    return payload
+
+
 def _selected_catalog_tasks(run_config: Mapping[str, Any]) -> set[str]:
     effective = _normalize_optional_social_account_catalog_backfill_selected_tasks(
         run_config.get("effective_selected_tasks")
@@ -147,6 +259,10 @@ def _stage_status_from_payload(
         return "running"
     if aggregate["waiting"] > 0 or any(status in {"pending", "queued", "retrying"} for status in row_statuses):
         return "queued"
+    if aggregate["total"] > 0 and aggregate["cancelled"] >= aggregate["total"]:
+        return "cancelled"
+    if row_statuses and all(status == "cancelled" for status in row_statuses):
+        return "cancelled"
     terminal_total = aggregate["completed"] + aggregate["cancelled"]
     if aggregate["total"] > 0 and terminal_total >= aggregate["total"]:
         return "completed"
@@ -340,6 +456,9 @@ def _catalog_completion_progress_payload(
     snapshot_completion = _metadata_dict(run_config.get("snapshot_completion_summary"))
     if snapshot_completion:
         payload["snapshot_completion_summary"] = snapshot_completion
+    comments_streaming = _catalog_comments_streaming_progress_payload(run_config)
+    if comments_streaming:
+        payload["comments_streaming"] = comments_streaming
 
     selected_tasks = _selected_catalog_tasks(run_config)
     stored_media_completion = _metadata_dict(run_config.get("media_completion"))
@@ -770,6 +889,8 @@ def _build_catalog_terminal_progress_payload(
         "auth_repair_reason",
         "partial_scrape",
         "stop_reason",
+        "launch_error_message",
+        "launch_failed_at",
     ):
         if key in run_config:
             payload[key] = run_config.get(key)
@@ -910,7 +1031,7 @@ def get_social_account_catalog_run_progress(
                 )
             )
         )
-        terminal_zero_job_launch = launch_state in {"blocked_auth", "completed_no_work"}
+        terminal_zero_job_launch = launch_state in {"blocked_auth", "completed_no_work", "failed"}
         recovery_result: dict[str, Any] = {"recovered": False, "reason": "awaiting_finalize"}
         if not fresh_pending_launch and not terminal_zero_job_launch:
             recovery_result = recover_pending_social_account_catalog_launch(
@@ -931,6 +1052,7 @@ def get_social_account_catalog_run_progress(
             if (
                 launch_state == "completed_no_work"
                 or launch_state == "blocked_auth"
+                or launch_state == "failed"
                 or no_work_reason
                 or (recovery_reason == "awaiting_finalize" and launch_state in {"pending", "finalizing"})
                 or (recovery_reason == "finalize_in_progress" and launch_state == "finalizing")

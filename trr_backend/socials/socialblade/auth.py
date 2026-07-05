@@ -65,6 +65,22 @@ class VisibleManagedChromeProfileError(RuntimeError):
     """Raised when local SocialBlade Chrome profile routing is unsafe."""
 
 
+class SocialBladeValidationBlockedError(RuntimeError):
+    """Raised when live cookie validation is blocked by Cloudflare (1020-class).
+
+    The extracted cookies are structurally complete (``cf_clearance`` + ``session``
+    are present); only the validation *egress* was denied. Callers that opt in via
+    ``allow_blocked_validation`` can still persist/push these cookies, because the
+    block is an IP/fingerprint problem rather than a bad-cookie problem. The offending
+    cookies ride along on the exception so the caller need not re-extract them.
+    """
+
+    def __init__(self, cookies: dict[str, str], reason: str | None) -> None:
+        self.cookies = dict(cookies or {})
+        self.reason = reason
+        super().__init__(f"SocialBlade cookie validation blocked by Cloudflare ({reason or 'unknown'})")
+
+
 def _default_socialblade_cookie_file_path() -> Path:
     return social_repo._default_platform_cookie_file_path("socialblade")  # noqa: SLF001
 
@@ -183,6 +199,7 @@ def validate_socialblade_cookie_health(
     cookies: dict[str, str],
     *,
     validation_handle: str | None = None,
+    allow_visible_browser_retry: bool = False,
 ) -> tuple[bool, str | None]:
     if not cookies:
         return False, "no_cookies_loaded"
@@ -199,7 +216,7 @@ def validate_socialblade_cookie_health(
             cookies,
             platform="instagram",
             allow_login_fallback=False,
-            allow_visible_browser_retry=False,
+            allow_visible_browser_retry=allow_visible_browser_retry,
         )
     except Exception as exc:  # noqa: BLE001
         return False, f"validation_scrape_failed:{str(exc) or type(exc).__name__}"
@@ -260,6 +277,7 @@ def socialblade_cookie_health_report(
     *,
     validate: bool = True,
     validation_handle: str | None = None,
+    allow_visible_browser_retry: bool = False,
 ) -> dict[str, Any]:
     """Return redacted SocialBlade cookie health for admin/operator preflight."""
     cookie_file = socialblade_cookie_file_path()
@@ -301,6 +319,7 @@ def socialblade_cookie_health_report(
         validation_ok, validation_reason = validate_socialblade_cookie_health(
             loaded_cookies,
             validation_handle=validation_handle,
+            allow_visible_browser_retry=allow_visible_browser_retry,
         )
 
     healthy = schema_reason is None and (validation_ok is not False)
@@ -334,8 +353,13 @@ def require_socialblade_cookie_health(
     *,
     source: str = "SocialBlade",
     validation_handle: str | None = None,
+    allow_visible_browser_retry: bool = False,
 ) -> dict[str, Any]:
-    health = socialblade_cookie_health_report(validate=True, validation_handle=validation_handle)
+    health = socialblade_cookie_health_report(
+        validate=True,
+        validation_handle=validation_handle,
+        allow_visible_browser_retry=allow_visible_browser_retry,
+    )
     if not bool(health.get("healthy")):
         reason = str(health.get("reason") or "unknown").strip()
         raise RuntimeError(f"{source} session preflight failed ({reason})")
@@ -368,9 +392,14 @@ def require_socialblade_usable_cookies(
     *,
     source: str,
     validation_handle: str | None = None,
+    allow_visible_browser_retry: bool = False,
 ) -> None:
     require_socialblade_authenticated_cookies(cookies, source=source)
-    healthy, reason = validate_socialblade_cookie_health(cookies, validation_handle=validation_handle)
+    healthy, reason = validate_socialblade_cookie_health(
+        cookies,
+        validation_handle=validation_handle,
+        allow_visible_browser_retry=allow_visible_browser_retry,
+    )
     if not healthy:
         raise RuntimeError(f"{source} captured SocialBlade cookies failed validation ({reason or 'unknown'})")
 
@@ -379,8 +408,17 @@ def extract_socialblade_cookies_from_chrome_profile(
     *,
     chrome_profile: str | None = None,
     validation_handle: str | None = None,
+    allow_visible_browser_retry: bool = False,
 ) -> dict[str, str]:
-    """Extract and validate SocialBlade cookies from the real Chrome auth profile."""
+    """Extract and validate SocialBlade cookies from the real Chrome auth profile.
+
+    Set ``allow_visible_browser_retry`` to let validation escalate to the visible
+    shared Chrome session (the same real profile the cookies came from) when the
+    headless fetch is challenged. When validation fails specifically with a
+    Cloudflare 1020-class block but the required cookies are present, a
+    ``SocialBladeValidationBlockedError`` (carrying the extracted cookies) is raised
+    so opt-in callers can still persist/push a structurally-valid cookie set.
+    """
     try:
         from pycookiecheat import chrome_cookies
     except ImportError as exc:  # pragma: no cover - dependency failure is environment-specific
@@ -396,8 +434,17 @@ def extract_socialblade_cookies_from_chrome_profile(
     extracted = chrome_cookies(validation_url, cookie_file=str(cookie_file))
     cookies = {str(name): str(value) for name, value in dict(extracted or {}).items() if name and value}
     require_socialblade_authenticated_cookies(cookies, source=f"Chrome profile {selection.display_name}")
-    healthy, reason = validate_socialblade_cookie_health(cookies, validation_handle=validation_handle)
+    healthy, reason = validate_socialblade_cookie_health(
+        cookies,
+        validation_handle=validation_handle,
+        allow_visible_browser_retry=allow_visible_browser_retry,
+    )
     if not healthy:
+        if is_socialblade_cloudflare_block_reason(reason):
+            # Structural cookies are present; only the validation egress was
+            # Cloudflare-blocked (1020). Surface a typed error carrying the cookies so
+            # opt-in callers can persist/push them instead of discarding a good set.
+            raise SocialBladeValidationBlockedError(cookies, reason)
         raise RuntimeError(
             f"Chrome profile {selection.display_name} SocialBlade cookies failed validation ({reason or 'unknown'})"
         )
@@ -408,6 +455,24 @@ def extract_socialblade_cookies_from_chrome_profile(
 def _body_text_matches_access_denied(body_text: str) -> bool:
     normalized = body_text.lower().replace(" ", "")
     return any(pattern.lower().replace("\\s*", "") in normalized for pattern in SOCIALBLADE_ACCESS_DENIED_PATTERNS)
+
+
+def is_socialblade_cloudflare_block_reason(reason: str | None) -> bool:
+    """True when a validation failure reason is a Cloudflare 1020-class block.
+
+    Distinguishes an *egress* denial (our IP/fingerprint was blocked, cookies are
+    likely fine) from a genuine auth/structure failure (bad or incomplete cookies).
+    The repair flow uses this to decide whether a freshly-extracted cookie set may
+    still be persisted/pushed despite a blocked live validation. Matches both the
+    ``validation_scrape_failed:...`` reason wrapper and the raw scraper/auth error
+    messages (``... blocked by Cloudflare (1020 access denied)``).
+    """
+    text = str(reason or "").strip().lower()
+    if not text:
+        return False
+    if "1020" in text or "blocked by cloudflare" in text:
+        return True
+    return _body_text_matches_access_denied(text)
 
 
 def normalize_socialblade_cookies(raw_payload: Any) -> list[dict[str, Any]]:

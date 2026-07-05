@@ -60,6 +60,7 @@ _PLATFORM_ALLOWED_HOST_SUFFIXES: dict[str, tuple[str, ...]] = {
     "youtube": (
         "youtube.com",
         "youtu.be",
+        "ggpht.com",
         "googlevideo.com",
         "ytimg.com",
     ),

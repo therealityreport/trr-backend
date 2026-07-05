@@ -49,6 +49,34 @@ def _safe_int(value: Any) -> int:
         return 0
 
 
+YOUTUBE_CHANNEL_SURFACES = ("videos", "shorts", "posts")
+
+
+def _normalize_youtube_surfaces(value: Any) -> tuple[str, ...]:
+    if value is None or value == "":
+        return YOUTUBE_CHANNEL_SURFACES
+    if isinstance(value, str):
+        raw_items = re.split(r"[,|]", value)
+    elif isinstance(value, Iterable):
+        raw_items = list(value)
+    else:
+        raw_items = [value]
+
+    normalized: list[str] = []
+    for item in raw_items:
+        surface = str(item or "").strip().lower()
+        if surface in {"video", "channel_videos"}:
+            surface = "videos"
+        elif surface in {"short", "reels"}:
+            surface = "shorts"
+        elif surface in {"community", "community_posts", "post"}:
+            surface = "posts"
+        if surface not in YOUTUBE_CHANNEL_SURFACES or surface in normalized:
+            continue
+        normalized.append(surface)
+    return tuple(normalized or YOUTUBE_CHANNEL_SURFACES)
+
+
 @dataclass
 class YouTubeScrapeConfig:
     """Configuration for a YouTube scrape operation."""
@@ -63,6 +91,8 @@ class YouTubeScrapeConfig:
     enforce_keyword_filter: bool = True
     allow_ytdlp_search_supplement: bool = True
     allow_ytdlp_video_enrichment: bool = True
+    surfaces: tuple[str, ...] | list[str] | str | None = YOUTUBE_CHANNEL_SURFACES
+    fetch_post_schema_org: bool = True
     source_type: str = "account"
     playlist_id: str | None = None
     playlist_url: str | None = None
@@ -81,6 +111,7 @@ class YouTubeScrapeConfig:
 
     def __post_init__(self):
         """Apply fast_mode overrides when enabled."""
+        self.surfaces = _normalize_youtube_surfaces(self.surfaces)
         if self.fast_mode:
             # Use a lower base delay unless explicitly overridden
             if self.delay_seconds == 2.0:  # Only override if at default
@@ -178,6 +209,8 @@ class YouTubeVideo:
     is_short: bool = False
     source_surface: str = "videos"
     published_text: str = ""
+    media_urls: list[str] = field(default_factory=list)
+    schema_org: dict[str, Any] = field(default_factory=dict)
 
     # Comments (populated when fetch_comments is called)
     comment_list: list[YouTubeComment] = field(default_factory=list)
@@ -201,6 +234,7 @@ class YouTubeScraper:
     CHANNEL_SEARCH_URL = "https://www.youtube.com/results"
     CHANNEL_VIDEOS_URL = "https://www.youtube.com/@{handle}/videos"
     CHANNEL_SHORTS_URL = "https://www.youtube.com/@{handle}/shorts"
+    CHANNEL_POSTS_URL = "https://www.youtube.com/@{handle}/posts"
     CHANNEL_ABOUT_URL = "https://www.youtube.com/@{handle}/about"
     VIDEO_WATCH_URL = "https://www.youtube.com/watch?v={video_id}"
     PLAYER_RESPONSE_MARKERS = (
@@ -396,6 +430,10 @@ class YouTubeScraper:
 
     COMMENT_API_URL = "https://www.youtube.com/youtubei/v1/next"
     YTINITAL_DATA_PATTERN = re.compile(r"var ytInitialData = ({.*?});", re.DOTALL)
+    SCHEMA_ORG_JSON_LD_PATTERN = re.compile(
+        r"<script[^>]+type=[\"']application/ld\+json[\"'][^>]*>(.*?)</script>",
+        re.IGNORECASE | re.DOTALL,
+    )
     PUBLISHED_DATE_PATTERNS = (
         re.compile(r'"(?:datePublished|uploadDate|publishDate)"\s*:\s*"([^"]+)"', re.IGNORECASE),
         re.compile(r'itemprop="(?:datePublished|uploadDate)"\s+content="([^"]+)"', re.IGNORECASE),
@@ -477,6 +515,7 @@ class YouTubeScraper:
         self._last_complete = False
         self._last_source_mode = "scraper"
         self._precise_publish_ts_cache: dict[str, int] = {}
+        self._post_schema_org_cache: dict[str, dict[str, Any]] = {}
         self._precise_publish_attempts = 0
         self._precise_publish_successes = 0
         self._precise_publish_failures = 0
@@ -685,6 +724,7 @@ class YouTubeScraper:
 
         candidate_paths = [
             renderer.get("ownerText", {}).get("runs", []),
+            renderer.get("authorText", {}).get("runs", []),
             renderer.get("shortBylineText", {}).get("runs", []),
             renderer.get("longBylineText", {}).get("runs", []),
             renderer.get("headline", {}).get("runs", []),
@@ -1242,6 +1282,300 @@ class YouTubeScraper:
             person_id=config.person_id,
         )
 
+    @classmethod
+    def _iter_schema_org_json_ld(cls, html: str) -> Iterable[dict[str, Any]]:
+        def _walk(value: Any) -> Iterable[dict[str, Any]]:
+            if isinstance(value, dict):
+                yield value
+                graph = value.get("@graph")
+                if isinstance(graph, list):
+                    for item in graph:
+                        yield from _walk(item)
+                for item in value.values():
+                    if isinstance(item, (dict, list)):
+                        yield from _walk(item)
+            elif isinstance(value, list):
+                for item in value:
+                    yield from _walk(item)
+
+        for match in cls.SCHEMA_ORG_JSON_LD_PATTERN.finditer(str(html or "")):
+            raw = unescape(str(match.group(1) or "")).strip()
+            if not raw:
+                continue
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            yield from _walk(payload)
+
+    @staticmethod
+    def _schema_type_matches(value: Any, *expected: str) -> bool:
+        expected_lower = {item.lower() for item in expected}
+        values = value if isinstance(value, list) else [value]
+        for item in values:
+            normalized = str(item or "").strip().split("/")[-1].lower()
+            if normalized in expected_lower:
+                return True
+        return False
+
+    @staticmethod
+    def _schema_image_urls(value: Any) -> list[str]:
+        urls: list[str] = []
+
+        def _add(candidate: Any) -> None:
+            url = str(candidate or "").strip()
+            if url.startswith(("http://", "https://")) and url not in urls:
+                urls.append(url)
+
+        def _walk(node: Any) -> None:
+            if isinstance(node, str):
+                _add(node)
+            elif isinstance(node, list):
+                for item in node:
+                    _walk(item)
+            elif isinstance(node, dict):
+                for key in ("url", "contentUrl", "thumbnailUrl"):
+                    if key in node:
+                        _walk(node.get(key))
+                if "image" in node:
+                    _walk(node.get("image"))
+
+        _walk(value)
+        return urls
+
+    def _extract_schema_org_post_metadata(self, html: str, *, post_url: str | None = None) -> dict[str, Any]:
+        for item in self._iter_schema_org_json_ld(html):
+            if not self._schema_type_matches(
+                item.get("@type"),
+                "DiscussionForumPosting",
+                "SocialMediaPosting",
+                "BlogPosting",
+                "Posting",
+            ):
+                continue
+            schema_url = str(item.get("url") or post_url or "").strip()
+            published_raw = str(item.get("datePublished") or item.get("uploadDate") or "").strip()
+            published_at = self._parse_timestamp(published_raw) if published_raw else 0
+            author = item.get("author") if isinstance(item.get("author"), dict) else {}
+            return {
+                "schema_type": item.get("@type"),
+                "url": schema_url or None,
+                "datePublished": published_raw or None,
+                "published_at": published_at or None,
+                "date_time": datetime.fromtimestamp(published_at, tz=UTC).isoformat() if published_at else None,
+                "headline": str(item.get("headline") or "").strip() or None,
+                "text": str(item.get("text") or item.get("articleBody") or item.get("description") or "").strip()
+                or None,
+                "image_urls": self._schema_image_urls(item.get("image")),
+                "author_name": str(author.get("name") or "").strip() or None,
+                "author_url": str(author.get("url") or "").strip() or None,
+            }
+        return {}
+
+    def _fetch_post_schema_org_metadata(
+        self,
+        post_url: str,
+        delay: float = 2.0,
+        *,
+        fast_mode: bool = False,
+    ) -> dict[str, Any]:
+        normalized_url = str(post_url or "").strip()
+        if not normalized_url:
+            return {}
+        cached = getattr(self, "_post_schema_org_cache", {}).get(normalized_url)
+        if cached is not None:
+            return dict(cached)
+
+        self._rate_limit(delay, fast_mode=fast_mode)
+        try:
+            response = self.session.get(
+                normalized_url,
+                headers=self._get_headers(),
+                timeout=self.REQUEST_TIMEOUT_SECONDS,
+            )
+            self._track_response_status(response.status_code)
+            response.raise_for_status()
+        except requests.exceptions.RequestException as exc:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if status_code:
+                self._track_response_status(status_code)
+            logger.debug("Failed to fetch YouTube post schema.org metadata for %s: %s", normalized_url, exc)
+            return {}
+        metadata = self._extract_schema_org_post_metadata(response.text or "", post_url=normalized_url)
+        self._post_schema_org_cache[normalized_url] = dict(metadata)
+        return metadata
+
+    def _post_id_from_renderer(self, renderer: dict[str, Any]) -> str:
+        if not isinstance(renderer, dict):
+            return ""
+        for key in ("postId", "backstagePostId", "entityId", "id"):
+            candidate = str(renderer.get(key) or "").strip()
+            if re.fullmatch(r"[A-Za-z0-9_-]{8,}", candidate):
+                return candidate
+        stack: list[Any] = [renderer]
+        visited = 0
+        while stack and visited < 2000:
+            node = stack.pop()
+            visited += 1
+            if isinstance(node, str):
+                match = re.search(r"/post/([A-Za-z0-9_-]{8,})", node)
+                if match:
+                    return match.group(1)
+            elif isinstance(node, dict):
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
+        return ""
+
+    def _post_url_from_renderer(self, renderer: dict[str, Any], post_id: str) -> str:
+        stack: list[Any] = [renderer]
+        visited = 0
+        while stack and visited < 2000:
+            node = stack.pop()
+            visited += 1
+            if isinstance(node, str):
+                match = re.search(r"((?:https://www\.youtube\.com)?/post/[A-Za-z0-9_-]{8,})", node)
+                if match:
+                    return self._normalize_youtube_url(match.group(1)) or ""
+            elif isinstance(node, dict):
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
+        return f"https://www.youtube.com/post/{post_id}" if post_id else ""
+
+    def _extract_post_image_urls(self, renderer: dict[str, Any]) -> list[str]:
+        urls: list[str] = []
+
+        def _add(candidate: Any) -> None:
+            url = str(candidate or "").strip()
+            if not url.startswith(("http://", "https://")):
+                return
+            normalized = url.lower()
+            if "youtube.com/post/" in normalized or "/@" in normalized:
+                return
+            if not any(host in normalized for host in ("yt3.ggpht.com", "googleusercontent.com", "i.ytimg.com")):
+                return
+            if url not in urls:
+                urls.append(url)
+
+        def _walk(node: Any, parent_key: str = "") -> None:
+            if isinstance(node, str):
+                if parent_key.lower() in {"url", "contenturl", "thumbnailurl"}:
+                    _add(node)
+            elif isinstance(node, list):
+                for item in node:
+                    _walk(item, parent_key=parent_key)
+            elif isinstance(node, dict):
+                thumb = self._pick_largest_thumbnail_url(node)
+                if thumb:
+                    _add(thumb)
+                for key, value in node.items():
+                    _walk(value, parent_key=str(key))
+
+        _walk(renderer)
+        return urls
+
+    @staticmethod
+    def _extract_hashtags(text: str) -> list[str]:
+        tags: list[str] = []
+        for match in re.finditer(r"#([A-Za-z0-9_]+)", str(text or "")):
+            tag = f"#{match.group(1)}"
+            if tag not in tags:
+                tags.append(tag)
+        return tags
+
+    def _parse_post_renderer(
+        self,
+        renderer: dict[str, Any],
+        config: YouTubeScrapeConfig,
+        *,
+        fallback_channel_avatar_url: str | None = None,
+    ) -> YouTubeVideo | None:
+        post_id = self._post_id_from_renderer(renderer)
+        post_url = self._post_url_from_renderer(renderer, post_id)
+        if not post_id and post_url:
+            match = re.search(r"/post/([A-Za-z0-9_-]{8,})", post_url)
+            post_id = match.group(1) if match else ""
+        if not post_id:
+            return None
+
+        content_text = (
+            self._extract_text(renderer.get("contentText"))
+            or self._extract_text(renderer.get("message"))
+            or self._extract_text(renderer.get("text"))
+            or self._extract_text(renderer.get("title"))
+        )
+        published_text = self._extract_text(renderer.get("publishedTimeText"))
+        published_at = self._estimate_publish_date(published_text)
+        schema_meta: dict[str, Any] = {}
+        if bool(getattr(config, "fetch_post_schema_org", True)) and post_url:
+            schema_meta = self._fetch_post_schema_org_metadata(
+                post_url,
+                min(max(float(config.delay_seconds or 0.0) * 0.25, 0.05), 0.35),
+                fast_mode=config.fast_mode,
+            )
+            schema_ts = _safe_int(schema_meta.get("published_at"))
+            if schema_ts > 0:
+                published_at = schema_ts
+            content_text = str(schema_meta.get("text") or content_text or "").strip()
+            post_url = str(schema_meta.get("url") or post_url or "").strip()
+
+        headline = str(schema_meta.get("headline") or "").strip()
+        title = headline or (content_text[:96].strip() if content_text else "YouTube community post")
+        media_urls = []
+        for candidate in list(schema_meta.get("image_urls") or []) + self._extract_post_image_urls(renderer):
+            candidate_url = str(candidate or "").strip()
+            if candidate_url and candidate_url not in media_urls:
+                media_urls.append(candidate_url)
+        thumbnail_url = media_urls[0] if media_urls else ""
+        likes = self._parse_compact_count_text(renderer.get("voteCount")) or 0
+        comments = self._parse_compact_count_text(renderer.get("replyCount")) or 0
+        channel_title = (
+            self._extract_text(renderer.get("authorText"))
+            or self._extract_text(renderer.get("ownerText"))
+            or str(schema_meta.get("author_name") or "")
+        )
+        channel_avatar_url = self._extract_channel_avatar_from_renderer(
+            renderer,
+            fallback_channel_avatar_url=fallback_channel_avatar_url,
+        )
+        combined_text = f"{title} {content_text}".lower()
+        keywords_matched = []
+        for kw in config.keywords:
+            kw_clean = kw.lower().lstrip("#")
+            if kw_clean in combined_text:
+                keywords_matched.append(kw)
+
+        return YouTubeVideo(
+            video_id=post_id,
+            title=title,
+            description=content_text,
+            date_time=datetime.fromtimestamp(published_at, tz=UTC).strftime("%Y-%m-%d %H:%M:%S")
+            if published_at
+            else "",
+            published_at=published_at,
+            channel_id="",
+            channel_title=channel_title,
+            duration="",
+            duration_seconds=0,
+            views=0,
+            likes=likes,
+            comments=comments,
+            url=post_url or f"https://www.youtube.com/post/{post_id}",
+            thumbnail_url=thumbnail_url,
+            tags=self._extract_hashtags(content_text),
+            keywords_matched=keywords_matched,
+            user_avatar_url=channel_avatar_url,
+            is_short=False,
+            source_surface="posts",
+            published_text=published_text,
+            media_urls=media_urls,
+            schema_org=schema_meta,
+            show_id=config.show_id,
+            season_number=config.season_number,
+            person_id=config.person_id,
+        )
+
     def _parse_view_count(self, view_text: str) -> int:
         """Parse view count from text like '1.2M views' or '1,234 views'."""
         if not view_text:
@@ -1567,6 +1901,8 @@ class YouTubeScraper:
             return current_in_range
         if not video.video_id:
             return current_in_range
+        if self._video_surface(video) == "posts":
+            return current_in_range
 
         needs_refine = video.published_at <= 0
         if not needs_refine and self._is_low_precision_publish_text(video.published_text):
@@ -1598,6 +1934,8 @@ class YouTubeScraper:
         normalized_surface = str(surface or "videos").strip().lower()
         if normalized_surface == "shorts":
             return self.CHANNEL_SHORTS_URL.format(handle=handle)
+        if normalized_surface == "posts":
+            return self.CHANNEL_POSTS_URL.format(handle=handle)
         return self.CHANNEL_VIDEOS_URL.format(handle=handle)
 
     def _channel_about_url(self, handle: str) -> str:
@@ -1611,7 +1949,7 @@ class YouTubeScraper:
         *,
         fast_mode: bool = False,
     ) -> dict | None:
-        """Fetch videos or shorts from a YouTube channel page."""
+        """Fetch videos, shorts, or community posts from a YouTube channel page."""
         self._rate_limit(delay, fast_mode=fast_mode)
 
         url = self._channel_surface_url(handle, surface)
@@ -1718,6 +2056,14 @@ class YouTubeScraper:
                 shorts_lockup = content.get("shortsLockupViewModel", {})
                 if shorts_lockup:
                     renderers.append(self._shorts_lockup_to_renderer(shorts_lockup))
+                post_renderer = content.get("backstagePostRenderer", {})
+                if post_renderer:
+                    renderers.append(post_renderer)
+                post_thread = content.get("backstagePostThreadRenderer", {})
+                if post_thread:
+                    thread_renderer = post_thread.get("post", {}).get("backstagePostRenderer", {})
+                    if thread_renderer:
+                        renderers.append(thread_renderer)
                 cont = item.get("continuationItemRenderer", {})
                 if cont:
                     endpoint = cont.get("continuationEndpoint", {})
@@ -1785,6 +2131,35 @@ class YouTubeScraper:
                 if video_renderer:
                     yield video_renderer
 
+    def _iter_post_renderers(self, data: dict):
+        """Iterate through community post renderers in YouTube data."""
+        stack: list[Any] = [data]
+        seen_ids: set[str] = set()
+        visited = 0
+        while stack and visited < 12000:
+            node = stack.pop()
+            visited += 1
+            if isinstance(node, dict):
+                renderer = node.get("backstagePostRenderer")
+                if isinstance(renderer, dict):
+                    post_id = self._post_id_from_renderer(renderer)
+                    dedupe_key = post_id or str(id(renderer))
+                    if dedupe_key not in seen_ids:
+                        seen_ids.add(dedupe_key)
+                        yield renderer
+                post_thread = node.get("backstagePostThreadRenderer")
+                if isinstance(post_thread, dict):
+                    thread_renderer = post_thread.get("post", {}).get("backstagePostRenderer", {})
+                    if isinstance(thread_renderer, dict):
+                        post_id = self._post_id_from_renderer(thread_renderer)
+                        dedupe_key = post_id or str(id(thread_renderer))
+                        if dedupe_key not in seen_ids:
+                            seen_ids.add(dedupe_key)
+                            yield thread_renderer
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
+
     def _emit_progress(
         self,
         progress_cb: Callable[[dict[str, Any]], None] | None,
@@ -1811,11 +2186,13 @@ class YouTubeScraper:
     @staticmethod
     def _video_surface(video: YouTubeVideo) -> str:
         surface = str(getattr(video, "source_surface", "") or "").strip().lower()
-        if surface in {"videos", "shorts"}:
+        if surface in set(YOUTUBE_CHANNEL_SURFACES):
             return surface
         if bool(getattr(video, "is_short", False)):
             return "shorts"
         url = str(getattr(video, "url", "") or "").lower()
+        if "/post/" in url:
+            return "posts"
         return "shorts" if "/shorts/" in url else "videos"
 
     def _apply_surface_guaranteed_limit(
@@ -1830,9 +2207,9 @@ class YouTubeScraper:
         if requested_limit <= 0:
             return [], False, 0
 
-        surfaces_present = {self._video_surface(video) for video in videos}
-        both_surfaces_present = {"videos", "shorts"} <= surfaces_present
-        effective_limit = max(requested_limit, 2) if both_surfaces_present else requested_limit
+        surfaces_present = {self._video_surface(video) for video in videos if self._video_surface(video)}
+        guaranteed_surfaces = [surface for surface in YOUTUBE_CHANNEL_SURFACES if surface in surfaces_present]
+        effective_limit = max(requested_limit, len(guaranteed_surfaces)) if guaranteed_surfaces else requested_limit
         if len(videos) <= effective_limit:
             return videos, effective_limit != requested_limit, effective_limit
 
@@ -1845,13 +2222,13 @@ class YouTubeScraper:
             return (-published_at, video_id, idx)
 
         sorted_items = sorted(indexed_videos, key=_sort_key)
-        if not both_surfaces_present:
+        if len(guaranteed_surfaces) <= 1:
             limited = [video for _, video in sorted_items[:effective_limit]]
             return limited, False, effective_limit
 
         selected_indices: set[int] = set()
         selected_items: list[tuple[int, YouTubeVideo]] = []
-        for surface in ("videos", "shorts"):
+        for surface in guaranteed_surfaces:
             for item in sorted_items:
                 idx, candidate = item
                 if idx in selected_indices:
@@ -2070,10 +2447,12 @@ class YouTubeScraper:
         matched: list[YouTubeVideo] = []
         seen_ids: set[str] = set()
         posts_checked = 0
-        surfaces_checked: dict[str, int] = {"videos": 0, "shorts": 0}
+        requested_surfaces = _normalize_youtube_surfaces(config.surfaces)
+        fallback_surfaces = [surface for surface in requested_surfaces if surface in {"videos", "shorts"}]
+        surfaces_checked: dict[str, int] = {surface: 0 for surface in requested_surfaces}
         errors: list[str] = []
 
-        for surface in ("videos", "shorts"):
+        for surface in fallback_surfaces:
             channel_url = f"https://www.youtube.com/@{normalized_handle}/{surface}"
             cmd = [
                 "yt-dlp",
@@ -2144,6 +2523,7 @@ class YouTubeScraper:
             "posts_checked": posts_checked,
             "matched_posts": len(matched),
             "surfaces_checked": surfaces_checked,
+            "unsupported_surfaces": [surface for surface in requested_surfaces if surface not in {"videos", "shorts"}],
             "errors": errors,
         }
 
@@ -2181,9 +2561,10 @@ class YouTubeScraper:
         if config.date_start or config.date_end:
             logger.info(f"Date range: {config.date_start} to {config.date_end}")
 
+        requested_surfaces = _normalize_youtube_surfaces(config.surfaces)
         videos = []
-        continuation_pages_by_surface: dict[str, int] = {"videos": 0, "shorts": 0}
-        surface_pages_scanned: dict[str, int] = {"videos": 0, "shorts": 0}
+        continuation_pages_by_surface: dict[str, int] = {surface: 0 for surface in requested_surfaces}
+        surface_pages_scanned: dict[str, int] = {surface: 0 for surface in requested_surfaces}
         checked_renderers = 0
         timestamp_unknown_count = 0
         in_range_hits = 0
@@ -2194,7 +2575,7 @@ class YouTubeScraper:
         scan_capped_reason: str | None = None
         continuation_failure_reason: str | None = None
         continuation_failure_count = 0
-        first_page_counts: dict[str, int] = {"videos": 0, "shorts": 0}
+        first_page_counts: dict[str, int] = {surface: 0 for surface in requested_surfaces}
         canonical_handle = self._normalize_handle(handle)
         canonical_channel_id = ""
         resolved_channel_title: str | None = None
@@ -2210,10 +2591,10 @@ class YouTubeScraper:
         initial_surfaces_processed: set[str] = set()
 
         def _total_pages_scanned() -> int:
-            return int(surface_pages_scanned.get("videos", 0) + surface_pages_scanned.get("shorts", 0))
+            return int(sum(surface_pages_scanned.values()))
 
         def _total_continuation_pages_scanned() -> int:
-            return int(continuation_pages_by_surface.get("videos", 0) + continuation_pages_by_surface.get("shorts", 0))
+            return int(sum(continuation_pages_by_surface.values()))
 
         def _bounded_date_window_scan() -> bool:
             return bool(config.date_start or config.date_end)
@@ -2249,7 +2630,7 @@ class YouTubeScraper:
                 return False
             if requested_limit <= 0:
                 return True
-            if not ({"videos", "shorts"} - initial_surfaces_processed):
+            if not (set(requested_surfaces) - initial_surfaces_processed):
                 return False
             unique_count, _surfaces_present = _unique_collection_state()
             return unique_count >= requested_limit
@@ -2260,13 +2641,14 @@ class YouTubeScraper:
                 return False
             if requested_limit <= 0:
                 return True
-            if {"videos", "shorts"} - initial_surfaces_processed:
+            if set(requested_surfaces) - initial_surfaces_processed:
                 return False
             unique_count, surfaces_present = _unique_collection_state()
-            effective_limit = max(requested_limit, 2) if {"videos", "shorts"} <= surfaces_present else requested_limit
+            guaranteed_surface_count = len([surface for surface in requested_surfaces if surface in surfaces_present])
+            effective_limit = max(requested_limit, guaranteed_surface_count)
             return unique_count >= effective_limit
 
-        for surface in ("videos", "shorts"):
+        for surface in requested_surfaces:
             logger.info("Fetching %s from @%s channel page...", surface, handle)
             surface_no_hit_pages = 0
             surface_pre_window_pages = 0
@@ -2337,7 +2719,7 @@ class YouTubeScraper:
             initial_surfaces_processed.add(surface)
             self._emit_progress(
                 progress_cb,
-                phase="scrape_initial_page" if surface == "videos" else "scrape_initial_page_shorts",
+                phase="scrape_initial_page" if surface == "videos" else f"scrape_initial_page_{surface}",
                 pages_scanned=_total_pages_scanned(),
                 posts_checked=checked_renderers,
                 matched_posts=len(videos),
@@ -2638,6 +3020,7 @@ class YouTubeScraper:
         self.last_retrieval_meta = {
             "retrieval_mode": "channel_continuation",
             "fallback_chain": list(fallback_chain),
+            "requested_surfaces": list(requested_surfaces),
             "continuation_pages": continuation_pages_total,
             "continuation_pages_by_surface": dict(continuation_pages_by_surface),
             "pages_scanned": max(1, _total_pages_scanned()),
@@ -2654,8 +3037,10 @@ class YouTubeScraper:
             "first_page_counts": first_page_counts,
             "ownership_filtered": ownership_filtered,
             "scan_capped_reason": scan_capped_reason,
+            "surface_pages_scanned": dict(surface_pages_scanned),
             "videos_pages_scanned": int(surface_pages_scanned.get("videos", 0)),
             "shorts_pages_scanned": int(surface_pages_scanned.get("shorts", 0)),
+            "posts_pages_scanned": int(surface_pages_scanned.get("posts", 0)),
             "surface_cap_override_applied": bool(surface_cap_override_applied),
             "requested_max_results": int(config.max_results) if config.max_results is not None else None,
             "effective_max_results": effective_result_cap,
@@ -2675,6 +3060,7 @@ class YouTubeScraper:
             "precise_publish_successes": self._precise_publish_successes,
             "precise_publish_failures": self._precise_publish_failures,
             "shorts_candidates_found": sum(1 for video in unique_videos if self._video_surface(video) == "shorts"),
+            "community_posts_found": sum(1 for video in unique_videos if self._video_surface(video) == "posts"),
             "shorts_precise_publish_attempts": self._shorts_precise_publish_attempts,
             "shorts_precise_publish_successes": self._shorts_precise_publish_successes,
             "shorts_precise_publish_failures": self._shorts_precise_publish_failures,
@@ -2694,6 +3080,7 @@ class YouTubeScraper:
             v
             for v in videos
             if isinstance(v, YouTubeVideo)
+            and self._video_surface(v) != "posts"
             and ((v.likes == 0 and v.comments == 0) or int(getattr(v, "duration_seconds", 0) or 0) <= 0)
         ]
 
@@ -3014,12 +3401,19 @@ class YouTubeScraper:
                     ownership_filtered_counter[0] += 1
                 continue
             stats["checked_renderers"] += 1
-            video = self._parse_video_renderer(
-                renderer,
-                config,
-                surface=surface,
-                fallback_channel_avatar_url=fallback_channel_avatar_url,
-            )
+            if surface == "posts":
+                video = self._parse_post_renderer(
+                    renderer,
+                    config,
+                    fallback_channel_avatar_url=fallback_channel_avatar_url,
+                )
+            else:
+                video = self._parse_video_renderer(
+                    renderer,
+                    config,
+                    surface=surface,
+                    fallback_channel_avatar_url=fallback_channel_avatar_url,
+                )
             if not video:
                 continue
             in_range: bool | None = None
@@ -3064,8 +3458,9 @@ class YouTubeScraper:
     ) -> list[YouTubeVideo] | tuple[list[YouTubeVideo], dict[str, int]]:
         """Process video data and apply filters."""
         fallback_channel_avatar_url = self._extract_channel_header_avatar_from_data(data)
+        renderers = self._iter_post_renderers(data) if surface == "posts" else self._iter_video_renderers(data)
         videos, stats = self._process_renderer_batch(
-            self._iter_video_renderers(data),
+            renderers,
             config,
             surface=surface,
             target_handle=target_handle,

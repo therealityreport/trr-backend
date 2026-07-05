@@ -74,7 +74,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--safe-preset", choices=("8", "12"), default=os.getenv("SAFE_PRESET"))
     parser.add_argument("--confirm-safe-12", help=f"Required for --safe-preset 12. Exact value: {CONFIRM_SAFE_12!r}.")
     parser.add_argument("--max-comments-per-post", type=int, default=0, help="0 means uncapped.")
-    parser.add_argument("--comments-load-strategy", default="instagram_comments_endpoint_cursor")
+    parser.add_argument("--comments-load-strategy", default="public_relay")
+    parser.add_argument("--date-start", help="Optional post posted_at lower bound, inclusive.")
+    parser.add_argument("--date-end", help="Optional post posted_at upper bound, exclusive.")
     parser.add_argument("--skip-launch-auth-probe", action="store_true")
     parser.add_argument("--force-rerun-existing", action="store_true")
     parser.add_argument("--enqueue", action="store_true", help="Create the comments retry run.")
@@ -124,9 +126,13 @@ def _delegate_argv(args: argparse.Namespace) -> list[str]:
         "--max-comments-per-post",
         str(max(0, int(args.max_comments_per_post or 0))),
         "--comments-load-strategy",
-        str(args.comments_load_strategy or "instagram_comments_endpoint_cursor"),
+        str(args.comments_load_strategy or "public_relay"),
         "--json",
     ]
+    if args.date_start:
+        delegate.extend(["--date-start", str(args.date_start).strip()])
+    if args.date_end:
+        delegate.extend(["--date-end", str(args.date_end).strip()])
     if worker_count is not None:
         delegate.extend(["--comments-worker-count", str(max(1, int(worker_count)))])
     for shortcode in approved_shortcodes:

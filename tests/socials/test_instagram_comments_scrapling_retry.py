@@ -21,8 +21,10 @@ from trr_backend.socials.instagram.comments_scrapling.fetcher import (
     InstagramCommentsFetchResult,
     InstagramCommentsScraplingFetcher,
     InstagramCommentsWarmupError,
+    _extract_graphql_connection_comments,
     _extract_rendered_permalink_comments,
     _pace_global_api_request,
+    _post_comments_graphql_doc_ids,
     _record_global_api_cooldown,
     _resolve_optional_positive_int_env,
     _try_advisory_lock_pace,
@@ -34,12 +36,56 @@ _FIXTURE_DIR = Path(__file__).parents[1] / "fixtures" / "instagram" / "scrapling
 
 
 @pytest.fixture(autouse=True)
-def _default_legacy_retry_tests_to_authenticated_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+def _default_legacy_retry_tests_to_authenticated_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
     monkeypatch.setenv("SOCIAL_INSTAGRAM_SCRAPE_MODE", "authenticated")
+    if str(request.node.name or "").startswith("test_completion_residual_gap_"):
+        return
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+
+    monkeypatch.setattr(jr, "_completion_residual_gap_targets_from_health", lambda **_kwargs: [])
 
 
 def _fixture_json(name: str) -> dict:
     return json.loads((_FIXTURE_DIR / name).read_text(encoding="utf-8"))
+
+
+def test_polaris_post_comments_container_query_fixture_parses_first_page() -> None:
+    payload = _fixture_json("comments_polaris_container_first_page.json")
+
+    comments, metadata = _extract_graphql_connection_comments(
+        payload,
+        shortcode="DXKD0wtAHRz",
+        post_url="https://www.instagram.com/p/DXKD0wtAHRz/",
+    )
+
+    assert len(comments) == 15
+    assert flattened_comment_count(comments) == 16
+    assert metadata["has_next_page"] is True
+    assert metadata["end_cursor"] == '{"cached_comments_cursor":"cursor-15","bifilter_token":"token-15"}'
+    assert metadata["top_level_count"] == 15
+    assert metadata["flattened_count"] == 16
+    assert "26297736713236852" in _post_comments_graphql_doc_ids()
+
+    first = comments[0]
+    assert first.comment_id == "17870000000000001"
+    assert first.child_comment_count == 1
+    assert first.likes == 7
+    assert first.is_covered is True
+    assert first.is_edited is True
+    assert first.parent_comment_id is None
+    assert first.owner_fbid_v2 == "fbid-1001"
+    assert first.owner_is_unpublished is False
+    assert first.restriction_status == "limited"
+    assert first.has_translation is True
+    assert first.giphy_media_info == {
+        "id": "giphy-1",
+        "images": {"original": {"url": "https://media.example.invalid/giphy-1.gif"}},
+    }
+    assert first.replies[0].parent_comment_id == first.comment_id
+    assert first.replies[0].owner_fbid_v2 == "fbid-1099"
 
 
 class _TrackingClient:
@@ -530,10 +576,15 @@ def test_fetch_comments_reconciles_tiny_unavailable_hidden_gap_after_reveal(monk
         )
     )
 
+    # SA-1 (comment-completeness): the hidden-unavailable gap tolerance is now 0
+    # and the baked `target<=3 and gap<=2` freebie was removed. With expected=3 and
+    # only 1 visible comment (gap=2), the post is no longer blessed
+    # "unavailable_reconciled" — it stays incomplete/retryable below target. The
+    # reveal is still attempted, then the post is re-driven instead of reconciled.
     assert len(result.comments) == 1
-    assert result.fetch_failed is False
-    assert result.retryable is False
-    assert result.fetch_reason == "hidden_comments_unavailable_reconciled"
+    assert result.fetch_failed is True
+    assert result.retryable is True
+    assert result.fetch_reason == "hidden_comments_unresolved"
     fetcher._fetch_rendered_comments_after_revealing_hidden.assert_awaited_once()
 
 
@@ -554,6 +605,11 @@ def test_reply_only_classifies_missing_replies_when_reply_api_is_exhausted() -> 
         )
     )
 
+    # SA-1 (comment-completeness): coverage_terminal_missing_classified is now
+    # gated behind attempt_count >= 3 no-progress passes. Below that the post stays
+    # reply_tail_incomplete/retryable; only on the exhausted attempt is the missing
+    # reply terminally classified. Drive attempt_count=3 to assert the gated
+    # terminal-missing classification this test is about.
     result = asyncio.run(
         fetcher._fetch_persisted_reply_tails(
             shortcode="DXpWUKECX3t",
@@ -568,6 +624,7 @@ def test_reply_only_classifies_missing_replies_when_reply_api_is_exhausted() -> 
             reply_resume_cursor_params_by_parent={},
             deadline=time.monotonic() + 30,
             reply_tail_deadline=time.monotonic() + 30,
+            attempt_count=3,
         )
     )
 
@@ -872,7 +929,13 @@ def test_fetch_comments_checkpoints_remaining_replies_after_reply_tail_budget(mo
     fetcher._fetch_rendered_comments_after_revealing_hidden.assert_not_awaited()
 
 
-def test_reply_tail_budget_gap_can_reconcile_stale_reported_count() -> None:
+def test_reply_tail_budget_gap_below_target_is_not_reconcilable() -> None:
+    # SA-2 (comment-completeness): the reconcilable reported-count gap tolerance is
+    # now 0 (was 1 absolute / ratio). A reply_tail_budget_exhausted stop that is
+    # even a single comment below the reported target is no longer blessed
+    # "complete-enough" — the post stays incomplete/retryable so the remaining
+    # comment is re-driven. (The reply-topology-gap guard still independently
+    # blocks reconciliation regardless of the count gap.)
     from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
 
     result = InstagramCommentsFetchResult(
@@ -884,11 +947,13 @@ def test_reply_tail_budget_gap_can_reconcile_stale_reported_count() -> None:
         retryable=True,
     )
 
-    assert jr._persisted_comment_coverage_gap_is_reconcilable(
+    # A 1-comment gap (99 stored vs 100 reported) is no longer tolerable.
+    assert not jr._persisted_comment_coverage_gap_is_reconcilable(
         result=result,
         stored_total_comments=99,
         max_comments_per_post=0,
     )
+    # And a persisted reply-topology gap still independently blocks reconciliation.
     assert not jr._persisted_comment_coverage_gap_is_reconcilable(
         result=result,
         stored_total_comments=99,
@@ -1533,7 +1598,12 @@ def test_fetch_comments_repeated_cursor_is_complete_when_expected_count_met(monk
     assert flattened_comment_count(result.comments) == 2
     assert result.fetch_failed is False
     assert result.retryable is False
-    assert result.fetch_reason == "coverage_target_met"
+    # SA-1 (comment-completeness): coverage_target_met now requires genuine cursor
+    # exhaustion (api_top_level_complete), not target alone. Here pagination ended
+    # on a repeated cursor (genuine end-of-pagination) with the target met, so the
+    # post is still terminal/complete but surfaces the real terminal reason
+    # (pagination_repeated_cursor) instead of being rewritten to coverage_target_met.
+    assert result.fetch_reason == "pagination_repeated_cursor"
     fetcher._fetch_rendered_comments_after_revealing_hidden.assert_not_awaited()
 
 
@@ -3001,7 +3071,13 @@ def test_fetch_gives_up_after_max_retries_with_retryable_true(monkeypatch: pytes
     """Exhausting retries surfaces retryable=True for queue requeue."""
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_BROWSER_API_FALLBACK_ON_429", "false")
     fetcher = _build_fetcher()
-    responses = [_mock_httpx_response(status_code=429, headers={"retry-after": "0"}) for _ in range(10)]
+    # SA-1 (comment-completeness): the transient retry cap was raised 5 -> 10, so
+    # exhausting it now takes _MAX_TRANSIENT_RETRIES + 1 attempts. Provide exactly
+    # that many 429 responses so the side_effect feed matches the new budget.
+    responses = [
+        _mock_httpx_response(status_code=429, headers={"retry-after": "0"})
+        for _ in range(InstagramCommentsScraplingFetcher._MAX_TRANSIENT_RETRIES + 1)
+    ]
     fetcher._fetch_api = AsyncMock(side_effect=responses)
 
     with patch("trr_backend.socials.instagram.comments_scrapling.fetcher.asyncio.sleep", AsyncMock()):
@@ -3980,9 +4056,12 @@ def test_incomplete_retry_stall_stops_repeated_zero_comment_hidden_gap() -> None
         },
     }
 
+    # SA-2 (comment-completeness): the stall give-up threshold is now 8 (was 2),
+    # so the post must reach attempt_count >= 8 with no cumulative progress before
+    # it can be declared stalled.
     stalled = jr._incomplete_retry_has_stalled(
         job=job,
-        attempt_count=3,
+        attempt_count=8,
         retryable_incomplete_targets=["SHORT1"],
         retry_fetch_reasons={"SHORT1": "hidden_comments_unresolved"},
         comments_fetched=53,
@@ -4028,9 +4107,10 @@ def test_incomplete_retry_stall_stops_repeated_partial_hidden_gap() -> None:
         },
     }
 
+    # SA-2 (comment-completeness): stall give-up threshold is now 8 (was 2).
     stalled = jr._incomplete_retry_has_stalled(
         job=job,
-        attempt_count=3,
+        attempt_count=8,
         retryable_incomplete_targets=["SHORT1"],
         retry_fetch_reasons={"SHORT1": "hidden_comments_unresolved"},
         comments_fetched=53,
@@ -4042,7 +4122,12 @@ def test_incomplete_retry_stall_stops_repeated_partial_hidden_gap() -> None:
     assert stalled["prior_items_found"] == 53
 
 
-def test_incomplete_retry_stall_stops_repeated_reply_tail_gap() -> None:
+def test_incomplete_retry_stall_does_not_stop_repeated_reply_tail_gap() -> None:
+    # SA-2 (comment-completeness): an exhausted reply-tail budget is now a
+    # retryable condition, not a genuinely-unrecoverable one. It was removed from
+    # _INCOMPLETE_RETRY_STALL_REASONS, so a repeated reply_tail_budget_exhausted
+    # gap must NEVER count toward the stall give-up — the post keeps retrying so
+    # the remaining replies can be filled.
     from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
 
     job = {
@@ -4056,15 +4141,13 @@ def test_incomplete_retry_stall_stops_repeated_reply_tail_gap() -> None:
 
     stalled = jr._incomplete_retry_has_stalled(
         job=job,
-        attempt_count=3,
+        attempt_count=8,
         retryable_incomplete_targets=["SHORT1"],
         retry_fetch_reasons={"SHORT1": "reply_tail_budget_exhausted"},
         comments_fetched=355,
     )
 
-    assert stalled is not None
-    assert stalled["target_source_ids"] == ["SHORT1"]
-    assert stalled["fetch_reasons"] == {"SHORT1": "reply_tail_budget_exhausted"}
+    assert stalled is None
 
 
 def test_incomplete_retry_stall_stops_repeated_coauthor_recovered_gap() -> None:
@@ -4079,9 +4162,10 @@ def test_incomplete_retry_stall_stops_repeated_coauthor_recovered_gap() -> None:
         },
     }
 
+    # SA-2 (comment-completeness): stall give-up threshold is now 8 (was 2).
     stalled = jr._incomplete_retry_has_stalled(
         job=job,
-        attempt_count=4,
+        attempt_count=8,
         retryable_incomplete_targets=["SHORT1"],
         retry_fetch_reasons={"SHORT1": "coauthor_auth_relay_fallback_recovered"},
         comments_fetched=844,
@@ -4092,7 +4176,10 @@ def test_incomplete_retry_stall_stops_repeated_coauthor_recovered_gap() -> None:
     assert stalled["fetch_reasons"] == {"SHORT1": "coauthor_auth_relay_fallback_recovered"}
 
 
-def test_incomplete_retry_stall_defaults_after_first_repeated_retry() -> None:
+def test_incomplete_retry_stall_uses_default_threshold_of_eight() -> None:
+    # SA-2 (comment-completeness): the default stall give-up threshold is now 8
+    # (was 2). A genuinely-unrecoverable reason that recurs with no cumulative
+    # progress only stalls once attempt_count reaches the default of 8.
     from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
 
     job = {
@@ -4100,26 +4187,41 @@ def test_incomplete_retry_stall_defaults_after_first_repeated_retry() -> None:
         "metadata": {
             "incomplete_target_source_ids": ["SHORT1", "SHORT2"],
             "incomplete_fetch_reasons": {
-                "SHORT1": "reply_tail_budget_exhausted",
-                "SHORT2": "reply_tail_budget_exhausted",
+                "SHORT1": "hidden_comments_unresolved",
+                "SHORT2": "hidden_comments_unresolved",
             },
             "retry_rebalance": {"remaining_target_source_ids": ["SHORT1", "SHORT2"]},
         },
     }
 
+    # Below the new default threshold the post must keep retrying.
+    assert (
+        jr._incomplete_retry_has_stalled(
+            job=job,
+            attempt_count=2,
+            retryable_incomplete_targets=["SHORT1", "SHORT2"],
+            retry_fetch_reasons={
+                "SHORT1": "hidden_comments_unresolved",
+                "SHORT2": "hidden_comments_unresolved",
+            },
+            comments_fetched=76,
+        )
+        is None
+    )
+
     stalled = jr._incomplete_retry_has_stalled(
         job=job,
-        attempt_count=2,
+        attempt_count=8,
         retryable_incomplete_targets=["SHORT1", "SHORT2"],
         retry_fetch_reasons={
-            "SHORT1": "reply_tail_budget_exhausted",
-            "SHORT2": "reply_tail_budget_exhausted",
+            "SHORT1": "hidden_comments_unresolved",
+            "SHORT2": "hidden_comments_unresolved",
         },
         comments_fetched=76,
     )
 
     assert stalled is not None
-    assert stalled["stall_attempts"] == 2
+    assert stalled["stall_attempts"] == 8
     assert stalled["target_source_ids"] == ["SHORT1", "SHORT2"]
 
 
@@ -4127,9 +4229,10 @@ def test_terminal_missing_classified_targets_are_not_retried() -> None:
     from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
 
     targets = jr._retryable_incomplete_target_source_ids(
-        incomplete_target_source_ids=["TERMINAL1", "RETRY1", "TERMINAL1"],
+        incomplete_target_source_ids=["TERMINAL1", "APPROVAL1", "RETRY1", "TERMINAL1"],
         incomplete_fetch_reasons={
             "TERMINAL1": jr._TERMINAL_MISSING_CLASSIFIED_REASON,
+            "APPROVAL1": jr.APPROVAL_BLOCKED_MISSING_CLASSIFICATION_REASON,
             "RETRY1": "reply_tail_budget_exhausted",
         },
         auth_failed_target_source_ids=["AUTH1"],
@@ -4189,6 +4292,164 @@ def test_retryable_incomplete_targets_keep_retry_path_when_db_saturated() -> Non
     assert skipped == []
 
 
+def test_completion_residual_gap_targets_from_health_returns_canary_gaps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+
+    canaries = ["DTgXh94kXyo", "DT_3qLDjo5T", "DYiDH6pN-1Z", "DVbFVXCDgeu"]
+    captured: dict[str, Any] = {}
+
+    def _fake_fetch_all(sql: str, params: list[Any]) -> list[dict[str, Any]]:
+        captured["sql"] = " ".join(sql.split()).lower()
+        captured["params"] = list(params)
+        return [
+            {
+                "shortcode": shortcode,
+                "instagram_reported_comments": 100,
+                "facebook_reported_comments": 0,
+                "saved_comment_count": 55,
+                "saved_parent_comments": 50,
+                "saved_child_replies": 5,
+                "covered_comment_count": 0,
+                "parent_capture_gap": 50,
+                "parent_capture_rate_pct": 50.0,
+                "last_comment_scraped_at": None,
+            }
+            for shortcode in canaries
+        ]
+
+    monkeypatch.setattr(jr.pg, "fetch_all", _fake_fetch_all)
+
+    residual = jr._completion_residual_gap_targets_from_health(target_source_ids=canaries)
+
+    assert [row["shortcode"] for row in residual] == canaries
+    assert [row["parent_capture_gap"] for row in residual] == [50, 50, 50, 50]
+    assert "from social.comment_capture_health" in captured["sql"]
+    assert captured["params"] == [canaries, 1, 4]
+
+
+def test_completion_residual_gap_health_check_saturation_retries_targets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+
+    canaries = ["DTgXh94kXyo", "DT_3qLDjo5T", "DYiDH6pN-1Z", "DVbFVXCDgeu"]
+
+    def _raise_saturated(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        raise jr.pg.DatabaseServiceUnavailableError("saturated")
+
+    monkeypatch.setattr(jr.pg, "fetch_all", _raise_saturated)
+
+    with pytest.raises(jr.CommentsScraplingRuntimeError) as exc_info:
+        jr._completion_residual_gap_targets_from_health(target_source_ids=canaries)
+
+    exc = exc_info.value
+    assert exc.error_code == "instagram_comments_health_gap_check_unavailable"
+    assert exc.retryable is True
+    assert exc.runtime_metadata["retry_target_source_ids"] == canaries
+    assert exc.runtime_metadata["completion_status"] == "comment_capture_health_check_unavailable"
+
+
+def test_job_runner_completion_health_gap_requeues_canary_shortcodes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+    from trr_backend.socials.instagram.comments_scrapling.persistence import PersistedInstagramComments
+
+    canaries = ["DTgXh94kXyo", "DT_3qLDjo5T", "DYiDH6pN-1Z", "DVbFVXCDgeu"]
+    fetch_calls: list[str] = []
+    finish_calls: list[dict[str, Any]] = []
+    config_updates: list[dict[str, Any]] = []
+
+    def fake_persist(*, shortcode: str, **_kwargs: Any) -> PersistedInstagramComments:
+        return PersistedInstagramComments(
+            post_id=f"post-{shortcode}",
+            stored_total_comments=1,
+            comments_upserted=1,
+            comments_marked_missing=0,
+            comment_media_mirror_jobs_enqueued=0,
+            comment_media_mirror_job_enqueue_errors=0,
+        )
+
+    class _FakeFetcher:
+        @property
+        def runtime_metadata(self) -> dict[str, Any]:
+            return {"transport": "test", "request_count": 1}
+
+        async def warmup(self) -> None:
+            return None
+
+        async def fetch_comments_for_shortcode(self, shortcode: str, **_kwargs: Any) -> InstagramCommentsFetchResult:
+            fetch_calls.append(shortcode)
+            return InstagramCommentsFetchResult(comments=[object()], fetch_failed=False, auth_failed=False)
+
+        async def aclose(self) -> None:
+            return None
+
+    fake_session = MagicMock()
+    fake_session.cookies = []
+    fake_session.auth_session.cookies = {}
+    fake_session.auth_session.metadata = {"source": "test"}
+    fake_session.browser_account_id = "testaccount"
+
+    monkeypatch.setattr(jr, "persist_instagram_comments_for_post", fake_persist)
+    monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
+    monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
+    monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
+    monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {})
+    monkeypatch.setattr(jr, "_load_comment_target_metadata", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        jr,
+        "_completion_residual_gap_targets_from_health",
+        lambda **_kwargs: [
+            {
+                "shortcode": shortcode,
+                "instagram_reported_comments": 100,
+                "saved_parent_comments": 50,
+                "parent_capture_gap": 50,
+            }
+            for shortcode in canaries
+        ],
+    )
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: None)
+    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(repo, "_update_job_config", lambda job_id, **kwargs: config_updates.append(dict(kwargs)))
+    monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
+
+    job = {
+        "id": "job-1",
+        "run_id": "run-1",
+        "config": {
+            "mode": "profile",
+            "account": "bravotv",
+            "target_source_ids": list(canaries),
+            "max_comments_per_post": 10,
+            "fetch_replies": False,
+        },
+        "attempt_count": 1,
+        "max_attempts": 3,
+    }
+
+    with patch(
+        "trr_backend.socials.instagram.comments_scrapling.job_runner.pg.fetch_one",
+        side_effect=_active_comments_job_fetch_one("retrying"),
+    ):
+        jr.run_instagram_comments_scrapling_job(job, worker_id="test-worker")
+
+    assert fetch_calls == canaries
+    assert finish_calls[-1]["status"] == "retrying"
+    assert finish_calls[-1]["last_error_code"] == "instagram_comments_health_gap_incomplete"
+    assert finish_calls[-1]["metadata"]["runtime_metadata"]["incomplete_target_source_ids"] == canaries
+    assert finish_calls[-1]["metadata"]["runtime_metadata"]["completion_status"] == "comment_capture_health_incomplete"
+    assert config_updates[-1]["config_updates"]["target_source_ids"] == canaries
+    assert config_updates[-1]["config_updates"]["comments_retry_incomplete"] is True
+
+
 def test_auto_auth_fallback_target_selection_is_flagged_and_gap_gated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4244,6 +4505,10 @@ def test_auto_auth_fallback_enqueue_payload_coercion_is_defined() -> None:
 
 
 def test_incomplete_retry_stall_stops_repeated_subset_of_prior_retry_targets() -> None:
+    # SA-2 (comment-completeness): reply_tail_incomplete is now retryable (dropped
+    # from the stall set), so this "subset of prior targets" regression uses a
+    # still-unrecoverable reason (hidden_comments_unresolved) and the new default
+    # give-up threshold of 8.
     from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
 
     job = {
@@ -4251,8 +4516,8 @@ def test_incomplete_retry_stall_stops_repeated_subset_of_prior_retry_targets() -
         "metadata": {
             "incomplete_target_source_ids": ["SHORT1", "SHORT2"],
             "incomplete_fetch_reasons": {
-                "SHORT1": "reply_tail_incomplete",
-                "SHORT2": "reply_tail_incomplete",
+                "SHORT1": "hidden_comments_unresolved",
+                "SHORT2": "hidden_comments_unresolved",
             },
             "retry_rebalance": {"remaining_target_source_ids": ["SHORT1", "SHORT2"]},
         },
@@ -4260,9 +4525,9 @@ def test_incomplete_retry_stall_stops_repeated_subset_of_prior_retry_targets() -
 
     stalled = jr._incomplete_retry_has_stalled(
         job=job,
-        attempt_count=3,
+        attempt_count=8,
         retryable_incomplete_targets=["SHORT1"],
-        retry_fetch_reasons={"SHORT1": "reply_tail_incomplete"},
+        retry_fetch_reasons={"SHORT1": "hidden_comments_unresolved"},
         comments_fetched=355,
     )
 
@@ -4317,7 +4582,12 @@ def test_incomplete_retry_stall_does_not_stop_target_without_current_reason() ->
     assert stalled is None
 
 
-def test_incomplete_retry_stall_stops_repeated_pagination_deadline_gap() -> None:
+def test_incomplete_retry_stall_does_not_stop_repeated_pagination_deadline_gap() -> None:
+    # SA-2 (comment-completeness): a self-imposed clock-cut
+    # (pagination_deadline_exceeded) is a retryable condition, not a
+    # genuinely-unrecoverable one. It was removed from the stall reason set, so a
+    # repeated deadline gap must NEVER count toward the give-up — the post is
+    # re-driven with backoff. (Deadlines are also unbounded by default now.)
     from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
 
     job = {
@@ -4331,19 +4601,20 @@ def test_incomplete_retry_stall_stops_repeated_pagination_deadline_gap() -> None
 
     stalled = jr._incomplete_retry_has_stalled(
         job=job,
-        attempt_count=3,
+        attempt_count=8,
         retryable_incomplete_targets=["SHORT1"],
         retry_fetch_reasons={"SHORT1": "pagination_deadline_exceeded"},
-        comments_fetched=120,
+        comments_fetched=80,
     )
 
-    assert stalled is not None
-    assert stalled["target_source_ids"] == ["SHORT1"]
-    assert stalled["prior_items_found"] == 80
-    assert stalled["current_comments_fetched"] == 120
+    assert stalled is None
 
 
-def test_incomplete_retry_stall_stops_repeated_transport_error_gap() -> None:
+def test_incomplete_retry_stall_does_not_stop_repeated_transport_error_gap() -> None:
+    # SA-2 (comment-completeness): a transport error/timeout is a retryable
+    # condition, not a genuinely-unrecoverable one. It was removed from the stall
+    # reason set, so a repeated transport gap must NEVER count toward the give-up,
+    # even at the new default give-up threshold.
     from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
 
     job = {
@@ -4357,16 +4628,14 @@ def test_incomplete_retry_stall_stops_repeated_transport_error_gap() -> None:
 
     stalled = jr._incomplete_retry_has_stalled(
         job=job,
-        attempt_count=2,
+        attempt_count=8,
         retryable_incomplete_targets=["SHORT1"],
         retry_fetch_reasons={"SHORT1": "transport_error"},
         comments_fetched=80,
         zero_comment_incomplete_targets=["SHORT1"],
     )
 
-    assert stalled is not None
-    assert stalled["target_source_ids"] == ["SHORT1"]
-    assert stalled["zero_comment_target_source_ids"] == ["SHORT1"]
+    assert stalled is None
 
 
 def test_incomplete_retry_stall_stops_repeated_persisted_reply_topology_gap() -> None:
@@ -4381,9 +4650,10 @@ def test_incomplete_retry_stall_stops_repeated_persisted_reply_topology_gap() ->
         },
     }
 
+    # SA-2 (comment-completeness): stall give-up threshold is now 8 (was 2).
     stalled = jr._incomplete_retry_has_stalled(
         job=job,
-        attempt_count=2,
+        attempt_count=8,
         retryable_incomplete_targets=["SHORT1"],
         retry_fetch_reasons={"SHORT1": "persisted_reply_topology_gap"},
         comments_fetched=355,
@@ -4405,9 +4675,10 @@ def test_incomplete_retry_stall_stops_repeated_html_challenge_gap() -> None:
         },
     }
 
+    # SA-2 (comment-completeness): stall give-up threshold is now 8 (was 2).
     stalled = jr._incomplete_retry_has_stalled(
         job=job,
-        attempt_count=2,
+        attempt_count=8,
         retryable_incomplete_targets=["SHORT1"],
         retry_fetch_reasons={"SHORT1": "html_challenge_or_auth_required"},
         comments_fetched=15,
@@ -6317,6 +6588,9 @@ def test_job_runner_passes_top_level_resume_cursor_from_prior_metadata(
             "fetch_replies": False,
             "expected_comment_count": None,
             "load_strategy": "instagram_comments_endpoint_cursor",
+            # The runner now always forwards the job's attempt_count so the
+            # fetcher's terminal-missing classifier can gate on exhaustion.
+            "attempt_count": 2,
             "top_level_cursor": "cursor-2",
             "top_level_cursor_param": "max_id",
         }
@@ -6409,6 +6683,8 @@ def test_job_runner_passes_coauthor_target_metadata_to_fetcher(monkeypatch: pyte
             "fetch_replies": False,
             "expected_comment_count": 149,
             "load_strategy": "instagram_comments_endpoint_cursor",
+            # The runner now always forwards the job's attempt_count.
+            "attempt_count": 1,
             "target_metadata": target_metadata,
         }
     ]
@@ -6631,6 +6907,8 @@ def test_job_runner_passes_reply_resume_cursors_from_prior_metadata(
             "fetch_replies": True,
             "expected_comment_count": None,
             "load_strategy": "instagram_comments_endpoint_cursor",
+            # The runner now always forwards the job's attempt_count.
+            "attempt_count": 2,
             "reply_resume_cursors": {"parent-1": "reply-cursor-2"},
             "reply_resume_cursor_params": {"parent-1": "max_id"},
         }
@@ -6740,6 +7018,8 @@ def test_job_runner_passes_top_level_resume_cursor_from_audit_payload(
             "fetch_replies": False,
             "expected_comment_count": None,
             "load_strategy": "instagram_comments_endpoint_cursor",
+            # The runner now always forwards the job's attempt_count.
+            "attempt_count": 2,
             "target_metadata": {
                 "source_id": "SHORT1",
                 "materialized_post_id": "00000000-0000-0000-0000-000000000001",
@@ -6846,6 +7126,8 @@ def test_job_runner_passes_reply_resume_cursor_from_audit_payload(
             "fetch_replies": True,
             "expected_comment_count": None,
             "load_strategy": "instagram_comments_endpoint_cursor",
+            # The runner now always forwards the job's attempt_count.
+            "attempt_count": 2,
             "reply_resume_cursors": {"parent-1": "audit-reply-cursor-2"},
             "reply_resume_cursor_params": {"parent-1": "max_id"},
         }
@@ -6915,11 +7197,16 @@ def test_audit_cursor_resume_preserves_existing_job_metadata_precedence() -> Non
 def test_audit_cursor_resume_repairs_degenerate_checkpoint_from_payload_cursor() -> None:
     from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
 
+    # SA-2 (comment-completeness): pagination_deadline_exceeded is no longer a
+    # retryable audit-cursor stop reason (deadlines are unbounded by default and
+    # the reason was dropped from the retryable set), so the resume normalizer now
+    # skips it. Use a still-retryable mid-pagination stop reason so the degenerate
+    # cursor-repair path (the actual subject of this test) is still exercised.
     metadata = jr._audit_cursor_resume_metadata_from_rows(
         [
             {
                 "shortcode": "SHORT1",
-                "cursor_stop_reason": "pagination_deadline_exceeded",
+                "cursor_stop_reason": "pagination_page_cap_reached",
                 "cursor_param": "min_id",
                 "cursor_min_id": "duplicate-cursor",
                 "cursor_payload": {
@@ -6927,7 +7214,7 @@ def test_audit_cursor_resume_repairs_degenerate_checkpoint_from_payload_cursor()
                     "chosen_cursor_param": "min_id",
                     "top_level_checkpoint": {
                         "target_shortcode": "SHORT1",
-                        "stop_reason": "pagination_deadline_exceeded",
+                        "stop_reason": "pagination_page_cap_reached",
                         "last_top_level_cursor": "duplicate-cursor",
                         "next_top_level_cursor": "duplicate-cursor",
                         "last_top_level_cursor_param": "min_id",
@@ -7070,6 +7357,8 @@ def test_job_runner_uses_reply_only_retry_for_persisted_missing_reply_parents(
             "fetch_replies": True,
             "expected_comment_count": None,
             "load_strategy": "instagram_comments_endpoint_cursor",
+            # The runner now always forwards the job's attempt_count.
+            "attempt_count": 1,
             "persisted_top_level_comments": [persisted_parent],
             "reply_only": True,
         }
@@ -8119,7 +8408,7 @@ def test_job_runner_reconciles_reply_only_auth_blocked_gap_despite_reply_topolog
     assert sample["stored_reply_gap_total"] == 45
 
 
-def test_job_runner_reconciles_high_coverage_terminal_pagination_gap(
+def test_job_runner_keeps_high_coverage_terminal_pagination_gap_incomplete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from trr_backend.repositories import social_season_analytics as repo
@@ -8223,18 +8512,23 @@ def test_job_runner_reconciles_high_coverage_terminal_pagination_gap(
     ):
         jr.run_instagram_comments_scrapling_job(job, worker_id="test-worker")
 
+    # SA-2 (comment-completeness): the terminal coverage-gap tolerance is now 0, so
+    # a 1000-reported / 910-stored pagination_repeated_cursor stop (gap=90) is no
+    # longer blessed terminal-complete. The post stays incomplete/retryable and is
+    # NOT reconciled.
     assert persist_calls == [{"shortcode": "SHORT1", "is_complete": False}]
-    assert reconcile_calls[0]["post_db_id"] == "post-SHORT1"
-    assert finish_calls[-1]["status"] == "completed"
+    assert reconcile_calls == []
+    assert finish_calls[-1]["status"] == "retrying"
     metadata = finish_calls[-1]["metadata"]
-    assert metadata["incomplete_target_source_ids"] == []
-    assert (
-        metadata["post_latency"]["samples"][0]["completion_reason"] == "stored_comment_coverage_terminal_gap_reconciled"
-    )
-    assert metadata["post_latency"]["samples"][0]["stored_total_comments"] == 910
+    assert metadata["incomplete_target_source_ids"] == ["SHORT1"]
+    assert metadata["incomplete_fetch_reasons"] == {"SHORT1": "pagination_repeated_cursor"}
+    sample = metadata["post_latency"]["samples"][0]
+    assert sample["completion_reason"] == "incomplete_fetch"
+    assert sample["operator_status"] == "incomplete_retryable"
+    assert sample["stored_total_comments"] == 910
 
 
-def test_job_runner_reconciles_one_comment_relay_recovery_gap(
+def test_job_runner_keeps_one_comment_relay_recovery_gap_incomplete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from trr_backend.repositories import social_season_analytics as repo
@@ -8347,16 +8641,21 @@ def test_job_runner_reconciles_one_comment_relay_recovery_gap(
     ):
         jr.run_instagram_comments_scrapling_job(job, worker_id="test-worker")
 
-    assert reconcile_calls[0]["post_db_id"] == "post-SHORT1"
-    assert finish_calls[-1]["status"] == "completed"
+    # SA-2 (comment-completeness): the reconcilable reported-count gap tolerance is
+    # now 0, so a 33-reported / 32-stored relay-recovery stop (gap=1) is no longer
+    # reconciled-complete. The post stays incomplete/retryable.
+    assert reconcile_calls == []
+    assert finish_calls[-1]["status"] == "retrying"
     metadata = finish_calls[-1]["metadata"]
-    assert metadata["incomplete_target_source_ids"] == []
-    assert metadata["post_latency"]["samples"][0]["completion_reason"] == "stored_comment_coverage_reconciled_gap"
-    assert metadata["post_latency"]["samples"][0]["operator_status"] == "complete"
-    assert metadata["post_latency"]["samples"][0]["stored_total_comments"] == 32
+    assert metadata["incomplete_target_source_ids"] == ["SHORT1"]
+    assert metadata["incomplete_fetch_reasons"] == {"SHORT1": "coauthor_auth_relay_fallback_recovered"}
+    sample = metadata["post_latency"]["samples"][0]
+    assert sample["completion_reason"] == "incomplete_fetch"
+    assert sample["operator_status"] == "incomplete_retryable"
+    assert sample["stored_total_comments"] == 32
 
 
-def test_job_runner_reconciles_high_coverage_terminal_transient_gap(
+def test_job_runner_keeps_high_coverage_transient_gap_incomplete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from trr_backend.repositories import social_season_analytics as repo
@@ -8463,14 +8762,21 @@ def test_job_runner_reconciles_high_coverage_terminal_transient_gap(
     ):
         jr.run_instagram_comments_scrapling_job(job, worker_id="test-worker")
 
-    assert reconcile_calls[0]["post_db_id"] == "post-SHORT1"
-    assert finish_calls[-1]["status"] == "completed"
+    # SA-2 (comment-completeness): http_429 was removed from the terminal
+    # coverage-gap reason set (only pagination_repeated_cursor may bless a gap as
+    # terminal now). A rate-limited stop that is 876-reported / 847-stored is never
+    # treated as "complete-enough" — the post stays incomplete/retryable so the
+    # rate-limit is re-driven with backoff. This is the biggest single coverage
+    # leak the plan closes.
+    assert reconcile_calls == []
+    assert finish_calls[-1]["status"] == "retrying"
     metadata = finish_calls[-1]["metadata"]
-    assert metadata["incomplete_target_source_ids"] == []
-    assert (
-        metadata["post_latency"]["samples"][0]["completion_reason"] == "stored_comment_coverage_terminal_gap_reconciled"
-    )
-    assert metadata["post_latency"]["samples"][0]["stored_total_comments"] == 847
+    assert metadata["incomplete_target_source_ids"] == ["SHORT1"]
+    assert metadata["incomplete_fetch_reasons"] == {"SHORT1": "http_429"}
+    sample = metadata["post_latency"]["samples"][0]
+    assert sample["completion_reason"] == "incomplete_fetch"
+    assert sample["operator_status"] == "incomplete_retryable"
+    assert sample["stored_total_comments"] == 847
 
 
 def test_job_runner_retries_only_remaining_posts_after_hard_retryable_failure(
