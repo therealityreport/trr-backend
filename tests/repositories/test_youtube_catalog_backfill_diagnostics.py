@@ -190,6 +190,36 @@ def test_youtube_posts_catalog_empty_fixture_sets_empty_page_error_without_netwo
     assert meta["error_class"] == "YouTubeEmptyChannelPage"
 
 
+def test_youtube_posts_catalog_merges_config_profile_snapshot_before_derived_fallback():
+    from trr_backend.socials.youtube.posts_catalog import scrape_shared_youtube_posts
+
+    fixture = _load_youtube_catalog_fixture("normal")
+    fixture["api_identity"] = None
+    dependencies, _scraper, api_client = _catalog_shared_dependencies(fixture=fixture, ytdlp_available=True)
+
+    _rows, meta = scrape_shared_youtube_posts(
+        run_id="fixture-run",
+        account_handle=fixture["account_handle"],
+        config={
+            "pipeline_ingest_mode": "shared_account_catalog_backfill",
+            "profile_snapshot": {
+                "display_name": "Configured Bravo",
+                "avatar_url": "https://images.test/configured-avatar.jpg",
+                "profile_url": "https://youtube.test/configured",
+            },
+        },
+        job_id="fixture-job",
+        dependencies=dependencies,
+    )
+
+    assert api_client.resolved_handle is None
+    assert meta["profile_snapshot"]["username"] == "bravo"
+    assert meta["profile_snapshot"]["display_name"] == "Configured Bravo"
+    assert meta["profile_snapshot"]["avatar_url"] == "https://images.test/configured-avatar.jpg"
+    assert meta["profile_snapshot"]["profile_url"] == "https://youtube.test/configured"
+    assert meta["profile_snapshot"]["channel_id"] == "UCbravo123"
+
+
 @pytest.mark.parametrize(
     "stats,expected",
     [

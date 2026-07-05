@@ -8,6 +8,7 @@ Persistence remains platform-owned.
 from __future__ import annotations
 
 from trr_backend.socials.pipelines.comments.instagram import (
+    append_instagram_comments_catalog_stream_targets_to_active_run,
     cancel_social_account_comments_job,
     cancel_social_account_comments_run,
     execute_social_account_comments_run_auth_repair,
@@ -23,6 +24,7 @@ from trr_backend.socials.pipelines.comments.instagram import (
 )
 
 __all__ = [
+    "append_instagram_comments_catalog_stream_targets_to_active_run",
     "cancel_social_account_comments_job",
     "cancel_social_account_comments_run",
     "execute_social_account_comments_run_auth_repair",

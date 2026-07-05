@@ -11,6 +11,7 @@ from trr_backend.socials.socialblade.fetcher import SocialBladeScraplingFetcher
 
 @dataclass(slots=True)
 class _DummyProxyConfig:
+    browser_proxy: str | dict[str, str] | None = None
     proxy_rotator: object | None = None
     api_proxy_url: str | None = None
     fingerprint: str = "proxy.example:8080:explicit"
@@ -156,12 +157,12 @@ def test_scrapling_fetcher_uses_direct_instagram_user_url_without_raw_init_scrip
 
 
 def test_scrapling_fetcher_passes_proxy_to_browser_and_http_client(monkeypatch: pytest.MonkeyPatch) -> None:
-    proxy_rotator = object()
+    browser_proxy = {"server": "http://proxy.example:8080", "username": "user", "password": "pass"}
     fetcher = SocialBladeScraplingFetcher(
         cookies=[{"name": "cf_clearance", "value": "seed", "domain": ".socialblade.com"}],
         raw_cookies={"cf_clearance": "seed"},
         platform="instagram",
-        proxy_config=_DummyProxyConfig(proxy_rotator=proxy_rotator, api_proxy_url="http://proxy.example:8080"),
+        proxy_config=_DummyProxyConfig(browser_proxy=browser_proxy, api_proxy_url="http://proxy.example:8080"),
     )
     captured: dict[str, object] = {}
 
@@ -180,7 +181,8 @@ def test_scrapling_fetcher_passes_proxy_to_browser_and_http_client(monkeypatch: 
     __import__("asyncio").run(fetcher._fetch_page("https://socialblade.com/instagram/user/thetraitorsus"))
     fetcher._rebuild_http_client()
 
-    assert captured["kwargs"]["proxy_rotator"] is proxy_rotator
+    assert captured["kwargs"]["proxy"] == browser_proxy
+    assert "proxy_rotator" not in captured["kwargs"]
     assert captured["httpx_kwargs"]["proxy"] == "http://proxy.example:8080"
     assert fetcher.runtime_metadata["selected_proxy_fingerprint"] == "proxy.example:8080:explicit"
     assert fetcher.runtime_metadata["proxy_session_mode"] == "explicit"

@@ -275,6 +275,17 @@ def _redact_text(value: str) -> str:
     return SECRET_RE.sub("[redacted]", value)
 
 
+def _recommendation_errors(recommendations: list[dict[str, Any]]) -> list[str]:
+    errors: list[str] = []
+    for recommendation in recommendations:
+        value = recommendation.get("errors")
+        if isinstance(value, list):
+            errors.extend(_redact_text(str(item)) for item in value if str(item))
+        elif value:
+            errors.append(_redact_text(str(value)))
+    return errors
+
+
 def _filter_specs(labels: str | None) -> tuple[QuerySpec, ...]:
     if not labels:
         return QUERY_SPECS
@@ -313,13 +324,14 @@ def _run_query_advisor(cur: psycopg2.extensions.cursor, spec: QuerySpec) -> dict
     try:
         cur.execute("select * from extensions.index_advisor(%s)", [_normalize_sql(spec.sql)])
         rows = [_json_safe(dict(row)) for row in cur.fetchall()]
+        recommendation_errors = _recommendation_errors(rows)
         return {
             "label": spec.label,
             "route": spec.route,
             "parameters": spec.parameters,
-            "status": "ok",
+            "status": "advisor_warning" if recommendation_errors else "ok",
             "recommendations": rows,
-            "errors": [],
+            "errors": recommendation_errors,
             "review_required": True,
         }
     except Exception as exc:  # noqa: BLE001 - report per-query advisor failures as evidence

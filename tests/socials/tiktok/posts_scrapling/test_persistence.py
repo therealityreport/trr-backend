@@ -1,6 +1,39 @@
 from __future__ import annotations
 
 
+class _FakeCursor:
+    def __init__(self, conn: _FakeConnection) -> None:
+        self._conn = conn
+
+    def __enter__(self) -> _FakeCursor:
+        return self
+
+    def __exit__(self, *_args) -> None:
+        return None
+
+    def execute(self, statement: str) -> None:
+        self._conn.statements.append(statement)
+
+
+class _FakeConnection:
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+
+    def cursor(self) -> _FakeCursor:
+        return _FakeCursor(self)
+
+
+class _ConnectionContext:
+    def __init__(self, conn: _FakeConnection | None = None) -> None:
+        self.conn = conn or _FakeConnection()
+
+    def __enter__(self) -> _FakeConnection:
+        return self.conn
+
+    def __exit__(self, *_args) -> None:
+        return None
+
+
 def test_adapt_tiktok_item_to_post_dto():
     from trr_backend.socials.tiktok.posts_scrapling.persistence import _tiktok_item_to_post_dto
 
@@ -120,19 +153,13 @@ def test_persist_tiktok_posts_accepts_aweme_id_without_id(monkeypatch):
     from trr_backend.repositories import social_season_analytics as repo
     from trr_backend.socials.tiktok.posts_scrapling.persistence import persist_tiktok_posts
 
-    class _ConnectionContext:
-        def __enter__(self):
-            return object()
-
-        def __exit__(self, *_args):
-            return None
-
     persisted_video_ids: list[str] = []
 
     def _fake_upsert(_context, *, post, **_kwargs):
         persisted_video_ids.append(post.video_id)
+        return {"id": post.video_id}
 
-    monkeypatch.setattr(pg, "db_connection", lambda: _ConnectionContext())
+    monkeypatch.setattr(pg, "db_connection", lambda **_kwargs: _ConnectionContext())
     monkeypatch.setattr(repo, "_upsert_tiktok_post", _fake_upsert)
 
     result = persist_tiktok_posts(
@@ -159,19 +186,13 @@ def test_persist_tiktok_post_dtos_accepts_canonical_posts(monkeypatch):
     from trr_backend.socials.tiktok.posts_scrapling.persistence import persist_tiktok_post_dtos
     from trr_backend.socials.tiktok.scraper import TikTokPost
 
-    class _ConnectionContext:
-        def __enter__(self):
-            return object()
-
-        def __exit__(self, *_args):
-            return None
-
     persisted_video_ids: list[str] = []
 
     def _fake_upsert(_context, *, post, **_kwargs):
         persisted_video_ids.append(post.video_id)
+        return {"id": post.video_id}
 
-    monkeypatch.setattr(pg, "db_connection", lambda: _ConnectionContext())
+    monkeypatch.setattr(pg, "db_connection", lambda **_kwargs: _ConnectionContext())
     monkeypatch.setattr(repo, "_upsert_tiktok_post", _fake_upsert)
 
     result = persist_tiktok_post_dtos(
@@ -227,18 +248,12 @@ def test_persist_tiktok_posts_tracks_skipped_reasons(monkeypatch):
     from trr_backend.repositories import social_season_analytics as repo
     from trr_backend.socials.tiktok.posts_scrapling.persistence import persist_tiktok_posts
 
-    class _ConnectionContext:
-        def __enter__(self):
-            return object()
-
-        def __exit__(self, *_args):
-            return None
-
     def _fake_upsert(_context, *, post, **_kwargs):
         if post.video_id == "bad":
             raise RuntimeError("upsert failed")
+        return {"id": post.video_id}
 
-    monkeypatch.setattr(pg, "db_connection", lambda: _ConnectionContext())
+    monkeypatch.setattr(pg, "db_connection", lambda **_kwargs: _ConnectionContext())
     monkeypatch.setattr(repo, "_upsert_tiktok_post", _fake_upsert)
 
     result = persist_tiktok_posts(
@@ -260,3 +275,84 @@ def test_persist_tiktok_posts_tracks_skipped_reasons(monkeypatch):
         "missing_video_id": 1,
         "upsert_failed": 1,
     }
+
+
+def test_persist_tiktok_posts_shared_catalog_mode_writes_catalog_rows(monkeypatch):
+    from trr_backend.db import pg
+    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.tiktok.posts_scrapling.persistence import persist_tiktok_post_dtos
+
+    conn = _FakeConnection()
+    catalog_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(pg, "db_connection", lambda **_kwargs: _ConnectionContext(conn))
+    monkeypatch.setattr(repo, "get_season_context", lambda _season_id: None)
+    monkeypatch.setattr(repo, "_upsert_tiktok_post", lambda *_args, **_kwargs: {"id": "materialized"})
+
+    def _fake_catalog_upsert(**kwargs):
+        catalog_calls.append(kwargs)
+        return {"id": "catalog"}
+
+    monkeypatch.setattr(repo, "_upsert_shared_catalog_post", _fake_catalog_upsert)
+
+    result = persist_tiktok_post_dtos(
+        account_handle="bravotv",
+        posts=[type("Post", (), {"video_id": "tt-1", "to_dict": lambda self: {"video_id": "tt-1"}})()],
+        run_id="run-1",
+        job_id="job-1",
+        season_id=None,
+        pipeline_ingest_mode="shared_account_catalog_backfill",
+    )
+
+    assert result.posts_upserted == 1
+    assert result.catalog_posts_upserted == 1
+    assert result.posts_skipped == 0
+    assert catalog_calls[0]["platform"] == "tiktok"
+    assert catalog_calls[0]["run_id"] == "run-1"
+    assert catalog_calls[0]["account_handle"] == "bravotv"
+    assert conn.statements == [
+        "SAVEPOINT tiktok_posts_scrapling_post_1",
+        "RELEASE SAVEPOINT tiktok_posts_scrapling_post_1",
+    ]
+
+
+def test_persist_tiktok_posts_uses_savepoint_after_per_post_error(monkeypatch):
+    from types import SimpleNamespace
+
+    from trr_backend.db import pg
+    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.tiktok.posts_scrapling.persistence import persist_tiktok_post_dtos
+
+    conn = _FakeConnection()
+    upserted_video_ids: list[str] = []
+
+    def _fake_upsert(_context, *, post, **_kwargs):
+        if post.video_id == "bad":
+            raise RuntimeError("post failed")
+        upserted_video_ids.append(post.video_id)
+        return {"id": post.video_id}
+
+    monkeypatch.setattr(pg, "db_connection", lambda **_kwargs: _ConnectionContext(conn))
+    monkeypatch.setattr(repo, "_upsert_tiktok_post", _fake_upsert)
+
+    result = persist_tiktok_post_dtos(
+        account_handle="bravotv",
+        posts=[
+            SimpleNamespace(video_id="bad", to_dict=lambda: {"video_id": "bad"}),
+            SimpleNamespace(video_id="good", to_dict=lambda: {"video_id": "good"}),
+        ],
+        run_id="run-1",
+        job_id="job-1",
+    )
+
+    assert upserted_video_ids == ["good"]
+    assert result.posts_upserted == 1
+    assert result.posts_skipped == 1
+    assert result.posts_skipped_by_reason == {"upsert_failed": 1}
+    assert conn.statements == [
+        "SAVEPOINT tiktok_posts_scrapling_post_1",
+        "ROLLBACK TO SAVEPOINT tiktok_posts_scrapling_post_1",
+        "RELEASE SAVEPOINT tiktok_posts_scrapling_post_1",
+        "SAVEPOINT tiktok_posts_scrapling_post_2",
+        "RELEASE SAVEPOINT tiktok_posts_scrapling_post_2",
+    ]

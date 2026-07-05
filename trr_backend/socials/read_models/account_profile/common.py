@@ -44,6 +44,13 @@ _SOCIAL_ACCOUNT_PROFILE_COMMENT_SORT_FIELDS = {"user", "comment", "likes", "repl
 _SOCIAL_ACCOUNT_PROFILE_COMMENT_SORT_DIRECTIONS = {"asc", "desc"}
 
 
+def _instagram_owner_account_match_sql(*, alias: str = "p") -> str:
+    return _core._instagram_owner_account_match_sql(alias=alias)
+
+
+_LOCAL_ROOM_NAMES.add("_instagram_owner_account_match_sql")
+
+
 def _sync_core_overrides() -> None:
     for _name in _IMPORTED_CORE_NAMES - _LOCAL_ROOM_NAMES:
         if hasattr(_core, _name):
@@ -175,6 +182,14 @@ def _instagram_post_comment_rollups_available(*, conn: Any | None = None) -> boo
     return _relation_exists("social.instagram_post_comment_rollups", conn=conn)
 
 
+def _tiktok_post_comment_rollups_available(*, conn: Any | None = None) -> bool:
+    return _relation_exists("social.tiktok_post_comment_rollups", conn=conn)
+
+
+def _youtube_post_comment_rollups_available(*, conn: Any | None = None) -> bool:
+    return _relation_exists("social.youtube_post_comment_rollups", conn=conn)
+
+
 def _instagram_saved_comment_counts_cte_sql(*, source_cte: str, active_condition: str, use_rollup: bool) -> str:
     if use_rollup:
         return f"""
@@ -200,6 +215,138 @@ def _instagram_saved_comment_counts_cte_sql(*, source_cte: str, active_condition
           group by c.post_id
         )
         """
+
+
+def _fetch_materialized_comments_only_profile_rows_page(
+    platform: str,
+    account_handle: str,
+    *,
+    page: int,
+    page_size: int,
+    search: str | None = None,
+    comment_filter: str | None = None,
+    sort_by: str | None = None,
+    sort_dir: str | None = None,
+    conn: Any | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    if normalized_platform not in {"tiktok", "youtube"}:
+        return _core._fetch_materialized_comments_only_profile_rows_page(
+            platform,
+            account_handle,
+            page=page,
+            page_size=page_size,
+            search=search,
+            comment_filter=comment_filter,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
+            conn=conn,
+        )
+
+    table, source_id_column, posted_at_column = _social_account_profile_base_query_parts(normalized_platform)
+    comment_table = f"{normalized_platform}_comments"
+    comment_fk_col = "post_id" if normalized_platform == "tiktok" else "video_id"
+    rollup_table = f"social.{normalized_platform}_post_comment_rollups"
+    rollup_fk_col = "post_id" if normalized_platform == "tiktok" else "video_id"
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    safe_page = max(1, int(page))
+    safe_page_size = max(1, min(int(page_size), _SOCIAL_ACCOUNT_PROFILE_MAX_PAGE_SIZE))
+    safe_offset = (safe_page - 1) * safe_page_size
+    posted_at_projection = f"p.{posted_at_column} as posted_at," if posted_at_column != "posted_at" else ""
+    order_by_sql = _comments_only_profile_order_by_sql(
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+    )
+    use_rollup = (
+        _tiktok_post_comment_rollups_available(conn=conn)
+        if normalized_platform == "tiktok"
+        else _youtube_post_comment_rollups_available(conn=conn)
+    )
+    base_rows_sql = f"""
+        with base_rows as (
+          select
+            p.id::text as profile_row_id,
+            p.show_id::text as show_id,
+            p.season_id::text as season_id,
+            p.source_account,
+            p.{source_id_column} as source_id,
+            {posted_at_projection}
+            s.season_number,
+            sh.name as show_name,
+            sh.slug as show_slug,
+            p.*
+          from social.{table} p
+          left join core.seasons s on s.id = p.season_id
+          left join core.shows sh on sh.id = coalesce(p.show_id, s.show_id)
+          where {_social_account_profile_owner_match_sql(normalized_platform, alias="p")}
+        )
+    """
+    if use_rollup:
+        saved_comment_counts_sql = f"""
+            saved_comment_counts as (
+              select
+                r.{rollup_fk_col}::text as join_key,
+                coalesce(r.active_comment_count, 0)::int as saved_comments
+              from {rollup_table} r
+              join base_rows p on p.profile_row_id = r.{rollup_fk_col}::text
+            )
+        """
+    else:
+        active_filter = (
+            "and coalesce(c.is_missing, false) = false"
+            if _comment_lifecycle_supported(comment_table, conn=conn)
+            else ""
+        )
+        saved_comment_counts_sql = f"""
+            saved_comment_counts as (
+              select
+                c.{comment_fk_col}::text as join_key,
+                count(*)::int as saved_comments
+              from social.{comment_table} c
+              join base_rows p on p.profile_row_id = c.{comment_fk_col}::text
+              where 1 = 1
+                {active_filter}
+              group by c.{comment_fk_col}
+            )
+        """
+    saved_counts_sql = f"""
+        {base_rows_sql},
+        {saved_comment_counts_sql},
+        filtered_rows as (
+          select
+            base_rows.*,
+            coalesce(saved_comment_counts.saved_comments, 0)::int as saved_comments
+          from base_rows
+          left join saved_comment_counts on saved_comment_counts.join_key = base_rows.profile_row_id
+          where greatest(
+            coalesce(base_rows.comments_count, 0),
+            coalesce(saved_comment_counts.saved_comments, 0)
+          ) > 0
+        )
+    """
+    total_sql = f"""
+        {saved_counts_sql}
+        select count(*)::int as total
+        from filtered_rows
+    """
+    page_sql = f"""
+        {saved_counts_sql}
+        select *
+        from filtered_rows
+        order by {order_by_sql}
+        limit %s offset %s
+    """
+    total_params: list[Any] = [normalized_account]
+    page_params: list[Any] = [normalized_account, safe_page_size, safe_offset]
+    if conn is None:
+        total_row = pg.fetch_one(total_sql, total_params) or {}
+        rows = pg.fetch_all(page_sql, page_params)
+    else:
+        with pg.db_cursor(conn=conn, label=f"{normalized_platform}_comments_only_profile_total") as cur:
+            total_row = pg.fetch_one_with_cursor(cur, total_sql, total_params) or {}
+        with pg.db_cursor(conn=conn, label=f"{normalized_platform}_comments_only_profile_rows") as cur:
+            rows = pg.fetch_all_with_cursor(cur, page_sql, page_params)
+    return rows, _normalize_non_negative_int(total_row.get("total"))
 
 
 def rebuild_instagram_post_comment_rollups(
@@ -344,7 +491,10 @@ def instagram_comment_rollup_health(*, sample_limit: int = 25) -> dict[str, Any]
                   (select count(*)::int from comment_counts) as comment_post_rows,
                   (select coalesce(sum(total_comment_count), 0)::int from comment_counts) as comment_rows,
                   (select count(*)::int from mismatches) as mismatch_count,
-                  coalesce((select jsonb_agg(to_jsonb(mismatch_sample)) from mismatch_sample), '[]'::jsonb) as mismatch_sample
+                  coalesce(
+                    (select jsonb_agg(to_jsonb(mismatch_sample)) from mismatch_sample),
+                    '[]'::jsonb
+                  ) as mismatch_sample
                 """,
                 [safe_sample_limit],
             )
@@ -377,7 +527,7 @@ def _fetch_instagram_profile_rows_page(
     safe_page = max(1, int(page))
     safe_page_size = max(1, min(int(page_size), _SOCIAL_ACCOUNT_PROFILE_MAX_PAGE_SIZE))
     safe_offset = (safe_page - 1) * safe_page_size
-    owner_match_clause = _social_account_profile_owner_match_sql("instagram", alias="p")
+    owner_match_clause = _instagram_owner_account_match_sql(alias="p")
     reported_comments_expr = _instagram_reported_comments_sql("p")
     catalog_reported_comments_expr = _instagram_reported_comments_sql("p")
     search_where_sql, search_params = _instagram_profile_posts_page_search_where_sql(search, alias="filtered_rows")
@@ -588,11 +738,13 @@ def _fetch_instagram_profile_rows_page(
             posted_at desc nulls last,
             id desc
         ),
-        {_instagram_saved_comment_counts_cte_sql(
+        {
+        _instagram_saved_comment_counts_cte_sql(
             source_cte="deduped_rows",
             active_condition=active_condition,
             use_rollup=use_comment_rollups,
-        )},
+        )
+    },
         filtered_rows as materialized (
           select
             d.*,
@@ -659,7 +811,7 @@ def _fetch_instagram_profile_rows_page_no_search(
     safe_offset = (safe_page - 1) * safe_page_size
     normalized_sort_by = _normalize_social_account_profile_post_sort_by(sort_by)
     normalized_sort_dir = _normalize_social_account_profile_post_sort_dir(sort_dir)
-    owner_match_clause = _social_account_profile_owner_match_sql("instagram", alias="p")
+    owner_match_clause = _instagram_owner_account_match_sql(alias="p")
     reported_comments_expr = _instagram_reported_comments_sql("p")
     order_by_sql = _comments_only_profile_order_by_sql(
         sort_by=sort_by,
@@ -796,11 +948,13 @@ def _fetch_instagram_profile_rows_page_no_search(
           from deduped_rows
         ),
         {score_source_rows_sql},
-        {_instagram_saved_comment_counts_cte_sql(
+        {
+        _instagram_saved_comment_counts_cte_sql(
             source_cte="score_source_rows",
             active_condition=active_condition,
             use_rollup=use_comment_rollups,
-        )},
+        )
+    },
         filtered_rows as materialized (
           select
             d.*,
@@ -986,7 +1140,7 @@ def _fetch_instagram_profile_rows_page_no_search_created(
     safe_page = max(1, int(page))
     safe_page_size = max(1, min(int(page_size), _SOCIAL_ACCOUNT_PROFILE_MAX_PAGE_SIZE))
     safe_offset = (safe_page - 1) * safe_page_size
-    owner_match_clause = _social_account_profile_owner_match_sql("instagram", alias="p")
+    owner_match_clause = _instagram_owner_account_match_sql(alias="p")
     reported_comments_expr = _instagram_reported_comments_sql("p")
     lifecycle_supported = _comment_lifecycle_supported("instagram_comments", conn=conn)
     active_condition = "c.is_missing is not true" if lifecycle_supported else "true"
@@ -1077,11 +1231,13 @@ def _fetch_instagram_profile_rows_page_no_search_created(
           order by posted_at desc nulls last, _row_id desc
           limit %s offset %s
         ),
-        {_instagram_saved_comment_counts_cte_sql(
+        {
+        _instagram_saved_comment_counts_cte_sql(
             source_cte="page_keys",
             active_condition=active_condition,
             use_rollup=use_comment_rollups,
-        )}
+        )
+    }
         select
           page_keys._page_rank,
           p.id::text as id,
@@ -1957,7 +2113,11 @@ def get_social_account_profile_posts(
                 with _social_profile_perf_span(breakdown, "assert_profile"):
                     _assert_social_account_profile_exists(normalized_platform, normalized_account, conn=read_conn)
                 with _social_profile_perf_span(breakdown, "fetch_rows"):
-                    rows, total = _fetch_materialized_comments_only_profile_rows_page(
+                    materialized_comments_loader = _room_callable(
+                        "_fetch_materialized_comments_only_profile_rows_page",
+                        _fetch_materialized_comments_only_profile_rows_page,
+                    )
+                    rows, total = materialized_comments_loader(
                         normalized_platform,
                         normalized_account,
                         page=safe_page,
@@ -2826,12 +2986,20 @@ def get_social_account_profile_hashtags(
     account_handle: str,
     *,
     window: str | None = None,
+    assignment_status: str | None = None,
 ) -> dict[str, Any]:
     _sync_core_overrides()
     normalized_platform = _normalize_social_account_profile_platform(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
+    normalized_assignment_status = str(assignment_status or "all").strip().lower()
+    if normalized_assignment_status not in {"all", "assigned", "unassigned"}:
+        raise ValueError("INVALID_HASHTAG_ASSIGNMENT_STATUS: assignment_status must be all, assigned, or unassigned")
     _assert_social_account_profile_exists(normalized_platform, normalized_account)
-    assignment_rows = _fetch_social_account_profile_assignment_rows(normalized_platform, normalized_account)
+    assignment_rows = _fetch_social_account_profile_assignment_rows(
+        normalized_platform,
+        normalized_account,
+        include_all_platform_scopes=True,
+    )
     lookback_days = _social_account_profile_window_to_lookback_days(window)
     preloaded_rows: list[dict[str, Any]] | None = None
     if normalized_platform == "instagram":
@@ -2842,15 +3010,18 @@ def get_social_account_profile_hashtags(
             normalized_account,
             posted_since=posted_since,
         )
-    return {
-        "items": _social_account_profile_hashtag_items(
-            normalized_platform,
-            normalized_account,
-            assignment_rows=assignment_rows,
-            lookback_days=lookback_days,
-            rows=preloaded_rows,
-        )
-    }
+    items = _social_account_profile_hashtag_items(
+        normalized_platform,
+        normalized_account,
+        assignment_rows=assignment_rows,
+        lookback_days=lookback_days,
+        rows=preloaded_rows,
+    )
+    if normalized_assignment_status == "assigned":
+        items = [item for item in items if item.get("assignments")]
+    elif normalized_assignment_status == "unassigned":
+        items = [item for item in items if not item.get("assignments")]
+    return {"items": items, "assignment_status": normalized_assignment_status}
 
 
 def get_social_account_profile_collaborators_tags(platform: str, account_handle: str) -> dict[str, Any]:
@@ -2884,6 +3055,7 @@ _LOCAL_ROOM_NAMES = {
     "get_social_account_profile_collaborators_tags",
     "instagram_comment_rollup_health",
     "rebuild_instagram_post_comment_rollups",
+    "_fetch_materialized_comments_only_profile_rows_page",
 }
 _LOCAL_ROOM_FUNCTIONS = {_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES}
 _CORE_ROOM_WRAPPERS = {_name: getattr(_core, _name, None) for _name in _LOCAL_ROOM_NAMES}

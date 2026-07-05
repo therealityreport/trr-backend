@@ -18,6 +18,7 @@ class PersistedTikTokPosts:
     posts_upserted: int
     posts_skipped: int
     posts_skipped_by_reason: dict[str, int] = field(default_factory=dict)
+    catalog_posts_upserted: int = 0
 
 
 @dataclass
@@ -95,18 +96,46 @@ def _tiktok_item_to_post_dto(item: dict[str, Any], *, account_handle: str) -> _S
     )
 
 
+def _savepoint_name(*, index: int) -> str:
+    return f"tiktok_posts_scrapling_post_{max(1, int(index))}"
+
+
+def _execute_savepoint_statement(conn: Any, statement: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(statement)
+
+
+class _PostSavepoint:
+    def __init__(self, *, conn: Any, index: int) -> None:
+        self._conn = conn
+        self._name = _savepoint_name(index=index)
+
+    def __enter__(self) -> None:
+        _execute_savepoint_statement(self._conn, f"SAVEPOINT {self._name}")
+
+    def __exit__(self, exc_type, _exc, _tb) -> bool:  # type: ignore[no-untyped-def]
+        if exc_type is not None:
+            _execute_savepoint_statement(self._conn, f"ROLLBACK TO SAVEPOINT {self._name}")
+        _execute_savepoint_statement(self._conn, f"RELEASE SAVEPOINT {self._name}")
+        return False
+
+
 def _persist_tiktok_post_dtos(
     *,
     account_handle: str,
     posts: list[Any],
+    run_id: str | None,
     job_id: str | None,
     season_id: str | None = None,
+    pipeline_ingest_mode: str | None = None,
 ) -> PersistedTikTokPosts:
     from trr_backend.db import pg
     from trr_backend.repositories import social_season_analytics as repo
 
     context = repo.get_season_context(season_id) if season_id else None
+    shared_catalog_mode = str(pipeline_ingest_mode or "").strip().lower() == "shared_account_catalog_backfill"
     posts_upserted = 0
+    catalog_posts_upserted = 0
     posts_skipped = 0
     posts_skipped_by_reason: dict[str, int] = {}
 
@@ -115,26 +144,48 @@ def _persist_tiktok_post_dtos(
         posts_skipped += 1
         posts_skipped_by_reason[reason] = int(posts_skipped_by_reason.get(reason) or 0) + 1
 
-    with pg.db_connection() as conn:
-        for post in posts:
-            if not str(getattr(post, "video_id", "") or "").strip():
+    with pg.db_connection(label="tiktok-posts-scrapling-sync") as conn:
+        for index, post in enumerate(posts, start=1):
+            video_id = str(getattr(post, "video_id", "") or "").strip()
+            if not video_id:
                 _record_skip("missing_video_id")
                 continue
+            canonical_row: dict[str, Any] | None = None
+            catalog_row: dict[str, Any] | None = None
             try:
-                repo._upsert_tiktok_post(
-                    context,
-                    job_id=job_id,
-                    account=account_handle,
-                    post=post,
-                    conn=conn,
-                )
-                posts_upserted += 1
+                with _PostSavepoint(conn=conn, index=index):
+                    canonical_row = repo._upsert_tiktok_post(
+                        context,
+                        job_id=job_id,
+                        account=account_handle,
+                        post=post,
+                        conn=conn,
+                    )
+                    if shared_catalog_mode:
+                        catalog_row = repo._upsert_shared_catalog_post(
+                            platform="tiktok",
+                            run_id=run_id,
+                            account_handle=account_handle,
+                            post=post,
+                            conn=conn,
+                        )
             except Exception:  # noqa: BLE001
-                logger.exception("Failed to upsert TikTok post %s via canonical helper", post.video_id)
+                logger.exception("Failed to upsert TikTok post %s via canonical helper", video_id)
                 _record_skip("upsert_failed")
+                continue
+            if canonical_row:
+                posts_upserted += 1
+            else:
+                _record_skip("canonical_upsert_returned_none")
+            if shared_catalog_mode:
+                if catalog_row:
+                    catalog_posts_upserted += 1
+                else:
+                    _record_skip("catalog_upsert_returned_none")
 
     return PersistedTikTokPosts(
         posts_upserted=posts_upserted,
+        catalog_posts_upserted=catalog_posts_upserted,
         posts_skipped=posts_skipped,
         posts_skipped_by_reason=posts_skipped_by_reason,
     )
@@ -147,14 +198,16 @@ def persist_tiktok_post_dtos(
     run_id: str | None,
     job_id: str | None,
     season_id: str | None = None,
+    pipeline_ingest_mode: str | None = None,
 ) -> PersistedTikTokPosts:
     """Persist already-adapted TikTokPost-compatible objects."""
-    del run_id
     return _persist_tiktok_post_dtos(
         account_handle=account_handle,
         posts=posts,
+        run_id=run_id,
         job_id=job_id,
         season_id=season_id,
+        pipeline_ingest_mode=pipeline_ingest_mode,
     )
 
 
@@ -165,9 +218,9 @@ def persist_tiktok_posts(
     run_id: str | None,
     job_id: str | None,
     season_id: str | None = None,
+    pipeline_ingest_mode: str | None = None,
 ) -> PersistedTikTokPosts:
     """Adapt raw TikTok API items and persist through canonical repo helper."""
-    del run_id
     posts: list[_ScraplingTikTokPostDTO] = []
     posts_skipped = 0
     posts_skipped_by_reason: dict[str, int] = {}
@@ -195,8 +248,10 @@ def persist_tiktok_posts(
     persisted = _persist_tiktok_post_dtos(
         account_handle=account_handle,
         posts=posts,
+        run_id=run_id,
         job_id=job_id,
         season_id=season_id,
+        pipeline_ingest_mode=pipeline_ingest_mode,
     )
     posts_skipped += persisted.posts_skipped
     for reason, count in persisted.posts_skipped_by_reason.items():
@@ -204,6 +259,7 @@ def persist_tiktok_posts(
 
     return PersistedTikTokPosts(
         posts_upserted=persisted.posts_upserted,
+        catalog_posts_upserted=persisted.catalog_posts_upserted,
         posts_skipped=posts_skipped,
         posts_skipped_by_reason=posts_skipped_by_reason,
     )

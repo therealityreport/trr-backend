@@ -183,6 +183,64 @@ def _shared_stage_post_limit(config: Mapping[str, Any] | None, *, default: int =
     return parsed
 
 
+_EMPTY_SOFT_BLOCK_MARKERS = (
+    "soft_block",
+    "soft-block",
+    "blocked",
+    "checkpoint",
+    "challenge",
+    "login",
+    "auth_failed",
+    "forbidden",
+    "unauthorized",
+    "rate_limited",
+    "empty_response",
+    "empty_payload",
+    "temporarily_unavailable",
+)
+
+
+def _empty_soft_block_reason(retrieval_meta: Mapping[str, Any]) -> str | None:
+    meta = _metadata_dict(retrieval_meta)
+    if _normalize_non_negative_int(meta.get("matched_posts")) > 0:
+        return None
+    stop_reason = str(meta.get("stop_reason") or "").strip()
+    if (
+        stop_reason == "no_edges"
+        and str(meta.get("source") or "").strip() == "threads_graphql_api"
+        and _normalize_non_negative_int(meta.get("posts_checked")) == 0
+    ):
+        return stop_reason
+    for key in (
+        "empty_result_reason",
+        "stop_reason",
+        "fetch_reason",
+        "block_reason",
+        "session_block_reason",
+        "profile_fetch_mode",
+        "error_message",
+        "redirect_target",
+    ):
+        value = str(meta.get(key) or "").strip()
+        normalized = value.lower()
+        if value and any(marker in normalized for marker in _EMPTY_SOFT_BLOCK_MARKERS):
+            return value
+    return None
+
+
+def _classify_empty_soft_block_result(retrieval_meta: MutableMapping[str, Any], *, rows: Sequence[Any]) -> None:
+    if rows or retrieval_meta.get("error_code"):
+        return
+    reason = _empty_soft_block_reason(retrieval_meta)
+    if not reason:
+        return
+    retrieval_meta["empty_result_reason"] = reason
+    retrieval_meta["error_code"] = "threads_empty_soft_block"
+    retrieval_meta["error_class"] = "ThreadsEmptySoftBlock"
+    retrieval_meta["retryable"] = True
+    retrieval_meta["complete"] = False
+
+
 def _resolve_threads_delay_seconds() -> float:
     return max(0.5, float(os.getenv("SOCIAL_THREADS_DELAY_SEC", "1.0")))
 
@@ -333,4 +391,5 @@ def scrape_shared_threads_posts(
         deps.metadata_dict(config.get("profile_snapshot")),
         _threads_profile_snapshot_from_posts(posts, account_handle, deps=deps),
     )
+    _classify_empty_soft_block_result(retrieval_meta, rows=rows)
     return rows, retrieval_meta

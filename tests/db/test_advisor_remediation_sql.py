@@ -12,6 +12,12 @@ EXTERNAL_ID_CONFLICTS_PK_MIGRATION = (
 SECURITY_FOLLOWUP_MIGRATION = (
     REPO_ROOT / "supabase/migrations/20260511195828_supabase_security_advisor_default_deny_and_search_path.sql"
 )
+SECURITY_ADVISOR_RPC_VECTOR_MIGRATION = (
+    REPO_ROOT / "supabase/migrations/20260629143025_supabase_security_advisor_rpc_and_vector_hardening.sql"
+)
+SOCIAL_ROLLUP_AND_RATE_PACE_SECURITY_MIGRATION = (
+    REPO_ROOT / "supabase/migrations/20260702184229_social_rollup_function_and_rate_pace_security.sql"
+)
 FLASHBACK_GAMEPLAY_REMOVAL_MIGRATION = (
     REPO_ROOT / "supabase/migrations/20260428113000_remove_flashback_gameplay_write_path.sql"
 )
@@ -218,6 +224,56 @@ def test_security_followup_is_default_deny_and_search_path_only() -> None:
         " alter extension",
     ):
         assert forbidden not in sql
+
+
+def test_security_advisor_rpc_and_vector_hardening_closes_current_warnings() -> None:
+    sql = _read(SECURITY_ADVISOR_RPC_VECTOR_MIGRATION).lower()
+
+    assert "alter function admin.set_updated_at()\n  set search_path = admin, pg_temp;" in sql
+    assert ("alter function firebase_surveys.set_updated_at()\n  set search_path = firebase_surveys, pg_temp;") in sql
+
+    for signature in (
+        "social.refresh_instagram_post_comment_rollup(uuid)",
+        "social.refresh_instagram_post_comment_rollup_tg()",
+    ):
+        assert f"alter function {signature}\n  security definer" in sql
+        assert f"revoke execute on function {signature}\n  from public, anon, authenticated;" in sql
+        assert f"grant execute on function {signature}\n  to service_role;" in sql
+
+    assert "alter function surveys.submit_response(uuid, jsonb)\n  security invoker" in sql
+    assert ("revoke execute on function surveys.submit_response(uuid, jsonb)\n  from public, anon;") in sql
+    assert ("grant execute on function surveys.submit_response(uuid, jsonb)\n  to authenticated, service_role;") in sql
+
+    assert "create extension if not exists vector with schema extensions;" in sql
+    assert "alter extension vector set schema extensions;" in sql
+
+
+def test_social_rollup_and_rate_pace_security_cleanup_locks_api_surface() -> None:
+    sql = _read(SOCIAL_ROLLUP_AND_RATE_PACE_SECURITY_MIGRATION).lower()
+
+    for signature in (
+        "social.refresh_tiktok_post_comment_rollup(uuid)",
+        "social.refresh_tiktok_post_comment_rollup_tg()",
+        "social.refresh_youtube_post_comment_rollup(uuid)",
+        "social.refresh_youtube_post_comment_rollup_tg()",
+    ):
+        assert f"alter function {signature}\n  security definer\n  set search_path = social, pg_temp;" in sql
+        assert f"revoke execute on function {signature}\n  from public, anon, authenticated;" in sql
+        assert f"grant execute on function {signature}\n  to service_role;" in sql
+
+    assert "alter table social.ig_comment_rate_pace enable row level security;" in sql
+    assert "grant all privileges on table social.ig_comment_rate_pace to service_role;" in sql
+    assert "revoke all on table social.ig_comment_rate_pace from anon, authenticated;" in sql
+
+    policy_block = _policy_block(sql, "ig_comment_rate_pace_service_role_all")
+    assert "on social.ig_comment_rate_pace" in policy_block
+    assert "for all" in policy_block
+    assert "to service_role" in policy_block
+    assert "using (true)" in policy_block
+    assert "with check (true)" in policy_block
+
+    assert "grant all privileges on table social.ig_comment_rate_pace to anon" not in sql
+    assert "grant all privileges on table social.ig_comment_rate_pace to authenticated" not in sql
 
 
 def test_flashback_gameplay_removal_drops_only_disabled_write_path() -> None:

@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from datetime import timedelta
 from typing import Any
 
@@ -74,6 +74,21 @@ _INSTAGRAM_THIN_PRESERVE_OPTIONAL_KEYS = {
     "video_play_count",
 }
 _INSTAGRAM_POST_BATCH_SIZE = 100
+_MISSING_INSTAGRAM_METRIC = object()
+_INSTAGRAM_LIKE_HIDDEN_KEYS = {
+    "like_and_view_counts_disabled",
+    "hide_like_and_view_counts",
+    "like_count_hidden",
+    "likes_hidden",
+}
+_INSTAGRAM_VIEW_HIDDEN_KEYS = _INSTAGRAM_LIKE_HIDDEN_KEYS | {
+    "view_count_hidden",
+    "views_hidden",
+}
+_INSTAGRAM_COMMENT_HIDDEN_KEYS = {
+    "comment_count_hidden",
+    "comments_count_hidden",
+}
 
 
 def _sync_core_overrides() -> None:
@@ -117,6 +132,157 @@ def _instagram_raw_data_is_thin_comments_header(raw_data: Any) -> bool:
     has_comments_shape = any(key in raw_data for key in _INSTAGRAM_COMMENTS_HEADER_KEYS)
     has_rich_post_shape = any(key in raw_data for key in _INSTAGRAM_RICH_POST_KEYS)
     return has_comments_shape and not has_rich_post_shape
+
+
+def _instagram_catalog_posted_at(value: Any) -> Any | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        if value <= 0:
+            return None
+    elif isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            if float(stripped) <= 0:
+                return None
+        except ValueError:
+            pass
+    return _parse_instagram_time(value)
+
+
+def _instagram_truthy_metric_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+    return False
+
+
+def _instagram_metric_hidden(raw_data: Mapping[str, Any], post: Any, keys: set[str]) -> bool:
+    for key in keys:
+        if _instagram_truthy_metric_flag(raw_data.get(key)):
+            return True
+        if _instagram_truthy_metric_flag(getattr(post, key, None)):
+            return True
+    return False
+
+
+def _instagram_known_metric_value(value: Any) -> int | None:
+    if value is None or value is _MISSING_INSTAGRAM_METRIC or isinstance(value, bool):
+        return None
+    if isinstance(value, Mapping):
+        for key in ("count", "total_count", "value"):
+            result = _instagram_known_metric_value(value.get(key))
+            if result is not None:
+                return result
+        return None
+    if isinstance(value, (int, float)):
+        return _normalize_non_negative_int(value)
+    if isinstance(value, str):
+        stripped = value.strip().replace(",", "")
+        if not stripped:
+            return None
+        try:
+            return _normalize_non_negative_int(stripped)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _instagram_first_known_metric_from_raw(raw_data: Mapping[str, Any], keys: Sequence[str]) -> int | None:
+    for key in keys:
+        if key not in raw_data:
+            continue
+        result = _instagram_known_metric_value(raw_data.get(key))
+        if result is not None:
+            return result
+    return None
+
+
+def _instagram_catalog_likes_metric(post: Any, raw_data: Mapping[str, Any]) -> int | None:
+    if _instagram_metric_hidden(raw_data, post, _INSTAGRAM_LIKE_HIDDEN_KEYS):
+        return None
+    raw_value = _instagram_first_known_metric_from_raw(
+        raw_data,
+        (
+            "like_count",
+            "likesCount",
+            "likes_count",
+            "edge_liked_by",
+            "edge_media_preview_like",
+        ),
+    )
+    if raw_value is not None:
+        return raw_value
+    return _instagram_known_metric_value(getattr(post, "likes", _MISSING_INSTAGRAM_METRIC))
+
+
+def _instagram_catalog_comments_metric(post: Any, raw_data: Mapping[str, Any]) -> int | None:
+    if _instagram_metric_hidden(raw_data, post, _INSTAGRAM_COMMENT_HIDDEN_KEYS):
+        return None
+    raw_value = _instagram_first_known_metric_from_raw(
+        raw_data,
+        (
+            "comment_count",
+            "commentsCount",
+            "comments_count",
+            "edge_media_to_comment",
+            "edge_media_to_parent_comment",
+        ),
+    )
+    if raw_value is not None:
+        return raw_value
+    return _instagram_known_metric_value(getattr(post, "comments", _MISSING_INSTAGRAM_METRIC))
+
+
+def _instagram_catalog_views_metric(post: Any, raw_data: Mapping[str, Any]) -> int | None:
+    if _instagram_metric_hidden(raw_data, post, _INSTAGRAM_VIEW_HIDDEN_KEYS):
+        return None
+    observed = getattr(post, "video_views_observed", _MISSING_INSTAGRAM_METRIC)
+    observed_value = _instagram_known_metric_value(observed)
+    if observed is not _MISSING_INSTAGRAM_METRIC:
+        return observed_value
+    raw_value = _instagram_first_known_metric_from_raw(
+        raw_data,
+        (
+            "video_view_count",
+            "videoViewCount",
+            "view_count",
+            "views_count",
+            "play_count",
+            "video_play_count",
+            "videoPlayCount",
+            "playCount",
+            "viewCount",
+        ),
+    )
+    if raw_value is not None:
+        return raw_value
+    return _instagram_known_metric_value(getattr(post, "video_views", _MISSING_INSTAGRAM_METRIC))
+
+
+def _apply_instagram_catalog_metric_semantics(
+    payload: dict[str, Any],
+    *,
+    post: Any,
+    raw_data: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Drop unknown metric columns so conflict updates preserve stored values."""
+    metric_values = {
+        "likes": _instagram_catalog_likes_metric(post, raw_data),
+        "comments_count": _instagram_catalog_comments_metric(post, raw_data),
+        "views": _instagram_catalog_views_metric(post, raw_data),
+    }
+    for key, value in metric_values.items():
+        if value is None:
+            payload.pop(key, None)
+        else:
+            payload[key] = value
+    return payload
 
 
 def _shared_instagram_catalog_graphql_page_size() -> int:
@@ -208,7 +374,7 @@ def _instagram_post_payload(
     """Build the legacy social.instagram_posts payload for one post."""
     _sync_core_overrides()
     shortcode = str(getattr(post, "shortcode", "") or "").strip()
-    posted_at = _parse_instagram_time(getattr(post, "taken_at", None))
+    posted_at = _instagram_catalog_posted_at(getattr(post, "taken_at", None))
     media_urls = [str(url).strip() for url in (getattr(post, "media_urls", []) or []) if str(url).strip()]
     thumbnail_url = str(getattr(post, "thumbnail_url", "") or "").strip() or (media_urls[0] if media_urls else None)
     profile_tags = _as_text_list(getattr(post, "profile_tags", []))
@@ -647,7 +813,7 @@ def _upsert_shared_catalog_instagram_post(
     payload = _shared_catalog_payload_base(
         source_id=shortcode,
         account_handle=account_handle,
-        posted_at=_parse_instagram_time(getattr(post, "taken_at", None)),
+        posted_at=_instagram_catalog_posted_at(getattr(post, "taken_at", None)),
         permalink=_shared_catalog_post_url(
             "instagram",
             account_handle=account_handle,
@@ -662,9 +828,9 @@ def _upsert_shared_catalog_instagram_post(
         mentions=_as_text_list(getattr(post, "mentions", []), prefix="@", strip_prefix="@"),
         collaborators=_as_text_list(getattr(post, "collaborators", []), prefix="@", strip_prefix="@"),
         profile_tags=_as_text_list(getattr(post, "profile_tags", []), prefix="@", strip_prefix="@"),
-        likes=getattr(post, "likes", 0),
-        comments_count=getattr(post, "comments", 0),
-        views=getattr(post, "video_views", getattr(post, "video_views_observed", 0)),
+        likes=getattr(post, "likes", None),
+        comments_count=getattr(post, "comments", None),
+        views=getattr(post, "video_views_observed", None),
         shares=resolved_repost_count,
         raw_data=raw_data,
         run_id=run_id,
@@ -676,6 +842,7 @@ def _upsert_shared_catalog_instagram_post(
         video_play_count=getattr(post, "video_play_count", None),
         video_duration=getattr(post, "video_duration", None),
     )
+    payload = _apply_instagram_catalog_metric_semantics(payload, post=post, raw_data=raw_data)
     row = _pg_upsert(PLATFORM_CATALOG_POST_TABLES["instagram"], payload, conflict_col="source_id", conn=conn)
     if row:
         _sync_instagram_catalog_post_collaborators(row, conn=conn)
@@ -697,10 +864,10 @@ def _shared_catalog_instagram_post_payload(
     raw_data = post.to_dict() if hasattr(post, "to_dict") else {}
     raw_data = raw_data if isinstance(raw_data, dict) else {}
     resolved_repost_count = _instagram_repost_count_from_post(post, raw_data)
-    return _shared_catalog_payload_base(
+    payload = _shared_catalog_payload_base(
         source_id=shortcode,
         account_handle=account_handle,
-        posted_at=_parse_instagram_time(getattr(post, "taken_at", None)),
+        posted_at=_instagram_catalog_posted_at(getattr(post, "taken_at", None)),
         permalink=_shared_catalog_post_url(
             "instagram",
             account_handle=account_handle,
@@ -720,9 +887,9 @@ def _shared_catalog_instagram_post_payload(
         mentions=_as_text_list(getattr(post, "mentions", []), prefix="@", strip_prefix="@"),
         collaborators=_as_text_list(getattr(post, "collaborators", []), prefix="@", strip_prefix="@"),
         profile_tags=_as_text_list(getattr(post, "profile_tags", []), prefix="@", strip_prefix="@"),
-        likes=getattr(post, "likes", 0),
-        comments_count=getattr(post, "comments", 0),
-        views=getattr(post, "video_views", getattr(post, "video_views_observed", 0)),
+        likes=getattr(post, "likes", None),
+        comments_count=getattr(post, "comments", None),
+        views=getattr(post, "video_views_observed", None),
         shares=resolved_repost_count,
         raw_data=raw_data,
         run_id=run_id,
@@ -734,6 +901,7 @@ def _shared_catalog_instagram_post_payload(
         video_play_count=getattr(post, "video_play_count", None),
         video_duration=getattr(post, "video_duration", None),
     )
+    return _apply_instagram_catalog_metric_semantics(payload, post=post, raw_data=raw_data)
 
 
 def _batch_upsert_shared_catalog_instagram_posts(
@@ -763,12 +931,21 @@ def _batch_upsert_shared_catalog_instagram_posts(
     ]
     if not payloads:
         return []
-    rows = _pg_upsert_many(
-        PLATFORM_CATALOG_POST_TABLES["instagram"],
-        payloads,
-        conflict_col="source_id",
-        conn=conn,
-    )
+    rows: list[dict[str, Any]] = []
+    for index in range(0, len(payloads), _INSTAGRAM_POST_BATCH_SIZE):
+        chunk = payloads[index : index + _INSTAGRAM_POST_BATCH_SIZE]
+        payloads_by_columns: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+        for payload in chunk:
+            payloads_by_columns.setdefault(tuple(payload.keys()), []).append(payload)
+        for grouped_payloads in payloads_by_columns.values():
+            rows.extend(
+                _pg_upsert_many(
+                    PLATFORM_CATALOG_POST_TABLES["instagram"],
+                    grouped_payloads,
+                    conflict_col="source_id",
+                    conn=conn,
+                )
+            )
     for row in rows:
         _sync_instagram_catalog_post_collaborators(row, conn=conn)
     return rows
@@ -992,7 +1169,7 @@ def _shared_instagram_posted_at_bounds(posts: Sequence[Any]) -> tuple[datetime |
     oldest_posted_at: datetime | None = None
     newest_posted_at: datetime | None = None
     for post in posts:
-        posted_at = _parse_instagram_time(getattr(post, "taken_at", None))
+        posted_at = _instagram_catalog_posted_at(getattr(post, "taken_at", None))
         if posted_at is None:
             continue
         if oldest_posted_at is None or posted_at < oldest_posted_at:
@@ -1197,8 +1374,15 @@ def _fetch_shared_instagram_graphql_posts_page(
             timeout_seconds=_shared_instagram_browser_session_lock_timeout_seconds(),
         ):
             public_scraper = build_scraper(browser_account_id=account_handle)
-            auth_scraper = build_scraper(authenticated=True, browser_account_id=account_handle) if auth_allowed else None
-            scrape_config = ScrapeConfig(username=account_handle, hashtags=[], delay_seconds=delay_seconds, max_pages=None)
+            auth_scraper = (
+                build_scraper(authenticated=True, browser_account_id=account_handle) if auth_allowed else None
+            )
+            scrape_config = ScrapeConfig(
+                username=account_handle,
+                hashtags=[],
+                delay_seconds=delay_seconds,
+                max_pages=None,
+            )
             data, page_meta, selected_transport = fetch_graphql_page(
                 account_handle=account_handle,
                 cursor=cursor,
@@ -1281,6 +1465,7 @@ def _discover_instagram_cursor_partitions(
         seen_cursors: set[str] = set()
         selected_transport: str | None = "authenticated" if auth_allowed else None
         last_retrieval_meta: dict[str, Any] = {}
+        discovery_had_error = False
 
         consecutive_rate_limit_failures = 0
         max_rate_limit_retries = 3
@@ -1322,6 +1507,50 @@ def _discover_instagram_cursor_partitions(
                     )
                     time_module.sleep(backoff)
                     continue
+                discovery_had_error = bool(
+                    last_retrieval_meta.get("error_code") or last_retrieval_meta.get("error_class")
+                )
+                if not discovery_had_error and (cursor or posts_checked > 0):
+                    last_retrieval_meta.setdefault("error_code", "instagram_graphql_discovery_cursor_empty_page")
+                    last_retrieval_meta.setdefault("error_class", "InstagramGraphQLEmptyOrErrorPage")
+                    last_retrieval_meta.setdefault("retryable", True)
+                    last_retrieval_meta.setdefault("graphql_cursor", str(cursor or "").strip() or None)
+                    discovery_had_error = True
+                if discovery_had_error:
+                    last_retrieval_meta.setdefault("error_code", "instagram_graphql_discovery_page_failed")
+                    last_retrieval_meta.setdefault("error_class", "InstagramDiscoveryPageFailed")
+                    last_retrieval_meta.setdefault("retryable", True)
+                    last_retrieval_meta.setdefault("graphql_cursor", str(cursor or "").strip() or None)
+                    if partition_posts > 0:
+                        partition_key = _shared_account_partition_key(
+                            run_id="pending",
+                            platform="instagram",
+                            account_handle=account_handle,
+                            shard_index=shard_index,
+                            cursor_start=partition_start_cursor,
+                            cursor_end=None,
+                        )
+                        partition = SharedAccountCursorPartition(
+                            partition_key=partition_key,
+                            shard_index=shard_index,
+                            shard_total=0,
+                            runner_lane=lanes[shard_index % len(lanes)],
+                            cursor_start=partition_start_cursor,
+                            cursor_end=None,
+                            boundary_start_at=partition_start_at,
+                            boundary_end_at=None,
+                            metadata={
+                                "pages_scanned": partition_pages,
+                                "posts_discovered": partition_posts,
+                                "incomplete_coverage": True,
+                                "partial_discovery": True,
+                                "discovery_error_code": last_retrieval_meta.get("error_code"),
+                                "graphql_cursor": last_retrieval_meta.get("graphql_cursor"),
+                            },
+                        )
+                        partitions.append(partition)
+                        if partition_callback:
+                            partition_callback(partition, expected_partition_count)
                 break
             consecutive_rate_limit_failures = 0
             page_info: dict[str, Any] = {}
@@ -1408,6 +1637,9 @@ def _discover_instagram_cursor_partitions(
             "posts_checked": posts_checked,
             "total_posts": total_posts,
             "partition_strategy": CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+            "complete_coverage": not discovery_had_error,
+            "partial_discovery": discovery_had_error,
+            "incomplete_coverage": discovery_had_error,
             "retrieval_transport": selected_transport
             or str(last_retrieval_meta.get("transport") or "").strip()
             or None,
@@ -1477,6 +1709,8 @@ def _scrape_shared_instagram_posts_partitioned(
         rows: list[dict[str, Any]] = []
         seen_cursors: set[str] = set()
         last_retrieval_meta: dict[str, Any] = {}
+        reached_boundary = False
+        partition_stop_reason: str | None = None
         consecutive_rate_limit_failures = 0
         max_rate_limit_retries = 3
         media_mirror_jobs_enqueued = 0
@@ -1517,6 +1751,18 @@ def _scrape_shared_instagram_posts_partitioned(
                     )
                     time_module.sleep(backoff)
                     continue
+                if last_retrieval_meta.get("error_code") or last_retrieval_meta.get("error_class"):
+                    last_retrieval_meta.setdefault("retryable", True)
+                    last_retrieval_meta.setdefault("graphql_cursor", str(cursor or "").strip() or None)
+                    partition_stop_reason = str(last_retrieval_meta.get("error_code") or "request_failed")
+                else:
+                    partition_stop_reason = "empty_page"
+                    if cursor or posts_checked > 0:
+                        last_retrieval_meta.setdefault("error_code", "instagram_graphql_cursor_empty_page")
+                        last_retrieval_meta.setdefault("error_class", "InstagramGraphQLEmptyOrErrorPage")
+                        last_retrieval_meta.setdefault("retryable", True)
+                        last_retrieval_meta.setdefault("graphql_cursor", str(cursor or "").strip() or None)
+                        partition_stop_reason = "instagram_graphql_cursor_empty_page"
                 break
             consecutive_rate_limit_failures = 0
             page_info: dict[str, Any] = {}
@@ -1554,15 +1800,24 @@ def _scrape_shared_instagram_posts_partitioned(
             next_cursor = str(page_info.get("end_cursor") or "").strip() or None
             has_next = bool(page_info.get("has_next_page"))
             if end_cursor and next_cursor == end_cursor:
+                reached_boundary = True
+                partition_stop_reason = "cursor_boundary_reached"
                 break
-            if not has_next or not next_cursor or next_cursor in seen_cursors:
+            if not has_next or not next_cursor:
+                reached_boundary = True
+                partition_stop_reason = "no_more_pages"
+                break
+            if next_cursor in seen_cursors:
+                last_retrieval_meta.setdefault("error_code", "instagram_graphql_repeating_cursor")
+                last_retrieval_meta.setdefault("error_class", "InstagramGraphQLRepeatingCursor")
+                last_retrieval_meta.setdefault("retryable", True)
+                last_retrieval_meta.setdefault("graphql_cursor", next_cursor)
+                partition_stop_reason = "repeating_cursor"
                 break
             cursor = next_cursor
             seen_cursors.add(cursor)
         # Detect partial scrape: if we stopped early due to errors (not end-of-feed)
         has_error = bool(last_retrieval_meta.get("error_code") or last_retrieval_meta.get("error_class"))
-        end_cursor_val = max(0, int(end_cursor or 0))
-        reached_boundary = end_cursor_val <= 0 or (cursor is not None and int(cursor) <= end_cursor_val)
         is_partial = has_error and not reached_boundary and posts_checked > 0
         retrieval_meta = {
             "retrieval_mode": "graphql_partition",
@@ -1575,6 +1830,8 @@ def _scrape_shared_instagram_posts_partitioned(
             or None,
             "persist_counters": {"posts_upserted": len(rows), "comments_upserted": 0},
             "partial_scrape": is_partial,
+            "reached_partition_boundary": reached_boundary,
+            "partition_stop_reason": partition_stop_reason,
         }
         if media_mirror_jobs_enqueued:
             retrieval_meta["media_mirror_jobs_enqueued"] = media_mirror_jobs_enqueued

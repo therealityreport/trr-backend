@@ -210,6 +210,8 @@ class ScrapeConfig:
         Check if timestamp is in date range.
         Returns None if before range (stop iteration), True if in range, False if after.
         """
+        if timestamp <= 0:
+            return True
         if timestamp < self.start_timestamp:
             return None  # Before range - stop
         if timestamp > self.end_timestamp:
@@ -261,8 +263,12 @@ class InstagramComment:
     owner_fbid_v2: str | None = None
     owner_is_mentionable: bool | None = None
     owner_is_private: bool | None = None
+    owner_is_unpublished: bool | None = None
     owner_latest_reel_media: int | None = None
     owner_profile_pic_id: str | None = None
+    restriction_status: str | None = None
+    has_translation: bool | None = None
+    giphy_media_info: dict[str, Any] | None = None
     is_hidden_by_instagram: bool = False
     source_snapshot_type: str = "full_comments_scrape"
 
@@ -447,6 +453,7 @@ class InstagramScraper:
     REQUEST_READ_TIMEOUT_SECONDS = 45
     METRICS_REQUEST_READ_TIMEOUT_SECONDS = 20
     DEFAULT_NO_MATCH_PAGE_LIMIT = 0
+    DATE_START_CONSECUTIVE_BEFORE_LIMIT = 3
     DEFAULT_METRICS_MAX_PAGES = 0
     DEFAULT_METRICS_TIMEOUT_SECONDS = 420
     _VIEW_COUNT_FIELD_PRIORITY = (
@@ -3185,6 +3192,13 @@ class InstagramScraper:
         elif self.last_retrieval_meta.get("request_error_code"):
             self.last_retrieval_meta["transport"] = "requests_enriched"
             self.last_retrieval_meta["retrieval_transport"] = "requests_enriched"
+            if cursor and self.last_retrieval_meta.get("error_code") in {
+                "instagram_graphql_cursor_unauthorized",
+                "instagram_graphql_cursor_forbidden",
+                "instagram_graphql_cursor_rate_limited",
+            }:
+                self._reset_request_session()
+                self._pop_profile_page_context_cache_entry(username)
         error_code = str(self.last_retrieval_meta.get("error_code") or "").strip() or None
         auth_recoverable_errors = self._graphql_auth_recoverable_errors()
         recovery_policy = self._graphql_recovery_policy(error_code)
@@ -4001,8 +4015,13 @@ class InstagramScraper:
         owner_fbid_v2 = _first_present("fbid_v2", "fbidV2")
         owner_is_mentionable = _coerce_optional_bool(_first_present("is_mentionable", "isMentionable"))
         owner_is_private = _coerce_optional_bool(_first_present("is_private", "isPrivate"))
+        owner_is_unpublished = _coerce_optional_bool(_first_present("is_unpublished", "isUnpublished"))
         owner_latest_reel_media = _coerce_optional_nonneg_int(_first_present("latest_reel_media", "latestReelMedia"))
         owner_profile_pic_id = _first_present("profile_pic_id", "profilePicId")
+        raw_giphy_media_info = _first_present("giphy_media_info", "giphyMediaInfo")
+        giphy_media_info = _compact_cursor_payload(
+            raw_giphy_media_info if isinstance(raw_giphy_media_info, Mapping) else None
+        )
         raw_child_comment_count = _first_present(
             "child_comment_count",
             "childCommentCount",
@@ -4119,8 +4138,19 @@ class InstagramScraper:
             owner_fbid_v2=str(owner_fbid_v2).strip() if owner_fbid_v2 else None,
             owner_is_mentionable=owner_is_mentionable,
             owner_is_private=owner_is_private,
+            owner_is_unpublished=owner_is_unpublished,
             owner_latest_reel_media=owner_latest_reel_media,
             owner_profile_pic_id=str(owner_profile_pic_id).strip() if owner_profile_pic_id else None,
+            restriction_status=_first_text(
+                "restriction_status",
+                "restrictionStatus",
+                "comment_restriction_status",
+                "commentRestrictionStatus",
+            ),
+            has_translation=_coerce_optional_bool(
+                _first_present("has_translation", "hasTranslation", "translation_available", "translationAvailable")
+            ),
+            giphy_media_info=giphy_media_info or None,
             post_shortcode=shortcode,
             post_url=post_url,
             comment_url=comment_url,
@@ -4903,7 +4933,9 @@ class InstagramScraper:
         initial_page_failed = False
         failure_reason: str | None = None
         stop_reason: str | None = None
+        terminal_failure_meta: dict[str, Any] = {}
         no_match_pages = 0
+        consecutive_before_date_start = 0
         no_match_page_limit = self._resolve_no_match_page_limit(config)
         seen_cursors: set[str] = set(resume_state.normalized_seen_cursors())
         self._pagination_session_rotated = False
@@ -4928,6 +4960,16 @@ class InstagramScraper:
                     config.max_scrape_seconds,
                 )
                 stop_reason = "timeout"
+                terminal_failure_meta = {
+                    "error_code": "instagram_graphql_pagination_timeout",
+                    "error_class": "InstagramGraphQLPaginationTimeout",
+                    "error_message": (
+                        f"GraphQL pagination timed out after {time.monotonic() - _t0:.0f}s "
+                        f"(limit: {config.max_scrape_seconds:.0f}s)"
+                    ),
+                    "retryable": True,
+                    "graphql_cursor": cursor,
+                }
                 break
 
             logger.info("Fetching page %d%s", page_num, " [fast]" if config.fast_mode else "")
@@ -4979,6 +5021,14 @@ class InstagramScraper:
                     initial_page_failed = True
                     failure_reason = "graphql_empty_or_error"
                 stop_reason = "graphql_empty_or_error"
+                terminal_failure_meta = dict(self.last_retrieval_meta or {})
+                terminal_failure_meta.setdefault(
+                    "error_code",
+                    "instagram_graphql_cursor_empty_page" if cursor else "instagram_graphql_initial_empty_page",
+                )
+                terminal_failure_meta.setdefault("error_class", "InstagramGraphQLEmptyOrErrorPage")
+                terminal_failure_meta.setdefault("retryable", bool(cursor or posts_checked > 0))
+                terminal_failure_meta.setdefault("graphql_cursor", cursor)
                 break
 
             if total_posts is None:
@@ -4987,6 +5037,7 @@ class InstagramScraper:
             page_info = {}
             posts_on_page = 0
             page_matches = 0
+            before_date_start_on_page = 0
 
             for node, pi in self._iter_posts_from_graphql(data):
                 page_info = pi
@@ -4998,11 +5049,17 @@ class InstagramScraper:
                 # Check date range
                 in_range = config.is_in_date_range(timestamp)
                 if in_range is None:  # Before range
-                    reached_date_limit = True
-                    stop_reason = "date_start_reached"
-                    break
-                if in_range is False:  # After range
+                    before_date_start_on_page += 1
+                    consecutive_before_date_start += 1
+                    if consecutive_before_date_start >= self.DATE_START_CONSECUTIVE_BEFORE_LIMIT:
+                        reached_date_limit = True
+                        stop_reason = "date_start_reached"
+                        break
                     continue
+                if in_range is False:  # After range
+                    consecutive_before_date_start = 0
+                    continue
+                consecutive_before_date_start = 0
 
                 # Check hashtag filter
                 caption = self._extract_caption(node)
@@ -5033,6 +5090,11 @@ class InstagramScraper:
                 stop_reason = "no_more_posts"
                 break
 
+            if not reached_date_limit and before_date_start_on_page > 0 and before_date_start_on_page == posts_on_page:
+                reached_date_limit = True
+                stop_reason = "date_start_reached"
+                break
+
             if no_match_page_limit > 0 and page_matches == 0 and (config.date_start or config.date_end):
                 no_match_pages += 1
                 if no_match_pages >= no_match_page_limit:
@@ -5055,6 +5117,13 @@ class InstagramScraper:
                     config.username,
                 )
                 stop_reason = "repeating_cursor"
+                terminal_failure_meta = {
+                    "error_code": "instagram_graphql_repeating_cursor",
+                    "error_class": "InstagramGraphQLRepeatingCursor",
+                    "error_message": "Instagram GraphQL pagination repeated a cursor.",
+                    "retryable": True,
+                    "graphql_cursor": next_cursor,
+                }
                 break
             cursor = next_cursor
             if cursor:
@@ -5096,7 +5165,7 @@ class InstagramScraper:
                 posts,
                 profile_pic_url=self._extract_profile_avatar_from_profile_payload(profile_data),
             )
-        self.last_retrieval_meta = {
+        final_retrieval_meta = {
             "retrieval_mode": "graphql",
             "first_page_count": len(posts) if page_num <= 1 else min(len(posts), 12),
             "fallback_reason": failure_reason,
@@ -5117,6 +5186,25 @@ class InstagramScraper:
                 last_transport=str(self.last_retrieval_meta.get("retrieval_transport") or "authenticated"),
             ).to_metadata(),
         }
+        if terminal_failure_meta:
+            for key in (
+                "error_code",
+                "error_class",
+                "error_status_code",
+                "error_message",
+                "retryable",
+                "graphql_cursor",
+                "transport",
+                "retrieval_transport",
+                "request_error_code",
+                "redirect_target",
+            ):
+                value = terminal_failure_meta.get(key)
+                if value is not None:
+                    final_retrieval_meta[key] = value
+            if posts_checked > 0:
+                final_retrieval_meta["partial_history"] = True
+        self.last_retrieval_meta = final_retrieval_meta
         if total_posts:
             self.last_retrieval_meta["total_posts"] = total_posts
         self._annotate_identity_meta()

@@ -1,0 +1,50 @@
+{
+  "data": {
+    "fetch__XDTMediaDict": {
+      "__typename": "XDTMediaDict",
+      "pk": "3875927249152668787",
+      "id": "3875927249152668787_2554414",
+      "code": "DXKD0wtAHRz",
+      "product_type": "clips",
+      "media_type": 2,
+      "taken_at": 1776272482,
+      "comment_count": 2295,
+      "comments_disabled": false,
+      "commenting_disabled_for_viewer": false,
+      "fb_comment_count": 742,
+      "fb_like_count": 1234,
+      "is_shared_to_fb": true,
+      "crosspost_metadata": {
+        "post_id": "fb-post-1",
+        "permalink_url": "https://www.facebook.com/bravo/posts/fb-post-1"
+      },
+      "social_context": {
+        "url": "https://www.facebook.com/bravo/posts/fb-post-1"
+      },
+      "user": {
+        "pk": "2554414",
+        "id": "2554414",
+        "username": "bravotv"
+      },
+      "caption": {
+        "text": "Tonight on #RHOSLC with @bravotv"
+      },
+      "video_versions": [
+        {
+          "url": "https://cdn.example.invalid/ig/video-high.mp4",
+          "width": 1080,
+          "height": 1920
+        }
+      ],
+      "image_versions2": {
+        "candidates": [
+          {
+            "url": "https://cdn.example.invalid/ig/thumb.jpg",
+            "width": 1080,
+            "height": 1920
+          }
+        ]
+      }
+    }
+  }
+}
