@@ -1363,6 +1363,7 @@ def get_week_detail(
     platform_results: dict[str, Any] = {}
     status_posts_by_platform: dict[str, list[dict[str, Any]]] = {}
     merged_posts: list[tuple[str, dict[str, Any]]] = []
+    merged_post_keys_seen: set[tuple[str, str]] = set()
     grand_posts = 0
     grand_comments = 0
     grand_engagement = 0
@@ -1386,13 +1387,14 @@ def get_week_detail(
                 },
             }
             return platform, result, 0
+        handler_post_limit = post_offset + post_limit + 1 if post_limit > 0 else 0
         handler_kwargs: dict[str, Any] = {
             "start_dt": start_dt,
             "end_dt": end_dt,
             "account_handles": account_handles,
             "max_comments": max_comments_per_post,
-            "post_limit": post_limit,
-            "post_offset": post_offset,
+            "post_limit": handler_post_limit,
+            "post_offset": 0,
             "sort_field": normalized_sort_field,
             "sort_dir": normalized_sort_dir,
         }
@@ -1437,6 +1439,16 @@ def get_week_detail(
         }
         status_posts_by_platform[platform] = result_posts
         for post in result_posts:
+            post_key_value = str(
+                (post if isinstance(post, dict) else {}).get("source_id")
+                or (post if isinstance(post, dict) else {}).get("url")
+                or ""
+            ).strip()
+            if post_key_value:
+                post_key = (platform, post_key_value)
+                if post_key in merged_post_keys_seen:
+                    continue
+                merged_post_keys_seen.add(post_key)
             merged_posts.append((platform, post))
         totals = result_totals
         grand_posts += int(totals.get("posts", 0))
@@ -1581,6 +1593,9 @@ def get_week_detail(
         page_end = post_offset + post_limit
         page_posts = merged_posts[post_offset:page_end]
     paged_total_posts = len(merged_posts)
+    reported_total_posts = sum(
+        int(platform_results.get(platform, {}).get("total_posts", 0) or 0) for platform in available_platforms
+    )
 
     posts_by_platform: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for platform, post in page_posts:
@@ -1618,8 +1633,8 @@ def get_week_detail(
             "limit": post_limit,
             "offset": post_offset,
             "returned": len(page_posts),
-            "total": paged_total_posts,
-            "has_more": page_end < paged_total_posts,
+            "total": reported_total_posts,
+            "has_more": page_end < reported_total_posts or page_end < paged_total_posts,
         },
         "totals": {
             "posts": grand_posts,

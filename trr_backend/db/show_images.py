@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
@@ -8,6 +9,26 @@ from trr_backend.db.session import DbSession
 
 class ShowImagesError(RuntimeError):
     pass
+
+
+def _stringify_temporal(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, datetime | date):
+        return value.isoformat()
+    return str(value)
+
+
+def _normalize_show_image_row(row: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(row)
+    if not normalized.get("url_original") and normalized.get("url"):
+        normalized["url_original"] = normalized.get("url")
+    for field in ("fetched_at", "created_at", "updated_at"):
+        if field in normalized:
+            normalized[field] = _stringify_temporal(normalized.get(field))
+    return normalized
 
 
 def list_tmdb_show_images(
@@ -34,4 +55,6 @@ def list_tmdb_show_images(
         raise ShowImagesError(f"Supabase error listing show images: {images_response.error}")
 
     data = images_response.data or []
-    return data if isinstance(data, list) else []
+    if not isinstance(data, list):
+        return []
+    return [_normalize_show_image_row(row) for row in data if isinstance(row, dict)]

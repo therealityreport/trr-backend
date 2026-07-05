@@ -34,7 +34,7 @@ def test_search_returns_contract_and_caches(monkeypatch: pytest.MonkeyPatch) -> 
             {
                 "query": query,
                 "pagination": {"per_type_limit": limit},
-                "shows": [{"id": "show-1", "name": "The Traitors", "slug": "the-traitors-us"}],
+                "shows": [{"id": "00000000-0000-0000-0000-0000000000a1", "name": "The Traitors", "slug": "the-traitors-us"}],
                 "people": [
                     {
                         "id": "person-1",
@@ -51,7 +51,7 @@ def test_search_returns_contract_and_caches(monkeypatch: pytest.MonkeyPatch) -> 
                         "episode_number": 1,
                         "season_number": 1,
                         "air_date": None,
-                        "show_id": "show-1",
+                        "show_id": "00000000-0000-0000-0000-0000000000a1",
                         "show_name": "The Traitors",
                         "show_slug": "the-traitors-us",
                     }
@@ -79,7 +79,7 @@ def test_list_shows_returns_contract(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda query, limit=None, offset=None: (
             [
                 {
-                    "id": "show-1",
+                    "id": "00000000-0000-0000-0000-0000000000a1",
                     "name": "The Real Housewives of Salt Lake City",
                     "slug": "the-real-housewives-of-salt-lake-city",
                     "canonical_slug": "the-real-housewives-of-salt-lake-city",
@@ -193,8 +193,8 @@ def test_show_detail_and_seasons_contracts(monkeypatch: pytest.MonkeyPatch) -> N
     )
 
     client = TestClient(app)
-    detail = client.get("/api/v1/admin/trr-api/shows/show-1")
-    seasons = client.get("/api/v1/admin/trr-api/shows/show-1/seasons?include_episode_signal=true")
+    detail = client.get("/api/v1/admin/trr-api/shows/00000000-0000-0000-0000-0000000000a1")
+    seasons = client.get("/api/v1/admin/trr-api/shows/00000000-0000-0000-0000-0000000000a1/seasons?include_episode_signal=true")
 
     assert detail.status_code == 200
     assert detail.json()["show"]["canonical_slug"] == "the-traitors-us"
@@ -211,6 +211,19 @@ def test_show_detail_and_seasons_contracts(monkeypatch: pytest.MonkeyPatch) -> N
         ],
         "pagination": {"limit": 20, "offset": 0, "count": 1},
     }
+
+
+def test_admin_show_routes_reject_invalid_show_id_before_repository(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_if_called(show_id: str):
+        raise AssertionError(f"repository should not be called for {show_id}")
+
+    monkeypatch.setattr(router_module.show_reads_repo, "get_show_detail", fail_if_called)
+
+    client = TestClient(app)
+    response = client.get("/api/v1/admin/trr-api/shows/not-a-uuid")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid show_id"
 
 
 def test_show_assets_route_returns_default_gallery_contract(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -234,7 +247,7 @@ def test_show_assets_route_returns_default_gallery_contract(monkeypatch: pytest.
     monkeypatch.setattr(router_module.show_reads_repo, "get_show_assets", fake_get_show_assets)
 
     client = TestClient(app)
-    response = client.get("/api/v1/admin/trr-api/shows/show-1/assets?limit=48&offset=5&sources=tmdb,bravo.com")
+    response = client.get("/api/v1/admin/trr-api/shows/00000000-0000-0000-0000-0000000000a1/assets?limit=48&offset=5&sources=tmdb,bravo.com")
 
     assert response.status_code == 200
     assert response.json() == {
@@ -258,7 +271,7 @@ def test_show_assets_route_returns_default_gallery_contract(monkeypatch: pytest.
         },
     }
     assert captured == {
-        "show_id": "show-1",
+        "show_id": "00000000-0000-0000-0000-0000000000a1",
         "kwargs": {"limit": 49, "offset": 5, "sources": ["tmdb", "bravo.com"], "full": False},
     }
 
@@ -281,7 +294,7 @@ def test_show_assets_route_decodes_cursor_and_exposes_next_cursor(monkeypatch: p
     monkeypatch.setattr(router_module.show_reads_repo, "get_show_assets", fake_get_show_assets)
 
     client = TestClient(app)
-    response = client.get("/api/v1/admin/trr-api/shows/show-1/assets?limit=2&cursor=b2Zmc2V0OjU=")
+    response = client.get("/api/v1/admin/trr-api/shows/00000000-0000-0000-0000-0000000000a1/assets?limit=2&cursor=b2Zmc2V0OjU=")
 
     assert response.status_code == 200
     assert response.json()["pagination"] == {
@@ -295,7 +308,7 @@ def test_show_assets_route_decodes_cursor_and_exposes_next_cursor(monkeypatch: p
         "full": False,
     }
     assert captured == {
-        "show_id": "show-1",
+        "show_id": "00000000-0000-0000-0000-0000000000a1",
         "kwargs": {"limit": 3, "offset": 5, "sources": None, "full": False},
     }
 
@@ -324,7 +337,7 @@ def test_show_assets_route_returns_full_gallery_contract_with_truthful_truncatio
     monkeypatch.setattr(router_module.show_reads_repo, "get_show_assets", fake_get_show_assets)
 
     client = TestClient(app)
-    response = client.get("/api/v1/admin/trr-api/shows/show-1/assets?full=true&offset=25")
+    response = client.get("/api/v1/admin/trr-api/shows/00000000-0000-0000-0000-0000000000a1/assets?full=true&offset=25")
 
     assert response.status_code == 200
     body = response.json()
@@ -342,7 +355,7 @@ def test_show_assets_route_returns_full_gallery_contract_with_truthful_truncatio
         "full": True,
     }
     assert captured == {
-        "show_id": "show-1",
+        "show_id": "00000000-0000-0000-0000-0000000000a1",
         "kwargs": {"limit": 5001, "offset": 0, "sources": None, "full": True},
     }
 
@@ -362,7 +375,7 @@ def test_season_assets_route_returns_gallery_contract(monkeypatch: pytest.Monkey
     monkeypatch.setattr(router_module.show_reads_repo, "get_show_season_assets", fake_get_show_season_assets)
 
     client = TestClient(app)
-    response = client.get("/api/v1/admin/trr-api/shows/show-1/seasons/6/assets?limit=48")
+    response = client.get("/api/v1/admin/trr-api/shows/00000000-0000-0000-0000-0000000000a1/seasons/6/assets?limit=48")
 
     assert response.status_code == 200
     body = response.json()
@@ -378,7 +391,7 @@ def test_season_assets_route_returns_gallery_contract(monkeypatch: pytest.Monkey
         "full": False,
     }
     assert captured == {
-        "show_id": "show-1",
+        "show_id": "00000000-0000-0000-0000-0000000000a1",
         "season_number": 6,
         "kwargs": {"limit": 49, "offset": 0, "sources": None, "full": False},
     }
@@ -400,7 +413,7 @@ def test_season_assets_route_returns_full_gallery_contract(monkeypatch: pytest.M
     )
 
     client = TestClient(app)
-    response = client.get("/api/v1/admin/trr-api/shows/show-1/seasons/6/assets?full=true")
+    response = client.get("/api/v1/admin/trr-api/shows/00000000-0000-0000-0000-0000000000a1/seasons/6/assets?full=true")
 
     assert response.status_code == 200
     assert response.json()["pagination"] == {
@@ -414,7 +427,7 @@ def test_season_assets_route_returns_full_gallery_contract(monkeypatch: pytest.M
         "full": True,
     }
     assert captured == {
-        "show_id": "show-1",
+        "show_id": "00000000-0000-0000-0000-0000000000a1",
         "season_number": 6,
         "kwargs": {"limit": 5001, "offset": 0, "sources": None, "full": True},
     }
@@ -439,7 +452,7 @@ def test_season_assets_route_decodes_cursor_and_exposes_next_cursor(monkeypatch:
     monkeypatch.setattr(router_module.show_reads_repo, "get_show_season_assets", fake_get_show_season_assets)
 
     client = TestClient(app)
-    response = client.get("/api/v1/admin/trr-api/shows/show-1/seasons/6/assets?limit=2&cursor=b2Zmc2V0Ojg=")
+    response = client.get("/api/v1/admin/trr-api/shows/00000000-0000-0000-0000-0000000000a1/seasons/6/assets?limit=2&cursor=b2Zmc2V0Ojg=")
 
     assert response.status_code == 200
     assert response.json()["pagination"] == {
@@ -453,7 +466,7 @@ def test_season_assets_route_decodes_cursor_and_exposes_next_cursor(monkeypatch:
         "full": False,
     }
     assert captured == {
-        "show_id": "show-1",
+        "show_id": "00000000-0000-0000-0000-0000000000a1",
         "season_number": 6,
         "kwargs": {"limit": 3, "offset": 8, "sources": None, "full": False},
     }
@@ -465,7 +478,7 @@ def test_unassigned_backdrops_route_returns_backend_payload(monkeypatch: pytest.
         "get_unassigned_season_backdrops",
         lambda season_id: (
             {
-                "season": {"id": season_id, "show_id": "show-1", "season_number": 6},
+                "season": {"id": season_id, "show_id": "00000000-0000-0000-0000-0000000000a1", "season_number": 6},
                 "backdrops": [{"media_asset_id": "asset-1", "display_url": "https://tmdb.example.com/1.jpg"}],
             },
             3,
@@ -476,7 +489,7 @@ def test_unassigned_backdrops_route_returns_backend_payload(monkeypatch: pytest.
     response = client.get("/api/v1/admin/trr-api/seasons/season-1/backdrops/unassigned")
 
     assert response.status_code == 200
-    assert response.json()["season"]["show_id"] == "show-1"
+    assert response.json()["season"]["show_id"] == "00000000-0000-0000-0000-0000000000a1"
     assert response.json()["backdrops"][0]["media_asset_id"] == "asset-1"
 
 
@@ -496,7 +509,7 @@ def test_assign_backdrops_route_invalidates_show_cache(monkeypatch: pytest.Monke
                 "mirror_failures": [],
             },
             5,
-            "show-1",
+            "00000000-0000-0000-0000-0000000000a1",
         ),
     )
     monkeypatch.setattr(
@@ -513,7 +526,7 @@ def test_assign_backdrops_route_invalidates_show_cache(monkeypatch: pytest.Monke
 
     assert response.status_code == 200
     assert response.json()["assigned"] == 1
-    assert invalidated == ["show-1"]
+    assert invalidated == ["00000000-0000-0000-0000-0000000000a1"]
 
 
 def test_invalidate_show_cache_clears_cached_entries(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -534,10 +547,10 @@ def test_invalidate_show_cache_clears_cached_entries(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(router_module.show_reads_repo, "get_show_detail", fake_detail)
 
     client = TestClient(app)
-    first = client.get("/api/v1/admin/trr-api/shows/show-1")
-    second = client.get("/api/v1/admin/trr-api/shows/show-1")
-    invalidate = client.post("/api/v1/admin/trr-api/shows/show-1/cache/invalidate")
-    third = client.get("/api/v1/admin/trr-api/shows/show-1")
+    first = client.get("/api/v1/admin/trr-api/shows/00000000-0000-0000-0000-0000000000a1")
+    second = client.get("/api/v1/admin/trr-api/shows/00000000-0000-0000-0000-0000000000a1")
+    invalidate = client.post("/api/v1/admin/trr-api/shows/00000000-0000-0000-0000-0000000000a1/cache/invalidate")
+    third = client.get("/api/v1/admin/trr-api/shows/00000000-0000-0000-0000-0000000000a1")
 
     assert first.status_code == 200
     assert second.status_code == 200
@@ -588,7 +601,7 @@ def test_show_cast_returns_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     client = TestClient(app)
-    response = client.get("/api/v1/admin/trr-api/shows/show-1/cast?limit=25&offset=0&minEpisodes=2")
+    response = client.get("/api/v1/admin/trr-api/shows/00000000-0000-0000-0000-0000000000a1/cast?limit=25&offset=0&minEpisodes=2")
 
     assert response.status_code == 200
     payload = response.json()
@@ -616,10 +629,10 @@ def test_show_cast_forwards_include_photos_flag(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(router_module.show_reads_repo, "get_show_cast", fake_get_show_cast)
 
     client = TestClient(app)
-    response = client.get("/api/v1/admin/trr-api/shows/show-1/cast?limit=500&include_photos=false")
+    response = client.get("/api/v1/admin/trr-api/shows/00000000-0000-0000-0000-0000000000a1/cast?limit=500&include_photos=false")
 
     assert response.status_code == 200
-    assert recorded["show_id"] == "show-1"
+    assert recorded["show_id"] == "00000000-0000-0000-0000-0000000000a1"
     assert recorded["kwargs"]["include_photos"] is False
 
 
@@ -676,7 +689,7 @@ def test_show_credits_returns_grouped_crew_rows_contract(monkeypatch: pytest.Mon
     )
 
     client = TestClient(app)
-    response = client.get("/api/v1/admin/trr-api/shows/show-1/credits")
+    response = client.get("/api/v1/admin/trr-api/shows/00000000-0000-0000-0000-0000000000a1/credits")
 
     assert response.status_code == 200
     payload = response.json()
@@ -703,7 +716,7 @@ def test_season_cast_returns_contract(monkeypatch: pytest.MonkeyPatch) -> None:
 
     client = TestClient(app)
     response = client.get(
-        "/api/v1/admin/trr-api/shows/show-1/seasons/6/cast?limit=10&offset=0&include_archive_only=true"
+        "/api/v1/admin/trr-api/shows/00000000-0000-0000-0000-0000000000a1/seasons/6/cast?limit=10&offset=0&include_archive_only=true"
     )
 
     assert response.status_code == 200

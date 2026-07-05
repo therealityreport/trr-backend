@@ -125,3 +125,63 @@ def test_create_and_item_routes_preserve_contract(monkeypatch: pytest.MonkeyPatc
     assert updated.json()["post"]["title"] == "Updated"
     assert deleted.status_code == 200
     assert deleted.json() == {"success": True}
+
+
+def test_update_social_post_forwards_explicit_nulls_without_touching_omitted_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_update: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        router_module.social_posts_repo,
+        "get_post",
+        lambda post_id: (
+            {
+                "id": post_id,
+                "trr_show_id": "11111111-1111-1111-1111-111111111111",
+                "trr_season_id": "22222222-2222-2222-2222-222222222222",
+                "platform": "instagram",
+                "url": "https://instagram.com/p/abc",
+                "title": "Existing title",
+                "notes": "Existing notes",
+                "created_by_firebase_uid": "firebase:admin-1",
+                "created_at": "2026-03-26T00:00:00Z",
+                "updated_at": "2026-03-26T00:00:00Z",
+            },
+            1,
+        ),
+    )
+
+    def fake_update_post(**kwargs):
+        captured_update.update(kwargs)
+        return (
+            {
+                "id": kwargs["post_id"],
+                "trr_show_id": "11111111-1111-1111-1111-111111111111",
+                "trr_season_id": None,
+                "platform": "instagram",
+                "url": "https://instagram.com/p/abc",
+                "title": None,
+                "notes": None,
+                "created_by_firebase_uid": "firebase:admin-1",
+                "created_at": "2026-03-26T00:00:00Z",
+                "updated_at": "2026-03-26T01:00:00Z",
+            },
+            1,
+        )
+
+    monkeypatch.setattr(router_module.social_posts_repo, "update_post", fake_update_post)
+
+    client = TestClient(app)
+    response = client.put(
+        "/api/v1/admin/social-posts/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        json={"trr_season_id": None, "title": None, "notes": None},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["post"]["trr_season_id"] is None
+    assert captured_update["trr_season_id"] is None
+    assert captured_update["title"] is None
+    assert captured_update["notes"] is None
+    assert captured_update["platform"] is router_module.social_posts_repo.OMITTED
+    assert captured_update["url"] is router_module.social_posts_repo.OMITTED

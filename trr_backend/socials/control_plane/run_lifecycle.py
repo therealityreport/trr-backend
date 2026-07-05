@@ -12,7 +12,7 @@ from psycopg2 import InterfaceError, OperationalError
 from psycopg2.pool import PoolError
 
 SOCIAL_CONTROL_POOL_NAME = "social_control"
-_SCRAPE_RUN_ALLOWED_STATUSES = {"queued", "running", "completed", "failed", "cancelled"}
+_SCRAPE_RUN_ALLOWED_STATUSES = {"queued", "running", "cancelling", "completed", "failed", "cancelled"}
 JobProgressState = dict[str, Any]
 
 
@@ -257,13 +257,13 @@ def _set_run_status(run_id: str, status: str, *, conn: Any | None = None) -> Non
             else started_at
           end,
           completed_at = case
-            when %s in ('queued', 'pending', 'retrying', 'running') then null
+            when %s in ('queued', 'pending', 'retrying', 'running', 'cancelling') then null
             when %s in ('completed', 'failed', 'cancelled') then coalesce(completed_at, now())
             else completed_at
           end,
           cancelled_at = case
             when %s in ('queued', 'pending', 'retrying', 'running') then null
-            when %s = 'cancelled' then coalesce(cancelled_at, now())
+            when %s in ('cancelling', 'cancelled') then coalesce(cancelled_at, now())
             else cancelled_at
           end
         where id = %s
@@ -1476,7 +1476,8 @@ def _finalize_run_status_locked(
         )
         or {}
     )
-    if str(current.get("status")) == "cancelled":
+    current_status = str(current.get("status") or "").strip().lower()
+    if current_status == "cancelled":
         return {"summary": summary, "skip_followups": True}
     current_config = legacy._metadata_dict(current.get("config"))
     stage_counts = _normalize_stage_counts(legacy._metadata_dict(summary).get("stage_counts"))
@@ -1520,6 +1521,8 @@ def _finalize_run_status_locked(
         next_status = "cancelling"
     elif active_jobs > 0 or status_breakdown["queued_jobs"] > 0:
         next_status = "queued"
+    elif current_status == "cancelling":
+        next_status = "cancelled"
     elif failed_jobs > 0 or fetch_terminal_error:
         next_status = "failed"
     else:
@@ -1552,6 +1555,8 @@ def _run_post_finalize_followups(
     if locked_result.get("skip_followups"):
         return summary
     next_status = str(locked_result.get("next_status") or "")
+    if next_status == "cancelled":
+        return summary
     current_config = legacy._metadata_dict(locked_result.get("run_config"))
     followup_updates = _maybe_start_deferred_comments_followup(
         run_id=run_id,

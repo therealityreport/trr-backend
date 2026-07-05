@@ -43,13 +43,13 @@ def test_single_refresh_passes_force(monkeypatch: pytest.MonkeyPatch) -> None:
 
     client = TestClient(app)
     response = client.post(
-        "/api/v1/admin/people/person-1/socialblade/refresh",
+        "/api/v1/admin/people/11111111-1111-1111-1111-111111111111/socialblade/refresh",
         json={"handle": "lisabarlow14", "force": True},
     )
 
     assert response.status_code == 200
     assert response.json()["refresh_status"] == "refreshed"
-    assert captured["person_id"] == "person-1"
+    assert captured["person_id"] == "11111111-1111-1111-1111-111111111111"
     assert captured["handle"] == "lisabarlow14"
     assert captured["platform"] == "instagram"
     assert captured["source"] == "person_page"
@@ -99,7 +99,7 @@ def test_single_refresh_runs_sync_pipeline_in_threadpool(monkeypatch: pytest.Mon
 
     client = TestClient(app)
     response = client.post(
-        "/api/v1/admin/people/person-1/socialblade/refresh",
+        "/api/v1/admin/people/11111111-1111-1111-1111-111111111111/socialblade/refresh",
         json={"handle": "heathergay", "force": True, "sourceScope": "creator"},
     )
 
@@ -110,7 +110,7 @@ def test_single_refresh_runs_sync_pipeline_in_threadpool(monkeypatch: pytest.Mon
     scraper = captured["threadpool_kwargs"].pop("scraper")
     assert callable(scraper)
     assert captured["threadpool_kwargs"] == {
-        "person_id": "person-1",
+        "person_id": "11111111-1111-1111-1111-111111111111",
         "handle": "heathergay",
         "platform": "instagram",
         "source": "person_page",
@@ -146,7 +146,7 @@ def test_single_refresh_returns_structured_error_when_local_scrape_fails(
 
     client = TestClient(app, raise_server_exceptions=False)
     response = client.post(
-        "/api/v1/admin/people/person-1/socialblade/refresh",
+        "/api/v1/admin/people/11111111-1111-1111-1111-111111111111/socialblade/refresh",
         json={"handle": "lisabarlow14", "force": True},
     )
 
@@ -249,9 +249,9 @@ def test_batch_refresh_dedupes_and_skips_fresh_rows(monkeypatch: pytest.MonkeyPa
         json={
             "source": "cast_comparison",
             "items": [
-                {"personId": "person-1", "handle": "lisabarlow14"},
-                {"personId": "person-1", "handle": "lisabarlow14"},
-                {"personId": "person-2", "handle": "freshalready"},
+                {"personId": "11111111-1111-1111-1111-111111111111", "handle": "lisabarlow14"},
+                {"personId": "11111111-1111-1111-1111-111111111111", "handle": "lisabarlow14"},
+                {"personId": "22222222-2222-2222-2222-222222222222", "handle": "freshalready"},
             ],
         },
     )
@@ -260,15 +260,15 @@ def test_batch_refresh_dedupes_and_skips_fresh_rows(monkeypatch: pytest.MonkeyPa
     assert response.status_code == 200
     assert payload["accepted"] == [
         {
-            "personId": "person-1",
+            "personId": "11111111-1111-1111-1111-111111111111",
             "handle": "lisabarlow14",
             "callId": "fc-cast-1",
         }
     ]
     assert payload["skipped"] == [
-        {"personId": "person-1", "handle": "lisabarlow14", "reason": "duplicate_request"},
+        {"personId": "11111111-1111-1111-1111-111111111111", "handle": "lisabarlow14", "reason": "duplicate_request"},
         {
-            "personId": "person-2",
+            "personId": "22222222-2222-2222-2222-222222222222",
             "handle": "freshalready",
             "reason": "fresh_within_24h",
             "scrapedAt": "2026-03-16T12:00:00Z",
@@ -278,7 +278,7 @@ def test_batch_refresh_dedupes_and_skips_fresh_rows(monkeypatch: pytest.MonkeyPa
     assert payload["errors"] == []
     assert dispatch_calls == [
         {
-            "person_id": "person-1",
+            "person_id": "11111111-1111-1111-1111-111111111111",
             "handle": "lisabarlow14",
             "source": "cast_comparison",
             "force": False,
@@ -319,14 +319,14 @@ def test_batch_refresh_cast_comparison_dispatches_modal_and_returns_call_id(
             "source": "cast_comparison",
             "source_scope": "creator",
             "force": True,
-            "items": [{"personId": "person-1", "handle": "NetworkOfficial"}],
+            "items": [{"personId": "11111111-1111-1111-1111-111111111111", "handle": "NetworkOfficial"}],
         },
     )
 
     assert response.status_code == 200
     assert response.json()["accepted"] == [
         {
-            "personId": "person-1",
+            "personId": "11111111-1111-1111-1111-111111111111",
             "handle": "networkofficial",
             "callId": "fc-cast-creator",
         }
@@ -334,7 +334,7 @@ def test_batch_refresh_cast_comparison_dispatches_modal_and_returns_call_id(
     assert response.json()["skipped"] == []
     assert response.json()["errors"] == []
     assert captured == {
-        "person_id": "person-1",
+        "person_id": "11111111-1111-1111-1111-111111111111",
         "handle": "networkofficial",
         "source": "cast_comparison",
         "force": True,
@@ -367,7 +367,7 @@ def test_batch_refresh_cast_comparison_dispatch_failure_returns_error(monkeypatc
         "/api/v1/admin/people/socialblade/refresh-batch",
         json={
             "source": "cast_comparison",
-            "items": [{"personId": "person-1", "handle": "NetworkOfficial"}],
+            "items": [{"personId": "11111111-1111-1111-1111-111111111111", "handle": "NetworkOfficial"}],
         },
     )
 
@@ -377,7 +377,7 @@ def test_batch_refresh_cast_comparison_dispatch_failure_returns_error(monkeypatc
         "skipped": [],
         "errors": [
             {
-                "personId": "person-1",
+                "personId": "11111111-1111-1111-1111-111111111111",
                 "handle": "networkofficial",
                 "reason": "modal_resolution_failed",
             }
@@ -504,7 +504,7 @@ def test_socialblade_history_returns_snapshot_rows(monkeypatch: pytest.MonkeyPat
         return [
             {
                 "id": "snap-1",
-                "person_id": "person-1",
+                "person_id": "11111111-1111-1111-1111-111111111111",
                 "platform": "instagram",
                 "account_handle": "lisabarlow14",
                 "instagram_handle": "lisabarlow14",
@@ -538,17 +538,22 @@ def test_socialblade_history_returns_snapshot_rows(monkeypatch: pytest.MonkeyPat
     client = TestClient(app)
     response = client.get(
         "/api/v1/admin/people/socialblade/history"
-        "?personId=person-1&personId=person-2&handle=@LisaBarlow14&platform=Instagram&limit=5"
+        "?personId=11111111-1111-1111-1111-111111111111&personId=22222222-2222-2222-2222-222222222222&handle=@LisaBarlow14&platform=Instagram&limit=5"
     )
 
     assert response.status_code == 200
     assert "pipeline.socialblade_growth_snapshots" in str(captured["sql"])
-    assert captured["params"] == ["instagram", ["person-1", "person-2"], ["lisabarlow14"], 5]
+    assert captured["params"] == [
+        "instagram",
+        ["11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"],
+        ["lisabarlow14"],
+        5,
+    ]
     payload = response.json()
     assert payload["count"] == 2
     assert payload["source"] == "socialblade_growth_snapshots"
     assert payload["filters"] == {
-        "personIds": ["person-1", "person-2"],
+        "personIds": ["11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"],
         "handles": ["lisabarlow14"],
         "platform": "instagram",
         "limit": 5,
@@ -556,7 +561,7 @@ def test_socialblade_history_returns_snapshot_rows(monkeypatch: pytest.MonkeyPat
     assert payload["items"] == [
         {
             "snapshotId": "snap-1",
-            "personId": "person-1",
+            "personId": "11111111-1111-1111-1111-111111111111",
             "handle": "lisabarlow14",
             "platform": "instagram",
             "scrapedAt": "2026-06-19T14:05:00Z",
@@ -594,6 +599,67 @@ def test_socialblade_history_requires_member_filter() -> None:
 
     assert response.status_code == 400
     assert response.json() == {"detail": "At least one personId or handle is required"}
+
+
+def test_socialblade_history_rejects_malformed_person_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    import trr_backend.repositories.socialblade_growth as growth_module
+    from trr_backend.db import pg as pg_module
+
+    monkeypatch.setattr(
+        growth_module,
+        "socialblade_growth_snapshots_table_exists",
+        lambda: (_ for _ in ()).throw(AssertionError("must not inspect table")),
+    )
+    monkeypatch.setattr(
+        pg_module,
+        "fetch_all",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not query snapshots")),
+    )
+
+    client = TestClient(app)
+    response = client.get("/api/v1/admin/people/socialblade/history?personId=not-a-uuid&handle=lisabarlow14")
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "personId must be a valid UUID"}
+
+
+def test_single_socialblade_refresh_rejects_malformed_person_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    import trr_backend.socials.socialblade.service as service_module
+
+    monkeypatch.setattr(
+        service_module,
+        "refresh_and_persist_socialblade",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not refresh")),
+    )
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/admin/people/not-a-uuid/socialblade/refresh",
+        json={"handle": "lisabarlow14", "force": True},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "personId must be a valid UUID"}
+
+
+def test_batch_socialblade_refresh_rejects_malformed_person_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    import trr_backend.socials.socialblade.service as service_module
+
+    monkeypatch.setattr(service_module, "socialblade_auto_refresh_enabled", lambda: True)
+    monkeypatch.setattr(
+        service_module,
+        "queue_refresh_decision",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not check queue decision")),
+    )
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/admin/people/socialblade/refresh-batch",
+        json={"source": "season_run", "items": [{"personId": "not-a-uuid", "handle": "lisabarlow14"}]},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "personId must be a valid UUID"}
 
 
 def test_account_socialblade_read_route_uses_platform_handle_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -857,7 +923,7 @@ def test_batch_refresh_respects_season_run_kill_switch(monkeypatch: pytest.Monke
         "/api/v1/admin/people/socialblade/refresh-batch",
         json={
             "source": "season_run",
-            "items": [{"personId": "person-1", "handle": "lisabarlow14"}],
+            "items": [{"personId": "11111111-1111-1111-1111-111111111111", "handle": "lisabarlow14"}],
         },
     )
 
@@ -865,7 +931,13 @@ def test_batch_refresh_respects_season_run_kill_switch(monkeypatch: pytest.Monke
     assert response.status_code == 200
     assert payload["accepted"] == []
     assert payload["errors"] == []
-    assert payload["skipped"] == [{"personId": "person-1", "handle": "lisabarlow14", "reason": "auto_refresh_disabled"}]
+    assert payload["skipped"] == [
+        {
+            "personId": "11111111-1111-1111-1111-111111111111",
+            "handle": "lisabarlow14",
+            "reason": "auto_refresh_disabled",
+        }
+    ]
 
 
 def test_batch_refresh_season_run_dispatches_following_sidecar(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -900,14 +972,20 @@ def test_batch_refresh_season_run_dispatches_following_sidecar(monkeypatch: pyte
             "source": "season_run",
             "sourceScope": "creator",
             "force": True,
-            "items": [{"personId": "person-1", "handle": "NetworkOfficial"}],
+            "items": [{"personId": "11111111-1111-1111-1111-111111111111", "handle": "NetworkOfficial"}],
         },
     )
 
     assert response.status_code == 200
-    assert response.json()["accepted"] == [{"personId": "person-1", "handle": "networkofficial", "callId": "fc-123"}]
+    assert response.json()["accepted"] == [
+        {
+            "personId": "11111111-1111-1111-1111-111111111111",
+            "handle": "networkofficial",
+            "callId": "fc-123",
+        }
+    ]
     assert captured == {
-        "person_id": "person-1",
+        "person_id": "11111111-1111-1111-1111-111111111111",
         "handle": "networkofficial",
         "source": "season_run",
         "force": True,
@@ -946,7 +1024,7 @@ def test_batch_refresh_stops_before_dispatch_when_socialblade_session_unhealthy(
         "/api/v1/admin/people/socialblade/refresh-batch",
         json={
             "source": "season_run",
-            "items": [{"personId": "person-1", "handle": "NetworkOfficial"}],
+            "items": [{"personId": "11111111-1111-1111-1111-111111111111", "handle": "NetworkOfficial"}],
         },
     )
 

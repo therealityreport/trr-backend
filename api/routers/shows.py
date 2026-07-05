@@ -333,7 +333,7 @@ def _build_show_external_ids(show: dict[str, Any]) -> dict[str, Any]:
 @router.get("", response_model=list[Show])
 def list_shows(
     db: SupabaseClient,
-    limit: int = Query(default=50, le=100),
+    limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> list[dict]:
     """List all shows with pagination."""
@@ -465,7 +465,7 @@ def list_show_images(
 def list_seasons(
     db: SupabaseClient,
     show_id: UUID,
-    limit: int = Query(default=50, le=100),
+    limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> list[dict]:
     """List all seasons for a show."""
@@ -510,7 +510,7 @@ def list_episodes(
     db: SupabaseClient,
     show_id: UUID,
     season_number: int,
-    limit: int = Query(default=50, le=100),
+    limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> list[dict]:
     """List all episodes for a season."""
@@ -547,7 +547,7 @@ def list_episodes(
 def list_show_cast(
     db: SupabaseAdminClient,
     show_id: UUID,
-    limit: int = Query(default=50, le=100),
+    limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
     """

@@ -7705,6 +7705,11 @@ def test_ingest_shared_accounts_catalog_mode_round_robins_multi_platform_brand_s
     )
     monkeypatch.setattr(
         social_repo,
+        "_shared_catalog_total_posts_for_window",
+        lambda platform, *_args, **_kwargs: 4049 if platform == "instagram" else 1200,
+    )
+    monkeypatch.setattr(
+        social_repo,
         "_best_known_social_account_total_posts",
         lambda platform, *_args, **_kwargs: 16454 if platform == "instagram" else 2876,
     )
@@ -24520,6 +24525,69 @@ def test_get_week_detail_uses_loaded_platform_posts_for_refresh_metadata(monkeyp
 
     assert payload["status_by_platform"]["instagram"]["last_refresh_at"] is None
     assert payload["status_by_platform"]["instagram"]["worker_run_id"] == "job-latest-1"
+
+
+def test_get_week_detail_dedupes_sorts_and_reports_has_more_from_totals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = SeasonContext(
+        season_id="season-week-pagination",
+        show_id="show-week-pagination",
+        show_name="Week Detail Show",
+        season_number=6,
+        anchor_date=date(2026, 1, 1),
+    )
+    week_start = datetime(2026, 1, 1, tzinfo=UTC)
+    week_windows = [WeekWindow(week_index=1, start_local=week_start, end_local=week_start + timedelta(days=7))]
+    captured_kwargs: dict[str, object] = {}
+
+    def _fake_instagram_handler(*_args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return {
+            "posts": [
+                {"source_id": "older", "posted_at": "2026-01-02T00:00:00+00:00", "engagement": 10},
+                {"source_id": "newer", "posted_at": "2026-01-04T00:00:00+00:00", "engagement": 20},
+                {"source_id": "newer", "posted_at": "2026-01-04T00:00:00+00:00", "engagement": 20},
+            ],
+            "total_posts": 4,
+            "totals": {
+                "posts": 4,
+                "total_comments": 0,
+                "total_engagement": 30,
+                "expected_comments_total": 0,
+                "saved_comments_total": 0,
+            },
+        }
+
+    monkeypatch.setattr(social_repo, "get_season_context", lambda _season_id: context)
+    monkeypatch.setattr(social_repo, "_resolve_week_windows", lambda *args, **kwargs: (week_windows, week_start))
+    monkeypatch.setattr(social_repo, "_target_accounts_by_platform", lambda *args, **kwargs: {"instagram": set()})
+    monkeypatch.setattr(social_repo, "_WEEK_DETAIL_HANDLERS", {"instagram": _fake_instagram_handler})
+
+    payload = social_repo.get_week_detail(
+        "season-week-pagination",
+        week_index=1,
+        platforms=["instagram"],
+        timezone="America/New_York",
+        source_scope="community",
+        max_comments_per_post=0,
+        post_limit=1,
+        post_offset=1,
+        sort_field="posted_at",
+        sort_dir="desc",
+        include_status=False,
+    )
+
+    assert captured_kwargs["post_limit"] == 3
+    assert captured_kwargs["post_offset"] == 0
+    assert [post["source_id"] for post in payload["platforms"]["instagram"]["posts"]] == ["older"]
+    assert payload["pagination"] == {
+        "limit": 1,
+        "offset": 1,
+        "returned": 1,
+        "total": 4,
+        "has_more": True,
+    }
 
 
 def test_build_platform_status_payload_clears_stale_when_active_jobs_present() -> None:
@@ -51521,11 +51589,14 @@ def test_cancel_active_jobs_cancels_all_active_and_finalizes_runs(monkeypatch: p
     assert len(heartbeat_calls) == 2
 
 
-def test_cancel_run_cancels_cancelling_jobs_and_clears_worker_heartbeats(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cancel_run_marks_running_jobs_cancelling_and_clears_terminal_heartbeats(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     run_id = "11111111-1111-1111-1111-111111111111"
     season_id = "22222222-2222-2222-2222-222222222222"
     fetch_one_calls: list[str] = []
     heartbeat_calls: list[str] = []
+    finalize_calls: list[str] = []
 
     def _fake_fetch_one(sql: str, params: list[object] | None = None):
         normalized = " ".join(sql.split()).lower()
@@ -51539,16 +51610,22 @@ def test_cancel_run_cancels_cancelling_jobs_and_clears_worker_heartbeats(monkeyp
     def _fake_execute_returning(sql: str, params: list[object] | None = None):
         normalized = " ".join(sql.split()).lower()
         assert "status in ('queued', 'pending', 'retrying', 'running', 'cancelling')" in normalized
-        assert params == [run_id]
+        assert "when status in ('running', 'cancelling') then 'cancelling'" in normalized
+        assert params == ["admin@example.com", run_id]
         return [
-            {"id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "run_id": run_id},
-            {"id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "run_id": run_id},
+            {"id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "run_id": run_id, "status": "cancelling"},
+            {"id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "run_id": run_id, "status": "cancelled"},
         ]
 
     monkeypatch.setattr(social_repo, "_assert_social_queue_schema_ready", lambda: None)
     monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
     monkeypatch.setattr(social_repo.pg, "execute_returning", _fake_execute_returning)
-    monkeypatch.setattr(social_repo, "_update_run_summary", lambda _run_id, force_recompute=False: {"total_jobs": 12})
+    monkeypatch.setattr(
+        social_repo,
+        "_finalize_run_status",
+        lambda _run_id, force_recompute=False: finalize_calls.append(f"{_run_id}:{force_recompute}")
+        or {"total_jobs": 12},
+    )
     monkeypatch.setattr(social_repo, "_invalidate_week_detail_cache_after_run_terminal_status", lambda: None)
     monkeypatch.setattr(
         social_repo,
@@ -51560,13 +51637,74 @@ def test_cancel_run_cancels_cancelling_jobs_and_clears_worker_heartbeats(monkeyp
 
     payload = social_repo.cancel_run(season_id, run_id, cancelled_by="admin@example.com")
 
-    assert payload["status"] == "cancelled"
+    assert payload["status"] == "cancelling"
     assert payload["cancelled_jobs"] == 2
-    assert any("update social.scrape_runs" in call for call in fetch_one_calls)
-    assert heartbeat_calls == [
-        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:idle:cancel_run",
-        "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:idle:cancel_run",
+    assert payload["cancelled_job_ids"] == [
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
     ]
+    assert payload["cancelling_jobs"] == 1
+    assert payload["cancelling_job_ids"] == ["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"]
+    assert any("update social.scrape_runs" in call for call in fetch_one_calls)
+    assert heartbeat_calls == ["bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:idle:cancel_run"]
+    assert finalize_calls == [f"{run_id}:True"]
+
+
+def test_recover_stale_running_jobs_terminalizes_stale_cancelling_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    cleared_heartbeats: list[str] = []
+    finalized: list[str] = []
+
+    def _fake_fetch_one(sql: str, params: list[object] | None = None):
+        captured["exists_sql"] = sql
+        captured["exists_params"] = list(params or [])
+        return {"has_stale": True}
+
+    def _fake_fetch_all(sql: str, params: list[object] | None = None):
+        captured["update_sql"] = sql
+        captured["update_params"] = list(params or [])
+        return [
+            {
+                "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "run_id": "11111111-1111-1111-1111-111111111111",
+                "platform": "youtube",
+                "stage": "posts",
+                "account_handle": "bravotv",
+                "prior_worker_id": "worker-1",
+                "status": "cancelled",
+                "attempt_count": 1,
+                "max_attempts": 3,
+            }
+        ]
+
+    monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+    monkeypatch.setattr(
+        social_repo,
+        "_clear_worker_heartbeat_for_job",
+        lambda *, job_id, status, metadata=None: cleared_heartbeats.append(
+            f"{job_id}:{status}:{(metadata or {}).get('job_status')}"
+        ),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_finalize_run_status",
+        lambda run_id, force_recompute=False: finalized.append(f"{run_id}:{force_recompute}") or {},
+    )
+
+    rows = social_repo.recover_stale_running_jobs(stale_after_seconds=60, limit=10)
+
+    exists_sql = " ".join(str(captured["exists_sql"]).split()).lower()
+    update_sql = " ".join(str(captured["update_sql"]).split()).lower()
+    assert "j.status in ('running', 'cancelling')" in exists_sql
+    assert "j.status in ('running', 'cancelling')" in update_sql
+    assert "when stale_jobs.was_cancelling then 'cancelled'" in update_sql
+    assert "cancelled_stale_timeout" in update_sql
+    assert rows[0]["status"] == "cancelled"
+    assert cleared_heartbeats == ["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:idle:cancelled"]
+    assert finalized == ["11111111-1111-1111-1111-111111111111:True"]
 
 
 def test_query_worker_health_uses_aggregate_totals_and_stale_hidden_count(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -196,6 +196,79 @@ def test_get_show_uses_watch_provider_lookup_without_nested_selects() -> None:
     ]
 
 
+def test_list_show_images_normalizes_served_media_rows_for_response_model() -> None:
+    show_id = uuid4()
+    image_id = uuid4()
+    fetched_at = datetime(2024, 3, 1, 12, 0, tzinfo=UTC)
+    dataset = {
+        "v_show_images_served_media_v2": [
+            {
+                "id": str(image_id),
+                "show_id": str(show_id),
+                "tmdb_id": 99,
+                "show_name": "Sample Show",
+                "source": "tmdb",
+                "kind": "poster",
+                "iso_639_1": "en",
+                "file_path": "/poster.jpg",
+                "url": "https://image.tmdb.org/t/p/original/poster.jpg",
+                "width": 1000,
+                "height": 1500,
+                "aspect_ratio": 0.667,
+                "fetched_at": fetched_at,
+            }
+        ]
+    }
+
+    client = _client_with_dataset(dataset)
+    try:
+        response = client.get(f"/api/v1/shows/{show_id}/images")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "id": str(image_id),
+            "show_id": str(show_id),
+            "tmdb_id": 99,
+            "show_name": "Sample Show",
+            "source": "tmdb",
+            "kind": "poster",
+            "iso_639_1": "en",
+            "file_path": "/poster.jpg",
+            "url_original": "https://image.tmdb.org/t/p/original/poster.jpg",
+            "width": 1000,
+            "height": 1500,
+            "aspect_ratio": 0.667,
+            "fetched_at": "2024-03-01T12:00:00+00:00",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/shows?limit=0",
+        "/api/v1/shows?limit=-1",
+        f"/api/v1/shows/{uuid4()}/seasons?limit=0",
+        f"/api/v1/shows/{uuid4()}/seasons?limit=-1",
+        f"/api/v1/shows/{uuid4()}/seasons/1/episodes?limit=0",
+        f"/api/v1/shows/{uuid4()}/seasons/1/episodes?limit=-1",
+        f"/api/v1/shows/{uuid4()}/cast?limit=0",
+        f"/api/v1/shows/{uuid4()}/cast?limit=-1",
+    ],
+)
+def test_show_routes_reject_zero_and_negative_limits(path: str) -> None:
+    client = _client_with_dataset({})
+    try:
+        response = client.get(path)
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 422
+
+
 def test_list_show_cast_uses_joined_sql_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     show_id = uuid4()
     cast_id = uuid4()

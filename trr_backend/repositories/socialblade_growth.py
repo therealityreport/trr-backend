@@ -7,6 +7,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
+from uuid import UUID
 
 from psycopg2.extras import Json
 
@@ -70,6 +71,16 @@ def _build_previous_run_snapshot(data: dict[str, Any] | None) -> dict[str, Any] 
 def normalize_socialblade_platform(platform: str | None) -> str:
     normalized = _PLATFORM_RE.sub("", str(platform or "").strip().lower())
     return normalized or "instagram"
+
+
+def normalize_socialblade_person_id(person_id: str | None, *, field_name: str = "personId") -> str | None:
+    rendered = str(person_id or "").strip()
+    if not rendered:
+        return None
+    try:
+        return str(UUID(rendered))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be a valid UUID") from exc
 
 
 def _is_youtube_channel_id(value: str, *, platform: str | None) -> bool:
@@ -233,11 +244,12 @@ def socialblade_growth_snapshots_table_exists() -> bool:
 
 def get_growth_data(person_id: str | None, handle: str, *, platform: str = "instagram") -> dict[str, Any] | None:
     """Fetch stored SocialBlade data for a handle, preferring the linked person row when present."""
+    normalized_person_id = normalize_socialblade_person_id(person_id)
     normalized_platform = normalize_socialblade_platform(platform)
     normalized_handle = normalize_socialblade_account_handle(handle, platform=normalized_platform)
     if not normalized_handle:
         return None
-    if person_id:
+    if normalized_person_id:
         row = pg.fetch_one(
             """
             SELECT *
@@ -255,7 +267,7 @@ def get_growth_data(person_id: str | None, handle: str, *, platform: str = "inst
               created_at DESC NULLS LAST
             LIMIT 1
             """,
-            [normalized_platform, normalized_handle, person_id, person_id],
+            [normalized_platform, normalized_handle, normalized_person_id, normalized_person_id],
         )
     else:
         row = pg.fetch_one(
@@ -282,6 +294,7 @@ def upsert_growth_data(
     platform: str = "instagram",
 ) -> dict[str, Any]:
     """Upsert merged SocialBlade data. Returns the stored row."""
+    normalized_person_id = normalize_socialblade_person_id(person_id)
     normalized_platform = normalize_socialblade_platform(platform)
     normalized_handle = normalize_socialblade_account_handle(handle, platform=normalized_platform)
     rows = pg.execute_returning(
@@ -303,7 +316,7 @@ def upsert_growth_data(
         " updated_at = now() "
         "RETURNING *",
         [
-            person_id,
+            normalized_person_id,
             normalized_platform,
             normalized_handle,
             normalized_handle,
@@ -332,6 +345,7 @@ def insert_growth_snapshot(
     force: bool = False,
 ) -> dict[str, Any]:
     """Insert an immutable SocialBlade scrape snapshot."""
+    normalized_person_id = normalize_socialblade_person_id(person_id)
     normalized_platform = normalize_socialblade_platform(platform)
     normalized_handle = normalize_socialblade_account_handle(handle, platform=normalized_platform)
     if not normalized_handle:
@@ -365,7 +379,7 @@ def insert_growth_snapshot(
         """,
         [
             growth_data_id,
-            person_id,
+            normalized_person_id,
             normalized_platform,
             normalized_handle,
             normalized_handle if normalized_platform == "instagram" else None,

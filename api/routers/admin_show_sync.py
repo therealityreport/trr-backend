@@ -14,10 +14,13 @@ import json
 import logging
 import os
 import re
+import subprocess
+import sys
 import time
 from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import UTC, datetime
+from pathlib import Path
 from threading import Lock, Thread, current_thread
 from typing import Any, Literal
 from uuid import UUID
@@ -93,6 +96,7 @@ from trr_backend.repositories.web_scrape_images import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin/shows", tags=["admin-show-sync"])
+BACKEND_ROOT = Path(__file__).resolve().parents[2]
 STREAM_HEARTBEAT_INTERVAL_SECONDS = 10
 VALID_REFRESH_TARGETS = frozenset({"show_core", "links", "bravo", "cast_profiles", "cast_media", "official_images"})
 NBCUMV_OFFICIAL_IMAGES_SETTING_PREFIX = "nbcumv_official_images"
@@ -1461,11 +1465,17 @@ def _run_script_step_with_metrics(
     metric_keys: list[str],
 ) -> tuple[SyncNetworksStreamingStepResult, str]:
     started = time.perf_counter()
-    stdout_buffer = io.StringIO()
-    stderr_buffer = io.StringIO()
     try:
-        with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
-            code = fn(list(argv))
+        module = _script_module_for_main(fn)
+        if module:
+            code, stdout, stderr = _run_script_module_step(module, argv, on_output_line=None)
+        else:
+            stdout_buffer = io.StringIO()
+            stderr_buffer = io.StringIO()
+            with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
+                code = fn(list(argv))
+            stdout = stdout_buffer.getvalue()
+            stderr = stderr_buffer.getvalue()
     except BaseException as exc:  # noqa: BLE001
         duration_ms = int((time.perf_counter() - started) * 1000)
         logger.exception("admin sync step failed: %s", name)
@@ -1487,7 +1497,7 @@ def _run_script_step_with_metrics(
             "",
         )
 
-    output = "\n".join([stdout_buffer.getvalue().strip(), stderr_buffer.getvalue().strip()]).strip()
+    output = "\n".join([stdout.strip(), stderr.strip()]).strip()
     metrics = {key: _extract_metric_int(output, key) for key in metric_keys}
     duration_ms = int((time.perf_counter() - started) * 1000)
     if int(code) == 0:
@@ -2489,36 +2499,6 @@ class RefreshStepSkippedError(RuntimeError):
         self.reason = str(reason or "").strip() or "Skipped"
 
 
-class _ProgressLineTee(io.TextIOBase):
-    def __init__(self, buffer: io.StringIO, on_line: Callable[[str], None] | None = None) -> None:
-        self._buffer = buffer
-        self._on_line = on_line
-        self._pending = ""
-
-    def write(self, text: str) -> int:
-        chunk = str(text or "")
-        self._buffer.write(chunk)
-        if not chunk or self._on_line is None:
-            return len(chunk)
-        self._pending += chunk
-        while "\n" in self._pending:
-            line, self._pending = self._pending.split("\n", 1)
-            cleaned = line.strip()
-            if cleaned:
-                self._on_line(cleaned)
-        return len(chunk)
-
-    def flush(self) -> None:
-        self._buffer.flush()
-        if self._on_line is None:
-            self._pending = ""
-            return
-        cleaned = self._pending.strip()
-        if cleaned:
-            self._on_line(cleaned)
-        self._pending = ""
-
-
 _LIVE_SCRIPT_OUTPUTS: dict[int, str] = {}
 _LIVE_SCRIPT_OUTPUTS_LOCK = Lock()
 
@@ -2546,6 +2526,66 @@ def _clear_live_script_output(thread_id: int | None) -> None:
         _LIVE_SCRIPT_OUTPUTS.pop(thread_id, None)
 
 
+def _script_module_for_main(fn: Callable[[list[str] | None], int]) -> str | None:
+    module = str(getattr(fn, "__module__", "") or "")
+    name = str(getattr(fn, "__name__", "") or "")
+    if module.startswith("scripts.sync.") and name == "main":
+        return module
+    return None
+
+
+def _subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    backend_root = str(BACKEND_ROOT)
+    existing_pythonpath = str(env.get("PYTHONPATH") or "").strip()
+    env["PYTHONPATH"] = (
+        backend_root
+        if not existing_pythonpath
+        else os.pathsep.join(part for part in (backend_root, existing_pythonpath) if part)
+    )
+    return env
+
+
+def _run_script_module_step(
+    module: str,
+    argv: list[str],
+    *,
+    on_output_line: Callable[[str], None] | None,
+) -> tuple[int, str, str]:
+    stdout_buffer = io.StringIO()
+    stderr_buffer = io.StringIO()
+
+    def _consume_lines(pipe: Any, buffer: io.StringIO) -> None:
+        try:
+            for line in iter(pipe.readline, ""):
+                buffer.write(line)
+                cleaned = line.strip()
+                if cleaned:
+                    _set_live_script_output(cleaned)
+                    if on_output_line is not None:
+                        on_output_line(cleaned)
+        finally:
+            pipe.close()
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", module, *list(argv)],
+        cwd=str(BACKEND_ROOT),
+        env=_subprocess_env(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    stdout_thread = Thread(target=_consume_lines, args=(proc.stdout, stdout_buffer), daemon=True)
+    stderr_thread = Thread(target=_consume_lines, args=(proc.stderr, stderr_buffer), daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+    code = proc.wait()
+    stdout_thread.join()
+    stderr_thread.join()
+    return int(code), stdout_buffer.getvalue(), stderr_buffer.getvalue()
+
+
 def _run_script_step(
     name: str,
     fn: Callable[[list[str] | None], int],
@@ -2554,28 +2594,22 @@ def _run_script_step(
     on_output_line: Callable[[str], None] | None = None,
 ) -> RefreshStepResult:
     started = time.perf_counter()
-    stdout_buffer = io.StringIO()
-    stderr_buffer = io.StringIO()
-
-    def _handle_output_line(line: str) -> None:
-        _set_live_script_output(line)
-        if on_output_line is not None:
-            on_output_line(line)
 
     try:
-        with (
-            redirect_stdout(_ProgressLineTee(stdout_buffer, _handle_output_line)),
-            redirect_stderr(_ProgressLineTee(stderr_buffer, _handle_output_line)),
-        ):
+        module = _script_module_for_main(fn)
+        if module:
+            code, stdout, stderr = _run_script_module_step(module, argv, on_output_line=on_output_line)
+        else:
             code = fn(list(argv))
+            stdout = ""
+            stderr = ""
     except Exception as exc:  # noqa: BLE001
         duration_ms = int((time.perf_counter() - started) * 1000)
         logger.exception("admin show refresh step failed: %s", name)
-        output = "\n".join([stdout_buffer.getvalue().strip(), stderr_buffer.getvalue().strip()]).strip() or None
-        return RefreshStepResult(status="failed", duration_ms=duration_ms, error=str(exc), output=output)
+        return RefreshStepResult(status="failed", duration_ms=duration_ms, error=str(exc), output=None)
 
     duration_ms = int((time.perf_counter() - started) * 1000)
-    output = "\n".join([stdout_buffer.getvalue().strip(), stderr_buffer.getvalue().strip()]).strip() or None
+    output = "\n".join([stdout.strip(), stderr.strip()]).strip() or None
     if int(code) == 0:
         return RefreshStepResult(status="success", duration_ms=duration_ms, exit_code=0, output=output)
     return RefreshStepResult(

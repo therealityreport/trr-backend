@@ -223,7 +223,7 @@ def test_set_run_status_clears_terminal_timestamps_when_reopened(
 
     social_repo._set_run_status("run-1", "running")
 
-    assert "when %s in ('queued', 'pending', 'retrying', 'running') then null" in str(captured["sql"])
+    assert "when %s in ('queued', 'pending', 'retrying', 'running', 'cancelling') then null" in str(captured["sql"])
     assert captured["params"] == ["running", "running", "running", "running", "running", "running", "run-1"]
 
 
@@ -931,6 +931,57 @@ def test_finalize_run_status_cancelled_skips_followup(
     payload = run_lifecycle._finalize_run_status("run-1")
 
     assert payload == {"active_jobs": 0, "failed_jobs": 0, "stage_counts": {}}
+
+
+def test_finalize_run_status_cancelling_run_without_open_jobs_becomes_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock_conn = object()
+    statuses: list[str] = []
+
+    @contextmanager
+    def fake_advisory_lock(lock_key, *, label, pool_name="default"):
+        del lock_key, label, pool_name
+        yield lock_conn
+
+    def fake_fetch_one(sql: str, params=None, *, conn=None, **_kwargs):
+        del params, conn
+        normalized = " ".join(sql.split()).lower()
+        if "select status, config from social.scrape_runs" in normalized:
+            return {"status": "cancelling", "config": {}}
+        return {}
+
+    monkeypatch.setattr(run_lifecycle.legacy.pg, "advisory_session_lock", fake_advisory_lock)
+    monkeypatch.setattr(run_lifecycle.legacy.pg, "fetch_one", fake_fetch_one)
+    monkeypatch.setattr(
+        run_lifecycle,
+        "_update_run_summary",
+        lambda *_args, **_kwargs: {"active_jobs": 0, "failed_jobs": 0, "stage_counts": {}},
+    )
+    monkeypatch.setattr(
+        run_lifecycle,
+        "_run_job_status_breakdown",
+        lambda *_args, **_kwargs: {"running_jobs": 0, "queued_jobs": 0, "cancelling_jobs": 0},
+    )
+    monkeypatch.setattr(run_lifecycle, "_set_run_status", lambda _run_id, status, **_kwargs: statuses.append(status))
+    monkeypatch.setattr(run_lifecycle, "_maybe_start_deferred_comments_followup", lambda **_kwargs: None)
+    monkeypatch.setattr(run_lifecycle.legacy, "_resolve_pipeline_ingest_mode", lambda value: value)
+    monkeypatch.setattr(
+        run_lifecycle.legacy,
+        "_maybe_enqueue_shared_catalog_classify_jobs_after_fetch",
+        lambda *_args, **_kwargs: 0,
+    )
+    monkeypatch.setattr(
+        run_lifecycle.legacy,
+        "_shared_catalog_fetch_has_terminal_error",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(run_lifecycle.legacy, "_column_exists", lambda *_args, **_kwargs: False)
+
+    payload = run_lifecycle._finalize_run_status("run-1")
+
+    assert payload == {"active_jobs": 0, "failed_jobs": 0, "stage_counts": {}}
+    assert statuses == ["cancelled"]
 
 
 def test_recover_unfinalized_terminal_runs_refinalizes_stuck_runs(

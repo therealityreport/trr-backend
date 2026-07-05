@@ -8,6 +8,7 @@ SocialPlatform = Literal["reddit", "twitter", "instagram", "tiktok", "youtube", 
 
 _TABLE = "admin.show_social_posts"
 _VALID_PLATFORMS = {"reddit", "twitter", "instagram", "tiktok", "youtube", "other"}
+OMITTED = object()
 
 
 def _to_string(value: Any) -> str | None:
@@ -117,11 +118,11 @@ def create_post(
 def update_post(
     *,
     post_id: str,
-    trr_season_id: Any = None,
-    platform: Any = None,
-    url: Any = None,
-    title: Any = None,
-    notes: Any = None,
+    trr_season_id: Any = OMITTED,
+    platform: Any = OMITTED,
+    url: Any = OMITTED,
+    title: Any = OMITTED,
+    notes: Any = OMITTED,
 ) -> tuple[dict[str, Any] | None, int]:
     updates: list[str] = []
     params: list[Any] = []
@@ -130,15 +131,15 @@ def update_post(
         params.append(value)
         return "%s"
 
-    if trr_season_id is not None:
+    if trr_season_id is not OMITTED:
         updates.append(f"trr_season_id = {_push(trr_season_id)}::uuid")
-    if platform is not None:
+    if platform is not OMITTED and platform is not None:
         updates.append(f"platform = {_push(_normalize_platform(platform))}")
-    if url is not None:
+    if url is not OMITTED and url is not None:
         updates.append(f"url = {_push(url)}")
-    if title is not None:
+    if title is not OMITTED:
         updates.append(f"title = {_push(title)}")
-    if notes is not None:
+    if notes is not OMITTED:
         updates.append(f"notes = {_push(notes)}")
 
     if not updates:

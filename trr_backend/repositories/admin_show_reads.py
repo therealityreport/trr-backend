@@ -836,132 +836,173 @@ def _get_show_assets_impl(
     normalized_sources = {
         str(source).strip().lower() for source in (sources or []) if isinstance(source, str) and source.strip()
     }
-    source_fetch_limit = (
-        ASSET_FULL_FETCH_LIMIT if full else (ASSET_QUERY_LIMIT + 1 if normalized_sources else fetch_limit)
-    )
     assets: list[dict[str, Any]] = []
     hosted_url_seen: set[str] = set()
     source_timings: dict[str, dict[str, Any]] = {}
     query_count = 0
 
-    media_link_rows = _fetch_asset_source_rows(
-        source_timings,
-        "show_media_links",
-        """
-        select
-          ml.id::text as link_id,
-          ml.kind as link_kind,
-          ml.is_primary as link_is_primary,
-          ml.context,
-          ml.media_asset_id::text as media_asset_id,
-          ma.id::text as asset_id,
-          ma.source,
-          ma.source_url,
-          ma.hosted_url,
-          ma.hosted_content_type,
-          ma.width,
-          ma.height,
-          ma.caption,
-          ma.metadata,
-          ma.ingest_status,
-          ma.fetched_at::text as fetched_at,
-          ma.created_at::text as created_at
-        from core.media_links as ml
-        left join core.media_assets as ma
-          on ma.id = ml.media_asset_id
-        where ml.entity_type = 'show'
-          and ml.entity_id = %s::uuid
-        order by ma.created_at desc nulls last, ml.id asc
-        limit %s::int
-        """,
-        [show_id, source_fetch_limit],
-    )
-    query_count += 1
-    for row in media_link_rows:
-        hosted_url = _pick_url_candidate(row.get("hosted_url"))
-        if not hosted_url or not _is_likely_image(row.get("hosted_content_type"), hosted_url):
-            continue
-        context = row.get("context") if isinstance(row.get("context"), dict) else {}
-        merged_metadata = _merged_metadata(row.get("metadata"), context)
-        source_url = _pick_url_candidate(
-            _read_metadata_source_url(merged_metadata),
-            row.get("source_url"),
-        )
-        thumbnail_crop = (
-            context.get("thumbnail_crop")
-            if context.get("thumbnail_crop") is not None
-            else merged_metadata.get("thumbnail_crop")
-        )
-        _push_asset(
-            assets,
-            hosted_url_seen,
-            asset={
-                "id": row.get("asset_id") or row.get("media_asset_id"),
-                "type": "show",
-                "origin_table": "media_assets",
-                "source": _normalize_scrape_source(str(row.get("source") or "unknown"), source_url, merged_metadata),
-                "source_url": source_url,
-                "kind": row.get("link_kind") or "other",
-                "hosted_url": hosted_url,
-                **_resolve_season_asset_variant_urls(
-                    merged_metadata,
-                    hosted_url=hosted_url,
-                    source_url=source_url,
-                    original_url=_read_metadata_original_url(merged_metadata),
-                ),
-                **_resolve_logo_variant_urls(merged_metadata),
-                "width": row.get("width"),
-                "height": row.get("height"),
-                "caption": row.get("caption"),
-                "context_section": context.get("context_section")
-                if isinstance(context.get("context_section"), str)
-                else None,
-                "context_type": context.get("context_type") if isinstance(context.get("context_type"), str) else None,
-                "fetched_at": row.get("fetched_at"),
-                "created_at": row.get("created_at"),
-                "metadata": merged_metadata,
-                "ingest_status": row.get("ingest_status"),
-                "hosted_content_type": row.get("hosted_content_type"),
-                "link_id": row.get("link_id"),
-                "media_asset_id": row.get("media_asset_id"),
-                "logo_link_is_primary": bool(row.get("link_is_primary"))
-                if str(row.get("link_kind") or "").strip().lower() == "logo"
-                else None,
-                "people_count": _read_people_count(context.get("people_count")),
-                "people_count_source": _read_people_count_source(context.get("people_count_source")),
-                **_thumbnail_crop_fields(thumbnail_crop),
-            },
-        )
+    source_filter = ""
+    source_params: list[Any] = []
+    if normalized_sources:
+        source_filter = "and lower(coalesce(source, '')) = any(%s)"
+        source_params.append(sorted(normalized_sources))
 
-    show_image_rows = _fetch_asset_source_rows(
+    asset_rows = _fetch_asset_source_rows(
         source_timings,
-        "show_images",
-        """
+        "show_assets",
+        f"""
+        with candidate_assets as (
+          select
+            0 as source_rank,
+            ml.id::text as link_id,
+            ml.kind as link_kind,
+            ml.is_primary as link_is_primary,
+            ml.context,
+            ml.media_asset_id::text as media_asset_id,
+            ma.id::text as asset_id,
+            ma.source,
+            ma.source_url,
+            ma.hosted_url,
+            ma.hosted_content_type,
+            ma.width,
+            ma.height,
+            ma.caption,
+            ma.metadata,
+            ma.ingest_status,
+            ma.fetched_at::text as fetched_at,
+            ma.created_at::text as created_at,
+            null::text as id,
+            null::text as kind,
+            null::text as image_type,
+            null::text as url,
+            null::text as url_original,
+            'media_assets'::text as origin_table
+          from core.media_links as ml
+          left join core.media_assets as ma
+            on ma.id = ml.media_asset_id
+          where ml.entity_type = 'show'
+            and ml.entity_id = %s::uuid
+            and ma.hosted_url is not null
+            and (
+              coalesce(ma.hosted_content_type, '') ilike 'image/%%'
+              or (
+                coalesce(ma.hosted_content_type, '') = ''
+                and ma.hosted_url !~* '\\.(mp4|mov|m3u8|webm|mp3|pdf|html)(\\?.*)?$'
+              )
+            )
+          union all
+          select
+            1 as source_rank,
+            null::text as link_id,
+            null::text as link_kind,
+            null::boolean as link_is_primary,
+            null::jsonb as context,
+            null::text as media_asset_id,
+            null::text as asset_id,
+            source,
+            null::text as source_url,
+            hosted_url,
+            null::text as hosted_content_type,
+            width,
+            height,
+            null::text as caption,
+            metadata,
+            null::text as ingest_status,
+            null::text as fetched_at,
+            created_at::text as created_at,
+            id::text as id,
+            kind,
+            image_type,
+            url,
+            url_original,
+            'show_images'::text as origin_table
+          from core.show_images
+          where show_id = %s::uuid
+            and hosted_url is not null
+        ), deduped_assets as (
+          select *
+          from (
+            select
+              candidate_assets.*,
+              row_number() over (
+                partition by hosted_url
+                order by source_rank asc, created_at desc nulls last, coalesce(asset_id, id, link_id) asc
+              ) as hosted_rank
+            from candidate_assets
+          ) ranked_assets
+          where hosted_rank = 1
+            {source_filter}
+        )
         select
-          id::text as id,
-          source,
-          kind,
-          image_type,
-          url,
-          url_original,
-          hosted_url,
-          width,
-          height,
-          created_at::text as created_at,
-          metadata
-        from core.show_images
-        where show_id = %s::uuid
-          and hosted_url is not null
-        order by created_at desc nulls last, id asc
+          *
+        from deduped_assets
+        order by source_rank asc, created_at desc nulls last, coalesce(asset_id, id, link_id) asc
         limit %s::int
+        offset %s::int
         """,
-        [show_id, source_fetch_limit],
+        [show_id, show_id, *source_params, normalized_limit, normalized_offset],
     )
     query_count += 1
-    for row in show_image_rows:
+
+    for row in asset_rows:
         hosted_url = _pick_url_candidate(row.get("hosted_url"))
         if not hosted_url:
             continue
+        origin_table = str(row.get("origin_table") or "").strip()
+        if origin_table == "media_assets":
+            context = row.get("context") if isinstance(row.get("context"), dict) else {}
+            merged_metadata = _merged_metadata(row.get("metadata"), context)
+            source_url = _pick_url_candidate(
+                _read_metadata_source_url(merged_metadata),
+                row.get("source_url"),
+            )
+            thumbnail_crop = (
+                context.get("thumbnail_crop")
+                if context.get("thumbnail_crop") is not None
+                else merged_metadata.get("thumbnail_crop")
+            )
+            _push_asset(
+                assets,
+                hosted_url_seen,
+                asset={
+                    "id": row.get("asset_id") or row.get("media_asset_id"),
+                    "type": "show",
+                    "origin_table": "media_assets",
+                    "source": _normalize_scrape_source(str(row.get("source") or "unknown"), source_url, merged_metadata),
+                    "source_url": source_url,
+                    "kind": row.get("link_kind") or "other",
+                    "hosted_url": hosted_url,
+                    **_resolve_season_asset_variant_urls(
+                        merged_metadata,
+                        hosted_url=hosted_url,
+                        source_url=source_url,
+                        original_url=_read_metadata_original_url(merged_metadata),
+                    ),
+                    **_resolve_logo_variant_urls(merged_metadata),
+                    "width": row.get("width"),
+                    "height": row.get("height"),
+                    "caption": row.get("caption"),
+                    "context_section": context.get("context_section")
+                    if isinstance(context.get("context_section"), str)
+                    else None,
+                    "context_type": context.get("context_type") if isinstance(context.get("context_type"), str) else None,
+                    "fetched_at": row.get("fetched_at"),
+                    "created_at": row.get("created_at"),
+                    "metadata": merged_metadata,
+                    "ingest_status": row.get("ingest_status"),
+                    "hosted_content_type": row.get("hosted_content_type"),
+                    "link_id": row.get("link_id"),
+                    "media_asset_id": row.get("media_asset_id"),
+                    "logo_link_is_primary": bool(row.get("link_is_primary"))
+                    if str(row.get("link_kind") or "").strip().lower() == "logo"
+                    else None,
+                    "people_count": _read_people_count(context.get("people_count")),
+                    "people_count_source": _read_people_count_source(context.get("people_count_source")),
+                    **_thumbnail_crop_fields(thumbnail_crop),
+                },
+            )
+            continue
+
         metadata = _metadata_dict(row.get("metadata"))
         source_url = _pick_url_candidate(_read_metadata_source_url(metadata), row.get("url"))
         _push_asset(
@@ -1003,13 +1044,8 @@ def _get_show_assets_impl(
             },
         )
 
-    filtered_assets = (
-        [asset for asset in assets if str(asset.get("source") or "").strip().lower() in normalized_sources]
-        if normalized_sources
-        else assets
-    )
     _log_asset_source_timings("show-assets", show_id=show_id, timings=source_timings)
-    return filtered_assets[normalized_offset : normalized_offset + normalized_limit], query_count
+    return assets, query_count
 
 
 def get_show_season_assets(

@@ -537,7 +537,13 @@ def _raise_if_shared_account_stage_cancelled(
             return
         run_status = str(run_state.get("status") or "").strip().lower() or None
 
-    cancel_scope = "job" if job_status == "cancelled" else "run" if run_status == "cancelled" else None
+    cancel_scope = (
+        "job"
+        if job_status in {"cancelled", "cancelling"}
+        else "run"
+        if run_status in {"cancelled", "cancelling"}
+        else None
+    )
     if not cancel_scope:
         return
 
@@ -12466,11 +12472,11 @@ def _abort_claimed_job_if_cancelled(
     account: str,
 ) -> dict[str, Any] | None:
     job_state = pg.fetch_one("select status from social.scrape_jobs where id = %s", [job_id]) or {}
-    job_is_cancelled = str(job_state.get("status") or "").strip().lower() == "cancelled"
+    job_is_cancelled = str(job_state.get("status") or "").strip().lower() in {"cancelled", "cancelling"}
     run_is_cancelled = False
     if run_id:
         run_state = pg.fetch_one("select status from social.scrape_runs where id = %s", [run_id]) or {}
-        run_is_cancelled = str(run_state.get("status") or "").strip().lower() == "cancelled"
+        run_is_cancelled = str(run_state.get("status") or "").strip().lower() in {"cancelled", "cancelling"}
     if not job_is_cancelled and not run_is_cancelled:
         return None
 
@@ -14511,7 +14517,7 @@ def recover_stale_running_jobs(
         f"""
         SELECT EXISTS(
             SELECT 1 FROM social.scrape_jobs j
-            WHERE j.status = 'running'
+            WHERE j.status in ('running', 'cancelling')
               AND (
                 coalesce(j.heartbeat_at, j.started_at, j.claimed_at, j.created_at)
                   < now() - (({stale_seconds_expr}) * interval '1 second')
@@ -14580,6 +14586,7 @@ def recover_stale_running_jobs(
             j.run_id::text as run_id,
             j.platform,
             coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type, '') as stage,
+            (j.status = 'cancelling') as was_cancelling,
             lower(coalesce(
               nullif(trim(j.config->>'account'), ''),
               nullif(trim(j.config->>'account_handle'), ''),
@@ -14698,7 +14705,7 @@ def recover_stale_running_jobs(
               else '[]'::jsonb
             end as comments_recovery_target_source_ids
           from social.scrape_jobs j
-          where j.status = 'running'
+          where j.status in ('running', 'cancelling')
             and (
               coalesce(j.heartbeat_at, j.started_at, j.claimed_at, j.created_at) <
                 now() - (({stale_seconds_expr}) * interval '1 second')
@@ -14745,8 +14752,11 @@ def recover_stale_running_jobs(
           select
             stale_candidates.*,
             (
-              stale_candidates.attempt_count < stale_candidates.max_attempts
+              stale_candidates.was_cancelling = false
+              and stale_candidates.attempt_count < stale_candidates.max_attempts
               or (
+                stale_candidates.was_cancelling = false
+                and
                 stale_candidates.stage = %s
                 and stale_candidates.post_classify_stale_heartbeat_retry_count < %s
               )
@@ -14758,6 +14768,7 @@ def recover_stale_running_jobs(
         update social.scrape_jobs as j
         set
           status = case
+            when stale_jobs.was_cancelling then 'cancelled'
             when stale_jobs.should_retry then 'retrying'
             else 'failed'
           end,
@@ -14789,6 +14800,10 @@ def recover_stale_running_jobs(
             else j.available_at
           end,
           error_message = case
+            when stale_jobs.was_cancelling then format(
+              'cancelled_stale_timeout: cancellation not observed for >= %%s seconds',
+              ({stale_seconds_expr})::int
+            )
             when stale_jobs.terminal_modal_invocation then format(
               'modal_invocation_terminal: remote invocation status=%%s',
               lower(coalesce(j.metadata #>> '{{dispatch,remote_invocation_status}}', 'unknown'))
@@ -14806,27 +14821,33 @@ def recover_stale_running_jobs(
           worker_id = null,
           heartbeat_at = now(),
           last_error_code = case
+            when stale_jobs.was_cancelling then 'cancelled_stale_timeout'
             when stale_jobs.terminal_modal_invocation then 'modal_invocation_terminal'
             when stale_jobs.stale_worker_claim then 'stale_worker_claim'
             else 'stale_heartbeat_timeout'
           end,
           last_error_class = case
+            when stale_jobs.was_cancelling then 'CancelledStaleTimeout'
             when stale_jobs.terminal_modal_invocation then 'ModalInvocationTerminal'
             when stale_jobs.stale_worker_claim then 'StaleWorkerClaim'
             else 'HeartbeatTimeout'
           end,
           metadata = coalesce(j.metadata, '{{}}'::jsonb) || jsonb_build_object(
             'error_code', case
+              when stale_jobs.was_cancelling then 'cancelled_stale_timeout'
               when stale_jobs.terminal_modal_invocation then 'modal_invocation_terminal'
               when stale_jobs.stale_worker_claim then 'stale_worker_claim'
               else 'stale_heartbeat_timeout'
             end,
             'error_class', case
+              when stale_jobs.was_cancelling then 'CancelledStaleTimeout'
               when stale_jobs.terminal_modal_invocation then 'ModalInvocationTerminal'
               when stale_jobs.stale_worker_claim then 'StaleWorkerClaim'
               else 'HeartbeatTimeout'
             end,
-            'retryable', (j.attempt_count < j.max_attempts),
+            'retryable', case when stale_jobs.was_cancelling then false else (j.attempt_count < j.max_attempts) end,
+            'cancelled', stale_jobs.was_cancelling,
+            'cancel_scope', case when stale_jobs.was_cancelling then 'job' else null end,
             'stale_heartbeat_timeout_seconds', case
               when stale_jobs.terminal_modal_invocation or stale_jobs.stale_worker_claim then null
               else ({stale_seconds_expr})::int
@@ -14884,6 +14905,7 @@ def recover_stale_running_jobs(
             post_classify_stale_retry_limit,
             stale_limit,
             INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+            *stale_seconds_params,
             worker_stale_seconds,
             *stale_seconds_params,
             *stale_seconds_params,
@@ -48713,9 +48735,9 @@ def cancel_run(season_id: str, run_id: str, *, cancelled_by: str | None = None) 
         """
         update social.scrape_runs
         set
-          status = 'cancelled',
+          status = 'cancelling',
           cancelled_at = now(),
-          completed_at = now(),
+          completed_at = null,
           summary = coalesce(summary, '{}'::jsonb) || jsonb_build_object('cancelled_by', %s)
         where id = %s
         returning id::text
@@ -48726,29 +48748,55 @@ def cancel_run(season_id: str, run_id: str, *, cancelled_by: str | None = None) 
         """
         update social.scrape_jobs
         set
-          status = 'cancelled',
-          completed_at = now(),
-          error_message = coalesce(error_message, 'Cancelled by user request')
+          status = case
+            when status in ('running', 'cancelling') then 'cancelling'
+            else 'cancelled'
+          end,
+          completed_at = case
+            when status in ('running', 'cancelling') then completed_at
+            else now()
+          end,
+          error_message = coalesce(error_message, 'Cancelled by user request'),
+          metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object(
+            'cancel_reason', 'run_cancelled_by_admin',
+            'cancelled_by', %s::text,
+            'cancelled_at', now()
+          )
         where run_id = %s
           and status in ('queued', 'pending', 'retrying', 'running', 'cancelling')
-        returning id::text, run_id::text as run_id
+        returning id::text, run_id::text as run_id, status
         """,
-        [run_id],
+        [cancelled_by, run_id],
     )
-    cancelled_job_ids = [str(row.get("id") or "").strip() for row in cancelled_jobs if str(row.get("id") or "").strip()]
-    for job_id in cancelled_job_ids:
+    affected_job_ids = [str(row.get("id") or "").strip() for row in cancelled_jobs if str(row.get("id") or "").strip()]
+    terminal_cancelled_job_ids = [
+        str(row.get("id") or "").strip()
+        for row in cancelled_jobs
+        if str(row.get("id") or "").strip() and str(row.get("status") or "").strip().lower() == "cancelled"
+    ]
+    cancelling_job_ids = [
+        str(row.get("id") or "").strip()
+        for row in cancelled_jobs
+        if str(row.get("id") or "").strip() and str(row.get("status") or "").strip().lower() == "cancelling"
+    ]
+    for job_id in terminal_cancelled_job_ids:
         _clear_worker_heartbeat_for_job(
             job_id=job_id,
             status="idle",
             metadata={"source": "cancel_run", "job_status": "cancelled"},
         )
-    summary = _update_run_summary(run_id, force_recompute=True)
-    _invalidate_week_detail_cache_after_run_terminal_status()
+    summary = _finalize_run_status(run_id, force_recompute=True)
+    final_status = "cancelling" if cancelling_job_ids else "cancelled"
+    if final_status == "cancelled":
+        _invalidate_week_detail_cache_after_run_terminal_status()
     return {
         "run_id": run_id,
         "season_id": season_id,
-        "status": "cancelled",
-        "cancelled_jobs": len(cancelled_job_ids),
+        "status": final_status,
+        "cancelled_jobs": len(affected_job_ids),
+        "cancelled_job_ids": affected_job_ids,
+        "cancelling_jobs": len(cancelling_job_ids),
+        "cancelling_job_ids": cancelling_job_ids,
         "summary": summary,
     }
 

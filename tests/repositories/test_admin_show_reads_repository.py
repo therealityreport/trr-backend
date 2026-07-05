@@ -1261,6 +1261,7 @@ def test_get_show_assets_preserves_logo_fields_and_dedupes_show_images(monkeypat
         if "from core.media_links as ml" in sql and "ml.entity_type = 'show'" in sql:
             return [
                 {
+                    "origin_table": "media_assets",
                     "link_id": "link-1",
                     "link_kind": "logo",
                     "link_is_primary": True,
@@ -1289,24 +1290,9 @@ def test_get_show_assets_preserves_logo_fields_and_dedupes_show_images(monkeypat
                     "ingest_status": "hosted",
                     "fetched_at": "2024-01-02T00:00:00Z",
                     "created_at": "2024-01-03T00:00:00Z",
-                }
-            ]
-        if "from core.show_images" in sql:
-            return [
-                {
-                    "id": "show-image-duplicate",
-                    "source": "tmdb",
-                    "kind": "logo",
-                    "image_type": None,
-                    "url": "https://tmdb.example.com/logo-duplicate.jpg",
-                    "url_original": None,
-                    "hosted_url": "https://cdn.example.com/logo.jpg",
-                    "width": 1200,
-                    "height": 800,
-                    "created_at": "2024-01-04T00:00:00Z",
-                    "metadata": None,
                 },
                 {
+                    "origin_table": "show_images",
                     "id": "show-image-2",
                     "source": "tmdb",
                     "kind": "poster",
@@ -1326,7 +1312,7 @@ def test_get_show_assets_preserves_logo_fields_and_dedupes_show_images(monkeypat
 
     assets, query_count = repo._get_show_assets_impl("show-1", limit=10, offset=0)
 
-    assert query_count == 2
+    assert query_count == 1
     assert [asset["id"] for asset in assets] == ["media-1", "show-image-2"]
     assert assets[0]["source"] == "bravotv.com"
     assert assets[0]["source_url"] == "https://www.bravotv.com/the-daily-dish"
@@ -1348,28 +1334,11 @@ def test_get_show_assets_paginates_after_fetch_limit(monkeypatch: pytest.MonkeyP
     def fake_fetch_all(query: str, params=None, cur=None):
         sql = str(query)
         if "from core.media_links as ml" in sql and "ml.entity_type = 'show'" in sql:
-            captured_limits.append(int(params[1]))
+            captured_limits.append(int(params[-2]))
+            assert int(params[-1]) == 1
             return [
                 {
-                    "link_id": "link-1",
-                    "link_kind": "poster",
-                    "link_is_primary": False,
-                    "context": None,
-                    "media_asset_id": "asset-1",
-                    "asset_id": "asset-1",
-                    "source": "tmdb",
-                    "source_url": "https://tmdb.example.com/1.jpg",
-                    "hosted_url": "https://cdn.example.com/1.jpg",
-                    "hosted_content_type": "image/jpeg",
-                    "width": None,
-                    "height": None,
-                    "caption": None,
-                    "metadata": None,
-                    "ingest_status": "hosted",
-                    "fetched_at": None,
-                    "created_at": None,
-                },
-                {
+                    "origin_table": "media_assets",
                     "link_id": "link-2",
                     "link_kind": "poster",
                     "link_is_primary": False,
@@ -1389,17 +1358,14 @@ def test_get_show_assets_paginates_after_fetch_limit(monkeypatch: pytest.MonkeyP
                     "created_at": None,
                 },
             ]
-        if "from core.show_images" in sql:
-            captured_limits.append(int(params[1]))
-            return []
         raise AssertionError(f"unexpected query: {sql}")
 
     monkeypatch.setattr(repo, "_fetch_all_rows", fake_fetch_all)
 
     assets, query_count = repo._get_show_assets_impl("show-1", limit=1, offset=1)
 
-    assert query_count == 2
-    assert captured_limits == [2, 2]
+    assert query_count == 1
+    assert captured_limits == [1]
     assert [asset["id"] for asset in assets] == ["asset-2"]
     assert assets[0]["source"] == "tmdb.com"
 
@@ -1410,9 +1376,11 @@ def test_get_show_assets_full_path_uses_full_fetch_limit(monkeypatch: pytest.Mon
     def fake_fetch_all(query: str, params=None, cur=None):
         sql = str(query)
         if "from core.media_links as ml" in sql and "ml.entity_type = 'show'" in sql:
-            captured_limits.append(int(params[1]))
+            captured_limits.append(int(params[-2]))
+            assert int(params[-1]) == 0
             return [
                 {
+                    "origin_table": "media_assets",
                     "link_id": "link-1",
                     "link_kind": "logo",
                     "link_is_primary": True,
@@ -1435,19 +1403,16 @@ def test_get_show_assets_full_path_uses_full_fetch_limit(monkeypatch: pytest.Mon
                     "ingest_status": "hosted",
                     "fetched_at": "2024-01-01T00:00:00Z",
                     "created_at": "2024-01-02T00:00:00Z",
-                }
+                },
             ]
-        if "from core.show_images" in sql:
-            captured_limits.append(int(params[1]))
-            return []
         raise AssertionError(f"unexpected query: {sql}")
 
     monkeypatch.setattr(repo, "_fetch_all_rows", fake_fetch_all)
 
     assets, query_count = repo._get_show_assets_impl("show-1", limit=5001, offset=0, full=True)
 
-    assert query_count == 2
-    assert captured_limits == [5001, 5001]
+    assert query_count == 1
+    assert captured_limits == [5001]
     assert len(assets) == 1
     assert assets[0]["source"] == "bravotv.com"
     assert assets[0]["display_url"] == "https://cdn.example.com/logo-card.jpg"
@@ -1706,9 +1671,12 @@ def test_get_show_assets_merges_default_rows_with_dedupe_and_logo_fields(
 
     def fake_fetch_all(query: str, params=None, cur=None):
         if "from core.media_links as ml" in query:
-            captured_limits.append(int(params[1]))
+            captured_limits.append(int(params[-2]))
+            assert int(params[-1]) == 0
+            assert params[2] == ["fanart", "tmdb"]
             return [
                 {
+                    "origin_table": "media_assets",
                     "link_id": "link-1",
                     "link_kind": "logo",
                     "link_is_primary": True,
@@ -1733,25 +1701,9 @@ def test_get_show_assets_merges_default_rows_with_dedupe_and_logo_fields(
                     "ingest_status": "completed",
                     "fetched_at": "2026-03-01T00:00:00Z",
                     "created_at": "2026-03-01T00:00:00Z",
-                }
-            ]
-        if "from core.show_images" in query:
-            captured_limits.append(int(params[1]))
-            return [
-                {
-                    "id": "legacy-duplicate",
-                    "source": "fanart",
-                    "kind": "logo",
-                    "image_type": "logo",
-                    "url": "https://fanart.example.com/logo.png",
-                    "url_original": "https://fanart.example.com/logo-original.png",
-                    "hosted_url": "https://cdn.example.com/logo.png",
-                    "width": 1000,
-                    "height": 300,
-                    "created_at": "2026-03-01T00:00:00Z",
-                    "metadata": {},
                 },
                 {
+                    "origin_table": "show_images",
                     "id": "legacy-poster",
                     "source": "fanart",
                     "kind": "poster",
@@ -1774,8 +1726,8 @@ def test_get_show_assets_merges_default_rows_with_dedupe_and_logo_fields(
 
     assets, query_count = repo._get_show_assets_impl("show-1", limit=10, offset=0, sources=["tmdb", "fanart"])
 
-    assert query_count == 2
-    assert captured_limits == [501, 501]
+    assert query_count == 1
+    assert captured_limits == [10]
     assert len(assets) == 2
     assert assets[0]["id"] == "asset-1"
     assert assets[0]["logo_link_is_primary"] is True
