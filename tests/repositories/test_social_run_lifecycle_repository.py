@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
 
 import pytest
@@ -222,7 +223,7 @@ def test_set_run_status_clears_terminal_timestamps_when_reopened(
 
     social_repo._set_run_status("run-1", "running")
 
-    assert "when %s in ('queued', 'pending', 'retrying', 'running') then null" in str(captured["sql"])
+    assert "when %s in ('queued', 'pending', 'retrying', 'running', 'cancelling') then null" in str(captured["sql"])
     assert captured["params"] == ["running", "running", "running", "running", "running", "running", "run-1"]
 
 
@@ -558,23 +559,41 @@ def test_recover_failed_deferred_comments_followups_repends_and_relaunches(
         lambda *_a, **_k: [{"run_id": "run-x", "config": candidate_config}],
     )
 
+    lock_held = {"value": False}
+    writes: list[dict] = []
+
     @contextmanager
     def fake_advisory_lock(lock_key, *, label, pool_name="default"):
         del lock_key, label, pool_name
-        yield lock_conn
+        lock_held["value"] = True
+        try:
+            yield lock_conn
+        finally:
+            lock_held["value"] = False
 
     monkeypatch.setattr(run_lifecycle.legacy.pg, "advisory_session_lock", fake_advisory_lock)
-    monkeypatch.setattr(
-        run_lifecycle.legacy.pg,
-        "fetch_one",
-        lambda *_a, **_k: {"run_id": "run-x", "status": "completed", "config": candidate_config, "summary": {}},
-    )
-    monkeypatch.setattr(run_lifecycle, "_merge_run_config", lambda *_a, **_k: None)
+
+    def fake_fetch_one(sql: str, params=None, *, conn=None, **_kwargs):
+        normalized = " ".join(sql.split()).lower()
+        if normalized.startswith("select"):
+            assert conn is lock_conn
+            return {"run_id": "run-x", "status": "completed", "config": candidate_config, "summary": {}}
+        if normalized.startswith("update"):
+            assert conn is lock_conn
+            payload = json.loads(params[0])
+            writes.append(payload)
+            updated_config = {"deferred_comments_followup": payload["deferred_comments_followup"]}
+            return {"status": "completed", "config": updated_config, "summary": {}}
+        raise AssertionError(f"unexpected SQL: {normalized}")
+
+    monkeypatch.setattr(run_lifecycle.legacy.pg, "fetch_one", fake_fetch_one)
 
     launched: list[dict] = []
 
     def _fake_launch(*, run_id, run_status, run_config, summary, conn=None):
-        del run_id, run_status, summary, conn
+        del run_id, run_status, summary
+        assert conn is None
+        assert lock_held["value"] is False
         launched.append(dict(run_config.get("deferred_comments_followup") or {}))
         return {"started": True}
 
@@ -584,10 +603,69 @@ def test_recover_failed_deferred_comments_followups_repends_and_relaunches(
 
     assert result["enabled"] is True
     assert result["retried"] == 1
+    assert writes[0]["deferred_comments_followup"]["state"] == "pending"
     assert launched and launched[0]["state"] == "pending"
     assert launched[0]["retry_attempts"] == 1
     assert launched[0]["error_message"] is None
     assert launched[0]["failed_at"] is None
+
+
+def test_recover_failed_deferred_comments_followups_restores_failed_when_launch_skips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SOCIAL_DEFERRED_COMMENTS_FOLLOWUP_RETRY_ENABLED", "1")
+    lock_conn = object()
+    stored_followup = {
+        "state": "failed",
+        "retryable": True,
+        "failed_at": "2020-01-01T00:00:00+00:00",
+        "platform": "instagram",
+        "account_handle": "bravotv",
+        "retry_attempts": 0,
+    }
+    candidate_config = {"deferred_comments_followup": stored_followup}
+    writes: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        run_lifecycle.legacy.pg,
+        "fetch_all",
+        lambda *_a, **_k: [{"run_id": "run-skip", "config": candidate_config}],
+    )
+
+    @contextmanager
+    def fake_advisory_lock(lock_key, *, label, pool_name="default"):
+        del lock_key, label, pool_name
+        yield lock_conn
+
+    def fake_fetch_one(sql: str, params=None, *, conn=None, **_kwargs):
+        normalized = " ".join(sql.split()).lower()
+        if normalized.startswith("select"):
+            return {"run_id": "run-skip", "status": "completed", "config": candidate_config, "summary": {}}
+        if normalized.startswith("update"):
+            payload = json.loads(params[0])
+            expected_state = params[2]
+            writes.append({"expected_state": expected_state, "payload": payload, "conn": conn})
+            return {
+                "status": "completed",
+                "config": {"deferred_comments_followup": payload["deferred_comments_followup"]},
+                "summary": {},
+            }
+        raise AssertionError(f"unexpected SQL: {normalized}")
+
+    monkeypatch.setattr(run_lifecycle.legacy.pg, "advisory_session_lock", fake_advisory_lock)
+    monkeypatch.setattr(run_lifecycle.legacy.pg, "fetch_one", fake_fetch_one)
+    monkeypatch.setattr(run_lifecycle, "_maybe_start_deferred_comments_followup", lambda **_kwargs: None)
+
+    result = run_lifecycle.recover_failed_deferred_comments_followups()
+
+    assert result["retried"] == 0
+    assert result["skipped"] == 1
+    assert [write["expected_state"] for write in writes] == ["failed", "pending"]
+    assert writes[0]["conn"] is lock_conn
+    assert writes[1]["conn"] is None
+    restored = writes[1]["payload"]["deferred_comments_followup"]
+    assert restored["state"] == "failed"
+    assert restored["retryable_reason"] == "deferred_retry_launch_skipped"
 
 
 def test_recover_failed_deferred_comments_followups_respects_backoff_and_cap(
@@ -597,9 +675,7 @@ def test_recover_failed_deferred_comments_followups_respects_backoff_and_cap(
     # cap is marked failed_exhausted and never relaunched.
     monkeypatch.setenv("SOCIAL_DEFERRED_COMMENTS_FOLLOWUP_RETRY_ENABLED", "1")
     recent_iso = run_lifecycle.legacy._iso(run_lifecycle.legacy._now_utc())
-    backoff_candidate = {
-        "deferred_comments_followup": {"state": "failed", "retryable": True, "failed_at": recent_iso}
-    }
+    backoff_candidate = {"deferred_comments_followup": {"state": "failed", "retryable": True, "failed_at": recent_iso}}
     monkeypatch.setattr(
         run_lifecycle.legacy.pg,
         "fetch_all",
@@ -855,6 +931,57 @@ def test_finalize_run_status_cancelled_skips_followup(
     payload = run_lifecycle._finalize_run_status("run-1")
 
     assert payload == {"active_jobs": 0, "failed_jobs": 0, "stage_counts": {}}
+
+
+def test_finalize_run_status_cancelling_run_without_open_jobs_becomes_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock_conn = object()
+    statuses: list[str] = []
+
+    @contextmanager
+    def fake_advisory_lock(lock_key, *, label, pool_name="default"):
+        del lock_key, label, pool_name
+        yield lock_conn
+
+    def fake_fetch_one(sql: str, params=None, *, conn=None, **_kwargs):
+        del params, conn
+        normalized = " ".join(sql.split()).lower()
+        if "select status, config from social.scrape_runs" in normalized:
+            return {"status": "cancelling", "config": {}}
+        return {}
+
+    monkeypatch.setattr(run_lifecycle.legacy.pg, "advisory_session_lock", fake_advisory_lock)
+    monkeypatch.setattr(run_lifecycle.legacy.pg, "fetch_one", fake_fetch_one)
+    monkeypatch.setattr(
+        run_lifecycle,
+        "_update_run_summary",
+        lambda *_args, **_kwargs: {"active_jobs": 0, "failed_jobs": 0, "stage_counts": {}},
+    )
+    monkeypatch.setattr(
+        run_lifecycle,
+        "_run_job_status_breakdown",
+        lambda *_args, **_kwargs: {"running_jobs": 0, "queued_jobs": 0, "cancelling_jobs": 0},
+    )
+    monkeypatch.setattr(run_lifecycle, "_set_run_status", lambda _run_id, status, **_kwargs: statuses.append(status))
+    monkeypatch.setattr(run_lifecycle, "_maybe_start_deferred_comments_followup", lambda **_kwargs: None)
+    monkeypatch.setattr(run_lifecycle.legacy, "_resolve_pipeline_ingest_mode", lambda value: value)
+    monkeypatch.setattr(
+        run_lifecycle.legacy,
+        "_maybe_enqueue_shared_catalog_classify_jobs_after_fetch",
+        lambda *_args, **_kwargs: 0,
+    )
+    monkeypatch.setattr(
+        run_lifecycle.legacy,
+        "_shared_catalog_fetch_has_terminal_error",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(run_lifecycle.legacy, "_column_exists", lambda *_args, **_kwargs: False)
+
+    payload = run_lifecycle._finalize_run_status("run-1")
+
+    assert payload == {"active_jobs": 0, "failed_jobs": 0, "stage_counts": {}}
+    assert statuses == ["cancelled"]
 
 
 def test_recover_unfinalized_terminal_runs_refinalizes_stuck_runs(

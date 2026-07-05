@@ -101,12 +101,16 @@ def test_launch_instagram_backfill_bootstraps_when_catalog_rows_exist_but_materi
         )
 
         assert payload["catalog_bootstrap_required"] is True
-        assert payload["comments_deferred_until_catalog_complete"] is True
+        assert payload["comments_deferred_until_catalog_complete"] is False
+        assert payload["comments_streaming_enabled"] is True
         assert payload["effective_selected_tasks"] == ["post_details", "comments", "media"]
         assert len(catalog_calls) == 1
         assert catalog_calls[0]["social_account_post_details_only"] is False
         assert comments_calls == []
-        assert merged_updates[-1]["deferred_comments_followup"]["state"] == "pending"
+        assert merged_updates[-1]["comments_streaming_enabled"] is True
+        assert merged_updates[-1]["comments_streaming_state"] == "started"
+        assert merged_updates[-1]["comments_streaming_source"] == "catalog_batch_persist"
+        assert merged_updates[-1]["deferred_comments_followup"] is None
     finally:
         (
             db_client.schema("social")

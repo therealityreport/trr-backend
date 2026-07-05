@@ -2,6 +2,10 @@
 
 **Status:** Active Backfill Posts post-discovery lane. Last reviewed: 2026-06-08.
 
+For shared Scrapling process rules, optional browser tuning envs, and
+redaction-safe metadata expectations across social lanes, see
+[Scrapling Social Jobs](/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/workspace/scrapling-social-jobs.md).
+
 ## What this lane does
 
 - Uses Scrapling/Patchright to warm up an Instagram profile page (`https://www.instagram.com/{username}/`), solving challenges and extracting runtime tokens (`lsd`, `bloks_version`, `__spin_*`).

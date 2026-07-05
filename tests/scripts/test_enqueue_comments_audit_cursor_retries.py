@@ -20,7 +20,17 @@ def test_build_payload_dry_run_selects_eligible_audit_rows(monkeypatch) -> None:
         },
     )
 
-    args = cli._parse_args(["--account", "bravotv", "--json"])
+    args = cli._parse_args(
+        [
+            "--account",
+            "bravotv",
+            "--date-start",
+            "2026-01-01",
+            "--date-end",
+            "2027-01-01",
+            "--json",
+        ]
+    )
     payload = cli._build_payload(args)
 
     assert payload["mode"] == "dry_run"
@@ -30,6 +40,10 @@ def test_build_payload_dry_run_selects_eligible_audit_rows(monkeypatch) -> None:
     assert calls[0]["dry_run"] is True
     assert calls[0]["batch_size"] == 1
     assert calls[0]["attach_to_active_run"] is True
+    assert calls[0]["max_comments_per_post"] == 0
+    assert calls[0]["comments_load_strategy"] == "public_relay"
+    assert calls[0]["date_start"] == "2026-01-01"
+    assert calls[0]["date_end"] == "2027-01-01"
 
 
 def test_build_payload_enqueue_threads_batch_size(monkeypatch) -> None:
@@ -64,4 +78,5 @@ def test_build_payload_enqueue_threads_batch_size(monkeypatch) -> None:
     assert calls[0]["account_handle"] == "bravotv"
     assert calls[0]["batch_size"] == 1
     assert calls[0]["max_comments_per_post"] == 0
+    assert calls[0]["comments_load_strategy"] == "public_relay"
     assert calls[0]["dry_run"] is False

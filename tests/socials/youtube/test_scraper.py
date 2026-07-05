@@ -51,6 +51,104 @@ def test_apply_surface_guaranteed_limit_overrides_small_cap_when_both_surfaces_p
     assert {"videos", "shorts"} <= {scraper._video_surface(video) for video in limited}
 
 
+def test_apply_surface_guaranteed_limit_includes_posts_surface() -> None:
+    scraper = YouTubeScraper()
+    videos = [
+        _build_video("video-1", surface="videos", published_at=1_000),
+        _build_video("short-1", surface="shorts", published_at=900),
+        _build_video("post-1", surface="posts", published_at=800),
+    ]
+
+    limited, override_applied, effective_limit = scraper._apply_surface_guaranteed_limit(videos, max_results=1)
+
+    assert override_applied is True
+    assert effective_limit == 3
+    assert len(limited) == 3
+    assert {"videos", "shorts", "posts"} == {scraper._video_surface(video) for video in limited}
+
+
+def test_schema_org_metadata_extracts_youtube_community_post_date() -> None:
+    scraper = YouTubeScraper()
+    html = """
+    <html>
+      <head>
+        <script type="application/ld+json">
+          {
+            "@type": "https://schema.org/DiscussionForumPosting",
+            "url": "https://www.youtube.com/post/UgkxT1TZohmogvmp7Y0HJz3JJ_vyJbi6VFyF",
+            "datePublished": "2026-06-25T14:15:18.656888-07:00",
+            "headline": "Post from Bravo",
+            "text": "BOTH #RHOA reunion seating charts have dropped! What do you think?",
+            "image": "https://yt3.ggpht.com/post-image",
+            "author": {"name": "Bravo", "url": "https://www.youtube.com/@bravo"}
+          }
+        </script>
+      </head>
+    </html>
+    """
+
+    metadata = scraper._extract_schema_org_post_metadata(html)
+
+    assert metadata["url"] == "https://www.youtube.com/post/UgkxT1TZohmogvmp7Y0HJz3JJ_vyJbi6VFyF"
+    assert metadata["datePublished"] == "2026-06-25T14:15:18.656888-07:00"
+    assert metadata["published_at"] == int(datetime.fromisoformat("2026-06-25T14:15:18.656888-07:00").timestamp())
+    assert metadata["text"] == "BOTH #RHOA reunion seating charts have dropped! What do you think?"
+    assert metadata["image_urls"] == ["https://yt3.ggpht.com/post-image"]
+    assert metadata["author_name"] == "Bravo"
+
+
+def test_parse_post_renderer_uses_schema_org_date_and_media(monkeypatch) -> None:
+    scraper = YouTubeScraper()
+    post_id = "UgkxT1TZohmogvmp7Y0HJz3JJ_vyJbi6VFyF"
+    schema_ts = int(datetime.fromisoformat("2026-06-25T14:15:18.656888-07:00").timestamp())
+    monkeypatch.setattr(
+        scraper,
+        "_fetch_post_schema_org_metadata",
+        lambda *_args, **_kwargs: {
+            "url": f"https://www.youtube.com/post/{post_id}",
+            "published_at": schema_ts,
+            "datePublished": "2026-06-25T14:15:18.656888-07:00",
+            "headline": "Post from Bravo",
+            "text": "BOTH #RHOA reunion seating charts have dropped! What do you think?",
+            "image_urls": ["https://yt3.ggpht.com/schema-image"],
+            "author_name": "Bravo",
+        },
+    )
+    renderer = {
+        "postId": post_id,
+        "contentText": {"runs": [{"text": "fallback text"}]},
+        "publishedTimeText": {"simpleText": "3 days ago"},
+        "authorText": {"runs": [{"text": "Bravo"}]},
+        "voteCount": "1.2K",
+        "replyCount": "54",
+        "backstageAttachment": {
+            "postMultiImageRenderer": {
+                "images": [
+                    {
+                        "backstageImageRenderer": {
+                            "image": {"thumbnails": [{"url": "https://yt3.ggpht.com/native-image"}]}
+                        }
+                    }
+                ]
+            }
+        },
+    }
+
+    video = scraper._parse_post_renderer(renderer, YouTubeScrapeConfig(channel_handle="bravo", keywords=["#RHOA"]))
+
+    assert video is not None
+    assert video.video_id == post_id
+    assert video.url == f"https://www.youtube.com/post/{post_id}"
+    assert video.source_surface == "posts"
+    assert video.published_at == schema_ts
+    assert video.date_time == datetime.fromtimestamp(schema_ts, tz=UTC).strftime("%Y-%m-%d %H:%M:%S")
+    assert video.description == "BOTH #RHOA reunion seating charts have dropped! What do you think?"
+    assert video.thumbnail_url == "https://yt3.ggpht.com/schema-image"
+    assert video.media_urls == ["https://yt3.ggpht.com/schema-image", "https://yt3.ggpht.com/native-image"]
+    assert video.tags == ["#RHOA"]
+    assert video.schema_org["datePublished"] == "2026-06-25T14:15:18.656888-07:00"
+
+
 def test_fetch_continuation_uses_bounded_continuation_timeout(monkeypatch) -> None:
     scraper = YouTubeScraper()
     captured: dict[str, object] = {}
@@ -446,7 +544,7 @@ def test_scrape_skips_ytdlp_channel_fallback_for_bounded_window_no_hits(monkeypa
         scraper.last_retrieval_meta["yt_dlp_channel_fallback_skip_reason"]
         == "bounded_window_no_hits_after_channel_scan"
     )
-    assert scraper.last_retrieval_meta["posts_checked"] == 48
+    assert scraper.last_retrieval_meta["posts_checked"] == 72
 
 
 def test_scrape_applies_max_results_before_ytdlp_enrichment(monkeypatch) -> None:
@@ -581,8 +679,10 @@ def test_scrape_skips_continuations_after_max_results_target(monkeypatch) -> Non
                 _build_video("video-2", surface="videos", published_at=900),
                 _build_video("video-3", surface="videos", published_at=800),
             ]
-        else:
+        elif surface == "shorts":
             videos = [_build_video("short-1", surface="shorts", published_at=950)]
+        else:
+            videos = [_build_video("post-1", surface="posts", published_at=850)]
         return videos, {
             "checked_renderers": len(videos),
             "before_window_items": 0,
@@ -615,9 +715,9 @@ def test_scrape_skips_continuations_after_max_results_target(monkeypatch) -> Non
         )
     )
 
-    assert fetched_surfaces == ["videos", "shorts"]
-    assert len(videos) == 2
-    assert {scraper._video_surface(video) for video in videos} == {"videos", "shorts"}
+    assert fetched_surfaces == ["videos", "shorts", "posts"]
+    assert len(videos) == 3
+    assert {scraper._video_surface(video) for video in videos} == {"videos", "shorts", "posts"}
     assert scraper.last_retrieval_meta["continuation_pages"] == 0
 
 
@@ -762,7 +862,7 @@ def test_scrape_applies_bounded_max_pages_across_surfaces(monkeypatch) -> None:
     assert videos == []
     assert fetched_surfaces == ["videos"]
     assert scraper.last_retrieval_meta["continuation_pages"] == 1
-    assert scraper.last_retrieval_meta["continuation_pages_by_surface"] == {"videos": 1, "shorts": 0}
+    assert scraper.last_retrieval_meta["continuation_pages_by_surface"] == {"videos": 1, "shorts": 0, "posts": 0}
     assert scraper.last_retrieval_meta["scan_capped_reason"] == "max_pages"
 
 

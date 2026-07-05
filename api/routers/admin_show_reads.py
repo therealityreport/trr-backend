@@ -7,6 +7,7 @@ import os
 import time
 from threading import Event, Lock
 from typing import Any
+from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.encoders import jsonable_encoder
@@ -39,6 +40,13 @@ _SEASON_BACKDROPS_CACHE_TTL_SECONDS = max(
     1,
 )
 _ASSET_CURSOR_PREFIX = "offset:"
+
+
+def _require_uuid_param(value: str, name: str) -> str:
+    try:
+        return str(UUID(str(value).strip()))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid {name}") from exc
 
 
 def _cache_get(key: str) -> dict[str, Any] | None:
@@ -290,6 +298,7 @@ def get_people_home(
 
 @router.get("/shows/{show_id}")
 def get_admin_show(show_id: str, _: InternalAdminUser = None) -> dict[str, Any]:
+    show_id = _require_uuid_param(show_id, "show_id")
     started_at = time.perf_counter()
     cache_key = f"show:{show_id}"
 
@@ -318,6 +327,7 @@ def get_admin_show_assets(
     sources: str | None = Query(None),
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
+    show_id = _require_uuid_param(show_id, "show_id")
     started_at = time.perf_counter()
     normalized_sources = ",".join(value.strip().lower() for value in (sources or "").split(",") if value.strip())
     requested_offset = 0 if full else (_decode_asset_cursor(cursor) if cursor else offset)
@@ -375,6 +385,7 @@ def list_admin_show_seasons(
     include_episode_signal: bool = Query(False),
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
+    show_id = _require_uuid_param(show_id, "show_id")
     started_at = time.perf_counter()
     cache_key = f"show-seasons:{show_id}:{limit}:{offset}:{1 if include_episode_signal else 0}"
 
@@ -417,6 +428,7 @@ def get_admin_show_season_assets(
     sources: str | None = Query(None),
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
+    show_id = _require_uuid_param(show_id, "show_id")
     started_at = time.perf_counter()
     normalized_sources = ",".join(value.strip().lower() for value in (sources or "").split(",") if value.strip())
     requested_offset = 0 if full else (_decode_asset_cursor(cursor) if cursor else offset)
@@ -571,6 +583,7 @@ def get_admin_show_cast(
     eligibility_mode: str = Query("default"),
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
+    show_id = _require_uuid_param(show_id, "show_id")
     started_at = time.perf_counter()
     cache_key = (
         f"show-cast:{show_id}:{limit}:{offset}:{min_episodes if min_episodes is not None else ''}:"
@@ -605,6 +618,7 @@ def get_admin_show_credits(
     show_id: str,
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
+    show_id = _require_uuid_param(show_id, "show_id")
     started_at = time.perf_counter()
     cache_key = f"show-credits:{show_id}"
     payload, query_count, cache_status = _get_or_build_cached_payload(
@@ -632,6 +646,7 @@ def get_admin_season_cast(
     photo_fallback: str = Query("none"),
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
+    show_id = _require_uuid_param(show_id, "show_id")
     started_at = time.perf_counter()
     cache_key = (
         f"season-cast:{show_id}:{season_number}:{limit}:{offset}:{1 if include_archive_only else 0}:{photo_fallback}"
@@ -661,6 +676,7 @@ def get_admin_season_cast(
 
 @router.post("/shows/{show_id}/cache/invalidate")
 def invalidate_admin_show_read_cache(show_id: str, _: InternalAdminUser = None) -> dict[str, bool]:
+    show_id = _require_uuid_param(show_id, "show_id")
     invalidate_show_read_cache(show_id=show_id)
     logger.info("[admin-show-read] route=invalidate-cache show_id=%s", show_id)
     return {"success": True}

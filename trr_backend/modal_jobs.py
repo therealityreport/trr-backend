@@ -6,6 +6,7 @@ import logging
 import os
 import pathlib
 import socket
+import sys
 import time
 import uuid
 from typing import Final
@@ -117,11 +118,63 @@ _SOCIAL_COMMENTS_RECOVERY_CONCURRENCY_LIMIT = max(
     1,
     int(os.getenv("TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_CONCURRENCY_LIMIT", "4")),
 )
+
+# Phase 2 (DB headroom): guard against scaling comments containers past the DB
+# session-pool ceiling. Each container against the Supavisor SESSION pooler pins
+# 1:1 Postgres backends; per-container demand = default pool + the social_control
+# named pool (both Modal-clamped). The budget (operator-set after reading the
+# dashboard pool size) bounds total comments-lane session demand. 0 = disabled.
+SOCIAL_INSTAGRAM_COMMENTS_DB_SESSION_BUDGET_ENV = "SOCIAL_INSTAGRAM_COMMENTS_DB_SESSION_BUDGET"
+
+
+def comments_db_session_budget_status() -> dict[str, int | bool]:
+    """Compute comments-lane DB session demand vs the configured budget.
+
+    sessions_per_worker = default pool + social_control named pool (the only named
+    pool the comments path opens), both Modal session-pooler clamped. worker_cap
+    covers the comments + recovery container caps. A budget <= 0 disables the
+    check (within_budget=True)."""
+    from trr_backend.db.pg import (
+        DEFAULT_MODAL_NAMED_SESSION_POOLER_MAXCONN,
+        DEFAULT_MODAL_SESSION_POOLER_MAXCONN,
+    )
+
+    sessions_per_worker = DEFAULT_MODAL_SESSION_POOLER_MAXCONN + DEFAULT_MODAL_NAMED_SESSION_POOLER_MAXCONN
+    worker_cap = _SOCIAL_COMMENTS_CONCURRENCY_LIMIT + _SOCIAL_COMMENTS_RECOVERY_CONCURRENCY_LIMIT
+    demand = worker_cap * sessions_per_worker
+    try:
+        budget = int(os.getenv(SOCIAL_INSTAGRAM_COMMENTS_DB_SESSION_BUDGET_ENV, "0"))
+    except ValueError:
+        budget = 0
+    return {
+        "sessions_per_worker": sessions_per_worker,
+        "worker_cap": worker_cap,
+        "demand": demand,
+        "budget": budget,
+        "within_budget": budget <= 0 or demand <= budget,
+    }
+
+
+def _log_comments_db_session_budget() -> None:
+    status = comments_db_session_budget_status()
+    if not status["within_budget"]:
+        logger.error(
+            "[comments-db-session-budget] comments-lane session demand %s exceeds "
+            "%s=%s (worker_cap=%s x sessions_per_worker=%s). Lower the comments/recovery "
+            "container caps or raise the Supavisor session pool before scaling.",
+            status["demand"],
+            SOCIAL_INSTAGRAM_COMMENTS_DB_SESSION_BUDGET_ENV,
+            status["budget"],
+            status["worker_cap"],
+            status["sessions_per_worker"],
+        )
+
+
 _SOCIAL_MEDIA_CONCURRENCY_LIMIT = max(
     1,
-    int(os.getenv("TRR_MODAL_SOCIAL_MEDIA_JOB_CONCURRENCY_LIMIT", "10")),
+    int(os.getenv("TRR_MODAL_SOCIAL_MEDIA_JOB_CONCURRENCY_LIMIT", "1")),
 )
-_SOCIAL_RECOVERY_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_SOCIAL_RECOVERY_CONCURRENCY_LIMIT", "4")))
+_SOCIAL_RECOVERY_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_SOCIAL_RECOVERY_CONCURRENCY_LIMIT", "1")))
 _SOCIAL_PENDING_LAUNCH_RECOVERY_LIMIT = max(
     1,
     int(os.getenv("TRR_MODAL_SOCIAL_PENDING_LAUNCH_RECOVERY_LIMIT", "10")),
@@ -219,6 +272,8 @@ def _instagram_public_first_mode_enabled() -> bool:
     return str(os.getenv("SOCIAL_INSTAGRAM_SCRAPE_MODE") or "public_first").strip().lower() in (
         _INSTAGRAM_PUBLIC_FIRST_MODE_ALIASES
     )
+
+
 _MODAL_LEAN_REQUIREMENTS: Final = _BACKEND_ROOT / "requirements.modal.lean.lock.txt"
 _MODAL_BROWSER_REQUIREMENTS: Final = _BACKEND_ROOT / "requirements.modal.browser.lock.txt"
 _MODAL_VISION_REQUIREMENTS: Final = _BACKEND_ROOT / "requirements.modal.vision.lock.txt"
@@ -244,6 +299,7 @@ _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "TRR_MODAL_APP_NAME": _APP_NAME,
     "TRR_MODAL_API_FUNCTION": _API_FUNCTION_NAME,
     "TRR_MODAL_API_LABEL": _API_LABEL,
+    "TRR_MODAL_MAINTENANCE_OWNER_REQUIRED": "1",
     "TRR_MODAL_ADMIN_OPERATION_FUNCTION": "run_admin_operation_v2",
     "TRR_MODAL_GOOGLE_NEWS_FUNCTION": "run_google_news_sync",
     "TRR_MODAL_REDDIT_REFRESH_FUNCTION": "run_reddit_refresh",
@@ -261,9 +317,17 @@ _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "TRR_MODAL_SOCIALBLADE_FUNCTION": "run_socialblade_scrape",
     "TRR_MODAL_STALE_WORKER_CLEANUP_FUNCTION": "purge_stale_social_worker_heartbeats",
     "TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT": "8",
+    # Phase 4 (GATED — do not raise until the gate passes): comments container cap.
+    # This is the REAL throughput-scaling lever (each container = its own egress +
+    # rate-pace slot), unlike PER_POST_CONCURRENCY below. To flip: raise "4" toward
+    # the target (e.g. "6"/"8") ONLY AFTER (1) the transaction-pooler flight test
+    # is validated (Phase 2) and (2) comments_db_session_budget_status() shows the
+    # new cap stays within_budget. Each added container pins default-pool(2) +
+    # social_control(1) = 3 session-pooler backends; recovery cap scales with it.
     "TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT": "4",
     "TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_CONCURRENCY_LIMIT": "4",
-    "TRR_MODAL_SOCIAL_MEDIA_JOB_CONCURRENCY_LIMIT": "10",
+    "TRR_MODAL_SOCIAL_MEDIA_JOB_CONCURRENCY_LIMIT": "1",
+    "TRR_MODAL_SOCIAL_RECOVERY_CONCURRENCY_LIMIT": "1",
     "TRR_MODAL_GOOGLE_NEWS_CONCURRENCY_LIMIT": "4",
     "TRR_MODAL_REDDIT_REFRESH_CONCURRENCY_LIMIT": "2",
     "TRR_MODAL_VISION_CONCURRENCY_LIMIT": "4",
@@ -276,6 +340,16 @@ _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY": "true",
     "SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY": "false",
     "SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS": "600",
+    # SocialBlade profile scrapes route through the Decodo residential proxy so the
+    # live lane no longer depends on an unproxied Modal egress that Cloudflare 1020s.
+    # The browser warmup must pass Scrapling's supported proxy= option and let
+    # Scrapling solve SocialBlade's Cloudflare interstitial. Sticky Decodo usernames
+    # are intentionally off here because the TRR Decodo gateway rejects the generated
+    # session-scoped username with 407.
+    "SOCIALBLADE_PROXY_PROVIDER": "decodo",
+    "SOCIALBLADE_USE_STICKY_PROXY": "false",
+    "SOCIALBLADE_PROXY_SESSION_TTL_SECONDS": "600",
+    "SOCIALBLADE_SCRAPLING_SOLVE_CLOUDFLARE": "true",
     "INSTAGRAM_BROWSER_NETWORK_POLICY_ENABLED": "true",
     "INSTAGRAM_BROWSER_BLOCK_STATIC_ASSETS": "true",
     "INSTAGRAM_BROWSER_DISABLE_EXTRA_RESOURCES": "true",
@@ -284,21 +358,59 @@ _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "SOCIAL_WORKER_POOL_SHARED_ACCOUNT_DISCOVERY": "3",
     "SOCIAL_WORKER_POOL_SHARED_ACCOUNT_POSTS": "8",
     "SOCIAL_SHARED_ACCOUNT_POSTS_PLATFORM_CAP_INSTAGRAM": "2",
-    "SOCIAL_WORKER_POOL_MEDIA_MIRROR": "10",
+    "SOCIAL_WORKER_POOL_MEDIA_MIRROR": "1",
     "SOCIAL_WORKER_POOL_COMMENT_MEDIA_MIRROR": "1",
-    "SOCIAL_MIRROR_PLATFORM_CAP": "10",
+    "SOCIAL_MIRROR_PLATFORM_CAP": "1",
     "SOCIAL_CATALOG_RUN_IN_FLIGHT_CAP": "8",
     "SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM": "4",
     "SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT": "8",
     "SOCIAL_INSTAGRAM_COMMENTS_MAX_SHARD_COUNT": "1000",
     "SOCIAL_INSTAGRAM_COMMENTS_GLOBAL_RATE_LIMIT_MODE": "advisory",
+    # Phase 4 (GATED): in-job per-post parallelism. SECONDARY lever — all posts in
+    # a job share one sticky egress + one rate slot, so raising this alone yields
+    # little until container-count fan-out (above) is in play; it runs in-process
+    # against the SAME clamped per-container pool, so it adds NO pooler sessions.
+    # Safe to raise toward the cap of 8 once per-egress pacing (Phase 1/3) is live
+    # and a benchmark shows req/s gains without a 429 increase. Keep at "1" until then.
     "SOCIAL_INSTAGRAM_COMMENTS_PER_POST_CONCURRENCY": "1",
-    # Escalate substantial public-incomplete comment targets (expected gap >=
-    # MIN_GAP, default 100) to authenticated/proxy fallback instead of failing the
-    # shard with "require approval". Maximizes comment completeness; MIN_GAP keeps
-    # auth/proxy cost bounded to high-value posts. See comments_scrapling.job_runner
-    # _select_auto_auth_fallback_targets.
-    "SOCIAL_INSTAGRAM_COMMENTS_AUTO_AUTH_FALLBACK": "1",
+    # Throughput (Phase 1): raise the public-relay GraphQL page size from the
+    # baked default 12 to the clamp ceiling 50 (~4x fewer requests per comment).
+    # Safe because the fetcher downgrades to 12 and retries the same cursor when a
+    # doc_id rejects the larger ``first`` (comments_scrapling.fetcher
+    # _try_page_size_downgrade / _try_child_page_size_downgrade). Reversible: unset
+    # or set back to "12".
+    "SOCIAL_INSTAGRAM_COMMENTS_COAUTHOR_GRAPHQL_PAGE_SIZE": "50",
+    "SOCIAL_INSTAGRAM_COMMENTS_COAUTHOR_GRAPHQL_CHILD_PAGE_SIZE": "50",
+    # Keep automatic account-backed escalation disabled. Public incomplete
+    # comment targets should go through the public-to-public recovery lane first;
+    # authenticated/proxy follow-up remains an explicit operator action.
+    "SOCIAL_INSTAGRAM_COMMENTS_AUTO_AUTH_FALLBACK": "0",
+    # Comment-completeness fleet determinism: pin the "scrape all comments"
+    # knobs. The deadlines are BOUNDED per-attempt CHECKPOINTS (not give-ups):
+    # each attempt scrapes a chunk, persists the partial + records a resume
+    # cursor, marks the shard retryable, and resumes from the cursor next attempt.
+    # Combined with gap-tolerance=0 + retry-until-complete this converges to ALL
+    # comments while making durable incremental progress and freeing workers
+    # between chunks. Do NOT set these to 0/unbounded: that holds everything in
+    # memory and persists nothing until post-completion, starving the worker pool
+    # and losing all work on a timeout/crash. Gap tolerances at 0 force
+    # exhaustion-based terminal classification; raised stall/refill/min-gap +
+    # checkpoint caps keep the long tail recoverable. See comments_scrapling.*.
+    "SOCIAL_INSTAGRAM_COMMENT_PAGINATION_MAX_SECONDS": "300",
+    "SOCIAL_INSTAGRAM_REPLY_PAGINATION_MAX_SECONDS": "180",
+    "SOCIAL_INSTAGRAM_REPLY_TAIL_TOTAL_MAX_SECONDS_PER_POST": "180",
+    "SOCIAL_INSTAGRAM_COMMENTS_TERMINAL_GAP_MAX": "0",
+    "SOCIAL_INSTAGRAM_COMMENTS_TERMINAL_GAP_RATIO": "0",
+    "SOCIAL_INSTAGRAM_COMMENTS_RECONCILABLE_GAP_MAX": "0",
+    "SOCIAL_INSTAGRAM_COMMENTS_RECONCILABLE_GAP_RATIO": "0",
+    "SOCIAL_INSTAGRAM_COMMENTS_HIDDEN_UNAVAILABLE_GAP_MAX": "0",
+    "SOCIAL_INSTAGRAM_COMMENTS_INCOMPLETE_STALL_ATTEMPTS": "8",
+    "SOCIAL_INSTAGRAM_COMMENTS_AUTO_AUTH_FALLBACK_MIN_GAP": "1",
+    "SOCIAL_INSTAGRAM_COMMENTS_AUTO_REFILL_LIMIT": "100",
+    "SOCIAL_INSTAGRAM_REPLY_CHECKPOINT_MAX_ITEMS": "1000",
+    "SOCIAL_INSTAGRAM_TOP_LEVEL_CHECKPOINT_MAX_ITEMS": "1000",
+    "SOCIAL_INSTAGRAM_COMMENTS_REVEAL_HIDDEN_WITHOUT_EXPECTED": "1",
+    "SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_RENDERED_DEADLINE_SECONDS": "300",
     "SOCIAL_THREADS_POSTS_SCRAPLING_ENABLED": "true",
     "SOCIAL_THREADS_POSTS_PROXY_PROVIDER": "decodo",
     "SOCIAL_TIKTOK_COMMENT_FETCH_TIMEOUT_SECONDS": "180",
@@ -433,7 +545,9 @@ def _modal_runtime_scheduler_owner_enabled() -> bool:
 
 
 def _modal_maintenance_owner_required() -> bool:
-    return _env_flag("TRR_MODAL_MAINTENANCE_OWNER_REQUIRED", default=False)
+    if _is_local_or_dev_runtime():
+        return _env_flag("TRR_MODAL_MAINTENANCE_OWNER_REQUIRED", default=False)
+    return True
 
 
 def _modal_maintenance_owner_names() -> list[str]:
@@ -460,10 +574,7 @@ def _validate_modal_maintenance_owner_config() -> str | None:
         return None
     owners = _modal_maintenance_owner_names()
     if not owners:
-        raise RuntimeError(
-            "Modal maintenance has no active owner. "
-            + _modal_maintenance_owner_fix_message()
-        )
+        raise RuntimeError("Modal maintenance has no active owner. " + _modal_maintenance_owner_fix_message())
     if len(owners) > 1:
         raise RuntimeError(
             "Modal maintenance has duplicate active owners: "
@@ -503,6 +614,8 @@ def _is_local_or_dev_runtime() -> bool:
     if normalized & _LOCAL_RUNTIME_MARKERS:
         return True
     if _env_flag("TRR_LOCAL_DEV") or _env_flag("TRR_MODAL_ALLOW_DOTENV_FALLBACK"):
+        return True
+    if "pytest" in sys.modules:
         return True
     if os.getenv("PYTEST_CURRENT_TEST"):
         return True
@@ -627,6 +740,10 @@ def _close_db_pools_after_worker(worker_family: str, **metadata: object) -> None
 _validate_modal_maintenance_owner_config()
 _secrets = _resolve_modal_secrets()
 _inject_modal_runtime_defaults()
+# Phase 2: surface a comments-lane DB session-budget breach at container startup
+# (after canonical defaults are injected) so an unsafe concurrency/container-cap
+# config is visible in logs before it can exhaust the Supavisor session pool.
+_log_comments_db_session_budget()
 configure_runtime_observability(service_name="trr-backend-modal-jobs")
 
 app = modal.App(_APP_NAME, image=_image)
@@ -1820,9 +1937,18 @@ def run_socialblade_scrape(
         normalized_source_scope = normalize_socialblade_source_scope(source_scope)
         cookies = load_socialblade_cookies_from_sources()
 
+        def _scrape_primary(normalized_handle: str) -> dict[str, object]:
+            return scrape_socialblade(
+                normalized_handle,
+                cookies,
+                platform=normalized_platform,
+                allow_login_fallback=False,
+                allow_visible_browser_retry=False,
+            )
+
         def _scrape_with_following_sidecar(safe_handle: str) -> dict[str, object]:
             return scrape_socialblade_then_following(
-                lambda normalized_handle: scrape_socialblade(normalized_handle, cookies, platform=normalized_platform),
+                _scrape_primary,
                 handle=safe_handle,
                 platform=normalized_platform,
                 source=source,

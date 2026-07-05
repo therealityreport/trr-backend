@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
 from hashlib import sha1
+from html import unescape
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -82,6 +83,12 @@ TRAILING_DECOR_RE = re.compile(r"[^\w]+$", flags=re.UNICODE)
 WORD_TOKEN_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9']+")
 ACRONYM_TERM_RE = re.compile(r"^[a-z0-9]{2,6}$")
 SEED_POST_ID_RE = re.compile(r"/comments/([a-z0-9]{5,9})(?:/|$)", flags=re.IGNORECASE)
+HTML_ANCHOR_TAG_RE = re.compile(r"</?a(?:\s+[^>]*)?>", flags=re.IGNORECASE)
+HTML_HREF_RE = re.compile(r"""href=(["'])(.*?)\1""", flags=re.IGNORECASE)
+REDDIT_MEDIA_URL_RE = re.compile(
+    r"""https?://[^\s\)"\]<>'`]+?\.(?:jpg|jpeg|png|gif|webp|mp4)(?:\?[^\s\)"\]<>'`]*)?""",
+    flags=re.IGNORECASE,
+)
 
 HINT_STOPWORDS = {
     "a",
@@ -830,6 +837,41 @@ def _extract_seed_post_id(url: str) -> str | None:
     if match:
         return match.group(1).lower()
     return None
+
+
+def _sanitize_reddit_media_url(value: str | None) -> str:
+    normalized = unescape(str(value or "")).strip()
+    if not normalized:
+        return ""
+    normalized = HTML_ANCHOR_TAG_RE.sub("", normalized).split("<", 1)[0].strip()
+    return normalized.strip("\"'")
+
+
+def _reddit_media_type_from_url(value: str) -> str:
+    path = str(value or "").split("?", 1)[0].lower()
+    return "video" if path.endswith(".mp4") else "image"
+
+
+def _extract_reddit_media_urls(value: str | None) -> list[tuple[str, str]]:
+    text = str(value or "")
+    if not text:
+        return []
+
+    candidates: list[str] = []
+    candidates.extend(match.group(2) for match in HTML_HREF_RE.finditer(text))
+    candidates.extend(match.group(0) for match in REDDIT_MEDIA_URL_RE.finditer(text))
+
+    output: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for raw in candidates:
+        normalized = _sanitize_reddit_media_url(raw)
+        if not normalized or normalized in seen:
+            continue
+        if not REDDIT_MEDIA_URL_RE.fullmatch(normalized):
+            continue
+        seen.add(normalized)
+        output.append((normalized, _reddit_media_type_from_url(normalized)))
+    return output
 
 
 def _merge_by_post_id(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3563,16 +3605,11 @@ def _run_detail_sync_phase(
     media_queued = 0
     media_mirrored = 0
     detail_errors: list[dict[str, str]] = []
-    media_url_pattern = re.compile(
-        r'https?://[^\s\)"\]>]+\.(?:jpg|jpeg|png|gif|webp|mp4)(?:\?[^\s\)"\]>]*)?',
-        re.IGNORECASE,
-    )
 
     def _process_single_detail_post(
         post_row: dict[str, Any],
         *,
         has_detail_scraped_at_value: bool,
-        media_re: re.Pattern[str],
     ) -> dict[str, Any]:
         result: dict[str, Any] = {
             "comments_upserted": 0,
@@ -3637,13 +3674,12 @@ def _run_detail_sync_phase(
 
             for comment in comments:
                 for text in (str(comment.get("body") or ""), str(comment.get("body_html") or "")):
-                    for match in media_re.findall(text):
-                        media_urls.append((match, "image"))
+                    media_urls.extend(_extract_reddit_media_urls(text))
 
             unique_media: list[tuple[str, str]] = []
             seen_urls: set[str] = set()
             for url, media_type in media_urls:
-                normalized_url = str(url or "").strip()
+                normalized_url = _sanitize_reddit_media_url(url)
                 if not normalized_url or normalized_url in seen_urls:
                     continue
                 seen_urls.add(normalized_url)
@@ -3706,7 +3742,6 @@ def _run_detail_sync_phase(
                 _process_single_detail_post,
                 row,
                 has_detail_scraped_at_value=has_detail_scraped_at,
-                media_re=media_url_pattern,
             ): row
             for row in target_posts
         }

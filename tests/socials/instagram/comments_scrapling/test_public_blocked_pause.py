@@ -10,8 +10,6 @@ so no live database is required.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 from trr_backend.socials.instagram.comments_scrapling.job_runner import (
     _PUBLIC_BLOCKED_PAUSE_MIN_BLOCKED,
     _PUBLIC_BLOCKED_PAUSE_MIN_CHECKED,
@@ -19,7 +17,6 @@ from trr_backend.socials.instagram.comments_scrapling.job_runner import (
     _recommend_public_blocked_pause,
     _retry_rebalance_metadata,
 )
-
 
 # --- threshold (a): N blocked posts with 0 recovered comments --------------
 
@@ -63,12 +60,14 @@ def test_below_blocked_threshold_does_not_trigger():
 
 
 def test_pause_triggers_on_high_ratio_even_with_recovered_comments():
-    # 25 checked, 20 blocked => 80% ratio. Even though some comments were
-    # recovered (so threshold (a) is off), the ratio threshold (b) fires.
+    # SA-2 (comment-completeness): thresholds were raised — pause (b) now needs
+    # >= _PUBLIC_BLOCKED_PAUSE_MIN_CHECKED (100) checked and a >= 90% genuine-block
+    # ratio. 100 checked, 95 blocked => 95% ratio. Even though some comments were
+    # recovered (so threshold (a) is off), the ratio threshold (b) still fires.
     assert (
         _public_blocked_pause_should_trigger(
             checked=_PUBLIC_BLOCKED_PAUSE_MIN_CHECKED,
-            blocked=20,
+            blocked=95,
             recovered_comments=7,
         )
         is True

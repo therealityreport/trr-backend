@@ -35,7 +35,10 @@ from trr_backend.socials._scrapling_http_utils import (
 from trr_backend.socials.scrapling_transport import (
     build_stealthy_fetcher,
     merge_response_cookies,
+    resolve_scrapling_fetcher_options,
     safe_cookie_metadata,
+    safe_scrapling_proxy_metadata,
+    scrapling_fetcher_metadata,
     scrapling_runtime_metadata,
 )
 
@@ -45,6 +48,26 @@ logger = logging.getLogger("socials.socialblade.fetcher")
 _SOCIALBLADE_HISTORY_LIMIT = 60
 _TRPC_CAPTURE_PLATFORMS = frozenset({"instagram", "tiktok"})
 _DATE_PREFIX_PATTERN = re.compile(r"^(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s*)?\d{4}-\d{2}-\d{2}$")
+_SOCIALBLADE_SCRAPLING_OPTION_KEYS = frozenset(
+    {
+        "additional_args",
+        "ai_targeted",
+        "allow_webgl",
+        "block_ads",
+        "block_webrtc",
+        "blocked_domains",
+        "dns_over_https",
+        "google_search",
+        "hide_canvas",
+        "init_script",
+        "real_chrome",
+        "selector_config",
+        "solve_cloudflare",
+        "useragent",
+        "wait_selector",
+        "wait_selector_state",
+    }
+)
 
 
 def _build_nav_headers(referer: str) -> dict[str, str]:
@@ -85,13 +108,22 @@ class SocialBladeScraplingFetcher:
         self._seed_cookie_names = sorted(self._raw_cookies.keys())
         self._platform = str(platform or "instagram").strip().lower() or "instagram"
         self._proxy_config = proxy_config
-        self._proxy_rotator = proxy_config.proxy_rotator if proxy_config else None
+        self._browser_proxy = proxy_config.browser_proxy if proxy_config else None
         self._api_proxy_url = proxy_config.api_proxy_url if proxy_config else None
         self._selected_proxy_fingerprint = proxy_config.fingerprint if proxy_config else "none"
         self._proxy_session_mode = proxy_config.session_mode if proxy_config else "none"
         self._headless = bool(headless)
         self._timeout_ms = max(5_000, int(timeout_ms))
         self._scrapling_runtime_metadata = scrapling_runtime_metadata()
+        self._scrapling_fetcher_options = resolve_scrapling_fetcher_options(
+            "SOCIALBLADE_SCRAPLING",
+            allowed_keys=_SOCIALBLADE_SCRAPLING_OPTION_KEYS,
+        )
+        self._scrapling_fetcher_metadata = scrapling_fetcher_metadata(
+            "StealthyFetcher",
+            self._scrapling_fetcher_options.metadata,
+            safe_scrapling_proxy_metadata(),
+        )
         self._fetcher = build_stealthy_fetcher()
         self._http_client: httpx.AsyncClient | None = None
         self._request_count = 0
@@ -108,12 +140,13 @@ class SocialBladeScraplingFetcher:
     @property
     def runtime_metadata(self) -> dict[str, Any]:
         cookie_metadata = safe_cookie_metadata(
-            {name: "" for name in self._seed_cookie_names},
+            dict.fromkeys(self._seed_cookie_names, ""),
             self._warmup_cookie_delta,
             prefix="",
         )
         return {
             "scrapling_runtime": dict(self._scrapling_runtime_metadata),
+            **self._scrapling_fetcher_metadata,
             "warmup_cookie_names": cookie_metadata["warmup_cookie_names"],
             "warmup_cookie_count": cookie_metadata["warmup_cookie_count"],
             "seed_cookie_names": cookie_metadata["seed_cookie_names"],
@@ -346,12 +379,13 @@ class SocialBladeScraplingFetcher:
         self._request_count += 1
         return await self._fetcher.async_fetch(
             url,
+            **self._scrapling_fetcher_options.kwargs,
             headless=self._headless,
             network_idle=False,
             load_dom=self._platform in _TRPC_CAPTURE_PLATFORMS,
             disable_resources=False,
             cookies=self._cookies,
-            proxy_rotator=self._proxy_rotator,
+            proxy=self._browser_proxy,
             extra_headers=_build_nav_headers(url),
             page_action=self._capture_platform_page_trpc if self._platform in _TRPC_CAPTURE_PLATFORMS else None,
             capture_xhr=r"/api/trpc/",

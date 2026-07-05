@@ -94,6 +94,15 @@ def _dedupe_nonempty_strings(values: list[str] | None) -> list[str]:
     return deduped
 
 
+def _normalize_person_id_or_400(person_id: str | None) -> str | None:
+    from trr_backend.repositories.socialblade_growth import normalize_socialblade_person_id
+
+    try:
+        return normalize_socialblade_person_id(person_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def _modal_call_status_response(inspection: dict[str, Any], *, call_id: str) -> dict[str, Any]:
     status = str(inspection.get("status") or "unknown").strip().lower() or "unknown"
     terminal = bool(inspection.get("terminal")) or status in {"completed", "failed", "cancelled"}
@@ -172,17 +181,20 @@ async def get_socialblade_history(
     from trr_backend.db import pg
     from trr_backend.repositories.socialblade_growth import (
         normalize_socialblade_account_handle,
+        normalize_socialblade_person_id,
         normalize_socialblade_platform,
         socialblade_growth_snapshots_table_exists,
     )
 
     normalized_platform = normalize_socialblade_platform(platform)
-    safe_person_ids = _dedupe_nonempty_strings(person_ids)
+    try:
+        safe_person_ids = _dedupe_nonempty_strings(
+            [normalized for value in person_ids or [] if (normalized := normalize_socialblade_person_id(value))]
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     safe_handles = _dedupe_nonempty_strings(
-        [
-            normalize_socialblade_account_handle(handle, platform=normalized_platform)
-            for handle in handles or []
-        ]
+        [normalize_socialblade_account_handle(handle, platform=normalized_platform) for handle in handles or []]
     )
     if not safe_person_ids and not safe_handles:
         raise HTTPException(status_code=400, detail="At least one personId or handle is required")
@@ -244,6 +256,24 @@ async def get_socialblade_history(
     }
 
 
+@router.get("/socialblade/cookies/health")
+async def get_socialblade_cookie_health(
+    validate: bool = Query(default=True),
+    handle: str | None = Query(default=None),
+    _admin: InternalAdminUser = None,
+) -> dict[str, Any]:
+    """Return redacted SocialBlade cookie health for admin preflight panels."""
+    from trr_backend.socials.socialblade.auth import socialblade_cookie_health_report
+    from trr_backend.socials.socialblade.service import sanitize_socialblade_handle
+
+    validation_handle = sanitize_socialblade_handle(handle or "") or None
+    return await run_in_threadpool(
+        socialblade_cookie_health_report,
+        validate=validate,
+        validation_handle=validation_handle,
+    )
+
+
 @router.get("/{person_id}/socialblade")
 async def get_socialblade_data(
     person_id: str,
@@ -253,13 +283,14 @@ async def get_socialblade_data(
     """Retrieve stored SocialBlade growth data for a person."""
     from trr_backend.socials.socialblade.service import sanitize_socialblade_handle
 
+    safe_person_id = _normalize_person_id_or_400(person_id)
     safe_handle = sanitize_socialblade_handle(handle)
     if not safe_handle:
         raise HTTPException(status_code=400, detail="Invalid handle")
 
     from trr_backend.repositories.socialblade_growth import get_growth_data
 
-    data = get_growth_data(person_id, safe_handle, platform="instagram")
+    data = get_growth_data(safe_person_id, safe_handle, platform="instagram")
     if not data:
         raise HTTPException(
             status_code=404,
@@ -283,6 +314,7 @@ async def refresh_socialblade_data(
         scrape_socialblade_then_following,
     )
 
+    safe_person_id = _normalize_person_id_or_400(person_id)
     safe_handle = sanitize_socialblade_handle(body.handle)
     if not safe_handle:
         raise HTTPException(status_code=400, detail="Invalid handle")
@@ -294,7 +326,7 @@ async def refresh_socialblade_data(
     try:
         return await run_in_threadpool(
             refresh_and_persist_socialblade,
-            person_id=person_id,
+            person_id=safe_person_id,
             handle=safe_handle,
             scraper=lambda normalized_handle: scrape_socialblade_then_following(
                 _scrape_socialblade_person_page,
@@ -310,7 +342,11 @@ async def refresh_socialblade_data(
     except SocialBladeRefreshError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Unexpected SocialBlade person refresh failure", extra={"person_id": person_id}, exc_info=True)
+        logger.warning(
+            "Unexpected SocialBlade person refresh failure",
+            extra={"person_id": safe_person_id},
+            exc_info=True,
+        )
         raise HTTPException(status_code=502, detail=str(exc) or "SocialBlade refresh failed") from exc
 
 
@@ -321,6 +357,7 @@ async def refresh_socialblade_data_batch(
 ) -> dict[str, Any]:
     """Refresh SocialBlade rows for multiple cast members."""
     from trr_backend.modal_dispatch import dispatch_socialblade_scrape
+    from trr_backend.socials.socialblade.auth import socialblade_cookie_health_report
     from trr_backend.socials.socialblade.service import (
         normalize_socialblade_source_scope,
         queue_refresh_decision,
@@ -335,6 +372,8 @@ async def refresh_socialblade_data_batch(
         source_scope = normalize_socialblade_source_scope(body.source_scope)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    for item in body.items:
+        _normalize_person_id_or_400(item.person_id)
 
     if source == "season_run" and not socialblade_auto_refresh_enabled():
         return {
@@ -355,8 +394,10 @@ async def refresh_socialblade_data_batch(
     skipped: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
+    pending_dispatch: list[tuple[SocialBladeBatchRefreshItem, str]] = []
 
     for item in body.items:
+        safe_person_id = _normalize_person_id_or_400(item.person_id)
         safe_handle = sanitize_socialblade_handle(item.handle)
         if not safe_handle:
             errors.append(
@@ -368,7 +409,7 @@ async def refresh_socialblade_data_batch(
             )
             continue
 
-        dedupe_key = (item.person_id, safe_handle)
+        dedupe_key = (safe_person_id or "", safe_handle)
         if dedupe_key in seen:
             skipped.append(
                 {
@@ -381,7 +422,7 @@ async def refresh_socialblade_data_batch(
         seen.add(dedupe_key)
 
         status, existing, reason = queue_refresh_decision(
-            person_id=item.person_id,
+            person_id=safe_person_id,
             handle=safe_handle,
             force=body.force,
             platform="instagram",
@@ -407,6 +448,29 @@ async def refresh_socialblade_data_batch(
             )
             continue
 
+        pending_dispatch.append((item.model_copy(update={"person_id": safe_person_id}), safe_handle))
+
+    if pending_dispatch:
+        validation_handle = pending_dispatch[0][1]
+        cookie_health = await run_in_threadpool(
+            socialblade_cookie_health_report,
+            validate=True,
+            validation_handle=validation_handle,
+        )
+        if not bool(cookie_health.get("healthy")):
+            reason = str(cookie_health.get("reason") or "unknown").strip()
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": f"SocialBlade session preflight failed before batch dispatch: {reason}",
+                    "code": "SOCIALBLADE_SESSION_PREFLIGHT_FAILED",
+                    "reason": reason,
+                    "retryable": True,
+                    "cookieHealth": cookie_health,
+                },
+            )
+
+    for item, safe_handle in pending_dispatch:
         dispatch_result = dispatch_socialblade_scrape(
             person_id=item.person_id,
             handle=safe_handle,

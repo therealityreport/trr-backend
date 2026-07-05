@@ -167,7 +167,9 @@ def _modal_runtime_scheduler_enabled() -> bool:
 
 
 def _modal_maintenance_owner_required() -> bool:
-    return _env_flag("TRR_MODAL_MAINTENANCE_OWNER_REQUIRED", False)
+    if _is_local_or_dev_runtime():
+        return _env_flag("TRR_MODAL_MAINTENANCE_OWNER_REQUIRED", False)
+    return True
 
 
 def _modal_maintenance_owner_names() -> list[str]:
@@ -194,10 +196,7 @@ def _validate_modal_maintenance_owner_config() -> str | None:
         return None
     owners = _modal_maintenance_owner_names()
     if not owners:
-        raise RuntimeError(
-            "Modal maintenance has no active owner. "
-            + _modal_maintenance_owner_fix_message()
-        )
+        raise RuntimeError("Modal maintenance has no active owner. " + _modal_maintenance_owner_fix_message())
     if len(owners) > 1:
         raise RuntimeError(
             "Modal maintenance has duplicate active owners: "

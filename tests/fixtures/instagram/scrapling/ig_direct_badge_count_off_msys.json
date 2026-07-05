@@ -1,0 +1,23 @@
+{
+  "friendlyName": "IGDBadgeCountOffMsysQuery",
+  "data": {
+    "ig_direct_badge_count_off_msys": {
+      "unread_count": 3,
+      "badge_count": 3,
+      "threads": [
+        {
+          "thread_id": "sanitized-thread-1",
+          "has_unread": true,
+          "last_seen_at": "1776272482000000"
+        }
+      ],
+      "iris_subscription": {
+        "sequence_id": "sanitized-iris-sequence",
+        "subscription_id": "sanitized-subscription"
+      }
+    }
+  },
+  "extensions": {
+    "is_final": true
+  }
+}

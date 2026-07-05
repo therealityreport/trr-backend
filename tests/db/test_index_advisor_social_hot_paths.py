@@ -94,6 +94,37 @@ def test_report_redacts_db_url_and_marks_review_required(tmp_path: Path) -> None
     assert "Do not execute returned DDL" in combined
 
 
+def test_report_surfaces_nested_recommendation_errors(tmp_path: Path) -> None:
+    module = _load_module()
+    report = {
+        "metadata": {
+            "generated_at": "2026-07-02T12:00:00+00:00",
+            "output_date": "2026-07-02",
+            "database": {"source": "TRR_DB_URL", "value": "redacted"},
+            "extension_schema": "extensions",
+            "extension_version": "0.2.0",
+            "read_only": True,
+        },
+        "queries": [
+            {
+                "label": "profile_dashboard/shared_account_source",
+                "route": "/api/v1/admin/socials/profiles/:platform/:handle/dashboard",
+                "parameters": {"platform": "instagram"},
+                "status": "advisor_warning",
+                "recommendations": [{"errors": ["hypopg: not more oid available"], "index_statements": []}],
+                "errors": ["hypopg: not more oid available"],
+                "review_required": True,
+            }
+        ],
+    }
+
+    _, md_path = module.write_reports(report, tmp_path, "2026-07-02")
+
+    markdown = md_path.read_text(encoding="utf-8")
+    assert "| profile_dashboard/shared_account_source | advisor_warning | 1 | 1 |" in markdown
+    assert "`hypopg: not more oid available`" in markdown
+
+
 def test_script_does_not_execute_returned_index_statements() -> None:
     script = SCRIPT.read_text(encoding="utf-8").lower()
 

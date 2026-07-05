@@ -140,13 +140,16 @@ def update_social_post(
             )
             season_value = body.trr_season_id
 
+    fields_set = body.model_fields_set
+    omitted = social_posts_repo.OMITTED
+
     post, _query_count = social_posts_repo.update_post(
         post_id=post_id,
-        trr_season_id=season_value if "trr_season_id" in body.model_fields_set else None,
-        platform=body.platform if "platform" in body.model_fields_set else None,
-        url=body.url if "url" in body.model_fields_set else None,
-        title=body.title if "title" in body.model_fields_set else None,
-        notes=body.notes if "notes" in body.model_fields_set else None,
+        trr_season_id=season_value if "trr_season_id" in fields_set else omitted,
+        platform=body.platform if "platform" in fields_set else omitted,
+        url=body.url if "url" in fields_set else omitted,
+        title=body.title if "title" in fields_set else omitted,
+        notes=body.notes if "notes" in fields_set else omitted,
     )
     if post is None:
         raise HTTPException(status_code=404, detail="Post not found")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import re
 import time
@@ -522,49 +523,146 @@ class TestSyncNetworksStreaming:
             print("failures=0")
             return 0
 
+        def fake_step_with_metrics(name, _fn, argv, _metric_keys):
+            if name == "tmdb_show_entities":
+                received["entities"] = list(argv or [])
+                return (
+                    SyncNetworksStreamingStepResult(
+                        status="success",
+                        duration_ms=1,
+                        exit_code=0,
+                        metrics={
+                            "networks_upserted": 7,
+                            "production_companies_upserted": 5,
+                            "logos_mirrored": 2,
+                            "failures": 0,
+                        },
+                    ),
+                    "",
+                )
+            if name == "tmdb_watch_providers":
+                received["providers"] = list(argv or [])
+                return (
+                    SyncNetworksStreamingStepResult(
+                        status="success",
+                        duration_ms=1,
+                        exit_code=0,
+                        metrics={
+                            "providers_upserted": 12,
+                            "show_watch_providers_upserted": 20,
+                            "logos_mirrored": 3,
+                            "failures": 1,
+                        },
+                    ),
+                    "",
+                )
+            if name == "network_streaming_links":
+                received["links"] = list(argv or [])
+                return (
+                    SyncNetworksStreamingStepResult(
+                        status="success",
+                        duration_ms=1,
+                        exit_code=0,
+                        metrics={
+                            "processed": 30,
+                            "links_enriched": 18,
+                            "wikidata_linked": 10,
+                            "wikipedia_linked": 9,
+                            "logos_mirrored": 4,
+                            "variants_black_mirrored": 3,
+                            "variants_white_mirrored": 2,
+                            "logo_assets_discovered": 25,
+                            "logo_assets_mirrored": 14,
+                            "logo_assets_skipped": 8,
+                            "logo_assets_failed": 3,
+                            "completion_total": 40,
+                            "completion_resolved": 39,
+                            "completion_unresolved": 1,
+                            "completion_unresolved_total": 1,
+                            "completion_unresolved_network": 1,
+                            "completion_unresolved_streaming": 0,
+                            "completion_unresolved_production": 0,
+                            "production_missing_logos": 6,
+                            "production_missing_bw_variants": 6,
+                            "unresolved_logos": 2,
+                            "failures": 2,
+                        },
+                    ),
+                    "\n".join(
+                        [
+                            "run_id=network-streaming-20260224T210000Z",
+                            "run_status=stopped",
+                            "resume_cursor_entity_type=network",
+                            "resume_cursor_entity_key=bravo",
+                            "completion_percent=97.50",
+                            'unresolved_logo={"type":"network","id":"77","name":"Bravo","reason":"no_logo_claim"}',
+                            'unresolved_logo={"type":"streaming","id":"531","name":"Peacock","reason":"download_failed"}',
+                        ]
+                    ),
+                )
+            if name == "show_logos":
+                received["show_logos"] = list(argv or [])
+                return (
+                    SyncNetworksStreamingStepResult(
+                        status="success",
+                        duration_ms=1,
+                        exit_code=0,
+                        metrics={
+                            "show_logos_discovered": 16,
+                            "show_logos_imported": 9,
+                            "show_logos_skipped": 4,
+                            "show_logo_failures": 3,
+                            "failures": 0,
+                        },
+                    ),
+                    "",
+                )
+            raise AssertionError(f"unexpected step {name}")
+
         with patch("api.routers.admin_show_sync._schema_preflight_missing_columns", return_value=[]):
-            with patch("api.routers.admin_show_sync.sync_tmdb_show_entities.main", side_effect=fake_entities):
-                with patch(
-                    "api.routers.admin_show_sync.sync_tmdb_watch_providers.main",
-                    side_effect=fake_providers,
-                ):
+            with patch("api.routers.admin_show_sync._run_script_step_with_metrics", side_effect=fake_step_with_metrics):
+                with patch("api.routers.admin_show_sync.sync_tmdb_show_entities.main", side_effect=fake_entities):
                     with patch(
-                        "api.routers.admin_show_sync.sync_networks_streaming_links.main",
-                        side_effect=fake_links,
+                        "api.routers.admin_show_sync.sync_tmdb_watch_providers.main",
+                        side_effect=fake_providers,
                     ):
-                        with patch("api.routers.admin_show_sync.sync_show_logos.main", side_effect=fake_show_logos):
-                            with patch(
-                                "api.routers.admin_show_sync._run_brand_family_wikipedia_import_step",
-                                return_value=SyncNetworksStreamingStepResult(
-                                    status="success",
-                                    duration_ms=1,
-                                    exit_code=0,
-                                    metrics={
-                                        "families_total": 0,
-                                        "families_processed": 0,
-                                        "wikipedia_rows_imported": 0,
-                                        "wikipedia_rows_matched": 0,
-                                        "rules_upserted": 0,
-                                        "fetch_errors": 0,
-                                        "skipped_dry_run": 0,
-                                    },
-                                ),
-                            ):
-                                response = client.post(
-                                    "/api/v1/admin/shows/sync-networks-streaming",
-                                    headers={"Authorization": f"Bearer {token}"},
-                                    json={
-                                        "skip_s3": True,
-                                        "force": True,
-                                        "limit": 50,
-                                        "refresh_external_sources": True,
-                                        "entity_type": "production",
-                                        "entity_keys": ["shed media", "big head productions"],
-                                        "batch_size": 20,
-                                        "max_runtime_sec": 1200,
-                                        "resume_run_id": "network-streaming-20260224T200000Z",
-                                    },
-                                )
+                        with patch(
+                            "api.routers.admin_show_sync.sync_networks_streaming_links.main",
+                            side_effect=fake_links,
+                        ):
+                            with patch("api.routers.admin_show_sync.sync_show_logos.main", side_effect=fake_show_logos):
+                                with patch(
+                                    "api.routers.admin_show_sync._run_brand_family_wikipedia_import_step",
+                                    return_value=SyncNetworksStreamingStepResult(
+                                        status="success",
+                                        duration_ms=1,
+                                        exit_code=0,
+                                        metrics={
+                                            "families_total": 0,
+                                            "families_processed": 0,
+                                            "wikipedia_rows_imported": 0,
+                                            "wikipedia_rows_matched": 0,
+                                            "rules_upserted": 0,
+                                            "fetch_errors": 0,
+                                            "skipped_dry_run": 0,
+                                        },
+                                    ),
+                                ):
+                                    response = client.post(
+                                        "/api/v1/admin/shows/sync-networks-streaming",
+                                        headers={"Authorization": f"Bearer {token}"},
+                                        json={
+                                            "skip_s3": True,
+                                            "force": True,
+                                            "limit": 50,
+                                            "refresh_external_sources": True,
+                                            "entity_type": "production",
+                                            "entity_keys": ["shed media", "big head productions"],
+                                            "batch_size": 20,
+                                            "max_runtime_sec": 1200,
+                                            "resume_run_id": "network-streaming-20260224T200000Z",
+                                        },
+                                    )
 
         assert response.status_code == 200
         payload = response.json()
@@ -775,33 +873,94 @@ class TestSyncNetworksStreaming:
             print("failures=0")
             return 0
 
+        def fake_step_with_metrics(name, _fn, _argv, _metric_keys):
+            if name == "tmdb_show_entities":
+                return (
+                    SyncNetworksStreamingStepResult(
+                        status="failed",
+                        duration_ms=1,
+                        exit_code=2,
+                        metrics={"failures": 4},
+                    ),
+                    "",
+                )
+            if name == "tmdb_watch_providers":
+                return (
+                    SyncNetworksStreamingStepResult(
+                        status="success",
+                        duration_ms=1,
+                        exit_code=0,
+                        metrics={"providers_upserted": 1, "logos_mirrored": 0, "failures": 0},
+                    ),
+                    "",
+                )
+            if name == "network_streaming_links":
+                return (
+                    SyncNetworksStreamingStepResult(
+                        status="success",
+                        duration_ms=1,
+                        exit_code=0,
+                        metrics={
+                            "links_enriched": 1,
+                            "logos_mirrored": 0,
+                            "completion_total": 2,
+                            "completion_resolved": 2,
+                            "completion_unresolved": 0,
+                            "completion_percent": 100.0,
+                            "failures": 0,
+                        },
+                    ),
+                    "",
+                )
+            if name == "show_logos":
+                return (
+                    SyncNetworksStreamingStepResult(
+                        status="success",
+                        duration_ms=1,
+                        exit_code=0,
+                        metrics={
+                            "show_logos_discovered": 0,
+                            "show_logos_imported": 0,
+                            "show_logos_skipped": 0,
+                            "show_logo_failures": 0,
+                            "failures": 0,
+                        },
+                    ),
+                    "",
+                )
+            raise AssertionError(f"unexpected step {name}")
+
         with patch("api.routers.admin_show_sync._schema_preflight_missing_columns", return_value=[]):
-            with patch("api.routers.admin_show_sync.sync_tmdb_show_entities.main", side_effect=bad_entities):
-                with patch("api.routers.admin_show_sync.sync_tmdb_watch_providers.main", side_effect=ok_providers):
-                    with patch("api.routers.admin_show_sync.sync_networks_streaming_links.main", side_effect=ok_links):
-                        with patch("api.routers.admin_show_sync.sync_show_logos.main", side_effect=ok_show_logos):
-                            with patch(
-                                "api.routers.admin_show_sync._run_brand_family_wikipedia_import_step",
-                                return_value=SyncNetworksStreamingStepResult(
-                                    status="success",
-                                    duration_ms=1,
-                                    exit_code=0,
-                                    metrics={
-                                        "families_total": 0,
-                                        "families_processed": 0,
-                                        "wikipedia_rows_imported": 0,
-                                        "wikipedia_rows_matched": 0,
-                                        "rules_upserted": 0,
-                                        "fetch_errors": 0,
-                                        "skipped_dry_run": 0,
-                                    },
-                                ),
-                            ):
-                                response = client.post(
-                                    "/api/v1/admin/shows/sync-networks-streaming",
-                                    headers={"Authorization": f"Bearer {token}"},
-                                    json={},
-                                )
+            with patch("api.routers.admin_show_sync._run_script_step_with_metrics", side_effect=fake_step_with_metrics):
+                with patch("api.routers.admin_show_sync.sync_tmdb_show_entities.main", side_effect=bad_entities):
+                    with patch("api.routers.admin_show_sync.sync_tmdb_watch_providers.main", side_effect=ok_providers):
+                        with patch(
+                            "api.routers.admin_show_sync.sync_networks_streaming_links.main",
+                            side_effect=ok_links,
+                        ):
+                            with patch("api.routers.admin_show_sync.sync_show_logos.main", side_effect=ok_show_logos):
+                                with patch(
+                                    "api.routers.admin_show_sync._run_brand_family_wikipedia_import_step",
+                                    return_value=SyncNetworksStreamingStepResult(
+                                        status="success",
+                                        duration_ms=1,
+                                        exit_code=0,
+                                        metrics={
+                                            "families_total": 0,
+                                            "families_processed": 0,
+                                            "wikipedia_rows_imported": 0,
+                                            "wikipedia_rows_matched": 0,
+                                            "rules_upserted": 0,
+                                            "fetch_errors": 0,
+                                            "skipped_dry_run": 0,
+                                        },
+                                    ),
+                                ):
+                                    response = client.post(
+                                        "/api/v1/admin/shows/sync-networks-streaming",
+                                        headers={"Authorization": f"Bearer {token}"},
+                                        json={},
+                                    )
 
         assert response.status_code == 200
         payload = response.json()
@@ -1830,39 +1989,76 @@ class TestRefreshShow:
 
         show_id = str(uuid4())
 
-        def fake_show_cast(_argv):
-            print("Fetching IMDb Full Credits for live updates...")
-            time.sleep(0.05)
-            print("Writing credits for show test-show...")
-            return 0
+        from api.routers.admin_show_sync import RefreshStepResult
 
-        def fake_episode_appearances(_argv):
-            print("Syncing episode appearances for live updates...")
-            return 0
+        def fake_script_step(name, _fn, _argv, *, on_output_line=None):
+            output_by_name = {
+                "credits_fullcredits_sync": "Fetching IMDb Full Credits for live updates...",
+                "credits_episode_appearances_sync": "Syncing episode appearances for live updates...",
+            }
+            if on_output_line is not None:
+                on_output_line(output_by_name[name])
+            return RefreshStepResult(status="success", duration_ms=1, exit_code=0, output=output_by_name[name])
 
         with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
             with patch("api.routers.admin_show_sync.STREAM_HEARTBEAT_INTERVAL_SECONDS", 0.01):
-                with patch("api.routers.admin_show_sync.sync_show_cast.main", side_effect=fake_show_cast):
-                    with patch(
-                        "api.routers.admin_show_sync.sync_episode_appearances.main",
-                        side_effect=fake_episode_appearances,
-                    ):
-                        with client.stream(
-                            "POST",
-                            f"/api/v1/admin/shows/{show_id}/refresh/stream",
-                            headers={"Authorization": f"Bearer {token}"},
-                            json={"targets": ["cast_credits"]},
-                        ) as response:
-                            assert response.status_code == 200
-                            text = "\n".join(
-                                line.decode("utf-8") if isinstance(line, (bytes, bytearray)) else str(line)
-                                for line in response.iter_lines()
-                            )
+                with patch("api.routers.admin_show_sync._run_script_step", side_effect=fake_script_step):
+                    with client.stream(
+                        "POST",
+                        f"/api/v1/admin/shows/{show_id}/refresh/stream",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json={"targets": ["cast_credits"]},
+                    ) as response:
+                        assert response.status_code == 200
+                        text = "\n".join(
+                            line.decode("utf-8") if isinstance(line, (bytes, bytearray)) else str(line)
+                            for line in response.iter_lines()
+                        )
 
         assert "Fetching IMDb Full Credits for live updates..." in text
         assert "Syncing episode appearances for live updates..." in text
         assert '"stage_key": "credits_fullcredits_sync"' in text
         assert '"stage_key": "credits_episode_appearances_sync"' in text
+
+    def test_run_script_step_captures_real_sync_script_output_in_subprocess(self, monkeypatch):
+        from api.routers import admin_show_sync
+
+        popen_calls: list[list[str]] = []
+
+        class FakeProc:
+            stdout = io.StringIO("line from stdout\n")
+            stderr = io.StringIO("line from stderr\n")
+
+            def wait(self) -> int:
+                return 0
+
+        def fake_popen(command, **_kwargs):
+            popen_calls.append(command)
+            return FakeProc()
+
+        lines: list[str] = []
+        monkeypatch.setattr(admin_show_sync.subprocess, "Popen", fake_popen)
+
+        result = admin_show_sync._run_script_step(
+            "credits_fullcredits_sync",
+            admin_show_sync.sync_show_cast.main,
+            ["--show-id", "show-1", "--force"],
+            on_output_line=lines.append,
+        )
+
+        assert result.status == "success"
+        assert result.output == "line from stdout\nline from stderr"
+        assert lines == ["line from stdout", "line from stderr"]
+        assert popen_calls == [
+            [
+                admin_show_sync.sys.executable,
+                "-m",
+                "scripts.sync.sync_show_cast",
+                "--show-id",
+                "show-1",
+                "--force",
+            ]
+        ]
 
 
 class TestRefreshShowPhotosStream:

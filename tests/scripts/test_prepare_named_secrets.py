@@ -119,6 +119,8 @@ def test_apply_runtime_overrides_injects_canonical_modal_defaults(monkeypatch: p
     assert result["TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT"] == "8"
     assert result["TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT"] == "4"
     assert result["TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_CONCURRENCY_LIMIT"] == "4"
+    assert result["TRR_MODAL_SOCIAL_MEDIA_JOB_CONCURRENCY_LIMIT"] == "1"
+    assert result["TRR_MODAL_SOCIAL_RECOVERY_CONCURRENCY_LIMIT"] == "1"
     assert result["TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_FUNCTION"] == "run_social_comments_recovery_job"
     assert result["SOCIAL_MODAL_DISPATCH_LIMIT"] == "12"
     assert result["SOCIAL_WORKER_POOL_COMMENTS"] == "4"
@@ -126,15 +128,19 @@ def test_apply_runtime_overrides_injects_canonical_modal_defaults(monkeypatch: p
     assert result["SOCIAL_WORKER_POOL_SHARED_ACCOUNT_POSTS"] == "8"
     assert result["SOCIAL_SHARED_ACCOUNT_POSTS_PLATFORM_CAP_INSTAGRAM"] == "2"
     assert result["SOCIAL_CATALOG_RUN_IN_FLIGHT_CAP"] == "8"
+    assert result["SOCIAL_WORKER_POOL_MEDIA_MIRROR"] == "1"
+    assert result["SOCIAL_WORKER_POOL_COMMENT_MEDIA_MIRROR"] == "1"
+    assert result["SOCIAL_MIRROR_PLATFORM_CAP"] == "1"
     assert result["SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM"] == "4"
     assert result["SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT"] == "8"
     assert result["SOCIAL_INSTAGRAM_COMMENTS_MAX_SHARD_COUNT"] == "1000"
     assert result["SOCIAL_INSTAGRAM_COMMENTS_GLOBAL_RATE_LIMIT_MODE"] == "advisory"
     assert result["SOCIAL_THREADS_POSTS_SCRAPLING_ENABLED"] == "true"
     assert result["SOCIAL_THREADS_POSTS_PROXY_PROVIDER"] == "decodo"
-    assert "SOCIALBLADE_PROXY_PROVIDER" not in result
-    assert "SOCIALBLADE_USE_STICKY_PROXY" not in result
-    assert "SOCIALBLADE_PROXY_SESSION_TTL_SECONDS" not in result
+    assert result["SOCIALBLADE_PROXY_PROVIDER"] == "decodo"
+    assert result["SOCIALBLADE_USE_STICKY_PROXY"] == "false"
+    assert result["SOCIALBLADE_PROXY_SESSION_TTL_SECONDS"] == "600"
+    assert result["SOCIALBLADE_SCRAPLING_SOLVE_CLOUDFLARE"] == "true"
     assert result["SOCIAL_TIKTOK_COMMENT_FETCH_TIMEOUT_SECONDS"] == "180"
     assert result["SOCIAL_PLATFORM_CAP_PER_ACCOUNT_SCALING"] == "false"
 
@@ -331,10 +337,7 @@ def test_split_env_preserves_non_empty_socialblade_inline_json(
         }
     )
 
-    assert (
-        social_values["SOCIALBLADE_COOKIES_JSON"]
-        == '{"cf_clearance":"inline-clearance","session":"inline-session"}'
-    )
+    assert social_values["SOCIALBLADE_COOKIES_JSON"] == '{"cf_clearance":"inline-clearance","session":"inline-session"}'
 
 
 def test_split_env_rejects_socialblade_cookie_payload_without_login_session(

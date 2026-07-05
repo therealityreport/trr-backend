@@ -69,6 +69,14 @@ CANONICAL_REMOTE_RUNTIME_OVERRIDES = {
     "SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY": "true",
     "SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY": "false",
     "SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS": "600",
+    # SocialBlade routes through Decodo residential proxy in production and lets
+    # Scrapling solve the Cloudflare interstitial. Sticky Decodo usernames are off
+    # for this lane because the current TRR Decodo gateway rejects session-scoped
+    # usernames with 407.
+    "SOCIALBLADE_PROXY_PROVIDER": "decodo",
+    "SOCIALBLADE_USE_STICKY_PROXY": "false",
+    "SOCIALBLADE_PROXY_SESSION_TTL_SECONDS": "600",
+    "SOCIALBLADE_SCRAPLING_SOLVE_CLOUDFLARE": "true",
     "INSTAGRAM_BROWSER_NETWORK_POLICY_ENABLED": "true",
     "INSTAGRAM_BROWSER_BLOCK_STATIC_ASSETS": "true",
     "INSTAGRAM_BROWSER_DISABLE_EXTRA_RESOURCES": "true",
@@ -89,6 +97,8 @@ CANONICAL_REMOTE_SOCIAL_CAP_DEFAULTS = {
     "TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT": "8",
     "TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT": "4",
     "TRR_MODAL_SOCIAL_COMMENTS_RECOVERY_JOB_CONCURRENCY_LIMIT": "4",
+    "TRR_MODAL_SOCIAL_MEDIA_JOB_CONCURRENCY_LIMIT": "1",
+    "TRR_MODAL_SOCIAL_RECOVERY_CONCURRENCY_LIMIT": "1",
     "SOCIAL_MODAL_DISPATCH_LIMIT": "12",
     "SOCIAL_WORKER_POOL_POSTS": "1",
     "SOCIAL_WORKER_POOL_COMMENTS": "4",
@@ -98,6 +108,7 @@ CANONICAL_REMOTE_SOCIAL_CAP_DEFAULTS = {
     "SOCIAL_CATALOG_RUN_IN_FLIGHT_CAP": "8",
     "SOCIAL_WORKER_POOL_MEDIA_MIRROR": "1",
     "SOCIAL_WORKER_POOL_COMMENT_MEDIA_MIRROR": "1",
+    "SOCIAL_MIRROR_PLATFORM_CAP": "1",
     "SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM": "4",
     "SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT": "8",
     "SOCIAL_INSTAGRAM_COMMENTS_MAX_SHARD_COUNT": "1000",
@@ -306,8 +317,7 @@ def _validate_socialblade_cookie_secret(value: str | None) -> None:
     missing = [name for name in SOCIALBLADE_REQUIRED_COOKIE_NAMES if name not in names]
     if missing:
         raise ValueError(
-            "SOCIALBLADE_COOKIES_JSON is missing required authenticated cookie names: "
-            + ", ".join(missing)
+            "SOCIALBLADE_COOKIES_JSON is missing required authenticated cookie names: " + ", ".join(missing)
         )
 
 

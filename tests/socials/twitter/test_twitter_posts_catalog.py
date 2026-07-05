@@ -319,6 +319,27 @@ def test_legacy_catalog_uses_tweet_upsert_and_caps_non_full_history_pages() -> N
     assert persistence.legacy_upsert_calls[0]["run_id"] is None
 
 
+def test_bounded_window_with_explicit_zero_max_posts_is_unlimited() -> None:
+    scraper = FakeTwitterScraper([_tweet("root")], retrieval_meta={"pages_scanned": 1, "posts_checked": 1})
+    persistence = FakeCatalogPersistenceAdapter()
+
+    scrape_shared_twitter_posts(
+        run_id="run-1",
+        account_handle="BravoTV",
+        config={
+            "pipeline_ingest_mode": SHARED_MODE,
+            "catalog_action_scope": "bounded_window",
+            "date_start": "2026-04-01T00:00:00Z",
+            "date_end": "2026-04-30T00:00:00Z",
+            "max_posts_per_target": 0,
+        },
+        job_id="job-1",
+        dependencies=_dependencies(scraper=scraper, persistence=persistence),
+    )
+
+    assert scraper.scrape_calls[0]["config"].max_pages is None
+
+
 def test_shared_catalog_hydrates_twitter_comments_when_selected() -> None:
     root = _tweet("root", username="TheTraitorsUS")
     root.replies = 787

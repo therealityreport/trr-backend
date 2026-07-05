@@ -54,6 +54,119 @@ def test_show_get_images_request_defaults_getty_limit_to_none() -> None:
     assert request.getty_limit is None
 
 
+@pytest.mark.anyio
+async def test_get_show_images_stream_runs_import_in_threadpool(monkeypatch: pytest.MonkeyPatch) -> None:
+    show_id = uuid4()
+    db = object()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        admin_show_images,
+        "_fetch_show",
+        lambda _db, _show_id: {
+            "id": str(show_id),
+            "name": "The Real Housewives of Salt Lake City",
+            "networks": ["Bravo"],
+        },
+    )
+
+    async def _fake_to_thread(func, /, *args, **kwargs):
+        captured["func"] = func
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        progress_cb = kwargs["progress_cb"]
+        progress_cb("import", 1, 1, "imported one image")
+        return {"imported": 1, "failed": 0}
+
+    monkeypatch.setattr(admin_show_images.asyncio, "to_thread", _fake_to_thread)
+
+    response = await admin_show_images.get_show_images_stream(
+        show_id,
+        connection=object(),
+        request=admin_show_images.ShowGetImagesRequest(limit=5, getty_limit=7),
+        db=db,
+        _=object(),
+    )
+
+    chunks: list[str] = []
+    async for chunk in response.body_iterator:
+        chunks.append(chunk.decode("utf-8") if isinstance(chunk, bytes) else str(chunk))
+
+    assert captured["func"] is admin_show_images._import_show_images
+    assert captured["args"] == (db,)
+    assert captured["kwargs"] == {
+        "show_id": str(show_id),
+        "show_name": "The Real Housewives of Salt Lake City",
+        "show_is_bravo": True,
+        "limit": 5,
+        "getty_limit": 7,
+        "progress_cb": captured["kwargs"]["progress_cb"],
+    }
+    assert any("event: progress" in chunk for chunk in chunks)
+    assert any("event: complete" in chunk for chunk in chunks)
+
+
+def test_import_show_images_reuses_nbcumv_single_item_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    from api.routers import admin_nbcumv
+    from trr_backend.integrations import getty as getty_integration
+    from trr_backend.integrations import nbcumv as nbcumv_integration
+
+    show_id = uuid4()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(admin_nbcumv, "_ensure_sources", lambda db: None)
+    monkeypatch.setattr(admin_nbcumv, "_load_eligible_people_index", lambda db: {"lisa barlow": []})
+    monkeypatch.setattr(getty_integration, "search_editorial_assets", lambda *args, **kwargs: [])
+    monkeypatch.setattr(nbcumv_integration, "resolve_show_by_title", lambda title: {"id": "nbc-show-1", "title": title})
+    monkeypatch.setattr(
+        nbcumv_integration,
+        "list_show_images",
+        lambda show_id, limit=None: [
+            {
+                "lbx_id": "lbx-1",
+                "lbx_filename": "NUP_000001.JPG",
+                "location": "Bravo",
+                "showIds": ["nbc-show-1"],
+            }
+        ],
+    )
+
+    def _fake_import_single_item(*, db, item, assign_people, people_index):
+        captured["db"] = db
+        captured["item"] = item
+        captured["assign_people"] = assign_people
+        captured["people_index"] = people_index
+        return {
+            "already_imported": False,
+            "created_person_ids": ["person-1"],
+            "created_show_ids": [str(show_id)],
+            "unmatched_people": [],
+        }
+
+    monkeypatch.setattr(admin_nbcumv, "_import_single_item", _fake_import_single_item)
+
+    db = object()
+    result = admin_show_images._import_show_images(
+        db,
+        show_id=str(show_id),
+        show_name="The Real Housewives of Salt Lake City",
+        show_is_bravo=True,
+        limit=1,
+        getty_limit=0,
+    )
+
+    item = captured["item"]
+    assert captured["db"] is db
+    assert captured["assign_people"] is True
+    assert captured["people_index"] == {"lisa barlow": []}
+    assert item.lbx_id == "lbx-1"
+    assert item.lbx_filename == "NUP_000001.JPG"
+    assert item.link_show_ids == [show_id]
+    assert result["nbcumv_imported"] == 1
+    assert result["show_links_created"] == 1
+    assert result["person_links_created"] == 1
+
+
 @pytest.mark.parametrize(
     ("show_is_bravo", "expected_resolution"),
     [(True, "auto_picdetective_bravo"), (False, "getty_watermark_fallback")],

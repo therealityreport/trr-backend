@@ -300,3 +300,34 @@ def test_threads_posts_catalog_merges_config_profile_snapshot_first() -> None:
     assert meta["profile_snapshot"]["avatar_url"] == "https://images.test/existing-avatar.jpg"
     assert meta["profile_snapshot"]["follower_count"] == 1234
     assert meta["profile_snapshot"]["is_verified"] is True
+
+
+def test_threads_posts_catalog_marks_graphql_no_edges_empty_result_retryable() -> None:
+    scraper = _FakeThreadsScraper(
+        [],
+        {
+            "source": "threads_graphql_api",
+            "pages_scanned": 1,
+            "posts_checked": 0,
+            "matched_posts": 0,
+            "stop_reason": "no_edges",
+        },
+        cookies={},
+    )
+    persistence = _FakeSharedCatalogPersistence()
+
+    rows, meta = scrape_shared_threads_posts(
+        run_id="run-soft-block",
+        account_handle="bravotv",
+        config={"pipeline_ingest_mode": "shared_account_catalog_backfill"},
+        job_id="job-soft-block",
+        dependencies=_posts_catalog_dependencies(scraper=scraper, persistence=persistence),
+    )
+
+    assert rows == []
+    assert meta["error_code"] == "threads_empty_soft_block"
+    assert meta["error_class"] == "ThreadsEmptySoftBlock"
+    assert meta["empty_result_reason"] == "no_edges"
+    assert meta["retryable"] is True
+    assert meta["complete"] is False
+    assert meta["persist_counters"] == {"posts_upserted": 0, "comments_upserted": 0}

@@ -204,3 +204,66 @@ def test_refresh_socialblade_cookies_opens_repair_tab_when_clearance_missing(mon
         raise AssertionError("Expected refresh_socialblade_cookies to raise")
 
     assert opened == {"cdp_url": "http://127.0.0.1:9222"}
+
+
+def test_socialblade_cookie_health_report_redacts_values(monkeypatch, tmp_path) -> None:
+    cookie_file = tmp_path / "socialblade_cookies.json"
+    cookie_file.write_text('{"cf_clearance":"secret-clearance","session":"secret-session"}', encoding="utf-8")
+
+    monkeypatch.setattr(auth_module, "socialblade_cookie_file_path", lambda: cookie_file)
+    monkeypatch.setattr(
+        auth_module,
+        "load_socialblade_cookies_from_sources",
+        lambda: {"cf_clearance": "secret-clearance", "session": "secret-session"},
+    )
+    monkeypatch.setattr(
+        auth_module,
+        "validate_socialblade_cookie_health",
+        lambda _cookies, *, validation_handle=None, allow_visible_browser_retry=False: (True, None),
+    )
+
+    report = auth_module.socialblade_cookie_health_report(validate=True)
+
+    assert report["healthy"] is True
+    assert report["cookieNames"] == ["cf_clearance", "session"]
+    assert report["cookieFile"]["exists"] is True
+    assert "secret-clearance" not in str(report)
+    assert "secret-session" not in str(report)
+
+
+def test_socialblade_cookie_health_report_missing_session(monkeypatch) -> None:
+    monkeypatch.setattr(auth_module, "socialblade_cookie_file_path", lambda: auth_module.Path("/tmp/missing.json"))
+    monkeypatch.setattr(auth_module, "load_socialblade_cookies_from_sources", lambda: {"cf_clearance": "token"})
+
+    report = auth_module.socialblade_cookie_health_report(validate=True)
+
+    assert report["healthy"] is False
+    assert report["reason"] == "missing_required_cookie:session"
+    assert report["validation"]["checked"] is False
+
+
+def test_socialblade_cookie_loader_preserves_browser_signal_cookies(monkeypatch, tmp_path) -> None:
+    cookie_file = tmp_path / "socialblade_cookies.json"
+    cookie_file.write_text(
+        auth_module.json.dumps(
+            {
+                "_ga": "analytics",
+                "_sharedID": "shared",
+                "cf_clearance": "clearance",
+                "session": "session-token",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.delenv("SOCIALBLADE_COOKIES_JSON", raising=False)
+    monkeypatch.setenv("SOCIALBLADE_COOKIES_FILE", str(cookie_file))
+
+    cookies = auth_module.load_socialblade_cookies_from_sources()
+
+    assert cookies == {
+        "_ga": "analytics",
+        "_sharedID": "shared",
+        "cf_clearance": "clearance",
+        "session": "session-token",
+    }

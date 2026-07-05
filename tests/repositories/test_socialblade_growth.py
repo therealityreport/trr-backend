@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from trr_backend.repositories import socialblade_growth as growth_repo
 from trr_backend.repositories.socialblade_growth import (
     _row_to_response,
     insert_growth_snapshot,
     merge_chart_data,
     normalize_socialblade_account_handle,
+    normalize_socialblade_person_id,
 )
 
 
@@ -344,6 +347,22 @@ def test_normalize_socialblade_account_handle_extracts_full_urls() -> None:
     assert normalize_socialblade_account_handle("https://www.tiktok.com/@BravoTV?lang=en") == "bravotv"
 
 
+def test_normalize_socialblade_person_id_rejects_malformed_uuid() -> None:
+    with pytest.raises(ValueError, match="personId must be a valid UUID"):
+        normalize_socialblade_person_id("not-a-uuid")
+
+
+def test_get_growth_data_rejects_malformed_person_id_before_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        growth_repo.pg,
+        "fetch_one",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not query growth data")),
+    )
+
+    with pytest.raises(ValueError, match="personId must be a valid UUID"):
+        growth_repo.get_growth_data("not-a-uuid", "lisabarlow14")
+
+
 def test_row_to_response_exposes_previous_run_snapshot() -> None:
     row = {
         "id": "growth-row-1",
@@ -404,7 +423,7 @@ def test_insert_growth_snapshot_writes_immutable_row(monkeypatch) -> None:
     monkeypatch.setattr(growth_repo.pg, "execute_returning", fake_execute_returning)
 
     row = insert_growth_snapshot(
-        "person-1",
+        "11111111-1111-1111-1111-111111111111",
         "@BravoTV",
         {
             "scraped_at": "2026-05-13T12:00:00Z",
@@ -422,7 +441,7 @@ def test_insert_growth_snapshot_writes_immutable_row(monkeypatch) -> None:
     assert "pipeline.socialblade_growth_snapshots" in str(captured["sql"])
     assert captured["params"][0:6] == [
         "growth-row-1",
-        "person-1",
+        "11111111-1111-1111-1111-111111111111",
         "instagram",
         "bravotv",
         "bravotv",

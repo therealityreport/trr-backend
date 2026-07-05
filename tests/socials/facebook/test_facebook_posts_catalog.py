@@ -255,3 +255,40 @@ def test_facebook_posts_catalog_preserves_injected_profile_snapshot_precedence()
     assert meta["profile_snapshot"]["username"] == "bravotv"
     assert meta["profile_snapshot"]["display_name"] == "Configured Bravo"
     assert meta["profile_snapshot"]["avatar_url"] == "https://images.test/configured-avatar.jpg"
+
+
+def test_facebook_posts_catalog_marks_soft_block_empty_result_retryable() -> None:
+    scraper = _FakeFacebookScraper(
+        posts=[],
+        retrieval_meta={
+            "source": "public_meta_fallback",
+            "pages_scanned": 1,
+            "posts_checked": 0,
+            "matched_posts": 0,
+            "stop_reason": "empty_response_soft_block",
+        },
+    )
+    persistence = _LocalFakeCatalogPersistence()
+    dependencies = FacebookPostsCatalogDependencies(
+        scraper_factory=lambda **_kwargs: scraper,
+        document_fetcher_factory=None,
+        scrape_config_factory=_scrape_config_factory,
+        persist_shared_catalog_posts_with_progress=persistence.persist_shared_catalog_posts_with_progress,
+        upsert_shared_catalog_post=persistence.upsert_shared_catalog_post,
+    )
+
+    rows, meta = scrape_shared_facebook_posts(
+        run_id="run-soft-block",
+        account_handle="bravotv",
+        config={"pipeline_ingest_mode": "shared_account_catalog_backfill"},
+        job_id="job-soft-block",
+        dependencies=dependencies,
+    )
+
+    assert rows == []
+    assert meta["error_code"] == "facebook_empty_soft_block"
+    assert meta["error_class"] == "FacebookEmptySoftBlock"
+    assert meta["empty_result_reason"] == "empty_response_soft_block"
+    assert meta["retryable"] is True
+    assert meta["complete"] is False
+    assert meta["persist_counters"] == {"posts_upserted": 0, "comments_upserted": 0}

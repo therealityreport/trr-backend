@@ -38,6 +38,8 @@ def _force_deployed_runtime(monkeypatch):
         "TRR_LOCAL_DEV",
     ):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED", "1")
+    monkeypatch.setenv("TRR_MODAL_RUNTIME_SCHEDULER_ENABLED", "0")
 
 
 class TestStartupLaneValidation:

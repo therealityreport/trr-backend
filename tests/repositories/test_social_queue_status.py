@@ -282,6 +282,56 @@ def test_get_queue_status_summary_only_skips_expensive_side_effects(
     assert len(query_calls) == 6
 
 
+def test_get_queue_status_read_does_not_run_recovery_side_effects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Cursor:
+        def execute(self, _sql: str, _params: list[object] | None = None) -> None:
+            return None
+
+    def _fake_fetch_all_with_cursor(_cur: object, sql: str, params: list[object] | None = None):
+        del params
+        normalized_sql = " ".join(sql.split()).lower()
+        if "post_persist_truthfulness" in normalized_sql:
+            return []
+        if "from social.scrape_jobs" in normalized_sql:
+            return [
+                {
+                    "platform": "instagram",
+                    "job_type": "posts",
+                    "status": "running",
+                    "stage": "posts",
+                    "total": 1,
+                }
+            ]
+        return []
+
+    def _unexpected_recovery(*_args, **_kwargs):
+        raise AssertionError("queue status reads must not run recovery side effects")
+
+    monkeypatch.setenv("SOCIAL_QUEUE_STATUS_CACHE_TTL_SECONDS", "0")
+    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name, **_kwargs: True)
+    monkeypatch.setattr(social_repo, "_reconcile_active_queue_runs", _unexpected_recovery)
+    monkeypatch.setattr(social_repo, "recover_dispatch_blocked_no_progress_jobs", _unexpected_recovery)
+    monkeypatch.setattr(social_repo, "_scrape_jobs_features", lambda: {"has_run_id": True, "has_queue_fields": True})
+    monkeypatch.setattr(social_repo, "_list_dispatch_blocked_jobs", lambda limit=100: ([], 0))
+    monkeypatch.setattr(social_repo, "get_worker_health", lambda: {"healthy": True, "healthy_workers": 1})
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None, **_kwargs: nullcontext(_Cursor()))
+    monkeypatch.setattr(social_repo.pg, "fetch_all_with_cursor", _fake_fetch_all_with_cursor)
+    monkeypatch.setattr(social_repo.pg, "fetch_all", lambda *_args, **_kwargs: [])
+
+    payload = social_repo.get_queue_status(
+        include_recent_failures=False,
+        include_stuck_jobs=False,
+        include_runs_summary=False,
+    )
+
+    assert payload["queue"]["by_status"]["running"] == 1
+    assert payload["queue"]["dispatch_blocked_jobs"] == []
+    assert payload["queue"]["dispatch_blocked_jobs_total"] == 0
+
+
 def test_get_queue_status_summary_includes_media_stale_claims(monkeypatch: pytest.MonkeyPatch) -> None:
     class _Cursor:
         def execute(self, _sql: str, _params: list[object] | None = None) -> None:

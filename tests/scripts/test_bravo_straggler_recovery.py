@@ -20,7 +20,9 @@ def _args(**overrides: Any) -> SimpleNamespace:
         "safe_preset": None,
         "confirm_safe_12": None,
         "max_comments_per_post": 0,
-        "comments_load_strategy": "cursor_api",
+        "comments_load_strategy": "public_relay",
+        "date_start": None,
+        "date_end": None,
         "skip_launch_auth_probe": False,
         "force_rerun_existing": False,
         "enqueue": False,
@@ -36,12 +38,18 @@ def test_delegate_argv_safe_12_preserves_batch_size_and_normalizes_account() -> 
         approved_shortcode=["ABC123"],
         safe_preset="12",
         confirm_safe_12=cli.CONFIRM_SAFE_12,
+        date_start="2026-01-01",
+        date_end="2027-01-01",
     )
 
     delegate = cli._delegate_argv(args)  # noqa: SLF001
 
     assert delegate[delegate.index("--account") + 1] == "bravotv"
     assert delegate[delegate.index("--batch-size") + 1] == "1"
+    assert delegate[delegate.index("--max-comments-per-post") + 1] == "0"
+    assert delegate[delegate.index("--comments-load-strategy") + 1] == "public_relay"
+    assert delegate[delegate.index("--date-start") + 1] == "2026-01-01"
+    assert delegate[delegate.index("--date-end") + 1] == "2027-01-01"
     assert delegate[delegate.index("--comments-worker-count") + 1] == "12"
     assert delegate[delegate.index("--shortcode") + 1] == "ABC123"
 
