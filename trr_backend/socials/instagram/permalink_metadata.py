@@ -58,6 +58,13 @@ _DEFAULT_GRAPHQL_SHORTCODE_DOC_IDS = (
 _DEFAULT_GRAPHQL_SHORTCODE_DOC_ID = _DEFAULT_GRAPHQL_SHORTCODE_DOC_IDS[-1]
 _DEFAULT_POST_ROOT_DOC_ID = "26767101476259141"
 _POST_ROOT_FRIENDLY_NAME = "PolarisPostRootQuery"
+_POST_DETAIL_EXCLUDED_FRIENDLY_NAMES = frozenset({"IGDBadgeCountOffMsysQuery"})
+_POST_DETAIL_FRIENDLY_NAME_KEYS = (
+    "friendlyName",
+    "queryName",
+    "operationName",
+    "fb_api_req_friendly_name",
+)
 
 _DEFAULT_HEADERS = {
     "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -300,6 +307,11 @@ def _iter_data_sjs_payloads(html: str) -> list[dict[str, Any]]:
 
 def _find_shortcode_media_item(node: Any) -> dict[str, Any] | None:
     if isinstance(node, dict):
+        if _is_excluded_post_detail_payload(node):
+            return None
+        media = _fetch_xdt_media_dict(node)
+        if media is not None:
+            return media
         media_info = node.get("xdt_api__v1__media__shortcode__web_info")
         if isinstance(media_info, dict):
             items = media_info.get("items")
@@ -316,6 +328,23 @@ def _find_shortcode_media_item(node: Any) -> dict[str, Any] | None:
             if found is not None:
                 return found
     return None
+
+
+def _is_excluded_post_detail_payload(node: dict[str, Any]) -> bool:
+    for key in _POST_DETAIL_FRIENDLY_NAME_KEYS:
+        friendly_name = str(node.get(key) or "").strip()
+        if friendly_name in _POST_DETAIL_EXCLUDED_FRIENDLY_NAMES:
+            return True
+    return False
+
+
+def _fetch_xdt_media_dict(node: dict[str, Any]) -> dict[str, Any] | None:
+    data = node.get("data")
+    media = data.get("fetch__XDTMediaDict") if isinstance(data, dict) else None
+    if isinstance(media, dict):
+        return media
+    media = node.get("fetch__XDTMediaDict")
+    return media if isinstance(media, dict) else None
 
 
 def _iter_nested_dicts(node: Any) -> list[dict[str, Any]]:

@@ -180,6 +180,124 @@ def test_dispatch_runtime_honors_pause_after_current(monkeypatch: pytest.MonkeyP
     assert heartbeat_updates[-1]["last_dispatch_blocked_reason"] == "pause_after_current"
 
 
+def test_dispatch_runtime_skips_paused_run_candidates_during_global_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy = dispatch_runtime.legacy
+    dispatched_job_ids: list[str] = []
+    candidates = [
+        {
+            "id": "job-paused",
+            "run_id": "run-paused",
+            "platform": "instagram",
+            "job_type": legacy.SHARED_ACCOUNT_POSTS_JOB_TYPE,
+            "status": "queued",
+            "config": {"stage": legacy.SHARED_ACCOUNT_POSTS_STAGE, "account": "bravotv"},
+            "metadata": {},
+        },
+        {
+            "id": "job-active",
+            "run_id": "run-active",
+            "platform": "instagram",
+            "job_type": legacy.SHARED_ACCOUNT_POSTS_JOB_TYPE,
+            "status": "queued",
+            "config": {"stage": legacy.SHARED_ACCOUNT_POSTS_STAGE, "account": "bravodailydish"},
+            "metadata": {},
+        },
+    ]
+
+    monkeypatch.setattr(legacy, "is_queue_enabled", lambda: True)
+    monkeypatch.setattr(legacy, "is_modal_remote_executor_enabled", lambda: True)
+    monkeypatch.setattr(legacy, "_run_pause_after_current_requested", lambda run_id: run_id == "run-paused")
+    monkeypatch.setattr(legacy, "recover_failed_instagram_comments_capacity_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(legacy, "recover_dispatch_blocked_no_progress_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(legacy, "recover_stale_unclaimed_dispatched_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(legacy, "_modal_social_dispatch_resolution", lambda: {"resolved": True, "reason": None})
+    monkeypatch.setattr(legacy, "_list_candidate_jobs_for_modal_dispatch", lambda **_kwargs: list(candidates))
+    monkeypatch.setattr(legacy, "_current_modal_dispatch_running_counts", lambda: ({}, {}, {}, {}, {}))
+    monkeypatch.setattr(legacy, "_modal_comment_recovery_priority_override_slots", lambda: 0)
+    monkeypatch.setattr(legacy, "_touch_job_dispatch_metadata", lambda job_id, **kwargs: None)
+    monkeypatch.setattr(legacy, "_touch_modal_social_dispatcher_heartbeat", lambda **kwargs: {})
+    monkeypatch.setattr(
+        legacy,
+        "dispatch_social_job",
+        lambda *, job_id, stage=None, priority_recovery=False: (
+            dispatched_job_ids.append(job_id) or {"dispatched": True, "reason": None, "call_id": f"call-{job_id}"}
+        ),
+    )
+
+    result = dispatch_runtime.dispatch_due_social_jobs(run_id=None, limit=2)
+
+    assert result["dispatched_job_ids"] == ["job-active"]
+    assert dispatched_job_ids == ["job-active"]
+
+
+def test_dispatch_runtime_clears_expired_pause_for_global_dispatch_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy = dispatch_runtime.legacy
+    now = datetime(2026, 6, 30, 18, 0, tzinfo=UTC)
+    dispatched_job_ids: list[str] = []
+    updated_pause_rows: list[dict[str, object]] = []
+    candidates = [
+        {
+            "id": "job-expired-pause",
+            "run_id": "11111111-1111-1111-1111-111111111111",
+            "platform": "instagram",
+            "job_type": legacy.SHARED_ACCOUNT_POSTS_JOB_TYPE,
+            "status": "queued",
+            "config": {"stage": legacy.SHARED_ACCOUNT_POSTS_STAGE, "account": "bravotv"},
+            "metadata": {},
+        },
+    ]
+
+    def _fetch_one(sql: str, params=None, **_kwargs):
+        if "select config" in sql and "from social.scrape_runs" in sql:
+            return {
+                "config": {
+                    "dispatch_control": {
+                        "pause_after_current": True,
+                        "resume_after": "2026-06-30T17:55:00+00:00",
+                    }
+                }
+            }
+        if "update social.scrape_runs" in sql:
+            updated_pause_rows.append({"sql": sql, "params": list(params or [])})
+            return {"id": "11111111-1111-1111-1111-111111111111"}
+        return None
+
+    monkeypatch.setattr(legacy, "is_queue_enabled", lambda: True)
+    monkeypatch.setattr(legacy, "is_modal_remote_executor_enabled", lambda: True)
+    monkeypatch.setattr(legacy, "_relation_exists", lambda relation_name: relation_name == "social.scrape_runs")
+    monkeypatch.setattr(legacy, "_now_utc", lambda: now)
+    monkeypatch.setattr(legacy.pg, "fetch_one", _fetch_one)
+    monkeypatch.setattr(legacy, "recover_failed_instagram_comments_capacity_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(legacy, "recover_dispatch_blocked_no_progress_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(legacy, "recover_stale_unclaimed_dispatched_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(legacy, "_modal_social_dispatch_resolution", lambda: {"resolved": True, "reason": None})
+    monkeypatch.setattr(legacy, "_list_candidate_jobs_for_modal_dispatch", lambda **_kwargs: list(candidates))
+    monkeypatch.setattr(legacy, "_current_modal_dispatch_running_counts", lambda: ({}, {}, {}, {}, {}))
+    monkeypatch.setattr(legacy, "_modal_comment_recovery_priority_override_slots", lambda: 0)
+    monkeypatch.setattr(legacy, "_touch_job_dispatch_metadata", lambda job_id, **kwargs: None)
+    monkeypatch.setattr(legacy, "_touch_modal_social_dispatcher_heartbeat", lambda **kwargs: {})
+    monkeypatch.setattr(
+        legacy,
+        "dispatch_social_job",
+        lambda *, job_id, stage=None, priority_recovery=False: (
+            dispatched_job_ids.append(job_id) or {"dispatched": True, "reason": None, "call_id": f"call-{job_id}"}
+        ),
+    )
+
+    result = dispatch_runtime.dispatch_due_social_jobs(run_id=None, limit=1)
+
+    assert result["dispatched_job_ids"] == ["job-expired-pause"]
+    assert dispatched_job_ids == ["job-expired-pause"]
+    assert updated_pause_rows
+    config_update = updated_pause_rows[0]["params"][0]
+    assert '"pause_after_current": false' in config_update
+    assert "resume_after_elapsed" in config_update
+
+
 def test_dispatch_runtime_recovers_comments_capacity_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
     legacy = dispatch_runtime.legacy
 
@@ -208,17 +326,19 @@ def test_dispatch_runtime_recovers_comments_capacity_jobs(monkeypatch: pytest.Mo
     assert result["dispatched_job_ids"] == []
 
 
-def test_global_recover_and_dispatch_recovers_comments_capacity_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_global_recover_and_dispatch_leaves_comments_capacity_to_run_scoped_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     legacy = dispatch_runtime.legacy
 
     monkeypatch.setattr(dispatch_runtime, "reconcile_terminal_modal_running_jobs", lambda **_kwargs: [])
     monkeypatch.setattr(legacy, "recover_stale_running_jobs", lambda **_kwargs: [])
     monkeypatch.setattr(dispatch_runtime, "recover_stale_unclaimed_dispatched_jobs", lambda **_kwargs: [])
-    monkeypatch.setattr(
-        legacy,
-        "recover_failed_instagram_comments_capacity_jobs",
-        lambda **_kwargs: [{"id": "job-capacity"}],
-    )
+
+    def fail_capacity_recovery(**_kwargs):
+        raise AssertionError("global dispatch must not recover comments capacity without a run_id")
+
+    monkeypatch.setattr(legacy, "recover_failed_instagram_comments_capacity_jobs", fail_capacity_recovery)
     monkeypatch.setattr(
         dispatch_runtime,
         "dispatch_due_social_jobs",
@@ -232,7 +352,102 @@ def test_global_recover_and_dispatch_recovers_comments_capacity_jobs(monkeypatch
 
     result = dispatch_runtime.recover_and_dispatch_due_social_jobs(limit=1)
 
-    assert result["recovered_capacity_jobs"] == ["job-capacity"]
+    assert result["recovered_capacity_jobs"] == []
+
+
+def test_dispatch_runtime_skips_posts_auth_cooldown_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy = dispatch_runtime.legacy
+    candidates = [
+        {
+            "id": "job-cooldown",
+            "run_id": "run-catalog",
+            "platform": "instagram",
+            "job_type": legacy.SHARED_ACCOUNT_POSTS_JOB_TYPE,
+            "status": "queued",
+            "config": {
+                "stage": legacy.SHARED_ACCOUNT_POSTS_STAGE,
+                "account": "bravotv",
+                "pipeline_ingest_mode": legacy.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+            },
+            "metadata": {},
+        }
+    ]
+
+    monkeypatch.setattr(legacy, "is_queue_enabled", lambda: True)
+    monkeypatch.setattr(legacy, "is_modal_remote_executor_enabled", lambda: True)
+    monkeypatch.setattr(legacy, "_run_pause_after_current_requested", lambda _run_id: False)
+    monkeypatch.setattr(legacy, "recover_failed_instagram_comments_capacity_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(legacy, "recover_dispatch_blocked_no_progress_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(legacy, "recover_stale_unclaimed_dispatched_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(legacy, "_modal_social_dispatch_resolution", lambda: {"resolved": True, "reason": None})
+    monkeypatch.setattr(legacy, "_list_candidate_jobs_for_modal_dispatch", lambda **_kwargs: list(candidates))
+    monkeypatch.setattr(legacy, "_current_modal_dispatch_running_counts", lambda: ({}, {}, {}, {}, {}))
+    monkeypatch.setattr(legacy, "_modal_comment_recovery_priority_override_slots", lambda: 0)
+    monkeypatch.setattr(legacy, "_job_blocked_by_posts_auth_cooldown", lambda _job: {"cooldown_until": "later"})
+    monkeypatch.setattr(legacy, "_touch_modal_social_dispatcher_heartbeat", lambda **_kwargs: {})
+
+    def fail_dispatch(**_kwargs):
+        raise AssertionError("cooldown-blocked posts job must not dispatch")
+
+    monkeypatch.setattr(legacy, "dispatch_social_job", fail_dispatch)
+
+    result = dispatch_runtime.dispatch_due_social_jobs(run_id="run-catalog", limit=1)
+
+    assert result["dispatched_job_ids"] == []
+    assert result["dispatch_attempts"] == 0
+
+
+def test_dispatch_runtime_stamps_remote_function_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy = dispatch_runtime.legacy
+    candidates = [
+        {
+            "id": "job-posts",
+            "run_id": "run-catalog",
+            "platform": "instagram",
+            "job_type": legacy.SHARED_ACCOUNT_POSTS_JOB_TYPE,
+            "status": "queued",
+            "config": {
+                "stage": legacy.SHARED_ACCOUNT_POSTS_STAGE,
+                "account": "bravotv",
+                "pipeline_ingest_mode": legacy.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+            },
+            "metadata": {},
+        }
+    ]
+    dispatch_writes: list[dict[str, object]] = []
+
+    monkeypatch.setattr(legacy, "is_queue_enabled", lambda: True)
+    monkeypatch.setattr(legacy, "is_modal_remote_executor_enabled", lambda: True)
+    monkeypatch.setattr(legacy, "_run_pause_after_current_requested", lambda _run_id: False)
+    monkeypatch.setattr(legacy, "recover_failed_instagram_comments_capacity_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(legacy, "recover_dispatch_blocked_no_progress_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(legacy, "recover_stale_unclaimed_dispatched_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(legacy, "_modal_social_dispatch_resolution", lambda: {"resolved": True, "reason": None})
+    monkeypatch.setattr(legacy, "_list_candidate_jobs_for_modal_dispatch", lambda **_kwargs: list(candidates))
+    monkeypatch.setattr(legacy, "_current_modal_dispatch_running_counts", lambda: ({}, {}, {}, {}, {}))
+    monkeypatch.setattr(legacy, "_modal_comment_recovery_priority_override_slots", lambda: 0)
+    monkeypatch.setattr(legacy, "_job_blocked_by_posts_auth_cooldown", lambda _job: None)
+    monkeypatch.setattr(legacy, "_touch_job_dispatch_metadata", lambda job_id, **kwargs: dispatch_writes.append(kwargs))
+    monkeypatch.setattr(legacy, "_touch_modal_social_dispatcher_heartbeat", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        legacy,
+        "dispatch_social_job",
+        lambda **_kwargs: {
+            "dispatched": True,
+            "call_id": "fc-123",
+            "function_name": "trr-backend-jobs.run_social_job",
+        },
+    )
+
+    result = dispatch_runtime.dispatch_due_social_jobs(run_id="run-catalog", limit=1)
+
+    assert result["dispatched_job_ids"] == ["job-posts"]
+    assert dispatch_writes[-1]["remote_invocation_id"] == "fc-123"
+    assert dispatch_writes[-1]["remote_function_name"] == "trr-backend-jobs.run_social_job"
 
 
 def test_reconcile_terminal_modal_running_jobs_completes_successful_stale_call(
@@ -321,6 +536,213 @@ def test_reconcile_terminal_modal_running_jobs_completes_successful_stale_call(
     assert metadata["terminal_modal_reconciliation"]["reason"] == "modal_call_completed_but_db_job_still_running"
 
 
+def test_reconcile_terminal_modal_running_jobs_requeues_unfinished_frontier_after_failed_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy = dispatch_runtime.legacy
+    now = datetime(2026, 6, 12, 4, 20, tzinfo=UTC)
+    released: list[dict[str, object]] = []
+    finished: list[dict[str, object]] = []
+    enqueued: list[dict[str, object]] = []
+    row = {
+        "id": "job-frontier",
+        "run_id": "run-catalog",
+        "platform": "instagram",
+        "source_scope": "network",
+        "status": "running",
+        "priority": 101,
+        "items_found": 200,
+        "attempt_count": 12,
+        "max_attempts": 12,
+        "worker_id": None,
+        "heartbeat_at": now - timedelta(seconds=301),
+        "started_at": now - timedelta(minutes=20),
+        "claimed_at": now - timedelta(minutes=16),
+        "created_at": now - timedelta(minutes=30),
+        "config": {
+            "stage": legacy.SHARED_ACCOUNT_POSTS_STAGE,
+            "platform": "instagram",
+            "source_scope": "network",
+            "account": "bravotv",
+            "pipeline_ingest_mode": legacy.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+            "partition_strategy": legacy.CATALOG_FULL_HISTORY_FRONTIER_STRATEGY,
+            "runner_strategy": legacy.CATALOG_FULL_HISTORY_FRONTIER_STRATEGY,
+            "runner_count": 4,
+        },
+        "metadata": {
+            "dispatch": {
+                "dispatch_backend": "modal",
+                "remote_invocation_id": "fc-failed",
+                "remote_invocation_status": "running",
+            },
+        },
+    }
+
+    monkeypatch.setattr(legacy, "_scrape_jobs_features", lambda: {"has_queue_fields": True})
+    monkeypatch.setattr(legacy, "_now_utc", lambda: now)
+    monkeypatch.setattr(legacy.pg, "fetch_all", lambda *_args, **_kwargs: [dict(row)])
+    monkeypatch.setattr(
+        legacy,
+        "_refresh_remote_modal_invocation_state",
+        lambda _job, **_kwargs: {
+            "function_call_id": "fc-failed",
+            "status": "failed",
+            "raw_status": "failed",
+            "checked_at": now.isoformat(),
+            "reason": "modal_failure",
+            "task_id": None,
+        },
+    )
+    monkeypatch.setattr(
+        legacy,
+        "_get_shared_account_run_frontier",
+        lambda **_kwargs: {
+            "status": "running",
+            "next_cursor": "cursor-1",
+            "total_posts": 27000,
+            "last_transport": "public",
+            "lease_owner": "job-frontier",
+            "exhausted": False,
+            "metadata": {"bounded_window_start_reached": False},
+        },
+    )
+    monkeypatch.setattr(
+        legacy,
+        "_enqueue_shared_posts_job",
+        lambda **kwargs: enqueued.append(dict(kwargs)) or {"status": "queued", "job_id": "job-continuation"},
+    )
+    monkeypatch.setattr(
+        legacy,
+        "_release_shared_account_run_frontier",
+        lambda **kwargs: released.append(dict(kwargs)) or {"status": kwargs.get("status")},
+    )
+    monkeypatch.setattr(
+        legacy,
+        "_finish_job",
+        lambda job_id, **kwargs: finished.append({"job_id": job_id, **kwargs}),
+    )
+
+    result = dispatch_runtime.reconcile_terminal_modal_running_jobs(run_id="run-catalog", limit=10)
+
+    assert result[0]["id"] == "job-frontier"
+    assert result[0]["status"] == "cancelled"
+    assert result[0]["continuation_job_id"] == "job-continuation"
+    assert enqueued[0]["partition_strategy"] == legacy.CATALOG_FULL_HISTORY_FRONTIER_STRATEGY
+    assert enqueued[0]["expected_total_posts"] == 27000
+    assert released == [
+        {
+            "run_id": "run-catalog",
+            "platform": "instagram",
+            "account_handle": "bravotv",
+            "lease_owner": "job-frontier",
+            "status": "queued",
+        }
+    ]
+    assert finished[0]["status"] == "cancelled"
+    assert finished[0]["last_error_code"] == "terminal_modal_frontier_requeued"
+    assert (
+        finished[0]["metadata"]["terminal_modal_frontier_reconciliation"]["continuation_job_id"] == "job-continuation"
+    )
+
+
+def test_reconcile_terminal_modal_running_jobs_defers_unfinished_frontier_during_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy = dispatch_runtime.legacy
+    now = datetime(2026, 6, 12, 4, 20, tzinfo=UTC)
+    cooldown_until = now + timedelta(minutes=15)
+    released: list[dict[str, object]] = []
+    finished: list[dict[str, object]] = []
+    row = {
+        "id": "job-frontier",
+        "run_id": "run-catalog",
+        "platform": "instagram",
+        "source_scope": "network",
+        "status": "running",
+        "priority": 101,
+        "items_found": 200,
+        "attempt_count": 12,
+        "max_attempts": 12,
+        "worker_id": None,
+        "heartbeat_at": now - timedelta(seconds=301),
+        "started_at": now - timedelta(minutes=20),
+        "claimed_at": now - timedelta(minutes=16),
+        "created_at": now - timedelta(minutes=30),
+        "config": {
+            "stage": legacy.SHARED_ACCOUNT_POSTS_STAGE,
+            "platform": "instagram",
+            "source_scope": "network",
+            "account": "bravotv",
+            "pipeline_ingest_mode": legacy.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+            "partition_strategy": legacy.CATALOG_FULL_HISTORY_FRONTIER_STRATEGY,
+            "runner_strategy": legacy.CATALOG_FULL_HISTORY_FRONTIER_STRATEGY,
+        },
+        "metadata": {
+            "dispatch": {
+                "dispatch_backend": "modal",
+                "remote_invocation_id": "fc-failed",
+                "remote_invocation_status": "running",
+            },
+        },
+    }
+
+    monkeypatch.setattr(legacy, "_scrape_jobs_features", lambda: {"has_queue_fields": True})
+    monkeypatch.setattr(legacy, "_now_utc", lambda: now)
+    monkeypatch.setattr(legacy.pg, "fetch_all", lambda *_args, **_kwargs: [dict(row)])
+    monkeypatch.setattr(
+        legacy,
+        "_refresh_remote_modal_invocation_state",
+        lambda _job, **_kwargs: {
+            "function_call_id": "fc-failed",
+            "status": "failed",
+            "raw_status": "failed",
+            "checked_at": now.isoformat(),
+            "reason": "modal_failure",
+            "task_id": None,
+        },
+    )
+    monkeypatch.setattr(
+        legacy,
+        "_get_shared_account_run_frontier",
+        lambda **_kwargs: {
+            "status": "running",
+            "next_cursor": "cursor-1",
+            "total_posts": 27000,
+            "last_transport": "public",
+            "lease_owner": "job-frontier",
+            "exhausted": False,
+            "metadata": {"bounded_window_start_reached": False},
+        },
+    )
+    monkeypatch.setattr(
+        legacy,
+        "_enqueue_shared_posts_job",
+        lambda **_kwargs: {
+            "status": "deferred_by_cooldown",
+            "cooldown": {"cooldown_until": cooldown_until.isoformat()},
+        },
+    )
+    monkeypatch.setattr(
+        legacy,
+        "_release_shared_account_run_frontier",
+        lambda **kwargs: released.append(dict(kwargs)) or {"status": kwargs.get("status")},
+    )
+    monkeypatch.setattr(
+        legacy,
+        "_finish_job",
+        lambda job_id, **kwargs: finished.append({"job_id": job_id, **kwargs}),
+    )
+
+    result = dispatch_runtime.reconcile_terminal_modal_running_jobs(run_id="run-catalog", limit=10)
+
+    assert result[0]["status"] == "retrying"
+    assert result[0]["deferred_by_cooldown"] is True
+    assert released[0]["status"] == "retrying"
+    assert finished[0]["status"] == "retrying"
+    assert finished[0]["next_available_at"] == cooldown_until
+    assert finished[0]["last_error_code"] == "terminal_modal_frontier_deferred_by_cooldown"
+
+
 def test_dispatch_runtime_uses_capacity_stage_and_job_config_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -405,6 +827,7 @@ def test_dispatch_runtime_uses_capacity_stage_and_job_config_cap(
     )
     monkeypatch.setattr(legacy, "_touch_job_dispatch_metadata", lambda job_id, **kwargs: None)
     monkeypatch.setattr(legacy, "_touch_modal_social_dispatcher_heartbeat", lambda **kwargs: {})
+
     def fake_dispatch_social_job(
         *,
         job_id: str,
@@ -444,6 +867,7 @@ def test_dispatch_runtime_priority_comment_recovery_bypasses_comments_capacity(
                 "account": "bravotv",
                 "target_source_ids": ["DTgXh94kXyo"],
                 "comments_audit_cursor_retry": True,
+                "comments_priority_recovery_override": True,
             },
             "metadata": {},
         }
@@ -457,13 +881,18 @@ def test_dispatch_runtime_priority_comment_recovery_bypasses_comments_capacity(
     monkeypatch.setattr(legacy, "recover_stale_unclaimed_dispatched_jobs", lambda **_kwargs: [])
     monkeypatch.setattr(legacy, "_modal_social_dispatch_resolution", lambda: {"resolved": True, "reason": None})
     monkeypatch.setattr(legacy, "_list_candidate_jobs_for_modal_dispatch", lambda **_kwargs: list(candidates))
-    monkeypatch.setattr(legacy, "_current_modal_dispatch_running_counts", lambda: ({"comments": 8}, {("comments", "instagram"): 8}, {}, {}, {}))
+    monkeypatch.setattr(
+        legacy,
+        "_current_modal_dispatch_running_counts",
+        lambda: ({"comments": 8}, {("comments", "instagram"): 8}, {}, {}, {}),
+    )
     monkeypatch.setattr(legacy, "_modal_dispatch_stage_global_cap", lambda _stage: 8)
     monkeypatch.setattr(legacy, "_modal_dispatch_effective_platform_cap", lambda *_args, **_kwargs: 8)
     monkeypatch.setattr(legacy, "_modal_comment_recovery_priority_override_slots", lambda: 1)
     monkeypatch.setattr(legacy, "_current_modal_priority_comment_recovery_running_count", lambda: 0)
     monkeypatch.setattr(legacy, "_touch_job_dispatch_metadata", lambda job_id, **kwargs: None)
     monkeypatch.setattr(legacy, "_touch_modal_social_dispatcher_heartbeat", lambda **kwargs: {})
+
     def fake_dispatch_social_job(
         *,
         job_id: str,
@@ -483,7 +912,29 @@ def test_dispatch_runtime_priority_comment_recovery_bypasses_comments_capacity(
     assert dispatched_priority_recovery == [True]
 
 
-def test_dispatch_runtime_routes_priority_comment_recovery_to_recovery_function_when_override_slot_busy(
+def test_priority_comment_recovery_requires_explicit_override_marker() -> None:
+    legacy = dispatch_runtime.legacy
+    comments_stage = legacy.INSTAGRAM_COMMENTS_SCRAPLING_STAGE
+    job = {
+        "id": "job-recovery",
+        "platform": "instagram",
+        "job_type": "comments",
+        "priority": 104,
+        "config": {
+            "stage": comments_stage,
+            "comments_audit_cursor_retry": True,
+        },
+        "metadata": {},
+    }
+
+    assert legacy._job_is_priority_comment_recovery(job, job["config"], stage=comments_stage) is False
+
+    marked_config = {**job["config"], "comments_priority_recovery_override": True}
+
+    assert legacy._job_is_priority_comment_recovery(job, marked_config, stage=comments_stage) is True
+
+
+def test_dispatch_runtime_uses_normal_function_when_priority_override_slot_busy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     legacy = dispatch_runtime.legacy
@@ -503,6 +954,7 @@ def test_dispatch_runtime_routes_priority_comment_recovery_to_recovery_function_
                 "account": "bravotv",
                 "target_source_ids": ["DTgXh94kXyo"],
                 "comments_audit_cursor_retry": True,
+                "comments_priority_recovery_override": True,
             },
             "metadata": {},
         }
@@ -540,7 +992,7 @@ def test_dispatch_runtime_routes_priority_comment_recovery_to_recovery_function_
 
     assert result["dispatched_job_ids"] == ["job-recovery"]
     assert dispatched_job_ids == ["job-recovery"]
-    assert dispatched_priority_recovery == [True]
+    assert dispatched_priority_recovery == [False]
 
 
 def test_dispatch_runtime_clears_stale_pending_modal_capacity_before_rerun(
@@ -600,7 +1052,11 @@ def test_dispatch_runtime_clears_stale_pending_modal_capacity_before_rerun(
             "task_id": None,
         },
     )
-    monkeypatch.setattr(legacy, "_touch_job_dispatch_metadata", lambda job_id, **kwargs: touched.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        legacy,
+        "_touch_job_dispatch_metadata",
+        lambda job_id, **kwargs: touched.append({"job_id": job_id, **kwargs}),
+    )
     monkeypatch.setattr(legacy, "_touch_modal_social_dispatcher_heartbeat", lambda **kwargs: {})
     monkeypatch.setattr(
         legacy,
@@ -725,9 +1181,7 @@ def _setup_public_comments_cap_dispatch(
         ),
     )
 
-    run_config = (
-        {"comments_worker_cap_current": run_worker_cap} if run_worker_cap is not None else {}
-    )
+    run_config = {"comments_worker_cap_current": run_worker_cap} if run_worker_cap is not None else {}
     monkeypatch.setattr(legacy.pg, "fetch_one", lambda *_args, **_kwargs: {"config": run_config})
 
     return dispatched_job_ids

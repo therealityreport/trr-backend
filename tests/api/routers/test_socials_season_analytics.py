@@ -2762,7 +2762,9 @@ def test_get_social_account_cookie_health_does_not_treat_public_comments_probe_a
                 "auth_probe_skipped": True,
                 "auth_required_for_hidden_comments": True,
                 "comments_auth_blocker": "strict_authenticated_probe_not_requested",
-                "operator_action": "Run a strict Instagram comments auth probe before launching hidden-comments recovery.",
+                "operator_action": (
+                    "Run a strict Instagram comments auth probe before launching hidden-comments recovery."
+                ),
                 "status": "public",
                 "result": "public",
                 "execution_backend": "modal",
@@ -2855,7 +2857,7 @@ def test_get_social_account_cookie_health_marks_comments_auth_rate_limited_unhea
     assert body["comments_auth_health"]["cache_ttl_seconds"] == 240
 
 
-def test_post_social_account_cookie_refresh_route_defaults_allow_cookie_refresh_and_returns_instagram_auth_repair_summary(
+def test_post_social_account_cookie_refresh_route_defaults_allow_cookie_refresh_and_returns_repair_summary(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2991,7 +2993,9 @@ def test_post_social_account_comments_run_rebalance_rejects_non_instagram(
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     run_id = uuid4()
 
-    with patch("trr_backend.socials.pipelines.comments.instagram.rebalance_slow_instagram_comments_shards") as rebalance_mock:
+    with patch(
+        "trr_backend.socials.pipelines.comments.instagram.rebalance_slow_instagram_comments_shards"
+    ) as rebalance_mock:
         response = client.post(
             f"/api/v1/admin/socials/profiles/tiktok/bravotv/comments/runs/{run_id}/rebalance",
             headers={"Authorization": f"Bearer {token}"},
@@ -3328,9 +3332,7 @@ def test_post_social_account_comments_run_cancel(client: TestClient, monkeypatch
     assert mocked.call_args.kwargs["cancelled_by"] == "admin@example.com"
 
 
-def test_post_social_account_comments_run_guarded_restart(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_post_social_account_comments_run_guarded_restart(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     old_run_id = str(uuid4())
@@ -3532,6 +3534,9 @@ def test_put_social_account_profile_hashtags(client: TestClient, monkeypatch: py
 def test_get_social_account_profile_hashtags_forwards_window(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from api.routers import socials as socials_router
+
+    socials_router._clear_account_profile_caches()
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
@@ -3540,12 +3545,46 @@ def test_get_social_account_profile_hashtags_forwards_window(
         return_value={"items": []},
     ) as mocked:
         response = client.get(
-            "/api/v1/admin/socials/profiles/instagram/bravotv/hashtags?window=30d",
+            "/api/v1/admin/socials/profiles/instagram/bravotv/hashtags?window=30d&assignment_status=unassigned",
             headers={"Authorization": f"Bearer {token}"},
         )
 
     assert response.status_code == 200
     assert mocked.call_args.kwargs["window"] == "30d"
+    assert mocked.call_args.kwargs["assignment_status"] == "unassigned"
+
+
+def test_get_social_account_profile_hashtag_conflicts(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    from api.routers import socials as socials_router
+
+    socials_router._clear_account_profile_caches()
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "items": [
+            {
+                "hashtag": "rhoa",
+                "display_hashtag": "#rhoa",
+                "distinct_show_count": 2,
+                "legacy_assignments": [],
+                "resolution_action": "merged_global_show_set",
+            }
+        ],
+        "limit": 10,
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_social_hashtag_assignment_conflict_history",
+        return_value=expected,
+    ) as mocked:
+        response = client.get(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/hashtags/conflicts?limit=10",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["hashtag"] == "rhoa"
+    assert mocked.call_args.kwargs["limit"] == 10
 
 
 def test_post_social_account_catalog_freshness(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -6626,6 +6665,72 @@ def test_post_social_account_comments_scrape_background_dispatch_exception_keeps
     assert response.json()["run_id"] == "comments-run-queued-2"
     assert scrape_mock.call_args.kwargs["dispatch_immediately"] is False
     dispatch_mock.assert_called_once_with(run_id="comments-run-queued-2")
+
+
+def test_post_social_account_comments_authenticated_followup_dry_run(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    run_id = "11111111-1111-1111-1111-111111111111"
+
+    with patch(
+        "trr_backend.socials.pipelines.comments.instagram.start_social_account_comments_authenticated_followup",
+        return_value={
+            "run_id": run_id,
+            "status": "dry_run",
+            "launch_performed": False,
+            "authenticated_followup": {"name": "authenticated_followup"},
+        },
+    ) as followup_mock:
+        response = client.post(
+            f"/api/v1/admin/socials/profiles/instagram/bravotv/comments/runs/{run_id}/authenticated-followup",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"dry_run": True, "comments_worker_count": 1, "comments_target_batch_size": 1},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "dry_run"
+    assert body["launch_performed"] is False
+    followup_mock.assert_called_once()
+    assert followup_mock.call_args.kwargs["comments_worker_count"] == 1
+    assert followup_mock.call_args.kwargs["comments_target_batch_size"] == 1
+    assert followup_mock.call_args.kwargs["dry_run"] is True
+
+
+def test_post_social_account_comments_public_recovery_dry_run(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    run_id = "11111111-1111-1111-1111-111111111111"
+
+    with patch(
+        "trr_backend.socials.pipelines.comments.instagram.start_social_account_comments_public_recovery",
+        return_value={
+            "run_id": run_id,
+            "status": "dry_run",
+            "launch_performed": False,
+            "public_recovery": {"name": "public_recovery"},
+        },
+    ) as recovery_mock:
+        response = client.post(
+            f"/api/v1/admin/socials/profiles/instagram/bravotv/comments/runs/{run_id}/public-recovery",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"dry_run": True, "comments_worker_count": 4, "comments_target_batch_size": 10},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "dry_run"
+    assert body["launch_performed"] is False
+    recovery_mock.assert_called_once()
+    assert recovery_mock.call_args.kwargs["comments_worker_count"] == 4
+    assert recovery_mock.call_args.kwargs["comments_target_batch_size"] == 10
+    assert recovery_mock.call_args.kwargs["dry_run"] is True
 
 
 def test_ingest_returns_503_when_remote_job_plane_enforced_and_queue_disabled(

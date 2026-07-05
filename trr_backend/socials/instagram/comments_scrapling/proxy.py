@@ -21,6 +21,7 @@ from trr_backend.socials.instagram._proxy_sessions import apply_decodo_session_a
 from trr_backend.socials.instagram.comments_scrapling.public_mode import (
     comments_proxy_provider_disabled,
     comments_proxy_provider_name,
+    public_proxy_enabled,
 )
 
 
@@ -154,7 +155,12 @@ def select_comments_proxy(*, session_key: str | None = None, public_mode: bool =
       browser_proxy = first URL string (ProxyRotator parses it)
       api_proxy_url = same URL string
     """
-    if public_mode:
+    # Public lane is proxy-free by default. It may use a budgeted STICKY egress
+    # only under the explicit SOCIAL_INSTAGRAM_COMMENTS_PUBLIC_PROXY_ENABLED flag
+    # (Phase 3). When enabled, fall through and build a sticky Decodo session so
+    # each shard becomes its own per-egress rate-pace slot.
+    public_proxy = bool(public_mode) and public_proxy_enabled()
+    if public_mode and not public_proxy:
         return None
 
     # 1. Explicit proxy URLs take precedence.
@@ -189,9 +195,13 @@ def select_comments_proxy(*, session_key: str | None = None, public_mode: bool =
         creds = _decodo_env()
         if creds:
             username, password, gateway = creds
+            # The public budgeted lane forces sticky so each shard pins a stable
+            # egress IP (per-egress pacing); otherwise honor the configured sticky
+            # vs force-rotating preference.
+            use_sticky = (sticky_proxy_requested and not force_rotating_proxy) or public_proxy
             sticky_username, session_mode = apply_decodo_session_affinity(
                 username,
-                use_sticky_proxy=sticky_proxy_requested and not force_rotating_proxy,
+                use_sticky_proxy=use_sticky,
                 session_ttl_seconds=resolve_positive_int_env(
                     "SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS",
                     600,
@@ -207,11 +217,18 @@ def select_comments_proxy(*, session_key: str | None = None, public_mode: bool =
             }
             api_url = f"http://{quote(sticky_username, safe='')}:{quote(password, safe='')}@{gateway}"
             rotator = _build_proxy_rotator(browser_dict)
+            fingerprint = _fingerprint_from_gateway(gateway, "decodo")
+            if use_sticky and session_key:
+                # Fold the per-shard sticky identity into the (credential-free)
+                # fingerprint so _global_rate_limit_key produces a distinct key per
+                # egress IP — converting one shared slot into N per-egress slots.
+                egress_token = hashlib.sha256(str(session_key).encode("utf-8")).hexdigest()[:12]
+                fingerprint = f"{fingerprint}:{egress_token}"
             return CommentsProxyConfig(
                 browser_proxy=browser_dict,
                 api_proxy_url=api_url,
                 proxy_rotator=rotator,
-                fingerprint=_fingerprint_from_gateway(gateway, "decodo"),
+                fingerprint=fingerprint,
                 session_mode=session_mode,
             )
 

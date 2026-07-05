@@ -211,3 +211,39 @@ def test_explicit_decodo_provider_can_opt_into_sticky_comments_proxy(monkeypatch
     assert config.browser_proxy["username"].startswith("global-user-session-")
     assert "-sessionduration-10" in config.browser_proxy["username"]
     assert "sessionduration-10" in config.api_proxy_url
+
+
+def test_public_mode_returns_none_without_public_proxy_flag(monkeypatch):
+    # Default public lane is proxy-free even with Decodo creds present.
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_PUBLIC_PROXY_ENABLED", raising=False)
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER", "decodo")
+    monkeypatch.setenv("DECODO_USERNAME", "u")
+    monkeypatch.setenv("DECODO_PASSWORD", "p")
+    monkeypatch.setenv("DECODO_GATEWAY", "gate.decodo.com:7000")
+    assert comments_proxy.select_comments_proxy(public_mode=True, session_key="bravotv:public:0") is None
+
+
+def test_public_proxy_flag_enables_sticky_per_egress_fingerprint(monkeypatch):
+    monkeypatch.setattr(comments_proxy, "_build_proxy_rotator", lambda selected: {"selected": selected})
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PUBLIC_PROXY_ENABLED", "1")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER", "decodo")
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_URLS", raising=False)
+    monkeypatch.delenv("DECODO_PROXY_URL", raising=False)
+    monkeypatch.setenv("DECODO_USERNAME", "u")
+    monkeypatch.setenv("DECODO_PASSWORD", "p")
+    monkeypatch.setenv("DECODO_GATEWAY", "gate.decodo.com:7000")
+    # Even with force-rotating (the production default), the public budgeted lane
+    # forces a sticky session so each shard pins a stable egress IP.
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY", "true")
+
+    cfg_a = comments_proxy.select_comments_proxy(public_mode=True, session_key="bravotv:public:0")
+    cfg_b = comments_proxy.select_comments_proxy(public_mode=True, session_key="bravotv:public:1")
+
+    assert cfg_a is not None and cfg_b is not None
+    assert cfg_a.session_mode == "sticky"
+    assert cfg_a.fingerprint.startswith("gate.decodo.com:7000:decodo:")
+    # Distinct shards -> distinct fingerprints -> per-egress rate pacing.
+    assert cfg_a.fingerprint != cfg_b.fingerprint
+    # Same shard -> deterministic, stable fingerprint.
+    cfg_a2 = comments_proxy.select_comments_proxy(public_mode=True, session_key="bravotv:public:0")
+    assert cfg_a2.fingerprint == cfg_a.fingerprint

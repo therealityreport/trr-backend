@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 import requests
 
 from trr_backend.socials.instagram.request_client import InstagramRequestFailure
-from trr_backend.socials.instagram.scraper import InstagramScraper
+from trr_backend.socials.instagram.scraper import InstagramScraper, ScrapeConfig
 
 
 class _FakeResponse:
@@ -25,6 +26,22 @@ class _FakeResponse:
 
     def json(self) -> dict[str, Any]:
         return self._json_payload
+
+
+def _graphql_posts_payload(
+    nodes: list[dict[str, Any]],
+    *,
+    has_next: bool = False,
+    end_cursor: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "data": {
+            "xdt_api__v1__feed__user_timeline_graphql_connection": {
+                "edges": [{"node": node} for node in nodes],
+                "page_info": {"has_next_page": has_next, "end_cursor": end_cursor},
+            }
+        }
+    }
 
 
 def test_fetch_posts_graphql_warms_profile_page_and_uses_public_web_headers(monkeypatch) -> None:
@@ -218,6 +235,55 @@ def test_fetch_posts_graphql_records_cursor_unauthorized_failure_metadata(monkey
     assert scraper.last_retrieval_meta["retryable"] is True
     assert scraper.last_retrieval_meta["graphql_cursor"] == "cursor-1"
     assert scraper.last_retrieval_meta["transport"] == "requests_enriched"
+
+
+def test_fetch_posts_graphql_clears_cursor_context_after_request_client_auth_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scraper = InstagramScraper(cookies={"sessionid": "seed", "csrftoken": "csrf", "ds_user_id": "1"})
+    reset_calls = 0
+    popped_usernames: list[str] = []
+
+    monkeypatch.setattr(
+        scraper,
+        "_warm_profile_request_context",
+        lambda *args, **kwargs: {
+            "lsd": "lsd-token",
+            "bloks_version": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        },
+    )
+    monkeypatch.setattr(scraper, "_resolve_graphql_cursor_retry_attempts", lambda cursor: 1)
+    monkeypatch.setattr(scraper, "_playwright_graphql_fallback_enabled", lambda: False)
+
+    def _fake_reset() -> None:
+        nonlocal reset_calls
+        reset_calls += 1
+
+    monkeypatch.setattr(scraper, "_reset_request_session", _fake_reset)
+    monkeypatch.setattr(
+        scraper,
+        "_pop_profile_page_context_cache_entry",
+        lambda username: popped_usernames.append(username),
+    )
+
+    class _Client:
+        def post_form_json(self, *args, **kwargs):
+            raise InstagramRequestFailure("unauthorized", status_code=401, retryable=False)
+
+    scraper._request_client = _Client()
+
+    payload = scraper.fetch_posts_graphql(
+        "bravotv",
+        "cursor-1",
+        0.0,
+        allow_browser_fallback=False,
+        allow_recovery=False,
+    )
+
+    assert payload is None
+    assert scraper.last_retrieval_meta["error_code"] == "instagram_graphql_cursor_unauthorized"
+    assert reset_calls == 1
+    assert popped_usernames == ["bravotv"]
 
 
 def test_fetch_posts_graphql_records_checkpoint_required_failure_metadata(monkeypatch) -> None:
@@ -790,6 +856,111 @@ def test_scrape_graphql_marks_initial_failure_without_shortcode_fallback(monkeyp
     assert posts == []
     assert scraper.last_retrieval_meta["initial_page_failed"] is True
     assert "shortcode_fallback_used" not in scraper.last_retrieval_meta
+
+
+def test_scrape_graphql_unknown_timestamp_does_not_trip_date_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = InstagramScraper(cookies={"sessionid": "seed", "csrftoken": "csrf", "ds_user_id": "1"})
+
+    monkeypatch.setattr(scraper, "fetch_profile_info", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        scraper,
+        "fetch_posts_graphql",
+        lambda *_args, **_kwargs: _graphql_posts_payload(
+            [{"code": "UNKNOWN_TS", "pk": "1", "id": "1", "taken_at_timestamp": 0}]
+        ),
+    )
+
+    posts = scraper._scrape_graphql(
+        ScrapeConfig(
+            username="bravotv",
+            hashtags=[],
+            date_start=datetime(2026, 1, 1, tzinfo=UTC),
+            delay_seconds=0.0,
+            max_pages=1,
+            max_scrape_seconds=60.0,
+        )
+    )
+
+    assert [post.shortcode for post in posts] == ["UNKNOWN_TS"]
+    assert posts[0].taken_at == 0
+    assert scraper.last_retrieval_meta["stop_reason"] == "no_more_pages"
+
+
+def test_scrape_graphql_single_older_pinned_node_does_not_stop_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = InstagramScraper(cookies={"sessionid": "seed", "csrftoken": "csrf", "ds_user_id": "1"})
+
+    monkeypatch.setattr(scraper, "fetch_profile_info", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        scraper,
+        "fetch_posts_graphql",
+        lambda *_args, **_kwargs: _graphql_posts_payload(
+            [
+                {"code": "OLD_PINNED", "pk": "1", "id": "1", "taken_at_timestamp": 1_700_000_000},
+                {"code": "IN_RANGE", "pk": "2", "id": "2", "taken_at_timestamp": 1_767_225_600},
+            ]
+        ),
+    )
+
+    posts = scraper._scrape_graphql(
+        ScrapeConfig(
+            username="bravotv",
+            hashtags=[],
+            date_start=datetime(2026, 1, 1, tzinfo=UTC),
+            delay_seconds=0.0,
+            max_pages=1,
+            max_scrape_seconds=60.0,
+        )
+    )
+
+    assert [post.shortcode for post in posts] == ["IN_RANGE"]
+    assert scraper.last_retrieval_meta["stop_reason"] == "no_more_pages"
+
+
+def test_scrape_graphql_cursor_failure_survives_final_retrieval_meta(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = InstagramScraper(cookies={"sessionid": "seed", "csrftoken": "csrf", "ds_user_id": "1"})
+    calls = 0
+
+    monkeypatch.setattr(scraper, "fetch_profile_info", lambda *_args, **_kwargs: None)
+
+    def _fake_fetch(_username: str, cursor: str | None, *_args: Any, **_kwargs: Any):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _graphql_posts_payload(
+                [{"code": "FIRST", "pk": "1", "id": "1", "taken_at_timestamp": 1_767_225_600}],
+                has_next=True,
+                end_cursor="cursor-2",
+            )
+        assert cursor == "cursor-2"
+        scraper.last_retrieval_meta = {
+            "error_code": "instagram_graphql_cursor_unauthorized",
+            "error_class": "HTTPError",
+            "error_status_code": 401,
+            "retryable": True,
+            "graphql_cursor": cursor,
+            "transport": "requests_enriched",
+        }
+        return None
+
+    monkeypatch.setattr(scraper, "fetch_posts_graphql", _fake_fetch)
+
+    posts = scraper._scrape_graphql(
+        ScrapeConfig(
+            username="bravotv",
+            hashtags=[],
+            delay_seconds=0.0,
+            max_pages=None,
+            max_scrape_seconds=60.0,
+        )
+    )
+
+    assert [post.shortcode for post in posts] == ["FIRST"]
+    assert scraper.last_retrieval_meta["stop_reason"] == "graphql_empty_or_error"
+    assert scraper.last_retrieval_meta["error_code"] == "instagram_graphql_cursor_unauthorized"
+    assert scraper.last_retrieval_meta["error_status_code"] == 401
+    assert scraper.last_retrieval_meta["retryable"] is True
+    assert scraper.last_retrieval_meta["graphql_cursor"] == "cursor-2"
+    assert scraper.last_retrieval_meta["partial_history"] is True
 
 
 def test_fetch_posts_graphql_uses_request_client(monkeypatch: pytest.MonkeyPatch) -> None:

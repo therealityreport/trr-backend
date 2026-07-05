@@ -44,7 +44,10 @@ from trr_backend.socials.scrapling_transport import (
     build_stealthy_fetcher,
     cookies_to_scrapling,
     merge_response_cookies,
+    resolve_scrapling_fetcher_options,
     safe_cookie_metadata,
+    safe_scrapling_proxy_metadata,
+    scrapling_fetcher_metadata,
     scrapling_runtime_metadata,
 )
 from trr_backend.socials.tiktok.posts_scrapling.proxy import TikTokPostsProxyConfig
@@ -57,6 +60,26 @@ TIKTOK_POST_PAGE_SIZE = 30
 TIKTOK_POST_PAGE_SIZE_MIN = 10
 TIKTOK_POST_PAGE_SIZE_MAX = 50
 _SEC_UID_RE = re.compile(r'\\?"secUid\\?"\s*:\s*\\?"(?P<sec_uid>[^"\\]+)')
+_TIKTOK_SCRAPLING_OPTION_KEYS = frozenset(
+    {
+        "additional_args",
+        "ai_targeted",
+        "allow_webgl",
+        "block_ads",
+        "block_webrtc",
+        "blocked_domains",
+        "dns_over_https",
+        "google_search",
+        "hide_canvas",
+        "init_script",
+        "real_chrome",
+        "selector_config",
+        "solve_cloudflare",
+        "useragent",
+        "wait_selector",
+        "wait_selector_state",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +220,15 @@ class TikTokPostsScraplingFetcher:
         self._last_challenge_classification: str | None = None
         self._captured_xhr_paths: list[str] = []
         self._scrapling_runtime_metadata = scrapling_runtime_metadata()
+        self._scrapling_fetcher_options = resolve_scrapling_fetcher_options(
+            "SOCIAL_TIKTOK_POSTS_SCRAPLING",
+            allowed_keys=_TIKTOK_SCRAPLING_OPTION_KEYS,
+        )
+        self._scrapling_fetcher_metadata = scrapling_fetcher_metadata(
+            "StealthyFetcher",
+            self._scrapling_fetcher_options.metadata,
+            safe_scrapling_proxy_metadata(),
+        )
         self._fetcher = build_stealthy_fetcher()
         self._http_client: httpx.AsyncClient | None = None
 
@@ -206,6 +238,7 @@ class TikTokPostsScraplingFetcher:
         return {
             **cookie_metadata,
             "scrapling_runtime": dict(self._scrapling_runtime_metadata),
+            **self._scrapling_fetcher_metadata,
             "cookie_sync_count": len(self._warmup_cookie_delta),
             "selected_proxy_fingerprint": self._selected_proxy_fingerprint,
             "sec_uid_resolved": bool(self._sec_uid),
@@ -369,6 +402,7 @@ class TikTokPostsScraplingFetcher:
     async def _fetch_page(self, url: str, *, referer: str) -> Any:
         self._request_count += 1
         fetch_kwargs = {
+            **self._scrapling_fetcher_options.kwargs,
             "headless": self._headless,
             "network_idle": False,
             "load_dom": False,

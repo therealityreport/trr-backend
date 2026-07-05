@@ -206,6 +206,7 @@ def test_tiktok_job_runner_records_progress_and_completion_metadata(
     assert metadata["stage_counters"] == {"posts": 1, "pages": 1}
     assert metadata["persist_counters"] == {
         "posts_upserted": 1,
+        "catalog_posts_upserted": 0,
         "posts_skipped": 0,
         "posts_skipped_by_reason": {},
     }
@@ -274,6 +275,7 @@ def test_tiktok_job_runner_records_retryable_error_metadata(
     assert metadata["runtime_metadata"]["fetch_reason"] == "http_429"
     assert metadata["persist_counters"] == {
         "posts_upserted": 0,
+        "catalog_posts_upserted": 0,
         "posts_skipped": 0,
         "posts_skipped_by_reason": {},
     }
@@ -283,6 +285,70 @@ def test_tiktok_job_runner_records_retryable_error_metadata(
         "phase": "failed",
         "last_progress_at": "2026-05-05T00:00:00+00:00",
     }
+
+
+def test_tiktok_job_runner_shared_mode_passes_catalog_mode_to_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_lifecycle: _FakeLifecycle,
+) -> None:
+    from trr_backend.socials.tiktok.posts_scrapling import job_runner as jr
+
+    class _FakeFetcher:
+        runtime_metadata = {"transport": "test", "request_count": 2}
+
+        async def warmup(self, _account_handle: str) -> None:
+            return None
+
+        async def resolve_sec_uid(self, _account_handle: str) -> str:
+            return "SEC_UID"
+
+        async def fetch_posts_page(self, *, sec_uid: str, cursor: str | None = None) -> SimpleNamespace:
+            del sec_uid, cursor
+            return SimpleNamespace(
+                auth_failed=False,
+                fetch_failed=False,
+                retryable=False,
+                fetch_reason=None,
+                posts=[{"id": "tiktok-1"}],
+                has_more=False,
+                cursor=None,
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    persist_calls: list[dict[str, Any]] = []
+
+    def _fake_persist(**kwargs: Any) -> PersistedTikTokPosts:
+        persist_calls.append(kwargs)
+        return PersistedTikTokPosts(posts_upserted=1, catalog_posts_upserted=1, posts_skipped=0)
+
+    _install_common_fakes(monkeypatch, jr, fetcher=_FakeFetcher())
+    monkeypatch.setattr(jr, "persist_tiktok_posts", _fake_persist)
+    monkeypatch.setattr(jr.pg, "fetch_one", _running_status_or_final_row)
+
+    jr.run_tiktok_posts_scrapling_job(
+        {
+            "id": "job-1",
+            "run_id": "run-1",
+            "config": {
+                "stage": "tiktok_posts_scrapling",
+                "account": "bravotv",
+                "pipeline_ingest_mode": "shared_account_catalog_backfill",
+            },
+        },
+        worker_id="worker-1",
+    )
+
+    assert persist_calls[0]["pipeline_ingest_mode"] == "shared_account_catalog_backfill"
+    assert persist_calls[0]["run_id"] == "run-1"
+    finish = fake_lifecycle.finish_calls[-1]
+    metadata = finish["metadata"]
+    assert finish["status"] == "completed"
+    assert metadata["stage"] == "tiktok_posts_scrapling"
+    assert metadata["pipeline_ingest_mode"] == "shared_account_catalog_backfill"
+    assert metadata["persist_counters"]["posts_upserted"] == 1
+    assert metadata["persist_counters"]["catalog_posts_upserted"] == 1
 
 
 def test_tiktok_job_runner_recovers_non_json_posts_with_canonical_fallback(

@@ -8,6 +8,28 @@ import pytest
 from trr_backend.socials.threads.posts_scrapling.persistence import persist_threads_posts
 
 
+class _FakeCursor:
+    def __init__(self, conn: _FakeConnection) -> None:
+        self._conn = conn
+
+    def __enter__(self) -> _FakeCursor:
+        return self
+
+    def __exit__(self, *_args) -> None:
+        return None
+
+    def execute(self, statement: str) -> None:
+        self._conn.statements.append(statement)
+
+
+class _FakeConnection:
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+
+    def cursor(self) -> _FakeCursor:
+        return _FakeCursor(self)
+
+
 def test_persist_threads_posts_uses_canonical_upsert(monkeypatch: pytest.MonkeyPatch) -> None:
     from trr_backend.db import pg
     from trr_backend.repositories import social_season_analytics as repo
@@ -15,7 +37,7 @@ def test_persist_threads_posts_uses_canonical_upsert(monkeypatch: pytest.MonkeyP
     @contextmanager
     def _fake_conn(*, label: str | None = None):
         del label
-        yield object()
+        yield _FakeConnection()
 
     monkeypatch.setattr(pg, "db_connection", _fake_conn)
     monkeypatch.setattr(repo, "get_season_context", lambda _season_id: None)
@@ -47,7 +69,7 @@ def test_persist_threads_posts_counts_skips_by_reason(monkeypatch: pytest.Monkey
     @contextmanager
     def _fake_conn(*, label: str | None = None):
         del label
-        yield object()
+        yield _FakeConnection()
 
     def _fake_upsert(_context, *, job_id, account, post, conn):
         del _context, job_id, account, conn
@@ -88,12 +110,13 @@ def test_persist_threads_posts_shared_catalog_mode_writes_catalog_rows(monkeypat
     from trr_backend.db import pg
     from trr_backend.repositories import social_season_analytics as repo
 
+    conn = _FakeConnection()
     catalog_calls: list[dict[str, object]] = []
 
     @contextmanager
     def _fake_conn(*, label: str | None = None):
         del label
-        yield object()
+        yield conn
 
     monkeypatch.setattr(pg, "db_connection", _fake_conn)
     monkeypatch.setattr(repo, "get_season_context", lambda _season_id: None)
@@ -119,3 +142,54 @@ def test_persist_threads_posts_shared_catalog_mode_writes_catalog_rows(monkeypat
     assert catalog_calls[0]["platform"] == "threads"
     assert catalog_calls[0]["run_id"] == "run-1"
     assert catalog_calls[0]["account_handle"] == "bravotv"
+    assert conn.statements == [
+        "SAVEPOINT threads_posts_scrapling_post_1",
+        "RELEASE SAVEPOINT threads_posts_scrapling_post_1",
+    ]
+
+
+def test_persist_threads_posts_uses_savepoint_after_per_post_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.db import pg
+    from trr_backend.repositories import social_season_analytics as repo
+
+    conn = _FakeConnection()
+    upserted_post_ids: list[str] = []
+
+    @contextmanager
+    def _fake_conn(*, label: str | None = None):
+        del label
+        yield conn
+
+    def _fake_upsert(_context, *, job_id, account, post, conn):
+        del _context, job_id, account, conn
+        if post.post_id == "explode":
+            raise RuntimeError("post failed")
+        upserted_post_ids.append(post.post_id)
+        return {"id": post.post_id}
+
+    monkeypatch.setattr(pg, "db_connection", _fake_conn)
+    monkeypatch.setattr(repo, "get_season_context", lambda _season_id: None)
+    monkeypatch.setattr(repo, "_upsert_meta_threads_post", _fake_upsert)
+
+    result = persist_threads_posts(
+        account_handle="bravotv",
+        posts=[
+            SimpleNamespace(post_id="explode", to_dict=lambda: {"post_id": "explode"}),
+            SimpleNamespace(post_id="ok", to_dict=lambda: {"post_id": "ok"}),
+        ],
+        run_id=None,
+        job_id="job-1",
+        season_id=None,
+    )
+
+    assert upserted_post_ids == ["ok"]
+    assert result.posts_upserted == 1
+    assert result.posts_skipped == 1
+    assert result.posts_skipped_by_reason == {"upsert_failed": 1}
+    assert conn.statements == [
+        "SAVEPOINT threads_posts_scrapling_post_1",
+        "ROLLBACK TO SAVEPOINT threads_posts_scrapling_post_1",
+        "RELEASE SAVEPOINT threads_posts_scrapling_post_1",
+        "SAVEPOINT threads_posts_scrapling_post_2",
+        "RELEASE SAVEPOINT threads_posts_scrapling_post_2",
+    ]

@@ -1,20 +1,25 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from trr_backend.socials.pipelines.comments.instagram import (
     SocialWorkerUnavailableError,
+    _append_instagram_comments_public_recovery_targets_to_active_run,
     _build_comments_scrape_run_progress_payload,
     _instagram_comments_audit_cursor_counts_by_shortcode,
     _load_instagram_comments_audit_cursor_rows,
     _normalize_instagram_comments_audit_retry_stop_reasons,
     _split_instagram_comments_audit_cursor_targets_into_active_run,
     enqueue_instagram_comments_audit_cursor_retries,
+    get_social_account_comments_authenticated_followup_bucket,
+    get_social_account_comments_public_recovery_bucket,
+    start_social_account_comments_authenticated_followup,
+    start_social_account_comments_public_recovery,
 )
 
 
 def test_comments_progress_payload_surfaces_network_spend_and_target_rows() -> None:
-    now = datetime(2026, 6, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 6, 12, tzinfo=UTC)
     payload = _build_comments_scrape_run_progress_payload(
         platform="instagram",
         account_handle="bravotv",
@@ -109,7 +114,7 @@ def test_comments_progress_payload_surfaces_network_spend_and_target_rows() -> N
 
 
 def test_comments_progress_payload_classifies_pagination_deadline_as_cursor_recovery() -> None:
-    now = datetime(2026, 6, 22, tzinfo=timezone.utc)
+    now = datetime(2026, 6, 22, tzinfo=UTC)
     payload = _build_comments_scrape_run_progress_payload(
         platform="instagram",
         account_handle="bravotv",
@@ -179,8 +184,52 @@ def test_comments_progress_payload_classifies_pagination_deadline_as_cursor_reco
     assert target_row["missing_comment_gap"] == 730
 
 
+def test_comments_progress_payload_exposes_public_recovery_before_authenticated_followup() -> None:
+    now = datetime(2026, 6, 30, tzinfo=UTC)
+    payload = _build_comments_scrape_run_progress_payload(
+        platform="instagram",
+        account_handle="bravotv",
+        rows=[
+            {
+                "run_id": "11111111-1111-1111-1111-111111111111",
+                "run_status": "failed",
+                "created_at": now,
+                "started_at": now,
+                "completed_at": now,
+                "run_config": {"target_source_ids_count": 1, "comments_shard_count": 1},
+                "job_id": "22222222-2222-2222-2222-222222222222",
+                "job_status": "failed",
+                "items_found": 0,
+                "job_created_at": now,
+                "job_started_at": now,
+                "job_completed_at": now,
+                "last_error_code": "instagram_comments_public_requires_approval",
+                "config": {
+                    "target_source_ids": ["APPROVAL1"],
+                    "comments_shard_index": 1,
+                    "comments_shard_count": 1,
+                    "comments_shard_target_count": 1,
+                },
+                "metadata": {},
+            }
+        ],
+    )
+
+    assert payload["recommended_next_action"] == "start_comments_public_recovery"
+    assert payload["public_comments_recovery_pending_target_source_ids"] == ["APPROVAL1"]
+    assert payload["public_comments_approval_required_target_source_ids"] == []
+    public_bucket = payload["public_recovery_bucket"]
+    assert public_bucket["status"] == "ready"
+    assert public_bucket["target_load_strategy"] == "public_relay"
+    assert public_bucket["target_scrape_mode"] == "public_first"
+    assert public_bucket["target_source_ids_count"] == 1
+    auth_bucket = payload["authenticated_followup_bucket"]
+    assert auth_bucket["status"] == "empty"
+    assert auth_bucket["target_source_ids_count"] == 0
+
+
 def test_comments_progress_payload_uses_database_counts_for_auth_blocked_target_rows() -> None:
-    now = datetime(2026, 6, 22, tzinfo=timezone.utc)
+    now = datetime(2026, 6, 22, tzinfo=UTC)
     payload = _build_comments_scrape_run_progress_payload(
         platform="instagram",
         account_handle="bravotv",
@@ -262,6 +311,347 @@ def test_comments_progress_payload_uses_database_counts_for_auth_blocked_target_
     assert target_row["auth_failed"] is True
 
 
+def test_public_recovery_bucket_uses_remaining_public_targets(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram._load_public_recovery_pending_comments_jobs",
+        lambda **_kwargs: [
+            {
+                "run_id": "11111111-1111-1111-1111-111111111111",
+                "run_status": "failed",
+                "run_config": {"source_scope": "network", "mode": "profile"},
+                "job_id": "22222222-2222-2222-2222-222222222222",
+                "job_status": "failed",
+                "last_error_code": "instagram_comments_public_requires_approval",
+                "config": {"target_source_ids": ["DONE1", "TODO1"]},
+                "metadata": {"retry_rebalance": {"remaining_target_source_ids": ["TODO1"]}},
+            }
+        ],
+    )
+
+    payload = get_social_account_comments_public_recovery_bucket(
+        platform="instagram",
+        account_handle="bravotv",
+        run_id="11111111-1111-1111-1111-111111111111",
+    )
+
+    assert payload["bucket"]["name"] == "public_recovery"
+    assert payload["bucket"]["status"] == "ready"
+    assert payload["bucket"]["target_load_strategy"] == "public_relay"
+    assert payload["target_source_ids"] == ["TODO1"]
+    assert payload["source_jobs"][0]["remaining_target_source_ids_count"] == 1
+
+
+def test_authenticated_followup_bucket_uses_auth_only_targets(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram._load_authenticated_followup_comments_jobs",
+        lambda **_kwargs: [
+            {
+                "run_id": "11111111-1111-1111-1111-111111111111",
+                "run_status": "failed",
+                "run_config": {"source_scope": "network", "mode": "profile"},
+                "job_id": "22222222-2222-2222-2222-222222222222",
+                "job_status": "failed",
+                "last_error_code": "checkpoint_required",
+                "config": {"target_source_ids": ["DONE1", "AUTH1"]},
+                "metadata": {"retry_rebalance": {"remaining_target_source_ids": ["AUTH1"]}},
+            }
+        ],
+    )
+
+    payload = get_social_account_comments_authenticated_followup_bucket(
+        platform="instagram",
+        account_handle="bravotv",
+        run_id="11111111-1111-1111-1111-111111111111",
+    )
+
+    assert payload["bucket"]["name"] == "authenticated_followup"
+    assert payload["bucket"]["status"] == "ready"
+    assert payload["bucket"]["target_load_strategy"] == "instagram_comments_endpoint_cursor"
+    assert payload["target_source_ids"] == ["AUTH1"]
+
+
+def test_public_recovery_launches_public_relay_run(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    merged: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram.get_social_account_comments_public_recovery_bucket",
+        lambda **_kwargs: {
+            "ok": True,
+            "run_id": "11111111-1111-1111-1111-111111111111",
+            "platform": "instagram",
+            "account_handle": "bravotv",
+            "bucket": {"name": "public_recovery", "status": "ready"},
+            "source_jobs": [{"job_id": "22222222-2222-2222-2222-222222222222"}],
+            "target_source_ids": ["TODO1", "TODO2"],
+            "target_source_ids_count": 2,
+        },
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram.get_active_social_account_comments_run",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram.pg.fetch_one",
+        lambda *_args, **_kwargs: {
+            "run_id": "11111111-1111-1111-1111-111111111111",
+            "status": "failed",
+            "source_scope": "network",
+            "initiated_by": "admin",
+            "config": {
+                "source_scope": "network",
+                "mode": "profile",
+                "refresh_policy": "stale_or_missing",
+                "date_start": "2026-01-01T00:00:00+00:00",
+                "date_end": "2027-01-01T00:00:00+00:00",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram._mark_social_account_comments_public_recovery_bucket",
+        lambda **_kwargs: 1,
+    )
+
+    def _start_comments(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return {"run_id": "33333333-3333-3333-3333-333333333333", "status": "queued"}
+
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram.start_social_account_comments_scrape",
+        _start_comments,
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram._merge_comments_run_config",
+        lambda **kwargs: merged.append(kwargs) or {},
+    )
+
+    payload = start_social_account_comments_public_recovery(
+        platform="instagram",
+        account_handle="bravotv",
+        run_id="11111111-1111-1111-1111-111111111111",
+        initiated_by="operator",
+    )
+
+    assert payload["launch_performed"] is True
+    assert captured["kwargs"]["comments_load_strategy"] == "public_relay"
+    assert captured["kwargs"]["skip_launch_auth_probe"] is True
+    assert captured["kwargs"]["target_source_ids"] == ["TODO1", "TODO2"]
+    assert captured["kwargs"]["comments_target_batch_size"] == 10
+    assert captured["kwargs"]["cancel_active_before_relaunch"] is False
+    assert merged[0]["metadata_updates"]["public_recovery"]["source_run_id"] == ("11111111-1111-1111-1111-111111111111")
+
+
+def test_public_recovery_appends_public_retry_jobs_to_active_run(monkeypatch) -> None:
+    created_jobs: list[dict[str, object]] = []
+    dispatched: list[str] = []
+
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram.pg.fetch_all",
+        lambda *_args, **_kwargs: [{"target_source_id": "TODO1"}],
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram.pg.fetch_one",
+        lambda *_args, **_kwargs: {
+            "run_id": "11111111-1111-1111-1111-111111111111",
+            "source_scope": "network",
+            "initiated_by": "admin",
+            "source_priority": 107,
+            "existing_job_count": 3,
+            "run_config": {
+                "platform": "instagram",
+                "account": "bravotv",
+                "source_scope": "network",
+                "mode": "profile",
+                "comments_load_strategy": "public_relay",
+                "comments_session_scope": "public_relay",
+                "comments_shard_count": 3,
+                "required_execution_backend": "modal",
+            },
+        },
+    )
+
+    def _create_job(_context, **kwargs):
+        created_jobs.append(kwargs)
+        return f"job-{len(created_jobs)}"
+
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram._create_job",
+        _create_job,
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram.dispatch_due_social_jobs",
+        lambda *, run_id: dispatched.append(run_id),
+    )
+
+    payload = _append_instagram_comments_public_recovery_targets_to_active_run(
+        run_id="11111111-1111-1111-1111-111111111111",
+        account_handle="bravotv",
+        target_source_ids=["TODO1", "TODO2", "TODO3"],
+        batch_size=2,
+        initiated_by="operator",
+        dispatch_immediately=False,
+    )
+
+    assert payload["created_target_job_ids"] == ["job-1"]
+    assert payload["skipped_active_target_source_ids"] == ["TODO1"]
+    assert dispatched == []
+    created_config = created_jobs[0]["config"]
+    assert created_jobs[0]["priority"] == 107
+    assert created_config["target_source_ids"] == ["TODO2", "TODO3"]
+    assert created_config["comments_public_recovery"] is True
+    assert created_config["comments_audit_cursor_retry"] is True
+    assert created_config["comments_audit_cursor_retry_standalone"] is True
+    assert created_config["comments_load_strategy"] == "public_relay"
+    assert created_config["comments_auth_validation_mode"] == "public_relay"
+    assert created_config["comments_target_batch_size"] == 2
+
+
+def test_public_recovery_active_run_uses_append_mode_without_immediate_dispatch(monkeypatch) -> None:
+    append_calls: list[dict[str, object]] = []
+    merged: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram.get_social_account_comments_public_recovery_bucket",
+        lambda **_kwargs: {
+            "ok": True,
+            "run_id": "11111111-1111-1111-1111-111111111111",
+            "platform": "instagram",
+            "account_handle": "bravotv",
+            "bucket": {"name": "public_recovery", "status": "ready"},
+            "source_jobs": [{"job_id": "22222222-2222-2222-2222-222222222222"}],
+            "target_source_ids": ["TODO1", "TODO2"],
+            "target_source_ids_count": 2,
+        },
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram.get_active_social_account_comments_run",
+        lambda *_args, **_kwargs: {"run_id": "11111111-1111-1111-1111-111111111111"},
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram.pg.fetch_one",
+        lambda *_args, **_kwargs: {
+            "run_id": "11111111-1111-1111-1111-111111111111",
+            "status": "running",
+            "source_scope": "network",
+            "initiated_by": "admin",
+            "config": {"source_scope": "network", "mode": "profile"},
+        },
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram._mark_social_account_comments_public_recovery_bucket",
+        lambda **_kwargs: 1,
+    )
+
+    def _append(**kwargs):
+        append_calls.append(kwargs)
+        return {"created_job_ids": ["33333333-3333-3333-3333-333333333333"], "created_target_job_count": 1}
+
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram._append_instagram_comments_public_recovery_targets_to_active_run",
+        _append,
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram._merge_comments_run_config",
+        lambda **kwargs: merged.append(kwargs) or {},
+    )
+
+    payload = start_social_account_comments_public_recovery(
+        platform="instagram",
+        account_handle="bravotv",
+        run_id="11111111-1111-1111-1111-111111111111",
+        initiated_by="operator",
+    )
+
+    assert payload["status"] == "queued"
+    assert payload["mode"] == "active_run_append"
+    assert payload["append_result"]["created_target_job_count"] == 1
+    assert append_calls == [
+        {
+            "run_id": "11111111-1111-1111-1111-111111111111",
+            "account_handle": "bravotv",
+            "target_source_ids": ["TODO1", "TODO2"],
+            "batch_size": 10,
+            "initiated_by": "operator",
+            "dispatch_immediately": False,
+        }
+    ]
+    assert merged[0]["metadata_updates"]["public_recovery"]["auth_fallback_policy"] == "not_considered"
+
+
+def test_authenticated_followup_launches_authenticated_cursor_run(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    merged: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram.get_social_account_comments_authenticated_followup_bucket",
+        lambda **_kwargs: {
+            "ok": True,
+            "run_id": "11111111-1111-1111-1111-111111111111",
+            "platform": "instagram",
+            "account_handle": "bravotv",
+            "bucket": {"name": "authenticated_followup", "status": "ready"},
+            "source_jobs": [{"job_id": "22222222-2222-2222-2222-222222222222"}],
+            "target_source_ids": ["TODO1", "TODO2"],
+            "target_source_ids_count": 2,
+        },
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram.get_active_social_account_comments_run",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram.pg.fetch_one",
+        lambda *_args, **_kwargs: {
+            "run_id": "11111111-1111-1111-1111-111111111111",
+            "status": "failed",
+            "source_scope": "network",
+            "initiated_by": "admin",
+            "config": {
+                "source_scope": "network",
+                "mode": "profile",
+                "refresh_policy": "stale_or_missing",
+                "date_start": "2026-01-01T00:00:00+00:00",
+                "date_end": "2027-01-01T00:00:00+00:00",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram._mark_social_account_comments_authenticated_followup_bucket",
+        lambda **_kwargs: 1,
+    )
+
+    def _start_comments(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return {"run_id": "33333333-3333-3333-3333-333333333333", "status": "queued"}
+
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram.start_social_account_comments_scrape",
+        _start_comments,
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram._merge_comments_run_config",
+        lambda **kwargs: merged.append(kwargs) or {},
+    )
+
+    payload = start_social_account_comments_authenticated_followup(
+        platform="instagram",
+        account_handle="bravotv",
+        run_id="11111111-1111-1111-1111-111111111111",
+        initiated_by="operator",
+    )
+
+    assert payload["launch_performed"] is True
+    assert captured["kwargs"]["comments_load_strategy"] == "instagram_comments_endpoint_cursor"
+    assert captured["kwargs"]["target_source_ids"] == ["TODO1", "TODO2"]
+    assert captured["kwargs"]["comments_target_batch_size"] == 1
+    assert captured["kwargs"]["cancel_active_before_relaunch"] is False
+    assert merged[0]["metadata_updates"]["authenticated_followup"]["source_run_id"] == (
+        "11111111-1111-1111-1111-111111111111"
+    )
+
+
 def test_comments_progress_counts_use_rollup_not_live_comment_count(monkeypatch) -> None:
     calls: list[dict[str, object]] = []
 
@@ -328,15 +718,21 @@ def test_audit_cursor_recovery_show_filter_uses_saved_post_metadata(monkeypatch)
         show_ids=["show-1"],
         season_ids=["season-1"],
         show_filters=["Summer House"],
+        date_start="2026-01-01",
+        date_end="2027-01-01",
     )
 
     query = str(calls[0]["query"])
     params = calls[0]["params"]
     assert "left join social.instagram_posts p" in query
     assert "left join core.shows sh" in query
+    assert "p.posted_at >= %s" in query
+    assert "p.posted_at < %s" in query
     assert "p.show_id::text = any" in query
     assert "p.season_id::text = any" in query
     assert "p.caption" in query
+    assert datetime(2026, 1, 1, tzinfo=UTC) in params
+    assert datetime(2027, 1, 1, tzinfo=UTC) in params
     assert ["show-1"] in params
     assert ["season-1"] in params
     assert "summerhouse" in next(item for item in params if isinstance(item, list) and "summerhouse" in item)
@@ -456,10 +852,11 @@ def test_audit_cursor_split_creates_standalone_target_job_without_source_job(mon
     assert payload["pending_target_source_ids"] == []
     assert dispatched == ["11111111-1111-1111-1111-111111111111"]
     created_config = created_jobs[0]["config"]
-    assert created_jobs[0]["priority"] == 104
+    assert created_jobs[0]["priority"] == 108
     assert created_config["target_source_ids"] == ["DTgXh94kXyo"]
     assert created_config["comments_audit_cursor_retry"] is True
     assert created_config["comments_audit_cursor_retry_standalone"] is True
+    assert created_config["comments_priority_recovery_override"] is False
     assert created_config["comments_load_strategy"] == "instagram_comments_endpoint_cursor"
     assert created_config["comments_session_scope"] == "instagram_comments_endpoint_cursor_worker"
     assert created_config["comments_target_batch_size"] == 1
@@ -538,6 +935,7 @@ def test_audit_cursor_split_force_rerun_replaces_existing_one_target_job(monkeyp
     assert payload["force_rerun_existing"] is True
     assert created_jobs[0]["priority"] == 104
     assert created_jobs[0]["config"]["comments_audit_cursor_retry_force_rerun"] is True
+    assert created_jobs[0]["config"]["comments_priority_recovery_override"] is False
     assert created_jobs[0]["config"]["comments_load_strategy"] == "instagram_comments_endpoint_cursor"
     assert created_jobs[0]["config"]["comments_session_scope"] == "instagram_comments_endpoint_cursor_worker"
     assert any(call["params"] and call["params"][-2] is True for call in fetch_one_calls)

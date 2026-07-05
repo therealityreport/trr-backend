@@ -20,6 +20,7 @@ from trr_backend.socials.instagram.comments_scrapling.fetcher import (
     _extract_graphql_preview_comments,
     _extract_rendered_dom_snapshot_comments,
     _extract_rendered_permalink_comments,
+    _public_comments_coverage_metadata,
     _target_metadata_indicates_coauthor,
 )
 from trr_backend.socials.instagram.scraper import InstagramComment
@@ -60,6 +61,45 @@ def _comment(
         reply_depth=1 if is_reply else 0,
         replies=list(replies or []),
     )
+
+
+class _AsyncClientContext:
+    def __init__(self, client):
+        self.client = client
+
+    async def __aenter__(self):
+        return self.client
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+
+def test_public_comments_coverage_stays_partial_on_exhausted_relay_with_display_gap() -> None:
+    metadata = _public_comments_coverage_metadata(
+        advertised_count=27_000,
+        recovered_count=1_044,
+        terminal_reason="pagination_complete",
+        max_comments=0,
+        missing_replies=0,
+    )
+
+    assert metadata["classification"] == "public_partial"
+    assert metadata["target_gap_count"] == 25_956
+    assert metadata["fallback_blocked_reason"] == "public_comments_partial_requires_approval"
+
+
+def test_public_comments_coverage_complete_when_effective_target_is_met() -> None:
+    metadata = _public_comments_coverage_metadata(
+        advertised_count=27_000,
+        recovered_count=100,
+        terminal_reason="pagination_complete",
+        max_comments=100,
+        missing_replies=0,
+    )
+
+    assert metadata["classification"] == "public_complete"
+    assert metadata["effective_target_count"] == 100
+    assert metadata["fallback_blocked_reason"] is None
 
 
 def test_status_only_payload_with_expected_comments_is_not_hidden_comments() -> None:
@@ -1038,6 +1078,209 @@ def test_public_relay_parent_pagination_defaults_to_uncapped(monkeypatch) -> Non
     assert metadata["page_cap_disabled"] is True
     assert metadata["attempts"][0]["pages"] == 3
     assert fake_client.post.await_count == 3
+
+
+def test_public_relay_parent_pagination_advances_new_cursor_after_zero_append(monkeypatch) -> None:
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_PUBLIC_COMMENTS_ZERO_APPEND_ADVANCE_LIMIT", raising=False)
+    fetcher = _build_fetcher()
+    fetcher._pace_api_requests = AsyncMock(return_value=True)
+    fetcher._fetch_public_relay_child_comments_for_status_only = AsyncMock(
+        return_value={"attempted": False, "reason": "test_child_lane_skipped"}
+    )
+    html = '"LSD",[],{"token":"lsd-token"}'
+
+    def page_payload(comment_id: str, *, cursor: str | None, has_next: bool) -> dict[str, object]:
+        return {
+            "data": {
+                "xdt_api__v1__media__media_id__comments__connection": {
+                    "edges": [
+                        {
+                            "node": {
+                                "pk": comment_id,
+                                "text": f"comment {comment_id}",
+                                "created_at": 1772766459,
+                                "child_comment_count": 0,
+                                "comment_like_count": 0,
+                                "user": {"pk": f"user-{comment_id}", "username": f"user{comment_id}"},
+                            }
+                        }
+                    ],
+                    "page_info": {"has_next_page": has_next, "end_cursor": cursor},
+                }
+            }
+        }
+
+    fake_client = MagicMock()
+    fake_client.get = AsyncMock(
+        return_value=httpx.Response(
+            200,
+            text=html,
+            request=httpx.Request("GET", "https://www.instagram.com/p/DU_oEbbgZfJ/"),
+        )
+    )
+    fake_client.post = AsyncMock(
+        side_effect=[
+            httpx.Response(
+                200,
+                json=page_payload("1", cursor="cursor-1", has_next=True),
+                request=httpx.Request("POST", "https://www.instagram.com/graphql/query/"),
+            ),
+            httpx.Response(
+                200,
+                json=page_payload("1", cursor="cursor-2", has_next=True),
+                request=httpx.Request("POST", "https://www.instagram.com/graphql/query/"),
+            ),
+            httpx.Response(
+                200,
+                json=page_payload("2", cursor=None, has_next=False),
+                request=httpx.Request("POST", "https://www.instagram.com/graphql/query/"),
+            ),
+        ]
+    )
+
+    with patch(
+        "trr_backend.socials.instagram.comments_scrapling.fetcher.build_comments_async_client",
+        return_value=_AsyncClientContext(fake_client),
+    ):
+        comments, metadata = asyncio.run(
+            fetcher._fetch_public_relay_coauthor_comments_for_status_only(
+                "DU_oEbbgZfJ",
+                "https://www.instagram.com/p/DU_oEbbgZfJ/",
+                media_id="123",
+                expected_comment_count=2,
+                max_comments=0,
+                allow_authenticated=False,
+            )
+        )
+
+    assert [comment.comment_id for comment in comments] == ["1", "2"]
+    assert metadata["reason"] == "child_comments_target_reached"
+    assert metadata["pages"][1]["merged_comments"] == 0
+    assert metadata["pages"][1]["zero_append_advance"] == 1
+    assert metadata["attempts"][0]["zero_append_advances"] == 1
+    assert fake_client.post.await_count == 3
+
+
+def test_public_relay_parent_pagination_retries_non_json_before_stalling(monkeypatch) -> None:
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_PUBLIC_COMMENTS_DECODE_RETRY_LIMIT", raising=False)
+    fetcher = _build_fetcher()
+    fetcher._pace_api_requests = AsyncMock(return_value=True)
+    fetcher._fetch_public_relay_child_comments_for_status_only = AsyncMock(
+        return_value={"attempted": False, "reason": "test_child_lane_skipped"}
+    )
+    html = '"LSD",[],{"token":"lsd-token"}'
+    payload = {
+        "data": {
+            "xdt_api__v1__media__media_id__comments__connection": {
+                "edges": [
+                    {
+                        "node": {
+                            "pk": "1",
+                            "text": "comment 1",
+                            "created_at": 1772766459,
+                            "child_comment_count": 0,
+                            "comment_like_count": 0,
+                            "user": {"pk": "user-1", "username": "user1"},
+                        }
+                    }
+                ],
+                "page_info": {"has_next_page": False, "end_cursor": None},
+            }
+        }
+    }
+    fake_client = MagicMock()
+    fake_client.get = AsyncMock(
+        return_value=httpx.Response(
+            200,
+            text=html,
+            request=httpx.Request("GET", "https://www.instagram.com/p/DU_oEbbgZfJ/"),
+        )
+    )
+    fake_client.post = AsyncMock(
+        side_effect=[
+            httpx.Response(
+                200,
+                text="for (;;);not json",
+                request=httpx.Request("POST", "https://www.instagram.com/graphql/query/"),
+            ),
+            httpx.Response(
+                200,
+                json=payload,
+                request=httpx.Request("POST", "https://www.instagram.com/graphql/query/"),
+            ),
+        ]
+    )
+
+    with (
+        patch(
+            "trr_backend.socials.instagram.comments_scrapling.fetcher.build_comments_async_client",
+            return_value=_AsyncClientContext(fake_client),
+        ),
+        patch(
+            "trr_backend.socials.instagram.comments_scrapling.fetcher._sleep_before_deadline",
+            AsyncMock(return_value=True),
+        ),
+    ):
+        comments, metadata = asyncio.run(
+            fetcher._fetch_public_relay_coauthor_comments_for_status_only(
+                "DU_oEbbgZfJ",
+                "https://www.instagram.com/p/DU_oEbbgZfJ/",
+                media_id="123",
+                expected_comment_count=1,
+                max_comments=0,
+                allow_authenticated=False,
+            )
+        )
+
+    assert [comment.comment_id for comment in comments] == ["1"]
+    assert metadata["reason"] == "child_comments_target_reached"
+    assert metadata["attempts"][0]["decode_retries"] == 1
+    assert metadata["attempts"][0]["last_decode_retry_reason"] == "graphql_relay_non_json_response"
+    assert fake_client.post.await_count == 2
+
+
+def test_public_relay_parent_pagination_does_not_retry_true_block_signal() -> None:
+    fetcher = _build_fetcher()
+    fetcher._pace_api_requests = AsyncMock(return_value=True)
+    fetcher._fetch_public_relay_child_comments_for_status_only = AsyncMock(
+        return_value={"attempted": False, "reason": "test_child_lane_skipped"}
+    )
+    html = '"LSD",[],{"token":"lsd-token"}'
+    fake_client = MagicMock()
+    fake_client.get = AsyncMock(
+        return_value=httpx.Response(
+            200,
+            text=html,
+            request=httpx.Request("GET", "https://www.instagram.com/p/DU_oEbbgZfJ/"),
+        )
+    )
+    fake_client.post = AsyncMock(
+        return_value=httpx.Response(
+            429,
+            text="too many requests",
+            request=httpx.Request("POST", "https://www.instagram.com/graphql/query/"),
+        )
+    )
+
+    with patch(
+        "trr_backend.socials.instagram.comments_scrapling.fetcher.build_comments_async_client",
+        return_value=_AsyncClientContext(fake_client),
+    ):
+        comments, metadata = asyncio.run(
+            fetcher._fetch_public_relay_coauthor_comments_for_status_only(
+                "DU_oEbbgZfJ",
+                "https://www.instagram.com/p/DU_oEbbgZfJ/",
+                media_id="123",
+                expected_comment_count=1,
+                max_comments=0,
+                allow_authenticated=False,
+            )
+        )
+
+    assert comments == []
+    assert metadata["reason"] == "http_429"
+    assert metadata["attempts"][0]["block_reason"] == "http_429"
+    assert fake_client.post.await_count == 1
 
 
 def test_single_session_load_all_memory_guardrail_marks_retryable(monkeypatch) -> None:

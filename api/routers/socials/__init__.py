@@ -3212,6 +3212,8 @@ class SharedReviewResolveRequest(BaseModel):
 
 class SocialAccountProfileHashtagAssignmentInput(BaseModel):
     show_id: UUID
+    assignment_scope: Literal["global", "platform"] = Field(default="global")
+    platform: Literal["instagram", "tiktok", "twitter", "youtube", "facebook", "threads"] | None = Field(default=None)
 
 
 class SocialAccountProfileHashtagInput(BaseModel):
@@ -3418,10 +3420,29 @@ class SocialAccountCommentsAuditCursorRetryRequest(BaseModel):
     comments_worker_count: int | None = Field(default=None, ge=1, le=24)
     max_comments_per_post: int = Field(default=0, ge=0)
     comments_load_strategy: InstagramCommentsLoadStrategy = Field(default="public_relay")
+    date_start: str | None = Field(default=None, max_length=64)
+    date_end: str | None = Field(default=None, max_length=64)
     skip_launch_auth_probe: bool = Field(default=False)
     attach_to_active_run: bool = Field(default=True)
     dispatch_immediately: bool = Field(default=True)
     force_rerun_existing: bool = Field(default=False)
+    dry_run: bool = Field(default=False)
+
+
+class SocialAccountCommentsAuthenticatedFollowupRequest(BaseModel):
+    comments_worker_count: int | None = Field(default=1, ge=1, le=4)
+    comments_target_batch_size: int = Field(default=1, ge=1, le=25)
+    comments_enable_media_followups: bool | None = Field(default=None)
+    dispatch_immediately: bool = Field(default=True)
+    dry_run: bool = Field(default=False)
+    operator_confirmation: str | None = Field(default=None)
+
+
+class SocialAccountCommentsPublicRecoveryRequest(BaseModel):
+    comments_worker_count: int | None = Field(default=4, ge=1, le=4)
+    comments_target_batch_size: int = Field(default=10, ge=1, le=25)
+    comments_enable_media_followups: bool | None = Field(default=None)
+    dispatch_immediately: bool = Field(default=False)
     dry_run: bool = Field(default=False)
 
 
@@ -4968,6 +4989,8 @@ def get_social_account_comments_audit_cursor_retries_route(
     show_id: list[str] | None = Query(default=None),
     season_id: list[str] | None = Query(default=None),
     show_filter: list[str] | None = Query(default=None),
+    date_start: str | None = Query(default=None, max_length=64),
+    date_end: str | None = Query(default=None, max_length=64),
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.socials.pipelines.comments.instagram import get_instagram_comments_audit_cursor_recovery
@@ -4989,6 +5012,8 @@ def get_social_account_comments_audit_cursor_retries_route(
             show_ids=show_id,
             season_ids=season_id,
             show_filters=show_filter,
+            date_start=date_start,
+            date_end=date_end,
         )
     except ValueError as exc:
         raise _value_error_to_bad_request(exc) from exc
@@ -5031,6 +5056,8 @@ async def post_social_account_comments_audit_cursor_retries_route(
             comments_worker_count=payload.comments_worker_count,
             max_comments_per_post=payload.max_comments_per_post,
             comments_load_strategy=payload.comments_load_strategy,
+            date_start=payload.date_start,
+            date_end=payload.date_end,
             skip_launch_auth_probe=payload.skip_launch_auth_probe,
             dry_run=payload.dry_run,
             attach_to_active_run=payload.attach_to_active_run,
@@ -5110,7 +5137,10 @@ async def post_social_account_comments_scrape_route(
         SocialWorkerUnavailableError,
         _dispatch_due_social_jobs_in_background,
     )
-    from trr_backend.socials.pipelines.comments.instagram import preview_social_account_comments_scrape, start_social_account_comments_scrape
+    from trr_backend.socials.pipelines.comments.instagram import (
+        preview_social_account_comments_scrape,
+        start_social_account_comments_scrape,
+    )
 
     if dry_run or payload.dry_run:
         try:
@@ -5173,6 +5203,8 @@ async def post_social_account_comments_scrape_route(
                 batch_size=1,
                 max_comments_per_post=0,
                 comments_load_strategy=payload.comments_load_strategy,
+                date_start=payload.date_start,
+                date_end=payload.date_end,
                 skip_launch_auth_probe=True,
                 dry_run=False,
                 attach_to_active_run=True,
@@ -5382,6 +5414,123 @@ async def post_social_account_comments_run_repair_auth_route(
         raise _lookup_error_to_not_found(exc) from exc
 
 
+@router.post("/profiles/{platform}/{account_handle}/comments/runs/{run_id}/public-recovery")
+async def post_social_account_comments_run_public_recovery_route(
+    platform: str,
+    account_handle: str,
+    run_id: UUID,
+    payload: SocialAccountCommentsPublicRecoveryRequest,
+    user: InternalAdminUser,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import (
+        SocialIngestConflictError,
+        SocialIngestValidationError,
+        SocialWorkerUnavailableError,
+    )
+    from trr_backend.socials.pipelines.comments.instagram import start_social_account_comments_public_recovery
+
+    try:
+        result = await run_in_threadpool(
+            start_social_account_comments_public_recovery,
+            platform=platform,
+            account_handle=account_handle,
+            run_id=str(run_id),
+            comments_worker_count=payload.comments_worker_count,
+            comments_target_batch_size=payload.comments_target_batch_size,
+            comments_enable_media_followups=payload.comments_enable_media_followups,
+            dispatch_immediately=payload.dispatch_immediately,
+            dry_run=payload.dry_run,
+            initiated_by=(user or {}).get("email"),
+        )
+        _clear_account_profile_caches()
+        return result
+    except SocialIngestConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": exc.code, "message": str(exc), **jsonable_encoder(exc.detail)},
+        ) from exc
+    except SocialIngestValidationError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": exc.code, "message": str(exc), **jsonable_encoder(getattr(exc, "detail", {}) or {})},
+        ) from exc
+    except SocialWorkerUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "SOCIAL_WORKER_UNAVAILABLE",
+                "message": str(exc),
+                "execution_mode": canonical_execution_mode(),
+                "execution_owner": execution_owner_label(),
+                "worker_health": _worker_health_detail(exc.worker_health),
+            },
+        ) from exc
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+
+
+@router.post("/profiles/{platform}/{account_handle}/comments/runs/{run_id}/authenticated-followup")
+async def post_social_account_comments_run_authenticated_followup_route(
+    platform: str,
+    account_handle: str,
+    run_id: UUID,
+    payload: SocialAccountCommentsAuthenticatedFollowupRequest,
+    user: InternalAdminUser,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import (
+        SocialIngestConflictError,
+        SocialIngestValidationError,
+        SocialWorkerUnavailableError,
+    )
+    from trr_backend.socials.pipelines.comments.instagram import start_social_account_comments_authenticated_followup
+
+    try:
+        if not payload.dry_run:
+            _require_instagram_auth_refresh_confirmation(platform, payload.operator_confirmation)
+        result = await run_in_threadpool(
+            start_social_account_comments_authenticated_followup,
+            platform=platform,
+            account_handle=account_handle,
+            run_id=str(run_id),
+            comments_worker_count=payload.comments_worker_count,
+            comments_target_batch_size=payload.comments_target_batch_size,
+            comments_enable_media_followups=payload.comments_enable_media_followups,
+            dispatch_immediately=payload.dispatch_immediately,
+            dry_run=payload.dry_run,
+            initiated_by=(user or {}).get("email"),
+        )
+        _clear_account_profile_caches()
+        return result
+    except SocialIngestConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": exc.code, "message": str(exc), **jsonable_encoder(exc.detail)},
+        ) from exc
+    except SocialIngestValidationError as exc:
+        status_code = 503 if exc.code == "SOCIAL_INSTAGRAM_COMMENTS_AUTH_REPAIR_FAILED" else 400
+        raise HTTPException(
+            status_code=status_code,
+            detail={"code": exc.code, "message": str(exc), **jsonable_encoder(getattr(exc, "detail", {}) or {})},
+        ) from exc
+    except SocialWorkerUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "SOCIAL_WORKER_UNAVAILABLE",
+                "message": str(exc),
+                "execution_mode": canonical_execution_mode(),
+                "execution_owner": execution_owner_label(),
+                "worker_health": _worker_health_detail(exc.worker_health),
+            },
+        ) from exc
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+
+
 @router.post("/profiles/{platform}/{account_handle}/comments/runs/{run_id}/cancel")
 def post_social_account_comments_run_cancel_route(
     platform: str,
@@ -5539,6 +5688,7 @@ def get_social_account_profile_hashtags_route(
     platform: str,
     account_handle: str,
     window: Literal["all", "30d", "365d"] | None = Query(default=None),
+    assignment_status: Literal["all", "assigned", "unassigned"] | None = Query(default="all"),
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     cache_key = _account_profile_cache_key(
@@ -5546,6 +5696,7 @@ def get_social_account_profile_hashtags_route(
         platform=platform,
         account_handle=account_handle,
         window=window,
+        extra=("assignment_status", assignment_status),
     )
     cached_payload = _get_ttl_cached_payload(
         _ACCOUNT_PROFILE_HASHTAGS_CACHE,
@@ -5559,6 +5710,7 @@ def get_social_account_profile_hashtags_route(
             platform=platform,
             account_handle=account_handle,
             window=window,
+            assignment_status=assignment_status,
         )
         _set_ttl_cached_payload(
             _ACCOUNT_PROFILE_HASHTAGS_CACHE,
@@ -5576,6 +5728,50 @@ def get_social_account_profile_hashtags_route(
     except Exception as exc:  # noqa: BLE001
         logger.exception(
             "Failed to fetch social account profile hashtags: platform=%s account=%s",
+            platform,
+            account_handle,
+        )
+        raise _to_social_read_http_exception(exc) from exc
+
+
+@router.get("/profiles/{platform}/{account_handle}/hashtags/conflicts")
+def get_social_account_profile_hashtag_conflicts_route(
+    platform: str,
+    account_handle: str,
+    limit: int = Query(default=25, ge=1, le=100),
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_social_hashtag_assignment_conflict_history
+
+    cache_key = _account_profile_cache_key(
+        surface="hashtag-conflicts",
+        platform=platform,
+        account_handle=account_handle,
+        extra=("limit", limit),
+    )
+    cached_payload = _get_ttl_cached_payload(
+        _ACCOUNT_PROFILE_HASHTAGS_CACHE,
+        _ACCOUNT_PROFILE_HASHTAGS_CACHE_LOCK,
+        cache_key,
+    )
+    if cached_payload is not None:
+        return cached_payload
+    try:
+        payload = get_social_hashtag_assignment_conflict_history(limit=limit)
+        _set_ttl_cached_payload(
+            _ACCOUNT_PROFILE_HASHTAGS_CACHE,
+            _ACCOUNT_PROFILE_HASHTAGS_CACHE_LOCK,
+            cache_key,
+            payload,
+            ttl_seconds=_ACCOUNT_PROFILE_CACHE_TTL_SECONDS,
+            max_entries=_ACCOUNT_PROFILE_CACHE_MAX_ENTRIES,
+        )
+        return payload
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to fetch social account profile hashtag conflicts: platform=%s account=%s",
             platform,
             account_handle,
         )
@@ -6073,9 +6269,9 @@ async def post_social_account_catalog_backfill_route(
         SocialIngestConflictError,
         SocialIngestValidationError,
         SocialWorkerUnavailableError,
+        _merge_catalog_run_config,
         _normalize_catalog_backfill_window,
         _normalize_social_account_catalog_backfill_selected_tasks,
-        _merge_catalog_run_config,
         begin_social_account_catalog_backfill_launch,
         launch_social_account_catalog_backfill,
     )
@@ -6619,7 +6815,12 @@ def _cookie_health_auth_probe_metadata(payload: Mapping[str, Any]) -> dict[str, 
 def _instagram_comments_auth_probe_is_rate_limited(payload: Mapping[str, Any]) -> bool:
     reason = str(payload.get("reason") or payload.get("comments_auth_blocker") or "").strip().lower()
     status = str(payload.get("status") or payload.get("result") or "").strip().lower()
-    return bool(payload.get("rate_limited")) or reason in {"http_429", "rate_limited"} or "429" in reason or status == "rate_limited"
+    return (
+        bool(payload.get("rate_limited"))
+        or reason in {"http_429", "rate_limited"}
+        or "429" in reason
+        or status == "rate_limited"
+    )
 
 
 @router.get("/profiles/{platform}/{account_handle}/cookies/health")
@@ -6730,9 +6931,7 @@ def get_cookie_health_route(
             "public_ready": comments_public_ready,
             "authenticated_ready": comments_authenticated_ready,
             "auth_probe_skipped": bool(comments_probe.get("auth_probe_skipped")),
-            "auth_required_for_hidden_comments": bool(
-                comments_probe.get("auth_required_for_hidden_comments")
-            )
+            "auth_required_for_hidden_comments": bool(comments_probe.get("auth_required_for_hidden_comments"))
             or not comments_authenticated_ready,
             "comments_auth_blocker": str(comments_probe.get("comments_auth_blocker") or "").strip() or None,
             "operator_action": str(comments_probe.get("operator_action") or "").strip() or None,
@@ -7222,11 +7421,7 @@ def recover_stale_social_media_mirror_jobs(
         )
 
     try:
-        stages = (
-            ["media_mirror", "comment_media_mirror"]
-            if payload.stage == "all"
-            else [payload.stage]
-        )
+        stages = ["media_mirror", "comment_media_mirror"] if payload.stage == "all" else [payload.stage]
         recovered_by_stage: dict[str, list[str]] = {}
         recovered_job_ids: list[str] = []
         for stage in stages:
@@ -7237,11 +7432,7 @@ def recover_stale_social_media_mirror_jobs(
                 stale_after_seconds=payload.stale_after_seconds,
                 limit=payload.recover_limit,
             )
-            stage_job_ids = [
-                str(row.get("id") or "").strip()
-                for row in recovered
-                if str(row.get("id") or "").strip()
-            ]
+            stage_job_ids = [str(row.get("id") or "").strip() for row in recovered if str(row.get("id") or "").strip()]
             recovered_by_stage[stage] = stage_job_ids
             recovered_job_ids.extend(stage_job_ids)
 

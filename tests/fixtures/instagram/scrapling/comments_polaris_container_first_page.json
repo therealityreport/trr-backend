@@ -1,0 +1,320 @@
+{
+  "data": {
+    "xdt_api__v1__media__media_id__comments__connection": {
+      "edges": [
+        {
+          "node": {
+            "id": "17870000000000001",
+            "pk": "17870000000000001",
+            "text": "First sanitized comment",
+            "created_at": 1776272401,
+            "comment_like_count": 7,
+            "child_comment_count": 1,
+            "is_covered": true,
+            "is_edited": true,
+            "restriction_status": "limited",
+            "has_translation": true,
+            "giphy_media_info": {
+              "id": "giphy-1",
+              "images": {
+                "original": {
+                  "url": "https://media.example.invalid/giphy-1.gif"
+                }
+              }
+            },
+            "owner": {
+              "id": "1001",
+              "pk": "1001",
+              "fbid_v2": "fbid-1001",
+              "username": "commenter_one",
+              "is_verified": true,
+              "is_unpublished": false,
+              "profile_pic_url": "https://cdn.example.invalid/profile/commenter-one.jpg"
+            },
+            "edge_threaded_comments": {
+              "count": 1,
+              "edges": [
+                {
+                  "node": {
+                    "id": "17870000000000099",
+                    "pk": "17870000000000099",
+                    "text": "Sanitized reply",
+                    "created_at": 1776272410,
+                    "comment_like_count": 2,
+                    "owner": {
+                      "id": "1099",
+                      "pk": "1099",
+                      "fbid_v2": "fbid-1099",
+                      "username": "reply_user",
+                      "is_verified": false,
+                      "is_unpublished": false,
+                      "profile_pic_url": "https://cdn.example.invalid/profile/reply-user.jpg"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "node": {
+            "id": "17870000000000002",
+            "text": "Second sanitized comment",
+            "created_at": 1776272402,
+            "comment_like_count": 0,
+            "child_comment_count": 0,
+            "is_covered": false,
+            "is_edited": false,
+            "owner": {
+              "id": "1002",
+              "pk": "1002",
+              "fbid_v2": "fbid-1002",
+              "username": "commenter_two",
+              "is_verified": false,
+              "is_unpublished": false,
+              "profile_pic_url": "https://cdn.example.invalid/profile/commenter-two.jpg"
+            }
+          }
+        },
+        {
+          "node": {
+            "id": "17870000000000003",
+            "text": "Third sanitized comment",
+            "created_at": 1776272403,
+            "comment_like_count": 3,
+            "child_comment_count": 0,
+            "owner": {
+              "id": "1003",
+              "pk": "1003",
+              "fbid_v2": "fbid-1003",
+              "username": "commenter_three",
+              "is_verified": false,
+              "is_unpublished": false,
+              "profile_pic_url": "https://cdn.example.invalid/profile/commenter-three.jpg"
+            }
+          }
+        },
+        {
+          "node": {
+            "id": "17870000000000004",
+            "text": "Fourth sanitized comment",
+            "created_at": 1776272404,
+            "comment_like_count": 4,
+            "child_comment_count": 0,
+            "owner": {
+              "id": "1004",
+              "pk": "1004",
+              "fbid_v2": "fbid-1004",
+              "username": "commenter_four",
+              "is_verified": false,
+              "is_unpublished": false,
+              "profile_pic_url": "https://cdn.example.invalid/profile/commenter-four.jpg"
+            }
+          }
+        },
+        {
+          "node": {
+            "id": "17870000000000005",
+            "text": "Fifth sanitized comment",
+            "created_at": 1776272405,
+            "comment_like_count": 5,
+            "child_comment_count": 0,
+            "owner": {
+              "id": "1005",
+              "pk": "1005",
+              "fbid_v2": "fbid-1005",
+              "username": "commenter_five",
+              "is_verified": false,
+              "is_unpublished": false,
+              "profile_pic_url": "https://cdn.example.invalid/profile/commenter-five.jpg"
+            }
+          }
+        },
+        {
+          "node": {
+            "id": "17870000000000006",
+            "text": "Sixth sanitized comment",
+            "created_at": 1776272406,
+            "comment_like_count": 6,
+            "child_comment_count": 0,
+            "owner": {
+              "id": "1006",
+              "pk": "1006",
+              "fbid_v2": "fbid-1006",
+              "username": "commenter_six",
+              "is_verified": false,
+              "is_unpublished": false,
+              "profile_pic_url": "https://cdn.example.invalid/profile/commenter-six.jpg"
+            }
+          }
+        },
+        {
+          "node": {
+            "id": "17870000000000007",
+            "text": "Seventh sanitized comment",
+            "created_at": 1776272407,
+            "comment_like_count": 7,
+            "child_comment_count": 0,
+            "owner": {
+              "id": "1007",
+              "pk": "1007",
+              "fbid_v2": "fbid-1007",
+              "username": "commenter_seven",
+              "is_verified": false,
+              "is_unpublished": false,
+              "profile_pic_url": "https://cdn.example.invalid/profile/commenter-seven.jpg"
+            }
+          }
+        },
+        {
+          "node": {
+            "id": "17870000000000008",
+            "text": "Eighth sanitized comment",
+            "created_at": 1776272408,
+            "comment_like_count": 8,
+            "child_comment_count": 0,
+            "owner": {
+              "id": "1008",
+              "pk": "1008",
+              "fbid_v2": "fbid-1008",
+              "username": "commenter_eight",
+              "is_verified": false,
+              "is_unpublished": false,
+              "profile_pic_url": "https://cdn.example.invalid/profile/commenter-eight.jpg"
+            }
+          }
+        },
+        {
+          "node": {
+            "id": "17870000000000009",
+            "text": "Ninth sanitized comment",
+            "created_at": 1776272409,
+            "comment_like_count": 9,
+            "child_comment_count": 0,
+            "owner": {
+              "id": "1009",
+              "pk": "1009",
+              "fbid_v2": "fbid-1009",
+              "username": "commenter_nine",
+              "is_verified": false,
+              "is_unpublished": false,
+              "profile_pic_url": "https://cdn.example.invalid/profile/commenter-nine.jpg"
+            }
+          }
+        },
+        {
+          "node": {
+            "id": "17870000000000010",
+            "text": "Tenth sanitized comment",
+            "created_at": 1776272411,
+            "comment_like_count": 10,
+            "child_comment_count": 0,
+            "owner": {
+              "id": "1010",
+              "pk": "1010",
+              "fbid_v2": "fbid-1010",
+              "username": "commenter_ten",
+              "is_verified": false,
+              "is_unpublished": false,
+              "profile_pic_url": "https://cdn.example.invalid/profile/commenter-ten.jpg"
+            }
+          }
+        },
+        {
+          "node": {
+            "id": "17870000000000011",
+            "text": "Eleventh sanitized comment",
+            "created_at": 1776272412,
+            "comment_like_count": 11,
+            "child_comment_count": 0,
+            "owner": {
+              "id": "1011",
+              "pk": "1011",
+              "fbid_v2": "fbid-1011",
+              "username": "commenter_eleven",
+              "is_verified": false,
+              "is_unpublished": false,
+              "profile_pic_url": "https://cdn.example.invalid/profile/commenter-eleven.jpg"
+            }
+          }
+        },
+        {
+          "node": {
+            "id": "17870000000000012",
+            "text": "Twelfth sanitized comment",
+            "created_at": 1776272413,
+            "comment_like_count": 12,
+            "child_comment_count": 0,
+            "owner": {
+              "id": "1012",
+              "pk": "1012",
+              "fbid_v2": "fbid-1012",
+              "username": "commenter_twelve",
+              "is_verified": false,
+              "is_unpublished": false,
+              "profile_pic_url": "https://cdn.example.invalid/profile/commenter-twelve.jpg"
+            }
+          }
+        },
+        {
+          "node": {
+            "id": "17870000000000013",
+            "text": "Thirteenth sanitized comment",
+            "created_at": 1776272414,
+            "comment_like_count": 13,
+            "child_comment_count": 0,
+            "owner": {
+              "id": "1013",
+              "pk": "1013",
+              "fbid_v2": "fbid-1013",
+              "username": "commenter_thirteen",
+              "is_verified": false,
+              "is_unpublished": false,
+              "profile_pic_url": "https://cdn.example.invalid/profile/commenter-thirteen.jpg"
+            }
+          }
+        },
+        {
+          "node": {
+            "id": "17870000000000014",
+            "text": "Fourteenth sanitized comment",
+            "created_at": 1776272415,
+            "comment_like_count": 14,
+            "child_comment_count": 0,
+            "owner": {
+              "id": "1014",
+              "pk": "1014",
+              "fbid_v2": "fbid-1014",
+              "username": "commenter_fourteen",
+              "is_verified": false,
+              "is_unpublished": false,
+              "profile_pic_url": "https://cdn.example.invalid/profile/commenter-fourteen.jpg"
+            }
+          }
+        },
+        {
+          "node": {
+            "id": "17870000000000015",
+            "text": "Fifteenth sanitized comment",
+            "created_at": 1776272416,
+            "comment_like_count": 15,
+            "child_comment_count": 0,
+            "owner": {
+              "id": "1015",
+              "pk": "1015",
+              "fbid_v2": "fbid-1015",
+              "username": "commenter_fifteen",
+              "is_verified": false,
+              "is_unpublished": false,
+              "profile_pic_url": "https://cdn.example.invalid/profile/commenter-fifteen.jpg"
+            }
+          }
+        }
+      ],
+      "page_info": {
+        "has_next_page": true,
+        "end_cursor": "{\"cached_comments_cursor\":\"cursor-15\",\"bifilter_token\":\"token-15\"}"
+      }
+    }
+  }
+}
