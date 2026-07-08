@@ -24,7 +24,9 @@ def test_select_threads_posts_proxy_prefers_explicit_urls(monkeypatch: pytest.Mo
     assert rotator_calls == ["http://user:pass@proxy.test:8080"]
 
 
-def test_select_threads_posts_proxy_defaults_to_decodo_when_credentials_exist(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_select_threads_posts_proxy_returns_none_when_decodo_credentials_exist_without_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     rotator_calls: list[str | dict[str, str]] = []
 
     def _fake_build_proxy_rotator(browser_proxy: str | dict[str, str]) -> dict[str, str | dict[str, str]]:
@@ -34,6 +36,27 @@ def test_select_threads_posts_proxy_defaults_to_decodo_when_credentials_exist(mo
     monkeypatch.setattr(threads_proxy, "build_proxy_rotator", _fake_build_proxy_rotator)
     monkeypatch.delenv("SOCIAL_THREADS_POSTS_PROXY_URLS", raising=False)
     monkeypatch.delenv("SOCIAL_THREADS_POSTS_PROXY_PROVIDER", raising=False)
+    monkeypatch.setenv("DECODO_USERNAME", "user")
+    monkeypatch.setenv("DECODO_PASSWORD", "secret")
+    monkeypatch.setenv("DECODO_GATEWAY", "gate.decodo.com:7000")
+
+    assert threads_proxy.select_threads_posts_proxy() is None
+
+    monkeypatch.setenv("SOCIAL_THREADS_POSTS_PROXY_PROVIDER", "")
+    assert threads_proxy.select_threads_posts_proxy() is None
+    assert rotator_calls == []
+
+
+def test_select_threads_posts_proxy_decodo(monkeypatch: pytest.MonkeyPatch) -> None:
+    rotator_calls: list[str | dict[str, str]] = []
+
+    def _fake_build_proxy_rotator(browser_proxy: str | dict[str, str]) -> dict[str, str | dict[str, str]]:
+        rotator_calls.append(browser_proxy)
+        return {"browser_proxy": browser_proxy}
+
+    monkeypatch.setattr(threads_proxy, "build_proxy_rotator", _fake_build_proxy_rotator)
+    monkeypatch.delenv("SOCIAL_THREADS_POSTS_PROXY_URLS", raising=False)
+    monkeypatch.setenv("SOCIAL_THREADS_POSTS_PROXY_PROVIDER", "decodo")
     monkeypatch.delenv("SOCIAL_THREADS_POSTS_USE_STICKY_PROXY", raising=False)
     monkeypatch.setenv("DECODO_USERNAME", "user")
     monkeypatch.setenv("DECODO_PASSWORD", "secret")
