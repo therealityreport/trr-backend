@@ -418,6 +418,23 @@ _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "TRR_ADMIN_IMAGE_EXECUTION_BACKEND": "modal",
     "SOCIAL_QUEUE_ENABLED": "true",
 }
+# Operator-tunable subset of _CANONICAL_MODAL_RUNTIME_DEFAULTS. For these keys
+# the canonical literal is a DEFAULT (applied via setdefault) so an operator can
+# override it through the Modal secret or environment. Everything NOT in this set
+# stays unconditionally pinned — in particular every DB-pool size and worker/
+# container concurrency cap, which are Supavisor session-budget safety clamps
+# (see comments_db_session_budget_status). Do not add a *_DB_POOL_*,
+# *_CONCURRENCY_LIMIT, or SOCIAL_WORKER_POOL_* key here without the DB-session-
+# budget analysis.
+_OPERATOR_TUNABLE_RUNTIME_DEFAULT_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER",
+        "SOCIALBLADE_PROXY_PROVIDER",
+        "SOCIAL_THREADS_POSTS_PROXY_PROVIDER",
+        "SOCIAL_INSTAGRAM_COMMENTS_COAUTHOR_GRAPHQL_PAGE_SIZE",
+        "SOCIAL_INSTAGRAM_COMMENTS_COAUTHOR_GRAPHQL_CHILD_PAGE_SIZE",
+    }
+)
 
 
 def _build_lean_image_base(*, image_factory: object | None = None):
@@ -680,7 +697,10 @@ def _resolve_modal_secrets() -> list[modal.Secret]:
 
 def _inject_modal_runtime_defaults() -> None:
     for key, value in _CANONICAL_MODAL_RUNTIME_DEFAULTS.items():
-        os.environ[key] = value
+        if key in _OPERATOR_TUNABLE_RUNTIME_DEFAULT_KEYS:
+            os.environ.setdefault(key, value)
+        else:
+            os.environ[key] = value
     if (os.getenv("OBJECT_STORAGE_ACCESS_KEY_ID") or "").strip() and (
         os.getenv("OBJECT_STORAGE_SECRET_ACCESS_KEY") or ""
     ).strip():
