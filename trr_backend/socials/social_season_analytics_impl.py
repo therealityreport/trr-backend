@@ -53366,7 +53366,7 @@ def _comments_coverage_for_platform(
 
     apply_account_filter = source_scope != "community" and bool(platform_accounts)
     account_handles_list = sorted(platform_accounts)
-    instagram_active_filter = "and c.is_missing = false" if _comment_lifecycle_supported("instagram_comments") else ""
+    instagram_lifecycle_supported = bool(_comment_lifecycle_supported("instagram_comments"))
     tiktok_active_filter = "and c.is_missing = false" if _comment_lifecycle_supported("tiktok_comments") else ""
     youtube_active_filter = "and c.is_missing = false" if _comment_lifecycle_supported("youtube_comments") else ""
     facebook_active_filter = "and c.is_missing = false" if _comment_lifecycle_supported("facebook_comments") else ""
@@ -53387,41 +53387,39 @@ def _comments_coverage_for_platform(
         params: list[Any] = [season_id, start_dt, end_dt]
         if apply_account_filter:
             params.append(account_handles_list)
-        row = (
-            pg.fetch_one(
-                f"""
-            with posts as (
-              select
-                p.id,
-                ({reported_comments_expr})::bigint as reported_comments
-              from social.instagram_posts p
-              where p.season_id = %s
-                and p.posted_at >= %s
-                and p.posted_at <= %s
-                {account_filter}
-            ), comment_counts as (
-              select c.post_id, count(*)::bigint as saved_comments
-              from social.instagram_comments c
-              join posts p on p.id = c.post_id
-              where true
-                {instagram_active_filter}
-              group by c.post_id
-            )
+        posts = pg.fetch_all(
+            f"""
             select
-              count(*)::bigint as posts_scanned,
-              coalesce(
-                sum(case when coalesce(cc.saved_comments, 0) < p.reported_comments then 1 else 0 end),
-                0
-              )::bigint as stale_posts_count,
-              coalesce(sum(coalesce(cc.saved_comments, 0)), 0)::bigint as saved_comments,
-              coalesce(sum(p.reported_comments), 0)::bigint as reported_comments
-            from posts p
-            left join comment_counts cc on cc.post_id = p.id
+              p.id,
+              ({reported_comments_expr})::bigint as reported_comments
+            from social.instagram_posts p
+            where p.season_id = %s
+              and p.posted_at >= %s
+              and p.posted_at <= %s
+              {account_filter}
             """,
-                params,
-            )
-            or {}
+            params,
         )
+        saved_counts = _instagram_saved_comment_counts_by_post(
+            [post["id"] for post in posts],
+            active_filter_applied=instagram_lifecycle_supported,
+        )
+        saved_comments = 0
+        reported_comments = 0
+        stale_posts_count = 0
+        for post in posts:
+            reported = int(post.get("reported_comments") or 0)
+            saved = int(saved_counts.get(post.get("id"), 0) or 0)
+            saved_comments += saved
+            reported_comments += reported
+            if saved < reported:
+                stale_posts_count += 1
+        row = {
+            "posts_scanned": len(posts),
+            "stale_posts_count": stale_posts_count,
+            "saved_comments": saved_comments,
+            "reported_comments": reported_comments,
+        }
     elif platform == "tiktok":
         account_filter = (
             "and ltrim(lower(coalesce(nullif(p.username, ''), nullif(p.source_account, ''), '')), '@') = any(%s)"
@@ -55146,6 +55144,42 @@ def _instagram_has_custom_cover_hint(node: Any) -> bool:
     return False
 
 
+def _instagram_saved_comment_counts_by_post(
+    post_ids: list[Any],
+    *,
+    active_filter_applied: bool,
+) -> dict[Any, int]:
+    """Per-post Instagram comment counts, from the rollup table when present."""
+    counts: dict[Any, int] = defaultdict(int)
+    if not post_ids:
+        return counts
+    if _relation_exists("social.instagram_post_comment_rollups"):
+        column = "active_comment_count" if active_filter_applied else "total_comment_count"
+        rows = pg.fetch_all(
+            f"""
+            select r.post_id, r.{column}::int as cnt
+            from social.instagram_post_comment_rollups r
+            where r.post_id = any(%s::uuid[])
+            """,
+            [post_ids],
+        )
+    else:
+        active_filter = "and coalesce(c.is_missing, false) = false" if active_filter_applied else ""
+        rows = pg.fetch_all(
+            f"""
+            select c.post_id, count(*)::int as cnt
+            from social.instagram_comments c
+            where c.post_id = any(%s::uuid[])
+              {active_filter}
+            group by c.post_id
+            """,
+            [post_ids],
+        )
+    for row in rows:
+        counts[row["post_id"]] = row["cnt"]
+    return counts
+
+
 def _normalize_media_url_for_compare(url: str | None) -> str:
     value = str(url or "").strip()
     if not value:
@@ -55304,26 +55338,16 @@ def _week_detail_instagram(
 
     post_ids = [p["id"] for p in posts]
     comments_by_post: dict[Any, list[dict]] = defaultdict(list)
-    comment_counts_by_post: dict[Any, int] = defaultdict(int)
+    instagram_comment_lifecycle_supported = bool(_comment_lifecycle_supported("instagram_comments"))
+    comment_counts_by_post = _instagram_saved_comment_counts_by_post(
+        post_ids,
+        active_filter_applied=instagram_comment_lifecycle_supported,
+    )
     instagram_comment_active_filter = (
-        "and coalesce(c.is_missing, false) = false" if _comment_lifecycle_supported("instagram_comments") else ""
+        "and coalesce(c.is_missing, false) = false" if instagram_comment_lifecycle_supported else ""
     )
 
     if post_ids:
-        # Get total comment counts per post
-        count_rows = pg.fetch_all(
-            f"""
-            select c.post_id, count(*)::int as cnt
-            from social.instagram_comments c
-            where c.post_id = any(%s::uuid[])
-              {instagram_comment_active_filter}
-            group by c.post_id
-            """,
-            [post_ids],
-        )
-        for row in count_rows:
-            comment_counts_by_post[row["post_id"]] = row["cnt"]
-
         # Get top N comments per post using lateral join (0 = no cap)
         limit_clause = f"limit {max_comments}" if max_comments > 0 else "limit all"
         comment_rows = pg.fetch_all(
