@@ -9,6 +9,7 @@ Supports:
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -92,6 +93,15 @@ from trr_backend.socials.instagram.request_client import InstagramRequestClient,
 from trr_backend.socials.instagram.resume_state import InstagramResumeState
 
 logger = logging.getLogger(__name__)
+
+
+def _sessionid_fingerprint(cookies: Mapping[str, Any]) -> str:
+    """Non-reversible, stable fingerprint of the sessionid for log correlation."""
+    raw = str((cookies or {}).get("sessionid") or "")
+    if not raw:
+        return "none"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+
 
 INSTAGRAM_AUTH_REPAIR_CONFIRMATION = "I UNDERSTAND INSTAGRAM AUTH RISK"
 INSTAGRAM_AUTH_REPAIR_CONFIRMATION_ENV = "SOCIAL_INSTAGRAM_AUTH_REPAIR_CONFIRMATION"
@@ -874,8 +884,8 @@ class InstagramScraper:
                 self.session.cookies.set(k, v, domain=".instagram.com")
             self._clear_profile_page_context_cache()
             logger.info(
-                "[instagram] confirmed cookie repair succeeded - sessionid=%s...",
-                fresh_cookies["sessionid"][:8],
+                "[instagram] confirmed cookie repair succeeded - sessionid_fp=%s",
+                _sessionid_fingerprint(fresh_cookies),
             )
             return {"refreshed": True, "reason": None, "cookie_file": str(cookie_path)}
         except Exception as exc:  # noqa: BLE001
@@ -968,7 +978,10 @@ class InstagramScraper:
             for k, v in fresh_cookies.items():
                 self.session.cookies.set(k, v, domain=".instagram.com")
             self._clear_profile_page_context_cache()
-            logger.info("[instagram] interactive login succeeded — sessionid=%s…", fresh_cookies["sessionid"][:8])
+            logger.info(
+                "[instagram] interactive login succeeded — sessionid_fp=%s",
+                _sessionid_fingerprint(fresh_cookies),
+            )
             return {"refreshed": True, "reason": None, "method": "interactive_chrome"}
         except Exception as exc:  # noqa: BLE001
             logger.warning("[instagram] interactive login failed: %s", exc)
