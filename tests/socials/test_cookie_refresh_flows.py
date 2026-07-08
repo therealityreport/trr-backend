@@ -443,6 +443,35 @@ def test_cookie_refresh_context_allows_profileless_browser_with_override(
     assert captured["browser_closed"] is True
 
 
+def test_cookie_refresh_context_closes_profileless_browser_when_new_context_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    chrome_root = tmp_path / "Chrome"
+    captured: dict[str, int] = {"close_calls": 0}
+
+    class _FakeBrowser:
+        def new_context(self, **_kwargs: object) -> object:
+            raise RuntimeError("new context failed")
+
+        def close(self) -> None:
+            captured["close_calls"] += 1
+
+    monkeypatch.setattr(browser_cookie_refresh, "_chrome_profile_base_dir", lambda: chrome_root)
+    monkeypatch.setattr(browser_cookie_refresh, "launch_browser", lambda *_args, **_kwargs: _FakeBrowser())
+
+    with pytest.raises(RuntimeError, match="new context failed"):
+        browser_cookie_refresh.open_cookie_refresh_context(
+            SimpleNamespace(chromium=object()),
+            platform="socialblade",
+            headless=True,
+            viewport={"width": 100, "height": 100},
+            require_profile=False,
+        )
+
+    assert captured["close_calls"] == 1
+
+
 def test_social_auth_refresh_rate_limit_blocks_repeated_attempts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
