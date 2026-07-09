@@ -74,12 +74,19 @@ def _delete_rows(*, row_ids: list[str]) -> int:
     return len(deleted)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Clean known YouTube false positives for a show.")
     parser.add_argument("--show-id", help="Show UUID to scope cleanup.")
     parser.add_argument("--show-name", default=DEFAULT_SHOW_NAME, help=f"Show name (default: {DEFAULT_SHOW_NAME})")
-    parser.add_argument("--dry-run", action="store_true", help="Preview candidate rows without deleting.")
-    args = parser.parse_args()
+    parser.add_argument("--dry-run", action="store_true", help="Preview candidate rows without deleting (default).")
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Actually delete matched rows. Without this, runs in dry-run.",
+    )
+    parser.set_defaults(dry_run=True)
+    args = parser.parse_args(argv)
+    dry_run = bool(args.dry_run and not args.apply)
 
     resolved_show_id = _resolve_show_id(show_id=args.show_id, show_name=args.show_name)
     candidates = _find_candidate_rows(resolved_show_id=resolved_show_id)
@@ -94,8 +101,8 @@ def main() -> None:
             row.get("title"),
         )
 
-    if args.dry_run:
-        logger.info("Dry run enabled: no rows deleted.")
+    if dry_run:
+        logger.info("Dry run (default): no rows deleted. Re-run with --apply to delete %d rows.", len(candidates))
         return
 
     if not candidates:

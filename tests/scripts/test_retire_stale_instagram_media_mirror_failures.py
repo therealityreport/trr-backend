@@ -112,6 +112,8 @@ def test_retire_matches_updates_only_selected_ids(monkeypatch) -> None:
     params = calls[0]["params"]
     assert "status = 'cancelled'" in query
     assert "where id::text = any(%s)" in query.lower()
+    assert "and status = %s" in query.lower()
+    assert "and status = 'failed'" not in query.lower()
     assert params[0] == mod.OBSOLETE_ERROR_MESSAGE
     assert params[1] == mod.OBSOLETE_ERROR_CODE
     assert params[2] == mod.OBSOLETE_ERROR_CLASS
@@ -121,3 +123,4 @@ def test_retire_matches_updates_only_selected_ids(monkeypatch) -> None:
         "obsolete_failure_resolution": "retired_from_retry_backlog",
     }
     assert params[4] == ["job-1", "job-3"]
+    assert params[5] == "failed"

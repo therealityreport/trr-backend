@@ -163,11 +163,12 @@ def _retire_matches(*, season_ids: list[str], show_ids: list[str]) -> list[dict[
           last_error_class = %s,
           metadata = coalesce(metadata, '{}'::jsonb) || %s::jsonb
         where id::text = any(%s)
+          and status = %s
         returning id::text as id,
                   season_id::text as season_id,
                   show_id::text as show_id
         """,
-        [OBSOLETE_ERROR_MESSAGE, OBSOLETE_ERROR_CODE, OBSOLETE_ERROR_CLASS, payload, job_ids],
+        [OBSOLETE_ERROR_MESSAGE, OBSOLETE_ERROR_CODE, OBSOLETE_ERROR_CLASS, payload, job_ids, "failed"],
     )
 
 

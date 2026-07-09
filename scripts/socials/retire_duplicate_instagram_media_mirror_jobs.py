@@ -21,6 +21,7 @@ except ModuleNotFoundError:  # pragma: no cover - script execution convenience
 DUPLICATE_ERROR_CODE = "duplicate_media_mirror_job_retired"
 DUPLICATE_ERROR_CLASS = "DuplicateMediaMirrorJobRetired"
 DUPLICATE_ERROR_MESSAGE = "duplicate_active_media_mirror_job_retired"
+ACTIVE_DUPLICATE_STATUSES = ("queued", "pending", "retrying", "running")
 
 
 @dataclass(slots=True)
@@ -128,9 +129,17 @@ def _retire_matches(*, season_ids: list[str], show_ids: list[str]) -> list[dict[
           last_error_class = %s,
           metadata = coalesce(metadata, '{}'::jsonb) || %s::jsonb
         where id::text = any(%s)
+          and status = any(%s)
         returning id::text as id
         """,
-        [DUPLICATE_ERROR_MESSAGE, DUPLICATE_ERROR_CODE, DUPLICATE_ERROR_CLASS, payload, duplicate_ids],
+        [
+            DUPLICATE_ERROR_MESSAGE,
+            DUPLICATE_ERROR_CODE,
+            DUPLICATE_ERROR_CLASS,
+            payload,
+            duplicate_ids,
+            list(ACTIVE_DUPLICATE_STATUSES),
+        ],
     )
 
 

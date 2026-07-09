@@ -90,11 +90,15 @@ def test_retire_matches_marks_duplicate_comment_media_jobs_cancelled(monkeypatch
 
     assert rows == [{"id": "job-1"}]
     assert len(calls) == 1
-    assert "status = 'cancelled'" in calls[0]["query"]
-    assert calls[0]["params"][0] == mod.DUPLICATE_ERROR_MESSAGE
-    assert calls[0]["params"][1] == mod.DUPLICATE_ERROR_CODE
-    assert calls[0]["params"][2] == mod.DUPLICATE_ERROR_CLASS
-    assert json.loads(calls[0]["params"][3]) == {"duplicate_active_comment_media_mirror_job": True}
-    assert calls[0]["params"][4] == ["job-1"]
+    query = calls[0]["query"]
+    params = calls[0]["params"]
+    assert "status = 'cancelled'" in query
+    assert "and status = any(%s)" in query.lower()
+    assert params[0] == mod.DUPLICATE_ERROR_MESSAGE
+    assert params[1] == mod.DUPLICATE_ERROR_CODE
+    assert params[2] == mod.DUPLICATE_ERROR_CLASS
+    assert json.loads(params[3]) == {"duplicate_active_comment_media_mirror_job": True}
+    assert params[4] == ["job-1"]
+    assert params[5] == list(mod.ACTIVE_DUPLICATE_STATUSES)
     assert "concat(config->>'post_id', ':', config->>'comment_id')" in mod.IDENTITY_SQL
     assert "owner_username" in mod.ACCOUNT_SQL
