@@ -29099,7 +29099,7 @@ def _upsert_tweet(
         return None
 
     _tweet_id, payload = prepared
-    row = _pg_upsert("twitter_tweets", payload, conflict_col="tweet_id", conn=conn)
+    row = _pg_upsert("twitter_tweets", payload, conflict_col="tweet_id", conn=conn, include_inserted_flag=True)
     if persist_stats is not None and row:
         persist_stats["comments_upserted"] = int(persist_stats.get("comments_upserted") or 0) + 1
     return row
