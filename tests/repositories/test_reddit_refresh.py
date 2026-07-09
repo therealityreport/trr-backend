@@ -2064,6 +2064,86 @@ def test_run_reddit_refresh_worker_loop_once_returns_one_when_no_work(monkeypatc
     assert result == 1
 
 
+def test_run_reddit_refresh_worker_loop_continues_after_run_failure(monkeypatch) -> None:
+    run_id = "63a7be5d-0000-4000-8000-000000000101"
+    claims = [
+        {"id": run_id, "attempt_count": 1},
+        None,
+    ]
+    claim_calls = 0
+    execute_calls: list[dict] = []
+
+    class StopLoop(Exception):
+        pass
+
+    def fake_claim_next_refresh_run(**kwargs):  # noqa: ANN001
+        nonlocal claim_calls
+        claim_calls += 1
+        return claims.pop(0)
+
+    def fake_execute_refresh_run(run_id_arg, **kwargs):  # noqa: ANN001
+        execute_calls.append({"run_id": run_id_arg, **kwargs})
+        raise RuntimeError("simulated refresh failure")
+
+    monkeypatch.setattr(reddit_refresh, "claim_next_refresh_run", fake_claim_next_refresh_run)
+    monkeypatch.setattr(reddit_refresh, "execute_refresh_run", fake_execute_refresh_run)
+    monkeypatch.setattr(reddit_refresh.time, "sleep", lambda _seconds: (_ for _ in ()).throw(StopLoop))
+
+    with pytest.raises(StopLoop):
+        reddit_refresh.run_reddit_refresh_worker_loop(worker_id="worker-1", once=False, poll_seconds=0.2)
+
+    assert claim_calls == 2
+    assert execute_calls == [
+        {
+            "run_id": run_id,
+            "preclaimed_run": {"id": run_id, "attempt_count": 1},
+            "worker_id": "worker-1",
+            "raise_on_failure": False,
+        }
+    ]
+
+
+def test_execute_refresh_run_suppresses_non_403_failure_when_requested(monkeypatch) -> None:
+    run_id = "63a7be5d-0000-4000-8000-000000000102"
+    run_row = {
+        "id": run_id,
+        "community_id": "community-1",
+        "season_id": "season-1",
+        "period_key": "season",
+        "subreddit": "bravorealhousewives",
+        "request_payload": {"mode": "sync_posts"},
+        "claim_token": "claim-token-1",
+    }
+    updates: list[dict] = []
+
+    monkeypatch.setattr(reddit_refresh.pg, "fetch_one", lambda *args, **kwargs: run_row)  # noqa: ANN002, ANN003, ARG005
+    monkeypatch.setattr(
+        reddit_refresh,
+        "_discover_window",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("simulated refresh failure")),  # noqa: ARG005
+    )
+    monkeypatch.setattr(
+        reddit_refresh,
+        "_update_run",
+        lambda run_id_arg, **kwargs: updates.append({"run_id": run_id_arg, **kwargs}),  # noqa: ANN001
+    )
+    monkeypatch.setattr(reddit_refresh, "_touch_refresh_run_heartbeat", lambda **kwargs: None)
+    monkeypatch.setattr(
+        reddit_refresh,
+        "get_refresh_run",
+        lambda run_id_arg: {"run_id": run_id_arg, "status": "failed"},
+    )
+
+    result = reddit_refresh.execute_refresh_run(run_id, raise_on_failure=False)
+
+    assert result == {"run_id": run_id, "status": "failed"}
+    failed_update = next((item for item in updates if item.get("status") == "failed"), None)
+    assert failed_update is not None
+    assert failed_update["release_claim"] is True
+    assert failed_update["claim_token"] == "claim-token-1"
+    assert failed_update["error_message"] == "simulated refresh failure"
+
+
 def test_execute_refresh_run_sync_details_emits_terminal_summary(monkeypatch) -> None:
     run_id = "63a7be5d-0000-4000-8000-000000000099"
     run_row = {

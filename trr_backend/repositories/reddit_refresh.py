@@ -3779,6 +3779,7 @@ def execute_refresh_run(
     *,
     preclaimed_run: dict[str, Any] | None = None,
     worker_id: str | None = None,
+    raise_on_failure: bool = True,
 ) -> dict[str, Any]:
     run = (
         dict(preclaimed_run)
@@ -4342,7 +4343,9 @@ def execute_refresh_run(
             claim_token=claim_token,
             release_claim=True,
         )
-        raise
+        if raise_on_failure:
+            raise
+        return get_refresh_run(run_id)
 
 
 def run_reddit_refresh_worker_loop(
@@ -4376,7 +4379,19 @@ def run_reddit_refresh_worker_loop(
             run_id[:8] if run_id else None,
             _safe_int(claimed.get("attempt_count")),
         )
-        execute_refresh_run(run_id, preclaimed_run=claimed, worker_id=normalized_worker)
+        try:
+            execute_refresh_run(
+                run_id,
+                preclaimed_run=claimed,
+                worker_id=normalized_worker,
+                raise_on_failure=False,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[reddit_refresh_worker_run_error] worker_id=%s run_id=%s",
+                normalized_worker,
+                run_id[:8] if run_id else None,
+            )
         if once:
             logger.info("[reddit_refresh_worker_once_complete] worker_id=%s run_id=%s", normalized_worker, run_id[:8])
             return 0
