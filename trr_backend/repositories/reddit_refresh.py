@@ -1029,6 +1029,7 @@ class RedditHttpClient:
         self.user_agent = (os.getenv("REDDIT_USER_AGENT") or "").strip() or REDDIT_USER_AGENT_DEFAULT
         self._oauth_token: str | None = None
         self._oauth_expires_at: float = 0.0
+        self._state_lock = threading.Lock()
         # Adaptive cooldown: starts at configured minimum, increases on 429s, decays on success
         self._adaptive_cooldown: float = self.page_cooldown
         self._adaptive_cooldown_min: float = self.page_cooldown
@@ -1052,8 +1053,9 @@ class RedditHttpClient:
         if not self.client_id or not self.client_secret:
             return None
         now = time.time()
-        if self._oauth_token and now < (self._oauth_expires_at - 30):
-            return self._oauth_token
+        with self._state_lock:
+            if self._oauth_token and now < (self._oauth_expires_at - 30):
+                return self._oauth_token
         try:
             response = self.session.post(
                 "https://www.reddit.com/api/v1/access_token",
@@ -1070,8 +1072,9 @@ class RedditHttpClient:
             expires_in = float(payload.get("expires_in") or 3600)
             if not token:
                 return None
-            self._oauth_token = token
-            self._oauth_expires_at = time.time() + max(60.0, expires_in)
+            with self._state_lock:
+                self._oauth_token = token
+                self._oauth_expires_at = time.time() + max(60.0, expires_in)
             return token
         except Exception as exc:  # noqa: BLE001
             logger.warning("[reddit_refresh_oauth_exception] %s", exc)
@@ -1096,10 +1099,11 @@ class RedditHttpClient:
                     )
                     if response.status_code == 429:
                         # Adaptive backoff: increase cooldown on rate limit
-                        self._adaptive_cooldown = min(
-                            self._adaptive_cooldown_max,
-                            self._adaptive_cooldown * 2,
-                        )
+                        with self._state_lock:
+                            self._adaptive_cooldown = min(
+                                self._adaptive_cooldown_max,
+                                self._adaptive_cooldown * 2,
+                            )
                         retry_after = response.headers.get("Retry-After")
                         delay = self.rate_limit_delay
                         if retry_after:
@@ -1125,12 +1129,15 @@ class RedditHttpClient:
                         )
                     payload = response.json() if response.content else {}
                     # Adaptive cooldown: use current adaptive value, decay toward minimum on success
-                    if self._adaptive_cooldown > 0:
-                        time.sleep(self._adaptive_cooldown)
-                    self._adaptive_cooldown = max(
-                        self._adaptive_cooldown_min,
-                        self._adaptive_cooldown * 0.9,
-                    )
+                    with self._state_lock:
+                        current_cooldown = self._adaptive_cooldown
+                    if current_cooldown > 0:
+                        time.sleep(current_cooldown)
+                    with self._state_lock:
+                        self._adaptive_cooldown = max(
+                            self._adaptive_cooldown_min,
+                            self._adaptive_cooldown * 0.9,
+                        )
                     return payload if isinstance(payload, dict) else {}
                 except RedditRefreshError:
                     raise

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 
@@ -50,6 +51,66 @@ def test_extract_reddit_media_urls_uses_clean_href_values_without_tag_tail() -> 
     assert reddit_refresh._extract_reddit_media_urls(body_html) == [  # noqa: SLF001
         ("https://preview.redd.it/example.jpeg?width=321&format=pjpg&auto=webp&s=abc123", "image")
     ]
+
+
+def test_reddit_http_client_reuses_cached_oauth_token(monkeypatch) -> None:
+    monkeypatch.setenv("REDDIT_CLIENT_ID", "client-id")
+    monkeypatch.setenv("REDDIT_CLIENT_SECRET", "client-secret")
+
+    class TokenResponse:
+        status_code = 200
+        content = b"{}"
+
+        def json(self) -> dict[str, object]:
+            return {"access_token": "cached-access-token", "expires_in": 3600}
+
+    class TokenSession:
+        def __init__(self) -> None:
+            self.post_calls = 0
+
+        def post(self, *_args, **_kwargs) -> TokenResponse:  # noqa: ANN002, ANN003
+            self.post_calls += 1
+            return TokenResponse()
+
+    client = reddit_refresh.RedditHttpClient()
+    session = TokenSession()
+    client.session = session
+
+    assert client._get_oauth_token() == "cached-access-token"  # noqa: SLF001
+    assert client._get_oauth_token() == "cached-access-token"  # noqa: SLF001
+    assert session.post_calls == 1
+
+
+def test_reddit_http_client_cooldown_lock_concurrency_smoke() -> None:
+    client = reddit_refresh.RedditHttpClient()
+    client._adaptive_cooldown = 0.05  # noqa: SLF001
+    errors: list[Exception] = []
+
+    def hammer_cooldown() -> None:
+        try:
+            for _ in range(50):
+                with client._state_lock:  # noqa: SLF001
+                    client._adaptive_cooldown = min(  # noqa: SLF001
+                        client._adaptive_cooldown_max,  # noqa: SLF001
+                        client._adaptive_cooldown * 2,  # noqa: SLF001
+                    )
+                with client._state_lock:  # noqa: SLF001
+                    client._adaptive_cooldown = max(  # noqa: SLF001
+                        client._adaptive_cooldown_min,  # noqa: SLF001
+                        client._adaptive_cooldown * 0.9,  # noqa: SLF001
+                    )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=hammer_cooldown) for _ in range(20)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    with client._state_lock:  # noqa: SLF001
+        assert client._adaptive_cooldown_min <= client._adaptive_cooldown <= client._adaptive_cooldown_max  # noqa: SLF001
 
 
 def test_build_reddit_refresh_save_proof_counts_saved_rows(monkeypatch) -> None:
