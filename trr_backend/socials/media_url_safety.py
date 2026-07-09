@@ -21,8 +21,8 @@ class MediaUrlSafetyPolicy:
     resolve_dns: bool = True
 
 
-_RESERVED_TEST_SUFFIXES = (".test", ".example", ".invalid", ".localhost")
-_RESERVED_TEST_HOSTS = {"example.com", "example.net", "example.org", "localhost"}
+_RESERVED_TEST_SUFFIXES = (".test", ".example", ".invalid")
+_RESERVED_TEST_HOSTS = {"example.com", "example.net", "example.org"}
 
 _PLATFORM_ALLOWED_HOST_SUFFIXES: dict[str, tuple[str, ...]] = {
     "instagram": (
@@ -64,6 +64,12 @@ _PLATFORM_ALLOWED_HOST_SUFFIXES: dict[str, tuple[str, ...]] = {
         "googlevideo.com",
         "ytimg.com",
     ),
+    "reddit": (
+        "redd.it",
+        "redditmedia.com",
+        "redditstatic.com",
+        "reddit.com",
+    ),
 }
 
 
@@ -91,6 +97,9 @@ def _is_reserved_test_host(hostname: str) -> bool:
 
 
 def _is_blocked_ip(ip: ipaddress._BaseAddress) -> bool:
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
     return any(
         (
             ip.is_loopback,
@@ -153,12 +162,13 @@ def validate_media_url(
         if _is_blocked_ip(literal_ip):
             raise UnsafeMediaUrlError("media_url_blocked_ip")
         active_policy = policy or MediaUrlSafetyPolicy(tuple(allowed_host_suffixes or ()))
-        if active_policy.allowed_host_suffixes and not _hostname_matches(hostname, active_policy.allowed_host_suffixes):
+        if not _hostname_matches(hostname, active_policy.allowed_host_suffixes):
             raise UnsafeMediaUrlError("media_url_host_not_allowed")
         return candidate
 
     active_policy = policy or MediaUrlSafetyPolicy(tuple(allowed_host_suffixes or ()))
-    if active_policy.allowed_host_suffixes and not _hostname_matches(hostname, active_policy.allowed_host_suffixes):
+    host_allowed = _hostname_matches(hostname, active_policy.allowed_host_suffixes)
+    if not host_allowed:
         if not (active_policy.allow_test_hosts and _is_reserved_test_host(hostname)):
             raise UnsafeMediaUrlError("media_url_host_not_allowed")
 
