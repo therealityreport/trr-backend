@@ -1229,3 +1229,39 @@ def test_threads_refresh_passes_in_protocol_validator(monkeypatch, tmp_path) -> 
         username="u", password="p", cookie_file=str(tmp_path / "t.json")
     )
     assert captured["validator"] is threads_cookie_refresh_mod._validate_threads_cookies_in_protocol
+
+
+def test_reconcile_private_paths_hardens_files_and_directories(tmp_path: Path) -> None:
+    nested = tmp_path / "instagram"
+    nested.mkdir()
+    cookie_file = nested / "bravo.cookies.json"
+    cookie_file.write_text("{}", encoding="utf-8")
+    tmp_path.chmod(0o755)
+    nested.chmod(0o755)
+    cookie_file.chmod(0o644)
+
+    hardened = browser_cookie_refresh.reconcile_private_paths(tmp_path)
+
+    assert hardened == 1
+    assert tmp_path.stat().st_mode & 0o777 == 0o700
+    assert nested.stat().st_mode & 0o777 == 0o700
+    assert cookie_file.stat().st_mode & 0o777 == 0o600
+
+
+def test_reconcile_private_paths_ignores_missing_root(tmp_path: Path) -> None:
+    assert browser_cookie_refresh.reconcile_private_paths(tmp_path / "missing") == 0
+
+
+def test_reconcile_private_paths_swallows_chmod_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cookie_file = tmp_path / "bravo.cookies.json"
+    cookie_file.write_text("{}", encoding="utf-8")
+
+    def _raise_os_error(self: Path, mode: int) -> None:
+        raise OSError("chmod blocked")
+
+    monkeypatch.setattr(Path, "chmod", _raise_os_error)
+
+    assert browser_cookie_refresh.reconcile_private_paths(tmp_path) == 0

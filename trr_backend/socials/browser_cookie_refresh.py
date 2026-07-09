@@ -447,6 +447,32 @@ def ensure_private_file_mode(path: str | Path) -> None:
         logger.debug("Failed to chmod private cookie/session file %s", target, exc_info=True)
 
 
+def reconcile_private_paths(*roots: str | Path, dir_mode: int = 0o700, file_mode: int = 0o600) -> int:
+    """Best-effort chmod for private credential/session roots."""
+    hardened = 0
+    for root in roots:
+        base = Path(root).expanduser()
+        if not base.exists():
+            continue
+        try:
+            for path in base.rglob("*"):
+                try:
+                    if path.is_dir():
+                        path.chmod(dir_mode)
+                    elif path.is_file():
+                        path.chmod(file_mode)
+                        hardened += 1
+                except OSError:
+                    logger.debug("Failed to chmod %s during private-path reconcile", path, exc_info=True)
+            try:
+                base.chmod(dir_mode)
+            except OSError:
+                logger.debug("Failed to chmod root %s during private-path reconcile", base, exc_info=True)
+        except OSError:
+            logger.debug("Failed to walk %s during private-path reconcile", base, exc_info=True)
+    return hardened
+
+
 def write_private_json_file(path: str | Path, payload: Any) -> None:
     target = Path(path).expanduser()
     target.parent.mkdir(parents=True, exist_ok=True)
