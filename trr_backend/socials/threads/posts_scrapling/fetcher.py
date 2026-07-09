@@ -305,7 +305,7 @@ class ThreadsPostsScraplingFetcher:
             return ThreadsPostsFetchResult(
                 posts=[],
                 fetch_failed=True,
-                auth_failed=bool(self._raw_cookies),
+                auth_failed=False,
                 retryable=True,
                 fetch_reason=str(reason or "legacy_threads_scraper_failed"),
             )

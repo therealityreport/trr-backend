@@ -243,6 +243,78 @@ def test_threads_job_runner_records_auth_cooldown_on_auth_failed_fetch(
     assert finish["metadata"]["runtime_metadata"]["error"]["auth_cooldown_recorded"] is True
 
 
+def test_threads_job_runner_fetch_failed_falls_back_without_auth_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_lifecycle: _FakeLifecycle,
+) -> None:
+    import trr_backend.socials.threads as threads_module
+    from trr_backend.socials.threads.posts_scrapling import job_runner as jr
+
+    class _FakeFetcher:
+        runtime_metadata = {"transport": "test", "request_count": 1, "complete": False}
+
+        async def warmup(self, _account_handle: str) -> None:
+            return None
+
+        async def fetch_posts(self, _account_handle: str, *, max_pages: int | None = None) -> Any:
+            del max_pages
+            return jr.ThreadsPostsFetchResult(
+                posts=[],
+                fetch_failed=True,
+                auth_failed=False,
+                retryable=True,
+                fetch_reason="legacy_threads_scraper_failed",
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    legacy_calls: list[str] = []
+
+    class _FakeLegacyScraper:
+        runtime_metadata = {
+            "complete": True,
+            "request_count": 1,
+            "retryable": False,
+            "stop_reason": "complete",
+        }
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+
+        def scrape(self, config: Any) -> list[Any]:
+            legacy_calls.append(config.username)
+            return [_thread_post("legacy-1")]
+
+    record_calls: list[tuple[str, str, str]] = []
+    _install_common_fakes(
+        monkeypatch,
+        jr,
+        fetcher=_FakeFetcher(),
+        persist_result=PersistedThreadsPosts(posts_upserted=1, posts_skipped=0),
+    )
+    monkeypatch.setattr(threads_module, "ThreadsScraper", _FakeLegacyScraper)
+    monkeypatch.setattr(
+        jr.auth_cooldown,
+        "record_auth_block",
+        lambda platform, account, code: record_calls.append((platform, account, code)),
+    )
+    monkeypatch.setattr(jr.pg, "fetch_one", _running_status_or_final_row)
+
+    jr.run_threads_posts_scrapling_job(
+        {"id": "job-1", "run_id": "run-1", "attempt_count": 1, "max_attempts": 2, "config": {"account": "bravotv"}},
+        worker_id="worker-1",
+    )
+
+    assert record_calls == []
+    assert legacy_calls == ["bravotv"]
+    finish = fake_lifecycle.finish_calls[-1]
+    assert finish["status"] == "completed"
+    assert finish["metadata"]["fetcher_runtime"]["fallback_chain"] == [
+        "legacy_threads_scraper",
+    ]
+
+
 def test_threads_job_runner_fails_safely_when_scrapling_rollout_disabled(
     monkeypatch: pytest.MonkeyPatch,
     fake_lifecycle: _FakeLifecycle,
