@@ -1091,3 +1091,53 @@ def test_fetch_comment_replies_parses_nested_comment_view_model(monkeypatch) -> 
     assert replies[0].comment_id == "reply-1"
     assert replies[0].is_reply is True
     assert replies[0].parent_comment_id == "parent-1"
+
+
+def test_fetch_comment_replies_stops_when_continuation_token_does_not_advance(monkeypatch) -> None:
+    scraper = YouTubeScraper()
+    calls: list[str] = []
+
+    def _fake_fetch_comment_continuation(token: str, *_args, **_kwargs):
+        calls.append(token)
+        return {
+            "onResponseReceivedActions": [
+                {
+                    "appendContinuationItemsAction": {
+                        "continuationItems": [
+                            {
+                                "commentRenderer": {
+                                    "commentId": "reply-1",
+                                    "contentText": {"runs": [{"text": "reply text"}]},
+                                    "authorText": {"simpleText": "Viewer"},
+                                    "authorEndpoint": {"browseEndpoint": {"browseId": "UCV"}},
+                                    "voteCount": {"simpleText": "1"},
+                                    "publishedTimeText": {"runs": [{"text": "1 day ago"}]},
+                                }
+                            },
+                            {
+                                "continuationItemRenderer": {
+                                    "continuationEndpoint": {"continuationCommand": {"token": token}}
+                                }
+                            },
+                        ]
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(scraper, "_rate_limit", lambda _delay, **_kw: None)
+    monkeypatch.setattr(scraper, "_fetch_comment_continuation", _fake_fetch_comment_continuation)
+
+    replies = scraper._fetch_comment_replies(
+        "reply-token",
+        "abc123",
+        "https://www.youtube.com/watch?v=abc123",
+        "parent-1",
+        delay=0.0,
+    )
+
+    assert calls == ["reply-token"]
+    assert len(replies) == 1
+    assert replies[0].comment_id == "reply-1"
+    assert replies[0].is_reply is True
+    assert replies[0].parent_comment_id == "parent-1"
