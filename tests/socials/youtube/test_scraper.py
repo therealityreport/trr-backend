@@ -352,6 +352,44 @@ def test_parse_video_renderer_uses_header_avatar_fallback_when_renderer_avatar_m
     assert parsed.user_avatar_url == "https://yt3.googleusercontent.com/avatar=s1024-c-k"
 
 
+def test_parse_video_renderer_reads_runs_form_view_count() -> None:
+    scraper = YouTubeScraper()
+    config = YouTubeScrapeConfig(channel_handle="bravo", keywords=[])
+    renderer = {
+        "videoId": "abc1234",
+        "title": {"runs": [{"text": "Bravo clip"}]},
+        "descriptionSnippet": {"runs": [{"text": "episode"}]},
+        "viewCountText": {"runs": [{"text": "1,234"}, {"text": " views"}]},
+        "publishedTimeText": {"simpleText": "1 day ago"},
+        "ownerText": {"runs": [{"text": "Bravo"}]},
+        "thumbnail": {"thumbnails": [{"url": "https://img.test/thumb.jpg"}]},
+    }
+
+    parsed = scraper._parse_video_renderer(renderer, config)  # noqa: SLF001
+
+    assert parsed is not None
+    assert parsed.views == 1234
+
+
+def test_parse_video_renderer_reads_simple_text_view_count() -> None:
+    scraper = YouTubeScraper()
+    config = YouTubeScrapeConfig(channel_handle="bravo", keywords=[])
+    renderer = {
+        "videoId": "abc1234",
+        "title": {"runs": [{"text": "Bravo clip"}]},
+        "descriptionSnippet": {"runs": [{"text": "episode"}]},
+        "viewCountText": {"simpleText": "5,678 views"},
+        "publishedTimeText": {"simpleText": "1 day ago"},
+        "ownerText": {"runs": [{"text": "Bravo"}]},
+        "thumbnail": {"thumbnails": [{"url": "https://img.test/thumb.jpg"}]},
+    }
+
+    parsed = scraper._parse_video_renderer(renderer, config)  # noqa: SLF001
+
+    assert parsed is not None
+    assert parsed.views == 5678
+
+
 def test_scrape_progress_reports_non_zero_shorts_initial_pages(monkeypatch) -> None:
     scraper = YouTubeScraper()
     progress_events: list[dict[str, int | str]] = []

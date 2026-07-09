@@ -1203,9 +1203,10 @@ class YouTubeScraper:
                 description = "".join(str(r.get("text") or "") for r in desc_runs if isinstance(r, dict))
 
         # Extract view count
-        view_text = renderer.get("viewCountText", {}).get("simpleText", "0")
+        view_count_text = renderer.get("viewCountText", {})
+        view_text = view_count_text.get("simpleText") or ""
         if not view_text:
-            runs = renderer.get("viewCountText", {}).get("runs", [])
+            runs = view_count_text.get("runs", [])
             if isinstance(runs, list):
                 view_text = "".join(str(item.get("text", "")) for item in runs if isinstance(item, dict))
         views = self._parse_view_count(view_text)
