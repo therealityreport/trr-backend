@@ -35,6 +35,14 @@ def _build_video(video_id: str, *, surface: str, published_at: int) -> YouTubeVi
     )
 
 
+def test_config_treats_naive_date_start_as_utc() -> None:
+    config = YouTubeScrapeConfig(channel_handle="bravo", date_start=datetime(2026, 5, 1))
+
+    assert config.date_start is not None
+    assert config.date_start.tzinfo is UTC
+    assert config.start_timestamp == datetime(2026, 5, 1, tzinfo=UTC).timestamp()
+
+
 def test_apply_surface_guaranteed_limit_overrides_small_cap_when_both_surfaces_present() -> None:
     scraper = YouTubeScraper()
     videos = [

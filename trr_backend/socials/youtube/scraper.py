@@ -120,6 +120,10 @@ class YouTubeScrapeConfig:
                 "YouTubeScrapeConfig fast_mode enabled: delay=%.2fs",
                 self.delay_seconds,
             )
+        if self.date_start is not None and self.date_start.tzinfo is None:
+            self.date_start = self.date_start.replace(tzinfo=UTC)
+        if self.date_end is not None and self.date_end.tzinfo is None:
+            self.date_end = self.date_end.replace(tzinfo=UTC)
 
     @property
     def start_timestamp(self) -> float:
