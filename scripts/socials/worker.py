@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import random
+import signal
 import socket
 import subprocess
 import sys
@@ -39,6 +40,15 @@ logger = logging.getLogger("socials.worker")
 _UNSET = object()
 _TASK8_EXECUTE_RUN_MAX_JOBS_DEFAULT: int | None = None
 _TASK8_EXECUTE_RUN_MAX_SECONDS_DEFAULT: float | None = None
+
+
+def _install_graceful_shutdown() -> None:
+    def _handler(signum: int, _frame: object) -> None:
+        logger.warning("[social_worker_signal] received signal=%s; shutting down", signum)
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _handler)
+    signal.signal(signal.SIGINT, _handler)
 
 
 def _worker_lane_from_env() -> str | None:
@@ -738,7 +748,7 @@ def _spawn_child_worker(
         cmd.extend(["--stage", stage])
     if platform:
         cmd.extend(["--platform", platform])
-    return subprocess.Popen(cmd, cwd=os.getcwd(), env=os.environ.copy())
+    return subprocess.Popen(cmd, cwd=os.getcwd(), env=os.environ.copy(), start_new_session=True)
 
 
 def _wait_process(proc: subprocess.Popen, timeout: float | None = None) -> int | None:
@@ -763,6 +773,16 @@ def _poll_process(proc: subprocess.Popen) -> int | None:
 
 
 def _stop_process(proc: subprocess.Popen, *, force: bool) -> None:
+    pid = getattr(proc, "pid", None)
+    if isinstance(pid, int) and pid > 0:
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL if force else signal.SIGTERM)
+            return
+        except ProcessLookupError:
+            return
+        except OSError:
+            pass
+
     action = getattr(proc, "kill" if force else "terminate", None)
     if callable(action):
         try:
@@ -834,6 +854,7 @@ def _wait_for_children(
 
 
 def main() -> int:
+    _install_graceful_shutdown()
     load_env()
     args = parse_args()
     stage_filter = None if args.stage == "any" else args.stage
