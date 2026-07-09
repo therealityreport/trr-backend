@@ -20,6 +20,7 @@ from trr_backend.socials.socialblade.scraper import (
     _parse_metric_number,
     _scrape_socialblade_in_context,
     _socialblade_page_is_logged_in,
+    _socialblade_payload_needs_login_retry,
     _socialblade_profile_url,
     scrape_socialblade,
 )
@@ -705,6 +706,51 @@ def test_scrape_socialblade_logs_in_and_retries_when_history_is_short(
     assert payload["history_source"] == "authenticated_api"
     assert payload["daily_channel_metrics_60day"]["row_count"] == 60
     assert calls == [{"cf_clearance": "stale"}, {"cf_clearance": "fresh", "session": "logged-in"}]
+
+
+def test_authenticated_30_day_socialblade_payload_does_not_need_login_retry() -> None:
+    payload = {
+        "history_source": "page_trpc_capture",
+        "daily_channel_metrics_60day": {
+            "period": "Last 30 Days",
+            "row_count": 30,
+            "data": [],
+        },
+        "daily_total_followers_chart": {
+            "total_data_points": 30,
+            "data": [],
+        },
+        "runtime_metadata": {
+            "capture_control_updates": {
+                "last60Days": "selected",
+                "daily": "selected",
+                "total": "selected",
+            },
+        },
+    }
+
+    assert _socialblade_payload_needs_login_retry(payload) is False
+
+
+def test_unauthenticated_30_day_socialblade_payload_still_needs_login_retry() -> None:
+    payload = {
+        "history_source": "table_fallback",
+        "daily_channel_metrics_60day": {
+            "period": "Last 30 Days",
+            "row_count": 30,
+            "data": [],
+        },
+        "daily_total_followers_chart": {
+            "total_data_points": 30,
+            "data": [],
+        },
+    }
+
+    assert _socialblade_payload_needs_login_retry(payload) is True
+
+
+def test_socialblade_payload_without_metrics_still_needs_login_retry() -> None:
+    assert _socialblade_payload_needs_login_retry({"history_source": "page_trpc_capture"}) is True
 
 
 def test_scrape_socialblade_marks_seeded_modal_table_result_degraded_when_history_is_short(
