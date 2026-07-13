@@ -9,6 +9,61 @@ import pytest
 import trr_backend.socials.pipelines.comments.instagram as comments_pipeline
 
 
+def test_session_advisory_lock_connection_uses_requested_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = object()
+    calls: list[tuple[str, str]] = []
+
+    @contextmanager
+    def db_connection(*, label: str, pool_name: str):
+        calls.append((label, pool_name))
+        yield connection
+
+    monkeypatch.setattr(comments_pipeline.pg, "db_connection", db_connection)
+
+    with comments_pipeline._session_advisory_lock_connection(
+        label="comments-lock",
+        pool_name="session_control",
+    ) as (lock_conn, discard_state):
+        assert lock_conn is connection
+        assert discard_state == {"discarded": False, "preserve_outcome": False}
+
+    assert calls == [("comments-lock", "session_control")]
+
+
+def test_session_advisory_lock_discard_closes_connection_and_preserves_completed_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Connection:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    connection = Connection()
+
+    @contextmanager
+    def db_connection(*, label: str, pool_name: str):  # noqa: ARG001
+        yield connection
+        raise RuntimeError("closed connection cannot commit")
+
+    monkeypatch.setattr(comments_pipeline.pg, "db_connection", db_connection)
+
+    with comments_pipeline._session_advisory_lock_connection(
+        label="comments-lock",
+        pool_name="session_control",
+    ) as (lock_conn, discard_state):
+        comments_pipeline._discard_session_advisory_lock_connection(
+            lock_conn,
+            discard_state=discard_state,
+            preserve_outcome=True,
+        )
+
+    assert connection.closed is True
+    assert discard_state == {"discarded": True, "preserve_outcome": True}
+
+
 @pytest.fixture
 def failed_rebalance_conn(monkeypatch: pytest.MonkeyPatch) -> object:
     conn = object()
