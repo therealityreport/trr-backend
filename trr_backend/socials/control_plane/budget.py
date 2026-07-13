@@ -139,7 +139,10 @@ def _instagram_db_session_pool_usage(*, requested_sessions: int) -> dict[str, An
     from trr_backend.db import pg
 
     limit = instagram_db_session_pool_limit()
-    probe = pg.probe_fresh_session_capacity(requested_sessions=requested_sessions)
+    probe = pg.probe_fresh_session_capacity(
+        requested_sessions=requested_sessions,
+        max_probe_sessions=limit,
+    )
     available = bool(probe.get("available"))
     reason = str(probe.get("reason") or "").strip() or None
     return {

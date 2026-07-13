@@ -108,6 +108,36 @@ def test_instagram_db_session_worker_budget_uses_canonical_env_with_legacy_fallb
     assert budget.instagram_db_session_worker_budget() == 10
 
 
+def test_instagram_db_session_pool_usage_probes_up_to_configured_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.db import pg
+
+    captured: dict[str, int] = {}
+
+    def _probe(*, requested_sessions: int, max_probe_sessions: int) -> dict[str, object]:
+        captured["requested_sessions"] = requested_sessions
+        captured["max_probe_sessions"] = max_probe_sessions
+        return {
+            "available": True,
+            "reason": "fresh_session_reservation_succeeded",
+            "requested_sessions": requested_sessions,
+            "reserved_sessions": requested_sessions,
+            "target": {},
+            "error": None,
+        }
+
+    monkeypatch.setenv(budget.INSTAGRAM_DB_SESSION_POOL_LIMIT_ENV, "15")
+    monkeypatch.setattr(pg, "probe_fresh_session_capacity", _probe)
+
+    usage = budget._instagram_db_session_pool_usage(requested_sessions=15)
+
+    assert captured == {"requested_sessions": 15, "max_probe_sessions": 15}
+    assert usage["available"] is True
+    assert usage["requested_sessions"] == 15
+    assert usage["reserved_sessions"] == 15
+
+
 def test_instagram_db_session_capacity_counts_active_and_dispatched_workers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
