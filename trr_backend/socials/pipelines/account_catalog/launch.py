@@ -341,10 +341,7 @@ def _instagram_db_session_capacity_for_launch(
         backend_effective_requested_workers=effective_requested_workers,
         conn=conn,
     )
-    if enforce and (
-        capacity.get("session_pool_blocked")
-        or not capacity.get("available")
-    ):
+    if enforce and (capacity.get("session_pool_blocked") or not capacity.get("available")):
         reason = (
             "session_pool_capacity"
             if capacity.get("session_pool_blocked")
@@ -419,9 +416,7 @@ def get_instagram_catalog_launch_capacity(
             else 0
         ),
         "effective_comments_worker_count": (
-            _worker_count_from_plan(worker_plan, "comments_worker_count") or 0
-            if "comments" in selected_task_set
-            else 0
+            _worker_count_from_plan(worker_plan, "comments_worker_count") or 0 if "comments" in selected_task_set else 0
         ),
         "adaptive_worker_plan": worker_plan,
     }
@@ -1320,6 +1315,7 @@ def start_social_account_catalog_backfill(
                     budget_decision=budget_decision,
                     conn=lock_conn,
                 )
+
         initial_completion_metadata = (
             _initial_instagram_completion_metadata(
                 account_handle=normalized_account,
@@ -1593,6 +1589,7 @@ def begin_social_account_catalog_backfill_launch(
                 budget_decision=budget_decision,
                 conn=lock_conn,
             )
+
     initial_completion_metadata = (
         _initial_instagram_completion_metadata(
             account_handle=normalized_account,
@@ -1901,9 +1898,7 @@ def finalize_social_account_catalog_backfill_launch(
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     started_at = time_module.perf_counter()
     initial_parent = {} if launch_group_id else _catalog_launch_parent_snapshot(run_id)
-    normalized_launch_group_id = (
-        str(launch_group_id or initial_parent.get("launch_group_id") or "").strip()
-    )
+    normalized_launch_group_id = str(launch_group_id or initial_parent.get("launch_group_id") or "").strip()
     if not normalized_launch_group_id:
         raise ValueError("Catalog launch group is missing.")
 
@@ -2611,9 +2606,7 @@ def launch_social_account_catalog_backfill(
             adaptive_worker_plan,
             "comments_worker_count",
         ) or _apply_budget_worker_limit(comments_worker_count, budget_decision)
-        db_session_capacity = (
-            _metadata_dict(reserved_db_session_capacity) or None if existing_catalog_run_id else None
-        )
+        db_session_capacity = _metadata_dict(reserved_db_session_capacity) or None if existing_catalog_run_id else None
         if db_session_capacity:
             budget_decision = _with_instagram_db_session_capacity(budget_decision, db_session_capacity)
     else:

@@ -286,9 +286,7 @@ def _build_run_entry(target: dict[str, Any], *, recent_log_limit: int) -> dict[s
         return entry
 
     run_status = (
-        str(progress.get("run_status") or progress.get("run_state") or target.get("run_status") or "")
-        .strip()
-        .lower()
+        str(progress.get("run_status") or progress.get("run_state") or target.get("run_status") or "").strip().lower()
         or None
     )
     posts_fetched = _posts_fetched_from_progress(progress)
@@ -332,9 +330,7 @@ def get_backfill_health(
     targets = _list_recent_catalog_run_targets(limit=run_limit)
     if not include_terminal_runs:
         targets = [
-            target
-            for target in targets
-            if str(target.get("run_status") or "").strip().lower() in _ACTIVE_RUN_STATUSES
+            target for target in targets if str(target.get("run_status") or "").strip().lower() in _ACTIVE_RUN_STATUSES
         ]
     run_entries: list[dict[str, Any]] = []
     for target in targets:

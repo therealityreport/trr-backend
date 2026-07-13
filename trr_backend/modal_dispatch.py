@@ -195,8 +195,7 @@ def modal_cast_screentime_function_name() -> str:
 
 def modal_cast_screentime_subtitle_function_name() -> str:
     return str(
-        os.getenv("TRR_MODAL_CAST_SCREENTIME_SUBTITLE_FUNCTION")
-        or "run_cast_screentime_subtitle_extraction"
+        os.getenv("TRR_MODAL_CAST_SCREENTIME_SUBTITLE_FUNCTION") or "run_cast_screentime_subtitle_extraction"
     ).strip()
 
 

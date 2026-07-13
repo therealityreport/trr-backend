@@ -188,4 +188,3 @@ def test_finish_job_preserves_primary_update_when_counter_sync_fails(monkeypatch
         "RELEASE SAVEPOINT finish_job_counter_sync",
         "transaction_committed",
     ]
-

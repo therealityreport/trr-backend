@@ -204,9 +204,7 @@ def cancel_social_account_catalog_run(
             conn=conn,
         )
 
-    draining_call_ids = sorted(
-        call_id for call_id, result in remote_results.items() if bool(result.get("draining"))
-    )
+    draining_call_ids = sorted(call_id for call_id, result in remote_results.items() if bool(result.get("draining")))
     return {
         "run_id": str(run_id),
         "status": "cancelled",
@@ -221,6 +219,7 @@ def cancel_social_account_catalog_run(
         "draining_remote_call_ids": draining_call_ids,
         "remote_drain_complete": not draining_call_ids,
     }
+
 
 __all__ = [
     "_batch_upsert_shared_catalog_instagram_posts",

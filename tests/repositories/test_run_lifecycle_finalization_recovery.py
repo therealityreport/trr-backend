@@ -95,7 +95,7 @@ def test_only_one_deferred_followup_claim_is_accepted(
         assert conn is lock_conn
         assert "config->'deferred_comments_followup'->>'state' = 'pending'" in normalized
         assert "launch_claimed_at" in normalized
-        payload = json.loads((params or ["{}"]) [0])
+        payload = json.loads((params or ["{}"])[0])
         candidate = payload["deferred_comments_followup"]
         if stored_followup.get("launch_claimed_at"):
             return None
@@ -149,7 +149,7 @@ def test_stale_deferred_followup_claim_is_reclaimed_with_a_new_lease(
         normalized = " ".join(sql.lower().split())
         captured["sql"] = normalized
         captured["params"] = list(params or [])
-        payload = json.loads((params or ["{}"]) [0])
+        payload = json.loads((params or ["{}"])[0])
         return {
             "status": "completed",
             "config": payload,
@@ -289,7 +289,7 @@ def test_recovered_deferred_followup_reuses_child_before_launch(
                 "summary": {},
             }
         if normalized.startswith("update social.scrape_runs"):
-            payload = json.loads((params or ["{}"]) [0])
+            payload = json.loads((params or ["{}"])[0])
             writes.append(payload)
             return {"status": "completed", "config": payload, "summary": {}}
         raise AssertionError(f"unexpected SQL: {normalized}")
@@ -394,7 +394,7 @@ def test_deferred_followup_cancels_child_when_parent_wins_attach_race(
         if normalized.startswith("select status, config"):
             return next(parent_reads)
         if normalized.startswith("update social.scrape_runs") and "jsonb_set" in normalized:
-            durable_updates.append(json.loads((params or ["{}"]) [0]))
+            durable_updates.append(json.loads((params or ["{}"])[0]))
             events.append("persist")
             return {"id": "run-1"}
         if normalized.startswith("update social.scrape_runs"):
@@ -412,6 +412,7 @@ def test_deferred_followup_cancels_child_when_parent_wins_attach_race(
         "start_social_account_comments_scrape",
         lambda *_args, **_kwargs: {"run_id": "comments-child-1", "status": "queued"},
     )
+
     def fake_cancel(**kwargs):
         events.append("cancel")
         cancelled_children.append(kwargs)
@@ -580,7 +581,7 @@ def test_deferred_child_cancellation_recovery_persists_terminal_outcome(
     )
 
     def fake_fetch_one(sql: str, params=None, **_kwargs):
-        payload = json.loads((params or ["{}"]) [0])
+        payload = json.loads((params or ["{}"])[0])
         if "returning config" in " ".join(sql.lower().split()):
             return {
                 "config": {
@@ -641,7 +642,7 @@ def test_completed_parent_orphan_child_cancellation_is_retried(
         normalized = " ".join(sql.lower().split())
         observed_sql.append(normalized)
         assert "status = 'cancelled'" not in normalized
-        payload = json.loads((params or ["{}"]) [0])
+        payload = json.loads((params or ["{}"])[0])
         if "returning config" in normalized:
             return {"config": payload}
         return {"id": "completed-parent"}
@@ -808,4 +809,3 @@ def test_forced_summary_recompute_reads_and_writes_on_supplied_connection(
     assert summary["completed_jobs"] == 1
     assert any("from social.scrape_jobs" in sql for sql, _conn in seen)
     assert all(conn is lock_conn for _sql, conn in seen)
-

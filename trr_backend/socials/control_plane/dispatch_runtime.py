@@ -1049,9 +1049,7 @@ def recover_and_dispatch_due_social_jobs(*, limit: int | None = None) -> dict[st
     try:
         from trr_backend.socials.control_plane import run_lifecycle
 
-        stale_followup_claims = run_lifecycle.recover_stale_deferred_comments_followup_claims(
-            limit=max(safe_limit, 25)
-        )
+        stale_followup_claims = run_lifecycle.recover_stale_deferred_comments_followup_claims(limit=max(safe_limit, 25))
     except Exception as exc:  # noqa: BLE001
         legacy.logger.warning("[recover_and_dispatch] stale deferred-followup claim sweep skipped: %s", exc)
     # bug-1: self-heal retryable deferred-comments-followup failures (gated off by

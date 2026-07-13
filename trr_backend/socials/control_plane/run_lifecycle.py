@@ -457,8 +457,7 @@ def _maybe_start_deferred_comments_followup(
                 # bug-3: honor an operator-requested comments parallelism on the
                 # deferred follow-up instead of always defaulting. None preserves the
                 # launcher's default. Signature verified to accept comments_worker_count.
-                comments_worker_count=legacy._normalize_non_negative_int(followup.get("comments_worker_count"))
-                or None,
+                comments_worker_count=legacy._normalize_non_negative_int(followup.get("comments_worker_count")) or None,
                 launch_group_id=str(followup.get("launch_group_id") or "").strip() or None,
                 cancel_active_before_relaunch=True,
             )

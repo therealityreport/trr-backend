@@ -259,4 +259,3 @@ def test_all_parts_status_waits_for_every_selected_lane() -> None:
     assert pending["all_parts_completed"] is False
     assert complete["all_parts_status"] == "completed"
     assert complete["all_parts_completed"] is True
-

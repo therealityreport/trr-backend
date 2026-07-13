@@ -557,32 +557,42 @@ def _all_parts_status_payload(
         )
     if "comments" in selected:
         comments = _metadata_dict(attached.get("comments"))
-        statuses["comments"] = str(
-            comments.get("status")
-            or comments.get("state")
-            or _metadata_dict(stage_graph.get("comments")).get("status")
-            or "pending"
-        ).strip().lower()
+        statuses["comments"] = (
+            str(
+                comments.get("status")
+                or comments.get("state")
+                or _metadata_dict(stage_graph.get("comments")).get("status")
+                or "pending"
+            )
+            .strip()
+            .lower()
+        )
     if "media" in selected:
         media_completion = _metadata_dict(payload.get("media_completion"))
         media = _metadata_dict(attached.get("media"))
         if bool(media_completion.get("completed")):
             statuses["media"] = "completed"
         else:
-            statuses["media"] = str(
-                media_completion.get("status")
-                or media.get("status")
-                or media.get("state")
-                or _metadata_dict(stage_graph.get("media")).get("status")
-                or "pending"
-            ).strip().lower()
+            statuses["media"] = (
+                str(
+                    media_completion.get("status")
+                    or media.get("status")
+                    or media.get("state")
+                    or _metadata_dict(stage_graph.get("media")).get("status")
+                    or "pending"
+                )
+                .strip()
+                .lower()
+            )
 
     run_status = str(payload.get("run_status") or "").strip().lower()
     launch_state = str(payload.get("launch_state") or "").strip().lower()
     if run_status == "failed" or any(status == "failed" for status in statuses.values()):
         overall = "failed"
-    elif run_status == "cancelled" or launch_state == "cancelled" or any(
-        status == "cancelled" for status in statuses.values()
+    elif (
+        run_status == "cancelled"
+        or launch_state == "cancelled"
+        or any(status == "cancelled" for status in statuses.values())
     ):
         overall = "cancelled"
     elif statuses and all(status == "completed" for status in statuses.values()):
