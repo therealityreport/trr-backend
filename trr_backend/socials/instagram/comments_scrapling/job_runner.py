@@ -3137,9 +3137,7 @@ def _enqueue_auto_auth_fallback_targets(
 ) -> dict[str, Any]:
     from trr_backend.socials.pipelines.comments.instagram import enqueue_instagram_comments_audit_cursor_retries
 
-    targets = list(
-        dict.fromkeys(str(item or "").strip() for item in source_ids if str(item or "").strip())
-    )
+    targets = list(dict.fromkeys(str(item or "").strip() for item in source_ids if str(item or "").strip()))
     if not targets:
         return {"requested": False, "created_job_count": 0, "target_source_ids": []}
     return enqueue_instagram_comments_audit_cursor_retries(
@@ -3174,9 +3172,7 @@ def _enqueue_auto_public_recovery_targets(
         _append_instagram_comments_public_recovery_targets_to_active_run,
     )
 
-    targets = list(
-        dict.fromkeys(str(item or "").strip() for item in source_ids if str(item or "").strip())
-    )
+    targets = list(dict.fromkeys(str(item or "").strip() for item in source_ids if str(item or "").strip()))
     if not targets:
         return {"requested": False, "created_job_count": 0, "target_source_ids": []}
     return _append_instagram_comments_public_recovery_targets_to_active_run(
@@ -4690,12 +4686,8 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                 # this point so they do not advance the counter spuriously.
                 posts_since_last_warmup += 1
                 normalized_result_shortcode = str(shortcode or "").strip()
-                normalized_result_fetch_reason = str(
-                    result.fetch_reason or "retryable_post_fetch_failed"
-                ).strip()
-                public_block_signal = (
-                    str(getattr(result, "public_block_signal", "none") or "none").strip().lower()
-                )
+                normalized_result_fetch_reason = str(result.fetch_reason or "retryable_post_fetch_failed").strip()
+                public_block_signal = str(getattr(result, "public_block_signal", "none") or "none").strip().lower()
                 is_genuine_public_block = public_comments_mode and public_block_signal != "none"
                 if is_genuine_public_block and normalized_result_shortcode:
                     if normalized_result_shortcode not in incomplete_target_source_ids:
@@ -5394,9 +5386,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                             )
 
                         public_recovery_targets = (
-                            retryable_incomplete_targets
-                            if _auto_public_recovery_enabled(config)
-                            else []
+                            retryable_incomplete_targets if _auto_public_recovery_enabled(config) else []
                         )
                         public_recovery_result: dict[str, Any] | None = None
                         if public_recovery_targets:

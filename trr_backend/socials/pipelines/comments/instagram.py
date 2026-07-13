@@ -124,9 +124,7 @@ _PUBLIC_COMMENTS_WORKER_CAP_REBALANCE_SLOW_ELAPSED_SECONDS = 240
 _PUBLIC_COMMENTS_WORKER_CAP_REBALANCE_SLOW_POSTS_PER_MINUTE = 0.5
 _PUBLIC_COMMENTS_WORKER_CAP_REBALANCE_MIN_REMAINING_TARGETS = 10
 _PUBLIC_COMMENTS_WORKER_CAP_REBALANCE_MAX_RETRY_SHARD_SIZE = 10
-_INSTAGRAM_COMMENTS_NONTERMINAL_REMOTE_INVOCATION_STATUSES = frozenset(
-    {"pending", "running", "queued", "unknown"}
-)
+_INSTAGRAM_COMMENTS_NONTERMINAL_REMOTE_INVOCATION_STATUSES = frozenset({"pending", "running", "queued", "unknown"})
 
 
 def _sync_core_overrides() -> None:
@@ -1520,8 +1518,7 @@ def _instagram_filter_incomplete_comment_targets(
         "p.raw_data ->> 'username'",
     )
     owner_direct_array = ",\n                ".join(
-        "nullif(ltrim(lower(trim(coalesce(" + expr + ", ''))), '@'), '')"
-        for expr in owner_direct_candidates
+        "nullif(ltrim(lower(trim(coalesce(" + expr + ", ''))), '@'), '')" for expr in owner_direct_candidates
     )
     owner_collaborator_paths = (
         "p.collaborators",
@@ -2476,8 +2473,7 @@ def start_social_account_comments_scrape(
                         else "database_unavailable"
                     )
                     raise pg.DatabaseServiceUnavailableError(
-                        read_error
-                        or str(db_session_capacity.get("block_reason") or "Database capacity unavailable."),
+                        read_error or str(db_session_capacity.get("block_reason") or "Database capacity unavailable."),
                         reason=reason,
                     )
                 if db_session_capacity.get("blocked"):
@@ -3144,9 +3140,7 @@ def _split_instagram_comments_audit_cursor_targets_into_active_run(
         config = _public_comments_config_overlay(_metadata_dict(row.get("config")))
         metadata = _metadata_dict(row.get("metadata"))
         source_targets = [
-            str(target or "").strip()
-            for target in config.get("target_source_ids") or []
-            if str(target or "").strip()
+            str(target or "").strip() for target in config.get("target_source_ids") or [] if str(target or "").strip()
         ]
         matched_targets = [target for target in source_targets if target in target_set]
         dispatch = _metadata_dict(metadata.get("dispatch"))
@@ -4308,9 +4302,8 @@ def rebalance_failed_instagram_comments_shard(
         metadata = _metadata_dict(row.get("metadata"))
         source_job_id = str(row.get("job_id") or "").strip()
         normalized_run_id = str(row.get("run_id") or "").strip()
-        source_already_claimed = (
-            str(row.get("status") or "").strip().lower() == "cancelled"
-            and bool(metadata.get("comments_retry_rebalance_claimed_at"))
+        source_already_claimed = str(row.get("status") or "").strip().lower() == "cancelled" and bool(
+            metadata.get("comments_retry_rebalance_claimed_at")
         )
         dispatch = _metadata_dict(metadata.get("dispatch"))
         remote_invocation_id = str(dispatch.get("remote_invocation_id") or "").strip()
@@ -4711,9 +4704,7 @@ def _instagram_comments_repair_run_config_value(
     ]
     if key in {"date_start", "date_end"}:
         sources.extend(
-            _metadata_dict(source.get("target_window"))
-            for source in list(sources)
-            if isinstance(source, Mapping)
+            _metadata_dict(source.get("target_window")) for source in list(sources) if isinstance(source, Mapping)
         )
     for source in sources:
         value = source.get(key)

@@ -70,4 +70,3 @@ def test_crawl4ai_runtime_rejects_unimplemented_or_unsupported_methods() -> None
         _run(runtime.fetch_posts("bravotv", limit=5))
     with pytest.raises(NotImplementedError):
         _run(runtime.fetch_post_detail("abc123"))
-

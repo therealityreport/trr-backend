@@ -171,11 +171,7 @@ def _safe_url_classes(url: Any) -> tuple[str, str]:
         return "unknown", "unknown"
     host = str(parsed.hostname or "").strip().lower()
     origin_class = (
-        "instagram"
-        if host == "instagram.com" or host.endswith(".instagram.com")
-        else "external"
-        if host
-        else "unknown"
+        "instagram" if host == "instagram.com" or host.endswith(".instagram.com") else "external" if host else "unknown"
     )
     path = str(parsed.path or "/").strip().lower()
     if path in {"", "/"}:

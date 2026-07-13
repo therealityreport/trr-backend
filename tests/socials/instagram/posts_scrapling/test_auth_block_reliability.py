@@ -282,12 +282,22 @@ def test_auth_block_rotates_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> No
             self._calls += 1
             if self._calls == 1:
                 return SimpleNamespace(
-                    auth_failed=True, fetch_failed=True, retryable=False,
-                    fetch_reason="http_401", posts=[], has_next_page=False, end_cursor=None,
+                    auth_failed=True,
+                    fetch_failed=True,
+                    retryable=False,
+                    fetch_reason="http_401",
+                    posts=[],
+                    has_next_page=False,
+                    end_cursor=None,
                 )
             return SimpleNamespace(
-                auth_failed=False, fetch_failed=False, retryable=False, fetch_reason=None,
-                posts=[{"shortcode": "ok1"}], has_next_page=False, end_cursor=None,
+                auth_failed=False,
+                fetch_failed=False,
+                retryable=False,
+                fetch_reason=None,
+                posts=[{"shortcode": "ok1"}],
+                has_next_page=False,
+                end_cursor=None,
             )
 
         async def set_api_proxy_config(self, _cfg, *, reason: str) -> None:
@@ -344,8 +354,13 @@ def test_auth_block_records_cooldown_when_budget_exhausted(monkeypatch: pytest.M
             del cursor, direction
             fetch_attempts.append(1)
             return SimpleNamespace(
-                auth_failed=True, fetch_failed=True, retryable=False,
-                fetch_reason="http_403", posts=[], has_next_page=False, end_cursor=None,
+                auth_failed=True,
+                fetch_failed=True,
+                retryable=False,
+                fetch_reason="http_403",
+                posts=[],
+                has_next_page=False,
+                end_cursor=None,
             )
 
         async def set_api_proxy_config(self, _cfg, *, reason: str) -> None:
@@ -367,8 +382,7 @@ def test_auth_block_records_cooldown_when_budget_exhausted(monkeypatch: pytest.M
     monkeypatch.setattr(
         auth_cooldown,
         "record_auth_block",
-        lambda *a, **k: recorded.append(a)
-        or SimpleNamespace(to_metadata=lambda: {"blocker_kind": "auth"}),
+        lambda *a, **k: recorded.append(a) or SimpleNamespace(to_metadata=lambda: {"blocker_kind": "auth"}),
     )
 
     job = {
@@ -415,8 +429,13 @@ def test_checkpoint_block_skips_rotation_and_records_cooldown(monkeypatch: pytes
         async def fetch_posts_page(self, _a: str, *, cursor=None, direction="forward"):  # noqa: ANN001
             del cursor, direction
             return SimpleNamespace(
-                auth_failed=True, fetch_failed=True, retryable=False,
-                fetch_reason="redirect_to_checkpoint", posts=[], has_next_page=False, end_cursor=None,
+                auth_failed=True,
+                fetch_failed=True,
+                retryable=False,
+                fetch_reason="redirect_to_checkpoint",
+                posts=[],
+                has_next_page=False,
+                end_cursor=None,
             )
 
         async def set_api_proxy_config(self, _cfg, *, reason: str) -> None:
@@ -437,8 +456,7 @@ def test_checkpoint_block_skips_rotation_and_records_cooldown(monkeypatch: pytes
     monkeypatch.setattr(
         auth_cooldown,
         "record_auth_block",
-        lambda *a, **k: recorded.append(a)
-        or SimpleNamespace(to_metadata=lambda: {"blocker_kind": "checkpoint"}),
+        lambda *a, **k: recorded.append(a) or SimpleNamespace(to_metadata=lambda: {"blocker_kind": "checkpoint"}),
     )
 
     job = {"id": "job-1", "run_id": "run-1", "config": {"account": "thetraitorsus", "stage": "posts_scrapling"}}

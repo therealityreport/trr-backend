@@ -1229,7 +1229,5 @@ def test_threads_refresh_passes_in_protocol_validator(monkeypatch, tmp_path) -> 
         return {"sessionid": "s", "csrftoken": "c"}
 
     monkeypatch.setattr(threads_cookie_refresh_mod, "refresh_simple_login_cookies", _fake_refresh)
-    threads_cookie_refresh_mod.refresh_threads_cookies(
-        username="u", password="p", cookie_file=str(tmp_path / "t.json")
-    )
+    threads_cookie_refresh_mod.refresh_threads_cookies(username="u", password="p", cookie_file=str(tmp_path / "t.json"))
     assert captured["validator"] is threads_cookie_refresh_mod._validate_threads_cookies_in_protocol

@@ -86,6 +86,7 @@ def _instagram_post_is_reel(
         )
     return any(str(value or "").strip().lower() in _REEL_MARKERS for value in candidates)
 
+
 PROFILE_POSTS_DOC_IDS_ENV = "SOCIAL_INSTAGRAM_PROFILE_POSTS_DOC_IDS"
 PROFILE_POSTS_FRIENDLY_NAME = "PolarisProfilePostsQuery"
 PROFILE_POSTS_ROOT_FIELD_NAME = "xdt_api__v1__feed__user_timeline_graphql_connection"

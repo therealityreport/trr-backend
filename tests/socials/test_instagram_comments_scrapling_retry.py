@@ -9800,9 +9800,7 @@ def test_fetch_comments_swaps_cursor_direction_when_min_id_repeats(monkeypatch) 
 
 def test_fetch_comments_both_cursor_directions_exhausted_stays_non_retryable() -> None:
     fetcher = _build_fetcher()
-    fetcher._parser._parse_comment = MagicMock(
-        side_effect=[_comment("c1"), _comment("c2"), _comment("c3")]
-    )
+    fetcher._parser._parse_comment = MagicMock(side_effect=[_comment("c1"), _comment("c2"), _comment("c3")])
     fetcher._fetch_json_response = AsyncMock(
         side_effect=[
             {

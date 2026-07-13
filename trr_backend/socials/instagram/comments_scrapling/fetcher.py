@@ -5133,9 +5133,7 @@ class InstagramCommentsScraplingFetcher:
                 }
             else:
                 fetch_failed = True
-                retryable = not (
-                    fetch_reason == "pagination_repeated_cursor" and reply_cursor_directions_exhausted
-                )
+                retryable = not (fetch_reason == "pagination_repeated_cursor" and reply_cursor_directions_exhausted)
                 fetch_reason = fetch_reason or "reply_tail_incomplete"
         elif fetch_reason in {
             "pagination_deadline_exceeded",
@@ -5278,9 +5276,9 @@ class InstagramCommentsScraplingFetcher:
             metadata["fetch_failed"] = bool(metadata.get("fetch_failed")) or replies_result.fetch_failed
             metadata["auth_failed"] = bool(metadata.get("auth_failed")) or replies_result.auth_failed
             metadata["retryable"] = bool(metadata.get("retryable")) or replies_result.retryable
-            metadata["cursor_directions_exhausted"] = bool(
-                metadata.get("cursor_directions_exhausted")
-            ) or bool((replies_result.diagnostic_metadata or {}).get("cursor_directions_exhausted"))
+            metadata["cursor_directions_exhausted"] = bool(metadata.get("cursor_directions_exhausted")) or bool(
+                (replies_result.diagnostic_metadata or {}).get("cursor_directions_exhausted")
+            )
             if replies_result.fetch_reason and not metadata.get("fetch_reason"):
                 metadata["fetch_reason"] = replies_result.fetch_reason
             if replies_result.fetch_failed and replies_result.retryable and not replies_result.reply_checkpoints:

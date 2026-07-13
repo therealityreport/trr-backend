@@ -293,9 +293,7 @@ def resolve_chrome_profile_selection(profile_name: str) -> ChromeProfileSelectio
     try:
         profile_entries = tuple(chrome_base.iterdir())
     except OSError as exc:
-        raise ChromeProfileNotAvailableError(
-            f"Chrome profile directory is not readable: {chrome_base}"
-        ) from exc
+        raise ChromeProfileNotAvailableError(f"Chrome profile directory is not readable: {chrome_base}") from exc
 
     for entry in profile_entries:
         prefs_file = entry / "Preferences"

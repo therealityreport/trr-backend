@@ -438,4 +438,3 @@ def test_waiting_rebalance_keeps_active_remote_dispatch_recoverable(
             "remote_invocation_status": remote_status,
         }
     ]
-
