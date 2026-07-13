@@ -24,14 +24,18 @@ def is_queue_enabled() -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
-def get_worker_auth_capabilities() -> dict[str, Any]:
+def get_worker_auth_capabilities(*, validate_instagram: bool = True) -> dict[str, Any]:
     instagram_cookies = _core._load_instagram_cookies_from_sources()
-    tiktok_cookies = _core._load_tiktok_cookies()
+    tiktok_cookies = _core._load_tiktok_cookies_from_sources()
     twitter_cookies, twitter_bearer = _core._load_twitter_auth()
     twikit_creds = _core._load_twikit_credentials(twitter_cookies)
-    facebook_cookies = _core._load_facebook_cookies()
-    threads_cookies = _core._load_threads_cookies()
-    instagram_validation = _core._inspect_instagram_cookie_health(instagram_cookies)
+    facebook_cookies = _core._load_facebook_cookies_from_sources()
+    threads_cookies = _core._load_threads_cookies_from_sources()
+    instagram_validation = (
+        _core._inspect_instagram_cookie_health(instagram_cookies)
+        if validate_instagram
+        else _core._instagram_cookie_schema_result(instagram_cookies)
+    )
     instagram_authenticated = bool(instagram_validation.get("valid"))
     instagram_auth_reason = str(instagram_validation.get("reason") or "").strip() or None
     instagram_auth_detail = (
@@ -170,25 +174,6 @@ def get_worker_health(*, stale_after_seconds: int | None = None) -> dict[str, An
     if modal_executor_enabled:
         ready, reason = _core._modal_social_dispatch_ready()
         modal_executor_reason = None if ready else reason
-        if ready:
-            _core._touch_modal_social_dispatcher_heartbeat(
-                metadata_updates={
-                    "dispatch_enabled": True,
-                    "last_dispatch_error": None,
-                    "last_dispatch_error_code": None,
-                    "last_dispatch_blocked_reason": None,
-                }
-            )
-        else:
-            _core._touch_modal_social_dispatcher_heartbeat(
-                metadata_updates={
-                    "dispatch_enabled": False,
-                    "last_dispatch_error": reason,
-                    "last_dispatch_error_code": reason,
-                    "last_dispatch_blocked_reason": reason,
-                    "last_dispatch_error_at": _core._iso(_core._now_utc()),
-                }
-            )
     cache_ttl_seconds = _core._resolve_positive_int_env(
         "SOCIAL_WORKER_HEALTH_CACHE_TTL_SECONDS",
         _core.SOCIAL_WORKER_HEALTH_CACHE_TTL_SECONDS_DEFAULT,

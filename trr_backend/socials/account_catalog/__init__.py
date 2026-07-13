@@ -8,6 +8,7 @@ from __future__ import annotations
 from trr_backend.socials.pipelines.account_catalog.launch import (
     begin_social_account_catalog_backfill_launch,
     finalize_social_account_catalog_backfill_launch,
+    get_instagram_catalog_launch_capacity,
     launch_social_account_catalog_backfill,
     start_social_account_catalog_backfill,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "begin_social_account_catalog_backfill_launch",
     "finalize_social_account_catalog_backfill_launch",
     "get_social_account_catalog_run_progress",
+    "get_instagram_catalog_launch_capacity",
     "get_social_account_profile_collaborators_tags",
     "get_social_account_profile_comments",
     "get_social_account_profile_hashtags",

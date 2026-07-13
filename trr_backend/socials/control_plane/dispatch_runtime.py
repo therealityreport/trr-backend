@@ -1045,6 +1045,15 @@ def recover_and_dispatch_due_social_jobs(*, limit: int | None = None) -> dict[st
         limit=safe_limit,
     )
     recovered_capacity: list[dict[str, Any]] = []
+    stale_followup_claims: dict[str, Any] = {"scanned": 0, "refinalized": 0, "failed": 0}
+    try:
+        from trr_backend.socials.control_plane import run_lifecycle
+
+        stale_followup_claims = run_lifecycle.recover_stale_deferred_comments_followup_claims(
+            limit=max(safe_limit, 25)
+        )
+    except Exception as exc:  # noqa: BLE001
+        legacy.logger.warning("[recover_and_dispatch] stale deferred-followup claim sweep skipped: %s", exc)
     # bug-1: self-heal retryable deferred-comments-followup failures (gated off by
     # default). Guarded so a failure here can never break the dispatch sweep.
     followup_retry: dict[str, Any] = {"enabled": False}
@@ -1063,7 +1072,32 @@ def recover_and_dispatch_due_social_jobs(*, limit: int | None = None) -> dict[st
         unfinalized_recovery = run_lifecycle.recover_unfinalized_terminal_runs(limit=max(safe_limit, 25))
     except Exception as exc:  # noqa: BLE001
         legacy.logger.warning("[recover_and_dispatch] unfinalized-terminal-run sweep skipped: %s", exc)
-    dispatch_summary = _call_extracted_override("dispatch_due_social_jobs", dispatch_due_social_jobs, limit=limit)
+    deadline_recovery: dict[str, Any] = {"scanned": 0, "expired_runs": 0, "failed_jobs": 0, "finalized_runs": 0}
+    try:
+        from trr_backend.socials.control_plane import run_lifecycle
+
+        deadline_recovery = run_lifecycle.recover_catalog_run_deadline_exceeded_jobs(limit=max(safe_limit, 25))
+    except Exception as exc:  # noqa: BLE001
+        legacy.logger.warning("[recover_and_dispatch] catalog-run-deadline sweep skipped: %s", exc)
+    child_cancellation_recovery: dict[str, Any] = {
+        "scanned": 0,
+        "claimed": 0,
+        "cancelled": 0,
+        "not_found": 0,
+        "retryable": 0,
+        "skipped": 0,
+    }
+    try:
+        from trr_backend.socials.control_plane import run_lifecycle
+
+        child_cancellation_recovery = run_lifecycle.recover_deferred_comments_child_cancellations(
+            limit=max(safe_limit, 25)
+        )
+    except Exception as exc:  # noqa: BLE001
+        legacy.logger.warning("[recover_and_dispatch] deferred child-cancellation sweep skipped: %s", exc)
+    # The sweep is the other entrypoint that must stay on the cap-aware owner;
+    # keep legacy overrides for the remaining extracted helpers only.
+    dispatch_summary = dispatch_due_social_jobs(limit=limit)
     return {
         "reconciled_terminal_jobs": [
             str(row.get("id") or "").strip() for row in terminal_reconciled if str(row.get("id") or "").strip()
@@ -1075,8 +1109,11 @@ def recover_and_dispatch_due_social_jobs(*, limit: int | None = None) -> dict[st
         "recovered_capacity_jobs": [
             str(row.get("id") or "").strip() for row in recovered_capacity if str(row.get("id") or "").strip()
         ],
+        "stale_deferred_comments_followup_claims": stale_followup_claims,
         "deferred_comments_followup_retry": followup_retry,
         "unfinalized_terminal_runs": unfinalized_recovery,
+        "catalog_run_deadline_sweep": deadline_recovery,
+        "deferred_comments_child_cancellation": child_cancellation_recovery,
         **dispatch_summary,
     }
 

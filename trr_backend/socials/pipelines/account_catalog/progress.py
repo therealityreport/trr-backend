@@ -46,6 +46,8 @@ _STAGE_JOB_NAMES = {
     "comments": {"comments"},
     "media": {"media_mirror"},
 }
+_NONTERMINAL_STAGE_STATUSES = {"pending", "queued", "running", "retrying"}
+_TERMINAL_STAGE_STATUSES = {"completed", "failed", "cancelled"}
 
 
 def _sync_core_overrides() -> None:
@@ -110,6 +112,7 @@ def _catalog_comments_streaming_progress_payload(run_config: Mapping[str, Any]) 
     total_lag_ms = _normalize_non_negative_int(config.get("comments_streaming_total_enqueue_lag_ms"))
     average_lag_ms = round(total_lag_ms / attempt_count, 1) if attempt_count > 0 else None
     comments_run_id = str(config.get("comments_run_id") or "").strip() or None
+    streaming_enabled = bool(config.get("comments_streaming_enabled"))
     state = str(config.get("comments_streaming_state") or "").strip().lower() or None
     targets_seen = _normalize_non_negative_int(config.get("comments_streaming_targets_seen"))
     targets_enqueued = _normalize_non_negative_int(config.get("comments_streaming_targets_enqueued"))
@@ -123,6 +126,14 @@ def _catalog_comments_streaming_progress_payload(run_config: Mapping[str, Any]) 
             "detail": (
                 "A saved catalog batch could not be added to the comments run. "
                 "Check the last streaming error before launching another backfill."
+            ),
+        }
+    elif not streaming_enabled and comments_run_id:
+        next_action = {
+            "code": "watch_comments_run",
+            "label": "Watch comments run",
+            "detail": (
+                "Catalog streaming is no longer waiting; remaining movement now belongs to the attached comments run."
             ),
         }
     elif state == "completed":
@@ -160,7 +171,7 @@ def _catalog_comments_streaming_progress_payload(run_config: Mapping[str, Any]) 
             if entry:
                 history.append(entry)
     payload: dict[str, Any] = {
-        "enabled": bool(config.get("comments_streaming_enabled")),
+        "enabled": streaming_enabled,
         "state": state,
         "source": str(config.get("comments_streaming_source") or "").strip().lower() or None,
         "comments_run_id": comments_run_id,
@@ -266,6 +277,35 @@ def _stage_status_from_payload(
     return None
 
 
+def _terminal_stage_status_from_job_rows(
+    *,
+    stage_name: str,
+    job_rows: Sequence[Mapping[str, Any]],
+) -> str | None:
+    stage_aliases = _STAGE_JOB_NAMES.get(stage_name, set())
+    if not stage_aliases:
+        return None
+
+    row_statuses: list[str] = []
+    for row in job_rows:
+        row_stage = str(row.get("stage") or row.get("job_type") or "").strip()
+        if row_stage not in stage_aliases:
+            continue
+        status = str(row.get("status") or "").strip().lower()
+        if status:
+            row_statuses.append(status)
+
+    if not row_statuses:
+        return None
+    if any(status == "failed" for status in row_statuses):
+        return "failed"
+    if all(status == "cancelled" for status in row_statuses):
+        return "cancelled"
+    if all(status in _TERMINAL_STAGE_STATUSES for status in row_statuses):
+        return "completed"
+    return None
+
+
 def _selected_stage_graph_payload(
     *,
     run_config: Mapping[str, Any],
@@ -291,6 +331,13 @@ def _selected_stage_graph_payload(
                 )
                 or "pending"
             )
+        elif stage_name == "detail_refresh" and normalized_status in _NONTERMINAL_STAGE_STATUSES:
+            terminal_status = _terminal_stage_status_from_job_rows(
+                stage_name=stage_name,
+                job_rows=job_rows,
+            )
+            if terminal_status:
+                entry["status"] = terminal_status
         entry["selected"] = True
         sanitized[stage_name] = entry
     if selected_tasks & {"post_details", "comments", "media"}:
@@ -491,6 +538,64 @@ def _catalog_completion_progress_payload(
         payload["media_completion"] = media_completion
     payload.update(_blocked_budget_progress_payload(run_config))
     return payload
+
+
+def _all_parts_status_payload(
+    *,
+    run_config: Mapping[str, Any],
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Derive overall status from every selected launch-group lane."""
+
+    selected = _selected_catalog_tasks(run_config)
+    stage_graph = _metadata_dict(payload.get("stage_graph"))
+    attached = _metadata_dict(payload.get("attached_followups"))
+    statuses: dict[str, str] = {}
+    if "post_details" in selected:
+        statuses["post_details"] = (
+            str(_metadata_dict(stage_graph.get("detail_refresh")).get("status") or "pending").strip().lower()
+        )
+    if "comments" in selected:
+        comments = _metadata_dict(attached.get("comments"))
+        statuses["comments"] = str(
+            comments.get("status")
+            or comments.get("state")
+            or _metadata_dict(stage_graph.get("comments")).get("status")
+            or "pending"
+        ).strip().lower()
+    if "media" in selected:
+        media_completion = _metadata_dict(payload.get("media_completion"))
+        media = _metadata_dict(attached.get("media"))
+        if bool(media_completion.get("completed")):
+            statuses["media"] = "completed"
+        else:
+            statuses["media"] = str(
+                media_completion.get("status")
+                or media.get("status")
+                or media.get("state")
+                or _metadata_dict(stage_graph.get("media")).get("status")
+                or "pending"
+            ).strip().lower()
+
+    run_status = str(payload.get("run_status") or "").strip().lower()
+    launch_state = str(payload.get("launch_state") or "").strip().lower()
+    if run_status == "failed" or any(status == "failed" for status in statuses.values()):
+        overall = "failed"
+    elif run_status == "cancelled" or launch_state == "cancelled" or any(
+        status == "cancelled" for status in statuses.values()
+    ):
+        overall = "cancelled"
+    elif statuses and all(status == "completed" for status in statuses.values()):
+        overall = "completed"
+    elif any(status in {"running", "processing"} for status in statuses.values()):
+        overall = "running"
+    else:
+        overall = "pending"
+    return {
+        "all_parts_status": overall,
+        "all_parts_completed": overall == "completed",
+        "all_parts_lanes": statuses,
+    }
 
 
 def _catalog_stage_graph_diagnostics(
@@ -751,10 +856,18 @@ def _catalog_posts_runtime_additive_payload(
     detail_stage = _metadata_dict(stage_graph.get("detail_refresh"))
     target_readiness = _metadata_dict(run_config.get("target_readiness"))
     details_progress = _metadata_dict(run_config.get("detail_refresh") or run_config.get("details_progress"))
-    if not details_progress:
+    terminal_detail_status = _terminal_stage_status_from_job_rows(stage_name="detail_refresh", job_rows=job_rows)
+    if details_progress:
+        details_status = str(details_progress.get("status") or "").strip().lower()
+        if terminal_detail_status and details_status in _NONTERMINAL_STAGE_STATUSES:
+            details_progress = {**details_progress, "status": terminal_detail_status}
+    else:
+        detail_status = str(detail_stage.get("status") or "").strip().lower() or None
+        if terminal_detail_status and detail_status in _NONTERMINAL_STAGE_STATUSES:
+            detail_status = terminal_detail_status
         details_progress = {
             "phase": "details_refresh",
-            "status": str(detail_stage.get("status") or "").strip().lower() or None,
+            "status": detail_status,
             "selected": bool(detail_stage.get("selected")),
             "blocker_reasons": list(detail_stage.get("blocker_reasons") or []),
             "detail_gap_count": _normalize_non_negative_int(
@@ -871,6 +984,12 @@ def _build_catalog_terminal_progress_payload(
         or payload["selected_tasks"]
     )
     payload["comments_run_id"] = str(run_config.get("comments_run_id") or "").strip() or None
+    payload["attached_followups"] = _resolve_run_attached_followups(
+        run_config=run_config,
+        run_id=run_id,
+        run_status=str(run_row.get("status") or "").strip().lower() or None,
+        comments_run_id=payload["comments_run_id"],
+    )
     for key in (
         "posts_auth_probe",
         "auth_repair_attempted",
@@ -917,6 +1036,7 @@ def _build_catalog_terminal_progress_payload(
             "last_error_code": diagnostics.get("last_error_code") or repairable_reason,
             "last_error_message": diagnostics.get("last_error_message"),
         }
+    payload.update(_all_parts_status_payload(run_config=run_config, payload=payload))
     payload.update(_blocked_budget_progress_payload(run_config))
     return payload
 
@@ -1011,7 +1131,7 @@ def get_social_account_catalog_run_progress(
         pending_age_seconds = (_now_utc() - created_at).total_seconds() if created_at is not None else None
         fresh_pending_launch = (
             task_pending
-            and launch_state in {"pending", "finalizing"}
+            and launch_state in {"reserved", "pending", "finalizing"}
             and (
                 not _catalog_launch_finalizing_is_stale(run_config)
                 or (
@@ -1043,7 +1163,7 @@ def get_social_account_catalog_run_progress(
                 or launch_state == "blocked_auth"
                 or launch_state == "failed"
                 or no_work_reason
-                or (recovery_reason == "awaiting_finalize" and launch_state in {"pending", "finalizing"})
+                or (recovery_reason == "awaiting_finalize" and launch_state in {"reserved", "pending", "finalizing"})
                 or (recovery_reason == "finalize_in_progress" and launch_state == "finalizing")
             ):
                 return _build_catalog_terminal_progress_payload(
@@ -1529,6 +1649,7 @@ def get_social_account_catalog_run_progress(
         "replacement_run_id": replacement_run_id,
         "auto_requeue_status": auto_requeue_status,
     }
+    payload.update(_all_parts_status_payload(run_config=run_config, payload=payload))
     payload.update(_blocked_budget_progress_payload(run_config))
     return payload
 

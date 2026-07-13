@@ -30,6 +30,7 @@ def get_queue_status(
     stuck_jobs_limit: int = 100,
     include_runs_summary: bool = True,
     summary_only: bool = False,
+    counts_only: bool = False,
     fresh: bool = False,
 ) -> dict[str, Any]:
     repo = _legacy_repo()
@@ -40,13 +41,14 @@ def get_queue_status(
     safe_stuck_jobs_limit = max(1, min(int(stuck_jobs_limit), 500))
     safe_include_runs_summary = bool(include_runs_summary)
     safe_summary_only = bool(summary_only)
+    safe_counts_only = bool(counts_only)
     cache_ttl_seconds = repo._resolve_positive_int_env(
         "SOCIAL_QUEUE_STATUS_CACHE_TTL_SECONDS",
         repo.SOCIAL_QUEUE_STATUS_CACHE_TTL_SECONDS_DEFAULT,
         minimum=0,
     )
 
-    if cache_ttl_seconds > 0 and not fresh:
+    if cache_ttl_seconds > 0 and not fresh and not safe_counts_only:
         now = repo.time_module.monotonic()
         with repo._queue_status_cache_lock:
             if repo._queue_status_cache is not None:
@@ -133,6 +135,8 @@ def get_queue_status(
             scrape_jobs_exists = repo._relation_exists("social.scrape_jobs", conn=conn)
         if not scrape_jobs_exists:
             queue_payload["error"] = "scrape_jobs_table_missing"
+            if safe_counts_only:
+                return copy.deepcopy({"queue_enabled": repo.is_queue_enabled(), "queue": queue_payload})
             return _finalize(
                 {
                     "queue_enabled": repo.is_queue_enabled(),
@@ -207,6 +211,11 @@ def get_queue_status(
     except Exception as exc:  # noqa: BLE001
         repo.logger.warning("Queue status aggregate query failed: %s", exc)
         errors.append(f"queue_aggregate_query_failed: {exc}")
+
+    if safe_counts_only:
+        if errors:
+            queue_payload["error"] = "; ".join(errors)
+        return copy.deepcopy({"queue_enabled": repo.is_queue_enabled(), "queue": queue_payload})
 
     try:
         media_stale_after_seconds = repo._resolve_positive_int_env(

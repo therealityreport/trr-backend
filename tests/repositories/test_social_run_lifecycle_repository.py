@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
+from datetime import UTC, datetime
 
 import pytest
 from psycopg2 import OperationalError
 
 import trr_backend.repositories.social_season_analytics as social_repo
 import trr_backend.socials.control_plane.run_lifecycle as run_lifecycle
+from trr_backend.socials.control_plane import dispatch_runtime
 
 
 def test_legacy_set_run_status_delegates_to_control_plane_run_lifecycle(
@@ -230,7 +232,7 @@ def test_set_run_status_clears_terminal_timestamps_when_reopened(
 def test_update_run_summary_prefers_incremental_counter_columns(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
 
-    monkeypatch.setattr(social_repo, "_run_counter_columns_ready", lambda: True)
+    monkeypatch.setattr(run_lifecycle.legacy, "_run_counter_columns_ready", lambda: True)
 
     def _fake_fetch_one(sql: str, params: list[object]):  # noqa: ARG001
         normalized = " ".join(sql.lower().split())
@@ -346,7 +348,7 @@ def test_preserve_protected_run_summary_fields_skips_missing_and_null() -> None:
 
 
 def test_update_run_summary_incremental_preserves_audit_fields(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(social_repo, "_run_counter_columns_ready", lambda: True)
+    monkeypatch.setattr(run_lifecycle.legacy, "_run_counter_columns_ready", lambda: True)
     captured: dict[str, object] = {}
 
     def _fake_fetch_one(sql: str, params: list[object]):  # noqa: ARG001
@@ -518,7 +520,7 @@ def test_finalize_run_status_reuses_lock_connection_for_all_reads(
     run_lifecycle._finalize_run_status("run-1")
 
     assert seen_fetch_conns == [lock_conn]
-    assert seen_lock_pools == ["social_control"]
+    assert seen_lock_pools == ["session_control"]
 
 
 def test_recover_failed_deferred_comments_followups_disabled_by_default(
@@ -734,6 +736,172 @@ def test_recover_failed_deferred_comments_followups_respects_backoff_and_cap(
     assert cap_result["retried"] == 0
     assert exhausted_writes
     assert exhausted_writes[0]["deferred_comments_followup"]["state"] == "failed_exhausted"
+
+
+def test_recover_catalog_run_deadline_exceeded_jobs_fails_queued_jobs_and_finalizes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 7, 7, 12, 0, tzinfo=UTC)
+    run_id = "11111111-1111-1111-1111-111111111111"
+    future_run_id = "22222222-2222-2222-2222-222222222222"
+    captured_updates: list[dict[str, object]] = []
+    finalized: list[str] = []
+    invalidated: list[str] = []
+
+    def fake_fetch_all(sql: str, params=None, **kwargs):
+        normalized = " ".join(sql.split()).lower()
+        if "from social.scrape_runs" in normalized:
+            assert kwargs.get("pool_name") == run_lifecycle.SOCIAL_CONTROL_POOL_NAME
+            return [
+                {
+                    "run_id": run_id,
+                    "status": "running",
+                    "config": {
+                        "pipeline_ingest_mode": run_lifecycle.legacy.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+                        "catalog_run_deadline_at": "2026-07-07T11:00:00+00:00",
+                        "catalog_run_deadline_seconds": 3600,
+                    },
+                },
+                {
+                    "run_id": future_run_id,
+                    "status": "running",
+                    "config": {
+                        "pipeline_ingest_mode": run_lifecycle.legacy.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+                        "catalog_run_deadline_at": "2026-07-07T12:05:00+00:00",
+                    },
+                },
+            ]
+        if normalized.startswith("update social.scrape_jobs"):
+            captured_updates.append({"sql": normalized, "params": list(params or []), "pool": kwargs.get("pool_name")})
+            assert "j.status in ('queued', 'pending', 'retrying')" in normalized
+            assert "run_deadline_exceeded" in normalized
+            assert "catalog_run_deadline_sweep" in normalized
+            return [
+                {"id": "job-1", "run_id": run_id, "platform": "instagram", "stage": "shared_account_posts"},
+                {"id": "job-2", "run_id": run_id, "platform": "instagram", "stage": "post_classify"},
+            ]
+        raise AssertionError(f"unexpected SQL: {normalized}")
+
+    monkeypatch.setattr(run_lifecycle.legacy.pg, "fetch_all", fake_fetch_all)
+    monkeypatch.setattr(run_lifecycle.legacy, "_now_utc", lambda: now)
+    monkeypatch.setattr(
+        run_lifecycle,
+        "_finalize_run_status",
+        lambda _run_id, force_recompute=False: finalized.append(f"{_run_id}:{force_recompute}") or {},
+    )
+    monkeypatch.setattr(run_lifecycle.legacy, "_invalidate_queue_status_cache", lambda: invalidated.append("yes"))
+
+    result = run_lifecycle.recover_catalog_run_deadline_exceeded_jobs(limit=25)
+
+    assert result == {
+        "scanned": 2,
+        "expired_runs": 1,
+        "failed_jobs": 2,
+        "finalized_runs": 1,
+        "affected_run_ids": [run_id],
+        "skipped_invalid_deadline": 0,
+    }
+    assert len(captured_updates) == 1
+    assert captured_updates[0]["pool"] == run_lifecycle.SOCIAL_CONTROL_POOL_NAME
+    assert captured_updates[0]["params"] == [
+        "2026-07-07T11:00:00+00:00",
+        3600,
+        "2026-07-07T12:00:00+00:00",
+        "running",
+        run_id,
+    ]
+    assert finalized == [f"{run_id}:True"]
+    assert invalidated == ["yes"]
+
+
+def test_recover_and_dispatch_runs_catalog_deadline_sweep_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    deadline_payload = {
+        "scanned": 1,
+        "expired_runs": 1,
+        "failed_jobs": 2,
+        "finalized_runs": 1,
+        "affected_run_ids": ["run-1"],
+    }
+
+    monkeypatch.setattr(
+        dispatch_runtime,
+        "reconcile_terminal_modal_running_jobs",
+        lambda **_kwargs: events.append("terminal") or [],
+    )
+    monkeypatch.setattr(
+        dispatch_runtime.legacy,
+        "recover_stale_running_jobs",
+        lambda **_kwargs: events.append("stale") or [],
+    )
+    monkeypatch.setattr(
+        dispatch_runtime,
+        "recover_stale_unclaimed_dispatched_jobs",
+        lambda **_kwargs: events.append("unclaimed") or [],
+    )
+    monkeypatch.setattr(
+        dispatch_runtime.legacy,
+        "recover_stale_unclaimed_dispatched_jobs",
+        lambda **_kwargs: events.append("legacy_unclaimed") or [],
+    )
+    monkeypatch.setattr(
+        run_lifecycle,
+        "recover_failed_deferred_comments_followups",
+        lambda **_kwargs: events.append("followup") or {"enabled": False},
+    )
+    stale_claim_payload = {"scanned": 1, "refinalized": 1, "failed": 0}
+    child_cancel_payload = {
+        "scanned": 1,
+        "claimed": 1,
+        "cancelled": 1,
+        "not_found": 0,
+        "retryable": 0,
+        "skipped": 0,
+    }
+    monkeypatch.setattr(
+        run_lifecycle,
+        "recover_stale_deferred_comments_followup_claims",
+        lambda **_kwargs: events.append("stale_followup_claim") or stale_claim_payload,
+    )
+    monkeypatch.setattr(
+        run_lifecycle,
+        "recover_deferred_comments_child_cancellations",
+        lambda **_kwargs: events.append("child_cancel") or child_cancel_payload,
+    )
+    monkeypatch.setattr(
+        run_lifecycle,
+        "recover_unfinalized_terminal_runs",
+        lambda **_kwargs: events.append("unfinalized") or {"scanned": 0, "finalized": 0},
+    )
+    monkeypatch.setattr(
+        run_lifecycle,
+        "recover_catalog_run_deadline_exceeded_jobs",
+        lambda **_kwargs: events.append("deadline") or deadline_payload,
+    )
+    monkeypatch.setattr(
+        dispatch_runtime,
+        "dispatch_due_social_jobs",
+        lambda **_kwargs: events.append("dispatch")
+        or {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": None},
+    )
+    monkeypatch.setattr(
+        dispatch_runtime.legacy,
+        "dispatch_due_social_jobs",
+        lambda **_kwargs: events.append("legacy_dispatch")
+        or {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": None},
+    )
+
+    result = dispatch_runtime.recover_and_dispatch_due_social_jobs(limit=1)
+
+    assert events.index("deadline") < events.index("dispatch")
+    assert events.index("stale_followup_claim") < events.index("dispatch")
+    assert events.index("child_cancel") < events.index("dispatch")
+    assert "legacy_dispatch" not in events
+    assert result["catalog_run_deadline_sweep"] == deadline_payload
+    assert result["stale_deferred_comments_followup_claims"] == stale_claim_payload
+    assert result["deferred_comments_child_cancellation"] == child_cancel_payload
 
 
 def test_finalize_run_status_force_recomputes_before_failed_terminal_status(

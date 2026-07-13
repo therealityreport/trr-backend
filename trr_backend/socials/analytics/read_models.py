@@ -2720,7 +2720,12 @@ def get_post_comments(
             "source_id": source_id,
             "author": post["author"] or "",
             "text": post.get("text") or "",
-            "url": f"https://www.instagram.com/p/{source_id}/",
+            "url": instagram_post_permalink(
+                source_id,
+                post_format=post.get("post_format"),
+                media_type=post.get("media_type"),
+                raw_data=post.get("raw_data") if isinstance(post.get("raw_data"), dict) else None,
+            ),
             "posted_at": _iso(post["ts"]),
             "thumbnail_url": thumbnail_url,
             "media_urls": media_urls,

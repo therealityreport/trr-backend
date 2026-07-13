@@ -4282,25 +4282,6 @@ def get_worker_health(*, stale_after_seconds: int | None = None) -> dict[str, An
     if modal_executor_enabled:
         ready, reason = _modal_social_dispatch_ready()
         modal_executor_reason = None if ready else reason
-        if ready:
-            _touch_modal_social_dispatcher_heartbeat(
-                metadata_updates={
-                    "dispatch_enabled": True,
-                    "last_dispatch_error": None,
-                    "last_dispatch_error_code": None,
-                    "last_dispatch_blocked_reason": None,
-                }
-            )
-        else:
-            _touch_modal_social_dispatcher_heartbeat(
-                metadata_updates={
-                    "dispatch_enabled": False,
-                    "last_dispatch_error": reason,
-                    "last_dispatch_error_code": reason,
-                    "last_dispatch_blocked_reason": reason,
-                    "last_dispatch_error_at": _iso(_now_utc()),
-                }
-            )
     cache_ttl_seconds = _resolve_positive_int_env(
         "SOCIAL_WORKER_HEALTH_CACHE_TTL_SECONDS",
         SOCIAL_WORKER_HEALTH_CACHE_TTL_SECONDS_DEFAULT,
@@ -13605,108 +13586,109 @@ def _finish_job(
 ) -> None:
     is_terminal = status in {"completed", "failed", "cancelled"}
     completed_expr = "now()" if is_terminal else "completed_at"
-    row = pg.fetch_one(
-        """
-        with prior as (
-          select
-            id,
-            run_id::text as run_id,
-            status as prior_status,
-            items_found as prior_items_found,
-            coalesce(config->>'stage', metadata->>'stage', job_type, 'unknown') as stage,
-            metadata as prior_metadata
-          from social.scrape_jobs
-          where id = %s
-          for update
-        )
-        update social.scrape_jobs
-        set
-          status = %s,
-          items_found = %s,
-          error_message = %s,
-          completed_at = """
-        + completed_expr
-        + """,
-          metadata = case
-            when %s = 'retrying'
-              then (coalesce(prior.prior_metadata, '{}'::jsonb) - 'dispatch') || coalesce(%s::jsonb, '{}'::jsonb)
-            when %s = 'completed'
-              then (
-                coalesce(prior.prior_metadata, '{}'::jsonb)
-                - 'error'
-                - 'error_code'
-                - 'error_class'
-                - 'error_message'
-                - 'retryable'
-              ) || coalesce(%s::jsonb, '{}'::jsonb)
-            else coalesce(prior.prior_metadata, '{}'::jsonb) || coalesce(%s::jsonb, '{}'::jsonb)
-          end,
-          heartbeat_at = now(),
-          last_error_code = %s,
-          last_error_class = %s,
-          available_at = coalesce(%s, available_at),
-          worker_id = case when %s = 'retrying' then null else worker_id end,
-          claimed_at = case when %s = 'retrying' then null else claimed_at end
-        from prior
-        where social.scrape_jobs.id = prior.id
-          and (
-            %s::text is null
-            or (
-              prior.prior_status = 'running'
-              and social.scrape_jobs.claimed_at is not null
+    with pg.db_connection(label="finish_social_scrape_job") as conn:
+        with pg.db_cursor(conn=conn, label="finish_social_scrape_job") as cur:
+            row = pg.fetch_one_with_cursor(
+                cur,
+                """
+            with prior as (
+              select
+                id,
+                run_id::text as run_id,
+                status as prior_status,
+                items_found as prior_items_found,
+                coalesce(config->>'stage', metadata->>'stage', job_type, 'unknown') as stage,
+                metadata as prior_metadata
+              from social.scrape_jobs
+              where id = %s
+              for update
+            )
+            update social.scrape_jobs
+            set
+              status = %s,
+              items_found = %s,
+              error_message = %s,
+              completed_at = """
+                + completed_expr
+                + """,
+              metadata = case
+                when %s = 'retrying'
+                  then (coalesce(prior.prior_metadata, '{}'::jsonb) - 'dispatch') || coalesce(%s::jsonb, '{}'::jsonb)
+                when %s = 'completed'
+                  then (
+                    coalesce(prior.prior_metadata, '{}'::jsonb)
+                    - 'error'
+                    - 'error_code'
+                    - 'error_class'
+                    - 'error_message'
+                    - 'retryable'
+                  ) || coalesce(%s::jsonb, '{}'::jsonb)
+                else coalesce(prior.prior_metadata, '{}'::jsonb) || coalesce(%s::jsonb, '{}'::jsonb)
+              end,
+              heartbeat_at = now(),
+              last_error_code = %s,
+              last_error_class = %s,
+              available_at = coalesce(%s, available_at),
+              worker_id = case when %s = 'retrying' then null else worker_id end,
+              claimed_at = case when %s = 'retrying' then null else claimed_at end
+            from prior
+            where social.scrape_jobs.id = prior.id
               and (
-                social.scrape_jobs.worker_id = %s::text
-                or %s::text like social.scrape_jobs.worker_id || '%%'
+                %s::text is null
+                or (
+                  prior.prior_status = 'running'
+                  and social.scrape_jobs.claimed_at is not null
+                  and (
+                    social.scrape_jobs.worker_id = %s::text
+                    or %s::text like social.scrape_jobs.worker_id || '%%'
+                  )
+                )
               )
+            returning
+              social.scrape_jobs.id::text as id,
+              prior.run_id as run_id,
+              prior.prior_status,
+              prior.prior_items_found,
+              prior.stage
+            """,
+                [
+                    job_id,
+                    status,
+                    items_found,
+                    error_message,
+                    status,
+                    _json_dumps(_metadata_dict(metadata)),
+                    status,
+                    _json_dumps(_metadata_dict(metadata)),
+                    _json_dumps(_metadata_dict(metadata)),
+                    last_error_code,
+                    last_error_class,
+                    next_available_at,
+                    status,
+                    status,
+                    expected_worker_id,
+                    expected_worker_id,
+                    expected_worker_id,
+                ],
             )
-          )
-        returning
-          social.scrape_jobs.id::text as id,
-          prior.run_id as run_id,
-          prior.prior_status,
-          prior.prior_items_found,
-          prior.stage
-        """,
-        [
-            job_id,
-            status,
-            items_found,
-            error_message,
-            status,
-            _json_dumps(_metadata_dict(metadata)),
-            status,
-            _json_dumps(_metadata_dict(metadata)),
-            _json_dumps(_metadata_dict(metadata)),
-            last_error_code,
-            last_error_class,
-            next_available_at,
-            status,
-            status,
-            expected_worker_id,
-            expected_worker_id,
-            expected_worker_id,
-        ],
-    )
-    if not row:
-        logger.warning(
-            "[finish_job] skipped stale finish for job=%s status=%s expected_worker_id=%s",
-            job_id,
-            status,
-            expected_worker_id,
-        )
-        return
-    if row and row.get("run_id"):
-        try:
-            _increment_run_counters_on_job_finish(
-                run_id=str(row.get("run_id")),
-                stage=str(row.get("stage") or "unknown"),
-                prior_status=str(row.get("prior_status") or ""),
-                new_status=status,
-                prior_items_found=_normalize_non_negative_int(row.get("prior_items_found")),
-                new_items_found=_normalize_non_negative_int(items_found),
-            )
-        except Exception as exc:  # noqa: BLE001
-            if pg._is_statement_timeout_error(exc) or isinstance(exc, pg.DatabaseServiceUnavailableError):
+        if row and row.get("run_id"):
+            counter_savepoint = "finish_job_counter_sync"
+            _create_savepoint(conn, counter_savepoint)
+            try:
+                _increment_run_counters_on_job_finish(
+                    run_id=str(row.get("run_id")),
+                    stage=str(row.get("stage") or "unknown"),
+                    prior_status=str(row.get("prior_status") or ""),
+                    new_status=status,
+                    prior_items_found=_normalize_non_negative_int(row.get("prior_items_found")),
+                    new_items_found=_normalize_non_negative_int(items_found),
+                    conn=conn,
+                )
+            except Exception as exc:  # noqa: BLE001
+                if not (pg._is_statement_timeout_error(exc) or isinstance(exc, pg.DatabaseServiceUnavailableError)):
+                    raise
+                _rollback_to_savepoint(conn, counter_savepoint)
+                _release_savepoint(conn, counter_savepoint)
                 logger.warning(
                     "[finish_job] run counter sync deferred after job=%s run=%s status=%s error=%s",
                     job_id,
@@ -13715,7 +13697,15 @@ def _finish_job(
                     exc,
                 )
             else:
-                raise
+                _release_savepoint(conn, counter_savepoint)
+    if not row:
+        logger.warning(
+            "[finish_job] skipped stale finish for job=%s status=%s expected_worker_id=%s",
+            job_id,
+            status,
+            expected_worker_id,
+        )
+        return
     if status == "completed" and row.get("run_id"):
         try:
             _cancel_duplicate_active_facebook_shared_post_jobs_after_completed_save(
