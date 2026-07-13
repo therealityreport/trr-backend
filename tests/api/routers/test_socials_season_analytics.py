@@ -1680,9 +1680,9 @@ def test_post_social_account_catalog_backfill_forwards_bounded_window_dates(
 
     assert response.status_code == 200
     assert mocked_begin.call_args.kwargs["date_start"] == datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
-    assert mocked_begin.call_args.kwargs["date_end"] == datetime(2026, 1, 8, 23, 59, 59, tzinfo=UTC)
+    assert mocked_begin.call_args.kwargs["date_end"] == datetime(2026, 1, 8, 0, 0, tzinfo=UTC)
     assert mocked_finalize.call_args.kwargs["date_start"] == datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
-    assert mocked_finalize.call_args.kwargs["date_end"] == datetime(2026, 1, 8, 23, 59, 59, tzinfo=UTC)
+    assert mocked_finalize.call_args.kwargs["date_end"] == datetime(2026, 1, 8, 0, 0, tzinfo=UTC)
 
 
 def test_get_social_account_catalog_post_detail_route(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

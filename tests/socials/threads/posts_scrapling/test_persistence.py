@@ -193,3 +193,38 @@ def test_persist_threads_posts_uses_savepoint_after_per_post_error(monkeypatch: 
         "SAVEPOINT threads_posts_scrapling_post_2",
         "RELEASE SAVEPOINT threads_posts_scrapling_post_2",
     ]
+
+
+def test_persist_threads_posts_tracks_required_shared_catalog_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.db import pg
+    from trr_backend.repositories import social_season_analytics as repo
+
+    @contextmanager
+    def _fake_conn(*, label: str | None = None):
+        del label
+        yield _FakeConnection()
+
+    monkeypatch.setattr(pg, "db_connection", _fake_conn)
+    monkeypatch.setattr(repo, "get_season_context", lambda _season_id: None)
+    monkeypatch.setattr(repo, "_upsert_meta_threads_post", lambda *_args, **_kwargs: {"id": "materialized"})
+
+    def _catalog_upsert(*, post, **_kwargs):
+        if post.post_id == "bad":
+            raise RuntimeError("catalog failed")
+        return {"id": "catalog"}
+
+    monkeypatch.setattr(repo, "_upsert_shared_catalog_post", _catalog_upsert)
+    result = persist_threads_posts(
+        account_handle="bravotv",
+        posts=[
+            SimpleNamespace(post_id="good", to_dict=lambda: {"post_id": "good"}),
+            SimpleNamespace(post_id="bad", to_dict=lambda: {"post_id": "bad"}),
+        ],
+        run_id="run-1",
+        job_id="job-1",
+        pipeline_ingest_mode="shared_account_catalog_backfill",
+    )
+
+    assert result.posts_upserted == 1
+    assert result.catalog_posts_upserted == 1
+    assert result.required_shared_persistence_failures == 1

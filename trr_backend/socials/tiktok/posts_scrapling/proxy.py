@@ -61,7 +61,7 @@ def select_tiktok_posts_proxy(*, session_key: str | None = None) -> TikTokPostsP
 
     # 2. DECODO credentials.
     provider = str(os.getenv("SOCIAL_TIKTOK_POSTS_PROXY_PROVIDER") or "").strip().lower()
-    if provider in {"", "decodo", "smartproxy"}:
+    if provider in {"decodo", "smartproxy"}:
         creds = _decodo_env()
         if creds:
             username, password, gateway = creds

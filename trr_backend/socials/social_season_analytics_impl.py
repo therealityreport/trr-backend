@@ -60,6 +60,7 @@ from trr_backend.modal_dispatch import (
     modal_social_job_function_names,
     resolve_modal_function,
 )
+from trr_backend.socials import source_scopes as _source_scopes
 from trr_backend.socials.crawlee_runtime import (
     AuthPreflightError,
     AuthPreflightResult,
@@ -70,12 +71,20 @@ from trr_backend.socials.crawlee_runtime import (
     is_auth_strict_for_platform,
     should_use_crawlee,
 )
+from trr_backend.socials.instagram.constants import instagram_post_permalink
 from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
 from trr_backend.socials.twitter import Tweet, TwitterScrapeConfig, TwitterScraper
 
 logger = logging.getLogger(__name__)
 
 SOCIAL_CATALOG_PROGRESS_POOL_NAME = "social_progress"
+
+_INSTAGRAM_PAYLOAD_PRIVATE_KEYS = (
+    "__payload_sidecar_raw_data",
+    "__payload_sidecar_asset_manifest",
+    "__payload_sidecar_child_posts_data",
+    "__payload_sidecar_present",
+)
 
 _SOCIAL_PROFILE_TOTAL_POSTS_CACHE: dict[tuple[str, str], tuple[float, int | None]] = {}
 _SOCIAL_PROFILE_TOTAL_POSTS_CACHE_LOCK = Lock()
@@ -92,10 +101,11 @@ _MODAL_REMOTE_AUTH_PROBE_CACHE: dict[tuple[str, str, str], tuple[float, dict[str
 _MODAL_REMOTE_AUTH_PROBE_CACHE_LOCK = Lock()
 
 SUPPORTED_PLATFORMS = SOCIAL_SUPPORTED_PLATFORMS
-SUPPORTED_SCOPES = ("network", "creator", "community", "news")
-LEGACY_SOURCE_SCOPE_ALIASES = {
-    "bravo": "network",
-}
+SUPPORTED_SCOPES = _source_scopes.SUPPORTED_SCOPES
+LEGACY_SOURCE_SCOPE_ALIASES = _source_scopes.LEGACY_SOURCE_SCOPE_ALIASES
+normalize_source_scope = _source_scopes.normalize_source_scope
+_normalize_source_scope_input = _source_scopes.normalize_source_scope_input
+_source_scope_is_network_family = _source_scopes.source_scope_is_network_family
 SOCIAL_ACCOUNT_PROFILE_COMMENT_FILTERS = {"commentable", "incomplete", "not_commentable"}
 SOCIAL_ACCOUNT_PROFILE_POST_SORT_FIELDS = {
     "post",
@@ -125,24 +135,6 @@ SUPPORTED_PIPELINE_INGEST_MODES = (
     "shared_account_async",
     "shared_account_catalog_backfill",
 )
-
-
-def normalize_source_scope(value: Any, *, default: str = "network") -> str:
-    normalized = str(value or default).strip().lower() or default
-    canonical = LEGACY_SOURCE_SCOPE_ALIASES.get(normalized, normalized)
-    if canonical not in SUPPORTED_SCOPES:
-        raise ValueError(f"Unsupported source scope: {value}")
-    return canonical
-
-
-def _normalize_source_scope_input(value: Any, *, default: str = "network") -> str:
-    normalized = str(value or default).strip().lower() or default
-    canonical = normalize_source_scope(normalized, default=default)
-    return normalized if normalized in LEGACY_SOURCE_SCOPE_ALIASES else canonical
-
-
-def _source_scope_is_network_family(value: Any) -> bool:
-    return normalize_source_scope(value) == "network"
 
 
 SUPPORTED_SYNC_STRATEGIES = ("incremental", "full_refresh")
@@ -1490,9 +1482,14 @@ def _build_catalog_backfill_shards(
 ) -> list[IngestTimeShard]:
     start_dt = _coerce_dt(date_start)
     end_dt = _coerce_dt(date_end)
-    span_days = _window_span_days(date_start=start_dt, date_end=end_dt)
+    window_span = end_dt - start_dt if start_dt is not None and end_dt is not None and end_dt > start_dt else None
+    span_days = (
+        max(1, window_span.days + int(bool(window_span.seconds or window_span.microseconds)))
+        if window_span is not None
+        else None
+    )
     shard_days = _catalog_backfill_window_shard_days(platform, span_days=span_days)
-    if start_dt is None or end_dt is None or end_dt < start_dt or shard_days is None:
+    if start_dt is None or end_dt is None or end_dt <= start_dt or shard_days is None:
         return [
             IngestTimeShard(
                 shard_index=0,
@@ -1510,10 +1507,8 @@ def _build_catalog_backfill_shards(
     shard_index = 0
     lanes = _catalog_backfill_run_scheduler_lanes(runner_count)
     shards: list[IngestTimeShard] = []
-    while cursor <= end_dt:
-        window_end = min(cursor + shard_delta - timedelta(microseconds=1), end_dt)
-        if window_end < cursor:
-            window_end = cursor
+    while cursor < end_dt:
+        window_end = min(cursor + shard_delta, end_dt)
         day_offset = max(0, (cursor.date() - start_dt.date()).days)
         shards.append(
             IngestTimeShard(
@@ -1526,9 +1521,7 @@ def _build_catalog_backfill_shards(
                 day_weight=1.0,
             )
         )
-        if window_end >= end_dt:
-            break
-        cursor = window_end + timedelta(microseconds=1)
+        cursor = window_end
         shard_index += 1
     return shards
 
@@ -1949,14 +1942,18 @@ def _normalize_catalog_backfill_window(
     date_start: datetime | None,
     date_end: datetime | None,
 ) -> tuple[datetime | None, datetime | None]:
+    start_supplied = date_start is not None and str(date_start).strip() != ""
+    end_supplied = date_end is not None and str(date_end).strip() != ""
+    if start_supplied != end_supplied:
+        raise ValueError("date_start and date_end must be supplied together for a bounded catalog backfill.")
+    if not start_supplied:
+        return None, None
     bounded_start = _coerce_dt(date_start)
     bounded_end = _coerce_dt(date_end)
-    if bounded_start is None or bounded_end is None or bounded_end < bounded_start:
-        return bounded_start, bounded_end
-    # Treat midnight end bounds as inclusive whole-day windows so a bounded
-    # backfill does not silently omit the final day on literal-timestamp scrapers.
-    if bounded_end.hour == 0 and bounded_end.minute == 0 and bounded_end.second == 0 and bounded_end.microsecond == 0:
-        bounded_end = bounded_end + timedelta(days=1) - timedelta(seconds=1)
+    if bounded_start is None or bounded_end is None:
+        raise ValueError("date_start and date_end must be valid timestamps for a bounded catalog backfill.")
+    if bounded_end <= bounded_start:
+        raise ValueError("date_end must be later than date_start for a bounded catalog backfill.")
     return bounded_start, bounded_end
 
 
@@ -20845,7 +20842,7 @@ def _load_existing_social_account_posts(
         conditions.append(f"{ts_col} >= %s")
         params.append(date_start)
     if date_end:
-        conditions.append(f"{ts_col} <= %s")
+        conditions.append(f"{ts_col} < %s")
         params.append(date_end)
     if source_ids is not None:
         normalized_source_ids = sorted({str(item or "").strip() for item in source_ids if str(item or "").strip()})
@@ -29114,7 +29111,7 @@ def _upsert_tweet(
         return None
 
     _tweet_id, payload = prepared
-    row = _pg_upsert("twitter_tweets", payload, conflict_col="tweet_id", conn=conn)
+    row = _pg_upsert("twitter_tweets", payload, conflict_col="tweet_id", conn=conn, include_inserted_flag=True)
     if persist_stats is not None and row:
         persist_stats["comments_upserted"] = int(persist_stats.get("comments_upserted") or 0) + 1
     return row
@@ -33723,12 +33720,26 @@ def _shared_catalog_base_query_parts(platform: str) -> tuple[str, str, str]:
     return table, source_id_column, posted_at_column
 
 
-def _shared_catalog_post_url(platform: str, *, account_handle: str, source_id: str, explicit: str | None) -> str | None:
+def _shared_catalog_post_url(
+    platform: str,
+    *,
+    account_handle: str,
+    source_id: str,
+    explicit: str | None,
+    post_format: object | None = None,
+    media_type: object | None = None,
+    raw_data: Mapping[str, object] | None = None,
+) -> str | None:
     if explicit and explicit.startswith(("http://", "https://")):
         return explicit
     normalized_platform = _normalize_platform_name(platform)
     if normalized_platform == "instagram" and source_id:
-        return f"https://www.instagram.com/p/{source_id}/"
+        return instagram_post_permalink(
+            source_id,
+            post_format=post_format,
+            media_type=media_type,
+            raw_data=raw_data,
+        )
     if normalized_platform == "tiktok" and source_id:
         return f"https://www.tiktok.com/@{account_handle}/video/{source_id}"
     if normalized_platform == "twitter" and source_id:
@@ -34406,7 +34417,7 @@ def _shared_catalog_total_posts_for_window(
         where_clauses.append(f"p.{posted_at_column} >= %s")
         params.append(start_dt)
     if end_dt is not None:
-        where_clauses.append(f"p.{posted_at_column} <= %s")
+        where_clauses.append(f"p.{posted_at_column} < %s")
         params.append(end_dt)
     try:
         row = (
@@ -38265,7 +38276,7 @@ def _filter_shared_instagram_posts_for_window(
         if start_dt is not None and posted_at < start_dt:
             crossed_start = True
             continue
-        if end_dt is not None and posted_at > end_dt:
+        if end_dt is not None and posted_at >= end_dt:
             continue
         selected_posts.append(post)
     return selected_posts, crossed_start
@@ -53381,7 +53392,7 @@ def _comments_coverage_for_platform(
 
     apply_account_filter = source_scope != "community" and bool(platform_accounts)
     account_handles_list = sorted(platform_accounts)
-    instagram_active_filter = "and c.is_missing = false" if _comment_lifecycle_supported("instagram_comments") else ""
+    instagram_lifecycle_supported = bool(_comment_lifecycle_supported("instagram_comments"))
     tiktok_active_filter = "and c.is_missing = false" if _comment_lifecycle_supported("tiktok_comments") else ""
     youtube_active_filter = "and c.is_missing = false" if _comment_lifecycle_supported("youtube_comments") else ""
     facebook_active_filter = "and c.is_missing = false" if _comment_lifecycle_supported("facebook_comments") else ""
@@ -53402,41 +53413,39 @@ def _comments_coverage_for_platform(
         params: list[Any] = [season_id, start_dt, end_dt]
         if apply_account_filter:
             params.append(account_handles_list)
-        row = (
-            pg.fetch_one(
-                f"""
-            with posts as (
-              select
-                p.id,
-                ({reported_comments_expr})::bigint as reported_comments
-              from social.instagram_posts p
-              where p.season_id = %s
-                and p.posted_at >= %s
-                and p.posted_at <= %s
-                {account_filter}
-            ), comment_counts as (
-              select c.post_id, count(*)::bigint as saved_comments
-              from social.instagram_comments c
-              join posts p on p.id = c.post_id
-              where true
-                {instagram_active_filter}
-              group by c.post_id
-            )
+        posts = pg.fetch_all(
+            f"""
             select
-              count(*)::bigint as posts_scanned,
-              coalesce(
-                sum(case when coalesce(cc.saved_comments, 0) < p.reported_comments then 1 else 0 end),
-                0
-              )::bigint as stale_posts_count,
-              coalesce(sum(coalesce(cc.saved_comments, 0)), 0)::bigint as saved_comments,
-              coalesce(sum(p.reported_comments), 0)::bigint as reported_comments
-            from posts p
-            left join comment_counts cc on cc.post_id = p.id
+              p.id,
+              ({reported_comments_expr})::bigint as reported_comments
+            from social.instagram_posts p
+            where p.season_id = %s
+              and p.posted_at >= %s
+              and p.posted_at <= %s
+              {account_filter}
             """,
-                params,
-            )
-            or {}
+            params,
         )
+        saved_counts = _instagram_saved_comment_counts_by_post(
+            [post["id"] for post in posts],
+            active_filter_applied=instagram_lifecycle_supported,
+        )
+        saved_comments = 0
+        reported_comments = 0
+        stale_posts_count = 0
+        for post in posts:
+            reported = int(post.get("reported_comments") or 0)
+            saved = int(saved_counts.get(post.get("id"), 0) or 0)
+            saved_comments += saved
+            reported_comments += reported
+            if saved < reported:
+                stale_posts_count += 1
+        row = {
+            "posts_scanned": len(posts),
+            "stale_posts_count": stale_posts_count,
+            "saved_comments": saved_comments,
+            "reported_comments": reported_comments,
+        }
     elif platform == "tiktok":
         account_filter = (
             "and ltrim(lower(coalesce(nullif(p.username, ''), nullif(p.source_account, ''), '')), '@') = any(%s)"
@@ -55161,6 +55170,42 @@ def _instagram_has_custom_cover_hint(node: Any) -> bool:
     return False
 
 
+def _instagram_saved_comment_counts_by_post(
+    post_ids: list[Any],
+    *,
+    active_filter_applied: bool,
+) -> dict[Any, int]:
+    """Per-post Instagram comment counts, from the rollup table when present."""
+    counts: dict[Any, int] = defaultdict(int)
+    if not post_ids:
+        return counts
+    if _relation_exists("social.instagram_post_comment_rollups"):
+        column = "active_comment_count" if active_filter_applied else "total_comment_count"
+        rows = pg.fetch_all(
+            f"""
+            select r.post_id, r.{column}::int as cnt
+            from social.instagram_post_comment_rollups r
+            where r.post_id = any(%s::uuid[])
+            """,
+            [post_ids],
+        )
+    else:
+        active_filter = "and coalesce(c.is_missing, false) = false" if active_filter_applied else ""
+        rows = pg.fetch_all(
+            f"""
+            select c.post_id, count(*)::int as cnt
+            from social.instagram_comments c
+            where c.post_id = any(%s::uuid[])
+              {active_filter}
+            group by c.post_id
+            """,
+            [post_ids],
+        )
+    for row in rows:
+        counts[row["post_id"]] = row["cnt"]
+    return counts
+
+
 def _normalize_media_url_for_compare(url: str | None) -> str:
     value = str(url or "").strip()
     if not value:
@@ -55270,8 +55315,18 @@ def _week_detail_instagram(
         sort_dir=sort_dir,
     )
     posts_params = query_params
-    posts = pg.fetch_all(
-        f"""
+    from trr_backend.socials.instagram import payload_sidecars
+
+    payload_mode = payload_sidecars.payload_read_mode()
+
+    def _fetch_posts(selected_payload_mode: str) -> list[dict[str, Any]]:
+        sidecar_join, sidecar_projection = _instagram_payload_sidecar_sql(
+            row_kind="post",
+            row_alias="p",
+            mode=selected_payload_mode,
+        )
+        return pg.fetch_all(
+            f"""
         select
           p.id,
           p.shortcode as source_id,
@@ -55301,12 +55356,15 @@ def _week_detail_instagram(
           coalesce(to_jsonb(p) -> 'collaborators_detail', '[]'::jsonb) as collaborators_detail,
           coalesce(to_jsonb(p) -> 'child_posts_data', '[]'::jsonb) as child_posts_data,
           coalesce(to_jsonb(p) -> 'raw_data', '{{}}'::jsonb) as raw_data,
+          coalesce(p.asset_manifest, '{{}}'::jsonb) as asset_manifest,
           {mirror_attempt_count_expr} as media_mirror_attempt_count,
           {mirror_last_attempt_at_expr} as media_mirror_last_attempt_at,
           {mirror_last_job_id_expr} as media_mirror_last_job_id,
           nullif(coalesce(to_jsonb(p) ->> 'metadata_error', ''), '') as metadata_error,
           p.posted_at as ts
+          {sidecar_projection}
         from social.instagram_posts p
+        {sidecar_join}
         where p.season_id = %s
           and p.posted_at >= %s
           and p.posted_at <= %s
@@ -55314,31 +55372,39 @@ def _week_detail_instagram(
         order by {order_by_clause}
         limit {effective_post_limit}
         """,
-        posts_params,
+            posts_params,
+        )
+
+    try:
+        posts = _fetch_posts(payload_mode)
+    except psycopg_errors.UndefinedTable:
+        if payload_mode == "legacy":
+            raise
+        _log_instagram_payload_schema_unavailable(
+            surface="instagram.week.detail",
+            entity_identity=season_id,
+        )
+        payload_mode = "legacy"
+        posts = _fetch_posts(payload_mode)
+    posts = _instagram_payload_rows_for_read(
+        posts,
+        row_kind="post",
+        mode=payload_mode,
+        surface="instagram.week.detail",
     )
 
     post_ids = [p["id"] for p in posts]
     comments_by_post: dict[Any, list[dict]] = defaultdict(list)
-    comment_counts_by_post: dict[Any, int] = defaultdict(int)
+    instagram_comment_lifecycle_supported = bool(_comment_lifecycle_supported("instagram_comments"))
+    comment_counts_by_post = _instagram_saved_comment_counts_by_post(
+        post_ids,
+        active_filter_applied=instagram_comment_lifecycle_supported,
+    )
     instagram_comment_active_filter = (
-        "and coalesce(c.is_missing, false) = false" if _comment_lifecycle_supported("instagram_comments") else ""
+        "and coalesce(c.is_missing, false) = false" if instagram_comment_lifecycle_supported else ""
     )
 
     if post_ids:
-        # Get total comment counts per post
-        count_rows = pg.fetch_all(
-            f"""
-            select c.post_id, count(*)::int as cnt
-            from social.instagram_comments c
-            where c.post_id = any(%s::uuid[])
-              {instagram_comment_active_filter}
-            group by c.post_id
-            """,
-            [post_ids],
-        )
-        for row in count_rows:
-            comment_counts_by_post[row["post_id"]] = row["cnt"]
-
         # Get top N comments per post using lateral join (0 = no cap)
         limit_clause = f"limit {max_comments}" if max_comments > 0 else "limit all"
         comment_rows = pg.fetch_all(
@@ -55459,7 +55525,13 @@ def _week_detail_instagram(
                     "source_id": p["source_id"],
                     "author": p["author"] or "",
                     "text": p.get("text") or "",
-                    "url": f"https://www.instagram.com/p/{p['source_id']}/" if p["source_id"] else "",
+                    "url": instagram_post_permalink(
+                        p["source_id"],
+                        post_format=p.get("post_format"),
+                        media_type=p.get("media_type"),
+                        raw_data=p.get("raw_data") if isinstance(p.get("raw_data"), Mapping) else None,
+                    )
+                    or "",
                     "posted_at": _iso(p["ts"]),
                     "likes": p["likes"],
                     "comments_count": p["comments_count"],
@@ -61911,7 +61983,7 @@ def _materialized_social_account_total_posts(
         date_clauses.append(f"and p.{posted_at_column} >= %s")
         date_params.append(start_dt)
     if end_dt is not None:
-        date_clauses.append(f"and p.{posted_at_column} <= %s")
+        date_clauses.append(f"and p.{posted_at_column} < %s")
         date_params.append(end_dt)
     sql = f"""
         select count(*)::int as total
@@ -66506,6 +66578,12 @@ def resolve_social_account_catalog_action_seed(
     catalog_action: str | None = None,
     catalog_action_scope: str | None = None,
 ) -> dict[str, Any]:
+    normalized_action = str(catalog_action or "").strip().lower() or "backfill"
+    normalized_scope = str(catalog_action_scope or "").strip().lower() or None
+    if normalized_scope == "bounded_window" and (date_start is None or date_end is None):
+        raise ValueError("date_start and date_end are required when catalog_action_scope is bounded_window.")
+    if normalized_scope == "full_history" and (date_start is not None or date_end is not None):
+        raise ValueError("date_start and date_end are not valid when catalog_action_scope is full_history.")
     normalized_date_start, normalized_date_end = _normalize_catalog_backfill_window(
         date_start=date_start,
         date_end=date_end,
@@ -66515,10 +66593,6 @@ def resolve_social_account_catalog_action_seed(
         date_start=normalized_date_start,
         date_end=normalized_date_end,
     )
-    normalized_action = str(catalog_action or "").strip().lower() or None
-    normalized_scope = str(catalog_action_scope or "").strip().lower() or None
-    if normalized_action is None:
-        normalized_action = "backfill"
     if normalized_scope is None:
         if normalized_action == "sync_recent":
             normalized_scope = "recent_window"
@@ -67929,3 +68003,570 @@ def get_social_account_profile_collaborators_tags(*args: Any, **kwargs: Any) -> 
     from trr_backend.socials.account_catalog.profile_reads import _LOCAL_ROOM_FUNCTIONS
 
     return _LOCAL_ROOM_FUNCTIONS["get_social_account_profile_collaborators_tags"](*args, **kwargs)
+
+
+def preview_social_account_catalog_backfill_target(
+    platform: str,
+    account_handle: str,
+    *,
+    date_start: datetime,
+    date_end: datetime,
+) -> dict[str, Any]:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    if normalized_platform not in set(CATALOG_SUPPORTED_PLATFORMS):
+        raise ValueError("Catalog backfill is not supported for this platform.")
+    bounded_start, bounded_end = _normalize_catalog_backfill_window(
+        date_start=date_start,
+        date_end=date_end,
+    )
+    assert bounded_start is not None and bounded_end is not None
+    catalog_total = _shared_catalog_total_posts_for_window(
+        normalized_platform,
+        normalized_account,
+        date_start=bounded_start,
+        date_end=bounded_end,
+    )
+    materialized_total = _materialized_social_account_total_posts(
+        normalized_platform,
+        normalized_account,
+        date_start=bounded_start,
+        date_end=bounded_end,
+    )
+    return {
+        "catalog_total": catalog_total,
+        "materialized_total": materialized_total,
+        "completion_target_posts": max(catalog_total, materialized_total),
+        "completion_target_source": "bounded_catalog",
+    }
+
+
+def _instagram_payload_sidecar_sql(*, row_kind: str, row_alias: str, mode: str) -> tuple[str, str]:
+    if mode == "legacy":
+        return "", ""
+    if row_kind == "mixed":
+        return (
+            f"""left join social.instagram_post_payloads payload_post_sidecar
+              on {row_alias}._profile_source_surface = 'materialized'
+             and payload_post_sidecar.post_id = {row_alias}.id::uuid
+            left join social.instagram_account_catalog_post_payloads payload_catalog_sidecar
+              on {row_alias}._profile_source_surface = 'catalog'
+             and payload_catalog_sidecar.catalog_post_id = {row_alias}.id::uuid""",
+            """,
+          coalesce(payload_post_sidecar.raw_data, payload_catalog_sidecar.raw_data)
+            as __payload_sidecar_raw_data,
+          payload_post_sidecar.asset_manifest as __payload_sidecar_asset_manifest,
+          coalesce(payload_post_sidecar.child_posts_data, payload_catalog_sidecar.child_posts_data)
+            as __payload_sidecar_child_posts_data,
+          (
+            payload_post_sidecar.post_id is not null
+            or payload_catalog_sidecar.catalog_post_id is not null
+          ) as __payload_sidecar_present""",
+        )
+    if row_kind == "post":
+        join = f"left join social.instagram_post_payloads payload_sidecar on payload_sidecar.post_id = {row_alias}.id"
+        asset_projection = "payload_sidecar.asset_manifest"
+        presence_projection = "payload_sidecar.post_id is not null"
+    else:
+        join = (
+            "left join social.instagram_account_catalog_post_payloads payload_sidecar "
+            f"on payload_sidecar.catalog_post_id = {row_alias}.id"
+        )
+        asset_projection = "null::jsonb"
+        presence_projection = "payload_sidecar.catalog_post_id is not null"
+    return (
+        join,
+        f""",
+          payload_sidecar.raw_data as __payload_sidecar_raw_data,
+          {asset_projection} as __payload_sidecar_asset_manifest,
+          payload_sidecar.child_posts_data as __payload_sidecar_child_posts_data,
+          ({presence_projection}) as __payload_sidecar_present""",
+    )
+
+
+def _log_instagram_payload_schema_unavailable(*, surface: str, entity_identity: Any) -> None:
+    from trr_backend.socials.instagram.payload_compare import build_payload_compare_event
+
+    logger.warning(
+        "instagram payload sidecar schema unavailable: %s",
+        build_payload_compare_event(
+            surface=surface,
+            entity_identity=entity_identity,
+            legacy_payload={},
+            new_payload={},
+            sidecar_present=False,
+            schema_unavailable=True,
+        ),
+    )
+
+
+def _instagram_payload_rows_for_read(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    row_kind: str,
+    mode: str,
+    surface: str,
+) -> list[dict[str, Any]]:
+    from trr_backend.socials.instagram import payload_sidecars
+    from trr_backend.socials.instagram.payload_compare import (
+        build_payload_compare_event,
+        should_sample_payload_compare,
+    )
+
+    resolved_rows: list[dict[str, Any]] = []
+    compare_legacy_payloads: list[dict[str, Any]] = []
+    compare_new_payloads: list[dict[str, Any]] = []
+    compare_identities: list[Any] = []
+    compare_sidecar_presence: list[bool] = []
+    for source_row in rows:
+        row = dict(source_row)
+        resolved_row_kind = row_kind
+        if row_kind == "mixed":
+            resolved_row_kind = (
+                "catalog"
+                if row.get("_row_kind") == "catalog" or row.get("_profile_source_surface") == "catalog"
+                else "post"
+            )
+        payload_fields = (
+            ("raw_data", "asset_manifest", "child_posts_data")
+            if resolved_row_kind == "post"
+            else ("raw_data", "child_posts_data")
+        )
+        sidecar_present = bool(row.get("__payload_sidecar_present"))
+        legacy_payload = {field: row.get(field) for field in payload_fields}
+        sidecar_payload = {
+            "raw_data": row.get("__payload_sidecar_raw_data"),
+            "asset_manifest": row.get("__payload_sidecar_asset_manifest"),
+            "child_posts_data": row.get("__payload_sidecar_child_posts_data"),
+        }
+        new_payload = {
+            field: payload_sidecars.payload_for_read_mode(
+                legacy=legacy_payload.get(field),
+                sidecar=sidecar_payload.get(field) if sidecar_present else None,
+                mode="sidecar",
+            )
+            for field in payload_fields
+        }
+        identity = row.get("id") or row.get("source_id") or row.get("shortcode")
+        if mode == "compare":
+            compare_legacy_payloads.append(legacy_payload)
+            compare_new_payloads.append(new_payload)
+            compare_identities.append(identity)
+            compare_sidecar_presence.append(sidecar_present)
+        if mode == "sidecar":
+            row.update(new_payload)
+            if resolved_row_kind == "catalog":
+                raw_data = row.get("raw_data") if isinstance(row.get("raw_data"), Mapping) else {}
+                if not row.get("hosted_media_urls") and isinstance(raw_data.get("hosted_media_urls"), list):
+                    row["hosted_media_urls"] = raw_data["hosted_media_urls"]
+                if not row.get("hosted_thumbnail_url") and raw_data.get("hosted_thumbnail_url"):
+                    row["hosted_thumbnail_url"] = raw_data["hosted_thumbnail_url"]
+                if not row.get("post_format") and raw_data.get("post_format"):
+                    row["post_format"] = raw_data["post_format"]
+                if not row.get("collaborators_detail") and isinstance(raw_data.get("collaborators_detail"), list):
+                    row["collaborators_detail"] = raw_data["collaborators_detail"]
+        for key in _INSTAGRAM_PAYLOAD_PRIVATE_KEYS:
+            row.pop(key, None)
+        resolved_rows.append(row)
+    if (
+        mode == "compare"
+        and compare_identities
+        and should_sample_payload_compare(
+            surface=surface,
+            entity_identity=compare_identities,
+        )
+    ):
+        logger.info(
+            "instagram payload compare: %s",
+            build_payload_compare_event(
+                surface=surface,
+                entity_identity=compare_identities,
+                legacy_payload=compare_legacy_payloads,
+                new_payload=compare_new_payloads,
+                sidecar_present=all(compare_sidecar_presence),
+                schema_unavailable=False,
+            ),
+        )
+    return resolved_rows
+
+
+def _fetch_instagram_catalog_gallery_rows_page(
+    account_handle: str,
+    *,
+    limit: int,
+    offset: int = 0,
+    statuses: list[str] | None = None,
+    conn: Any | None = None,
+    include_collaborators: bool | None = None,
+    _payload_mode_override: str | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Fetch one narrow-key catalog page and its exact filtered total.
+
+    The total rides on the same candidate scan as the page. An empty,
+    out-of-range page has no window row, so only that case uses the narrow
+    count-only fallback.
+    """
+    collaborators_available = (
+        _instagram_catalog_gallery_collaborator_rows_available(conn=conn)
+        if include_collaborators is None
+        else include_collaborators
+    )
+    ctes_sql = _instagram_catalog_gallery_account_rows_cte_sql(
+        statuses=statuses,
+        include_collaborators=collaborators_available,
+    )
+    params = _instagram_catalog_gallery_account_rows_params(
+        account_handle,
+        statuses=statuses,
+        include_collaborators=collaborators_available,
+    )
+    safe_limit = max(1, int(limit))
+    safe_offset = max(0, int(offset))
+    from trr_backend.socials.instagram import payload_sidecars
+
+    payload_mode = _payload_mode_override or payload_sidecars.payload_read_mode()
+    sidecar_join, sidecar_projection = _instagram_payload_sidecar_sql(
+        row_kind="catalog",
+        row_alias="p",
+        mode=payload_mode,
+    )
+    query = f"""
+            with {ctes_sql},
+            page_keys as materialized (
+              select
+                id,
+                posted_at,
+                row_number() over (
+                  order by posted_at desc nulls last, id desc
+                )::int as page_rank,
+                count(*) over()::int as total_count
+              from touching_rows
+              order by posted_at desc nulls last, id desc
+              limit %s offset %s
+            )
+            select
+              pk.page_rank,
+              pk.total_count,
+              p.id::text as id,
+              p.source_id,
+              p.assigned_show_id::text as show_id,
+              p.assigned_season_id::text as season_id,
+              p.source_account,
+              p.posted_at,
+              p.assignment_status,
+              p.assignment_source,
+              p.candidate_matches,
+              s.season_number,
+              sh.name as show_name,
+              sh.slug as show_slug,
+              p.title,
+              p.caption,
+              p.description,
+              p.text,
+              p.media_type,
+              p.media_urls,
+              p.thumbnail_url,
+              p.hashtags,
+              p.mentions,
+              p.collaborators,
+              p.profile_tags,
+              p.likes,
+              p.comments_count,
+              p.views,
+              p.shares,
+              p.retweets,
+              p.replies_count,
+              p.quotes,
+              p.raw_data,
+              p.permalink
+              {sidecar_projection}
+            from page_keys pk
+            join social.instagram_account_catalog_posts p on p.id = pk.id
+            {sidecar_join}
+            left join core.seasons s on s.id = p.assigned_season_id
+            left join core.shows sh on sh.id = coalesce(p.assigned_show_id, s.show_id)
+            order by pk.page_rank
+            """
+    try:
+        query_params = [*params, safe_limit, safe_offset]
+        if conn is not None:
+            with pg.db_cursor(conn=conn, label="instagram_catalog_gallery_rows_page") as cur:
+                rows = pg.fetch_all_with_cursor(cur, query, query_params)
+        else:
+            rows = pg.fetch_all(query, query_params)
+    except psycopg_errors.UndefinedTable:
+        if payload_mode != "legacy":
+            _log_instagram_payload_schema_unavailable(
+                surface="instagram.catalog.gallery",
+                entity_identity=account_handle,
+            )
+            return _fetch_instagram_catalog_gallery_rows_page(
+                account_handle,
+                limit=limit,
+                offset=offset,
+                statuses=statuses,
+                conn=conn,
+                include_collaborators=collaborators_available,
+                _payload_mode_override="legacy",
+            )
+        return [], 0
+    rows = _instagram_payload_rows_for_read(
+        rows,
+        row_kind="catalog",
+        mode=payload_mode,
+        surface="instagram.catalog.gallery",
+    )
+    if rows:
+        return rows, _normalize_non_negative_int(rows[0].get("total_count"))
+    return [], _instagram_catalog_gallery_total_posts(
+        account_handle,
+        statuses=statuses,
+        conn=conn,
+        include_collaborators=collaborators_available,
+    )
+
+
+def _fetch_instagram_catalog_detail_rows(
+    account_handle: str,
+    *,
+    source_id: str,
+    conn: Any | None = None,
+    _payload_mode_override: str | None = None,
+) -> list[dict[str, Any]]:
+    from trr_backend.socials.instagram import payload_sidecars
+
+    payload_mode = _payload_mode_override or payload_sidecars.payload_read_mode()
+    sidecar_join, sidecar_projection = _instagram_payload_sidecar_sql(
+        row_kind="catalog", row_alias="p", mode=payload_mode
+    )
+    account_match = _shared_catalog_account_match_sql("instagram", alias="p")
+    query = f"""
+        select
+          p.id::text as id,
+          p.source_id,
+          p.assigned_show_id::text as show_id,
+          p.assigned_season_id::text as season_id,
+          p.source_account,
+          p.posted_at,
+          p.assignment_status,
+          p.assignment_source,
+          p.candidate_matches,
+          s.season_number,
+          sh.name as show_name,
+          sh.slug as show_slug,
+          p.*
+          {sidecar_projection}
+        from social.instagram_account_catalog_posts p
+        {sidecar_join}
+        left join core.seasons s on s.id = p.assigned_season_id
+        left join core.shows sh on sh.id = coalesce(p.assigned_show_id, s.show_id)
+        where {account_match}
+          and p.source_id = %s
+        order by p.posted_at desc nulls last, p.id desc
+        limit 1
+    """
+    params = [_normalize_social_account_profile_handle(account_handle), source_id]
+    try:
+        if conn is None:
+            rows = pg.fetch_all(query, params)
+        else:
+            with pg.db_cursor(conn=conn, label="instagram_catalog_detail") as cur:
+                rows = pg.fetch_all_with_cursor(cur, query, params)
+    except psycopg_errors.UndefinedTable:
+        if payload_mode == "legacy":
+            return []
+        _log_instagram_payload_schema_unavailable(
+            surface="instagram.catalog.detail",
+            entity_identity=source_id,
+        )
+        return _fetch_instagram_catalog_detail_rows(
+            account_handle,
+            source_id=source_id,
+            conn=conn,
+            _payload_mode_override="legacy",
+        )
+    return _instagram_payload_rows_for_read(
+        rows,
+        row_kind="catalog",
+        mode=payload_mode,
+        surface="instagram.catalog.detail",
+    )
+
+
+def _fetch_instagram_materialized_detail_row(
+    account_handle: str,
+    *,
+    source_id: str,
+    conn: Any | None = None,
+    _payload_mode_override: str | None = None,
+) -> dict[str, Any] | None:
+    from trr_backend.socials.instagram import payload_sidecars
+
+    payload_mode = _payload_mode_override or payload_sidecars.payload_read_mode()
+    sidecar_join, sidecar_projection = _instagram_payload_sidecar_sql(row_kind="post", row_alias="p", mode=payload_mode)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    owner_match_clause = _social_account_profile_owner_match_sql("instagram", alias="p")
+    query = f"""
+        select
+          p.id::text as id,
+          p.show_id::text as show_id,
+          p.season_id::text as season_id,
+          p.source_account,
+          p.shortcode as source_id,
+          p.posted_at,
+          s.season_number,
+          sh.name as show_name,
+          sh.slug as show_slug,
+          p.*
+          {sidecar_projection}
+        from social.instagram_posts p
+        {sidecar_join}
+        left join core.seasons s on s.id = p.season_id
+        left join core.shows sh on sh.id = coalesce(p.show_id, s.show_id)
+        where {owner_match_clause}
+          and p.shortcode = %s
+        order by p.posted_at desc nulls last, p.id desc
+        limit 1
+    """
+    params = [normalized_account, source_id]
+    try:
+        if conn is None:
+            row = pg.fetch_one(query, params)
+        else:
+            with pg.db_cursor(conn=conn, label="instagram_materialized_detail") as cur:
+                row = pg.fetch_one_with_cursor(cur, query, params)
+    except psycopg_errors.UndefinedTable:
+        if payload_mode == "legacy":
+            return None
+        _log_instagram_payload_schema_unavailable(
+            surface="instagram.profile.detail",
+            entity_identity=source_id,
+        )
+        return _fetch_instagram_materialized_detail_row(
+            account_handle,
+            source_id=source_id,
+            conn=conn,
+            _payload_mode_override="legacy",
+        )
+    rows = _instagram_payload_rows_for_read(
+        [row] if row else [],
+        row_kind="post",
+        mode=payload_mode,
+        surface="instagram.profile.detail",
+    )
+    return rows[0] if rows else None
+
+
+def _instagram_catalog_gallery_account_rows_cte_sql(
+    *,
+    statuses: list[str] | None = None,
+    include_collaborators: bool = True,
+) -> str:
+    owner_status_clause = "and p.assignment_status = any(%s)" if statuses else ""
+    if not include_collaborators:
+        return f"""
+            owner_rows as materialized (
+              select
+                p.id,
+                p.posted_at
+              from social.instagram_account_catalog_posts p
+              where (
+                lower(p.source_account) = %s
+                or lower(p.owner_username) = %s
+              )
+                {owner_status_clause}
+            ),
+            touching_rows as materialized (
+              select * from owner_rows
+            )
+            """
+
+    collaborator_status_clause = "and p.assignment_status = any(%s)" if statuses else ""
+    return f"""
+            owner_rows as materialized (
+              select
+                p.id,
+                p.posted_at
+              from social.instagram_account_catalog_posts p
+              where (
+                lower(p.source_account) = %s
+                or lower(p.owner_username) = %s
+              )
+                {owner_status_clause}
+            ),
+            collaborator_rows as materialized (
+              select
+                p.id,
+                p.posted_at
+              from social.instagram_account_catalog_post_collaborators m
+              join social.instagram_account_catalog_posts p
+                on p.id = m.catalog_post_id
+              where m.collaborator_handle = %s
+                and lower(coalesce(p.source_account, '')) <> %s
+                and lower(coalesce(p.owner_username, '')) <> %s
+                {collaborator_status_clause}
+            ),
+            touching_rows as materialized (
+              select * from owner_rows
+              union
+              select * from collaborator_rows
+            )
+            """
+
+
+def _instagram_catalog_gallery_account_rows_params(
+    account_handle: str,
+    *,
+    statuses: list[str] | None = None,
+    include_collaborators: bool = True,
+) -> list[Any]:
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    params: list[Any] = [normalized_account, normalized_account]
+    if statuses:
+        params.append(statuses)
+    if include_collaborators:
+        params.extend([normalized_account, normalized_account, normalized_account])
+        if statuses:
+            params.append(statuses)
+    return params
+
+
+def _instagram_catalog_gallery_collaborator_rows_available(*, conn: Any | None = None) -> bool:
+    return _instagram_catalog_collaborator_membership_available(conn=conn)
+
+
+def _instagram_catalog_gallery_total_posts(
+    account_handle: str,
+    *,
+    statuses: list[str] | None = None,
+    conn: Any | None = None,
+    include_collaborators: bool | None = None,
+) -> int:
+    collaborators_available = (
+        _instagram_catalog_gallery_collaborator_rows_available(conn=conn)
+        if include_collaborators is None
+        else include_collaborators
+    )
+    ctes_sql = _instagram_catalog_gallery_account_rows_cte_sql(
+        statuses=statuses,
+        include_collaborators=collaborators_available,
+    )
+    params = _instagram_catalog_gallery_account_rows_params(
+        account_handle,
+        statuses=statuses,
+        include_collaborators=collaborators_available,
+    )
+    query = f"""
+            with {ctes_sql}
+            select count(*)::int as total
+            from touching_rows
+            """
+    try:
+        if conn is not None:
+            with pg.db_cursor(conn=conn, label="instagram_catalog_gallery_total_posts") as cur:
+                row = pg.fetch_one_with_cursor(cur, query, params) or {}
+        else:
+            row = pg.fetch_one(query, params) or {}
+    except psycopg_errors.UndefinedTable:
+        return 0
+    return _normalize_non_negative_int(row.get("total"))

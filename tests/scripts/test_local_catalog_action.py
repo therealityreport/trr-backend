@@ -206,8 +206,8 @@ def test_main_dispatches_selected_task_backfill_through_launch_orchestrator(monk
         __import__("sys").modules,
         "trr_backend.socials.control_plane",
         SimpleNamespace(
-            execute_run_with_inline_worker_registration=lambda run_id, **kwargs: executed.append(
-                (run_id, kwargs["worker_id"])
+            execute_run_with_inline_worker_registration=lambda run_id, **kwargs: (
+                executed.append((run_id, kwargs["worker_id"])) or {"run_id": run_id, "status": "completed"}
             )
         ),
     )
@@ -215,6 +215,7 @@ def test_main_dispatches_selected_task_backfill_through_launch_orchestrator(monk
     assert cli.main() == 0
     assert captured["selected_tasks"] == ["post_details", "comments", "media"]
     assert captured["allow_local_dev_inline_bypass"] is True
+    assert captured["execution_preference"] == "prefer_local_inline"
     assert executed == [
         ("catalog-run-1", "local-script:catalog:instagram:1"),
         ("comments-run-1", "local-script:catalog:instagram:2"),
@@ -224,7 +225,98 @@ def test_main_dispatches_selected_task_backfill_through_launch_orchestrator(monk
     assert "local_catalog_db_pool_defaults" in captured_output.err
 
 
-def test_main_dry_run_prints_plan_without_loading_runtime(monkeypatch, capsys) -> None:
+def test_main_submits_queue_owned_launch_without_starting_an_inline_worker(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "apply_workspace_runtime_env", lambda **kwargs: {})
+    monkeypatch.setattr(
+        cli,
+        "parse_args",
+        lambda argv=None: SimpleNamespace(
+            platform="twitter",
+            account="bravotv",
+            source_scope="network",
+            action="backfill",
+            execution_owner="queue",
+            selected_tasks=[],
+            comment_anchor_source_ids=[],
+        ),
+    )
+    captured: dict[str, object] = {}
+
+    def _start(*args, **kwargs):
+        captured.update(kwargs)
+        return {"run_id": "queued-run-1", "platform": "twitter", "status": "queued"}
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "trr_backend.repositories.social_season_analytics",
+        SimpleNamespace(
+            is_queue_enabled=lambda: True,
+            assert_worker_available_when_queue_enabled=lambda **kwargs: captured.update(worker_guard=kwargs),
+            start_social_account_catalog_backfill=_start,
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_load_module",
+        lambda name: (_ for _ in ()).throw(AssertionError("queue submission must not start a local worker"))
+        if name == "trr_backend.socials.control_plane"
+        else __import__("sys").modules[name],
+    )
+
+    assert cli.main() == 0
+    payload = __import__("json").loads(capsys.readouterr().out)
+    assert payload["status"] == "submitted"
+    assert payload["submission_status"] == "queued"
+    assert payload["execution_owner"] == "queue"
+    assert payload["submitted_run_ids"] == ["queued-run-1"]
+    assert captured["inline_worker_id"] is None
+    assert captured["allow_local_dev_inline_bypass"] is False
+    assert captured["execution_preference"] == "auto"
+    assert captured["worker_guard"] == {
+        "required_execution_backend": "modal",
+        "platform": "twitter",
+        "account_handle": "bravotv",
+    }
+
+
+def test_main_rejects_queue_launch_that_was_not_accepted(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "apply_workspace_runtime_env", lambda **kwargs: {})
+    monkeypatch.setattr(
+        cli,
+        "parse_args",
+        lambda argv=None: SimpleNamespace(
+            platform="twitter",
+            account="bravotv",
+            source_scope="network",
+            action="backfill",
+            execution_owner="queue",
+            selected_tasks=[],
+            comment_anchor_source_ids=[],
+        ),
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "trr_backend.repositories.social_season_analytics",
+        SimpleNamespace(
+            is_queue_enabled=lambda: True,
+            assert_worker_available_when_queue_enabled=lambda **kwargs: None,
+            start_social_account_catalog_backfill=lambda *args, **kwargs: {
+                "run_id": "rejected-run-1",
+                "platform": "twitter",
+                "status": "failed",
+            },
+        ),
+    )
+
+    assert cli.main() == 1
+    payload = __import__("json").loads(capsys.readouterr().err.splitlines()[-1])
+    assert payload["reason"] == "queue_launch_not_accepted"
+    assert payload["submitted_run_ids"] == ["rejected-run-1"]
+
+
+def test_main_bounded_instagram_dry_run_preserves_offline_plan_when_preview_is_unavailable(monkeypatch, capsys) -> None:
     monkeypatch.setattr(cli, "load_dotenv", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no env")))
     monkeypatch.setattr(
         cli,
@@ -268,6 +360,75 @@ def test_main_dry_run_prints_plan_without_loading_runtime(monkeypatch, capsys) -
     assert payload["date_start"] == "2026-01-01T00:00:00Z"
     assert payload["date_end"] == "2026-12-31T23:59:59Z"
     assert payload["catalog_action_scope"] == "bounded_window"
+    assert payload["bounded_preview_available"] is False
+    assert payload["bounded_preview_error"] == "AssertionError: no env"
+
+
+def test_main_bounded_instagram_dry_run_emits_read_only_target_preview(monkeypatch, capsys) -> None:
+    calls: list[str] = []
+    preview_args: dict[str, object] = {}
+
+    monkeypatch.setattr(cli, "load_dotenv", lambda *args, **kwargs: calls.append("dotenv"))
+    monkeypatch.setattr(
+        cli,
+        "apply_workspace_runtime_env",
+        lambda **kwargs: calls.append("workspace_env") or {},
+    )
+
+    def _preview(*args, **kwargs):
+        calls.append("preview")
+        preview_args.update({"args": args, **kwargs})
+        return {
+            "catalog_total": 360,
+            "materialized_total": 360,
+            "completion_target_posts": 360,
+            "completion_target_source": "bounded_catalog",
+        }
+
+    def _unexpected_launch(*_args, **_kwargs):
+        raise AssertionError("dry-run must not launch")
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "trr_backend.repositories.social_season_analytics",
+        SimpleNamespace(
+            preview_social_account_catalog_backfill_target=_preview,
+            start_social_account_catalog_backfill=_unexpected_launch,
+            launch_social_account_catalog_backfill=_unexpected_launch,
+        ),
+    )
+
+    assert (
+        cli.main(
+            [
+                "--platform",
+                "instagram",
+                "--account",
+                "bravotv",
+                "--action",
+                "backfill",
+                "--date-start",
+                "2026-06-01T00:00:00Z",
+                "--date-end",
+                "2026-08-01T00:00:00Z",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
+
+    payload = __import__("json").loads(capsys.readouterr().out)
+    assert calls == ["dotenv", "workspace_env", "preview"]
+    assert payload["would_launch"] is False
+    assert payload["bounded_preview_available"] is True
+    assert payload["bounded_preview_error"] is None
+    assert payload["catalog_total"] == 360
+    assert payload["materialized_total"] == 360
+    assert payload["completion_target_posts"] == 360
+    assert payload["completion_target_source"] == "bounded_catalog"
+    assert preview_args["args"] == ("instagram", "bravotv")
+    assert preview_args["date_start"].isoformat() == "2026-06-01T00:00:00+00:00"
+    assert preview_args["date_end"].isoformat() == "2026-08-01T00:00:00+00:00"
 
 
 def test_main_blocks_bravotv_instagram_backfill_without_confirmation(monkeypatch, capsys) -> None:
@@ -355,6 +516,72 @@ def test_main_cancels_started_run_on_keyboard_interrupt(monkeypatch, capsys) -> 
     assert cancelled[0]["platform"] == "instagram"
     assert cancelled[0]["account_handle"] == "bravotv"
     assert cancelled[0]["cancelled_by"] == "local-script:local_catalog_action.py:interrupted"
+
+
+def test_main_cancels_all_launch_runs_when_a_sibling_does_not_complete(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "apply_workspace_runtime_env", lambda **kwargs: {})
+    monkeypatch.setattr(
+        cli,
+        "parse_args",
+        lambda argv=None: SimpleNamespace(
+            platform="instagram",
+            account="bravotv",
+            source_scope="network",
+            action="backfill",
+            selected_tasks=["post_details", "comments"],
+            comment_anchor_source_ids=[],
+            confirm_bravotv_instagram_backfill=cli.BRAVOTV_INSTAGRAM_BACKFILL_CONFIRMATION,
+        ),
+    )
+    cancelled: list[str] = []
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "trr_backend.repositories.social_season_analytics",
+        SimpleNamespace(
+            launch_social_account_catalog_backfill=lambda *args, **kwargs: {
+                "platform": "instagram",
+                "catalog_run_id": "catalog-run-1",
+                "comments_run_id": "comments-run-1",
+            },
+            cancel_social_account_catalog_run=lambda **kwargs: (
+                cancelled.append(kwargs["run_id"]) or {"run_id": kwargs["run_id"], "status": "cancelled"}
+            ),
+        ),
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "trr_backend.socials.control_plane",
+        SimpleNamespace(
+            execute_run_with_inline_worker_registration=lambda run_id, **kwargs: {
+                "run_id": run_id,
+                "status": "failed",
+            }
+        ),
+    )
+
+    assert cli.main() == 1
+    payload = __import__("json").loads(capsys.readouterr().out)
+    assert payload["status"] == "failed"
+    assert payload["reason"] == "local_run_did_not_complete"
+    assert payload["run_outcomes"] == [{"run_id": "catalog-run-1", "status": "failed"}]
+    assert payload["launch_cleanup"]["cancelled_run_ids"] == ["catalog-run-1", "comments-run-1"]
+    assert cancelled == ["catalog-run-1", "comments-run-1"]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--date-start", "2026-01-01T00:00:00Z"],
+        ["--date-start", "not-a-date", "--date-end", "2026-01-02T00:00:00Z"],
+        ["--date-start", "2026-01-01T00:00:00Z", "--date-end", "2026-01-01T00:00:00Z"],
+        ["--date-start", "2026-01-02T00:00:00Z", "--date-end", "2026-01-01T00:00:00Z"],
+    ],
+)
+def test_parse_args_rejects_invalid_bounded_windows(args: list[str]) -> None:
+    with pytest.raises(SystemExit):
+        cli.parse_args(["--platform", "twitter", "--account", "bravotv", "--action", "backfill", *args])
 
 
 def test_main_prints_blocked_launch_payload_without_run_id(monkeypatch, capsys) -> None:

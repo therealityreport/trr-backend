@@ -8,6 +8,7 @@ from datetime import timedelta
 from typing import Any
 
 import trr_backend.socials.social_season_analytics_impl as _core
+from trr_backend.socials.instagram import payload_sidecars as _payload_sidecars
 from trr_backend.socials.instagram.post_normalizer import _REPOST_COUNT_ALIASES, _extract_repost_count
 
 _RESERVED_CORE_EXPORTS = {
@@ -370,6 +371,7 @@ def _instagram_post_payload(
     account: str,
     post: Any,
     conn: Any | None = None,
+    existing_row: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Build the legacy social.instagram_posts payload for one post."""
     _sync_core_overrides()
@@ -398,25 +400,29 @@ def _instagram_post_payload(
     raw_data_raw = post.to_dict() if hasattr(post, "to_dict") else {}
     raw_data = dict(raw_data_raw) if isinstance(raw_data_raw, dict) else {}
     incoming_raw_data_is_thin = _instagram_raw_data_is_thin_comments_header(raw_data)
-    existing_row: dict[str, Any] = {}
+    existing_row = dict(existing_row or {})
     existing_views = 0
-    if shortcode:
+    if shortcode and not existing_row:
         with pg.db_cursor(conn=conn) as cur:
             existing_row = (
                 pg.fetch_one_with_cursor(
                     cur,
                     (
                         "select coalesce(p.views, 0)::bigint as views, "
-                        "coalesce(to_jsonb(p) -> 'raw_data', '{}'::jsonb) as raw_data, "
+                        "coalesce(s.raw_data, p.raw_data, '{}'::jsonb) as raw_data, "
+                        "coalesce(s.child_posts_data, p.child_posts_data, '[]'::jsonb) as child_posts_data, "
+                        "coalesce(s.asset_manifest, p.asset_manifest, '{}'::jsonb) as asset_manifest, "
                         "coalesce(p.media_urls, '[]'::jsonb) as media_urls, "
                         "nullif(p.thumbnail_url, '') as thumbnail_url "
-                        "from social.instagram_posts p where p.shortcode = %s limit 1"
+                        "from social.instagram_posts p "
+                        "left join social.instagram_post_payloads s on s.post_id = p.id "
+                        "where p.shortcode = %s limit 1"
                     ),
                     [shortcode],
                 )
                 or {}
             )
-            existing_views = _normalize_non_negative_int(existing_row.get("views"))
+    existing_views = _normalize_non_negative_int(existing_row.get("views"))
     if incoming_raw_data_is_thin:
         existing_raw_data = existing_row.get("raw_data")
         if isinstance(existing_raw_data, dict) and existing_raw_data:
@@ -579,6 +585,16 @@ def _instagram_post_payload(
     collaborators_detail = [u.to_dict() if hasattr(u, "to_dict") else u for u in collaborators_detail_raw]
     owner_detail = getattr(post, "owner_detail", None)
     child_posts_data = getattr(post, "child_posts_data", []) or []
+    asset_manifest = getattr(post, "asset_manifest", None)
+    if incoming_raw_data_is_thin:
+        if not child_posts_data:
+            existing_child_posts_data = existing_row.get("child_posts_data")
+            if isinstance(existing_child_posts_data, list):
+                child_posts_data = existing_child_posts_data
+        if not asset_manifest:
+            existing_asset_manifest = existing_row.get("asset_manifest")
+            if isinstance(existing_asset_manifest, dict):
+                asset_manifest = existing_asset_manifest
 
     # Coerce video_duration
     video_duration_raw = getattr(post, "video_duration", None)
@@ -666,6 +682,8 @@ def _instagram_post_payload(
         "video_duration": video_duration,
         "child_posts_data": child_posts_data if child_posts_data else [],
     }
+    if isinstance(asset_manifest, dict) and _instagram_posts_has_column("asset_manifest", conn=conn):
+        optional_payload["asset_manifest"] = asset_manifest
     for key, value in optional_payload.items():
         if incoming_raw_data_is_thin and key in _INSTAGRAM_THIN_PRESERVE_OPTIONAL_KEYS and value is None:
             continue
@@ -730,18 +748,26 @@ def _upsert_instagram_post(
     post: Any,
     conn: Any | None = None,
 ) -> dict[str, Any] | None:
-    payload = _instagram_post_payload(
-        context,
-        job_id=job_id,
-        account=account,
-        post=post,
-        conn=conn,
-    )
-    if payload is None:
-        return None
-    row = _pg_upsert("instagram_posts", payload, conflict_col="shortcode", conn=conn)
-    _sync_instagram_canonical_post(legacy_row=row, payload=payload, post=post, conn=conn)
-    return row
+    _sync_core_overrides()
+    with _payload_sidecars.payload_write_transaction(
+        conn,
+        label="instagram_post_payload_dual_write",
+    ) as tx_conn:
+        payload = _instagram_post_payload(
+            context,
+            job_id=job_id,
+            account=account,
+            post=post,
+            conn=tx_conn,
+        )
+        if payload is None:
+            return None
+        row = _pg_upsert("instagram_posts", payload, conflict_col="shortcode", conn=tx_conn)
+        sidecar = _payload_sidecars.post_sidecar_payload(legacy_row=row or {}, payload=payload)
+        if sidecar is not None:
+            _payload_sidecars.upsert_post_payloads([sidecar], conn=tx_conn)
+        _sync_instagram_canonical_post(legacy_row=row, payload=payload, post=post, conn=tx_conn)
+        return row
 
 
 def _batch_upsert_instagram_posts(
@@ -758,41 +784,57 @@ def _batch_upsert_instagram_posts(
         "_instagram_post_payload",
         _instagram_post_payload,
     )
-    records: list[tuple[dict[str, Any], Any]] = []
-    for post in posts:
-        payload = payload_builder(
-            context,
-            job_id=job_id,
-            account=account,
-            post=post,
-            conn=conn,
-        )
-        if payload is not None:
-            records.append((payload, post))
-    if not records:
-        return []
-
-    rows: list[dict[str, Any]] = []
-    for index in range(0, len(records), _INSTAGRAM_POST_BATCH_SIZE):
-        chunk = records[index : index + _INSTAGRAM_POST_BATCH_SIZE]
-        records_by_columns: dict[tuple[str, ...], list[tuple[dict[str, Any], Any]]] = {}
-        for payload, post in chunk:
-            records_by_columns.setdefault(tuple(payload.keys()), []).append((payload, post))
-
-        for grouped_records in records_by_columns.values():
-            payloads = [payload for payload, _post in grouped_records]
-            grouped_rows = _pg_upsert_many("instagram_posts", payloads, conflict_col="shortcode", conn=conn)
-            records_by_shortcode = {
-                str(payload.get("shortcode") or "").strip(): (payload, post) for payload, post in grouped_records
+    with _payload_sidecars.payload_write_transaction(conn, label="instagram_post_payload_batch_dual_write") as tx_conn:
+        existing_by_shortcode: dict[str, dict[str, Any]] = {}
+        local_payload_builder = _LOCAL_ROOM_FUNCTIONS.get("_instagram_post_payload", _instagram_post_payload)
+        if payload_builder is local_payload_builder:
+            existing_by_shortcode = _payload_sidecars.fetch_post_preservation_rows(
+                [str(getattr(post, "shortcode", "") or "") for post in posts],
+                conn=tx_conn,
+            )
+        records: list[tuple[dict[str, Any], Any]] = []
+        for post in posts:
+            builder_kwargs: dict[str, Any] = {
+                "job_id": job_id,
+                "account": account,
+                "post": post,
+                "conn": tx_conn,
             }
-            for row in grouped_rows:
-                shortcode = str((row or {}).get("shortcode") or "").strip()
-                record = records_by_shortcode.get(shortcode)
-                if record is not None:
-                    payload, post = record
-                    _sync_instagram_canonical_post(legacy_row=row, payload=payload, post=post, conn=conn)
-                rows.append(row)
-    return rows
+            if payload_builder is local_payload_builder:
+                shortcode = str(getattr(post, "shortcode", "") or "").strip()
+                builder_kwargs["existing_row"] = existing_by_shortcode.get(shortcode, {})
+            payload = payload_builder(context, **builder_kwargs)
+            if payload is not None:
+                records.append((payload, post))
+        if not records:
+            return []
+
+        rows: list[dict[str, Any]] = []
+        for index in range(0, len(records), _INSTAGRAM_POST_BATCH_SIZE):
+            chunk = records[index : index + _INSTAGRAM_POST_BATCH_SIZE]
+            records_by_columns: dict[tuple[str, ...], list[tuple[dict[str, Any], Any]]] = {}
+            for payload, post in chunk:
+                records_by_columns.setdefault(tuple(payload.keys()), []).append((payload, post))
+
+            for grouped_records in records_by_columns.values():
+                payloads = [payload for payload, _post in grouped_records]
+                grouped_rows = _pg_upsert_many("instagram_posts", payloads, conflict_col="shortcode", conn=tx_conn)
+                records_by_shortcode = {
+                    str(payload.get("shortcode") or "").strip(): (payload, post) for payload, post in grouped_records
+                }
+                sidecars: list[dict[str, Any]] = []
+                for row in grouped_rows:
+                    shortcode = str((row or {}).get("shortcode") or "").strip()
+                    record = records_by_shortcode.get(shortcode)
+                    if record is not None:
+                        payload, post = record
+                        sidecar = _payload_sidecars.post_sidecar_payload(legacy_row=row or {}, payload=payload)
+                        if sidecar is not None:
+                            sidecars.append(sidecar)
+                        _sync_instagram_canonical_post(legacy_row=row, payload=payload, post=post, conn=tx_conn)
+                    rows.append(row)
+                _payload_sidecars.upsert_post_payloads(sidecars, conn=tx_conn)
+        return rows
 
 
 def _upsert_shared_catalog_instagram_post(
@@ -803,50 +845,34 @@ def _upsert_shared_catalog_instagram_post(
     conn: Any | None = None,
 ) -> dict[str, Any] | None:
     _sync_core_overrides()
-    shortcode = str(getattr(post, "shortcode", "") or "").strip()
-    if not shortcode:
-        return None
-    media_urls = [str(url).strip() for url in (getattr(post, "media_urls", []) or []) if str(url).strip()]
-    raw_data = post.to_dict() if hasattr(post, "to_dict") else {}
-    raw_data = raw_data if isinstance(raw_data, dict) else {}
-    resolved_repost_count = _instagram_repost_count_from_post(post, raw_data)
-    payload = _shared_catalog_payload_base(
-        source_id=shortcode,
-        account_handle=account_handle,
-        posted_at=_instagram_catalog_posted_at(getattr(post, "taken_at", None)),
-        permalink=_shared_catalog_post_url(
-            "instagram",
+    with _payload_sidecars.payload_write_transaction(
+        conn,
+        label="instagram_catalog_payload_dual_write",
+    ) as tx_conn:
+        shortcode = str(getattr(post, "shortcode", "") or "").strip()
+        existing_row = None
+        if shortcode and tx_conn is not None:
+            existing_row = _payload_sidecars.fetch_catalog_preservation_rows([shortcode], conn=tx_conn).get(shortcode)
+        payload = _shared_catalog_instagram_post_payload(
+            run_id=run_id,
             account_handle=account_handle,
-            source_id=shortcode,
-            explicit=_first_non_empty_str(getattr(post, "post_url", None), getattr(post, "permalink_url", None)),
-        ),
-        caption=str(getattr(post, "caption", "") or "") or None,
-        media_type=str(getattr(post, "post_type", "") or "").strip() or None,
-        media_urls=media_urls,
-        thumbnail_url=str(getattr(post, "thumbnail_url", "") or "").strip() or (media_urls[0] if media_urls else None),
-        hashtags=_as_text_list(getattr(post, "hashtags", []), strip_prefix="#"),
-        mentions=_as_text_list(getattr(post, "mentions", []), prefix="@", strip_prefix="@"),
-        collaborators=_as_text_list(getattr(post, "collaborators", []), prefix="@", strip_prefix="@"),
-        profile_tags=_as_text_list(getattr(post, "profile_tags", []), prefix="@", strip_prefix="@"),
-        likes=getattr(post, "likes", None),
-        comments_count=getattr(post, "comments", None),
-        views=getattr(post, "video_views_observed", None),
-        shares=resolved_repost_count,
-        raw_data=raw_data,
-        run_id=run_id,
-        music_info=getattr(post, "music_info", None),
-        audio_url=str(getattr(post, "audio_url", "") or "").strip() or None,
-        paid_partnership=bool(getattr(post, "sponsored", False)),
-        child_posts_data=getattr(post, "child_posts_data", None),
-        owner_username=str(getattr(post, "username", "") or "").strip() or None,
-        video_play_count=getattr(post, "video_play_count", None),
-        video_duration=getattr(post, "video_duration", None),
-    )
-    payload = _apply_instagram_catalog_metric_semantics(payload, post=post, raw_data=raw_data)
-    row = _pg_upsert(PLATFORM_CATALOG_POST_TABLES["instagram"], payload, conflict_col="source_id", conn=conn)
-    if row:
-        _sync_instagram_catalog_post_collaborators(row, conn=conn)
-    return row
+            post=post,
+            existing_row=existing_row,
+        )
+        if payload is None:
+            return None
+        row = _pg_upsert(
+            PLATFORM_CATALOG_POST_TABLES["instagram"],
+            payload,
+            conflict_col="source_id",
+            conn=tx_conn,
+        )
+        sidecar = _payload_sidecars.catalog_sidecar_payload(legacy_row=row or {}, payload=payload)
+        if sidecar is not None:
+            _payload_sidecars.upsert_catalog_payloads([sidecar], conn=tx_conn)
+        if row:
+            _sync_instagram_catalog_post_collaborators(row, conn=tx_conn)
+        return row
 
 
 def _shared_catalog_instagram_post_payload(
@@ -854,6 +880,7 @@ def _shared_catalog_instagram_post_payload(
     run_id: str | None,
     account_handle: str,
     post: Any,
+    existing_row: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Build the upsert payload dict for one Instagram catalog post (no DB call)."""
     _sync_core_overrides()
@@ -863,6 +890,15 @@ def _shared_catalog_instagram_post_payload(
     media_urls = [str(url).strip() for url in (getattr(post, "media_urls", []) or []) if str(url).strip()]
     raw_data = post.to_dict() if hasattr(post, "to_dict") else {}
     raw_data = raw_data if isinstance(raw_data, dict) else {}
+    child_posts_data = getattr(post, "child_posts_data", None)
+    if _instagram_raw_data_is_thin_comments_header(raw_data) and existing_row:
+        existing_raw_data = existing_row.get("raw_data")
+        if isinstance(existing_raw_data, dict) and existing_raw_data:
+            raw_data = dict(existing_raw_data)
+        if not child_posts_data:
+            existing_children = existing_row.get("child_posts_data")
+            if isinstance(existing_children, list) and existing_children:
+                child_posts_data = list(existing_children)
     resolved_repost_count = _instagram_repost_count_from_post(post, raw_data)
     payload = _shared_catalog_payload_base(
         source_id=shortcode,
@@ -876,6 +912,9 @@ def _shared_catalog_instagram_post_payload(
                 getattr(post, "post_url", None),
                 getattr(post, "permalink_url", None),
             ),
+            post_format=_first_non_empty_str(getattr(post, "post_format", None), getattr(post, "post_type", None)),
+            media_type=getattr(post, "media_type", None),
+            raw_data=raw_data,
         ),
         caption=str(getattr(post, "caption", "") or "") or None,
         media_type=str(getattr(post, "post_type", "") or "").strip() or None,
@@ -896,7 +935,7 @@ def _shared_catalog_instagram_post_payload(
         music_info=getattr(post, "music_info", None),
         audio_url=str(getattr(post, "audio_url", "") or "").strip() or None,
         paid_partnership=bool(getattr(post, "sponsored", False)),
-        child_posts_data=getattr(post, "child_posts_data", None),
+        child_posts_data=child_posts_data,
         owner_username=str(getattr(post, "username", "") or "").strip() or None,
         video_play_count=getattr(post, "video_play_count", None),
         video_duration=getattr(post, "video_duration", None),
@@ -917,38 +956,69 @@ def _batch_upsert_shared_catalog_instagram_posts(
         "_shared_catalog_instagram_post_payload",
         _shared_catalog_instagram_post_payload,
     )
-    payloads = [
-        p
-        for post in posts
-        if (
-            p := payload_builder(
-                run_id=run_id,
-                account_handle=account_handle,
-                post=post,
-            )
+    production_upsert = getattr(_pg_upsert_many, "__module__", "") == _core.__name__
+    transaction = (
+        _payload_sidecars.payload_write_transaction(conn, label="instagram_catalog_payload_batch_dual_write")
+        if conn is not None or production_upsert
+        else nullcontext(conn)
+    )
+    with transaction as tx_conn:
+        existing_by_source_id: dict[str, dict[str, Any]] = {}
+        local_payload_builder = _LOCAL_ROOM_FUNCTIONS.get(
+            "_shared_catalog_instagram_post_payload", _shared_catalog_instagram_post_payload
         )
-        is not None
-    ]
-    if not payloads:
-        return []
-    rows: list[dict[str, Any]] = []
-    for index in range(0, len(payloads), _INSTAGRAM_POST_BATCH_SIZE):
-        chunk = payloads[index : index + _INSTAGRAM_POST_BATCH_SIZE]
-        payloads_by_columns: dict[tuple[str, ...], list[dict[str, Any]]] = {}
-        for payload in chunk:
-            payloads_by_columns.setdefault(tuple(payload.keys()), []).append(payload)
-        for grouped_payloads in payloads_by_columns.values():
-            rows.extend(
-                _pg_upsert_many(
+        if payload_builder is local_payload_builder and tx_conn is not None:
+            existing_by_source_id = _payload_sidecars.fetch_catalog_preservation_rows(
+                [str(getattr(post, "shortcode", "") or "") for post in posts],
+                conn=tx_conn,
+            )
+        payloads: list[dict[str, Any]] = []
+        for post in posts:
+            builder_kwargs: dict[str, Any] = {
+                "run_id": run_id,
+                "account_handle": account_handle,
+                "post": post,
+            }
+            if payload_builder is local_payload_builder:
+                source_id = str(getattr(post, "shortcode", "") or "").strip()
+                builder_kwargs["existing_row"] = existing_by_source_id.get(source_id)
+            payload = payload_builder(**builder_kwargs)
+            if payload is not None:
+                payloads.append(payload)
+        if not payloads:
+            return []
+        rows: list[dict[str, Any]] = []
+        for index in range(0, len(payloads), _INSTAGRAM_POST_BATCH_SIZE):
+            chunk = payloads[index : index + _INSTAGRAM_POST_BATCH_SIZE]
+            payloads_by_columns: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+            for payload in chunk:
+                payloads_by_columns.setdefault(tuple(payload.keys()), []).append(payload)
+            for grouped_payloads in payloads_by_columns.values():
+                grouped_rows = _pg_upsert_many(
                     PLATFORM_CATALOG_POST_TABLES["instagram"],
                     grouped_payloads,
                     conflict_col="source_id",
-                    conn=conn,
+                    conn=tx_conn,
                 )
-            )
-    for row in rows:
-        _sync_instagram_catalog_post_collaborators(row, conn=conn)
-    return rows
+                payload_by_source_id = {
+                    str(payload.get("source_id") or "").strip(): payload for payload in grouped_payloads
+                }
+                sidecars = [
+                    sidecar
+                    for row in grouped_rows
+                    if (
+                        sidecar := _payload_sidecars.catalog_sidecar_payload(
+                            legacy_row=row,
+                            payload=payload_by_source_id.get(str(row.get("source_id") or "").strip(), {}),
+                        )
+                    )
+                    is not None
+                ]
+                _payload_sidecars.upsert_catalog_payloads(sidecars, conn=tx_conn)
+                rows.extend(grouped_rows)
+        for row in rows:
+            _sync_instagram_catalog_post_collaborators(row, conn=tx_conn)
+        return rows
 
 
 def _build_instagram_scraper_with_auth_fallback(
@@ -2152,6 +2222,10 @@ def _scrape_shared_instagram_post_details_refresh(
             _coerce_dt(config.get("date_end")),
         )
         all_existing_posts_count = len(existing_posts)
+        bounded_window = _catalog_backfill_has_bounded_window(
+            date_start=_coerce_dt(config.get("date_start")),
+            date_end=_coerce_dt(config.get("date_end")),
+        )
         if detail_shard_count > 1:
             existing_posts = [
                 post for index, post in enumerate(existing_posts) if index % detail_shard_count == detail_shard_index
@@ -2161,7 +2235,9 @@ def _scrape_shared_instagram_post_details_refresh(
             platform="instagram",
             account_handle=account_handle,
         )
-        progress_total_posts = max(all_existing_posts_count, expected_total_posts)
+        progress_total_posts = (
+            len(existing_posts) if bounded_window else max(all_existing_posts_count, expected_total_posts)
+        )
         metrics_pages_scanned = 0
         metrics_posts_checked = 0
         progress_every_posts = _instagram_detail_refresh_progress_every_posts(config)
@@ -2447,6 +2523,10 @@ def _scrape_shared_instagram_post_details_refresh(
                         error_code="metadata_enrichment_exception",
                     )
                     details_refresh_error_reasons["metadata_enrichment_exception"] += 1
+            if parsed_post is not None and not legacy_inline_enrichment:
+                if not str(getattr(parsed_post, "metadata_source", "") or "").strip():
+                    parsed_post.metadata_source = "api_permalink"
+                _mark_instagram_metadata_attempt(post=parsed_post, now_utc=now_utc, success=True)
             unresolved_required_detail_fields = detail_fetch_skipped and (
                 bool(classification.get("metrics_missing"))
                 or "missing_required_source_media" in (classification.get("reasons") or [])
@@ -2545,9 +2625,10 @@ def _scrape_shared_instagram_post_details_refresh(
     )
     retrieval_meta: dict[str, Any] = {
         "source": "db_metrics_refresh",
-        "expected_total_posts": expected_total_posts or None,
-        "total_posts": progress_total_posts or None,
-        "completion_target_posts": details_refresh_completion_target_posts or None,
+        "expected_total_posts": expected_total_posts if bounded_window else expected_total_posts or None,
+        "total_posts": progress_total_posts,
+        "completion_target_posts": details_refresh_completion_target_posts,
+        "completion_target_source": "bounded_catalog" if bounded_window else None,
         "details_refresh_account_rows_seen": all_existing_posts_count,
         "details_refreshed_posts": details_refreshed_posts,
         "details_refresh_views_updated": details_refresh_views_updated,

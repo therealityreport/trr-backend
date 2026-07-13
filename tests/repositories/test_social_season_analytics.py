@@ -70,6 +70,12 @@ from trr_backend.socials.read_models.account_profile.comment_breakdown import (
 )
 
 
+def _patch_instagram_payload_write_connection(monkeypatch: pytest.MonkeyPatch) -> object:
+    conn = object()
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(conn))
+    return conn
+
+
 @pytest.fixture(autouse=True)
 def _clear_scraper_cache():
     """Clear the scraper instance cache between tests to prevent cross-test leakage."""
@@ -5210,6 +5216,7 @@ def test_load_threads_cookies_drops_invalid_cookie_pair_when_refresh_unavailable
 
 def test_upsert_instagram_post_persists_metadata_and_hosted_urls(monkeypatch) -> None:
     captured: dict[str, object] = {}
+    _patch_instagram_payload_write_connection(monkeypatch)
 
     def _fake_upsert(table: str, payload: dict[str, object], *, conflict_col: str, conn=None):
         captured["table"] = table
@@ -5320,6 +5327,7 @@ def test_upsert_instagram_post_persists_metadata_and_hosted_urls(monkeypatch) ->
 
 def test_upsert_instagram_post_preserves_rich_metadata_for_comments_header_payload(monkeypatch) -> None:
     captured: dict[str, object] = {}
+    _patch_instagram_payload_write_connection(monkeypatch)
     existing_raw_data = {
         "image_versions2": {"candidates": [{"url": "https://source.example/rich.jpg"}]},
         "media_repost_count": 12,
@@ -5775,6 +5783,7 @@ def test_shared_instagram_cursor_auth_repair_required_after_threshold(
 
 def test_upsert_instagram_post_uses_raw_reported_comment_count_when_post_count_is_zero(monkeypatch) -> None:
     captured: dict[str, object] = {}
+    _patch_instagram_payload_write_connection(monkeypatch)
 
     def _fake_upsert(table: str, payload: dict[str, object], *, conflict_col: str, conn=None):
         captured["table"] = table
@@ -5827,6 +5836,7 @@ def test_upsert_instagram_post_uses_raw_reported_comment_count_when_post_count_i
 
 def test_upsert_instagram_post_persists_facebook_crosspost_metadata(monkeypatch) -> None:
     captured: dict[str, object] = {}
+    _patch_instagram_payload_write_connection(monkeypatch)
 
     def _fake_upsert(table: str, payload: dict[str, object], *, conflict_col: str, conn=None):
         captured["payload"] = payload
@@ -5880,6 +5890,7 @@ def test_upsert_instagram_post_persists_facebook_crosspost_metadata(monkeypatch)
 
 def test_upsert_instagram_post_skips_missing_optional_columns(monkeypatch) -> None:
     captured: dict[str, object] = {}
+    _patch_instagram_payload_write_connection(monkeypatch)
 
     def _fake_upsert(table: str, payload: dict[str, object], *, conflict_col: str, conn=None):
         captured["table"] = table
@@ -5933,6 +5944,7 @@ def test_upsert_instagram_post_skips_missing_optional_columns(monkeypatch) -> No
 
 def test_upsert_instagram_post_uses_monotonic_views_and_preserves_when_observed_missing(monkeypatch) -> None:
     captured_payloads: list[dict[str, object]] = []
+    _patch_instagram_payload_write_connection(monkeypatch)
 
     def _fake_upsert(table: str, payload: dict[str, object], *, conflict_col: str, conn=None):
         captured_payloads.append(payload)
@@ -20971,6 +20983,12 @@ def test_dismiss_social_account_catalog_run_allows_completion_gap_failed_progres
 
 def test_upsert_shared_catalog_instagram_post_uses_source_id_conflict_key(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
+    _patch_instagram_payload_write_connection(monkeypatch)
+    monkeypatch.setattr(
+        instagram_catalog_ingest._payload_sidecars,
+        "fetch_catalog_preservation_rows",
+        lambda *_args, **_kwargs: {},
+    )
 
     class _InstagramPost:
         shortcode = " shortcode-1 "

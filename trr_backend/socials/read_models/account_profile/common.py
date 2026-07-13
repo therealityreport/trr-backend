@@ -522,6 +522,7 @@ def _fetch_instagram_profile_rows_page(
     sort_by: str | None = None,
     sort_dir: str | None = None,
     conn: Any | None = None,
+    _payload_mode_override: str | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     safe_page = max(1, int(page))
@@ -536,10 +537,17 @@ def _fetch_instagram_profile_rows_page(
         sort_dir=sort_dir,
         missing_comments_sql="greatest(coalesce(filtered_rows.missing_comments, 0), 0)",
     )
+    page_order_by_sql = order_by_sql.replace("filtered_rows.", "page_rows.")
     lifecycle_supported = _comment_lifecycle_supported("instagram_comments", conn=conn)
     active_condition = "c.is_missing is not true" if lifecycle_supported else "true"
     use_comment_rollups = _instagram_post_comment_rollups_available(conn=conn)
     collaborator_rows_available = _instagram_catalog_collaborator_membership_available(conn=conn)
+    from trr_backend.socials.instagram import payload_sidecars
+
+    payload_mode = _payload_mode_override or payload_sidecars.payload_read_mode()
+    sidecar_join, sidecar_projection = _core._instagram_payload_sidecar_sql(
+        row_kind="mixed", row_alias="page_rows", mode=payload_mode
+    )
     collaborator_rows_sql = (
         f"""
         collaborator_rows as materialized (
@@ -563,14 +571,23 @@ def _fetch_instagram_profile_rows_page(
             coalesce(p.media_urls, '[]'::jsonb) as media_urls,
             nullif(p.thumbnail_url, '') as thumbnail_url,
             coalesce(p.media_urls, '[]'::jsonb) as source_media_urls,
-            coalesce(to_jsonb(p) -> 'hosted_media_urls', '[]'::jsonb) as hosted_media_urls,
+            coalesce(
+              nullif(p.hosted_media_urls, '[]'::jsonb),
+              nullif(p.raw_data -> 'hosted_media_urls', '[]'::jsonb),
+              '[]'::jsonb
+            ) as hosted_media_urls,
             nullif(p.thumbnail_url, '') as source_thumbnail_url,
-            nullif(coalesce(to_jsonb(p) ->> 'hosted_thumbnail_url', ''), '') as hosted_thumbnail_url,
-            nullif(coalesce(to_jsonb(p) ->> 'post_format', ''), '') as post_format,
+            coalesce(nullif(p.hosted_thumbnail_url, ''), nullif(p.raw_data ->> 'hosted_thumbnail_url', ''))
+              as hosted_thumbnail_url,
+            coalesce(nullif(p.post_format, ''), nullif(p.raw_data ->> 'post_format', '')) as post_format,
             coalesce(p.hashtags, '[]'::jsonb) as hashtags,
             coalesce(p.mentions, '[]'::jsonb) as mentions,
             coalesce(p.collaborators, '[]'::jsonb) as collaborators,
-            coalesce(to_jsonb(p) -> 'collaborators_detail', p.raw_data -> 'collaborators_detail', '[]'::jsonb)
+            coalesce(
+              nullif(p.collaborators_detail, '[]'::jsonb),
+              nullif(p.raw_data -> 'collaborators_detail', '[]'::jsonb),
+              '[]'::jsonb
+            )
               as collaborators_detail,
             coalesce(p.profile_tags, '[]'::jsonb) as profile_tags,
             coalesce(p.likes, 0)::bigint as likes,
@@ -634,14 +651,14 @@ def _fetch_instagram_profile_rows_page(
             coalesce(p.media_urls, '[]'::jsonb) as media_urls,
             nullif(p.thumbnail_url, '') as thumbnail_url,
             coalesce(p.media_urls, '[]'::jsonb) as source_media_urls,
-            coalesce(to_jsonb(p) -> 'hosted_media_urls', '[]'::jsonb) as hosted_media_urls,
+            coalesce(p.hosted_media_urls, '[]'::jsonb) as hosted_media_urls,
             nullif(p.thumbnail_url, '') as source_thumbnail_url,
-            nullif(coalesce(to_jsonb(p) ->> 'hosted_thumbnail_url', ''), '') as hosted_thumbnail_url,
-            nullif(coalesce(to_jsonb(p) ->> 'post_format', ''), '') as post_format,
+            nullif(coalesce(p.hosted_thumbnail_url, ''), '') as hosted_thumbnail_url,
+            nullif(coalesce(p.post_format, ''), '') as post_format,
             coalesce(p.hashtags, '[]'::jsonb) as hashtags,
             coalesce(p.mentions, '[]'::jsonb) as mentions,
             coalesce(p.collaborators, '[]'::jsonb) as collaborators,
-            coalesce(to_jsonb(p) -> 'collaborators_detail', '[]'::jsonb) as collaborators_detail,
+            coalesce(p.collaborators_detail, '[]'::jsonb) as collaborators_detail,
             coalesce(p.profile_tags, '[]'::jsonb) as profile_tags,
             coalesce(p.likes, 0)::bigint as likes,
             {reported_comments_expr}::bigint as comments_count,
@@ -687,14 +704,23 @@ def _fetch_instagram_profile_rows_page(
             coalesce(p.media_urls, '[]'::jsonb) as media_urls,
             nullif(p.thumbnail_url, '') as thumbnail_url,
             coalesce(p.media_urls, '[]'::jsonb) as source_media_urls,
-            coalesce(to_jsonb(p) -> 'hosted_media_urls', '[]'::jsonb) as hosted_media_urls,
+            coalesce(
+              nullif(p.hosted_media_urls, '[]'::jsonb),
+              nullif(p.raw_data -> 'hosted_media_urls', '[]'::jsonb),
+              '[]'::jsonb
+            ) as hosted_media_urls,
             nullif(p.thumbnail_url, '') as source_thumbnail_url,
-            nullif(coalesce(to_jsonb(p) ->> 'hosted_thumbnail_url', ''), '') as hosted_thumbnail_url,
-            nullif(coalesce(to_jsonb(p) ->> 'post_format', ''), '') as post_format,
+            coalesce(nullif(p.hosted_thumbnail_url, ''), nullif(p.raw_data ->> 'hosted_thumbnail_url', ''))
+              as hosted_thumbnail_url,
+            coalesce(nullif(p.post_format, ''), nullif(p.raw_data ->> 'post_format', '')) as post_format,
             coalesce(p.hashtags, '[]'::jsonb) as hashtags,
             coalesce(p.mentions, '[]'::jsonb) as mentions,
             coalesce(p.collaborators, '[]'::jsonb) as collaborators,
-            coalesce(to_jsonb(p) -> 'collaborators_detail', p.raw_data -> 'collaborators_detail', '[]'::jsonb)
+            coalesce(
+              nullif(p.collaborators_detail, '[]'::jsonb),
+              nullif(p.raw_data -> 'collaborators_detail', '[]'::jsonb),
+              '[]'::jsonb
+            )
               as collaborators_detail,
             coalesce(p.profile_tags, '[]'::jsonb) as profile_tags,
             coalesce(p.likes, 0)::bigint as likes,
@@ -765,14 +791,42 @@ def _fetch_instagram_profile_rows_page(
         params.extend([normalized_account, normalized_account])
     params.extend(search_params)
     page_sql = f"""
-        {candidate_rows_sql}
-        select *, count(*) over()::int as _total_count
-        from filtered_rows
-        order by {order_by_sql}
-        limit %s offset %s
+        {candidate_rows_sql},
+        page_rows as materialized (
+          select *, count(*) over()::int as _total_count
+          from filtered_rows
+          order by {order_by_sql}
+          limit %s offset %s
+        )
+        select page_rows.* {sidecar_projection}
+        from page_rows
+        {sidecar_join}
+        order by {page_order_by_sql}
     """
+    try:
+        if conn is None:
+            rows = pg.fetch_all(page_sql, [*params, safe_page_size, safe_offset])
+        else:
+            with pg.db_cursor(conn=conn, label="instagram_profile_posts_rows") as cur:
+                rows = pg.fetch_all_with_cursor(cur, page_sql, [*params, safe_page_size, safe_offset])
+    except psycopg_errors.UndefinedTable:
+        if payload_mode == "legacy":
+            raise
+        _core._log_instagram_payload_schema_unavailable(
+            surface="instagram.profile.search",
+            entity_identity=normalized_account,
+        )
+        return _fetch_instagram_profile_rows_page(
+            account_handle,
+            page=page,
+            page_size=page_size,
+            search=search,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
+            conn=conn,
+            _payload_mode_override="legacy",
+        )
     if conn is None:
-        rows = pg.fetch_all(page_sql, [*params, safe_page_size, safe_offset])
         total_row = {"total": rows[0].get("_total_count")} if rows and rows[0].get("_total_count") is not None else {}
         if not total_row:
             total_sql = f"""
@@ -782,8 +836,6 @@ def _fetch_instagram_profile_rows_page(
             """
             total_row = pg.fetch_one(total_sql, params) or {}
     else:
-        with pg.db_cursor(conn=conn, label="instagram_profile_posts_rows") as cur:
-            rows = pg.fetch_all_with_cursor(cur, page_sql, [*params, safe_page_size, safe_offset])
         total_row = {"total": rows[0].get("_total_count")} if rows and rows[0].get("_total_count") is not None else {}
         if not total_row:
             total_sql = f"""
@@ -793,6 +845,12 @@ def _fetch_instagram_profile_rows_page(
             """
             with pg.db_cursor(conn=conn, label="instagram_profile_posts_total") as cur:
                 total_row = pg.fetch_one_with_cursor(cur, total_sql, params) or {}
+    rows = _core._instagram_payload_rows_for_read(
+        rows,
+        row_kind="mixed",
+        mode=payload_mode,
+        surface="instagram.profile.search",
+    )
     return rows, _normalize_non_negative_int(total_row.get("total"))
 
 
@@ -804,6 +862,7 @@ def _fetch_instagram_profile_rows_page_no_search(
     sort_by: str | None = None,
     sort_dir: str | None = None,
     conn: Any | None = None,
+    _payload_mode_override: str | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     safe_page = max(1, int(page))
@@ -826,6 +885,15 @@ def _fetch_instagram_profile_rows_page_no_search(
     )
     score_candidate_limit = safe_offset + safe_page_size
     collaborator_rows_available = _instagram_catalog_collaborator_membership_available(conn=conn)
+    from trr_backend.socials.instagram import payload_sidecars
+
+    payload_mode = _payload_mode_override or payload_sidecars.payload_read_mode()
+    post_sidecar_join, post_sidecar_projection = _core._instagram_payload_sidecar_sql(
+        row_kind="post", row_alias="p", mode=payload_mode
+    )
+    catalog_sidecar_join, catalog_sidecar_projection = _core._instagram_payload_sidecar_sql(
+        row_kind="catalog", row_alias="p", mode=payload_mode
+    )
     collaborator_rows_sql = (
         """
         collaborator_rows as materialized (
@@ -977,7 +1045,7 @@ def _fetch_instagram_profile_rows_page_no_search(
         {scored_rows_sql},
         page_keys as materialized (
           select
-            row_number() over ()::int as _page_rank,
+            row_number() over (order by {order_by_sql})::int as _page_rank,
             filtered_rows.*,
             (select total from total_count) as _total_count
           from filtered_rows
@@ -1005,14 +1073,14 @@ def _fetch_instagram_profile_rows_page_no_search(
           coalesce(p.media_urls, '[]'::jsonb) as media_urls,
           nullif(p.thumbnail_url, '') as thumbnail_url,
           coalesce(p.media_urls, '[]'::jsonb) as source_media_urls,
-          coalesce(to_jsonb(p) -> 'hosted_media_urls', '[]'::jsonb) as hosted_media_urls,
+          coalesce(p.hosted_media_urls, '[]'::jsonb) as hosted_media_urls,
           nullif(p.thumbnail_url, '') as source_thumbnail_url,
-          nullif(coalesce(to_jsonb(p) ->> 'hosted_thumbnail_url', ''), '') as hosted_thumbnail_url,
-          nullif(coalesce(to_jsonb(p) ->> 'post_format', ''), '') as post_format,
+          nullif(coalesce(p.hosted_thumbnail_url, ''), '') as hosted_thumbnail_url,
+          nullif(coalesce(p.post_format, ''), '') as post_format,
           coalesce(p.hashtags, '[]'::jsonb) as hashtags,
           coalesce(p.mentions, '[]'::jsonb) as mentions,
           coalesce(p.collaborators, '[]'::jsonb) as collaborators,
-          coalesce(to_jsonb(p) -> 'collaborators_detail', '[]'::jsonb) as collaborators_detail,
+          coalesce(p.collaborators_detail, '[]'::jsonb) as collaborators_detail,
           coalesce(p.profile_tags, '[]'::jsonb) as profile_tags,
           coalesce(p.likes, 0)::bigint as likes,
           {reported_comments_expr}::bigint as comments_count,
@@ -1035,10 +1103,12 @@ def _fetch_instagram_profile_rows_page_no_search(
           page_keys._profile_match_mode,
           page_keys._profile_dataset_priority,
           page_keys._total_count
+          {post_sidecar_projection}
         from page_keys
         join social.instagram_posts p
           on page_keys._row_kind = 'materialized'
          and p.id::text = page_keys._row_id
+        {post_sidecar_join}
         left join core.seasons s on s.id = p.season_id
         left join core.shows sh on sh.id = coalesce(p.show_id, s.show_id)
         union all
@@ -1063,14 +1133,23 @@ def _fetch_instagram_profile_rows_page_no_search(
           coalesce(p.media_urls, '[]'::jsonb) as media_urls,
           nullif(p.thumbnail_url, '') as thumbnail_url,
           coalesce(p.media_urls, '[]'::jsonb) as source_media_urls,
-          coalesce(to_jsonb(p) -> 'hosted_media_urls', '[]'::jsonb) as hosted_media_urls,
+          coalesce(
+            nullif(p.hosted_media_urls, '[]'::jsonb),
+            nullif(p.raw_data -> 'hosted_media_urls', '[]'::jsonb),
+            '[]'::jsonb
+          ) as hosted_media_urls,
           nullif(p.thumbnail_url, '') as source_thumbnail_url,
-          nullif(coalesce(to_jsonb(p) ->> 'hosted_thumbnail_url', ''), '') as hosted_thumbnail_url,
-          nullif(coalesce(to_jsonb(p) ->> 'post_format', ''), '') as post_format,
+          coalesce(nullif(p.hosted_thumbnail_url, ''), nullif(p.raw_data ->> 'hosted_thumbnail_url', ''))
+            as hosted_thumbnail_url,
+          coalesce(nullif(p.post_format, ''), nullif(p.raw_data ->> 'post_format', '')) as post_format,
           coalesce(p.hashtags, '[]'::jsonb) as hashtags,
           coalesce(p.mentions, '[]'::jsonb) as mentions,
           coalesce(p.collaborators, '[]'::jsonb) as collaborators,
-          coalesce(to_jsonb(p) -> 'collaborators_detail', p.raw_data -> 'collaborators_detail', '[]'::jsonb)
+          coalesce(
+            nullif(p.collaborators_detail, '[]'::jsonb),
+            nullif(p.raw_data -> 'collaborators_detail', '[]'::jsonb),
+            '[]'::jsonb
+          )
             as collaborators_detail,
           coalesce(p.profile_tags, '[]'::jsonb) as profile_tags,
           coalesce(p.likes, 0)::bigint as likes,
@@ -1094,18 +1173,41 @@ def _fetch_instagram_profile_rows_page_no_search(
           page_keys._profile_match_mode,
           page_keys._profile_dataset_priority,
           page_keys._total_count
+          {catalog_sidecar_projection}
         from page_keys
         join social.instagram_account_catalog_posts p
           on page_keys._row_kind = 'catalog'
          and p.id::text = page_keys._row_id
+        {catalog_sidecar_join}
         left join social.instagram_posts materialized_post
           on materialized_post.shortcode = p.source_id
         left join core.seasons s on s.id = p.assigned_season_id
         left join core.shows sh on sh.id = coalesce(p.assigned_show_id, s.show_id)
         order by _page_rank asc
     """
+    try:
+        if conn is None:
+            rows = pg.fetch_all(page_keys_sql, [*params, safe_page_size, safe_offset])
+        else:
+            with pg.db_cursor(conn=conn, label="instagram_profile_posts_rows") as cur:
+                rows = pg.fetch_all_with_cursor(cur, page_keys_sql, [*params, safe_page_size, safe_offset])
+    except psycopg_errors.UndefinedTable:
+        if payload_mode == "legacy":
+            raise
+        _core._log_instagram_payload_schema_unavailable(
+            surface="instagram.profile.normal",
+            entity_identity=normalized_account,
+        )
+        return _fetch_instagram_profile_rows_page_no_search(
+            account_handle,
+            page=page,
+            page_size=page_size,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
+            conn=conn,
+            _payload_mode_override="legacy",
+        )
     if conn is None:
-        rows = pg.fetch_all(page_keys_sql, [*params, safe_page_size, safe_offset])
         total_row = {"total": rows[0].get("_total_count")} if rows and rows[0].get("_total_count") is not None else {}
         if not total_row:
             total_sql = f"""
@@ -1115,8 +1217,6 @@ def _fetch_instagram_profile_rows_page_no_search(
             """
             total_row = pg.fetch_one(total_sql, params) or {}
     else:
-        with pg.db_cursor(conn=conn, label="instagram_profile_posts_rows") as cur:
-            rows = pg.fetch_all_with_cursor(cur, page_keys_sql, [*params, safe_page_size, safe_offset])
         total_row = {"total": rows[0].get("_total_count")} if rows and rows[0].get("_total_count") is not None else {}
         if not total_row:
             total_sql = f"""
@@ -1126,6 +1226,12 @@ def _fetch_instagram_profile_rows_page_no_search(
             """
             with pg.db_cursor(conn=conn, label="instagram_profile_posts_total") as cur:
                 total_row = pg.fetch_one_with_cursor(cur, total_sql, params) or {}
+    rows = _core._instagram_payload_rows_for_read(
+        rows,
+        row_kind="mixed",
+        mode=payload_mode,
+        surface="instagram.profile.normal",
+    )
     return rows, _normalize_non_negative_int(total_row.get("total"))
 
 
@@ -1135,6 +1241,7 @@ def _fetch_instagram_profile_rows_page_no_search_created(
     page: int,
     page_size: int,
     conn: Any | None = None,
+    _payload_mode_override: str | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     safe_page = max(1, int(page))
@@ -1146,6 +1253,15 @@ def _fetch_instagram_profile_rows_page_no_search_created(
     active_condition = "c.is_missing is not true" if lifecycle_supported else "true"
     use_comment_rollups = _instagram_post_comment_rollups_available(conn=conn)
     collaborator_rows_available = _instagram_catalog_collaborator_membership_available(conn=conn)
+    from trr_backend.socials.instagram import payload_sidecars
+
+    payload_mode = _payload_mode_override or payload_sidecars.payload_read_mode()
+    post_sidecar_join, post_sidecar_projection = _core._instagram_payload_sidecar_sql(
+        row_kind="post", row_alias="p", mode=payload_mode
+    )
+    catalog_sidecar_join, catalog_sidecar_projection = _core._instagram_payload_sidecar_sql(
+        row_kind="catalog", row_alias="p", mode=payload_mode
+    )
     collaborator_rows_sql = (
         """
         collaborator_rows as materialized (
@@ -1177,7 +1293,7 @@ def _fetch_instagram_profile_rows_page_no_search_created(
         )
         """
     )
-    page_sql = f"""
+    candidate_rows_sql = f"""
         with owner_rows as materialized (
           select
             'materialized'::text as _row_kind,
@@ -1221,10 +1337,13 @@ def _fetch_instagram_profile_rows_page_no_search_created(
             _profile_dataset_priority desc,
             posted_at desc nulls last,
             _row_id desc
-        ),
+        )
+    """
+    page_sql = f"""
+        {candidate_rows_sql},
         page_keys as materialized (
           select
-            row_number() over ()::int as _page_rank,
+            row_number() over (order by posted_at desc nulls last, _row_id desc)::int as _page_rank,
             deduped_rows.*,
             count(*) over()::int as _total_count
           from deduped_rows
@@ -1259,14 +1378,14 @@ def _fetch_instagram_profile_rows_page_no_search_created(
           coalesce(p.media_urls, '[]'::jsonb) as media_urls,
           nullif(p.thumbnail_url, '') as thumbnail_url,
           coalesce(p.media_urls, '[]'::jsonb) as source_media_urls,
-          coalesce(to_jsonb(p) -> 'hosted_media_urls', '[]'::jsonb) as hosted_media_urls,
+          coalesce(p.hosted_media_urls, '[]'::jsonb) as hosted_media_urls,
           nullif(p.thumbnail_url, '') as source_thumbnail_url,
-          nullif(coalesce(to_jsonb(p) ->> 'hosted_thumbnail_url', ''), '') as hosted_thumbnail_url,
-          nullif(coalesce(to_jsonb(p) ->> 'post_format', ''), '') as post_format,
+          nullif(coalesce(p.hosted_thumbnail_url, ''), '') as hosted_thumbnail_url,
+          nullif(coalesce(p.post_format, ''), '') as post_format,
           coalesce(p.hashtags, '[]'::jsonb) as hashtags,
           coalesce(p.mentions, '[]'::jsonb) as mentions,
           coalesce(p.collaborators, '[]'::jsonb) as collaborators,
-          coalesce(to_jsonb(p) -> 'collaborators_detail', '[]'::jsonb) as collaborators_detail,
+          coalesce(p.collaborators_detail, '[]'::jsonb) as collaborators_detail,
           coalesce(p.profile_tags, '[]'::jsonb) as profile_tags,
           coalesce(p.likes, 0)::bigint as likes,
           {reported_comments_expr}::bigint as comments_count,
@@ -1290,10 +1409,12 @@ def _fetch_instagram_profile_rows_page_no_search_created(
           page_keys._profile_match_mode,
           page_keys._profile_dataset_priority,
           page_keys._total_count
+          {post_sidecar_projection}
         from page_keys
         join social.instagram_posts p
           on page_keys._row_kind = 'materialized'
          and p.id::text = page_keys._row_id
+        {post_sidecar_join}
         left join saved_comment_counts
           on saved_comment_counts.profile_row_id = p.id::text
         left join core.seasons s on s.id = p.season_id
@@ -1320,14 +1441,23 @@ def _fetch_instagram_profile_rows_page_no_search_created(
           coalesce(p.media_urls, '[]'::jsonb) as media_urls,
           nullif(p.thumbnail_url, '') as thumbnail_url,
           coalesce(p.media_urls, '[]'::jsonb) as source_media_urls,
-          coalesce(to_jsonb(p) -> 'hosted_media_urls', '[]'::jsonb) as hosted_media_urls,
+          coalesce(
+            nullif(p.hosted_media_urls, '[]'::jsonb),
+            nullif(p.raw_data -> 'hosted_media_urls', '[]'::jsonb),
+            '[]'::jsonb
+          ) as hosted_media_urls,
           nullif(p.thumbnail_url, '') as source_thumbnail_url,
-          nullif(coalesce(to_jsonb(p) ->> 'hosted_thumbnail_url', ''), '') as hosted_thumbnail_url,
-          nullif(coalesce(to_jsonb(p) ->> 'post_format', ''), '') as post_format,
+          coalesce(nullif(p.hosted_thumbnail_url, ''), nullif(p.raw_data ->> 'hosted_thumbnail_url', ''))
+            as hosted_thumbnail_url,
+          coalesce(nullif(p.post_format, ''), nullif(p.raw_data ->> 'post_format', '')) as post_format,
           coalesce(p.hashtags, '[]'::jsonb) as hashtags,
           coalesce(p.mentions, '[]'::jsonb) as mentions,
           coalesce(p.collaborators, '[]'::jsonb) as collaborators,
-          coalesce(to_jsonb(p) -> 'collaborators_detail', p.raw_data -> 'collaborators_detail', '[]'::jsonb)
+          coalesce(
+            nullif(p.collaborators_detail, '[]'::jsonb),
+            nullif(p.raw_data -> 'collaborators_detail', '[]'::jsonb),
+            '[]'::jsonb
+          )
             as collaborators_detail,
           coalesce(p.profile_tags, '[]'::jsonb) as profile_tags,
           coalesce(p.likes, 0)::bigint as likes,
@@ -1352,10 +1482,12 @@ def _fetch_instagram_profile_rows_page_no_search_created(
           page_keys._profile_match_mode,
           page_keys._profile_dataset_priority,
           page_keys._total_count
+          {catalog_sidecar_projection}
         from page_keys
         join social.instagram_account_catalog_posts p
           on page_keys._row_kind = 'catalog'
          and p.id::text = page_keys._row_id
+        {catalog_sidecar_join}
         left join social.instagram_posts materialized_post
           on materialized_post.shortcode = p.source_id
         left join saved_comment_counts
@@ -1367,12 +1499,46 @@ def _fetch_instagram_profile_rows_page_no_search_created(
     params: list[Any] = [normalized_account, normalized_account]
     if collaborator_rows_available:
         params.extend([normalized_account, normalized_account])
-    if conn is None:
-        rows = pg.fetch_all(page_sql, [*params, safe_page_size, safe_offset])
+    try:
+        if conn is None:
+            rows = pg.fetch_all(page_sql, [*params, safe_page_size, safe_offset])
+        else:
+            with pg.db_cursor(conn=conn, label="instagram_profile_posts_created_rows") as cur:
+                rows = pg.fetch_all_with_cursor(cur, page_sql, [*params, safe_page_size, safe_offset])
+    except psycopg_errors.UndefinedTable:
+        if payload_mode != "legacy":
+            _core._log_instagram_payload_schema_unavailable(
+                surface="instagram.profile.created",
+                entity_identity=normalized_account,
+            )
+            return _fetch_instagram_profile_rows_page_no_search_created(
+                account_handle,
+                page=page,
+                page_size=page_size,
+                conn=conn,
+                _payload_mode_override="legacy",
+            )
+        raise
+    rows = _core._instagram_payload_rows_for_read(
+        rows,
+        row_kind="mixed",
+        mode=payload_mode,
+        surface="instagram.profile.created",
+    )
+    if rows:
+        total = _normalize_non_negative_int(rows[0].get("_total_count"))
     else:
-        with pg.db_cursor(conn=conn, label="instagram_profile_posts_created_rows") as cur:
-            rows = pg.fetch_all_with_cursor(cur, page_sql, [*params, safe_page_size, safe_offset])
-    total = _normalize_non_negative_int(rows[0].get("_total_count")) if rows else 0
+        total_sql = f"""
+            {candidate_rows_sql}
+            select count(*)::int as total
+            from deduped_rows
+        """
+        if conn is None:
+            total_row = pg.fetch_one(total_sql, params) or {}
+        else:
+            with pg.db_cursor(conn=conn, label="instagram_profile_posts_created_total") as cur:
+                total_row = pg.fetch_one_with_cursor(cur, total_sql, params) or {}
+        total = _normalize_non_negative_int(total_row.get("total"))
     return rows, total
 
 
@@ -2503,13 +2669,15 @@ def get_social_account_profile_comments(
                             c.comment_id,
                             c.post_id::text as post_id,
                             p.shortcode as post_source_id,
+                            p.media_type as post_media_type,
+                            nullif(p.post_format, '') as post_format,
                             coalesce(
-                              nullif(to_jsonb(p) ->> 'post_url', ''),
-                              nullif(to_jsonb(p) ->> 'permalink', ''),
-                              nullif(to_jsonb(p) ->> 'permalink_url', ''),
-                              nullif(to_jsonb(p) ->> 'canonical_url', ''),
-                              nullif(to_jsonb(p) ->> 'url', ''),
-                              nullif(to_jsonb(p) ->> 'link', '')
+                              nullif(p.permalink, ''),
+                              nullif(p.raw_data ->> 'post_url', ''),
+                              nullif(p.raw_data ->> 'permalink_url', ''),
+                              nullif(p.raw_data ->> 'canonical_url', ''),
+                              nullif(p.raw_data ->> 'url', ''),
+                              nullif(p.raw_data ->> 'link', '')
                             ) as post_url,
                             c.username,
                             c.user_id,
@@ -2580,13 +2748,15 @@ def get_social_account_profile_comments(
                             reply.comment_id,
                             reply.post_id::text as post_id,
                             p.shortcode as post_source_id,
+                            p.media_type as post_media_type,
+                            nullif(p.post_format, '') as post_format,
                             coalesce(
-                              nullif(to_jsonb(p) ->> 'post_url', ''),
-                              nullif(to_jsonb(p) ->> 'permalink', ''),
-                              nullif(to_jsonb(p) ->> 'permalink_url', ''),
-                              nullif(to_jsonb(p) ->> 'canonical_url', ''),
-                              nullif(to_jsonb(p) ->> 'url', ''),
-                              nullif(to_jsonb(p) ->> 'link', '')
+                              nullif(p.permalink, ''),
+                              nullif(p.raw_data ->> 'post_url', ''),
+                              nullif(p.raw_data ->> 'permalink_url', ''),
+                              nullif(p.raw_data ->> 'canonical_url', ''),
+                              nullif(p.raw_data ->> 'url', ''),
+                              nullif(p.raw_data ->> 'link', '')
                             ) as post_url,
                             reply.username,
                             reply.user_id,
@@ -2671,6 +2841,8 @@ def get_social_account_profile_comments(
                           comment_id,
                           post_id,
                           post_source_id,
+                          post_media_type,
+                          post_format,
                           post_url,
                           username,
                           user_id,
@@ -2717,6 +2889,8 @@ def get_social_account_profile_comments(
                             null::text as comment_id,
                             null::text as post_id,
                             null::text as post_source_id,
+                            null::text as post_media_type,
+                            null::text as post_format,
                             null::text as post_url,
                             null::text as username,
                             null::text as user_id,
@@ -2811,13 +2985,15 @@ def get_social_account_profile_comments(
                             c.comment_id,
                             c.post_id::text as post_id,
                             p.shortcode as post_source_id,
+                            p.media_type as post_media_type,
+                            nullif(p.post_format, '') as post_format,
                             coalesce(
-                              nullif(to_jsonb(p) ->> 'post_url', ''),
-                              nullif(to_jsonb(p) ->> 'permalink', ''),
-                              nullif(to_jsonb(p) ->> 'permalink_url', ''),
-                              nullif(to_jsonb(p) ->> 'canonical_url', ''),
-                              nullif(to_jsonb(p) ->> 'url', ''),
-                              nullif(to_jsonb(p) ->> 'link', '')
+                              nullif(p.permalink, ''),
+                              nullif(p.raw_data ->> 'post_url', ''),
+                              nullif(p.raw_data ->> 'permalink_url', ''),
+                              nullif(p.raw_data ->> 'canonical_url', ''),
+                              nullif(p.raw_data ->> 'url', ''),
+                              nullif(p.raw_data ->> 'link', '')
                             ) as post_url,
                             c.username,
                             c.user_id,
@@ -2869,6 +3045,8 @@ def get_social_account_profile_comments(
                           comment_id,
                           post_id,
                           post_source_id,
+                          post_media_type,
+                          post_format,
                           post_url,
                           username,
                           user_id,
@@ -2897,6 +3075,8 @@ def get_social_account_profile_comments(
                             null::text as comment_id,
                             null::text as post_id,
                             null::text as post_source_id,
+                            null::text as post_media_type,
+                            null::text as post_format,
                             null::text as post_url,
                             null::text as username,
                             null::text as user_id,

@@ -10,6 +10,7 @@ import subprocess
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -54,6 +55,18 @@ def _account_for_platform(args: argparse.Namespace, platform: str) -> str:
     return str(override or PLATFORM_DEFAULT_ACCOUNTS[platform]).strip().lstrip("@")
 
 
+def _validate_bounded_window(*, date_start: str, date_end: str) -> None:
+    try:
+        start = datetime.fromisoformat(str(date_start).strip().replace("Z", "+00:00"))
+        end = datetime.fromisoformat(str(date_end).strip().replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("--date-start and --date-end must be valid ISO-8601 timestamps") from exc
+    if start.tzinfo is None or end.tzinfo is None:
+        raise ValueError("--date-start and --date-end must include a timezone")
+    if end <= start:
+        raise ValueError("--date-end must be later than --date-start")
+
+
 def build_prepared_commands(args: argparse.Namespace) -> list[PreparedBackfillCommand]:
     commands: list[PreparedBackfillCommand] = []
     for platform in _normalize_platforms(args.platform):
@@ -68,8 +81,8 @@ def build_prepared_commands(args: argparse.Namespace) -> list[PreparedBackfillCo
             "network",
             "--action",
             "backfill",
-            "--selected-task",
-            "post_details",
+            "--execution-owner",
+            "queue",
             "--date-start",
             args.date_start,
             "--date-end",
@@ -150,6 +163,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    try:
+        _validate_bounded_window(date_start=args.date_start, date_end=args.date_end)
+    except ValueError as exc:
+        parser.error(str(exc))
     commands = build_prepared_commands(args)
     if not commands:
         parser.error("at least one supported platform is required")

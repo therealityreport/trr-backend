@@ -11,9 +11,20 @@ from scripts.modal import deploy_backend as cli
 
 
 def test_pinned_modal_env_forces_admin_profile() -> None:
-    env = cli.pinned_modal_env({"MODAL_PROFILE": "thb-bbl", "OTHER": "1"})
+    env = cli.pinned_modal_env(
+        {
+            "MODAL_PROFILE": "thb-bbl",
+            "TRR_MODAL_APP_NAME": "other-app",
+            "TRR_MODAL_INSTAGRAM_PAYLOAD_READ_MODE": "compare",
+            "TRR_MODAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE": "0.1",
+            "OTHER": "1",
+        }
+    )
 
     assert env["MODAL_PROFILE"] == "admin-56995"
+    assert env["TRR_MODAL_APP_NAME"] == "trr-backend-jobs"
+    assert env["TRR_MODAL_INSTAGRAM_PAYLOAD_READ_MODE"] == "compare"
+    assert env["TRR_MODAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE"] == "0.1"
     assert env["OTHER"] == "1"
 
 
@@ -160,11 +171,7 @@ def test_format_deploy_history_stamp_includes_recent_versions() -> None:
 
 def test_stamp_incident_note_replaces_existing_stamp(tmp_path) -> None:
     note_path = tmp_path / "incident.md"
-    note_path.write_text(
-        "# Incident\n\n"
-        f"{cli.HISTORY_STAMP_START}\nold\n{cli.HISTORY_STAMP_END}\n\n"
-        "## Tail\n"
-    )
+    note_path.write_text(f"# Incident\n\n{cli.HISTORY_STAMP_START}\nold\n{cli.HISTORY_STAMP_END}\n\n## Tail\n")
 
     stamped = cli.stamp_incident_note(
         note_path=note_path,
@@ -192,13 +199,14 @@ def test_resolve_incident_note_path_accepts_named_note() -> None:
     assert cli.resolve_incident_note_path(
         incident_note="ignored.md",
         incident_note_name="modal-v439-v440-serve-backend-api-crash-loop-2026-05-28",
-    ) == (
-        cli.INCIDENT_NOTES_DIR / "modal-v439-v440-serve-backend-api-crash-loop-2026-05-28.md"
-    )
+    ) == (cli.INCIDENT_NOTES_DIR / "modal-v439-v440-serve-backend-api-crash-loop-2026-05-28.md")
 
 
 def test_resolve_incident_note_path_accepts_named_note_with_extension() -> None:
-    assert cli.resolve_incident_note_path(
-        incident_note="ignored.md",
-        incident_note_name="custom-note.md",
-    ) == cli.INCIDENT_NOTES_DIR / "custom-note.md"
+    assert (
+        cli.resolve_incident_note_path(
+            incident_note="ignored.md",
+            incident_note_name="custom-note.md",
+        )
+        == cli.INCIDENT_NOTES_DIR / "custom-note.md"
+    )

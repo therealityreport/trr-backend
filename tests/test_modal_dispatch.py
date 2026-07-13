@@ -34,9 +34,13 @@ class _FakeInputInfo:
 class _FakeFunctionCall:
     def __init__(self, graph: list[_FakeInputInfo]) -> None:
         self._graph = graph
+        self.cancel_calls: list[dict[str, object]] = []
 
     def get_call_graph(self) -> list[_FakeInputInfo]:
         return self._graph
+
+    def cancel(self, *, terminate_containers: bool = False) -> None:
+        self.cancel_calls.append({"terminate_containers": terminate_containers})
 
 
 def test_inspect_modal_function_call_normalizes_pending_capacity(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -118,6 +122,33 @@ def test_inspect_modal_function_call_returns_unknown_on_inspection_failure(
     assert payload["status"] == "unknown"
     assert payload["reason"] == "modal_call_inspection_failed"
     assert payload["error"] == "boom"
+    assert payload["nonterminal"] is True
+    assert payload["terminal"] is False
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [("pending", True), ("running", True), ("unknown", True), ("completed", False), ("failed", False)],
+)
+def test_modal_invocation_is_nonterminal_uses_canonical_status_semantics(status: str, expected: bool) -> None:
+    assert modal_dispatch.modal_invocation_is_nonterminal(status) is expected
+
+
+def test_cancel_modal_function_call_terminates_container_and_reports_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    call = _FakeFunctionCall([_FakeInputInfo(function_call_id="fc-running", status="PENDING", task_id="task-1")])
+    fake_modal = types.SimpleNamespace(
+        FunctionCall=types.SimpleNamespace(from_id=lambda _call_id: call),
+    )
+    monkeypatch.setitem(sys.modules, "modal", fake_modal)
+
+    payload = modal_dispatch.cancel_modal_function_call("fc-running")
+
+    assert call.cancel_calls == [{"terminate_containers": True}]
+    assert payload["cancel_requested"] is True
+    assert payload["inspection"]["status"] == "running"
+    assert payload["draining"] is True
 
 
 def test_modal_social_job_function_name_for_stage_routes_three_backfill_lanes() -> None:

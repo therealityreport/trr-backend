@@ -1384,3 +1384,114 @@ def test_comments_db_session_budget_status(monkeypatch):
     # Garbage budget is treated as disabled.
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_DB_SESSION_BUDGET", "not-a-number")
     assert modal_jobs.comments_db_session_budget_status()["within_budget"] is True
+
+
+@pytest.mark.parametrize("read_mode", ("legacy", "compare", "sidecar"))
+def test_modal_api_runtime_env_accepts_payload_read_modes(
+    monkeypatch: pytest.MonkeyPatch,
+    read_mode: str,
+) -> None:
+    monkeypatch.setenv("TRR_MODAL_INSTAGRAM_PAYLOAD_READ_MODE", read_mode.upper())
+    monkeypatch.delenv("TRR_MODAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE", raising=False)
+
+    assert modal_jobs._modal_api_runtime_env() == {
+        "SOCIAL_INSTAGRAM_PAYLOAD_READ_MODE": read_mode,
+        "SOCIAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE": "0.1" if read_mode == "compare" else "0",
+    }
+
+
+def test_modal_api_runtime_env_rejects_invalid_payload_read_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRR_MODAL_INSTAGRAM_PAYLOAD_READ_MODE", "typo")
+
+    with pytest.raises(RuntimeError, match="must be one of: compare, legacy, sidecar"):
+        modal_jobs._modal_api_runtime_env()
+
+
+def test_modal_api_runtime_env_defaults_to_legacy_despite_stale_runtime_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TRR_MODAL_INSTAGRAM_PAYLOAD_READ_MODE", raising=False)
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_PAYLOAD_READ_MODE", "sidecar")
+
+    assert modal_jobs._modal_api_runtime_env() == {
+        "SOCIAL_INSTAGRAM_PAYLOAD_READ_MODE": "legacy",
+        "SOCIAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE": "0",
+    }
+
+
+def test_modal_api_runtime_env_explicit_legacy_rolls_back_stale_runtime_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRR_MODAL_INSTAGRAM_PAYLOAD_READ_MODE", "legacy")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_PAYLOAD_READ_MODE", "sidecar")
+    monkeypatch.setenv("TRR_MODAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE", "not-a-number")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE", "1")
+
+    assert modal_jobs._modal_api_runtime_env() == {
+        "SOCIAL_INSTAGRAM_PAYLOAD_READ_MODE": "legacy",
+        "SOCIAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE": "0",
+    }
+
+
+@pytest.mark.parametrize("sample_rate", ("0.01", "0.1", "0.25", "1"))
+def test_modal_api_runtime_env_accepts_compare_sample_rate(
+    monkeypatch: pytest.MonkeyPatch,
+    sample_rate: str,
+) -> None:
+    monkeypatch.setenv("TRR_MODAL_INSTAGRAM_PAYLOAD_READ_MODE", "compare")
+    monkeypatch.setenv("TRR_MODAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE", sample_rate)
+
+    assert modal_jobs._modal_api_runtime_env() == {
+        "SOCIAL_INSTAGRAM_PAYLOAD_READ_MODE": "compare",
+        "SOCIAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE": sample_rate,
+    }
+
+
+@pytest.mark.parametrize("sample_rate", ("0", "-0.1", "1.1", "nan", "inf", "not-a-number"))
+def test_modal_api_runtime_env_rejects_invalid_compare_sample_rate(
+    monkeypatch: pytest.MonkeyPatch,
+    sample_rate: str,
+) -> None:
+    monkeypatch.setenv("TRR_MODAL_INSTAGRAM_PAYLOAD_READ_MODE", "compare")
+    monkeypatch.setenv("TRR_MODAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE", sample_rate)
+
+    with pytest.raises(RuntimeError, match="must be greater than 0 and at most 1"):
+        modal_jobs._modal_api_runtime_env()
+
+
+def test_modal_api_runtime_env_compare_default_ignores_stale_runtime_sample_rate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRR_MODAL_INSTAGRAM_PAYLOAD_READ_MODE", "compare")
+    monkeypatch.delenv("TRR_MODAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE", raising=False)
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE", "0")
+
+    assert modal_jobs._modal_api_runtime_env() == {
+        "SOCIAL_INSTAGRAM_PAYLOAD_READ_MODE": "compare",
+        "SOCIAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE": "0.1",
+    }
+
+
+def test_modal_api_deploy_env_overrides_named_secret_without_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    modal_reload_guard,
+) -> None:
+    partial_modal = types.ModuleType("modal")
+    monkeypatch.setitem(sys.modules, "modal", partial_modal)
+    monkeypatch.setenv("TRR_MODAL_INSTAGRAM_PAYLOAD_READ_MODE", "compare")
+    monkeypatch.setenv("TRR_MODAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE", "0.1")
+    monkeypatch.setenv("TRR_MODAL_RUNTIME_SECRET_NAME", "trr-backend-runtime")
+    monkeypatch.setenv("TRR_MODAL_SOCIAL_SECRET_NAME", "trr-social-auth")
+
+    reloaded = importlib.reload(modal_jobs)
+
+    assert reloaded.serve_backend_api._modal_function_options["secrets"] == [
+        {"named": "trr-backend-runtime"},
+        {"named": "trr-social-auth"},
+    ]
+    assert reloaded.serve_backend_api._modal_function_options["env"] == {
+        "SOCIAL_INSTAGRAM_PAYLOAD_READ_MODE": "compare",
+        "SOCIAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE": "0.1",
+    }

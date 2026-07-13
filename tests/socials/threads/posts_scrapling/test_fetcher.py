@@ -42,10 +42,12 @@ def test_threads_fetcher_runtime_metadata_includes_final_request_count() -> None
     fetcher._last_stop_reason = "complete"  # noqa: SLF001
     fetcher._last_retryable = False  # noqa: SLF001
     fetcher._last_complete = True  # noqa: SLF001
+    fetcher._scraper.last_retrieval_meta = {"pages_scanned": 3}  # noqa: SLF001
 
     assert fetcher.runtime_metadata["request_count"] == 4
     assert fetcher.runtime_metadata["fallback_chain"] == ["scrapling_warmup", "graphql_profile_posts"]
     assert fetcher.runtime_metadata["complete"] is True
+    assert fetcher.runtime_metadata["pages_fetched"] == 3
 
 
 def test_threads_fetcher_runtime_metadata_does_not_claim_scrapling_before_use() -> None:

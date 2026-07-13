@@ -243,6 +243,7 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
     posts_fetched = 0
     posts_upserted = 0
     catalog_posts_upserted = 0
+    required_catalog_upsert_failures = 0
     posts_skipped = 0
     posts_skipped_by_reason: dict[str, int] = {}
     pages_fetched = 0
@@ -275,15 +276,19 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
         return {"posts": posts_fetched, "pages": pages_fetched}
 
     def _persist_counters() -> dict[str, Any]:
-        return {
+        counters = {
             "posts_upserted": posts_upserted,
             "catalog_posts_upserted": catalog_posts_upserted,
             "posts_skipped": posts_skipped,
             "posts_skipped_by_reason": dict(posts_skipped_by_reason),
         }
+        if required_catalog_upsert_failures:
+            counters["required_catalog_upsert_failures"] = required_catalog_upsert_failures
+        return counters
 
     async def _run_job() -> dict[str, Any]:
         nonlocal posts_fetched, posts_upserted, catalog_posts_upserted, posts_skipped, pages_fetched
+        nonlocal required_catalog_upsert_failures
         nonlocal fetcher_metadata, last_cursor, stop_reason
 
         session = resolve_tiktok_posts_session()
@@ -339,6 +344,7 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
 
         async def _run_canonical_fallback(trigger_reason: Any) -> bool:
             nonlocal posts_fetched, posts_upserted, catalog_posts_upserted, posts_skipped, pages_fetched
+            nonlocal required_catalog_upsert_failures
             nonlocal fetcher_metadata, stop_reason, canonical_fallback_metadata
 
             cookies = dict(session.raw_cookies or session.cookies or {})
@@ -372,6 +378,7 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
             posts_fetched += len(fallback_posts)
             posts_upserted += persisted.posts_upserted
             catalog_posts_upserted += int(getattr(persisted, "catalog_posts_upserted", 0) or 0)
+            required_catalog_upsert_failures += int(getattr(persisted, "required_catalog_upsert_failures", 0) or 0)
             posts_skipped += persisted.posts_skipped
             _merge_skipped_reasons(dict(getattr(persisted, "posts_skipped_by_reason", {}) or {}))
             pages_fetched += _canonical_tiktok_fallback_page_count(
@@ -480,6 +487,9 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
                     posts_fetched += len(result.posts)
                     posts_upserted += persisted.posts_upserted
                     catalog_posts_upserted += int(getattr(persisted, "catalog_posts_upserted", 0) or 0)
+                    required_catalog_upsert_failures += int(
+                        getattr(persisted, "required_catalog_upsert_failures", 0) or 0
+                    )
                     posts_skipped += persisted.posts_skipped
                     _merge_skipped_reasons(dict(getattr(persisted, "posts_skipped_by_reason", {}) or {}))
                     persisted_page = True
@@ -522,6 +532,18 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
             if canonical_fallback_metadata:
                 fetcher_metadata["canonical_fallback"] = canonical_fallback_metadata
             _raise_if_cancelled(job_id=job_id, run_id=run_id, runtime_metadata=fetcher_metadata)
+            if required_catalog_upsert_failures:
+                stop_reason = "tiktok_shared_catalog_persistence_incomplete"
+                raise TikTokPostsScraplingRuntimeError(
+                    f"TikTok shared catalog persistence was incomplete for @{account_handle}; "
+                    "saved posts will be retried.",
+                    error_code="tiktok_shared_catalog_persistence_incomplete",
+                    retryable=True,
+                    runtime_metadata={
+                        **fetcher_metadata,
+                        "required_catalog_upsert_failures": required_catalog_upsert_failures,
+                    },
+                )
             return fetcher_metadata
         finally:
             fetcher_metadata = _fetcher_runtime_metadata()
@@ -621,6 +643,7 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
                 "pipeline_ingest_mode": pipeline_ingest_mode or None,
                 "error_code": error_code,
                 "error_class": error_class,
+                "retryable": retryable,
                 "activity": {"phase": "failed", "last_progress_at": lifecycle.format_time(lifecycle.now_utc())},
                 "stage_counters": _stage_counters(),
                 "persist_counters": _persist_counters(),

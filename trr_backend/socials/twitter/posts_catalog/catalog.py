@@ -873,7 +873,9 @@ def _persist_tweet_interactions(
             comment_fail_reasons.add("fetch_exception")
             replies = []
 
-        reply_upserted = 0
+        reply_inserted = 0
+        reply_duplicate = 0
+        reply_skipped = 0
         for reply_index, reply in enumerate(replies, start=1):
             if not getattr(reply, "reply_to_tweet_id", None):
                 reply.reply_to_tweet_id = tweet_id
@@ -894,7 +896,12 @@ def _persist_tweet_interactions(
             stats["comments_fetched"] += 1
             if row:
                 stats["comments_upserted"] += 1
-                reply_upserted += 1
+                if row.get("__trr_inserted"):
+                    reply_inserted += 1
+                else:
+                    reply_duplicate += 1
+            else:
+                reply_skipped += 1
             if reply_index == 1 or reply_index % 25 == 0 or reply_index == len(replies):
                 _emit_interaction_progress(
                     index=index,
@@ -917,9 +924,9 @@ def _persist_tweet_interactions(
                 root_source_id=tweet_id,
                 interaction_kind="reply",
                 reported_count=expected_replies,
-                saved_count_after=reply_upserted,
-                unique_saved_delta=reply_upserted,
-                duplicate_count=max(0, len(replies) - reply_upserted),
+                saved_count_after=reply_inserted + reply_duplicate,
+                unique_saved_delta=reply_inserted,
+                duplicate_count=reply_duplicate,
                 pages_scanned=max(reply_pages_scanned, _shared_catalog_progress_pages_scanned(retrieval_meta)),
                 status=reply_status,
                 exhaustion_reason=reply_fail_reason if reply_status == "exhausted" else None,
@@ -929,6 +936,7 @@ def _persist_tweet_interactions(
                     "phase": "persist_twitter_replies",
                     "run_id": run_id,
                     "fetched_count": len(replies),
+                    "skipped_count": reply_skipped,
                 },
             )
 
@@ -1015,7 +1023,9 @@ def _persist_tweet_interactions(
             quote_fail_reasons.add("fetch_exception")
             quotes = []
 
-        quote_upserted = 0
+        quote_inserted = 0
+        quote_duplicate = 0
+        quote_skipped = 0
         for quote_index, quote in enumerate(quotes, start=1):
             quote.is_reply = False
             quote.reply_to_tweet_id = None
@@ -1045,7 +1055,12 @@ def _persist_tweet_interactions(
             stats["quotes_fetched"] += 1
             if row:
                 stats["quotes_upserted"] += 1
-                quote_upserted += 1
+                if row.get("__trr_inserted"):
+                    quote_inserted += 1
+                else:
+                    quote_duplicate += 1
+            else:
+                quote_skipped += 1
             if should_emit_quote_progress:
                 _emit_interaction_progress(
                     index=index,
@@ -1069,9 +1084,9 @@ def _persist_tweet_interactions(
                 root_source_id=tweet_id,
                 interaction_kind="quote",
                 reported_count=expected_quotes,
-                saved_count_after=quote_upserted,
-                unique_saved_delta=quote_upserted,
-                duplicate_count=max(0, quote_saved_total - quote_upserted),
+                saved_count_after=quote_inserted + quote_duplicate,
+                unique_saved_delta=quote_inserted,
+                duplicate_count=quote_duplicate,
                 off_root_count=quote_off_root_count,
                 pages_scanned=max(quote_pages_scanned, _shared_catalog_progress_pages_scanned(retrieval_meta)),
                 status=quote_status,
@@ -1083,6 +1098,7 @@ def _persist_tweet_interactions(
                     "run_id": run_id,
                     "fetched_count": len(quotes),
                     "saved_candidate_count": quote_saved_total,
+                    "skipped_count": quote_skipped,
                 },
             )
 

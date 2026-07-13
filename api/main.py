@@ -618,6 +618,7 @@ from api.routers import (  # noqa: E402
     admin_show_reads,
     admin_show_roles,
     admin_show_sync,
+    admin_social_completion,
     admin_social_posts,
     admin_socialblade,
     discussions,
@@ -664,6 +665,7 @@ app.include_router(admin_show_bravo.router, prefix="/api/v1")
 app.include_router(admin_show_images.router, prefix="/api/v1")
 app.include_router(admin_show_news.router, prefix="/api/v1")
 app.include_router(admin_scrape.router, prefix="/api/v1")
+app.include_router(admin_social_completion.router, prefix="/api/v1")
 app.include_router(admin_social_posts.router, prefix="/api/v1")
 app.include_router(admin_socialblade.router, prefix="/api/v1")
 app.include_router(admin_show_sync.router, prefix="/api/v1")
