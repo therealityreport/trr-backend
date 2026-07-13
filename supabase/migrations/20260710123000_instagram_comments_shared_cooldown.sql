@@ -16,4 +16,3 @@ where lower(btrim(platform)) = 'instagram'
   and lower(btrim(last_error_code)) = 'database_capacity';
 
 commit;
-
