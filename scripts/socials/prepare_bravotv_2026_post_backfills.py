@@ -63,8 +63,8 @@ def _validate_bounded_window(*, date_start: str, date_end: str) -> None:
         raise ValueError("--date-start and --date-end must be valid ISO-8601 timestamps") from exc
     if start.tzinfo is None or end.tzinfo is None:
         raise ValueError("--date-start and --date-end must include a timezone")
-    if end < start:
-        raise ValueError("--date-end must not be earlier than --date-start")
+    if end <= start:
+        raise ValueError("--date-end must be later than --date-start")
 
 
 def build_prepared_commands(args: argparse.Namespace) -> list[PreparedBackfillCommand]:

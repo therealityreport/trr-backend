@@ -127,8 +127,8 @@ def _validate_backfill_window(*, action: str, date_start: str | None, date_end: 
         raise ValueError("--date-start and --date-end are only supported with --action backfill")
     if not start or not end:
         raise ValueError("--date-start and --date-end must be supplied together")
-    if _parse_timestamp(end, option="--date-end") < _parse_timestamp(start, option="--date-start"):
-        raise ValueError("--date-end must not be earlier than --date-start")
+    if _parse_timestamp(end, option="--date-end") <= _parse_timestamp(start, option="--date-start"):
+        raise ValueError("--date-end must be later than --date-start")
 
 
 def apply_workspace_runtime_env(*, repo_root: Path) -> Any:
