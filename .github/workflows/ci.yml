@@ -116,6 +116,7 @@ jobs:
           version: "0.9.27"
           enable-cache: true
           cache-dependency-glob: requirements.lock.txt
+          ignore-nothing-to-cache: true
 
       - name: Determine changed Python files
         id: changed
