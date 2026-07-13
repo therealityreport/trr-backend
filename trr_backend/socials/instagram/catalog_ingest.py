@@ -749,13 +749,10 @@ def _upsert_instagram_post(
     conn: Any | None = None,
 ) -> dict[str, Any] | None:
     _sync_core_overrides()
-    production_upsert = getattr(_pg_upsert, "__module__", "") == _core.__name__
-    transaction = (
-        _payload_sidecars.payload_write_transaction(conn, label="instagram_post_payload_dual_write")
-        if conn is not None or production_upsert
-        else nullcontext(conn)
-    )
-    with transaction as tx_conn:
+    with _payload_sidecars.payload_write_transaction(
+        conn,
+        label="instagram_post_payload_dual_write",
+    ) as tx_conn:
         payload = _instagram_post_payload(
             context,
             job_id=job_id,
@@ -848,13 +845,10 @@ def _upsert_shared_catalog_instagram_post(
     conn: Any | None = None,
 ) -> dict[str, Any] | None:
     _sync_core_overrides()
-    production_upsert = getattr(_pg_upsert, "__module__", "") == _core.__name__
-    transaction = (
-        _payload_sidecars.payload_write_transaction(conn, label="instagram_catalog_payload_dual_write")
-        if conn is not None or production_upsert
-        else nullcontext(conn)
-    )
-    with transaction as tx_conn:
+    with _payload_sidecars.payload_write_transaction(
+        conn,
+        label="instagram_catalog_payload_dual_write",
+    ) as tx_conn:
         shortcode = str(getattr(post, "shortcode", "") or "").strip()
         existing_row = None
         if shortcode and tx_conn is not None:

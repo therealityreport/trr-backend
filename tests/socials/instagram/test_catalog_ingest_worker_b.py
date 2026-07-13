@@ -74,6 +74,7 @@ def test_shared_catalog_payload_omits_unknown_metrics_and_zero_timestamp() -> No
 
 def test_single_shared_catalog_upsert_overwrites_known_lower_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
+    fake_conn = object()
 
     def _fake_pg_upsert(table: str, payload: dict[str, Any], *, conflict_col: str, conn: Any = None):
         captured.update({"table": table, "payload": payload, "conflict_col": conflict_col, "conn": conn})
@@ -85,6 +86,11 @@ def test_single_shared_catalog_upsert_overwrites_known_lower_metrics(monkeypatch
         "_sync_instagram_catalog_post_collaborators",
         lambda *_args, **_kwargs: None,
     )
+    monkeypatch.setattr(
+        catalog._payload_sidecars,
+        "fetch_catalog_preservation_rows",
+        lambda *_args, **_kwargs: {},
+    )
 
     row = catalog._upsert_shared_catalog_instagram_post(
         run_id="run-1",
@@ -95,6 +101,7 @@ def test_single_shared_catalog_upsert_overwrites_known_lower_metrics(monkeypatch
             video_views_observed=8,
             raw_data={"like_count": 3, "comment_count": 1, "video_view_count": 8},
         ),
+        conn=fake_conn,
     )
 
     assert row is not None
@@ -103,6 +110,7 @@ def test_single_shared_catalog_upsert_overwrites_known_lower_metrics(monkeypatch
     assert captured["payload"]["likes"] == 3
     assert captured["payload"]["comments_count"] == 1
     assert captured["payload"]["views"] == 8
+    assert captured["conn"] is fake_conn
 
 
 def test_batch_shared_catalog_upsert_groups_unknown_metric_payloads(monkeypatch: pytest.MonkeyPatch) -> None:

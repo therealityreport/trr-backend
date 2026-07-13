@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -83,6 +85,123 @@ def test_catalog_thin_update_preserves_rich_raw_and_child_payload() -> None:
     assert payload is not None
     assert payload["raw_data"]["image_versions2"]["candidates"][0]["url"] == "rich"
     assert payload["child_posts_data"] == [{"slide_index": 0}]
+
+
+def test_single_post_dual_write_opens_managed_transaction_for_patched_upsert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    managed_conn = object()
+    observed_at = datetime(2026, 7, 13, 18, 30, tzinfo=UTC)
+    captured: dict[str, Any] = {}
+
+    @contextmanager
+    def _managed_transaction(conn: Any, *, label: str):
+        captured["transaction"] = (conn, label)
+        yield managed_conn
+
+    def _fake_payload(*_args: Any, conn: Any, **_kwargs: Any) -> dict[str, Any]:
+        assert conn is managed_conn
+        return {
+            "shortcode": "POST123",
+            "raw_data": {"shortcode": "POST123"},
+            "asset_manifest": {},
+            "child_posts_data": [],
+            "metadata_scraped_at": observed_at,
+        }
+
+    def _fake_upsert(*_args: Any, conn: Any, **_kwargs: Any) -> dict[str, Any]:
+        assert conn is managed_conn
+        return {
+            "id": "11111111-1111-4111-8111-111111111111",
+            "shortcode": "POST123",
+        }
+
+    def _fake_sidecar_upsert(payloads: list[dict[str, Any]], *, conn: Any) -> list[dict[str, Any]]:
+        captured["sidecar_payloads"] = payloads
+        captured["sidecar_conn"] = conn
+        return []
+
+    monkeypatch.setattr(catalog._payload_sidecars, "payload_write_transaction", _managed_transaction)
+    monkeypatch.setattr(catalog, "_instagram_post_payload", _fake_payload)
+    monkeypatch.setattr(catalog._core, "_pg_upsert", _fake_upsert)
+    monkeypatch.setattr(catalog._payload_sidecars, "upsert_post_payloads", _fake_sidecar_upsert)
+    monkeypatch.setattr(catalog._core, "_sync_instagram_canonical_post", lambda **_kwargs: None)
+
+    row = catalog._upsert_instagram_post(
+        None,
+        job_id="job-1",
+        account="bravotv",
+        post=SimpleNamespace(shortcode="POST123"),
+        conn=None,
+    )
+
+    assert row == {
+        "id": "11111111-1111-4111-8111-111111111111",
+        "shortcode": "POST123",
+    }
+    assert captured["transaction"] == (None, "instagram_post_payload_dual_write")
+    assert captured["sidecar_conn"] is managed_conn
+    assert captured["sidecar_payloads"][0]["payload_updated_at"] == observed_at
+
+
+def test_single_catalog_dual_write_rolls_back_managed_transaction_for_patched_upsert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    managed_conn = object()
+    observed_at = datetime(2026, 7, 13, 18, 45, tzinfo=UTC)
+    captured: dict[str, Any] = {"rolled_back": False}
+
+    @contextmanager
+    def _managed_transaction(conn: Any, *, label: str):
+        captured["transaction"] = (conn, label)
+        try:
+            yield managed_conn
+        except RuntimeError:
+            captured["rolled_back"] = True
+            raise
+
+    def _fake_payload(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "source_id": "CATALOG123",
+            "raw_data": {"shortcode": "CATALOG123"},
+            "child_posts_data": [],
+            "updated_at": observed_at,
+        }
+
+    def _fake_upsert(*_args: Any, conn: Any, **_kwargs: Any) -> dict[str, Any]:
+        assert conn is managed_conn
+        return {
+            "id": "22222222-2222-4222-8222-222222222222",
+            "source_id": "CATALOG123",
+        }
+
+    def _fake_sidecar_upsert(payloads: list[dict[str, Any]], *, conn: Any) -> list[dict[str, Any]]:
+        captured["sidecar_payloads"] = payloads
+        captured["sidecar_conn"] = conn
+        raise RuntimeError("catalog sidecar failed")
+
+    monkeypatch.setattr(catalog._payload_sidecars, "payload_write_transaction", _managed_transaction)
+    monkeypatch.setattr(catalog, "_shared_catalog_instagram_post_payload", _fake_payload)
+    monkeypatch.setattr(catalog._core, "_pg_upsert", _fake_upsert)
+    monkeypatch.setattr(
+        catalog._payload_sidecars,
+        "fetch_catalog_preservation_rows",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(catalog._payload_sidecars, "upsert_catalog_payloads", _fake_sidecar_upsert)
+
+    with pytest.raises(RuntimeError, match="catalog sidecar failed"):
+        catalog._upsert_shared_catalog_instagram_post(
+            run_id="run-1",
+            account_handle="bravotv",
+            post=SimpleNamespace(shortcode="CATALOG123"),
+            conn=None,
+        )
+
+    assert captured["transaction"] == (None, "instagram_catalog_payload_dual_write")
+    assert captured["sidecar_conn"] is managed_conn
+    assert captured["sidecar_payloads"][0]["payload_updated_at"] == observed_at
+    assert captured["rolled_back"] is True
 
 
 def test_post_batch_dual_writes_sidecars_in_same_transaction_without_n_plus_one(
