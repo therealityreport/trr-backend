@@ -759,9 +759,8 @@ def _socialblade_payload_needs_login_retry(payload: dict[str, Any] | None) -> bo
         chart_points = 0
     history_source = str(payload.get("history_source") or "").strip()
     period = str(metrics.get("period") or "").strip()
-    if (
-        history_source not in _SOCIALBLADE_AUTHENTICATED_HISTORY_SOURCES
-        and re.search(r"\b(?:14|30|31)\s+days\b", period, re.IGNORECASE)
+    if history_source not in _SOCIALBLADE_AUTHENTICATED_HISTORY_SOURCES and re.search(
+        r"\b(?:14|30|31)\s+days\b", period, re.IGNORECASE
     ):
         return True
     if chart_points > row_count:
