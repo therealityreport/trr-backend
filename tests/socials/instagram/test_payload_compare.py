@@ -262,4 +262,3 @@ def test_trace_lookup_failure_degrades_safely(monkeypatch: pytest.MonkeyPatch) -
     assert "trace_id" not in event
     assert "trace_id_hash" not in event
     assert event["schema_unavailable"] is True
-

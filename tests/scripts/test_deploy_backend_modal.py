@@ -171,11 +171,7 @@ def test_format_deploy_history_stamp_includes_recent_versions() -> None:
 
 def test_stamp_incident_note_replaces_existing_stamp(tmp_path) -> None:
     note_path = tmp_path / "incident.md"
-    note_path.write_text(
-        "# Incident\n\n"
-        f"{cli.HISTORY_STAMP_START}\nold\n{cli.HISTORY_STAMP_END}\n\n"
-        "## Tail\n"
-    )
+    note_path.write_text(f"# Incident\n\n{cli.HISTORY_STAMP_START}\nold\n{cli.HISTORY_STAMP_END}\n\n## Tail\n")
 
     stamped = cli.stamp_incident_note(
         note_path=note_path,
@@ -203,13 +199,14 @@ def test_resolve_incident_note_path_accepts_named_note() -> None:
     assert cli.resolve_incident_note_path(
         incident_note="ignored.md",
         incident_note_name="modal-v439-v440-serve-backend-api-crash-loop-2026-05-28",
-    ) == (
-        cli.INCIDENT_NOTES_DIR / "modal-v439-v440-serve-backend-api-crash-loop-2026-05-28.md"
-    )
+    ) == (cli.INCIDENT_NOTES_DIR / "modal-v439-v440-serve-backend-api-crash-loop-2026-05-28.md")
 
 
 def test_resolve_incident_note_path_accepts_named_note_with_extension() -> None:
-    assert cli.resolve_incident_note_path(
-        incident_note="ignored.md",
-        incident_note_name="custom-note.md",
-    ) == cli.INCIDENT_NOTES_DIR / "custom-note.md"
+    assert (
+        cli.resolve_incident_note_path(
+            incident_note="ignored.md",
+            incident_note_name="custom-note.md",
+        )
+        == cli.INCIDENT_NOTES_DIR / "custom-note.md"
+    )

@@ -471,4 +471,3 @@ def _current_trace_id() -> str | None:
     except Exception:  # pragma: no cover - defensive optional integration boundary
         return None
     return str(value) if value else None
-

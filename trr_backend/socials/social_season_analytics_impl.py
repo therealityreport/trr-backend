@@ -68024,6 +68024,8 @@ def preview_social_account_catalog_backfill_target(
         "completion_target_posts": max(catalog_total, materialized_total),
         "completion_target_source": "bounded_catalog",
     }
+
+
 def _instagram_payload_sidecar_sql(*, row_kind: str, row_alias: str, mode: str) -> tuple[str, str]:
     if mode == "legacy":
         return "", ""
@@ -68066,6 +68068,7 @@ def _instagram_payload_sidecar_sql(*, row_kind: str, row_alias: str, mode: str) 
           ({presence_projection}) as __payload_sidecar_present""",
     )
 
+
 def _log_instagram_payload_schema_unavailable(*, surface: str, entity_identity: Any) -> None:
     from trr_backend.socials.instagram.payload_compare import build_payload_compare_event
 
@@ -68080,6 +68083,7 @@ def _log_instagram_payload_schema_unavailable(*, surface: str, entity_identity: 
             schema_unavailable=True,
         ),
     )
+
 
 def _instagram_payload_rows_for_read(
     rows: Sequence[Mapping[str, Any]],
@@ -68149,9 +68153,13 @@ def _instagram_payload_rows_for_read(
         for key in _INSTAGRAM_PAYLOAD_PRIVATE_KEYS:
             row.pop(key, None)
         resolved_rows.append(row)
-    if mode == "compare" and compare_identities and should_sample_payload_compare(
-        surface=surface,
-        entity_identity=compare_identities,
+    if (
+        mode == "compare"
+        and compare_identities
+        and should_sample_payload_compare(
+            surface=surface,
+            entity_identity=compare_identities,
+        )
     ):
         logger.info(
             "instagram payload compare: %s",
@@ -68165,6 +68173,7 @@ def _instagram_payload_rows_for_read(
             ),
         )
     return resolved_rows
+
 
 def _fetch_instagram_catalog_gallery_rows_page(
     account_handle: str,
@@ -68301,6 +68310,7 @@ def _fetch_instagram_catalog_gallery_rows_page(
         include_collaborators=collaborators_available,
     )
 
+
 def _fetch_instagram_catalog_detail_rows(
     account_handle: str,
     *,
@@ -68367,6 +68377,7 @@ def _fetch_instagram_catalog_detail_rows(
         surface="instagram.catalog.detail",
     )
 
+
 def _fetch_instagram_materialized_detail_row(
     account_handle: str,
     *,
@@ -68377,9 +68388,7 @@ def _fetch_instagram_materialized_detail_row(
     from trr_backend.socials.instagram import payload_sidecars
 
     payload_mode = _payload_mode_override or payload_sidecars.payload_read_mode()
-    sidecar_join, sidecar_projection = _instagram_payload_sidecar_sql(
-        row_kind="post", row_alias="p", mode=payload_mode
-    )
+    sidecar_join, sidecar_projection = _instagram_payload_sidecar_sql(row_kind="post", row_alias="p", mode=payload_mode)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     owner_match_clause = _social_account_profile_owner_match_sql("instagram", alias="p")
     query = f"""
@@ -68431,6 +68440,8 @@ def _fetch_instagram_materialized_detail_row(
         surface="instagram.profile.detail",
     )
     return rows[0] if rows else None
+
+
 def _instagram_catalog_gallery_account_rows_cte_sql(
     *,
     statuses: list[str] | None = None,
@@ -68487,6 +68498,7 @@ def _instagram_catalog_gallery_account_rows_cte_sql(
             )
             """
 
+
 def _instagram_catalog_gallery_account_rows_params(
     account_handle: str,
     *,
@@ -68503,8 +68515,10 @@ def _instagram_catalog_gallery_account_rows_params(
             params.append(statuses)
     return params
 
+
 def _instagram_catalog_gallery_collaborator_rows_available(*, conn: Any | None = None) -> bool:
     return _instagram_catalog_collaborator_membership_available(conn=conn)
+
 
 def _instagram_catalog_gallery_total_posts(
     account_handle: str,

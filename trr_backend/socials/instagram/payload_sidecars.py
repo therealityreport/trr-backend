@@ -264,4 +264,3 @@ def upsert_catalog_payloads(payloads: Sequence[Mapping[str, Any]], *, conn: Any)
         values,
         conn=conn,
     )
-

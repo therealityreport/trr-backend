@@ -159,4 +159,3 @@ def test_bulk_catalog_upsert_uses_one_statement_without_legacy_emptying(monkeypa
     assert "insert into social.instagram_account_catalog_post_payloads" in normalized
     assert "is distinct from" in normalized
     assert "update social.instagram_account_catalog_posts" not in normalized
-

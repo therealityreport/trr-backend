@@ -130,4 +130,3 @@ def test_post_batch_dual_writes_sidecars_in_same_transaction_without_n_plus_one(
     )
     assert len(rows) == 2
     assert captured == {"sidecar_calls": 1, "payload_count": 2, "conn": fake_conn}
-

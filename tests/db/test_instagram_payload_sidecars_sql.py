@@ -78,4 +78,3 @@ def test_schema_rollback_is_explicit_and_does_not_touch_legacy_payloads() -> Non
     assert "drop table if exists social.instagram_post_payloads" in sql
     assert "update social.instagram_posts" not in sql
     assert "update social.instagram_account_catalog_posts" not in sql
-

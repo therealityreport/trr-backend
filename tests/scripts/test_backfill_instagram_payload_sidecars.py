@@ -259,4 +259,3 @@ def test_cli_exposes_status_dry_run_resume_and_timeout_bounds() -> None:
     assert args.after_id.startswith("11111111")
     assert args.batch_size == 25
     assert args.max_rows == 100
-

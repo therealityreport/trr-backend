@@ -52,9 +52,7 @@ def test_completion_summary_normalizes_profile_and_preserves_json(monkeypatch) -
         fake_get_social_completion_summary,
     )
 
-    response = TestClient(app).get(
-        "/api/v1/admin/socials/profiles/Instagram/%40BravoTV/completion-summary?year=2026"
-    )
+    response = TestClient(app).get("/api/v1/admin/socials/profiles/Instagram/%40BravoTV/completion-summary?year=2026")
 
     assert response.status_code == 200
     assert response.json() == _completion_payload()
@@ -81,9 +79,7 @@ def test_completion_summary_defaults_invalid_or_omitted_year_to_current_utc_year
     )
     client = TestClient(app)
 
-    invalid = client.get(
-        "/api/v1/admin/socials/profiles/instagram/bravotv/completion-summary?year=nope"
-    )
+    invalid = client.get("/api/v1/admin/socials/profiles/instagram/bravotv/completion-summary?year=nope")
     omitted = client.get("/api/v1/admin/socials/profiles/instagram/bravotv/completion-summary")
 
     assert invalid.status_code == 200
@@ -103,9 +99,7 @@ def test_completion_summary_rejects_unsupported_platform_before_repository(monke
         fail_if_called,
     )
 
-    response = TestClient(app).get(
-        "/api/v1/admin/socials/profiles/tiktok/bravotv/completion-summary?year=2026"
-    )
+    response = TestClient(app).get("/api/v1/admin/socials/profiles/tiktok/bravotv/completion-summary?year=2026")
 
     assert response.status_code == 400
     assert response.json() == {"error": "unsupported_profile"}
@@ -117,9 +111,7 @@ def test_completion_summary_maps_database_saturation_to_retryable_503(monkeypatc
 
     monkeypatch.setattr(router_module.completion_repo, "get_social_completion_summary", fail)
 
-    response = TestClient(app).get(
-        "/api/v1/admin/socials/profiles/instagram/bravotv/completion-summary?year=2026"
-    )
+    response = TestClient(app).get("/api/v1/admin/socials/profiles/instagram/bravotv/completion-summary?year=2026")
 
     assert response.status_code == 503
     detail = response.json()["detail"]
@@ -137,9 +129,7 @@ def test_completion_summary_maps_unexpected_errors_without_leaking_details(monke
 
     monkeypatch.setattr(router_module.completion_repo, "get_social_completion_summary", fail)
 
-    response = TestClient(app).get(
-        "/api/v1/admin/socials/profiles/instagram/bravotv/completion-summary?year=2026"
-    )
+    response = TestClient(app).get("/api/v1/admin/socials/profiles/instagram/bravotv/completion-summary?year=2026")
 
     assert response.status_code == 500
     assert response.json()["detail"]["code"] == "SOCIAL_COMPLETION_SUMMARY_FAILED"
@@ -180,4 +170,3 @@ def test_landing_scrape_job_health_maps_database_errors(monkeypatch) -> None:
 
     assert response.status_code == 503
     assert response.json()["detail"]["reason"] == "statement_timeout"
-

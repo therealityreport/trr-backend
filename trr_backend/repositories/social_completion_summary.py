@@ -616,9 +616,7 @@ def _fetch_completion_summary_mode_row(
     account_handle: str,
     year: int,
 ) -> dict[str, Any]:
-    compatibility_sql = (
-        _COMPLETION_SUMMARY_RAW_COMPAT_SIDECAR_SQL if sidecar else _COMPLETION_SUMMARY_RAW_COMPAT_SQL
-    )
+    compatibility_sql = _COMPLETION_SUMMARY_RAW_COMPAT_SIDECAR_SQL if sidecar else _COMPLETION_SUMMARY_RAW_COMPAT_SQL
     if year < COMPLETION_TYPED_FAST_PATH_MIN_YEAR:
         return _fetch_completion_summary_row(
             compatibility_sql,
@@ -645,11 +643,14 @@ def _fetch_completion_summary_mode_row(
 
 
 def _fetch_completion_summary_row(sql: str, *, account_handle: str, year: int) -> dict[str, Any]:
-    return pg.fetch_one(
-        sql,
-        [account_handle, year],
-        pool_name="social_profile",
-    ) or {}
+    return (
+        pg.fetch_one(
+            sql,
+            [account_handle, year],
+            pool_name="social_profile",
+        )
+        or {}
+    )
 
 
 def _completion_summary_from_row(
@@ -715,11 +716,14 @@ def _log_payload_compare_event(
 def get_social_landing_scrape_job_health() -> ScrapeJobHealthSummary:
     """Return the landing page's existing eight-hour scrape-job health rollup."""
 
-    row = pg.fetch_one(
-        _SCRAPE_JOB_HEALTH_SQL,
-        [SCRAPE_JOB_HEALTH_WINDOW_HOURS, list(SCRAPE_JOB_HEALTH_PLATFORMS)],
-        pool_name="social_profile",
-    ) or {}
+    row = (
+        pg.fetch_one(
+            _SCRAPE_JOB_HEALTH_SQL,
+            [SCRAPE_JOB_HEALTH_WINDOW_HOURS, list(SCRAPE_JOB_HEALTH_PLATFORMS)],
+            pool_name="social_profile",
+        )
+        or {}
+    )
     return {
         "window_hours": SCRAPE_JOB_HEALTH_WINDOW_HOURS,
         "window_started_at": _to_iso_string(row.get("window_started_at")),
@@ -731,4 +735,3 @@ def get_social_landing_scrape_job_health() -> ScrapeJobHealthSummary:
         "in_failed_sql_transaction_hits": _read_count(row.get("in_failed_sql_transaction_hits")),
         "latest_failure_at": _to_iso_string(row.get("latest_failure_at")),
     }
-

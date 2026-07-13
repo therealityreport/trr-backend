@@ -1305,6 +1305,8 @@ def test_comments_db_session_budget_status(monkeypatch):
     # Garbage budget is treated as disabled.
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_DB_SESSION_BUDGET", "not-a-number")
     assert modal_jobs.comments_db_session_budget_status()["within_budget"] is True
+
+
 @pytest.mark.parametrize("read_mode", ("legacy", "compare", "sidecar"))
 def test_modal_api_runtime_env_accepts_payload_read_modes(
     monkeypatch: pytest.MonkeyPatch,
@@ -1318,6 +1320,7 @@ def test_modal_api_runtime_env_accepts_payload_read_modes(
         "SOCIAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE": "0.1" if read_mode == "compare" else "0",
     }
 
+
 def test_modal_api_runtime_env_rejects_invalid_payload_read_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1325,6 +1328,7 @@ def test_modal_api_runtime_env_rejects_invalid_payload_read_mode(
 
     with pytest.raises(RuntimeError, match="must be one of: compare, legacy, sidecar"):
         modal_jobs._modal_api_runtime_env()
+
 
 def test_modal_api_runtime_env_defaults_to_legacy_despite_stale_runtime_value(
     monkeypatch: pytest.MonkeyPatch,
@@ -1336,6 +1340,7 @@ def test_modal_api_runtime_env_defaults_to_legacy_despite_stale_runtime_value(
         "SOCIAL_INSTAGRAM_PAYLOAD_READ_MODE": "legacy",
         "SOCIAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE": "0",
     }
+
 
 def test_modal_api_runtime_env_explicit_legacy_rolls_back_stale_runtime_value(
     monkeypatch: pytest.MonkeyPatch,
@@ -1350,6 +1355,7 @@ def test_modal_api_runtime_env_explicit_legacy_rolls_back_stale_runtime_value(
         "SOCIAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE": "0",
     }
 
+
 @pytest.mark.parametrize("sample_rate", ("0.01", "0.1", "0.25", "1"))
 def test_modal_api_runtime_env_accepts_compare_sample_rate(
     monkeypatch: pytest.MonkeyPatch,
@@ -1363,6 +1369,7 @@ def test_modal_api_runtime_env_accepts_compare_sample_rate(
         "SOCIAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE": sample_rate,
     }
 
+
 @pytest.mark.parametrize("sample_rate", ("0", "-0.1", "1.1", "nan", "inf", "not-a-number"))
 def test_modal_api_runtime_env_rejects_invalid_compare_sample_rate(
     monkeypatch: pytest.MonkeyPatch,
@@ -1373,6 +1380,7 @@ def test_modal_api_runtime_env_rejects_invalid_compare_sample_rate(
 
     with pytest.raises(RuntimeError, match="must be greater than 0 and at most 1"):
         modal_jobs._modal_api_runtime_env()
+
 
 def test_modal_api_runtime_env_compare_default_ignores_stale_runtime_sample_rate(
     monkeypatch: pytest.MonkeyPatch,
@@ -1385,6 +1393,7 @@ def test_modal_api_runtime_env_compare_default_ignores_stale_runtime_sample_rate
         "SOCIAL_INSTAGRAM_PAYLOAD_READ_MODE": "compare",
         "SOCIAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE": "0.1",
     }
+
 
 def test_modal_api_deploy_env_overrides_named_secret_without_mutation(
     monkeypatch: pytest.MonkeyPatch,

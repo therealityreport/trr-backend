@@ -137,9 +137,7 @@ def test_modal_invocation_is_nonterminal_uses_canonical_status_semantics(status:
 def test_cancel_modal_function_call_terminates_container_and_reports_drain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    call = _FakeFunctionCall(
-        [_FakeInputInfo(function_call_id="fc-running", status="PENDING", task_id="task-1")]
-    )
+    call = _FakeFunctionCall([_FakeInputInfo(function_call_id="fc-running", status="PENDING", task_id="task-1")])
     fake_modal = types.SimpleNamespace(
         FunctionCall=types.SimpleNamespace(from_id=lambda _call_id: call),
     )

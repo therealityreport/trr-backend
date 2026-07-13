@@ -603,4 +603,3 @@ def test_landing_scrape_job_health_returns_empty_shape_without_a_row(monkeypatch
         "in_failed_sql_transaction_hits": 0,
         "latest_failure_at": None,
     }
-

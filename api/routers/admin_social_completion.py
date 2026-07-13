@@ -121,4 +121,3 @@ def get_social_landing_scrape_job_health(
             code="SOCIAL_LANDING_SCRAPE_JOB_HEALTH_FAILED",
             message="Failed to load social landing scrape-job health.",
         ) from error
-
