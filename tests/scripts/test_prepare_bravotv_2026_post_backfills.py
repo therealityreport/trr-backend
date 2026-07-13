@@ -109,6 +109,7 @@ def test_prepared_commands_do_not_limit_catalog_post_discovery_to_details() -> N
     "args",
     [
         ["--date-start", "invalid"],
+        ["--date-start", "2026-01-01T00:00:00Z", "--date-end", "2026-01-01T00:00:00Z"],
         ["--date-start", "2026-01-02T00:00:00Z", "--date-end", "2026-01-01T00:00:00Z"],
     ],
 )

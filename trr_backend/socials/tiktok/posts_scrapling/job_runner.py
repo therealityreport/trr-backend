@@ -533,6 +533,7 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
                 fetcher_metadata["canonical_fallback"] = canonical_fallback_metadata
             _raise_if_cancelled(job_id=job_id, run_id=run_id, runtime_metadata=fetcher_metadata)
             if required_catalog_upsert_failures:
+                stop_reason = "tiktok_shared_catalog_persistence_incomplete"
                 raise TikTokPostsScraplingRuntimeError(
                     f"TikTok shared catalog persistence was incomplete for @{account_handle}; "
                     "saved posts will be retried.",

@@ -280,7 +280,7 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
     posts_upserted = 0
     materialized_posts_upserted = 0
     catalog_posts_upserted = 0
-    required_catalog_upsert_failures = 0
+    required_shared_persistence_failures = 0
     posts_skipped = 0
     posts_skipped_by_reason: dict[str, int] = {}
     pages_fetched = 0
@@ -309,9 +309,8 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
             "catalog_posts_upserted": catalog_posts_upserted,
             "posts_skipped": posts_skipped,
             "posts_skipped_by_reason": dict(posts_skipped_by_reason),
+            "required_shared_persistence_failures": required_shared_persistence_failures,
         }
-        if required_catalog_upsert_failures:
-            counters["required_catalog_upsert_failures"] = required_catalog_upsert_failures
         return counters
 
     def _listing_progress(*, partial: bool | None = None) -> dict[str, Any]:
@@ -402,7 +401,7 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
 
     async def _run_job() -> dict[str, Any]:
         nonlocal posts_fetched, posts_upserted, materialized_posts_upserted, catalog_posts_upserted
-        nonlocal required_catalog_upsert_failures
+        nonlocal required_shared_persistence_failures
         nonlocal posts_skipped, pages_fetched
         nonlocal fetcher_metadata, auth_metadata, stop_reason, persistence_state
 
@@ -559,12 +558,14 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
             posts_fetched = len(result.posts)
             materialized_posts_upserted = persisted.posts_upserted
             catalog_posts_upserted = int(getattr(persisted, "catalog_posts_upserted", 0) or 0)
-            required_catalog_upsert_failures = int(getattr(persisted, "required_catalog_upsert_failures", 0) or 0)
+            required_shared_persistence_failures = int(
+                getattr(persisted, "required_shared_persistence_failures", 0) or 0
+            )
             posts_upserted = max(materialized_posts_upserted, catalog_posts_upserted)
             posts_skipped = persisted.posts_skipped
             _merge_skipped_reasons(dict(getattr(persisted, "posts_skipped_by_reason", {}) or {}))
             persistence_state = "completed"
-            fetch_incomplete = bool(result.fetch_failed or result.retryable) or (
+            fetch_incomplete = bool(result.fetch_failed or result.retryable or fetcher_metadata.get("retryable")) or (
                 "complete" in fetcher_metadata
                 and not bool(fetcher_metadata["complete"])
                 and stop_reason not in {"max_posts_reached", "max_pages"}
@@ -580,7 +581,7 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
                         "fetch_reason": result.fetch_reason,
                     },
                 )
-            if required_catalog_upsert_failures:
+            if required_shared_persistence_failures:
                 raise ThreadsPostsScraplingRuntimeError(
                     f"Threads shared catalog persistence was incomplete for @{account_handle}; "
                     "saved posts will be retried.",
@@ -588,7 +589,7 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
                     retryable=True,
                     runtime_metadata={
                         **fetcher_metadata,
-                        "required_catalog_upsert_failures": required_catalog_upsert_failures,
+                        "required_shared_persistence_failures": required_shared_persistence_failures,
                     },
                 )
             if posts_fetched > 0 and posts_upserted > 0:

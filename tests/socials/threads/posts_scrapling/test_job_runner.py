@@ -730,6 +730,7 @@ def test_threads_job_runner_records_terminal_runtime_metadata(
         "catalog_posts_upserted": 0,
         "posts_skipped": 2,
         "posts_skipped_by_reason": {"missing_post_id": 1, "upsert_failed": 1},
+        "required_shared_persistence_failures": 0,
     }
     assert metadata["threads_posts_scrapling_persist_diagnostics"] == metadata["persist_counters"]
     assert metadata["fetcher_state"]["transport"] == "graphql_profile_posts"
@@ -799,6 +800,70 @@ def test_threads_job_runner_retries_after_persisting_incomplete_fetch(
     assert finish["metadata"]["stage_counters"] == {"posts": 1, "pages": 3}
 
 
+def test_threads_job_runner_honors_legacy_retryable_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_lifecycle: _FakeLifecycle,
+) -> None:
+    from trr_backend.socials import threads as threads_module
+    from trr_backend.socials.threads.posts_scrapling import job_runner as jr
+
+    class _FakeFetcher:
+        runtime_metadata = {"transport": "graphql_profile_posts", "request_count": 1, "complete": False}
+
+        async def warmup(self, _account_handle: str) -> None:
+            return None
+
+        async def fetch_posts(self, _account_handle: str, *, max_pages: int | None = None) -> Any:
+            del max_pages
+            return jr.ThreadsPostsFetchResult(
+                posts=[],
+                fetch_failed=True,
+                retryable=True,
+                fetch_reason="threads_graphql_page_fetch_failed",
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    class _FakeLegacyScraper:
+        runtime_metadata = {
+            "request_count": 2,
+            "complete": False,
+            "retryable": True,
+            "stop_reason": "legacy_page_fetch_failed",
+        }
+        last_retrieval_meta = {"pages_scanned": 2}
+
+        def scrape(self, _config: Any) -> list[Any]:
+            return [_thread_post()]
+
+    _install_common_fakes(
+        monkeypatch,
+        jr,
+        fetcher=_FakeFetcher(),
+        persist_result=PersistedThreadsPosts(posts_upserted=1, posts_skipped=0),
+    )
+    monkeypatch.setattr(threads_module, "ThreadsScraper", lambda **_kwargs: _FakeLegacyScraper())
+    monkeypatch.setattr(jr.pg, "fetch_one", _running_status_or_final_row)
+
+    jr.run_threads_posts_scrapling_job(
+        {
+            "id": "job-1",
+            "run_id": "run-1",
+            "attempt_count": 1,
+            "max_attempts": 2,
+            "config": {"account": "bravotv"},
+        },
+        worker_id="worker-1",
+    )
+
+    finish = fake_lifecycle.finish_calls[-1]
+    assert finish["status"] == "retrying"
+    error_metadata = finish["metadata"]["runtime_metadata"]["error"]
+    assert error_metadata["retryable"] is True
+    assert error_metadata["fetch_incomplete"] is True
+
+
 def test_threads_job_runner_retries_incomplete_shared_catalog_persistence(
     monkeypatch: pytest.MonkeyPatch,
     fake_lifecycle: _FakeLifecycle,
@@ -825,7 +890,7 @@ def test_threads_job_runner_retries_incomplete_shared_catalog_persistence(
         persist_result=PersistedThreadsPosts(
             posts_upserted=1,
             catalog_posts_upserted=1,
-            required_catalog_upsert_failures=1,
+            required_shared_persistence_failures=1,
             posts_skipped=1,
             posts_skipped_by_reason={"upsert_failed": 1},
         ),
@@ -847,4 +912,4 @@ def test_threads_job_runner_retries_incomplete_shared_catalog_persistence(
     assert finish["status"] == "retrying"
     assert finish["last_error_code"] == "threads_shared_catalog_persistence_incomplete"
     assert finish["metadata"]["persist_counters"]["posts_upserted"] == 1
-    assert finish["metadata"]["persist_counters"]["required_catalog_upsert_failures"] == 1
+    assert finish["metadata"]["persist_counters"]["required_shared_persistence_failures"] == 1

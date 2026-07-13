@@ -411,6 +411,8 @@ def test_tiktok_job_runner_retries_incomplete_shared_catalog_persistence(
     assert finish["last_error_code"] == "tiktok_shared_catalog_persistence_incomplete"
     assert finish["metadata"]["persist_counters"]["posts_upserted"] == 1
     assert finish["metadata"]["persist_counters"]["required_catalog_upsert_failures"] == 1
+    assert finish["metadata"]["stop_reason"] == "tiktok_shared_catalog_persistence_incomplete"
+    assert finish["metadata"]["listing_progress"]["stop_reason"] == "tiktok_shared_catalog_persistence_incomplete"
 
 
 def test_tiktok_job_runner_recovers_non_json_posts_with_canonical_fallback(
