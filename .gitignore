@@ -105,6 +105,11 @@ out
 .playwright-mcp
 artifacts/
 
+# Duplicate root wrappers for canonical scripts under scripts/
+/backfill_tmdb_show_details.py
+/resolve_tmdb_ids_via_find.py
+/test_connection.py
+
 # Runtime lock files used to coordinate local/background jobs.
 .locks/
 
