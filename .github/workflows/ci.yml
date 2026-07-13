@@ -48,7 +48,10 @@ jobs:
       - name: Verify requirements lock freshness
         run: |
           cp requirements.lock.txt /tmp/requirements.lock.before.txt
-          uv pip compile requirements.in --python-version 3.11 -o requirements.lock.txt
+          uv pip compile requirements.in \
+            --python-version 3.11 \
+            --python-platform x86_64-manylinux_2_28 \
+            -o requirements.lock.txt
           diff -u /tmp/requirements.lock.before.txt requirements.lock.txt
 
       - name: Install dependencies

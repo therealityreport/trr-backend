@@ -225,6 +225,31 @@ def test_dispatch_cast_screentime_run_uses_cast_function(monkeypatch: pytest.Mon
     assert captured["kwargs"] == {"run_id": "run-123"}
 
 
+def test_dispatch_cast_screentime_subtitle_extraction_uses_media_function(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_spawn_named_modal_function(**kwargs):
+        captured.update(kwargs)
+        return {"dispatched": True, "call_id": "fc-subtitles"}
+
+    monkeypatch.setattr(modal_dispatch, "_spawn_named_modal_function", _fake_spawn_named_modal_function)
+
+    result = modal_dispatch.dispatch_cast_screentime_subtitle_extraction(
+        video_asset_id="asset-123",
+        force=True,
+    )
+
+    assert result == {"dispatched": True, "call_id": "fc-subtitles"}
+    assert captured == {
+        "function_name": "run_cast_screentime_subtitle_extraction",
+        "log_label": "cast screentime subtitle extraction",
+        "dispatcher_name": "cast-screentime-subtitles",
+        "kwargs": {"video_asset_id": "asset-123", "force": True},
+    }
+
+
 def test_dispatch_socialblade_scrape_passes_platform_and_following_sidecar(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

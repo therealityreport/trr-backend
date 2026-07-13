@@ -3,6 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from uuid import uuid4
 
+import pytest
 from psycopg2.extras import Json
 
 from trr_backend.repositories import cast_screentime
@@ -22,6 +23,194 @@ def test_json_wrap_sanitizes_decimal_and_uuid_values():
     assert adapted["screen_time_seconds"] == 2.0
     assert isinstance(adapted["person_id"], str)
     assert adapted["nested"][0]["confidence"] == 0.95
+
+
+def test_get_subtitle_summary_returns_aggregate_counts_and_filters_skipped(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        cast_screentime.pg,
+        "fetch_one",
+        lambda sql, params: (
+            {
+                "video_asset_id": "asset-1",
+                "status": "complete",
+                "attempts": 1,
+            }
+            if "FROM ml.analysis_media_assets" in sql
+            else {
+                "discovered_track_count": 2,
+                "eligible_track_count": 1,
+                "completed_track_count": 1,
+                "failed_track_count": 0,
+                "primary_track_id": "track-1",
+            }
+        ),
+    )
+
+    def _fetch_all(sql, params):
+        calls.append(sql)
+        return [{"id": "track-1", "selection_status": "eligible_english"}]
+
+    monkeypatch.setattr(cast_screentime.pg, "fetch_all", _fetch_all)
+
+    result = cast_screentime.get_subtitle_summary("asset-1")
+
+    assert result["status"] == "complete"
+    assert result["discovered_track_count"] == 2
+    assert result["primary_track_id"] == "track-1"
+    assert "selection_status = 'eligible_english'" in calls[0]
+
+
+def test_queue_subtitle_extraction_does_not_redispatch_active_job(monkeypatch):
+    class _ConnectionContext:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(cast_screentime.pg, "db_connection", lambda **_kwargs: _ConnectionContext())
+    monkeypatch.setattr(
+        cast_screentime.pg,
+        "fetch_one",
+        lambda *_args, **_kwargs: {"video_asset_id": "asset-1", "status": "running"},
+    )
+    monkeypatch.setattr(
+        cast_screentime.pg,
+        "execute_returning",
+        lambda *_args, **_kwargs: pytest.fail("active job must not be updated"),
+    )
+
+    result = cast_screentime.queue_subtitle_extraction("asset-1")
+
+    assert result == {
+        "video_asset_id": "asset-1",
+        "status": "running",
+        "already_active": True,
+        "should_dispatch": False,
+        "force": False,
+    }
+
+
+def test_queue_subtitle_extraction_force_requeues_complete_asset(monkeypatch):
+    class _ConnectionContext:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(cast_screentime.pg, "db_connection", lambda **_kwargs: _ConnectionContext())
+    monkeypatch.setattr(
+        cast_screentime.pg,
+        "fetch_one",
+        lambda *_args, **_kwargs: {"video_asset_id": "asset-1", "status": "complete"},
+    )
+    monkeypatch.setattr(
+        cast_screentime.pg,
+        "execute_returning",
+        lambda *_args, **_kwargs: [{"video_asset_id": "asset-1", "status": "queued"}],
+    )
+
+    result = cast_screentime.queue_subtitle_extraction("asset-1", force=True)
+
+    assert result["status"] == "queued"
+    assert result["should_dispatch"] is True
+    assert result["force"] is True
+
+
+def test_queue_subtitle_extraction_force_does_not_overlap_running_asset(monkeypatch):
+    class _ConnectionContext:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(cast_screentime.pg, "db_connection", lambda **_kwargs: _ConnectionContext())
+    monkeypatch.setattr(
+        cast_screentime.pg,
+        "fetch_one",
+        lambda *_args, **_kwargs: {
+            "video_asset_id": "asset-1",
+            "status": "running",
+            "is_stale": False,
+        },
+    )
+    monkeypatch.setattr(
+        cast_screentime.pg,
+        "execute_returning",
+        lambda *_args, **_kwargs: pytest.fail("a live worker must not be requeued"),
+    )
+
+    result = cast_screentime.queue_subtitle_extraction("asset-1", force=True)
+
+    assert result["status"] == "running"
+    assert result["already_active"] is True
+    assert result["should_dispatch"] is False
+    assert result["force"] is True
+
+
+def test_queue_subtitle_extraction_force_recovers_only_stale_running_asset(monkeypatch):
+    class _ConnectionContext:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    captured = {}
+    monkeypatch.setattr(cast_screentime.pg, "db_connection", lambda **_kwargs: _ConnectionContext())
+    monkeypatch.setattr(
+        cast_screentime.pg,
+        "fetch_one",
+        lambda *_args, **_kwargs: {
+            "video_asset_id": "asset-1",
+            "status": "running",
+            "is_stale": True,
+        },
+    )
+
+    def _execute_returning(sql, params, **_kwargs):
+        captured["sql"] = sql
+        return [{"video_asset_id": "asset-1", "status": "queued"}]
+
+    monkeypatch.setattr(cast_screentime.pg, "execute_returning", _execute_returning)
+
+    result = cast_screentime.queue_subtitle_extraction("asset-1", force=True)
+
+    assert result["status"] == "queued"
+    assert result["already_active"] is False
+    assert result["should_dispatch"] is True
+    assert "subtitle_extraction_started_at = NULL" in captured["sql"]
+
+
+def test_reconcile_stale_subtitle_extractions_bounds_interval(monkeypatch):
+    captured = {}
+
+    def _execute_returning(sql, params):
+        captured["sql"] = sql
+        captured["params"] = params
+        return [{"id": "asset-1", "subtitle_extraction_status": "failed"}]
+
+    monkeypatch.setattr(cast_screentime.pg, "execute_returning", _execute_returning)
+
+    result = cast_screentime.reconcile_stale_subtitle_extractions(stale_after_seconds=1)
+
+    assert result[0]["subtitle_extraction_status"] == "failed"
+    assert captured["params"] == [60]
+    assert "subtitle_worker_stale" in captured["sql"]
+    assert "subtitle_extraction_status IN ('queued', 'running')" in captured["sql"]
+
+
+def test_update_subtitle_extraction_status_rejects_untrusted_column_name():
+    with pytest.raises(ValueError, match="Unsupported subtitle extraction timestamp"):
+        cast_screentime.update_subtitle_extraction_status("asset-1", "failed", dropped_table_at="now")
+
+
+def test_update_subtitle_track_rejects_non_identifier_column():
+    with pytest.raises(ValueError, match="Invalid SQL identifier"):
+        cast_screentime.update_subtitle_track("track-1", {"status = 'failed'; --": "complete"})
 
 
 def test_replace_cast_screentime_evidence_dedupes_duplicate_evidence_keys(monkeypatch):

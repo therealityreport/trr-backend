@@ -102,6 +102,7 @@ def test_expected_function_names_includes_runtime_probes(monkeypatch: pytest.Mon
     assert "run_social_media_job" in function_names
     assert "run_social_comments_job" in function_names
     assert "run_social_comments_recovery_job" in function_names
+    assert "run_cast_screentime_subtitle_extraction" in function_names
     assert cli.required_social_function_names() == (
         "run_social_job",
         "run_social_posts_job",
