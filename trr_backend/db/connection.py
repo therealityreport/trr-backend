@@ -12,7 +12,7 @@ import os
 import subprocess
 import sys
 from functools import lru_cache
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +102,25 @@ def classify_connection_class(url: str) -> str:
     return "other"
 
 
+def derive_supavisor_transaction_url(session_url: str) -> str:
+    """Derive the matching Supavisor transaction-pool URL from a session URL."""
+    parsed = urlsplit(str(session_url or "").strip())
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError("Supavisor session URL must include a valid port") from error
+    if (
+        parsed.scheme not in {"postgres", "postgresql"}
+        or not (parsed.hostname or "").strip().lower().endswith("pooler.supabase.com")
+        or port != 5432
+    ):
+        raise ValueError("Supavisor session URL must use pooler.supabase.com:5432")
+    host_and_auth, separator, _port = parsed.netloc.rpartition(":")
+    if not separator or not host_and_auth:
+        raise ValueError("Supavisor session URL must include port 5432")
+    return urlunsplit(parsed._replace(netloc=f"{host_and_auth}:6543"))
+
+
 def _env_truthy(name: str) -> bool:
     return (os.getenv(name) or "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -133,13 +152,9 @@ def resolve_database_url_candidate_details() -> tuple[dict[str, str | int | None
     """
     Resolve candidate database URLs in priority order.
 
-    Priority order:
-    1. TRR_DB_DIRECT_URL
-    2. TRR_DB_TRANSACTION_URL only when TRR_DB_RUNTIME_LANE=transaction and
-       TRR_DB_TRANSACTION_FLIGHT_TEST=1
-    3. TRR_DB_SESSION_URL
-    4. TRR_DB_URL
-    5. TRR_DB_FALLBACK_URL (optional operator-provided fallback)
+    Local/direct resolution is unchanged. In the explicit transaction runtime
+    lane, only transaction-class candidates are returned; a missing explicit
+    transaction URL is derived from a validated Supavisor session URL.
     """
 
     def _append_candidate(
@@ -159,12 +174,58 @@ def resolve_database_url_candidate_details() -> tuple[dict[str, str | int | None
     seen: set[str] = set()
 
     _append_candidate(candidates, seen, os.getenv(DIRECT_DB_ENV), source=DIRECT_DB_ENV)
-    if resolve_runtime_connection_lane() == "transaction" and transaction_flight_test_enabled():
-        _append_candidate(candidates, seen, os.getenv(TRANSACTION_DB_ENV), source=TRANSACTION_DB_ENV)
-    _append_candidate(candidates, seen, os.getenv(SESSION_DB_ENV), source=SESSION_DB_ENV)
-    _append_candidate(candidates, seen, os.getenv(CANONICAL_DB_ENV), source=CANONICAL_DB_ENV)
-    _append_candidate(candidates, seen, os.getenv(FALLBACK_DB_ENV), source=FALLBACK_DB_ENV)
+    transaction_lane = resolve_runtime_connection_lane() == "transaction" and transaction_flight_test_enabled()
+    if transaction_lane:
+        explicit_transaction_url = (os.getenv(TRANSACTION_DB_ENV) or "").strip()
+        if explicit_transaction_url:
+            _append_candidate(
+                candidates,
+                seen,
+                explicit_transaction_url,
+                source=TRANSACTION_DB_ENV,
+            )
+        for env_name in (SESSION_DB_ENV, CANONICAL_DB_ENV, FALLBACK_DB_ENV):
+            source_url = (os.getenv(env_name) or "").strip()
+            if not source_url:
+                continue
+            if classify_connection_class(source_url) == "transaction":
+                _append_candidate(candidates, seen, source_url, source=env_name)
+                continue
+            if classify_connection_class(source_url) != "session":
+                continue
+            _append_candidate(
+                candidates,
+                seen,
+                derive_supavisor_transaction_url(source_url),
+                source=f"{env_name}:derived_transaction",
+            )
+    else:
+        _append_candidate(candidates, seen, os.getenv(SESSION_DB_ENV), source=SESSION_DB_ENV)
+        _append_candidate(candidates, seen, os.getenv(CANONICAL_DB_ENV), source=CANONICAL_DB_ENV)
+        _append_candidate(candidates, seen, os.getenv(FALLBACK_DB_ENV), source=FALLBACK_DB_ENV)
 
+    return tuple(candidates)
+
+
+def resolve_session_database_url_candidate_details() -> tuple[dict[str, str | int | None], ...]:
+    """Resolve candidates suitable for session-scoped locks and pacing."""
+    candidates: list[dict[str, str | int | None]] = []
+    seen: set[str] = set()
+
+    def _append(value: str | None, *, source: str, allow_direct: bool = False) -> None:
+        url = str(value or "").strip()
+        if not url or url in seen:
+            return
+        connection_class = classify_connection_class(url)
+        if connection_class != "session" and not (allow_direct and connection_class in {"direct", "local"}):
+            return
+        candidates.append({"url": url, **describe_database_url_target(url, source=source)})
+        seen.add(url)
+
+    _append(os.getenv(DIRECT_DB_ENV), source=DIRECT_DB_ENV, allow_direct=True)
+    _append(os.getenv(SESSION_DB_ENV), source=SESSION_DB_ENV)
+    _append(os.getenv(CANONICAL_DB_ENV), source=CANONICAL_DB_ENV)
+    _append(os.getenv(FALLBACK_DB_ENV), source=FALLBACK_DB_ENV)
     return tuple(candidates)
 
 
@@ -192,10 +253,10 @@ def log_database_resolution_summary() -> None:
     )
     winner_source = str(winner["source"])
     winner_connection_class = str(winner["connection_class"])
-    if winner_connection_class in {"direct", "transaction"}:
+    if winner_connection_class == "direct":
         logger.warning(
             "[db-resolution] non_default_connection_class connection_class=%s "
-            "source=%s; default runtime lane is session via pooler.supabase.com:5432",
+            "source=%s; direct connections are reserved for local development",
             winner_connection_class,
             winner_source,
         )
@@ -218,12 +279,9 @@ def resolve_database_url() -> str:
     """
     Resolve the database URL using a prioritized lookup.
 
-    Priority order:
-    1. TRR_DB_DIRECT_URL - explicit local direct database lane
-    2. TRR_DB_TRANSACTION_URL - only during an explicit transaction-mode flight test
-    3. TRR_DB_SESSION_URL - preferred explicit session-mode URL
-    4. TRR_DB_URL - compatibility/canonical runtime database URL
-    5. TRR_DB_FALLBACK_URL - Optional operator-provided fallback
+    Local uses the explicit direct lane. Deployed transaction mode uses an
+    explicit or safely derived transaction-pool URL. Session-mode resolution
+    remains available for compatibility and dedicated session-control pools.
 
     Returns:
         Database connection URL string.
@@ -240,14 +298,15 @@ def resolve_database_url() -> str:
         "For remote/production:\n"
         "  Set TRR_DB_SESSION_URL or TRR_DB_URL to your Supabase session-pooler connection string.\n"
         "  Optionally set TRR_DB_FALLBACK_URL for controlled failover.\n"
-        "  Transaction-mode flight tests require TRR_DB_TRANSACTION_URL, "
-        "TRR_DB_RUNTIME_LANE=transaction, and TRR_DB_TRANSACTION_FLIGHT_TEST=1.\n"
+        "  Transaction runtime requires TRR_DB_RUNTIME_LANE=transaction and "
+        "TRR_DB_TRANSACTION_FLIGHT_TEST=1. Set TRR_DB_TRANSACTION_URL or provide "
+        "a valid Supavisor session URL that can be safely derived.\n"
         "  Example: postgresql://postgres.<project>:<password>@<host>:5432/postgres\n\n"
         "For local development:\n"
         "  Set TRR_DB_DIRECT_URL to your direct Postgres connection string.\n\n"
         "Available environment variables (checked in order):\n"
         "  - TRR_DB_DIRECT_URL (explicit local direct DB lane)\n"
-        "  - TRR_DB_TRANSACTION_URL (explicit flight-test env only)\n"
+        "  - TRR_DB_TRANSACTION_URL (optional explicit transaction runtime URL)\n"
         "  - TRR_DB_SESSION_URL (preferred session runtime env)\n"
         "  - TRR_DB_URL (compatibility/canonical runtime env)\n"
         "  - TRR_DB_FALLBACK_URL (optional runtime fallback)\n"

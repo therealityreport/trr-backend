@@ -116,7 +116,42 @@ def test_transaction_url_is_first_for_explicit_flight_test(
 
     candidates = connection.resolve_database_url_candidates()
 
-    assert candidates == (transaction_pooler, session_pooler)
+    assert candidates == (
+        transaction_pooler,
+        connection.derive_supavisor_transaction_url(session_pooler),
+    )
+
+
+def test_transaction_lane_derives_url_from_validated_session_pooler(
+    monkeypatch: pytest.MonkeyPatch,
+    _reset_db_env: None,
+) -> None:
+    session_pooler = (
+        "postgresql://postgres.session:p%40ss@aws-1-us-east-1.pooler.supabase.com:5432/postgres?sslmode=require"
+    )
+    monkeypatch.setenv("TRR_DB_RUNTIME_LANE", "transaction")
+    monkeypatch.setenv("TRR_DB_TRANSACTION_FLIGHT_TEST", "1")
+    monkeypatch.setenv("TRR_DB_SESSION_URL", session_pooler)
+
+    details = connection.resolve_database_url_candidate_details()
+
+    assert details[0]["url"] == session_pooler.replace(":5432/", ":6543/")
+    assert details[0]["source"] == "TRR_DB_SESSION_URL:derived_transaction"
+    assert details[0]["connection_class"] == "transaction"
+    assert connection.resolve_session_database_url_candidate_details()[0]["url"] == session_pooler
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "postgresql://postgres:secret@example.com:5432/postgres",
+        "postgresql://postgres:secret@aws-1-us-east-1.pooler.supabase.com:6543/postgres",
+        "https://aws-1-us-east-1.pooler.supabase.com:5432/postgres",
+    ),
+)
+def test_transaction_url_derivation_rejects_non_session_supavisor_urls(url: str) -> None:
+    with pytest.raises(ValueError, match="Supavisor session URL"):
+        connection.derive_supavisor_transaction_url(url)
 
 
 def test_derived_direct_never_produced_at_runtime(

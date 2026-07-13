@@ -290,6 +290,40 @@ def test_inject_modal_runtime_defaults_overrides_explicit_env(
     assert os.environ["TRR_DB_POOL_MAXCONN"] == "2"
 
 
+def test_inject_modal_runtime_defaults_preserves_operator_tunable_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER", "none")
+
+    modal_jobs._inject_modal_runtime_defaults()
+
+    assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER"] == "none"
+
+
+def test_inject_modal_runtime_defaults_applies_operator_tunable_default_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SOCIALBLADE_PROXY_PROVIDER", raising=False)
+
+    modal_jobs._inject_modal_runtime_defaults()
+
+    assert os.environ["SOCIALBLADE_PROXY_PROVIDER"] == "decodo"
+
+
+def test_inject_modal_runtime_defaults_keeps_safety_clamps_pinned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT", "999")
+
+    modal_jobs._inject_modal_runtime_defaults()
+
+    assert os.environ["TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT"] == "4"
+
+
+def test_operator_tunable_runtime_default_keys_exist_in_canonical_defaults() -> None:
+    assert modal_jobs._OPERATOR_TUNABLE_RUNTIME_DEFAULT_KEYS <= modal_jobs._CANONICAL_MODAL_RUNTIME_DEFAULTS.keys()
+
+
 def test_inject_modal_runtime_defaults_clears_object_storage_profile_when_static_creds_present(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

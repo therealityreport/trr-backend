@@ -11,6 +11,7 @@ from threading import Lock
 from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import urlparse
 
+import psycopg2
 from psycopg2.extensions import (
     TRANSACTION_STATUS_ACTIVE,
     TRANSACTION_STATUS_IDLE,
@@ -23,6 +24,7 @@ from psycopg2.pool import PoolError, ThreadedConnectionPool
 
 from trr_backend.db.connection import (
     resolve_database_url_candidate_details,
+    resolve_session_database_url_candidate_details,
 )
 from trr_backend.observability import (
     record_postgres_pool_acquire_duration,
@@ -39,7 +41,7 @@ DEFAULT_POOL_MAXCONN = 24
 DEFAULT_SESSION_POOLER_MINCONN = 1
 DEFAULT_SESSION_POOLER_MAXCONN = 2
 DEFAULT_MODAL_SESSION_POOLER_MINCONN = 1
-DEFAULT_MODAL_SESSION_POOLER_MAXCONN = 2
+DEFAULT_MODAL_SESSION_POOLER_MAXCONN = 1
 DEFAULT_MODAL_NAMED_SESSION_POOLER_MAXCONN = 1
 LOCAL_SESSION_POOLER_MAX_CEILING = 8
 DEFAULT_POOL_ACQUIRE_ATTEMPTS = 8
@@ -95,6 +97,8 @@ def _pool_size_env_names(pool_name: str) -> tuple[str, str]:
         return "TRR_SOCIAL_PROFILE_DB_POOL_MINCONN", "TRR_SOCIAL_PROFILE_DB_POOL_MAXCONN"
     if pool_name == "social_control":
         return "TRR_SOCIAL_CONTROL_DB_POOL_MINCONN", "TRR_SOCIAL_CONTROL_DB_POOL_MAXCONN"
+    if pool_name == "session_control":
+        return "TRR_SESSION_CONTROL_DB_POOL_MINCONN", "TRR_SESSION_CONTROL_DB_POOL_MAXCONN"
     if pool_name == "social_progress":
         return "TRR_SOCIAL_PROGRESS_DB_POOL_MINCONN", "TRR_SOCIAL_PROGRESS_DB_POOL_MAXCONN"
     if pool_name == "health":
@@ -103,7 +107,13 @@ def _pool_size_env_names(pool_name: str) -> tuple[str, str]:
 
 
 def _known_pool_names() -> tuple[str, ...]:
-    return ("default", "social_profile", "social_control", "social_progress", "health")
+    return ("default", "social_profile", "social_control", "social_progress", "health", "session_control")
+
+
+def _database_candidates_for_pool(pool_name: str) -> tuple[dict[str, str | int | None], ...]:
+    if pool_name == "session_control":
+        return resolve_session_database_url_candidate_details()
+    return resolve_database_url_candidate_details()
 
 
 def _session_pooler_warning_maxconn(pool_name: str) -> int:
@@ -242,9 +252,11 @@ def is_database_service_unavailable_error(error: Exception) -> bool:
     if isinstance(error, DatabaseServiceUnavailableError):
         return True
     message = _error_message(error)
+    reason = _database_service_unavailable_reason(message)
     return (
         _is_pool_exhausted_error(error)
         or _is_statement_timeout_error(error)
+        or reason in {"session_pool_capacity", "pool_capacity", "pool_initialization"}
         or "database pool initialization failed" in message
     )
 
@@ -282,6 +294,89 @@ def database_service_unavailable_detail(error: Exception) -> dict[str, Any]:
     }
 
 
+def probe_fresh_session_capacity(
+    *,
+    requested_sessions: int = 1,
+    max_probe_sessions: int = 10,
+) -> dict[str, Any]:
+    """Reserve fresh Supavisor session slots briefly without initializing a named pool."""
+
+    safe_requested = max(0, min(int(requested_sessions), max(0, int(max_probe_sessions))))
+    candidates = resolve_session_database_url_candidate_details()
+    candidate = candidates[0] if candidates else {}
+    target = {
+        "source": candidate.get("source"),
+        "host_class": candidate.get("host_class"),
+        "connection_class": candidate.get("connection_class"),
+        "port": candidate.get("port"),
+    }
+    if safe_requested == 0:
+        return {
+            "available": True,
+            "blocked": False,
+            "reason": "no_session_slots_requested",
+            "requested_sessions": 0,
+            "reserved_sessions": 0,
+            "target": target,
+            "error": None,
+        }
+    url = str(candidate.get("url") or "").strip()
+    if not url:
+        return {
+            "available": False,
+            "blocked": True,
+            "reason": "database_configuration",
+            "requested_sessions": safe_requested,
+            "reserved_sessions": 0,
+            "target": target,
+            "error": "session_database_url_missing",
+        }
+
+    connections: list[Any] = []
+    try:
+        for _index in range(safe_requested):
+            connect_kwargs: dict[str, Any] = {
+                "dsn": url,
+                "application_name": "trr-backend:session-capacity-probe",
+                "connect_timeout": min(5, DEFAULT_CONNECT_TIMEOUT_SECONDS),
+            }
+            sslmode = _sslmode_for_url(url)
+            if sslmode:
+                connect_kwargs["sslmode"] = sslmode
+            conn = psycopg2.connect(**connect_kwargs)
+            connections.append(conn)
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute("select 1")
+                cur.fetchone()
+        return {
+            "available": True,
+            "blocked": False,
+            "reason": "fresh_session_reservation_succeeded",
+            "requested_sessions": safe_requested,
+            "reserved_sessions": len(connections),
+            "target": target,
+            "error": None,
+        }
+    except Exception as exc:  # noqa: BLE001 - normalized below without leaking the DSN
+        reason = _database_service_unavailable_reason(_error_message(exc))
+        return {
+            "available": False,
+            "blocked": True,
+            "reason": reason,
+            "requested_sessions": safe_requested,
+            "reserved_sessions": len(connections),
+            "target": target,
+            "error": type(exc).__name__,
+        }
+    finally:
+        for conn in connections:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                logger.debug("fresh session capacity probe close failed", exc_info=True)
+
+
 def _is_transient_transport_error(error: Exception) -> bool:
     message = _error_message(error)
     if not message:
@@ -301,6 +396,7 @@ def _is_transient_transport_error(error: Exception) -> bool:
         "connection reset by peer",
         "connection refused",
         "connection timed out",
+        "timeout expired",
         "could not receive data from server",
         "emaxconnsession",
         "maxclientsinsessionmode",
@@ -349,6 +445,11 @@ def _resolve_pool_sizing(
     modal_runtime = _is_modal_container_runtime()
     local_or_dev_runtime = _is_local_or_dev_runtime()
     modal_session_pooler_maxconn = _modal_session_pooler_maxconn(pool_name)
+    if pool_name == "session_control":
+        minconn = 1
+        maxconn = 1
+        minconn_source = "fixed:session_control"
+        maxconn_source = "fixed:session_control"
     if session_pooler and modal_runtime and not trr_local_dev and maxconn > modal_session_pooler_maxconn:
         maxconn = modal_session_pooler_maxconn
         maxconn_source = "clamped:modal_session_pooler_ceiling"
@@ -486,7 +587,7 @@ def _pool_counts(pool: ThreadedConnectionPool | None) -> tuple[int | None, int |
 
 def _configured_pool_snapshot(pool_name: str) -> dict[str, Any]:
     minconn_env_name, maxconn_env_name = _pool_size_env_names(pool_name)
-    candidate_details = resolve_database_url_candidate_details()
+    candidate_details = _database_candidates_for_pool(pool_name)
     candidate_detail = candidate_details[0] if candidate_details else None
     if candidate_detail is None:
         return {
@@ -628,7 +729,7 @@ def _log_checkout(
         }
     in_use, available = _pool_counts(pool)
     acquire_duration_seconds = max(0.0, time.perf_counter() - acquire_started_at)
-    logger.info(
+    logger.debug(
         "[db-pool] checkout id=%s label=%s acquire_ms=%.1f backend_pid=%s tx_status=%s in_use=%s available=%s",
         checkout_id,
         label,
@@ -657,7 +758,7 @@ def _log_return(
             started_at = metadata.get("started_at")
     held_ms = (time.perf_counter() - started_at) * 1000.0 if started_at is not None else None
     in_use, available = _pool_counts(pool)
-    logger.info(
+    logger.debug(
         "[db-pool] return id=%s label=%s held_ms=%s backend_pid=%s tx_status=%s in_use=%s available=%s",
         checkout_id,
         label,
@@ -770,7 +871,7 @@ def _get_pool(*, pool_name: str = "default") -> ThreadedConnectionPool:
             return active_pool
 
         init_errors: list[Exception] = []
-        candidate_details = resolve_database_url_candidate_details()
+        candidate_details = _database_candidates_for_pool(pool_name)
         for index, candidate_detail in enumerate(candidate_details):
             candidate = str(candidate_detail["url"])
             minconn_env_name, maxconn_env_name = _pool_size_env_names(pool_name)
@@ -1001,7 +1102,6 @@ def _run_with_transient_retry(operation: Callable[[], T]) -> T:
             last_error = error
             if not _should_retry_query(error, attempt=attempt):
                 raise
-            reset_pool()
     if last_error is not None:
         raise last_error
     raise RuntimeError("unreachable")
@@ -1020,7 +1120,7 @@ def _get_connection_with_retry(
         pool = _get_pool(pool_name=pool_name)
         for acquire_attempt in range(acquire_attempts):
             acquire_started_at = time.perf_counter()
-            logger.info(
+            logger.debug(
                 "[db-pool] acquire_start label=%s attempt=%s acquire_attempt=%s in_use=%s available=%s",
                 label,
                 attempt,
@@ -1044,7 +1144,9 @@ def _get_connection_with_retry(
                 return pool, conn, checkout_id
             except Exception as error:
                 last_error = error
-                logger.warning(
+                pool_exhausted = _is_pool_exhausted_error(error)
+                will_retry_pool_acquire = pool_exhausted and acquire_attempt < (acquire_attempts - 1)
+                (logger.debug if will_retry_pool_acquire else logger.warning)(
                     "[db-pool] acquire_failed label=%s attempt=%s acquire_attempt=%s error=%s in_use=%s available=%s",
                     label,
                     attempt,
@@ -1052,11 +1154,11 @@ def _get_connection_with_retry(
                     type(error).__name__,
                     *_pool_counts(pool),
                 )
-                if _is_pool_exhausted_error(error):
+                if pool_exhausted:
                     record_postgres_pool_exhausted(
                         _database_service_unavailable_reason(_error_message(error)),
                     )
-                if _is_pool_exhausted_error(error) and acquire_attempt < (acquire_attempts - 1):
+                if will_retry_pool_acquire:
                     time.sleep(acquire_sleep_seconds)
                     continue
                 if _should_retry_query(error, attempt=attempt):
@@ -1211,9 +1313,16 @@ def advisory_session_lock(
     lock_key: int,
     *,
     label: str,
-    pool_name: str = "default",
+    pool_name: str = "session_control",
 ):
     """Hold a session-scoped advisory lock on a single pooled connection."""
+    if pool_name != "session_control":
+        logger.warning(
+            "[db-pool] advisory_lock_pool_redirect label=%s requested_pool=%s selected_pool=session_control",
+            label,
+            pool_name,
+        )
+        pool_name = "session_control"
     with db_read_connection(label=label, pool_name=pool_name) as conn:
         with db_read_cursor(conn=conn, label=label) as cur:
             cur.execute("select pg_try_advisory_lock(%s) as locked", [lock_key])

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from datetime import UTC, datetime
@@ -17,9 +18,7 @@ STATE_NORMAL: LaneBudgetState = "normal"
 STATE_REDUCED: LaneBudgetState = "reduced"
 STATE_PAUSED: LaneBudgetState = "paused"
 STATE_IDENTITY_BLOCKED: LaneBudgetState = "identity_blocked"
-LANE_STATES: frozenset[str] = frozenset(
-    {STATE_NORMAL, STATE_REDUCED, STATE_PAUSED, STATE_IDENTITY_BLOCKED}
-)
+LANE_STATES: frozenset[str] = frozenset({STATE_NORMAL, STATE_REDUCED, STATE_PAUSED, STATE_IDENTITY_BLOCKED})
 
 DEFAULT_LANE = "instagram_backfill"
 DEFAULT_PLATFORM = "instagram"
@@ -28,6 +27,11 @@ INSTAGRAM_BACKFILL_RUNBOOK_VERSION = "v4"
 INSTAGRAM_BACKFILL_LIVE_APPLY_WORKER_CAP = 2
 INSTAGRAM_BACKFILL_CANARY_WORKER_CAP = 4
 INSTAGRAM_BACKFILL_MINIMUM_SAMPLE_FLOOR = 25
+INSTAGRAM_DB_SESSION_WORKER_BUDGET_ENV = "SOCIAL_INSTAGRAM_DB_SESSION_WORKER_BUDGET"
+LEGACY_INSTAGRAM_COMMENTS_DB_SESSION_BUDGET_ENV = "SOCIAL_INSTAGRAM_COMMENTS_DB_SESSION_BUDGET"
+DEFAULT_INSTAGRAM_DB_SESSION_WORKER_BUDGET = 10
+INSTAGRAM_DB_SESSION_POOL_LIMIT_ENV = "SOCIAL_INSTAGRAM_DB_SESSION_POOL_LIMIT"
+DEFAULT_INSTAGRAM_DB_SESSION_POOL_LIMIT = 15
 
 ACTIVE_QUEUE_STATUSES: tuple[str, ...] = ("queued", "pending", "running", "retrying")
 
@@ -101,6 +105,229 @@ DEFAULT_LIMITS: dict[str, Any] = {
     "proxy_usd_reduced_threshold": None,
     "proxy_usd_paused_threshold": None,
 }
+
+
+def instagram_db_session_worker_budget() -> int:
+    """Return the combined Instagram Modal-worker budget.
+
+    The comments-only variable remains a compatibility fallback while deployed
+    environments move to the canonical combined-worker name.
+    """
+
+    raw = str(
+        os.getenv(INSTAGRAM_DB_SESSION_WORKER_BUDGET_ENV)
+        or os.getenv(LEGACY_INSTAGRAM_COMMENTS_DB_SESSION_BUDGET_ENV)
+        or DEFAULT_INSTAGRAM_DB_SESSION_WORKER_BUDGET
+    ).strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return DEFAULT_INSTAGRAM_DB_SESSION_WORKER_BUDGET
+
+
+def instagram_db_session_pool_limit() -> int:
+    raw = str(os.getenv(INSTAGRAM_DB_SESSION_POOL_LIMIT_ENV) or DEFAULT_INSTAGRAM_DB_SESSION_POOL_LIMIT).strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return DEFAULT_INSTAGRAM_DB_SESSION_POOL_LIMIT
+
+
+def _instagram_db_session_pool_usage(*, requested_sessions: int) -> dict[str, Any]:
+    """Prove requested session headroom with short-lived fresh reservations."""
+
+    from trr_backend.db import pg
+
+    limit = instagram_db_session_pool_limit()
+    probe = pg.probe_fresh_session_capacity(
+        requested_sessions=requested_sessions,
+        max_probe_sessions=limit,
+    )
+    available = bool(probe.get("available"))
+    reason = str(probe.get("reason") or "").strip() or None
+    return {
+        "available": available,
+        "source": "fresh_session_reservation",
+        "limit": limit,
+        "observed_sessions": None,
+        "remaining_sessions": None,
+        "at_capacity": reason == "session_pool_capacity",
+        "application_name": "trr-backend:session-capacity-probe",
+        "requested_sessions": _to_int(probe.get("requested_sessions")),
+        "reserved_sessions": _to_int(probe.get("reserved_sessions")),
+        "probe_reason": reason,
+        "probe_target": _metadata_dict(probe.get("target")),
+        "read_error": None if available else reason or str(probe.get("error") or "session_capacity_probe_failed"),
+    }
+
+
+def get_instagram_db_session_capacity(
+    *,
+    requested_workers: int = 0,
+    raw_requested_workers: int | None = None,
+    backend_effective_requested_workers: int | None = None,
+    active_workers: int | None = None,
+    conn: Any | None = None,
+) -> dict[str, Any]:
+    """Return the canonical Instagram DB-session capacity snapshot."""
+
+    budget = instagram_db_session_worker_budget()
+    read_error: str | None = None
+    active_db_job_ids: list[str] = []
+    dispatched_unclaimed_job_ids: list[str] = []
+    draining_remote_call_ids: list[str] = []
+    nonterminal_remote_call_ids: list[str] = []
+    session_pool_usage: dict[str, Any] = {
+        "available": False,
+        "source": "not_checked_active_worker_override",
+        "limit": instagram_db_session_pool_limit(),
+        "observed_sessions": None,
+        "remaining_sessions": None,
+        "at_capacity": None,
+        "application_name": None,
+        "read_error": None,
+    }
+    if active_workers is None:
+        try:
+            from trr_backend.db import pg
+            from trr_backend.modal_dispatch import inspect_modal_function_call
+
+            rows = pg.fetch_all(
+                """
+                select
+                  id::text as job_id,
+                  lower(coalesce(status, '')) as status,
+                  nullif(trim(coalesce(worker_id, '')), '') as worker_id,
+                  claimed_at,
+                  nullif(metadata #>> '{dispatch,remote_invocation_id}', '') as remote_invocation_id,
+                  lower(coalesce(metadata #>> '{dispatch,remote_invocation_status}', 'unknown'))
+                    as remote_invocation_status
+                from social.scrape_jobs
+                where lower(coalesce(platform, '')) = 'instagram'
+                  and lower(coalesce(config->>'stage', metadata->>'stage', job_type, '')) in (
+                    'comments',
+                    'comments_scrapling',
+                    'shared_account_discovery',
+                    'shared_account_posts'
+                  )
+                  and (
+                    status in ('queued', 'pending', 'retrying', 'running', 'claimed', 'dispatched', 'processing')
+                    or (
+                      status in ('completed', 'failed', 'cancelled')
+                      and coalesce(completed_at, heartbeat_at, started_at, claimed_at, created_at)
+                        >= now() - interval '2 hours'
+                      and nullif(metadata #>> '{dispatch,remote_invocation_id}', '') is not null
+                      and lower(coalesce(metadata #>> '{dispatch,remote_invocation_status}', 'unknown'))
+                        not in ('completed', 'failed', 'cancelled', 'terminated', 'error')
+                    )
+                  )
+                """,
+                conn=conn,
+                pool_name="social_control",
+            )
+            inspections: dict[str, dict[str, Any]] = {}
+            for row in rows:
+                call_id = str(row.get("remote_invocation_id") or "").strip()
+                if call_id and call_id not in inspections:
+                    inspections[call_id] = inspect_modal_function_call(call_id)
+
+            for row in rows:
+                job_id = str(row.get("job_id") or "").strip()
+                status = _normalize_text(row.get("status"))
+                call_id = str(row.get("remote_invocation_id") or "").strip()
+                inspection_status = _normalize_text(_metadata_dict(inspections.get(call_id)).get("status"))
+                remote_nonterminal = bool(call_id) and inspection_status not in {"completed", "failed"}
+                if remote_nonterminal and call_id not in nonterminal_remote_call_ids:
+                    nonterminal_remote_call_ids.append(call_id)
+
+                claimed = bool(str(row.get("worker_id") or "").strip() or row.get("claimed_at"))
+                if status in {"running", "claimed", "processing"} or (status == "dispatched" and claimed):
+                    if job_id:
+                        active_db_job_ids.append(job_id)
+                elif status in {"queued", "pending", "retrying", "dispatched"} and remote_nonterminal:
+                    if job_id:
+                        dispatched_unclaimed_job_ids.append(job_id)
+                elif remote_nonterminal:
+                    draining_remote_call_ids.append(call_id)
+        except Exception as exc:  # noqa: BLE001 - diagnostics stay available during DB pressure
+            read_error = f"{type(exc).__name__}: {exc}"
+    else:
+        active_db_job_ids = [f"active-worker-{index + 1}" for index in range(_to_int(active_workers))]
+
+    active_db_jobs = len(active_db_job_ids)
+    dispatched_unclaimed_jobs = len(dispatched_unclaimed_job_ids)
+    draining_remote_calls = len(dict.fromkeys(draining_remote_call_ids))
+    occupied = active_db_jobs + dispatched_unclaimed_jobs + draining_remote_calls
+    effective_requested = _to_int(
+        requested_workers if backend_effective_requested_workers is None else backend_effective_requested_workers
+    )
+    raw_requested = _to_int(effective_requested if raw_requested_workers is None else raw_requested_workers)
+    if active_workers is None:
+        session_pool_usage = _instagram_db_session_pool_usage(requested_sessions=effective_requested)
+    remaining = max(0, budget - occupied)
+    worker_budget_blocked = read_error is None and effective_requested > remaining
+    session_pool_remaining = session_pool_usage.get("remaining_sessions")
+    session_pool_blocked = bool(
+        effective_requested > 0
+        and (
+            not session_pool_usage.get("available")
+            or _to_int(session_pool_usage.get("reserved_sessions")) < effective_requested
+        )
+    )
+    blocked = worker_budget_blocked or session_pool_blocked
+    capacity_available = bool(read_error is None and (effective_requested == 0 or session_pool_usage.get("available")))
+    capacity_read_error = read_error or (
+        str(session_pool_usage.get("read_error") or "session_capacity_probe_failed")
+        if effective_requested > 0 and not session_pool_usage.get("available")
+        else None
+    )
+    block_reason = (
+        "instagram_db_session_pool_capacity_exceeded"
+        if session_pool_blocked and session_pool_usage.get("probe_reason") == "session_pool_capacity"
+        else "instagram_db_session_pool_probe_failed"
+        if session_pool_blocked
+        else "instagram_db_session_worker_budget_exceeded"
+        if worker_budget_blocked
+        else None
+    )
+    return {
+        "worker_budget": budget,
+        "safe_combined_worker_limit": budget,
+        "safe_limit": budget,
+        "active_workers": occupied,
+        "occupied_workers": occupied,
+        "active_db_jobs": active_db_jobs,
+        "active_db_job_ids": active_db_job_ids,
+        "dispatched_unclaimed_jobs": dispatched_unclaimed_jobs,
+        "dispatched_unclaimed_job_ids": dispatched_unclaimed_job_ids,
+        "nonterminal_remote_calls": len(nonterminal_remote_call_ids),
+        "nonterminal_remote_call_ids": nonterminal_remote_call_ids,
+        "draining_remote_calls": draining_remote_calls,
+        "draining_remote_call_ids": list(dict.fromkeys(draining_remote_call_ids)),
+        "remaining_workers": remaining,
+        "remaining_slots": remaining,
+        "raw_requested_workers": raw_requested,
+        "backend_effective_requested_workers": effective_requested,
+        "requested_workers": effective_requested,
+        "session_pool": {
+            **session_pool_usage,
+            "requested_sessions": effective_requested,
+            "blocked": session_pool_blocked,
+        },
+        "session_pool_available": bool(session_pool_usage.get("available")),
+        "session_pool_limit": _to_int(session_pool_usage.get("limit")),
+        "session_pool_observed_sessions": session_pool_usage.get("observed_sessions"),
+        "session_pool_remaining_sessions": session_pool_remaining,
+        "session_pool_requested_sessions": effective_requested,
+        "session_pool_reserved_sessions": _to_int(session_pool_usage.get("reserved_sessions")),
+        "session_pool_at_capacity": session_pool_usage.get("at_capacity"),
+        "session_pool_blocked": session_pool_blocked,
+        "session_pool_read_error": session_pool_usage.get("read_error"),
+        "blocked": blocked,
+        "block_reason": block_reason,
+        "available": capacity_available,
+        "read_error": capacity_read_error,
+    }
 
 
 def instagram_backfill_runbook_metadata(*, state: str = "active", cap4_canary_active: bool = False) -> dict[str, Any]:
@@ -230,9 +457,7 @@ def _resolve_limits(benchmark_overrides: Mapping[str, Any] | None) -> dict[str, 
     limits = dict(DEFAULT_LIMITS)
     override_payload = _metadata_dict(benchmark_overrides)
     nested_limits = _metadata_dict(override_payload.get("limits"))
-    cap4_canary_enabled = bool(
-        override_payload.get("enable_cap4_canary") or nested_limits.get("enable_cap4_canary")
-    )
+    cap4_canary_enabled = bool(override_payload.get("enable_cap4_canary") or nested_limits.get("enable_cap4_canary"))
     for source in (override_payload, nested_limits):
         for key, default in DEFAULT_LIMITS.items():
             if key in source:
@@ -409,9 +634,7 @@ def _identity_blocker_from_worker_auth(backfill_health: Mapping[str, Any], platf
         "platform": platform,
         "instagram_authenticated": False,
         "reason": (
-            worker_auth.get("instagram_auth_reason")
-            or worker_auth.get("reason")
-            or "instagram_identity_unavailable"
+            worker_auth.get("instagram_auth_reason") or worker_auth.get("reason") or "instagram_identity_unavailable"
         ),
         "detail": worker_auth.get("instagram_auth_detail"),
     }
@@ -697,9 +920,7 @@ def _auth_failure_pressure(
 ) -> dict[str, Any]:
     runs = _list_of_dicts(backfill_health.get("runs"))
     matching_runs = [
-        run
-        for run in runs
-        if _matches_platform(run, platform) and _matches_account(run, account, unknown_matches=True)
+        run for run in runs if _matches_platform(run, platform) and _matches_account(run, account, unknown_matches=True)
     ]
     max_rate = 0.0
     total_failures = 0
@@ -1170,11 +1391,19 @@ __all__ = [
     "INSTAGRAM_BACKFILL_LIVE_APPLY_WORKER_CAP",
     "INSTAGRAM_BACKFILL_MINIMUM_SAMPLE_FLOOR",
     "INSTAGRAM_BACKFILL_RUNBOOK_VERSION",
+    "DEFAULT_INSTAGRAM_DB_SESSION_POOL_LIMIT",
+    "DEFAULT_INSTAGRAM_DB_SESSION_WORKER_BUDGET",
+    "INSTAGRAM_DB_SESSION_POOL_LIMIT_ENV",
+    "INSTAGRAM_DB_SESSION_WORKER_BUDGET_ENV",
+    "LEGACY_INSTAGRAM_COMMENTS_DB_SESSION_BUDGET_ENV",
     "STATE_IDENTITY_BLOCKED",
     "STATE_NORMAL",
     "STATE_PAUSED",
     "STATE_REDUCED",
     "build_budget_decision",
     "get_budget_decision",
+    "get_instagram_db_session_capacity",
+    "instagram_db_session_pool_limit",
+    "instagram_db_session_worker_budget",
     "instagram_backfill_runbook_metadata",
 ]
