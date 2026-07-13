@@ -1252,6 +1252,40 @@ def test_reconcile_private_paths_ignores_missing_root(tmp_path: Path) -> None:
     assert browser_cookie_refresh.reconcile_private_paths(tmp_path / "missing") == 0
 
 
+def test_reconcile_private_paths_does_not_chmod_symlink_targets(tmp_path: Path) -> None:
+    private_root = tmp_path / "private"
+    private_root.mkdir()
+    outside_root = tmp_path / "outside"
+    outside_root.mkdir()
+    outside_file = outside_root / "credentials.json"
+    outside_file.write_text("{}", encoding="utf-8")
+    outside_root.chmod(0o755)
+    outside_file.chmod(0o644)
+    (private_root / "escaped-dir").symlink_to(outside_root, target_is_directory=True)
+    (private_root / "escaped-file.json").symlink_to(outside_file)
+
+    hardened = browser_cookie_refresh.reconcile_private_paths(private_root)
+
+    assert hardened == 0
+    assert outside_root.stat().st_mode & 0o777 == 0o755
+    assert outside_file.stat().st_mode & 0o777 == 0o644
+
+
+def test_reconcile_private_paths_ignores_symlink_root(tmp_path: Path) -> None:
+    outside_root = tmp_path / "outside"
+    outside_root.mkdir()
+    outside_file = outside_root / "credentials.json"
+    outside_file.write_text("{}", encoding="utf-8")
+    outside_root.chmod(0o755)
+    outside_file.chmod(0o644)
+    linked_root = tmp_path / "private-link"
+    linked_root.symlink_to(outside_root, target_is_directory=True)
+
+    assert browser_cookie_refresh.reconcile_private_paths(linked_root) == 0
+    assert outside_root.stat().st_mode & 0o777 == 0o755
+    assert outside_file.stat().st_mode & 0o777 == 0o644
+
+
 def test_reconcile_private_paths_swallows_chmod_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1259,7 +1293,8 @@ def test_reconcile_private_paths_swallows_chmod_failure(
     cookie_file = tmp_path / "bravo.cookies.json"
     cookie_file.write_text("{}", encoding="utf-8")
 
-    def _raise_os_error(self: Path, mode: int) -> None:
+    def _raise_os_error(self: Path, mode: int, *, follow_symlinks: bool = True) -> None:
+        del follow_symlinks
         raise OSError("chmod blocked")
 
     monkeypatch.setattr(Path, "chmod", _raise_os_error)

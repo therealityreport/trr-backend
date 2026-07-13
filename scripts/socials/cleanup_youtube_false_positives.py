@@ -78,8 +78,9 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Clean known YouTube false positives for a show.")
     parser.add_argument("--show-id", help="Show UUID to scope cleanup.")
     parser.add_argument("--show-name", default=DEFAULT_SHOW_NAME, help=f"Show name (default: {DEFAULT_SHOW_NAME})")
-    parser.add_argument("--dry-run", action="store_true", help="Preview candidate rows without deleting (default).")
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="Preview candidate rows without deleting (default).")
+    mode.add_argument(
         "--apply",
         action="store_true",
         help="Actually delete matched rows. Without this, runs in dry-run.",

@@ -452,20 +452,22 @@ def reconcile_private_paths(*roots: str | Path, dir_mode: int = 0o700, file_mode
     hardened = 0
     for root in roots:
         base = Path(root).expanduser()
-        if not base.exists():
+        if base.is_symlink() or not base.exists():
             continue
         try:
             for path in base.rglob("*"):
                 try:
+                    if path.is_symlink():
+                        continue
                     if path.is_dir():
-                        path.chmod(dir_mode)
+                        path.chmod(dir_mode, follow_symlinks=False)
                     elif path.is_file():
-                        path.chmod(file_mode)
+                        path.chmod(file_mode, follow_symlinks=False)
                         hardened += 1
                 except OSError:
                     logger.debug("Failed to chmod %s during private-path reconcile", path, exc_info=True)
             try:
-                base.chmod(dir_mode)
+                base.chmod(dir_mode, follow_symlinks=False)
             except OSError:
                 logger.debug("Failed to chmod root %s during private-path reconcile", base, exc_info=True)
         except OSError:

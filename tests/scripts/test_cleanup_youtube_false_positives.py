@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 import scripts.socials.cleanup_youtube_false_positives as mod
 
 
@@ -23,3 +25,10 @@ def test_main_apply_deletes_candidate_rows(monkeypatch) -> None:
     mod.main(["--apply"])
 
     assert delete_calls == [["row-1"]]
+
+
+def test_main_rejects_apply_and_dry_run_together() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        mod.main(["--apply", "--dry-run"])
+
+    assert exc_info.value.code == 2
