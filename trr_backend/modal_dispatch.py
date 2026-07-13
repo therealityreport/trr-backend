@@ -48,6 +48,19 @@ _MODAL_COMPLETED_INVOCATION_STATUS = "completed"
 _MODAL_FAILED_INVOCATION_STATUS = "failed"
 _MODAL_UNKNOWN_INVOCATION_STATUS = "unknown"
 _MODAL_FAILED_INPUT_STATUSES = frozenset({"failure", "init_failure", "terminated", "timeout"})
+_MODAL_NONTERMINAL_INVOCATION_STATUSES = frozenset(
+    {
+        _MODAL_PENDING_INVOCATION_STATUS,
+        _MODAL_RUNNING_INVOCATION_STATUS,
+        _MODAL_UNKNOWN_INVOCATION_STATUS,
+    }
+)
+
+
+def modal_invocation_is_nonterminal(status: str | None) -> bool:
+    """Return whether a canonical Modal call status is safe from replacement."""
+
+    return str(status or "").strip().lower() in _MODAL_NONTERMINAL_INVOCATION_STATUSES
 
 
 def _env_flag(name: str, *, default: bool = False) -> bool:
@@ -180,6 +193,13 @@ def modal_cast_screentime_function_name() -> str:
     return str(os.getenv("TRR_MODAL_CAST_SCREENTIME_FUNCTION") or "run_cast_screentime_analysis").strip()
 
 
+def modal_cast_screentime_subtitle_function_name() -> str:
+    return str(
+        os.getenv("TRR_MODAL_CAST_SCREENTIME_SUBTITLE_FUNCTION")
+        or "run_cast_screentime_subtitle_extraction"
+    ).strip()
+
+
 def modal_app_name() -> str:
     return str(os.getenv("TRR_MODAL_APP_NAME") or "trr-backend-jobs").strip()
 
@@ -227,6 +247,7 @@ def modal_dispatch_config() -> dict[str, Any]:
         "stale_worker_cleanup_function": modal_stale_worker_cleanup_function_name(),
         "vision_function": modal_vision_function_name(),
         "cast_screentime_function": modal_cast_screentime_function_name(),
+        "cast_screentime_subtitle_function": modal_cast_screentime_subtitle_function_name(),
         "socialblade_function": modal_socialblade_function_name(),
     }
 
@@ -325,7 +346,7 @@ def inspect_modal_function_call(function_call_id: str) -> dict[str, Any]:
         "task_id": None,
         "checked_at": checked_at,
         "reason": None,
-        "nonterminal": False,
+        "nonterminal": modal_invocation_is_nonterminal(_MODAL_UNKNOWN_INVOCATION_STATUS),
         "terminal": False,
     }
     if not normalized_call_id:
@@ -387,10 +408,48 @@ def inspect_modal_function_call(function_call_id: str) -> dict[str, Any]:
             "raw_status": raw_status or None,
             "task_id": task_id,
             "reason": blocked_reason,
-            "nonterminal": normalized_status in {_MODAL_PENDING_INVOCATION_STATUS, _MODAL_RUNNING_INVOCATION_STATUS},
+            "nonterminal": modal_invocation_is_nonterminal(normalized_status),
             "terminal": normalized_status in {_MODAL_COMPLETED_INVOCATION_STATUS, _MODAL_FAILED_INVOCATION_STATUS},
         }
     )
+    return payload
+
+
+def cancel_modal_function_call(function_call_id: str) -> dict[str, Any]:
+    """Request hard cancellation for one Modal call and report its drain state."""
+
+    normalized_call_id = str(function_call_id or "").strip()
+    requested_at = _utcnow_iso()
+    payload: dict[str, Any] = {
+        "function_call_id": normalized_call_id or None,
+        "cancel_requested": False,
+        "cancel_requested_at": requested_at,
+        "terminate_containers": True,
+        "error": None,
+    }
+    if not normalized_call_id:
+        payload["reason"] = "modal_call_id_missing"
+        payload["inspection"] = inspect_modal_function_call(normalized_call_id)
+        return payload
+
+    try:
+        import modal
+
+        modal.FunctionCall.from_id(normalized_call_id).cancel(terminate_containers=True)
+        payload["cancel_requested"] = True
+        payload["reason"] = None
+    except Exception as exc:  # noqa: BLE001 - caller still needs conservative drain evidence
+        payload["reason"] = "modal_call_cancel_failed"
+        payload["error"] = str(exc)
+
+    inspection = inspect_modal_function_call(normalized_call_id)
+    payload["inspection"] = inspection
+    payload["checked_at"] = inspection.get("checked_at") or _utcnow_iso()
+    payload["draining"] = str(inspection.get("status") or "unknown").strip().lower() in {
+        _MODAL_PENDING_INVOCATION_STATUS,
+        _MODAL_RUNNING_INVOCATION_STATUS,
+        _MODAL_UNKNOWN_INVOCATION_STATUS,
+    }
     return payload
 
 
@@ -720,6 +779,21 @@ def dispatch_cast_screentime_run(*, run_id: str) -> dict[str, Any]:
         log_label="cast screentime",
         kwargs={"run_id": run_id},
         dispatcher_name="cast-screentime",
+    )
+
+
+def dispatch_cast_screentime_subtitle_extraction(
+    *,
+    video_asset_id: str,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Queue embedded-subtitle extraction for one retained video asset."""
+
+    return _spawn_named_modal_function(
+        function_name=modal_cast_screentime_subtitle_function_name(),
+        log_label="cast screentime subtitle extraction",
+        kwargs={"video_asset_id": str(video_asset_id or "").strip(), "force": bool(force)},
+        dispatcher_name="cast-screentime-subtitles",
     )
 
 

@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import hashlib
 import os
 from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
 from typing import Any
 
 import trr_backend.socials.social_season_analytics_impl as _core
@@ -300,6 +302,164 @@ def _worker_count_from_plan(plan: Mapping[str, Any] | None, key: str) -> int | N
     value = _metadata_dict(plan).get(key)
     normalized = _normalize_non_negative_int(value)
     return normalized or None
+
+
+def _instagram_db_session_capacity_for_launch(
+    *,
+    selected_tasks: Sequence[Any] | None,
+    details_worker_count: int | None,
+    comments_worker_count: int | None,
+    raw_details_worker_count: int | None = None,
+    raw_comments_worker_count: int | None = None,
+    enforce: bool,
+    conn: Any | None = None,
+) -> dict[str, Any]:
+    from trr_backend.socials.control_plane.budget import get_instagram_db_session_capacity
+
+    tasks = set(_normalize_social_account_catalog_backfill_selected_tasks(selected_tasks))
+    effective_requested_workers = 0
+    raw_requested_workers = 0
+    if "post_details" in tasks:
+        effective_requested_workers += max(1, _normalize_non_negative_int(details_worker_count))
+        raw_requested_workers += max(
+            1,
+            _normalize_non_negative_int(
+                details_worker_count if raw_details_worker_count is None else raw_details_worker_count
+            ),
+        )
+    if "comments" in tasks:
+        effective_requested_workers += max(1, _normalize_non_negative_int(comments_worker_count))
+        raw_requested_workers += max(
+            1,
+            _normalize_non_negative_int(
+                comments_worker_count if raw_comments_worker_count is None else raw_comments_worker_count
+            ),
+        )
+    capacity = get_instagram_db_session_capacity(
+        requested_workers=effective_requested_workers,
+        raw_requested_workers=raw_requested_workers,
+        backend_effective_requested_workers=effective_requested_workers,
+        conn=conn,
+    )
+    if enforce and (
+        capacity.get("session_pool_blocked")
+        or not capacity.get("available")
+    ):
+        reason = (
+            "session_pool_capacity"
+            if capacity.get("session_pool_blocked")
+            or "emaxconnsession" in str(capacity.get("read_error") or "").lower()
+            or "maxclientsinsessionmode" in str(capacity.get("read_error") or "").lower()
+            else "database_unavailable"
+        )
+        raise pg.DatabaseServiceUnavailableError(
+            str(capacity.get("read_error") or capacity.get("block_reason") or "Database capacity unavailable."),
+            reason=reason,
+        )
+    if enforce and capacity.get("blocked"):
+        if capacity.get("session_pool_blocked"):
+            message = (
+                "Instagram backfill needs "
+                f"{capacity['requested_workers']} session-control slots but only "
+                f"{capacity.get('session_pool_remaining_sessions') or 0} of "
+                f"{capacity.get('session_pool_limit') or 0} observed Supabase session slots remain."
+            )
+        else:
+            message = (
+                "Instagram backfill needs "
+                f"{capacity['requested_workers']} workers but only {capacity['remaining_workers']} "
+                f"of {capacity['worker_budget']} DB-safe worker slots remain."
+            )
+        raise SocialIngestConflictError(
+            "INSTAGRAM_DB_SESSION_WORKER_BUDGET_EXCEEDED",
+            message,
+            detail={"db_session_capacity": capacity},
+        )
+    return capacity
+
+
+def get_instagram_catalog_launch_capacity(
+    account_handle: str,
+    *,
+    selected_tasks: Sequence[Any] | None,
+    details_refresh_worker_count: int | None = None,
+    comments_worker_count: int | None = None,
+    enable_cap4_canary: bool = False,
+) -> dict[str, Any]:
+    """Return the same capacity decision the backend launch gate will enforce."""
+
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    normalized_tasks = _normalize_social_account_catalog_backfill_selected_tasks(selected_tasks)
+    budget_decision = _instagram_backfill_budget_decision(
+        normalized_account,
+        enable_cap4_canary=enable_cap4_canary,
+    )
+    worker_plan = _instagram_backfill_worker_plan(
+        selected_tasks=normalized_tasks,
+        budget_decision=budget_decision,
+        details_refresh_worker_count=details_refresh_worker_count,
+        comments_worker_count=comments_worker_count,
+    )
+    capacity = _instagram_db_session_capacity_for_launch(
+        selected_tasks=normalized_tasks,
+        details_worker_count=_worker_count_from_plan(worker_plan, "details_refresh_worker_count"),
+        comments_worker_count=_worker_count_from_plan(worker_plan, "comments_worker_count"),
+        raw_details_worker_count=details_refresh_worker_count,
+        raw_comments_worker_count=comments_worker_count,
+        enforce=False,
+    )
+    selected_task_set = set(normalized_tasks)
+    return {
+        **capacity,
+        "account_handle": normalized_account,
+        "selected_tasks": normalized_tasks,
+        "effective_details_worker_count": (
+            _worker_count_from_plan(worker_plan, "details_refresh_worker_count") or 0
+            if "post_details" in selected_task_set
+            else 0
+        ),
+        "effective_comments_worker_count": (
+            _worker_count_from_plan(worker_plan, "comments_worker_count") or 0
+            if "comments" in selected_task_set
+            else 0
+        ),
+        "adaptive_worker_plan": worker_plan,
+    }
+
+
+def _with_instagram_db_session_capacity(
+    budget_decision: Mapping[str, Any] | None,
+    capacity: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if budget_decision is None:
+        return None
+    return {**dict(budget_decision), "db_session_capacity": dict(capacity)}
+
+
+def _instagram_db_session_admission_config(
+    *,
+    selected_tasks: Sequence[Any] | None,
+    details_worker_count: int | None,
+    comments_worker_count: int | None,
+    raw_details_worker_count: int | None,
+    raw_comments_worker_count: int | None,
+    budget_decision: Mapping[str, Any] | None,
+    conn: Any,
+) -> dict[str, Any]:
+    capacity = _instagram_db_session_capacity_for_launch(
+        selected_tasks=selected_tasks,
+        details_worker_count=details_worker_count,
+        comments_worker_count=comments_worker_count,
+        raw_details_worker_count=raw_details_worker_count,
+        raw_comments_worker_count=raw_comments_worker_count,
+        enforce=True,
+        conn=conn,
+    )
+    admitted_budget = _with_instagram_db_session_capacity(budget_decision, capacity)
+    return {
+        "db_session_capacity": capacity,
+        **({"budget_decision": admitted_budget} if admitted_budget else {}),
+    }
 
 
 def _catalog_launch_timing_payload(
@@ -1060,6 +1220,7 @@ def start_social_account_catalog_backfill(
     effective_selected_tasks: Sequence[Any] | None = None,
     launch_group_id: str | None = None,
     existing_run_id: str | None = None,
+    reserved_db_session_capacity: Mapping[str, Any] | None = None,
     enable_cap4_canary: bool = False,
 ) -> dict[str, Any]:
     _sync_core_overrides()
@@ -1136,7 +1297,29 @@ def start_social_account_catalog_backfill(
     )
     run_id = str(existing_run_id or "").strip() or None
     reserved_here = run_id is None
+    db_session_capacity = (
+        _metadata_dict(reserved_db_session_capacity) or None
+        if normalized_platform == "instagram" and not reserved_here
+        else None
+    )
+    if db_session_capacity:
+        budget_decision = _with_instagram_db_session_capacity(budget_decision, db_session_capacity)
+    if run_id and not reserved_here and launch_group_id and _catalog_launch_parent_cancelled(run_id):
+        return _catalog_launch_parent_result(_catalog_launch_parent_snapshot(run_id))
     if reserved_here:
+        admission_callback = None
+        if normalized_platform == "instagram":
+
+            def admission_callback(lock_conn: Any) -> dict[str, Any]:
+                return _instagram_db_session_admission_config(
+                    selected_tasks=effective_selected_tasks or selected_tasks,
+                    details_worker_count=effective_details_worker_count,
+                    comments_worker_count=effective_comments_worker_count,
+                    raw_details_worker_count=details_refresh_worker_count,
+                    raw_comments_worker_count=comments_worker_count,
+                    budget_decision=budget_decision,
+                    conn=lock_conn,
+                )
         initial_completion_metadata = (
             _initial_instagram_completion_metadata(
                 account_handle=normalized_account,
@@ -1170,6 +1353,7 @@ def start_social_account_catalog_backfill(
                 ),
                 **({"enable_cap4_canary": True} if enable_cap4_canary else {}),
                 **({"budget_decision": budget_decision} if budget_decision else {}),
+                **({"db_session_capacity": db_session_capacity} if db_session_capacity else {}),
                 **({"adaptive_worker_plan": adaptive_worker_plan} if adaptive_worker_plan else {}),
                 **initial_completion_metadata,
                 **_catalog_stage_graph_metadata(
@@ -1181,8 +1365,18 @@ def start_social_account_catalog_backfill(
             initial_status=_catalog_launch_initial_status(
                 allow_local_dev_inline_bypass=allow_local_dev_inline_bypass,
             ),
+            admission_callback=admission_callback,
         )
+        reservation_updates = _metadata_dict(reservation.get("config_updates"))
+        db_session_capacity = _metadata_dict(reservation_updates.get("db_session_capacity")) or None
+        admitted_budget = _metadata_dict(reservation_updates.get("budget_decision"))
+        if admitted_budget:
+            budget_decision = admitted_budget
+        elif db_session_capacity:
+            budget_decision = _with_instagram_db_session_capacity(budget_decision, db_session_capacity)
         run_id = str(reservation.get("run_id") or "").strip() or None
+        if reservation.get("deduped"):
+            return _catalog_launch_parent_result(reservation)
         logger.info(
             "[catalog-launch] kickoff_reserved platform=%s account=%s run_id=%s lock_wait_ms=%.1f lock_held_ms=%.1f",
             normalized_platform,
@@ -1277,15 +1471,24 @@ def start_social_account_catalog_backfill(
         ):
             ingest_kwargs["twitter_comments_in_posts_stage"] = twitter_comments_in_posts_stage
         result = ingest_shared_accounts(**ingest_kwargs)
+        if run_id and not reserved_here and launch_group_id:
+            cancelled = _cancel_launch_group_if_parent_cancelled(
+                run_id=run_id,
+                platform=normalized_platform,
+                account_handle=normalized_account,
+            )
+            if cancelled:
+                return cancelled
         if run_id:
             _merge_catalog_run_config(
                 run_id=run_id,
                 metadata_updates={
-                    "launch_state": "ready",
-                    "launch_task_resolution_pending": False,
-                    "launch_completed_at": _iso(_now_utc()),
+                    "launch_state": "ready" if reserved_here else "finalizing",
+                    "launch_task_resolution_pending": not reserved_here,
+                    **({"launch_completed_at": _iso(_now_utc())} if reserved_here else {}),
                     **({"enable_cap4_canary": True} if enable_cap4_canary else {}),
                     **({"budget_decision": budget_decision} if budget_decision else {}),
+                    **({"db_session_capacity": db_session_capacity} if db_session_capacity else {}),
                     **({"adaptive_worker_plan": adaptive_worker_plan} if adaptive_worker_plan else {}),
                     **_catalog_stage_graph_metadata(
                         selected_tasks=_normalize_optional_social_account_catalog_backfill_selected_tasks(
@@ -1300,6 +1503,13 @@ def start_social_account_catalog_backfill(
                     ),
                 },
             )
+        if db_session_capacity:
+            return {
+                **dict(result or {}),
+                "budget_decision": budget_decision,
+                "db_session_capacity": db_session_capacity,
+                "adaptive_worker_plan": adaptive_worker_plan,
+            }
         return result
     except Exception as exc:  # noqa: BLE001
         if reserved_here and run_id:
@@ -1369,6 +1579,20 @@ def begin_social_account_catalog_backfill_launch(
         if adaptive_worker_plan
         else _apply_budget_worker_limit(comments_worker_count, budget_decision)
     )
+    db_session_capacity: dict[str, Any] | None = None
+    admission_callback = None
+    if normalized_platform == "instagram":
+
+        def admission_callback(lock_conn: Any) -> dict[str, Any]:
+            return _instagram_db_session_admission_config(
+                selected_tasks=normalized_selected_tasks,
+                details_worker_count=effective_details_worker_count,
+                comments_worker_count=effective_comments_worker_count,
+                raw_details_worker_count=details_refresh_worker_count,
+                raw_comments_worker_count=comments_worker_count,
+                budget_decision=budget_decision,
+                conn=lock_conn,
+            )
     initial_completion_metadata = (
         _initial_instagram_completion_metadata(
             account_handle=normalized_account,
@@ -1403,8 +1627,10 @@ def begin_social_account_catalog_backfill_launch(
                 force_catalog_rediscovery=bool(force_catalog_rediscovery),
                 task_resolution_pending=True,
             ),
+            "launch_state": "reserved",
             **({"enable_cap4_canary": True} if enable_cap4_canary else {}),
             **({"budget_decision": budget_decision} if budget_decision else {}),
+            **({"db_session_capacity": db_session_capacity} if db_session_capacity else {}),
             **({"adaptive_worker_plan": adaptive_worker_plan} if adaptive_worker_plan else {}),
             **initial_completion_metadata,
             **_catalog_stage_graph_metadata(
@@ -1416,8 +1642,18 @@ def begin_social_account_catalog_backfill_launch(
         initial_status=_catalog_launch_initial_status(
             allow_local_dev_inline_bypass=allow_local_dev_inline_bypass,
         ),
+        admission_callback=admission_callback,
     )
+    reservation_updates = _metadata_dict(reservation.get("config_updates"))
+    db_session_capacity = _metadata_dict(reservation_updates.get("db_session_capacity")) or None
+    admitted_budget = _metadata_dict(reservation_updates.get("budget_decision"))
+    if admitted_budget:
+        budget_decision = admitted_budget
+    elif db_session_capacity:
+        budget_decision = _with_instagram_db_session_capacity(budget_decision, db_session_capacity)
     run_id = str(reservation.get("run_id") or "").strip()
+    if reservation.get("deduped"):
+        return _catalog_launch_parent_result(reservation)
     initial_status = _catalog_launch_initial_status(
         allow_local_dev_inline_bypass=allow_local_dev_inline_bypass,
     )
@@ -1449,11 +1685,12 @@ def begin_social_account_catalog_backfill_launch(
         "catalog_bootstrap_required": None,
         "comments_deferred_until_catalog_complete": False,
         "post_details_skipped_reason": None,
-        "launch_state": "pending",
+        "launch_state": "reserved",
         "launch_task_resolution_pending": True,
         "attached_followups": {},
         "enable_cap4_canary": bool(enable_cap4_canary),
         "budget_decision": budget_decision,
+        "db_session_capacity": db_session_capacity,
         "adaptive_worker_plan": adaptive_worker_plan,
         **initial_completion_metadata,
         "catalog_action": action_seed["catalog_action"],
@@ -1482,6 +1719,117 @@ class CatalogLaunchTimeout(Exception):  # noqa: N818
 
 
 _CATALOG_FINALIZE_LAUNCH_TIMEOUT_DEFAULT_S = 100.0
+
+
+def _catalog_launch_group_lock_key(launch_group_id: str) -> int:
+    normalized = str(launch_group_id or "").strip().lower()
+    return int(hashlib.md5(f"catalog-launch-group:{normalized}".encode()).hexdigest()[:15], 16) % (2**31)
+
+
+@contextmanager
+def _catalog_launch_group_transaction_lock(launch_group_id: str):
+    """Try one transaction advisory lock for the full launch-owner lifetime."""
+
+    with pg.db_connection(label="catalog-launch-group-owner") as conn:
+        with pg.db_cursor(conn=conn, label="catalog-launch-group-owner") as cur:
+            row = pg.fetch_one_with_cursor(
+                cur,
+                "select pg_try_advisory_xact_lock(%s) as locked",
+                [_catalog_launch_group_lock_key(launch_group_id)],
+            )
+        yield bool((row or {}).get("locked"))
+
+
+def _catalog_launch_parent_snapshot(run_id: str) -> dict[str, Any]:
+    row = _load_catalog_run_row_by_id(run_id)
+    config = _metadata_dict(row.get("config"))
+    return {
+        **dict(row or {}),
+        "config": config,
+        "launch_state": str(config.get("launch_state") or "").strip().lower() or None,
+        "launch_group_id": str(config.get("launch_group_id") or "").strip() or None,
+    }
+
+
+def _catalog_launch_parent_cancelled(run_id: str) -> bool:
+    parent = _catalog_launch_parent_snapshot(run_id)
+    return str(parent.get("status") or "").strip().lower() in {"cancelled", "cancelling"} or str(
+        parent.get("launch_state") or ""
+    ).strip().lower() in {"cancelled", "cancelling"}
+
+
+def _catalog_launch_parent_result(parent: Mapping[str, Any], *, owner_active: bool = False) -> dict[str, Any]:
+    config = _metadata_dict(parent.get("config"))
+    run_id = str(parent.get("run_id") or parent.get("id") or "").strip() or None
+    launch_state = str(parent.get("launch_state") or config.get("launch_state") or "").strip().lower() or None
+    return {
+        "run_id": run_id,
+        "catalog_run_id": run_id,
+        "comments_run_id": str(config.get("comments_run_id") or "").strip() or None,
+        "status": str(parent.get("status") or "").strip().lower() or None,
+        "catalog_status": str(parent.get("status") or "").strip().lower() or None,
+        "launch_group_id": str(config.get("launch_group_id") or "").strip() or None,
+        "launch_state": launch_state,
+        "launch_task_resolution_pending": launch_state in {"reserved", "pending", "finalizing"},
+        "selected_tasks": _normalize_optional_social_account_catalog_backfill_selected_tasks(
+            config.get("selected_tasks")
+        ),
+        "effective_selected_tasks": _normalize_optional_social_account_catalog_backfill_selected_tasks(
+            config.get("effective_selected_tasks")
+        ),
+        "attached_followups": _metadata_dict(config.get("attached_followups")),
+        "budget_decision": _metadata_dict(config.get("budget_decision")) or None,
+        "db_session_capacity": _metadata_dict(config.get("db_session_capacity")) or None,
+        "finalizer_owner_active": owner_active,
+    }
+
+
+def _cancel_launch_group_if_parent_cancelled(
+    *,
+    run_id: str | None,
+    platform: str,
+    account_handle: str,
+) -> dict[str, Any] | None:
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id or not _catalog_launch_parent_cancelled(normalized_run_id):
+        return None
+    try:
+        from trr_backend.socials.control_plane.shared_accounts import cancel_social_account_catalog_run
+
+        cancel_social_account_catalog_run(
+            platform=platform,
+            account_handle=account_handle,
+            run_id=normalized_run_id,
+            cancelled_by="catalog_parent_cancelled",
+            reconcile_summary=False,
+        )
+    except Exception:  # noqa: BLE001 - parent cancellation still wins even if the drain audit fails
+        logger.exception("[catalog-launch] launch_group_cancel_sweep_failed run_id=%s", normalized_run_id)
+    return _catalog_launch_parent_result(_catalog_launch_parent_snapshot(normalized_run_id))
+
+
+def _cas_catalog_launch_state(
+    *,
+    run_id: str,
+    launch_group_id: str,
+    from_states: Sequence[str],
+    to_state: str,
+    metadata_updates: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    updates = {"launch_state": to_state, **dict(metadata_updates or {})}
+    row = pg.fetch_one(
+        """
+        update social.scrape_runs
+        set config = coalesce(config, '{}'::jsonb) || %s::jsonb
+        where id = %s::uuid
+          and coalesce(config->>'launch_group_id', '') = %s
+          and lower(coalesce(config->>'launch_state', 'reserved')) = any(%s::text[])
+          and lower(coalesce(status, '')) not in ('cancelled', 'cancelling')
+        returning id::text as id, id::text as run_id, status, config, summary
+        """,
+        [_json_dumps(updates), run_id, launch_group_id, [str(state).strip().lower() for state in from_states]],
+    )
+    return dict(row or {})
 
 
 def _catalog_finalize_launch_timeout_seconds() -> float:
@@ -1552,22 +1900,42 @@ def finalize_social_account_catalog_backfill_launch(
     normalized_platform = _normalize_social_account_profile_platform(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     started_at = time_module.perf_counter()
-    try:
-        _merge_catalog_run_config(
-            run_id=run_id,
-            metadata_updates={
-                "launch_state": "finalizing",
-                "launch_task_resolution_pending": True,
-                "launch_finalizing_started_at": _iso(_now_utc()),
-                **({"enable_cap4_canary": True} if enable_cap4_canary else {}),
-            },
-        )
-        _launch_callable = _room_callable(
-            "launch_social_account_catalog_backfill",
-            launch_social_account_catalog_backfill,
-        )
-        result = _run_catalog_launch_with_timeout(
-            lambda: _launch_callable(
+    initial_parent = {} if launch_group_id else _catalog_launch_parent_snapshot(run_id)
+    normalized_launch_group_id = (
+        str(launch_group_id or initial_parent.get("launch_group_id") or "").strip()
+    )
+    if not normalized_launch_group_id:
+        raise ValueError("Catalog launch group is missing.")
+
+    def _finalize_once() -> dict[str, Any]:
+        with _catalog_launch_group_transaction_lock(normalized_launch_group_id) as acquired:
+            parent = _catalog_launch_parent_snapshot(run_id)
+            if not acquired:
+                return _catalog_launch_parent_result(parent, owner_active=True)
+            if _catalog_launch_parent_cancelled(run_id):
+                return _catalog_launch_parent_result(parent)
+            if str(parent.get("launch_state") or "") in {"ready", "completed_no_work"}:
+                return _catalog_launch_parent_result(parent)
+
+            transitioned = _cas_catalog_launch_state(
+                run_id=run_id,
+                launch_group_id=normalized_launch_group_id,
+                from_states=("reserved", "pending", "finalizing"),
+                to_state="finalizing",
+                metadata_updates={
+                    "launch_task_resolution_pending": True,
+                    "launch_finalizing_started_at": _iso(_now_utc()),
+                    **({"enable_cap4_canary": True} if enable_cap4_canary else {}),
+                },
+            )
+            if not transitioned:
+                return _catalog_launch_parent_result(_catalog_launch_parent_snapshot(run_id))
+
+            _launch_callable = _room_callable(
+                "launch_social_account_catalog_backfill",
+                launch_social_account_catalog_backfill,
+            )
+            result = _launch_callable(
                 normalized_platform,
                 normalized_account,
                 source_scope=source_scope,
@@ -1582,12 +1950,41 @@ def finalize_social_account_catalog_backfill_launch(
                 comments_enable_media_followups=comments_enable_media_followups,
                 comment_anchor_source_ids=comment_anchor_source_ids,
                 existing_catalog_run_id=run_id,
-                launch_group_id_override=launch_group_id,
+                launch_group_id_override=normalized_launch_group_id,
                 catalog_action=catalog_action,
                 catalog_action_scope=catalog_action_scope,
                 force_catalog_rediscovery=force_catalog_rediscovery,
                 enable_cap4_canary=enable_cap4_canary,
-            ),
+                reserved_db_session_capacity=_metadata_dict(
+                    _metadata_dict(parent.get("config")).get("db_session_capacity")
+                )
+                or None,
+            )
+            cancelled = _cancel_launch_group_if_parent_cancelled(
+                run_id=run_id,
+                platform=normalized_platform,
+                account_handle=normalized_account,
+            )
+            if cancelled:
+                return cancelled
+            ready = _cas_catalog_launch_state(
+                run_id=run_id,
+                launch_group_id=normalized_launch_group_id,
+                from_states=("finalizing",),
+                to_state="ready",
+                metadata_updates={
+                    "launch_task_resolution_pending": False,
+                    "launch_completed_at": _iso(_now_utc()),
+                    "launch_finalize_timeout": False,
+                },
+            )
+            if not ready:
+                return _catalog_launch_parent_result(_catalog_launch_parent_snapshot(run_id))
+            return {**dict(result or {}), "launch_state": "ready", "launch_task_resolution_pending": False}
+
+    try:
+        result = _run_catalog_launch_with_timeout(
+            _finalize_once,
             timeout_seconds=_catalog_finalize_launch_timeout_seconds(),
         )
         logger.info(
@@ -1620,12 +2017,13 @@ def finalize_social_account_catalog_backfill_launch(
             run_id,
             exc.timeout_seconds,
         )
-        raise
+        return _catalog_launch_parent_result(_catalog_launch_parent_snapshot(run_id), owner_active=True)
     except Exception as exc:  # noqa: BLE001
-        _record_social_account_catalog_launch_failure(
-            run_id=run_id,
-            error_message=str(exc),
-        )
+        if not _catalog_launch_parent_cancelled(run_id):
+            _record_social_account_catalog_launch_failure(
+                run_id=run_id,
+                error_message=str(exc),
+            )
         logger.exception(
             "[catalog-launch] finalize_failed platform=%s account=%s run_id=%s",
             normalized_platform,
@@ -1667,6 +2065,7 @@ def launch_social_account_catalog_backfill(
     catalog_action_scope: str | None = None,
     force_catalog_rediscovery: bool = False,
     enable_cap4_canary: bool = False,
+    reserved_db_session_capacity: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     _sync_core_overrides()
     normalized_platform = _normalize_social_account_profile_platform(platform)
@@ -1977,6 +2376,8 @@ def launch_social_account_catalog_backfill(
         }
 
     launch_group_id = str(launch_group_id_override or uuid4())
+    if existing_catalog_run_id and _catalog_launch_parent_cancelled(existing_catalog_run_id):
+        return _catalog_launch_parent_result(_catalog_launch_parent_snapshot(existing_catalog_run_id))
     catalog_result: dict[str, Any] | None = None
     comments_result: dict[str, Any] | None = None
     deferred_comments_followup: dict[str, Any] | None = None
@@ -2090,6 +2491,40 @@ def launch_social_account_catalog_backfill(
                     },
                     "timing_ms": coverage_ms,
                 }
+            elif (
+                normalized_catalog_action == "backfill"
+                and bounded_window_scope == "bounded_window"
+                and not requires_catalog_bootstrap
+                and stored_post_count > 0
+                and not instagram_targeted_comment_source_ids
+                and any(task in effective_selected_tasks for task in ("post_details", "media"))
+            ):
+                comments_shard_count = _instagram_comments_profile_shard_count(stored_post_count)
+                target_readiness = {
+                    "status": "completed",
+                    "account_handle": normalized_account,
+                    "saved_source_ids_count": stored_post_count,
+                    "commentable_target_count": stored_post_count,
+                    "comments_target_source_ids_count": stored_post_count,
+                    "incomplete_comment_target_count": stored_post_count,
+                    "media_candidate_count": stored_post_count,
+                    "detail_gap_count": _normalize_non_negative_int(
+                        _metadata_dict(coverage.get("detail_gap_counts")).get("posts_needing_detail_refresh")
+                    ),
+                    "can_start_comments": True,
+                    "blocker_reasons": [],
+                    "comments_blocker_reasons": [],
+                    "refresh_policy": "stale_or_missing",
+                    "comments_preview": {
+                        "comments_shard_count": comments_shard_count,
+                        "comments_sharding_enabled": comments_shard_count > 1,
+                        "recommended_comments_shard_count": _instagram_comments_recommended_shard_count(
+                            target_count=stored_post_count
+                        ),
+                        "target_priority": "bounded_existing_posts",
+                    },
+                    "timing_ms": coverage_ms,
+                }
             elif requires_catalog_bootstrap or (
                 normalized_catalog_action == "backfill"
                 and bounded_window_scope == "bounded_window"
@@ -2176,6 +2611,13 @@ def launch_social_account_catalog_backfill(
             adaptive_worker_plan,
             "comments_worker_count",
         ) or _apply_budget_worker_limit(comments_worker_count, budget_decision)
+        db_session_capacity = (
+            _metadata_dict(reserved_db_session_capacity) or None if existing_catalog_run_id else None
+        )
+        if db_session_capacity:
+            budget_decision = _with_instagram_db_session_capacity(budget_decision, db_session_capacity)
+    else:
+        db_session_capacity = None
     catalog_tasks = (
         [task for task in effective_selected_tasks if task in ("post_details", "comments", "media")]
         if requires_catalog_bootstrap
@@ -2183,8 +2625,18 @@ def launch_social_account_catalog_backfill(
     )
     catalog_selected = bool(catalog_tasks)
     catalog_details_refresh_only = catalog_selected and not requires_catalog_bootstrap
+    bounded_existing_posts_comments_run = bool(
+        normalized_platform == "instagram"
+        and "comments" in effective_selected_tasks
+        and normalized_catalog_action == "backfill"
+        and bounded_window_scope == "bounded_window"
+        and catalog_details_refresh_only
+        and stored_post_count > 0
+        and not instagram_targeted_comment_source_ids
+    )
     comments_deferred_until_catalog_complete = False
     catalog_comments_streaming_enabled = False
+    comments_reused_existing_run = False
     media_attachment_id = _catalog_media_attachment_id(launch_group_id) if "media" in effective_selected_tasks else None
     force_detail_fetch = (
         "post_details" in effective_selected_tasks and _instagram_catalog_backfill_force_detail_fetch_enabled()
@@ -2237,6 +2689,8 @@ def launch_social_account_catalog_backfill(
         )
         if budget_decision:
             no_work_payload["budget_decision"] = budget_decision
+        if db_session_capacity:
+            no_work_payload["db_session_capacity"] = db_session_capacity
         if adaptive_worker_plan:
             no_work_payload["adaptive_worker_plan"] = adaptive_worker_plan
         logger.info(
@@ -2258,6 +2712,14 @@ def launch_social_account_catalog_backfill(
         return no_work_payload
 
     if catalog_selected:
+        if existing_catalog_run_id:
+            cancelled = _cancel_launch_group_if_parent_cancelled(
+                run_id=existing_catalog_run_id,
+                platform=normalized_platform,
+                account_handle=normalized_account,
+            )
+            if cancelled:
+                return cancelled
         catalog_launch_started_at = time_module.perf_counter()
         catalog_result = _room_callable(
             "start_social_account_catalog_backfill",
@@ -2284,9 +2746,22 @@ def launch_social_account_catalog_backfill(
             effective_selected_tasks=effective_selected_tasks,
             launch_group_id=launch_group_id,
             existing_run_id=existing_catalog_run_id,
+            reserved_db_session_capacity=db_session_capacity,
             enable_cap4_canary=enable_cap4_canary,
         )
         catalog_launch_ms = round((time_module.perf_counter() - catalog_launch_started_at) * 1000, 1)
+        admitted_capacity = _metadata_dict((catalog_result or {}).get("db_session_capacity"))
+        if admitted_capacity:
+            db_session_capacity = admitted_capacity
+            budget_decision = _with_instagram_db_session_capacity(budget_decision, admitted_capacity)
+        if existing_catalog_run_id:
+            cancelled = _cancel_launch_group_if_parent_cancelled(
+                run_id=existing_catalog_run_id,
+                platform=normalized_platform,
+                account_handle=normalized_account,
+            )
+            if cancelled:
+                return cancelled
         if media_attachment_id:
             attached_followups["media"] = _build_attached_media_followup(
                 attachment_id=media_attachment_id,
@@ -2308,10 +2783,13 @@ def launch_social_account_catalog_backfill(
     )
 
     if "comments" in effective_selected_tasks:
+        if existing_catalog_run_id and _catalog_launch_parent_cancelled(existing_catalog_run_id):
+            return _catalog_launch_parent_result(_catalog_launch_parent_snapshot(existing_catalog_run_id))
         comments_launch_started_at = time_module.perf_counter()
         catalog_comments_streaming_enabled = bool(
             catalog_result is not None
             and normalized_platform == "instagram"
+            and not bounded_existing_posts_comments_run
             and not bool(allow_local_dev_inline_bypass)
             and normalized_execution_preference != "prefer_local_inline"
         )
@@ -2340,6 +2818,8 @@ def launch_social_account_catalog_backfill(
                 "source_scope": source_scope,
                 "refresh_policy": "stale_or_missing",
                 "target_filter": comments_followup_target_filter,
+                "date_start": _iso(date_start) if date_start is not None else None,
+                "date_end": _iso(date_end) if date_end is not None else None,
                 "comments_enable_media_followups": effective_comments_enable_media_followups,
                 "comments_worker_count": effective_comments_worker_count,
                 "allow_local_dev_inline_bypass": bool(allow_local_dev_inline_bypass),
@@ -2363,6 +2843,7 @@ def launch_social_account_catalog_backfill(
                         "effective_selected_tasks": effective_selected_tasks,
                         **({"enable_cap4_canary": True} if enable_cap4_canary else {}),
                         **({"budget_decision": budget_decision} if budget_decision else {}),
+                        **({"db_session_capacity": db_session_capacity} if db_session_capacity else {}),
                         **({"adaptive_worker_plan": adaptive_worker_plan} if adaptive_worker_plan else {}),
                         **public_posts_auth_metadata,
                         "deferred_comments_followup": deferred_comments_followup,
@@ -2421,7 +2902,10 @@ def launch_social_account_catalog_backfill(
                     skip_launch_auth_probe=bool(instagram_targeted_comment_source_ids),
                     target_source_ids=instagram_targeted_comment_source_ids or None,
                     comments_worker_count=effective_comments_worker_count,
-                    cancel_active_before_relaunch=False,
+                    reserved_db_session_capacity=db_session_capacity,
+                    cancel_active_before_relaunch=True,
+                    date_start=normalized_date_start.isoformat() if normalized_date_start else None,
+                    date_end=normalized_date_end.isoformat() if normalized_date_end else None,
                 )
             except SocialIngestConflictError as exc:
                 if exc.code == "SOCIAL_ACCOUNT_COMMENTS_LAUNCH_IN_PROGRESS":
@@ -2440,62 +2924,12 @@ def launch_social_account_catalog_backfill(
                         normalized_account,
                         str((catalog_result or {}).get("run_id") or "").strip() or None,
                     )
-                elif exc.code != "SOCIAL_ACCOUNT_COMMENTS_RUN_ALREADY_ACTIVE":
-                    raise
                 else:
-                    active_comments_run_id = str(exc.detail.get("run_id") or "").strip()
-                    if not active_comments_run_id:
-                        raise
-                    comments_result = {
-                        "run_id": active_comments_run_id,
-                        "status": str(exc.detail.get("status") or "running").strip().lower() or "running",
-                        "reused_active_run": True,
-                    }
-                    comments_source = "reused_run"
-                    logger.info(
-                        (
-                            "[catalog-launch] reusing active comments run platform=%s account=%s "
-                            "catalog_run_id=%s comments_run_id=%s"
-                        ),
-                        normalized_platform,
-                        normalized_account,
-                        str((catalog_result or {}).get("run_id") or "").strip() or None,
-                        active_comments_run_id,
-                    )
-                    catalog_run_id_for_media = str((catalog_result or {}).get("run_id") or "").strip() or None
-                    if media_attachment_id and catalog_run_id_for_media:
-                        try:
-                            media_followup = _enqueue_instagram_account_media_repair_jobs(
-                                run_id=catalog_run_id_for_media,
-                                source_scope=source_scope,
-                                account_handle=normalized_account,
-                            )
-                            media_followup_status = (
-                                "queued" if media_followup["enqueued_job_count"] > 0 else "completed"
-                            )
-                        except Exception:
-                            logger.exception(
-                                (
-                                    "[catalog-launch] media_followup_enqueue_failed platform=%s account=%s "
-                                    "catalog_run_id=%s comments_run_id=%s"
-                                ),
-                                normalized_platform,
-                                normalized_account,
-                                catalog_run_id_for_media,
-                                active_comments_run_id,
-                            )
-                            media_followup = {
-                                "enqueued_job_ids": [],
-                                "enqueued_job_count": 0,
-                            }
-                            media_followup_status = "failed"
-                        attached_followups["media"] = _build_attached_media_followup(
-                            attachment_id=media_attachment_id,
-                            source="catalog_media_mirror",
-                            status=media_followup_status,
-                            enqueued_job_ids=media_followup["enqueued_job_ids"],
-                            enqueued_job_count=media_followup["enqueued_job_count"],
-                        )
+                    raise
+            admitted_capacity = _metadata_dict((comments_result or {}).get("db_session_capacity"))
+            if admitted_capacity:
+                db_session_capacity = admitted_capacity
+                budget_decision = _with_instagram_db_session_capacity(budget_decision, admitted_capacity)
             attached_followups["comments"] = _build_attached_comments_followup(
                 run_id=str((comments_result or {}).get("run_id") or "").strip() or None,
                 status=str((comments_result or {}).get("status") or "").strip().lower() or "pending",
@@ -2509,16 +2943,33 @@ def launch_social_account_catalog_backfill(
                     status=str((comments_result or {}).get("status") or "").strip().lower() or "pending",
                 )
         comments_launch_ms = round((time_module.perf_counter() - comments_launch_started_at) * 1000, 1)
+        if existing_catalog_run_id:
+            cancelled = _cancel_launch_group_if_parent_cancelled(
+                run_id=existing_catalog_run_id,
+                platform=normalized_platform,
+                account_handle=normalized_account,
+            )
+            if cancelled:
+                return cancelled
 
     catalog_run_id = str((catalog_result or {}).get("run_id") or "").strip() or None
     comments_run_id = str((comments_result or {}).get("run_id") or "").strip() or None
     comments_auth_metadata = _catalog_comments_auth_metadata(comments_result)
     if catalog_run_id and not comments_deferred_until_catalog_complete:
+        if existing_catalog_run_id:
+            cancelled = _cancel_launch_group_if_parent_cancelled(
+                run_id=existing_catalog_run_id,
+                platform=normalized_platform,
+                account_handle=normalized_account,
+            )
+            if cancelled:
+                return cancelled
         catalog_metadata_updates: dict[str, Any] = {
             "selected_tasks": normalized_selected_tasks,
             "effective_selected_tasks": effective_selected_tasks,
             **({"enable_cap4_canary": True} if enable_cap4_canary else {}),
             **({"budget_decision": budget_decision} if budget_decision else {}),
+            **({"db_session_capacity": db_session_capacity} if db_session_capacity else {}),
             **({"adaptive_worker_plan": adaptive_worker_plan} if adaptive_worker_plan else {}),
             **(
                 _initial_instagram_completion_metadata(
@@ -2623,6 +3074,7 @@ def launch_social_account_catalog_backfill(
         "comments_run_id": comments_run_id,
         "catalog_status": str((catalog_result or {}).get("status") or "").strip() or None,
         "comments_status": str((comments_result or {}).get("status") or "").strip() or None,
+        "comments_reused_existing_run": comments_reused_existing_run,
         "catalog_action": normalized_catalog_action,
         "catalog_action_scope": normalized_catalog_action_scope,
         "catalog_bootstrap_required": requires_catalog_bootstrap if catalog_selected else False,
@@ -2634,6 +3086,7 @@ def launch_social_account_catalog_backfill(
         "comments_started_before_detail_complete": comments_started_before_detail_complete,
         "enable_cap4_canary": bool(enable_cap4_canary),
         "budget_decision": budget_decision,
+        "db_session_capacity": db_session_capacity,
         "adaptive_worker_plan": adaptive_worker_plan,
         **(
             _initial_instagram_completion_metadata(
@@ -2679,6 +3132,7 @@ _LOCAL_ROOM_NAMES = {
     "begin_social_account_catalog_backfill_launch",
     "finalize_social_account_catalog_backfill_launch",
     "launch_social_account_catalog_backfill",
+    "get_instagram_catalog_launch_capacity",
 }
 _LOCAL_ROOM_FUNCTIONS = {_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES}
 _CORE_ROOM_WRAPPERS = {_name: getattr(_core, _name, None) for _name in _LOCAL_ROOM_NAMES}
@@ -2686,5 +3140,6 @@ __all__ = [
     "start_social_account_catalog_backfill",
     "begin_social_account_catalog_backfill_launch",
     "finalize_social_account_catalog_backfill_launch",
+    "get_instagram_catalog_launch_capacity",
     "launch_social_account_catalog_backfill",
 ]

@@ -330,11 +330,15 @@ def get_backfill_health(
     generated_at = _core._iso(_core._now_utc())
 
     targets = _list_recent_catalog_run_targets(limit=run_limit)
+    if not include_terminal_runs:
+        targets = [
+            target
+            for target in targets
+            if str(target.get("run_status") or "").strip().lower() in _ACTIVE_RUN_STATUSES
+        ]
     run_entries: list[dict[str, Any]] = []
     for target in targets:
         entry = _build_run_entry(target, recent_log_limit=recent_log_limit)
-        if not include_terminal_runs and not entry.get("is_active"):
-            continue
         run_entries.append(entry)
 
     # Cross-account auth cooldowns: one lookup per distinct (platform, account) seen
@@ -359,7 +363,7 @@ def get_backfill_health(
     # Worker / auth health (degrade to safe defaults on failure).
     worker_auth: dict[str, Any]
     try:
-        worker_auth = get_worker_auth_capabilities()
+        worker_auth = get_worker_auth_capabilities(validate_instagram=False)
     except Exception as exc:  # noqa: BLE001
         logger.warning("backfill_health: worker auth capabilities read failed: %s", exc)
         worker_auth = {"error": f"{type(exc).__name__}: {exc}"}
@@ -374,7 +378,7 @@ def get_backfill_health(
     # Queue depth (bounded summary path — same as the health-dot/queue surfaces).
     queue_section: dict[str, Any]
     try:
-        queue_status = get_queue_status(summary_only=True, include_runs_summary=True)
+        queue_status = get_queue_status(summary_only=True, counts_only=True, include_runs_summary=False)
         queue_block = _core._metadata_dict(queue_status.get("queue"))
         by_status = _core._metadata_dict(queue_block.get("by_status"))
         queue_depth = sum(

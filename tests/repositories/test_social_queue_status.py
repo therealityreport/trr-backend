@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 import trr_backend.repositories.social_season_analytics as social_repo
+import trr_backend.socials.control_plane.queue_status as queue_status
 import trr_backend.socials.control_plane.worker_health as worker_health
 
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "socials" / "run_metadata"
@@ -280,6 +281,44 @@ def test_get_queue_status_summary_only_skips_expensive_side_effects(
     assert payload["queue"]["running_jobs"] == []
     assert payload["queue"]["media_queued_jobs"] == []
     assert len(query_calls) == 6
+
+
+def test_get_queue_status_counts_only_stops_after_aggregate(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Cursor:
+        def execute(self, _sql: str, _params: list[object] | None = None) -> None:
+            return None
+
+    connection_labels: list[str] = []
+
+    def _db_connection(*, label: str, **_kwargs):
+        connection_labels.append(label)
+        if len(connection_labels) > 2:
+            raise AssertionError("counts_only must skip later DB queries")
+        return nullcontext(object())
+
+    monkeypatch.setenv("SOCIAL_QUEUE_STATUS_CACHE_TTL_SECONDS", "60")
+    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name, **_kwargs: True)
+    monkeypatch.setattr(social_repo.pg, "db_connection", _db_connection)
+    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None, **_kwargs: nullcontext(_Cursor()))
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_all_with_cursor",
+        lambda *_args, **_kwargs: [
+            {"platform": "instagram", "job_type": "posts", "status": "running", "stage": "posts", "total": 2}
+        ],
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "get_worker_health",
+        lambda: pytest.fail("counts_only must skip worker health"),
+    )
+
+    payload = queue_status.get_queue_status(counts_only=True)
+
+    assert connection_labels == ["queue-status:relation-check", "queue-status:aggregate"]
+    assert payload["queue"]["by_status"]["running"] == 2
+    assert "workers" not in payload
+    assert social_repo._queue_status_cache is None
 
 
 def test_get_queue_status_read_does_not_run_recovery_side_effects(
