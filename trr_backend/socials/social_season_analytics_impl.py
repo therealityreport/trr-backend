@@ -18524,7 +18524,10 @@ def _download_avatar_to_tempfile(
         safe_requests_get,
     )
 
-    media_url_policy = MediaUrlSafetyPolicy(allowed_hosts_for_platform(platform))
+    media_url_policy = MediaUrlSafetyPolicy(
+        allowed_hosts_for_platform(platform),
+        allow_test_hosts=False,
+    )
     temp_path: str | None = None
     content_type = "application/octet-stream"
     total_bytes = 0
