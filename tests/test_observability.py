@@ -47,6 +47,19 @@ def test_better_stack_queue_preserves_request_trace() -> None:
     assert event["trace_id"] == "trace-queued"
 
 
+def test_better_stack_queue_filters_urllib3_before_enqueue() -> None:
+    log_queue: Queue[logging.LogRecord] = Queue(maxsize=1)
+    handler = observability.NonBlockingQueueHandler(log_queue)
+
+    handler.handle(logging.LogRecord("urllib3", logging.INFO, __file__, 1, "noise", (), None))
+    handler.handle(logging.LogRecord("test.logger", logging.INFO, __file__, 2, "signal", (), None))
+
+    queued = log_queue.get_nowait()
+    assert queued.name == "test.logger"
+    assert queued.getMessage() == "signal"
+    assert log_queue.empty()
+
+
 def test_configure_runtime_observability_adds_better_stack_handler(monkeypatch) -> None:
     root_logger = logging.getLogger()
     original_handlers = list(root_logger.handlers)

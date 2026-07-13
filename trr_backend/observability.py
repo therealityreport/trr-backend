@@ -177,6 +177,11 @@ def _build_better_stack_event(record: logging.LogRecord, *, service_name: str) -
 class NonBlockingQueueHandler(QueueHandler):
     """Queue logs without making request threads wait for remote shipping."""
 
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name == "urllib3":
+            return False
+        return super().filter(record)
+
     def prepare(self, record: logging.LogRecord) -> logging.LogRecord:
         prepared = copy(record)
         prepared.trr_trace_id = get_trace_id() or ""
