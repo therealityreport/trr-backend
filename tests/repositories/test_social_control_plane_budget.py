@@ -97,6 +97,86 @@ def test_default_budget_decision_is_normal_without_live_reads() -> None:
     }
 
 
+def test_instagram_db_session_worker_budget_uses_canonical_env_with_legacy_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(budget.INSTAGRAM_DB_SESSION_WORKER_BUDGET_ENV, raising=False)
+    monkeypatch.setenv(budget.LEGACY_INSTAGRAM_COMMENTS_DB_SESSION_BUDGET_ENV, "7")
+    assert budget.instagram_db_session_worker_budget() == 7
+
+    monkeypatch.setenv(budget.INSTAGRAM_DB_SESSION_WORKER_BUDGET_ENV, "10")
+    assert budget.instagram_db_session_worker_budget() == 10
+
+
+def test_instagram_db_session_capacity_counts_active_and_dispatched_workers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend import modal_dispatch
+    from trr_backend.db import pg
+
+    captured: dict[str, object] = {}
+    lock_conn = object()
+
+    def _fetch_all(sql: str, params=None, *, conn=None, pool_name: str = "default"):
+        captured["sql"] = sql
+        captured["conn"] = conn
+        captured["pool_name"] = pool_name
+        return [
+            *[
+                {
+                    "job_id": f"active-{index}",
+                    "status": "running",
+                    "worker_id": f"worker-{index}",
+                    "claimed_at": "now",
+                    "remote_invocation_id": None,
+                }
+                for index in range(4)
+            ],
+            *[
+                {
+                    "job_id": f"dispatched-{index}",
+                    "status": "queued",
+                    "worker_id": None,
+                    "claimed_at": None,
+                    "remote_invocation_id": f"call-{index}",
+                }
+                for index in range(4)
+            ],
+        ]
+
+    monkeypatch.setenv(budget.INSTAGRAM_DB_SESSION_WORKER_BUDGET_ENV, "10")
+    monkeypatch.setattr(pg, "fetch_all", _fetch_all)
+    monkeypatch.setattr(modal_dispatch, "inspect_modal_function_call", lambda _call_id: {"status": "running"})
+    monkeypatch.setattr(
+        budget,
+        "_instagram_db_session_pool_usage",
+        lambda **_kwargs: {
+            "available": True,
+            "limit": 15,
+            "reserved_sessions": 3,
+            "probe_reason": "fresh_session_reservation_succeeded",
+            "read_error": None,
+        },
+    )
+
+    capacity = budget.get_instagram_db_session_capacity(requested_workers=3, conn=lock_conn)
+
+    assert capacity["worker_budget"] == 10
+    assert capacity["active_db_jobs"] == 4
+    assert capacity["dispatched_unclaimed_jobs"] == 4
+    assert capacity["active_workers"] == 8
+    assert capacity["remaining_workers"] == 2
+    assert capacity["requested_workers"] == 3
+    assert capacity["blocked"] is True
+    assert capacity["available"] is True
+    assert capacity["read_error"] is None
+    assert captured["conn"] is lock_conn
+    assert captured["pool_name"] == "social_control"
+    assert "remote_invocation_id" in str(captured["sql"])
+    assert "shared_account_posts" in str(captured["sql"])
+    assert "comments_scrapling" in str(captured["sql"])
+
+
 def test_runbook_live_apply_cap_clamps_overrides_to_two_workers() -> None:
     decision = budget.build_budget_decision(
         lane=LANE,

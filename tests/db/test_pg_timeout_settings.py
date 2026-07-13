@@ -114,3 +114,8 @@ class TestStatementTimeoutDetection:
         """A statement timeout error must NOT be classified as a transient transport error."""
         err = Exception("canceling statement due to statement timeout")
         assert _is_transient_transport_error(err) is False
+
+    def test_psycopg_connect_timeout_is_transient(self) -> None:
+        """A direct-endpoint timeout can fall through to the next configured candidate."""
+        err = Exception("connection to server at db.example.test, port 5432 failed: timeout expired")
+        assert _is_transient_transport_error(err) is True

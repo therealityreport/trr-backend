@@ -350,6 +350,33 @@ def test_db_read_connection_uses_social_control_pool_sizing(monkeypatch: pytest.
     assert fake_pool.putconn_calls == 1
 
 
+def test_session_control_pool_uses_session_candidates_and_one_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_pool = _FakePool()
+    created: list[tuple[int, int, str]] = []
+    session_dsn = "postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
+
+    def _pool_factory(*, minconn, maxconn, **kwargs):
+        created.append((minconn, maxconn, kwargs["dsn"]))
+        return fake_pool
+
+    monkeypatch.setenv("TRR_SESSION_CONTROL_DB_POOL_MINCONN", "5")
+    monkeypatch.setenv("TRR_SESSION_CONTROL_DB_POOL_MAXCONN", "5")
+    monkeypatch.setattr(
+        pg,
+        "resolve_session_database_url_candidate_details",
+        lambda: (_detail(session_dsn),),
+    )
+    monkeypatch.setattr(pg, "ThreadedConnectionPool", _pool_factory)
+
+    with pg.db_read_connection(label="session-control", pool_name="session_control"):
+        pass
+
+    assert created == [(1, 1, session_dsn)]
+    assert pg.current_pool_dsn(pool_name="session_control") == session_dsn
+
+
 def test_db_read_connection_discards_closed_connection_on_return(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -386,6 +413,24 @@ def test_advisory_session_lock_uses_one_connection_for_lock_and_unlock(
         "select pg_try_advisory_lock(%s) as locked",
         "select pg_advisory_unlock(%s)",
     ]
+
+
+def test_advisory_session_lock_redirects_legacy_pool_to_session_control(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_pool = _FakeThreadedPool()
+    selected_pools: list[str] = []
+
+    def _get_pool(*, pool_name: str = "default"):
+        selected_pools.append(pool_name)
+        return fake_pool
+
+    monkeypatch.setattr(pg, "_get_pool", _get_pool)
+
+    with pg.advisory_session_lock(lock_key=123, label="test", pool_name="social_control"):
+        pass
+
+    assert selected_pools == ["session_control"]
 
 
 def test_advisory_session_lock_raises_when_lock_unavailable(
@@ -539,6 +584,8 @@ def test_is_database_service_unavailable_error_detects_pool_exhaustion_and_init_
         is True
     )
     assert pg.is_database_service_unavailable_error(RuntimeError("Database pool initialization failed: boom")) is True
+    assert pg.is_database_service_unavailable_error(RuntimeError("FATAL: EMAXCONNSESSION")) is True
+    assert pg.is_database_service_unavailable_error(RuntimeError("FATAL: MaxClientsInSessionMode")) is True
     assert pg.is_database_service_unavailable_error(RuntimeError("other failure")) is False
 
 
@@ -713,8 +760,8 @@ def test_resolve_pool_sizing_clamps_modal_session_pooler_overrides_without_pytes
 
     assert sizing["requested_minconn"] == 4
     assert sizing["requested_maxconn"] == 16
-    assert sizing["minconn"] == 2
-    assert sizing["maxconn"] == 2
+    assert sizing["minconn"] == 1
+    assert sizing["maxconn"] == 1
     assert sizing["session_pooler_override_clamped"] is False
     assert sizing["modal_session_pooler_override_clamped"] is True
     assert sizing["maxconn_source"] == "clamped:modal_session_pooler_ceiling"
@@ -808,8 +855,8 @@ def test_resolve_pool_sizing_clamps_modal_session_pooler_overrides(monkeypatch: 
 
     assert sizing["requested_minconn"] == 4
     assert sizing["requested_maxconn"] == 16
-    assert sizing["minconn"] == 2
-    assert sizing["maxconn"] == 2
+    assert sizing["minconn"] == 1
+    assert sizing["maxconn"] == 1
     assert sizing["modal_session_pooler_override_clamped"] is True
     assert sizing["minconn_source"] == "clamped:modal_session_pooler_ceiling"
     assert sizing["maxconn_source"] == "clamped:modal_session_pooler_ceiling"
@@ -830,7 +877,7 @@ def test_resolve_pool_sizing_keeps_local_clamp_outside_modal(monkeypatch: pytest
     assert sizing["session_pooler_override_clamped"] is True
 
 
-def test_fetch_one_retries_once_on_ssl_connection_closed_fault(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fetch_one_retries_ssl_fault_without_resetting_shared_pool(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = {"fetch": 0, "reset": 0}
 
     @contextmanager
@@ -855,7 +902,7 @@ def test_fetch_one_retries_once_on_ssl_connection_closed_fault(monkeypatch: pyte
 
     assert result == {"ok": True}
     assert calls["fetch"] == 2
-    assert calls["reset"] == 1
+    assert calls["reset"] == 0
 
 
 def test_get_connection_with_retry_reraises_last_pool_error_after_retries_exhausted(
@@ -876,7 +923,7 @@ def test_get_connection_with_retry_reraises_last_pool_error_after_retries_exhaus
         pg._get_connection_with_retry(label="fetch_one")
 
 
-def test_fetch_all_retries_once_on_closed_cursor_fault(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fetch_all_retries_closed_cursor_without_resetting_shared_pool(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = {"fetch": 0, "reset": 0}
 
     @contextmanager
@@ -901,10 +948,10 @@ def test_fetch_all_retries_once_on_closed_cursor_fault(monkeypatch: pytest.Monke
 
     assert result == [{"ok": True}]
     assert calls["fetch"] == 2
-    assert calls["reset"] == 1
+    assert calls["reset"] == 0
 
 
-def test_fetch_one_retries_once_on_closed_pool_fault(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fetch_one_retries_closed_pool_fault_without_global_reset(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = {"fetch": 0, "reset": 0}
 
     @contextmanager
@@ -929,7 +976,7 @@ def test_fetch_one_retries_once_on_closed_pool_fault(monkeypatch: pytest.MonkeyP
 
     assert result == {"ok": True}
     assert calls["fetch"] == 2
-    assert calls["reset"] == 1
+    assert calls["reset"] == 0
 
 
 def test_db_connection_does_not_mask_errors_when_pool_closes_during_putconn(
@@ -951,7 +998,10 @@ def test_db_connection_does_not_mask_errors_when_pool_closes_during_putconn(
     assert fake_pool.putconn_calls == 1
 
 
-def test_db_connection_retries_pool_acquire_on_pool_exhaustion(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_db_connection_retries_pool_acquire_without_warning_spam(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     fake_pool = _FakePoolExhaustThenSuccess(failures_before_success=2)
     monkeypatch.setattr(
         pg,
@@ -967,6 +1017,7 @@ def test_db_connection_retries_pool_acquire_on_pool_exhaustion(monkeypatch: pyte
 
     assert fake_pool.getconn_calls == 3
     assert fake_pool.putconn_calls == 1
+    assert "acquire_failed" not in caplog.text
 
 
 def test_reset_pool_rotates_active_pool_without_closing_checked_out_connections(
@@ -1173,6 +1224,11 @@ def test_local_pool_pressure_summary_does_not_expose_pool_details(monkeypatch: p
         "resolve_database_url_candidate_details",
         lambda: (_detail("postgresql://db.example.com/postgres"),),
     )
+    monkeypatch.setattr(
+        pg,
+        "resolve_session_database_url_candidate_details",
+        lambda: (_detail("postgresql://db.example.com/postgres"),),
+    )
 
     summary = pg.local_pool_pressure_summary()
 
@@ -1189,6 +1245,11 @@ def test_local_pool_pressure_snapshot_reports_named_application_names(monkeypatc
         "resolve_database_url_candidate_details",
         lambda: (_detail("postgresql://db.example.com/postgres"),),
     )
+    monkeypatch.setattr(
+        pg,
+        "resolve_session_database_url_candidate_details",
+        lambda: (_detail("postgresql://db.example.com/postgres"),),
+    )
 
     snapshot = pg.local_pool_pressure_snapshot()
 
@@ -1197,6 +1258,7 @@ def test_local_pool_pressure_snapshot_reports_named_application_names(monkeypatc
     assert application_names["social_profile"] == "trr-backend:social_profile"
     assert application_names["social_control"] == "trr-backend:social_control"
     assert application_names["health"] == "trr-backend:health"
+    assert application_names["session_control"] == "trr-backend:session_control"
 
 
 def test_build_pool_for_non_session_urls_keeps_default_pool_size(monkeypatch: pytest.MonkeyPatch) -> None:
