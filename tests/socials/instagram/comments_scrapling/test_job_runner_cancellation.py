@@ -48,6 +48,8 @@ def _patch_common_runner_dependencies(monkeypatch: pytest.MonkeyPatch, jr: Any, 
     # stub must return a real UTC datetime rather than ``None``.
     monkeypatch.setattr(repo, "_now_utc", lambda: datetime(2026, 4, 28, tzinfo=UTC))
     monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {})
+    monkeypatch.setattr(jr, "_load_public_replay_guard_rows", lambda **_kwargs: {})
+    monkeypatch.setattr(jr, "_completion_residual_gap_targets_from_health", lambda **_kwargs: [])
 
 
 def test_comments_job_runner_checks_cancellation_after_warmup_before_opening_persist_conn(

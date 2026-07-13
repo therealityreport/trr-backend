@@ -26,6 +26,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -122,6 +123,11 @@ _SPIN_R_RE = re.compile(r'"__spin_r":(?P<token>\d+)')
 _SPIN_B_RE = re.compile(r'"__spin_b":"(?P<token>[^"]+)"')
 _SPIN_T_RE = re.compile(r'"__spin_t":(?P<token>\d+)')
 _HSI_RE = re.compile(r'"hsi":"?(?P<token>\d+)"?')
+_REDIRECT_LOOP_RE = re.compile(
+    r"(?:exceeded\s+\d+\s+redirects|too[ _-]+many[ _-]+redirects|max(?:imum)?[ _-]+redirects)",
+    re.IGNORECASE,
+)
+_URL_IN_ERROR_RE = re.compile(r"https?://[^\s;<>'\"]+", re.IGNORECASE)
 
 
 @dataclass(slots=True)
@@ -146,6 +152,48 @@ _AUTHENTICATED_COOKIE_NAMES = frozenset({"sessionid", "ds_user_id"})
 def _auth_failure_text(text: str) -> bool:
     normalized = str(text or "").strip().lower()
     return any(token in normalized for token in ("login", "checkpoint", "challenge", "accounts/login"))
+
+
+def _is_redirect_loop_exception(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    for _ in range(4):
+        if isinstance(current, httpx.TooManyRedirects) or _REDIRECT_LOOP_RE.search(str(current or "")):
+            return True
+        current = current.__cause__ or current.__context__ if current is not None else None
+    return False
+
+
+def _safe_url_classes(url: Any) -> tuple[str, str]:
+    raw_url = str(url or "").strip()
+    try:
+        parsed = urlparse(raw_url)
+    except Exception:  # noqa: BLE001
+        return "unknown", "unknown"
+    host = str(parsed.hostname or "").strip().lower()
+    origin_class = (
+        "instagram"
+        if host == "instagram.com" or host.endswith(".instagram.com")
+        else "external"
+        if host
+        else "unknown"
+    )
+    path = str(parsed.path or "/").strip().lower()
+    if path in {"", "/"}:
+        path_class = "home"
+    elif "/accounts/login" in path:
+        path_class = "login"
+    elif "/checkpoint" in path or "/challenge" in path:
+        path_class = "checkpoint"
+    elif len([part for part in path.split("/") if part]) == 1:
+        path_class = "profile"
+    else:
+        path_class = "other"
+    return origin_class, path_class
+
+
+def _redirect_loop_url_classes(exc: BaseException) -> tuple[str, str]:
+    urls = _URL_IN_ERROR_RE.findall(str(exc or ""))
+    return _safe_url_classes(urls[-1].rstrip(".,)")) if urls else ("instagram", "unknown")
 
 
 def _safe_rate_limit_key(value: str) -> str:
@@ -301,7 +349,7 @@ def _try_advisory_lock_pace(*, key: str, delay_seconds: float) -> dict[str, Any]
         return _pacing_result(acquired=False, paced=True, error=f"pg_import_failed:{exc}")
     remaining_seconds = 0.0
     try:
-        with pg.db_connection(label="instagram-posts-rate-limit-pace", pool_name="social_control") as conn:
+        with pg.db_connection(label="instagram-posts-rate-limit-pace", pool_name="session_control") as conn:
             with pg.db_cursor(conn=conn) as cur:
                 cur.execute(
                     """
@@ -841,6 +889,7 @@ class InstagramPostsScraplingFetcher:
         )
         self._page_size = max(1, resolved_page_size)
         self._request_count = 0
+        self._warmup_failure_metadata: dict[str, Any] = {}
         self._warmup_cookie_delta: dict[str, str] = {}
         self._selected_proxy_fingerprint: str = proxy_config.fingerprint if proxy_config else "none"
         self._proxy_session_mode: str = proxy_config.session_mode if proxy_config else "none"
@@ -951,6 +1000,7 @@ class InstagramPostsScraplingFetcher:
             "authenticated_cookie_count": sum(1 for name in self._raw_cookies if name in _AUTHENTICATED_COOKIE_NAMES),
             "warmup_cookie_names": sorted(self._warmup_cookie_delta.keys()),
             "warmup_cookie_count": len(self._warmup_cookie_delta),
+            "warmup_failure": dict(self._warmup_failure_metadata),
             "selected_proxy_fingerprint": self._selected_proxy_fingerprint,
             "proxy_session_mode": self._proxy_session_mode,
             "proxy_identity": proxy_identity.to_metadata(),
@@ -1027,11 +1077,23 @@ class InstagramPostsScraplingFetcher:
         try:
             response = await self._fetch_page(profile_url, referer=profile_url)
         except Exception as exc:  # noqa: BLE001
+            if _is_redirect_loop_exception(exc):
+                origin_class, path_class = _redirect_loop_url_classes(exc)
+                self._record_warmup_failure(
+                    error_code="instagram_posts_redirect_loop",
+                    origin_class=origin_class,
+                    path_class=path_class,
+                )
+                self._warmup_pool_metadata.update({"miss": True, "refresh_reason": "redirect_loop"})
+                raise InstagramPostsWarmupError(
+                    "Instagram posts warmup stopped after a redirect loop.",
+                    error_code="instagram_posts_redirect_loop",
+                    retryable=False,
+                ) from exc
             if self._activate_requests_fallback("warmup_transport_failed"):
                 self._requests_fallback_metadata.update(
                     {
                         "warmup_error_class": type(exc).__name__,
-                        "warmup_error_message": str(exc)[:500],
                     }
                 )
                 return
@@ -1042,9 +1104,26 @@ class InstagramPostsScraplingFetcher:
                 retryable=True,
             ) from exc
         text = _response_text(response)
-        if _status_code(response) in {401, 403} or _auth_failure_text(text):
-            if self._activate_requests_fallback("warmup_auth_failed"):
-                return
+        response_url = getattr(response, "url", None)
+        origin_class, path_class = _safe_url_classes(
+            response_url if isinstance(response_url, str | httpx.URL) else profile_url
+        )
+        status_code = _status_code(response)
+        location = _safe_location(response) if 300 <= status_code < 400 else ""
+        _, location_path_class = _safe_url_classes(f"https://www.instagram.com{location}") if location else ("", "")
+        if location_path_class in {"login", "checkpoint", "home"}:
+            path_class = location_path_class
+        elif _auth_failure_text(text):
+            path_class = (
+                "checkpoint" if any(token in text.lower() for token in ("checkpoint", "challenge")) else "login"
+            )
+        terminal_redirect = path_class in {"login", "checkpoint", "home"}
+        if status_code in {401, 403} or _auth_failure_text(text) or terminal_redirect:
+            self._record_warmup_failure(
+                error_code="instagram_posts_warmup_auth_failed",
+                origin_class=origin_class,
+                path_class=path_class,
+            )
             self._consecutive_auth_failures += 1
             self._warmup_pool_metadata.update({"miss": True, "refresh_reason": "auth_failure"})
             raise InstagramPostsWarmupError(
@@ -1079,6 +1158,22 @@ class InstagramPostsScraplingFetcher:
                 "proxy_fingerprint": self._selected_proxy_fingerprint,
             },
         )
+
+    def _record_warmup_failure(
+        self,
+        *,
+        error_code: str,
+        origin_class: str,
+        path_class: str,
+    ) -> None:
+        self._warmup_failure_metadata = {
+            "phase": "document_warmup",
+            "attempt_count": 1,
+            "final_origin_class": str(origin_class or "unknown"),
+            "final_path_class": str(path_class or "unknown"),
+            "proxy_fingerprint": self._selected_proxy_fingerprint,
+            "error_code": error_code,
+        }
 
     def warmup_snapshot(self) -> dict[str, Any]:
         """Return enough warmup state for another posts fetcher in the same shard."""

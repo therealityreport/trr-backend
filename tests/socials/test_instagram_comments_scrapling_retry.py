@@ -3373,18 +3373,80 @@ def test_advisory_api_pacing_stops_when_cooldown_exceeds_deadline(tmp_path: Path
     assert sleep_mock.call_args.args[0] == pytest.approx(0.01, abs=0.01)
 
 
-def test_advisory_api_pacing_uses_social_control_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_advisory_api_pacing_uses_session_control_pool_and_waits_after_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from trr_backend.db import pg
 
     calls: list[tuple[str, str]] = []
+    state = {"in_connection": False}
 
     class FakeCursor:
-        def execute(self, _sql: str, _params: Any = None) -> None:
-            return None
+        sql = ""
 
-        def fetchone(self) -> list[float]:
-            # Reservation upsert returns remaining-seconds; 0 ⇒ no wait.
-            return [0.0]
+        def execute(self, sql: str, _params: Any = None) -> None:
+            self.sql = sql
+
+        def fetchone(self) -> dict[str, float]:
+            if "cooldown_until - now()" in self.sql:
+                return {"cooldown_seconds": 3.0}
+            assert "coalesce(p.cooldown_until, now())" in self.sql
+            return {"wait_seconds": 2.0}
+
+    @contextmanager
+    def fake_db_connection(*, label: str, pool_name: str = "default"):
+        calls.append((label, pool_name))
+        state["in_connection"] = True
+        try:
+            yield object()
+        finally:
+            state["in_connection"] = False
+
+    @contextmanager
+    def fake_db_cursor(*, conn: Any = None, label: str = "write-cursor"):
+        del conn, label
+        yield FakeCursor()
+
+    monkeypatch.setattr(pg, "db_connection", fake_db_connection)
+    monkeypatch.setattr(pg, "db_cursor", fake_db_cursor)
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.comments_scrapling.fetcher._wait_for_global_api_cooldown",
+        lambda **_kwargs: True,
+    )
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.comments_scrapling.fetcher.time.sleep",
+        lambda seconds: (sleep_calls.append(seconds), assert_not_in_connection(state)),
+    )
+
+    result = _try_advisory_lock_pace(key="advisory-pool", delay_seconds=0.0, deadline=None)
+
+    assert result["acquired"] is True
+    assert result["paced"] is True
+    assert result["error"] is None
+    assert calls == [
+        ("instagram-comments-rate-limit-pace", "session_control"),
+        ("instagram-comments-rate-limit-cooldown-read", "session_control"),
+    ]
+    assert sleep_calls == [2.0, 3.0]
+
+
+def assert_not_in_connection(state: dict[str, bool]) -> None:
+    assert state["in_connection"] is False
+
+
+def test_record_global_api_cooldown_extends_db_deadline_and_keeps_file_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from trr_backend.db import pg
+
+    calls: list[tuple[str, str]] = []
+    executed: list[tuple[str, Any]] = []
+
+    class FakeCursor:
+        def execute(self, sql: str, params: Any = None) -> None:
+            executed.append((sql, params))
 
     @contextmanager
     def fake_db_connection(*, label: str, pool_name: str = "default"):
@@ -3398,13 +3460,67 @@ def test_advisory_api_pacing_uses_social_control_pool(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(pg, "db_connection", fake_db_connection)
     monkeypatch.setattr(pg, "db_cursor", fake_db_cursor)
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.comments_scrapling.fetcher.tempfile.gettempdir",
+        lambda: str(tmp_path),
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.comments_scrapling.fetcher.time.monotonic",
+        lambda: 100.0,
+    )
 
-    result = _try_advisory_lock_pace(key="advisory-pool", delay_seconds=0.0, deadline=None)
+    _record_global_api_cooldown(key="proxy-isolated-key", delay_seconds=5.0)
 
-    assert result["acquired"] is True
-    assert result["paced"] is True
-    assert result["error"] is None
-    assert calls == [("instagram-comments-rate-limit-pace", "social_control")]
+    assert calls == [("instagram-comments-rate-limit-cooldown", "session_control")]
+    assert len(executed) == 1
+    assert "greatest(" in executed[0][0]
+    assert "excluded.cooldown_until" in executed[0][0]
+    assert executed[0][1] == ("proxy-isolated-key", 5.0)
+    cooldown_file = tmp_path / "trr-instagram-comments-rate" / "proxy-isolated-key.cooldown"
+    assert float(cooldown_file.read_text(encoding="utf-8")) == 105.0
+
+
+def test_record_global_api_cooldown_falls_back_to_file_when_db_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from trr_backend.db import pg
+
+    @contextmanager
+    def unavailable_db_connection(**_kwargs: Any):
+        raise RuntimeError("database unavailable")
+        yield
+
+    monkeypatch.setattr(pg, "db_connection", unavailable_db_connection)
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.comments_scrapling.fetcher.tempfile.gettempdir",
+        lambda: str(tmp_path),
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.comments_scrapling.fetcher.time.monotonic",
+        lambda: 200.0,
+    )
+
+    _record_global_api_cooldown(key="db-fallback", delay_seconds=7.0)
+
+    cooldown_file = tmp_path / "trr-instagram-comments-rate" / "db-fallback.cooldown"
+    assert float(cooldown_file.read_text(encoding="utf-8")) == 207.0
+
+
+def test_comments_auto_refill_dispatch_uses_control_plane_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.socials.control_plane import dispatch_runtime
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+
+    calls: list[dict[str, object]] = []
+
+    def fake_dispatch(*, run_id=None, limit=None):
+        calls.append({"run_id": run_id, "limit": limit})
+        return {"dispatched_job_ids": ["job-1"]}
+
+    monkeypatch.setattr(dispatch_runtime, "dispatch_due_social_jobs", fake_dispatch)
+
+    assert jr._dispatch_due_social_jobs(run_id="run-1", limit=4) == {"dispatched_job_ids": ["job-1"]}
+    assert calls == [{"run_id": "run-1", "limit": 4}]
 
 
 # ---------------------------------------------------------------------------
@@ -5394,6 +5510,26 @@ def test_comments_job_runner_skips_duplicate_public_replay_after_auth_block(
         "auth_blocked_existing_public_coverage_skipped"
     )
     assert metadata["post_latency"]["samples"][0]["public_replay_guard"]["saved_comment_count"] == 124
+
+
+def test_public_replay_guard_accepts_legacy_and_recovery_pending_reasons(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+
+    captured: dict[str, object] = {}
+
+    def fake_fetch_all(sql: str, params: list[object]) -> list[dict[str, object]]:
+        captured["sql"] = " ".join(sql.split())
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr(jr.pg, "fetch_all", fake_fetch_all)
+
+    assert jr._load_public_replay_guard_rows(target_source_ids=["ABC123"]) == {}
+    assert "fallback_blocked_reason" in str(captured["sql"])
+    assert {
+        "public_comments_partial_requires_approval",
+        "public_comments_partial_public_recovery_pending",
+    } <= set(captured["params"][-1])
 
 
 def test_comments_job_runner_blocks_browser_session_invalidation_before_rendered_fallback(
@@ -8656,7 +8792,7 @@ def test_job_runner_keeps_one_comment_relay_recovery_gap_incomplete(
     assert sample["stored_total_comments"] == 32
 
 
-def test_job_runner_keeps_high_coverage_transient_gap_incomplete(
+def test_job_runner_retries_saved_public_partial_with_remaining_gap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from trr_backend.repositories import social_season_analytics as repo
@@ -8713,6 +8849,7 @@ def test_job_runner_keeps_high_coverage_transient_gap_incomplete(
                 reported_comment_count=876,
                 request_count=14,
                 retryable=True,
+                public_block_signal="http_429",
             )
 
         async def aclose(self) -> None:
@@ -8728,6 +8865,11 @@ def test_job_runner_keeps_high_coverage_transient_gap_incomplete(
     monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
+    monkeypatch.setattr(
+        jr,
+        "_enqueue_auto_public_recovery_targets",
+        lambda **_kwargs: pytest.fail("saved partial coverage must not enqueue another job"),
+    )
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
     monkeypatch.setattr(repo, "_emit_job_progress", lambda *a, **k: None)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
@@ -8752,6 +8894,7 @@ def test_job_runner_keeps_high_coverage_transient_gap_incomplete(
             "account": "bravotv",
             "target_source_ids": ["SHORT1"],
             "fetch_replies": True,
+            "comments_load_strategy": "public_relay",
         },
         "attempt_count": 1,
         "max_attempts": 3,
@@ -8759,7 +8902,7 @@ def test_job_runner_keeps_high_coverage_transient_gap_incomplete(
 
     with patch(
         "trr_backend.socials.instagram.comments_scrapling.job_runner.pg.fetch_one",
-        side_effect=_active_comments_job_fetch_one("completed"),
+        side_effect=_active_comments_job_fetch_one("retrying"),
     ):
         jr.run_instagram_comments_scrapling_job(job, worker_id="test-worker")
 
@@ -8771,16 +8914,53 @@ def test_job_runner_keeps_high_coverage_transient_gap_incomplete(
     # leak the plan closes.
     assert reconcile_calls == []
     assert finish_calls[-1]["status"] == "retrying"
+    assert finish_calls[-1]["last_error_code"] == "instagram_comments_public_retryable"
     metadata = finish_calls[-1]["metadata"]
     assert metadata["incomplete_target_source_ids"] == ["SHORT1"]
     assert metadata["incomplete_fetch_reasons"] == {"SHORT1": "http_429"}
+    assert metadata["runtime_metadata"]["completion_status"] == "public_comments_blocked_retryable"
+    assert metadata["runtime_metadata"]["retry_target_source_ids"] == ["SHORT1"]
     sample = metadata["post_latency"]["samples"][0]
     assert sample["completion_reason"] == "incomplete_fetch"
     assert sample["operator_status"] == "incomplete_retryable"
     assert sample["stored_total_comments"] == 847
 
 
-def test_job_runner_retries_only_remaining_posts_after_hard_retryable_failure(
+def test_auto_public_recovery_appends_explicit_targets_without_audit_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+    from trr_backend.socials.pipelines.comments import instagram as comments_pipeline
+
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        comments_pipeline,
+        "_append_instagram_comments_public_recovery_targets_to_active_run",
+        lambda **kwargs: calls.append(kwargs) or {"created_target_job_count": 1},
+    )
+
+    result = jr._enqueue_auto_public_recovery_targets(
+        run_id="11111111-1111-1111-1111-111111111111",
+        source_job_id="22222222-2222-2222-2222-222222222222",
+        account_handle="bravotv",
+        source_ids=["SHORT1", "SHORT1"],
+    )
+
+    assert result == {"created_target_job_count": 1}
+    assert calls == [
+        {
+            "run_id": "11111111-1111-1111-1111-111111111111",
+            "account_handle": "bravotv",
+            "target_source_ids": ["SHORT1"],
+            "batch_size": 1,
+            "dispatch_immediately": True,
+            "initiated_by": "comments-public-auto-recovery",
+            "exclude_active_job_id": "22222222-2222-2222-2222-222222222222",
+        }
+    ]
+
+
+def test_job_runner_stops_after_first_genuine_http_429(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from trr_backend.repositories import social_season_analytics as repo
@@ -8790,6 +8970,7 @@ def test_job_runner_retries_only_remaining_posts_after_hard_retryable_failure(
     finish_calls: list[dict[str, Any]] = []
     config_update_calls: list[dict[str, Any]] = []
     persist_calls: list[str] = []
+    fetch_calls: list[str] = []
 
     def fake_persist(*, shortcode: str, **_kwargs: Any) -> PersistedInstagramComments:
         persist_calls.append(shortcode)
@@ -8813,14 +8994,16 @@ def test_job_runner_retries_only_remaining_posts_after_hard_retryable_failure(
             return None
 
         async def fetch_comments_for_shortcode(self, shortcode: str, **_kwargs: Any) -> InstagramCommentsFetchResult:
+            fetch_calls.append(shortcode)
             if shortcode == "SHORT2":
                 return InstagramCommentsFetchResult(
-                    comments=[],
+                    comments=[object()],
                     fetch_failed=True,
                     auth_failed=False,
                     fetch_reason="http_429",
                     request_count=3,
                     retryable=True,
+                    public_block_signal="http_429",
                 )
             return InstagramCommentsFetchResult(
                 comments=[object()],
@@ -8868,6 +9051,7 @@ def test_job_runner_retries_only_remaining_posts_after_hard_retryable_failure(
             "account": "bravotv",
             "target_source_ids": ["SHORT1", "SHORT2", "SHORT3"],
             "fetch_replies": True,
+            "comments_load_strategy": "public_relay",
             "comments_shard_index": 1,
             "comments_shard_count": 2,
             "comments_shard_target_count": 3,
@@ -8882,21 +9066,18 @@ def test_job_runner_retries_only_remaining_posts_after_hard_retryable_failure(
     ):
         jr.run_instagram_comments_scrapling_job(job, worker_id="test-worker")
 
-    assert persist_calls == ["SHORT1", "SHORT3"]
+    assert fetch_calls == ["SHORT1", "SHORT2"]
+    assert persist_calls == ["SHORT1", "SHORT2"]
     assert config_update_calls == [
         {
-            "target_source_ids": ["SHORT2"],
-            "comments_shard_target_count": 1,
+            "target_source_ids": ["SHORT2", "SHORT3"],
+            "comments_shard_target_count": 2,
             "comments_retry_incomplete": True,
             "comments_retry_incomplete_source_job_id": "job-1",
         }
     ]
     assert finish_calls[-1]["status"] == "retrying"
-    assert finish_calls[-1]["last_error_code"] == "instagram_comments_incomplete_retryable"
-    assert finish_calls[-1]["metadata"]["retry_rebalance"] == {
-        "remaining_target_source_ids": ["SHORT2"],
-        "eligible": True,
-    }
+    assert finish_calls[-1]["last_error_code"] == "instagram_comments_public_retryable"
 
 
 def test_job_runner_completes_one_pass_incomplete_fill_with_unresolved_targets(
@@ -9615,6 +9796,139 @@ def test_fetch_comments_swaps_cursor_direction_when_min_id_repeats(monkeypatch) 
     # Direction swap surfaced in runtime metadata.
     assert fetcher.runtime_metadata["cursor_direction_swaps"]["top_level"] == 1
     assert fetcher.runtime_metadata["retry_reason_counts"].get("pagination_repeated_cursor_swap_direction") == 1
+
+
+def test_fetch_comments_both_cursor_directions_exhausted_stays_non_retryable() -> None:
+    fetcher = _build_fetcher()
+    fetcher._parser._parse_comment = MagicMock(
+        side_effect=[_comment("c1"), _comment("c2"), _comment("c3")]
+    )
+    fetcher._fetch_json_response = AsyncMock(
+        side_effect=[
+            {
+                "payload": {
+                    "comments": [{"id": "c1"}],
+                    "has_more_comments": True,
+                    "next_max_id": "max-2",
+                    "next_min_id": "min-9",
+                },
+                "failed": False,
+                "auth_failed": False,
+                "reason": None,
+                "retryable": False,
+            },
+            {
+                "payload": {
+                    "comments": [{"id": "c2"}],
+                    "has_more_comments": True,
+                    "next_max_id": "max-2",
+                    "next_min_id": "min-9",
+                },
+                "failed": False,
+                "auth_failed": False,
+                "reason": None,
+                "retryable": False,
+            },
+            {
+                "payload": {
+                    "comments": [{"id": "c3"}],
+                    "has_more_comments": False,
+                    "has_more_headload_comments": True,
+                    "next_min_id": "min-9",
+                    "next_max_id": "max-2",
+                },
+                "failed": False,
+                "auth_failed": False,
+                "reason": None,
+                "retryable": False,
+            },
+        ]
+    )
+    fetcher._fetch_rendered_comments_after_revealing_hidden = AsyncMock(return_value=[])
+
+    result = asyncio.run(
+        fetcher.fetch_comments_for_shortcode(
+            "ABC123",
+            max_comments=10,
+            fetch_replies=False,
+            expected_comment_count=4,
+        )
+    )
+
+    assert [comment.comment_id for comment in result.comments] == ["c1", "c2", "c3"]
+    assert result.fetch_failed is True
+    assert result.retryable is False
+    assert result.fetch_reason == "pagination_repeated_cursor"
+    assert result.diagnostic_metadata["cursor_directions_exhausted"] is True
+
+
+def test_fetch_replies_both_cursor_directions_exhausted_stays_non_retryable() -> None:
+    fetcher = _build_fetcher()
+    fetcher._parser._parse_comment = MagicMock(
+        side_effect=[
+            _comment("r1", is_reply=True, parent_comment_id="parent-1"),
+            _comment("r2", is_reply=True, parent_comment_id="parent-1"),
+            _comment("r3", is_reply=True, parent_comment_id="parent-1"),
+        ]
+    )
+    fetcher._fetch_json_response = AsyncMock(
+        side_effect=[
+            {
+                "payload": {
+                    "child_comments": [{"id": "r1"}],
+                    "has_more_tail_child_comments": True,
+                    "next_min_child_cursor": "min-2",
+                    "next_max_child_cursor": "max-9",
+                },
+                "failed": False,
+                "auth_failed": False,
+                "reason": None,
+                "retryable": False,
+            },
+            {
+                "payload": {
+                    "child_comments": [{"id": "r2"}],
+                    "has_more_tail_child_comments": True,
+                    "next_min_child_cursor": "min-2",
+                    "next_max_child_cursor": "max-9",
+                },
+                "failed": False,
+                "auth_failed": False,
+                "reason": None,
+                "retryable": False,
+            },
+            {
+                "payload": {
+                    "child_comments": [{"id": "r3"}],
+                    "has_more_tail_child_comments": False,
+                    "has_more_head_child_comments": True,
+                    "next_max_child_cursor": "max-9",
+                    "next_min_child_cursor": "min-2",
+                },
+                "failed": False,
+                "auth_failed": False,
+                "reason": None,
+                "retryable": False,
+            },
+        ]
+    )
+
+    result = asyncio.run(
+        fetcher._fetch_comment_replies(
+            media_id="media-1",
+            comment_id="parent-1",
+            shortcode="ABC123",
+            post_url="https://www.instagram.com/p/ABC123/",
+            expected_reply_count=4,
+        )
+    )
+
+    assert [comment.comment_id for comment in result.comments] == ["r1", "r2", "r3"]
+    assert result.fetch_failed is True
+    assert result.retryable is False
+    assert result.fetch_reason == "pagination_repeated_cursor"
+    assert result.diagnostic_metadata["cursor_directions_exhausted"] is True
+    assert result.reply_checkpoints == []
 
 
 def test_zstd_decoding_error_is_retryable_transport_error() -> None:

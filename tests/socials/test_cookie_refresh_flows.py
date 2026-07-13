@@ -89,12 +89,14 @@ def test_instagram_cookie_validation_username_uses_public_fallback_not_login_ide
 
 def test_instagram_cookie_health_probe_disables_repair_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
     observed_env: dict[str, str | None] = {}
+    observed_kwargs: dict[str, object] = {}
 
     class _FakeInstagramScraper:
         def __init__(self, **_kwargs: object) -> None:
             self.last_retrieval_meta: dict[str, object] = {}
 
-        def fetch_posts_graphql(self, *_args: object, **_kwargs: object) -> None:
+        def fetch_posts_graphql(self, *_args: object, **kwargs: object) -> None:
+            observed_kwargs.update(kwargs)
             observed_env["auto_refresh"] = os.getenv("SOCIAL_INSTAGRAM_COOKIE_AUTO_REFRESH")
             observed_env["graphql_recovery_disabled"] = os.getenv("SOCIAL_INSTAGRAM_GRAPHQL_RECOVERY_DISABLED")
             observed_env["interactive_login"] = os.getenv("SOCIAL_INSTAGRAM_INTERACTIVE_LOGIN")
@@ -122,6 +124,8 @@ def test_instagram_cookie_health_probe_disables_repair_side_effects(monkeypatch:
         "graphql_recovery_disabled": "true",
         "interactive_login": "false",
     }
+    assert observed_kwargs["allow_browser_fallback"] is False
+    assert observed_kwargs["allow_recovery"] is False
     assert os.getenv("SOCIAL_INSTAGRAM_COOKIE_AUTO_REFRESH") == "true"
     assert os.getenv("SOCIAL_INSTAGRAM_GRAPHQL_RECOVERY_DISABLED") is None
     assert os.getenv("SOCIAL_INSTAGRAM_INTERACTIVE_LOGIN") == "1"
@@ -441,6 +445,35 @@ def test_cookie_refresh_context_allows_profileless_browser_with_override(
     assert captured["launch_kwargs"]["headless"] is True
     assert captured["context_kwargs"] == {"viewport": {"width": 100, "height": 100}}
     assert captured["browser_closed"] is True
+
+
+def test_cookie_refresh_context_closes_profileless_browser_when_new_context_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    chrome_root = tmp_path / "Chrome"
+    captured: dict[str, int] = {"close_calls": 0}
+
+    class _FakeBrowser:
+        def new_context(self, **_kwargs: object) -> object:
+            raise RuntimeError("new context failed")
+
+        def close(self) -> None:
+            captured["close_calls"] += 1
+
+    monkeypatch.setattr(browser_cookie_refresh, "_chrome_profile_base_dir", lambda: chrome_root)
+    monkeypatch.setattr(browser_cookie_refresh, "launch_browser", lambda *_args, **_kwargs: _FakeBrowser())
+
+    with pytest.raises(RuntimeError, match="new context failed"):
+        browser_cookie_refresh.open_cookie_refresh_context(
+            SimpleNamespace(chromium=object()),
+            platform="socialblade",
+            headless=True,
+            viewport={"width": 100, "height": 100},
+            require_profile=False,
+        )
+
+    assert captured["close_calls"] == 1
 
 
 def test_social_auth_refresh_rate_limit_blocks_repeated_attempts(

@@ -242,7 +242,12 @@ def _classify_public_block_signal(terminal_reason: str | None) -> str:
         return PUBLIC_BLOCK_SIGNAL_NONE
     if normalized == BROWSER_SESSION_INVALIDATED_REASON or _browser_session_invalidated_text(normalized):
         return PUBLIC_BLOCK_SIGNAL_SESSION_INVALIDATED
-    if "429" in normalized or "rate_limit" in normalized or "too_many_requests" in normalized:
+    if (
+        "429" in normalized
+        or "1675004" in normalized
+        or "rate_limit" in normalized
+        or "too_many_requests" in normalized
+    ):
         return PUBLIC_BLOCK_SIGNAL_HTTP_429
     if "checkpoint" in normalized:
         return PUBLIC_BLOCK_SIGNAL_CHECKPOINT
@@ -2422,21 +2427,16 @@ def _public_relay_block_reason_from_response(
         return "login_required"
 
     if isinstance(payload, Mapping):
-        payload_text = " ".join(
-            str(value or "")
-            for value in (
-                payload.get("status"),
-                payload.get("message"),
-                payload.get("error"),
-                payload.get("error_message"),
-                payload.get("description"),
-            )
-        ).strip()
+        # GraphQL errors are commonly nested under data/errors/extensions. A
+        # serialized scan keeps the classifier shape-agnostic and catches Meta's
+        # rate-limit code even when no top-level message is present.
+        payload_text = json.dumps(payload, sort_keys=True, default=str)
         normalized_payload = payload_text.lower()
         if _browser_session_invalidated_text(payload_text):
             return BROWSER_SESSION_INVALIDATED_REASON
         if (
             "429" in normalized_payload
+            or "1675004" in normalized_payload
             or "rate_limit" in normalized_payload
             or "too many requests" in normalized_payload
         ):
@@ -2544,6 +2544,28 @@ def _record_global_api_cooldown(*, key: str, delay_seconds: float) -> None:
     delay = max(0.0, float(delay_seconds or 0))
     if delay <= 0:
         return
+    try:
+        from trr_backend.db import pg
+
+        with pg.db_connection(label="instagram-comments-rate-limit-cooldown", pool_name="session_control") as conn:
+            with pg.db_cursor(conn=conn) as cur:
+                cur.execute(
+                    """
+                    insert into social.ig_comment_rate_pace as p (rate_key, last_start, cooldown_until)
+                    values (%s, now(), now() + make_interval(secs => %s))
+                    on conflict (rate_key) do update
+                       set cooldown_until = greatest(
+                           coalesce(p.cooldown_until, '-infinity'::timestamptz),
+                           excluded.cooldown_until
+                       )
+                    """,
+                    (str(key or "instagram"), delay),
+                )
+    except Exception:  # noqa: BLE001
+        logger.debug("failed to persist global api cooldown", exc_info=True)
+
+    # Container-local fallback keeps this worker safe if Postgres later becomes
+    # unavailable; the persisted row remains authoritative across containers.
     path = _global_rate_cooldown_path(key)
     cooldown_until = time.monotonic() + delay
     with open(path, "a+", encoding="utf-8") as handle:
@@ -2608,6 +2630,28 @@ def _advisory_lock_keys_for(key: str) -> tuple[int, int]:
     return _RATE_LIMIT_ADVISORY_LOCK_NAMESPACE, key_int
 
 
+def _persisted_global_api_cooldown_remaining(key: str) -> float | None:
+    try:
+        from trr_backend.db import pg
+
+        with pg.db_connection(label="instagram-comments-rate-limit-cooldown-read", pool_name="session_control") as conn:
+            with pg.db_cursor(conn=conn) as cur:
+                cur.execute(
+                    """
+                    select extract(epoch from (cooldown_until - now()))::float8 as cooldown_seconds
+                    from social.ig_comment_rate_pace
+                    where rate_key = %s
+                    """,
+                    (str(key or "instagram"),),
+                )
+                row = cur.fetchone() or {}
+                value = row.get("cooldown_seconds")
+                return max(0.0, float(value)) if value is not None else 0.0
+    except Exception:  # noqa: BLE001
+        logger.debug("failed to read persisted global api cooldown", exc_info=True)
+        return None
+
+
 def _try_advisory_lock_pace(*, key: str, delay_seconds: float, deadline: float | None) -> dict[str, Any]:
     """Cross-container minimum-spacing pace via a DB-clock slot reservation.
 
@@ -2641,7 +2685,7 @@ def _try_advisory_lock_pace(*, key: str, delay_seconds: float, deadline: float |
         return {"acquired": False, "paced": True, "wait_ms": 0, "error": f"pg_import_failed:{exc}"}
     remaining_seconds = 0.0
     try:
-        with pg.db_connection(label="instagram-comments-rate-limit-pace", pool_name="social_control") as conn:
+        with pg.db_connection(label="instagram-comments-rate-limit-pace", pool_name="session_control") as conn:
             with pg.db_cursor(conn=conn) as cur:
                 # Atomic slot reservation. The row-level lock on the upsert is the
                 # cross-container serializer; it is held only for this statement,
@@ -2653,14 +2697,19 @@ def _try_advisory_lock_pace(*, key: str, delay_seconds: float, deadline: float |
                     insert into social.ig_comment_rate_pace as p (rate_key, last_start)
                     values (%s, now())
                     on conflict (rate_key) do update
-                       set last_start = greatest(p.last_start + make_interval(secs => %s), now())
-                    returning extract(epoch from (last_start - now()))::float8
+                       set last_start = greatest(
+                           p.last_start + make_interval(secs => %s),
+                           now(),
+                           coalesce(p.cooldown_until, now())
+                       )
+                    returning extract(epoch from (last_start - now()))::float8 as wait_seconds
                     """,
                     (str(key or "instagram"), delay),
                 )
-                row = cur.fetchone()
-                if row and row[0] is not None:
-                    remaining_seconds = max(0.0, float(row[0]))
+                row = cur.fetchone() or {}
+                wait_seconds = row.get("wait_seconds")
+                if wait_seconds is not None:
+                    remaining_seconds = max(0.0, float(wait_seconds))
     except Exception as exc:  # noqa: BLE001
         return {"acquired": False, "paced": True, "wait_ms": 0, "error": str(exc)}
     # Connection returned to the pool above; wait OUTSIDE the lock so concurrent
@@ -2675,6 +2724,19 @@ def _try_advisory_lock_pace(*, key: str, delay_seconds: float, deadline: float |
                 time.sleep(deadline_remaining)
                 return {"acquired": True, "paced": False, "wait_ms": wait_ms, "error": None}
         time.sleep(remaining_seconds)
+        # A sibling can record a 429 while this reservation is waiting. Recheck
+        # after the connection is returned so an already-queued request does not
+        # leak through the newly persisted cooldown.
+        cooldown_remaining = _persisted_global_api_cooldown_remaining(key)
+        if cooldown_remaining and cooldown_remaining > 0:
+            deadline_remaining = _deadline_remaining_seconds(deadline)
+            if deadline_remaining is not None:
+                if deadline_remaining <= 0:
+                    return {"acquired": True, "paced": False, "wait_ms": wait_ms, "error": None}
+                if cooldown_remaining > deadline_remaining:
+                    time.sleep(deadline_remaining)
+                    return {"acquired": True, "paced": False, "wait_ms": wait_ms, "error": None}
+            time.sleep(cooldown_remaining)
     return {"acquired": True, "paced": True, "wait_ms": wait_ms, "error": None}
 
 
@@ -3706,6 +3768,8 @@ class InstagramCommentsScraplingFetcher:
         # falling back to terminal repeated_cursor.
         cursor_directions_attempted: set[str] = set()
         cursor_direction_swaps = 0
+        top_level_cursor_directions_exhausted = False
+        reply_cursor_directions_exhausted = False
         # 0 == unlimited: skip wall-clock cuts entirely and let cursor
         # exhaustion (repeated_cursor / no-new-rows) drive the stop.
         _comment_pagination_budget_seconds = _resolve_positive_float_env(
@@ -4184,6 +4248,9 @@ class InstagramCommentsScraplingFetcher:
                         ),
                         deadline=reply_fetch_deadline,
                     )
+                    reply_cursor_directions_exhausted = reply_cursor_directions_exhausted or bool(
+                        (replies_result.diagnostic_metadata or {}).get("cursor_directions_exhausted")
+                    )
                     if (
                         reply_tail_deadline is not None
                         and replies_result.fetch_reason == "pagination_deadline_exceeded"
@@ -4384,6 +4451,7 @@ class InstagramCommentsScraplingFetcher:
                     "min_id" in cursor_directions_attempted and "max_id" in cursor_directions_attempted
                 )
                 if both_directions_attempted:
+                    top_level_cursor_directions_exhausted = True
                     retryable = retryable and not has_gap
                 else:
                     retryable = retryable or has_gap
@@ -4443,6 +4511,9 @@ class InstagramCommentsScraplingFetcher:
             )
             reply_checkpoints.extend(
                 item for item in residual_child_metadata.get("reply_checkpoints", []) if isinstance(item, dict)
+            )
+            reply_cursor_directions_exhausted = reply_cursor_directions_exhausted or bool(
+                residual_child_metadata.get("cursor_directions_exhausted")
             )
             fetch_failed = fetch_failed or bool(residual_child_metadata.get("fetch_failed"))
             auth_failed = auth_failed or bool(residual_child_metadata.get("auth_failed"))
@@ -4748,7 +4819,10 @@ class InstagramCommentsScraplingFetcher:
                     fetch_reason = "hidden_comments_unavailable_reconciled"
                 else:
                     fetch_failed = True
-                    retryable = True
+                    retryable = not (
+                        fetch_reason == "pagination_repeated_cursor"
+                        and (top_level_cursor_directions_exhausted or reply_cursor_directions_exhausted)
+                    )
                     if not fetch_reason:
                         fetch_reason = (
                             "reply_tail_incomplete" if current_missing_reply_count > 0 else "hidden_comments_unresolved"
@@ -4851,6 +4925,9 @@ class InstagramCommentsScraplingFetcher:
             "child_replies": child_reply_count(comments),
             "challenge_stop": bool(auth_failed),
             "session_invalidated": bool(browser_session_invalidated_detected),
+            "cursor_directions_exhausted": bool(
+                top_level_cursor_directions_exhausted or reply_cursor_directions_exhausted
+            ),
             "memory_guardrail": current_memory_guardrail_metadata(),
         }
         if single_session_rendered_metadata:
@@ -4899,6 +4976,7 @@ class InstagramCommentsScraplingFetcher:
         reply_checkpoints: list[dict[str, Any]] = []
         comments_fetched = 0
         merged_reply_count = 0
+        reply_cursor_directions_exhausted = False
         diagnostic_metadata: dict[str, Any] = {}
 
         for comment in persisted_top_level_comments:
@@ -4962,6 +5040,9 @@ class InstagramCommentsScraplingFetcher:
                     resume_cursor=reply_resume_cursors_by_parent.get(comment_id),
                     resume_cursor_param=reply_resume_cursor_params_by_parent.get(comment_id),
                     deadline=reply_fetch_deadline,
+                )
+                reply_cursor_directions_exhausted = reply_cursor_directions_exhausted or bool(
+                    (replies_result.diagnostic_metadata or {}).get("cursor_directions_exhausted")
                 )
                 if (
                     reply_tail_deadline is not None
@@ -5052,7 +5133,9 @@ class InstagramCommentsScraplingFetcher:
                 }
             else:
                 fetch_failed = True
-                retryable = True
+                retryable = not (
+                    fetch_reason == "pagination_repeated_cursor" and reply_cursor_directions_exhausted
+                )
                 fetch_reason = fetch_reason or "reply_tail_incomplete"
         elif fetch_reason in {
             "pagination_deadline_exceeded",
@@ -5075,7 +5158,10 @@ class InstagramCommentsScraplingFetcher:
             retryable=retryable,
             reply_checkpoints=reply_checkpoints,
             top_level_checkpoint=None,
-            diagnostic_metadata=diagnostic_metadata,
+            diagnostic_metadata={
+                **diagnostic_metadata,
+                "cursor_directions_exhausted": reply_cursor_directions_exhausted,
+            },
         )
 
     async def _fetch_residual_child_reply_lanes(
@@ -5104,6 +5190,7 @@ class InstagramCommentsScraplingFetcher:
             "auth_failed": False,
             "retryable": False,
             "fetch_reason": None,
+            "cursor_directions_exhausted": False,
         }
         if target_count is None or flattened_comment_count(comments) >= target_count:
             return metadata
@@ -5191,6 +5278,9 @@ class InstagramCommentsScraplingFetcher:
             metadata["fetch_failed"] = bool(metadata.get("fetch_failed")) or replies_result.fetch_failed
             metadata["auth_failed"] = bool(metadata.get("auth_failed")) or replies_result.auth_failed
             metadata["retryable"] = bool(metadata.get("retryable")) or replies_result.retryable
+            metadata["cursor_directions_exhausted"] = bool(
+                metadata.get("cursor_directions_exhausted")
+            ) or bool((replies_result.diagnostic_metadata or {}).get("cursor_directions_exhausted"))
             if replies_result.fetch_reason and not metadata.get("fetch_reason"):
                 metadata["fetch_reason"] = replies_result.fetch_reason
             if replies_result.fetch_failed and replies_result.retryable and not replies_result.reply_checkpoints:
@@ -6219,6 +6309,8 @@ class InstagramCommentsScraplingFetcher:
                         attempt["location"] = _safe_location(response)
                         if await _retry_parent_relay_soft_failure("graphql_relay_http_error", response):
                             continue
+                        if attempt.get("block_reason"):
+                            break
                         if _try_page_size_downgrade("graphql_relay_http_error"):
                             continue
                         attempt.setdefault("reason", "graphql_relay_http_error")
@@ -6227,6 +6319,8 @@ class InstagramCommentsScraplingFetcher:
                     if payload is None:
                         if await _retry_parent_relay_soft_failure("graphql_relay_non_json_response", response):
                             continue
+                        if attempt.get("block_reason"):
+                            break
                         if _try_page_size_downgrade("graphql_relay_non_json_response"):
                             continue
                         attempt.setdefault("reason", "graphql_relay_non_json_response")
@@ -6238,6 +6332,8 @@ class InstagramCommentsScraplingFetcher:
                             payload_ref=payload,
                         ):
                             continue
+                        if attempt.get("block_reason"):
+                            break
                         if _try_page_size_downgrade("graphql_relay_error_payload"):
                             continue
                         attempt.setdefault("reason", "graphql_relay_error_payload")
@@ -6636,6 +6732,9 @@ class InstagramCommentsScraplingFetcher:
                     if status_code >= 400 or 300 <= status_code < 400:
                         if await _retry_child_relay_soft_failure("graphql_child_relay_http_error", response):
                             continue
+                        if metadata.get("block_reason"):
+                            stop_reason = str(metadata["block_reason"])
+                            break
                         if _try_child_page_size_downgrade("graphql_child_relay_http_error"):
                             continue
                         stop_reason = str(metadata.get("reason") or "graphql_child_relay_http_error")
@@ -6644,6 +6743,9 @@ class InstagramCommentsScraplingFetcher:
                     if payload is None:
                         if await _retry_child_relay_soft_failure("graphql_child_relay_non_json_response", response):
                             continue
+                        if metadata.get("block_reason"):
+                            stop_reason = str(metadata["block_reason"])
+                            break
                         if _try_child_page_size_downgrade("graphql_child_relay_non_json_response"):
                             continue
                         stop_reason = str(metadata.get("reason") or "graphql_child_relay_non_json_response")
@@ -6655,6 +6757,9 @@ class InstagramCommentsScraplingFetcher:
                             payload_ref=payload,
                         ):
                             continue
+                        if metadata.get("block_reason"):
+                            stop_reason = str(metadata["block_reason"])
+                            break
                         if _try_child_page_size_downgrade("graphql_child_relay_error_payload"):
                             continue
                         stop_reason = str(metadata.get("reason") or "graphql_child_relay_error_payload")
@@ -7272,6 +7377,7 @@ class InstagramCommentsScraplingFetcher:
         # declaring repeated_cursor terminal.
         cursor_directions_attempted: set[str] = set()
         cursor_direction_swaps = 0
+        cursor_directions_exhausted = False
         last_attempt_count = 0
         last_reply_cursor: str | None = None
         last_reply_cursor_param: str | None = None
@@ -7417,6 +7523,7 @@ class InstagramCommentsScraplingFetcher:
                     "min_id" in cursor_directions_attempted and "max_id" in cursor_directions_attempted
                 )
                 if both_directions_attempted:
+                    cursor_directions_exhausted = True
                     retryable = retryable and not has_gap
                 else:
                     retryable = retryable or has_gap
@@ -7499,7 +7606,10 @@ class InstagramCommentsScraplingFetcher:
             request_count=self._request_count,
             retryable=retryable,
             reply_checkpoints=reply_checkpoints,
-            diagnostic_metadata=diagnostic_metadata,
+            diagnostic_metadata={
+                **diagnostic_metadata,
+                "cursor_directions_exhausted": cursor_directions_exhausted,
+            },
         )
 
     async def _fetch_rendered_replies_for_parent_comment(

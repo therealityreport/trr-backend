@@ -21,6 +21,7 @@ from trr_backend.socials.instagram.comments_scrapling.fetcher import (
     _extract_rendered_dom_snapshot_comments,
     _extract_rendered_permalink_comments,
     _public_comments_coverage_metadata,
+    _public_relay_block_reason_from_response,
     _target_metadata_indicates_coauthor,
 )
 from trr_backend.socials.instagram.scraper import InstagramComment
@@ -85,7 +86,7 @@ def test_public_comments_coverage_stays_partial_on_exhausted_relay_with_display_
 
     assert metadata["classification"] == "public_partial"
     assert metadata["target_gap_count"] == 25_956
-    assert metadata["fallback_blocked_reason"] == "public_comments_partial_requires_approval"
+    assert metadata["fallback_blocked_reason"] == "public_comments_partial_public_recovery_pending"
 
 
 def test_public_comments_coverage_complete_when_effective_target_is_met() -> None:
@@ -100,6 +101,27 @@ def test_public_comments_coverage_complete_when_effective_target_is_met() -> Non
     assert metadata["classification"] == "public_complete"
     assert metadata["effective_target_count"] == 100
     assert metadata["fallback_blocked_reason"] is None
+
+
+def test_public_relay_nested_graphql_rate_limit_code_is_blocking() -> None:
+    response = httpx.Response(
+        200,
+        request=httpx.Request("POST", "https://www.instagram.com/graphql/query/"),
+    )
+    payload = {
+        "data": {
+            "comments": {
+                "errors": [
+                    {
+                        "message": "Please wait a few minutes before you try again.",
+                        "extensions": {"code": 1675004},
+                    }
+                ]
+            }
+        }
+    }
+
+    assert _public_relay_block_reason_from_response(response, payload=payload) == "http_429"
 
 
 def test_status_only_payload_with_expected_comments_is_not_hidden_comments() -> None:
@@ -918,6 +940,44 @@ def test_public_relay_child_hydration_skips_zero_count_parents_by_default(monkey
     assert metadata["parent_attempts"] == 0
     assert metadata["parents_skipped_without_reply_gap"] == 2
     assert public_client.post.await_count == 0
+
+
+def test_public_relay_child_hydration_does_not_downgrade_after_rate_limit(monkeypatch) -> None:
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_COAUTHOR_GRAPHQL_CHILD_PAGE_SIZE", "50")
+    fetcher = _build_fetcher()
+    fetcher._pace_api_requests = AsyncMock(return_value=True)
+    parent = _comment("parent-1", username="alpha", reply_count=1)
+    public_client = MagicMock()
+    public_client.post = AsyncMock(
+        return_value=httpx.Response(
+            429,
+            text="too many requests",
+            request=httpx.Request("POST", "https://www.instagram.com/graphql/query/"),
+        )
+    )
+
+    with patch(
+        "trr_backend.socials.instagram.comments_scrapling.fetcher._post_child_comments_graphql_doc_attempts",
+        return_value=[("ChildCommentsQuery", "doc-1")],
+    ):
+        metadata = asyncio.run(
+            fetcher._fetch_public_relay_child_comments_for_status_only(
+                public_client=public_client,
+                shortcode="ABC123",
+                post_url="https://www.instagram.com/p/ABC123/",
+                media_id="123",
+                comments=[parent],
+                graphql_headers={},
+                common_body={},
+                target_count=2,
+                max_comments=0,
+            )
+        )
+
+    assert metadata["reason"] == "http_429"
+    assert metadata["block_reason"] == "http_429"
+    assert public_client.post.await_count == 1
+    assert "graphql_child_relay_page_size_downgrade" not in fetcher.runtime_metadata["retry_reason_counts"]
 
 
 def test_coauthor_relay_prefers_authenticated_session_for_parent_comments() -> None:

@@ -11,12 +11,12 @@ Covers:
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
-from unittest.mock import MagicMock
 
 
 @pytest.fixture(autouse=True)
@@ -36,6 +36,59 @@ def _mock_scrapling(monkeypatch):
     mock_module.ProxyRotator = MagicMock()
     monkeypatch.setitem(__import__("sys").modules, "scrapling.fetchers", mock_module)
     return mock_module
+
+
+# ---------------------------------------------------------------------------
+# Identity-level auth cooldown helpers
+# ---------------------------------------------------------------------------
+
+
+def test_record_identity_auth_block_uses_reserved_sentinel_handle(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.socials.instagram import auth_cooldown
+
+    calls: list[tuple[str, str, str | None]] = []
+    expected = object()
+
+    def _record(platform: str, account_handle: str, error_code: str | None):
+        calls.append((platform, account_handle, error_code))
+        return expected
+
+    monkeypatch.setattr(auth_cooldown, "record_auth_block", _record)
+
+    result = auth_cooldown.record_identity_auth_block(
+        platform=" Instagram ",
+        error_code="http_401",
+    )
+
+    assert result is expected
+    assert calls == [("instagram", "__identity__:instagram", "http_401")]
+
+
+def test_identity_auth_cooldown_helpers_use_existing_get_and_clear(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.socials.instagram import auth_cooldown
+
+    calls: list[tuple[Any, ...]] = []
+    expected = object()
+
+    def _get(platform: str, account_handle: str):
+        calls.append(("get", platform, account_handle))
+        return expected
+
+    def _clear(platform: str, account_handle: str, *, force: bool = False) -> bool:
+        calls.append(("clear", platform, account_handle, force))
+        return force
+
+    monkeypatch.setattr(auth_cooldown, "get_active_cooldown", _get)
+    monkeypatch.setattr(auth_cooldown, "clear_cooldown", _clear)
+
+    assert auth_cooldown.get_active_identity_cooldown(platform="Instagram") is expected
+    assert auth_cooldown.clear_identity_cooldown(platform="Instagram") is False
+    assert auth_cooldown.clear_identity_cooldown(platform="Instagram", force=True) is True
+    assert calls == [
+        ("get", "instagram", "__identity__:instagram"),
+        ("clear", "instagram", "__identity__:instagram", False),
+        ("clear", "instagram", "__identity__:instagram", True),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -63,13 +116,13 @@ def test_proxy_session_key_generation_zero_is_unsuffixed() -> None:
 def test_proxy_session_key_generation_suffix_changes_key() -> None:
     from trr_backend.socials.instagram.posts_scrapling.job_runner import _posts_proxy_session_key
 
-    kwargs = dict(
-        account_handle="thetraitorsus",
-        stage="posts_scrapling",
-        config={"shard_count": 2, "shard_index": 1},
-        job_metadata={},
-        browser_account_id="thetraitorsus",
-    )
+    kwargs = {
+        "account_handle": "thetraitorsus",
+        "stage": "posts_scrapling",
+        "config": {"shard_count": 2, "shard_index": 1},
+        "job_metadata": {},
+        "browser_account_id": "thetraitorsus",
+    }
     gen0 = _posts_proxy_session_key(**kwargs, rotation_generation=0)
     gen1 = _posts_proxy_session_key(**kwargs, rotation_generation=1)
     gen2 = _posts_proxy_session_key(**kwargs, rotation_generation=2)

@@ -131,6 +131,11 @@ def test_load_comment_target_metadata_uses_catalog_collaborator_fallback(
     assert "instagram_account_catalog_post_collaborators" in captured["sql"]
     assert "instagram_account_catalog_posts" in captured["sql"]
     assert "ltrim(lower(coalesce(nullif(m.collaborator_handle, ''), '')), '@') = %s" in captured["sql"]
+    assert "to_jsonb" not in captured["sql"]
+    assert "when ltrim(lower(coalesce(nullif(p.source_account, ''), '')), '@') = %s then 4" in captured["sql"]
+    assert "then 3" in captured["sql"]
+    assert "else 1" in captured["sql"]
+    assert "5 as profile_match_rank" in captured["sql"]
     assert captured["params"][0] == ["ABC123"]
     assert captured["params"][-2:] == ["thetraitorsus", "thetraitorsus"]
 
