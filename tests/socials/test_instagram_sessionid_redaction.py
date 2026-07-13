@@ -17,5 +17,5 @@ def test_sessionid_fingerprint_changes_for_different_sessionids() -> None:
     )
 
 
-def test_sessionid_fingerprint_missing_sessionid_is_none() -> None:
+def test_sessionid_fingerprint_missing_sessionid_returns_none_sentinel() -> None:
     assert _sessionid_fingerprint({}) == "none"
