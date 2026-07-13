@@ -62,6 +62,52 @@ def _clear_modal_owner_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("TRR_MODAL_RUNTIME_SCHEDULER_ENABLED", raising=False)
 
 
+@pytest.fixture
+def modal_reload_guard():
+    module_names = (
+        "modal",
+        "trr_backend.modal_dispatch",
+        "trr_backend.socials.control_plane",
+    )
+    env_names = (
+        "TRR_MODAL_MAINTENANCE_OWNER_REQUIRED",
+        "TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED",
+        "TRR_MODAL_RUNTIME_SCHEDULER_ENABLED",
+        "SOCIAL_INSTAGRAM_PAYLOAD_READ_MODE",
+        "TRR_MODAL_INSTAGRAM_PAYLOAD_READ_MODE",
+        "SOCIAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE",
+        "TRR_MODAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE",
+        "TRR_MODAL_RUNTIME_SECRET_NAME",
+        "TRR_MODAL_SOCIAL_SECRET_NAME",
+    )
+    original_modules = {name: sys.modules.get(name) for name in module_names}
+    original_env = {name: os.environ.get(name) for name in env_names}
+    try:
+        yield
+    finally:
+        for name, module in original_modules.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+        for name, value in original_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        importlib.reload(modal_jobs)
+
+
+@pytest.fixture(autouse=True)
+def _restore_modal_env(pristine_environ: dict[str, str]):
+    yield
+    for key in modal_jobs._CANONICAL_MODAL_RUNTIME_DEFAULTS:
+        if key in pristine_environ:
+            os.environ[key] = pristine_environ[key]
+        else:
+            os.environ.pop(key, None)
+
+
 def test_resolve_modal_secrets_uses_named_secrets_when_both_present(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1367,10 +1413,10 @@ def test_reload_falls_back_to_stub_when_modal_module_is_partial(
 
 def test_comments_db_session_budget_status(monkeypatch):
     # Default container caps: comments(4) + recovery(4) = 8 workers; per-worker
-    # sessions = default pool(2) + social_control(1) = 3; demand = 24.
+    # sessions = default pool(1) + social_control(1) = 2; demand = 16.
     monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_DB_SESSION_BUDGET", raising=False)
     status = modal_jobs.comments_db_session_budget_status()
-    assert status["sessions_per_worker"] == 3
+    assert status["sessions_per_worker"] == 2
     assert status["demand"] == status["worker_cap"] * status["sessions_per_worker"]
     # Budget 0/unset disables the check.
     assert status["within_budget"] is True
