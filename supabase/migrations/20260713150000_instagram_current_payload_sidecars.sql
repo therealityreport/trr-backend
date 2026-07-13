@@ -386,4 +386,3 @@ grant all privileges on table
 to service_role;
 
 commit;
-

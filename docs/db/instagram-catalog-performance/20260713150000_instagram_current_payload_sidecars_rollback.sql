@@ -5,4 +5,3 @@ begin;
 drop table if exists social.instagram_account_catalog_post_payloads;
 drop table if exists social.instagram_post_payloads;
 commit;
-
