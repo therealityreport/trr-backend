@@ -146,12 +146,15 @@ class FakeCatalogPersistenceAdapter:
     def upsert_tweet(self, context, **kwargs) -> dict[str, Any]:
         self.legacy_upsert_calls.append({"context": context, **kwargs})
         tweet = kwargs["tweet"]
-        return {
+        row = {
             "job_id": kwargs["job_id"],
             "run_id": kwargs["run_id"],
             "source_account": kwargs["account"],
             "tweet_id": tweet.tweet_id,
         }
+        if getattr(tweet, "is_reply", False) or getattr(tweet, "is_quote", False):
+            row["__trr_inserted"] = True
+        return row
 
 
 def _dependencies(
@@ -440,6 +443,53 @@ def test_shared_catalog_writes_reply_interaction_fetch_state() -> None:
     assert final_state["duplicate_count"] == 0
     assert final_state["status"] == "completed"
     assert final_state["last_error_code"] is None
+
+
+def test_shared_catalog_reply_state_counts_inserts_duplicates_and_skips() -> None:
+    root = _tweet("root", username="TheTraitorsUS")
+    root.replies = 60
+    replies = [_tweet(f"fresh-{index}", username="viewer", is_reply=True) for index in range(2)]
+    replies.extend(_tweet(f"dupe-{index}", username="viewer", is_reply=True) for index in range(4))
+    replies.extend(_tweet(f"skip-{index}", username="viewer", is_reply=True) for index in range(51))
+    scraper = FakeTwitterScraper([root], replies_by_tweet_id={"root": replies})
+    persistence = FakeCatalogPersistenceAdapter()
+    interaction_state_calls: list[dict[str, Any]] = []
+
+    def _upsert_tweet(context, **kwargs):
+        persistence.legacy_upsert_calls.append({"context": context, **kwargs})
+        tweet_id = kwargs["tweet"].tweet_id
+        if tweet_id.startswith("fresh-"):
+            return {"tweet_id": tweet_id, "__trr_inserted": True}
+        if tweet_id.startswith("dupe-"):
+            return {"tweet_id": tweet_id, "__trr_inserted": False}
+        if tweet_id.startswith("skip-"):
+            return None
+        return {"tweet_id": tweet_id}
+
+    persistence.upsert_tweet = _upsert_tweet
+
+    scrape_shared_twitter_posts(
+        run_id="run-1",
+        account_handle="TheTraitorsUS",
+        config={
+            "pipeline_ingest_mode": SHARED_MODE,
+            "catalog_action_scope": "full_history",
+            "twitter_comments_in_posts_stage": True,
+        },
+        job_id="11111111-1111-1111-1111-111111111111",
+        dependencies=_dependencies(
+            scraper=scraper,
+            persistence=persistence,
+            interaction_state_calls=interaction_state_calls,
+        ),
+    )
+
+    reply_states = [call for call in interaction_state_calls if call["interaction_kind"] == "reply"]
+    final_state = reply_states[-1]
+    assert final_state["saved_count_after"] == 6
+    assert final_state["unique_saved_delta"] == 2
+    assert final_state["duplicate_count"] == 4
+    assert final_state["metadata"]["skipped_count"] == 51
 
 
 def test_shared_catalog_writes_exhausted_quote_interaction_fetch_state() -> None:

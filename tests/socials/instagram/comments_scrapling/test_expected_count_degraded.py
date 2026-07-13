@@ -110,15 +110,15 @@ def test_db_unavailable_error_degrades_map_and_continues(monkeypatch):
 
 def test_non_db_error_propagates(monkeypatch):
     # A non-DB error (a real bug) must NOT be swallowed by the narrowed except.
-    class _Boom(RuntimeError):
+    class _BoomError(RuntimeError):
         pass
 
     def _raise_boom(**_kwargs):
-        raise _Boom("attribute bug")
+        raise _BoomError("attribute bug")
 
     monkeypatch.setattr(jr, "_load_expected_comment_counts", _raise_boom)
 
-    with pytest.raises(_Boom):
+    with pytest.raises(_BoomError):
         try:
             jr._load_expected_comment_counts(
                 repo=SimpleNamespace(),
@@ -127,3 +127,33 @@ def test_non_db_error_propagates(monkeypatch):
             )
         except pg.DatabaseServiceUnavailableError:  # pragma: no cover - never hit
             pass
+
+
+def test_expected_count_query_preserves_requested_order_and_coauthor_max(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _fake_fetch_all(sql: str, params: list[object]):
+        captured["sql"] = " ".join(sql.split()).lower()
+        captured["params"] = params
+        return [
+            {"shortcode": "B", "reported_comments": 9},
+            {"shortcode": "A", "reported_comments": 0},
+        ]
+
+    monkeypatch.setattr(jr.pg, "fetch_all", _fake_fetch_all)
+    repo = SimpleNamespace(_instagram_reported_comments_sql=lambda alias: f"{alias}.comments_count")
+
+    counts = _load_expected_comment_counts(
+        repo=repo,
+        account_handle="@thetraitorsus",
+        target_source_ids=["B", "A", "B"],
+    )
+
+    sql = str(captured["sql"])
+    assert counts == {"B": 9, "A": 0}
+    assert captured["params"] == [["B", "A"]]
+    assert "with ordinality" in sql
+    assert "max((p.comments_count)::bigint)" in sql
+    assert "left join shortcode_max" in sql
+    assert "order by r.sort_order" in sql
+    assert "source_account" not in sql

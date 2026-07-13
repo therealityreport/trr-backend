@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from threading import Event
@@ -1680,9 +1680,9 @@ def test_post_social_account_catalog_backfill_forwards_bounded_window_dates(
 
     assert response.status_code == 200
     assert mocked_begin.call_args.kwargs["date_start"] == datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
-    assert mocked_begin.call_args.kwargs["date_end"] == datetime(2026, 1, 8, 23, 59, 59, tzinfo=UTC)
+    assert mocked_begin.call_args.kwargs["date_end"] == datetime(2026, 1, 8, 0, 0, tzinfo=UTC)
     assert mocked_finalize.call_args.kwargs["date_start"] == datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
-    assert mocked_finalize.call_args.kwargs["date_end"] == datetime(2026, 1, 8, 23, 59, 59, tzinfo=UTC)
+    assert mocked_finalize.call_args.kwargs["date_end"] == datetime(2026, 1, 8, 0, 0, tzinfo=UTC)
 
 
 def test_get_social_account_catalog_post_detail_route(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -6945,10 +6945,6 @@ def test_ingest_comments_only_inline_fallback_spawns_per_platform_workers() -> N
     worker_counts: list[int] = []
     execute_calls: list[dict[str, object]] = []
 
-    class _FakeFuture:
-        def result(self) -> None:
-            return None
-
     class _FakeThreadPoolExecutor:
         def __init__(self, *, max_workers: int):
             worker_counts.append(max_workers)
@@ -6961,7 +6957,9 @@ def test_ingest_comments_only_inline_fallback_spawns_per_platform_workers() -> N
 
         def submit(self, fn, *args, **kwargs):  # noqa: ANN001
             fn(*args, **kwargs)
-            return _FakeFuture()
+            future: Future[None] = Future()
+            future.set_result(None)
+            return future
 
     def _record_execute(
         run_id: str, *, worker_id: str | None = None, stage: str | None = None, platform: str | None = None

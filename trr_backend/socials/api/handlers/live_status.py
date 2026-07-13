@@ -10,6 +10,8 @@ from threading import Lock
 from time import monotonic
 from typing import Any
 
+from trr_backend.db.pg import is_database_service_unavailable_error
+
 logger = logging.getLogger(__name__)
 
 LIVE_STATUS_STREAM_INTERVAL_SECONDS = 5.0
@@ -68,6 +70,8 @@ def _build_live_status_payload_uncached() -> dict[str, Any]:
             statement_timeout_ms=1000,
         )
     except Exception as exc:  # noqa: BLE001
+        if is_database_service_unavailable_error(exc):
+            raise
         logger.warning("Failed to build social live-status queue payload", exc_info=True)
         queue_status = {
             "queue_enabled": False,
@@ -85,6 +89,8 @@ def _build_live_status_payload_uncached() -> dict[str, Any]:
     try:
         admin_operations = admin_operations_repo.get_admin_operations_health()
     except Exception as exc:  # noqa: BLE001
+        if is_database_service_unavailable_error(exc):
+            raise
         logger.warning("Failed to build social live-status admin-operations payload", exc_info=True)
         admin_operations = {
             "healthy": False,

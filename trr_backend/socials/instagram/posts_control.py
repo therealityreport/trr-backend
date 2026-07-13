@@ -119,7 +119,7 @@ def start_instagram_posts_scrapling_scrape(
 
     lock_key = _social_account_posts_scrapling_start_lock_key(normalized_platform, normalized_account)
     lock_label = f"posts-scrapling-start-lock:instagram:{normalized_account[:48]}"
-    with pg.db_connection(label=lock_label) as lock_conn:
+    with pg.db_connection(label=lock_label, pool_name="session_control") as lock_conn:
         with pg.db_cursor(conn=lock_conn, label=lock_label) as cur:
             lock_row = pg.fetch_one_with_cursor(cur, "select pg_try_advisory_lock(%s) as locked", [lock_key]) or {}
         if not bool(lock_row.get("locked")):

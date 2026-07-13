@@ -14,6 +14,7 @@ from trr_backend.socials.pipelines.account_catalog.freshness import (
 from trr_backend.socials.pipelines.account_catalog.launch import (
     begin_social_account_catalog_backfill_launch,
     finalize_social_account_catalog_backfill_launch,
+    get_instagram_catalog_launch_capacity,
     launch_social_account_catalog_backfill,
     start_social_account_catalog_backfill,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "begin_social_account_catalog_backfill_launch",
     "finalize_social_account_catalog_backfill_launch",
     "get_social_account_catalog_freshness",
+    "get_instagram_catalog_launch_capacity",
     "get_social_account_catalog_gap_analysis_status",
     "get_social_account_catalog_review_queue",
     "get_social_account_catalog_run_progress",

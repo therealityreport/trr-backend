@@ -166,6 +166,8 @@ def test_incomplete_fill_uses_reply_only_when_persisted_reply_gap_exists(
     monkeypatch.setattr(jr.pg, "db_connection", fake_db_connection)
     monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {"SHORT1": 1})
     monkeypatch.setattr(jr, "_load_comment_target_metadata", lambda **_kwargs: {})
+    monkeypatch.setattr(jr, "_load_public_replay_guard_rows", lambda **_kwargs: {})
+    monkeypatch.setattr(jr, "_completion_residual_gap_targets_from_health", lambda **_kwargs: [])
     monkeypatch.setattr(jr, "_load_persisted_replies_by_parent", lambda **_kwargs: {})
     monkeypatch.setattr(jr, "_load_persisted_top_level_comments_for_reply_retry", lambda **_kwargs: [persisted_parent])
     monkeypatch.setattr(jr, "_insert_instagram_post_comments_audit", lambda **_kwargs: None)

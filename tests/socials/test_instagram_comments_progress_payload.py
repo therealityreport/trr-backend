@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from trr_backend.socials.pipelines.comments.instagram import (
     SocialWorkerUnavailableError,
     _append_instagram_comments_public_recovery_targets_to_active_run,
@@ -890,8 +892,8 @@ def test_audit_cursor_split_force_rerun_replaces_existing_one_target_job(monkeyp
                 },
                 "metadata": {
                     "dispatch": {
-                        "remote_invocation_id": "fc-pending",
-                        "remote_invocation_status": "pending",
+                        "remote_invocation_id": "fc-completed",
+                        "remote_invocation_status": "completed",
                     }
                 },
             }
@@ -939,3 +941,62 @@ def test_audit_cursor_split_force_rerun_replaces_existing_one_target_job(monkeyp
     assert created_jobs[0]["config"]["comments_load_strategy"] == "instagram_comments_endpoint_cursor"
     assert created_jobs[0]["config"]["comments_session_scope"] == "instagram_comments_endpoint_cursor_worker"
     assert any(call["params"] and call["params"][-2] is True for call in fetch_one_calls)
+
+
+@pytest.mark.parametrize("remote_status", ["running", "unknown"])
+def test_audit_cursor_split_force_rerun_preserves_active_remote_job(monkeypatch, remote_status: str) -> None:
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram.pg.fetch_all",
+        lambda *_args, **_kwargs: [
+            {
+                "run_id": "11111111-1111-1111-1111-111111111111",
+                "source_scope": "network",
+                "initiated_by": "admin",
+                "job_id": "33333333-3333-3333-3333-333333333333",
+                "status": "queued",
+                "priority": 104,
+                "target_count": 1,
+                "matched_targets": ["DTgXh94kXyo"],
+                "config": {
+                    "platform": "instagram",
+                    "account": "bravotv",
+                    "source_scope": "network",
+                    "target_source_ids": ["DTgXh94kXyo"],
+                },
+                "metadata": {
+                    "dispatch": {
+                        "remote_invocation_id": f"fc-{remote_status}",
+                        "remote_invocation_status": remote_status,
+                    }
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram.pg.fetch_one",
+        lambda *_args, **_kwargs: pytest.fail("active remote job must not be cancelled"),
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.pipelines.comments.instagram._create_job",
+        lambda *_args, **_kwargs: pytest.fail("replacement job must not be created"),
+    )
+
+    payload = _split_instagram_comments_audit_cursor_targets_into_active_run(
+        run_id="11111111-1111-1111-1111-111111111111",
+        account_handle="bravotv",
+        target_source_ids=["DTgXh94kXyo"],
+        batch_size=1,
+        initiated_by="audit-cursor-retry",
+        dispatch_immediately=True,
+        force_rerun_existing=True,
+    )
+
+    assert payload["created_target_job_ids"] == []
+    assert payload["cancelled_source_job_ids"] == []
+    assert payload["skipped_sources"] == [
+        {
+            "job_id": "33333333-3333-3333-3333-333333333333",
+            "reason": "remote_invocation_active",
+            "remote_invocation_status": remote_status,
+        }
+    ]

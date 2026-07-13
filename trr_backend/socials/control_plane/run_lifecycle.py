@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import importlib
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from types import ModuleType
 from typing import Any
 from uuid import UUID
@@ -244,11 +244,22 @@ def _create_run(
     return run_id
 
 
-def _set_run_status(run_id: str, status: str, *, conn: Any | None = None) -> None:
+def _set_run_status(
+    run_id: str,
+    status: str,
+    *,
+    conn: Any | None = None,
+    expected_status: str | None = None,
+) -> bool:
     status = _normalize_scrape_run_status(status)
-    _call_with_optional_conn(
+    where_clause = "where id = %s"
+    params: list[Any] = [status, status, status, status, status, status, run_id]
+    if expected_status is not None:
+        where_clause += " and status = %s"
+        params.append(str(expected_status or "").strip().lower())
+    row = _call_with_optional_conn(
         legacy.pg.fetch_one,
-        """
+        f"""
         update social.scrape_runs
         set
           status = %s,
@@ -266,15 +277,18 @@ def _set_run_status(run_id: str, status: str, *, conn: Any | None = None) -> Non
             when %s in ('cancelling', 'cancelled') then coalesce(cancelled_at, now())
             else cancelled_at
           end
-        where id = %s
+        {where_clause}
         returning id::text
         """,
-        [status, status, status, status, status, status, run_id],
+        params,
         conn=conn,
     )
+    if not row:
+        return False
     legacy._invalidate_queue_status_cache()
     if status in {"completed", "failed", "cancelled"}:
         legacy._invalidate_week_detail_cache_after_run_terminal_status()
+    return True
 
 
 def _merge_run_config(
@@ -320,7 +334,87 @@ def _maybe_start_deferred_comments_followup(
     summary: dict[str, Any],
     conn: Any | None = None,
 ) -> dict[str, Any] | None:
-    if str(run_status or "").strip().lower() not in {"completed", "queued", "running"}:
+    run_status = str(run_status or "").strip().lower()
+    followup = legacy._metadata_dict(run_config.get("deferred_comments_followup"))
+    comments_result: dict[str, Any] | None = None
+    launch_claimed_at = str(followup.get("launch_claimed_at") or "").strip()
+    launch_claim_token = str(followup.get("launch_claim_token") or "").strip()
+    if launch_claimed_at or launch_claim_token:
+        # The claim is written while holding the run-finalize lock. Re-read the
+        # parent after that lock is released so cancellation wins before launch.
+        current = (
+            legacy.pg.fetch_one(
+                "select status, config from social.scrape_runs where id = %s::uuid",
+                [run_id],
+                pool_name=SOCIAL_CONTROL_POOL_NAME,
+            )
+            or {}
+        )
+        current_status = str(current.get("status") or "").strip().lower()
+        current_config = legacy._metadata_dict(current.get("config"))
+        current_followup = legacy._metadata_dict(current_config.get("deferred_comments_followup"))
+        if current_status in {"cancelling", "cancelled"}:
+            cancelled_at = legacy._iso(legacy._now_utc())
+            attached_followups = legacy._normalize_attached_followups(current_config.get("attached_followups"))
+            child_run_id = str(current_followup.get("comments_run_id") or "").strip() or None
+            cancelled_followup = {
+                **current_followup,
+                "state": "cancelled",
+                "launch_claim_token": None,
+                "launch_claimed_at": None,
+                "launch_lease_expires_at": None,
+                "cancelled_at": cancelled_at,
+                "cancel_reason": "parent_run_cancelled_before_deferred_followup",
+            }
+            if child_run_id:
+                _cancel_deferred_comments_child_durably(
+                    run_id=run_id,
+                    followup=cancelled_followup,
+                    child_run_id=child_run_id,
+                    cancelled_by="parent_run_cancelled_before_deferred_followup",
+                    cancel_reason="parent_run_cancelled_before_deferred_followup",
+                    attached_followups=attached_followups,
+                    conn=conn,
+                )
+            else:
+                _merge_run_config(
+                    run_id,
+                    config_updates={"deferred_comments_followup": cancelled_followup},
+                    conn=conn,
+                )
+            return {"_deferred_followup_parent_cancelled": True}
+        if current_status not in {"completed", "queued", "running"}:
+            return None
+        current_claim_token, current_claimed_at = _deferred_comments_followup_claim_identity(current_followup)
+        if launch_claim_token:
+            if current_claim_token != launch_claim_token:
+                return None
+        elif current_claimed_at != launch_claimed_at:
+            return None
+        run_status = current_status
+        run_config = current_config
+        followup = current_followup
+
+        if followup.get("launch_recovered_at"):
+            recovered_child = _find_recovered_deferred_comments_child(run_id=run_id, followup=followup)
+            if recovered_child:
+                comments_result = {
+                    "run_id": recovered_child["run_id"],
+                    "status": recovered_child["status"],
+                    "runtime_version": legacy._metadata_dict(recovered_child["config"].get("required_runtime_version")),
+                    "created_by_runtime_version": legacy._metadata_dict(
+                        recovered_child["config"].get("created_by_runtime_version")
+                    ),
+                }
+                recovered_existing_child = True
+            else:
+                recovered_existing_child = False
+        else:
+            recovered_existing_child = False
+    else:
+        recovered_existing_child = False
+
+    if run_status not in {"completed", "queued", "running"}:
         return None
     if not legacy._shared_account_catalog_scrape_complete(run_config=run_config, summary=summary, conn=conn):
         return None
@@ -336,7 +430,6 @@ def _maybe_start_deferred_comments_followup(
         if reconcile_result is None:
             return None
         return {"comments_streaming_latest_reconcile": reconcile_result}
-    followup = legacy._metadata_dict(run_config.get("deferred_comments_followup"))
     if str(followup.get("state") or "").strip().lower() != "pending":
         return None
     if str(followup.get("platform") or "").strip().lower() != "instagram":
@@ -346,7 +439,7 @@ def _maybe_start_deferred_comments_followup(
     now_iso = legacy._iso(legacy._now_utc())
     try:
         comments_source = "deferred_after_catalog"
-        try:
+        if not recovered_existing_child:
             comments_result = legacy.start_social_account_comments_scrape(
                 str(followup.get("platform") or "").strip(),
                 str(followup.get("account_handle") or "").strip(),
@@ -356,6 +449,8 @@ def _maybe_start_deferred_comments_followup(
                 max_comments_per_post=None,
                 refresh_policy=str(followup.get("refresh_policy") or "all_saved_posts"),
                 target_filter=str(followup.get("target_filter") or "").strip() or None,
+                date_start=legacy._coerce_dt(followup.get("date_start")),
+                date_end=legacy._coerce_dt(followup.get("date_end")),
                 initiated_by="catalog_completion_followup",
                 allow_local_dev_inline_bypass=bool(followup.get("allow_local_dev_inline_bypass")),
                 comments_enable_media_followups=bool(followup.get("comments_enable_media_followups")),
@@ -364,16 +459,8 @@ def _maybe_start_deferred_comments_followup(
                 # launcher's default. Signature verified to accept comments_worker_count.
                 comments_worker_count=legacy._normalize_non_negative_int(followup.get("comments_worker_count")) or None,
                 launch_group_id=str(followup.get("launch_group_id") or "").strip() or None,
-                cancel_active_before_relaunch=False,
+                cancel_active_before_relaunch=True,
             )
-        except legacy.SocialIngestConflictError as exc:
-            if exc.code != "SOCIAL_ACCOUNT_COMMENTS_RUN_ALREADY_ACTIVE":
-                raise
-            comments_result = {
-                "run_id": str(exc.detail.get("run_id") or "").strip() or None,
-                "status": str(exc.detail.get("status") or "running").strip().lower() or "running",
-            }
-            comments_source = "reused_run"
         config_updates = {
             "attached_followups": {
                 **attached_followups,
@@ -386,6 +473,9 @@ def _maybe_start_deferred_comments_followup(
             "deferred_comments_followup": {
                 **followup,
                 "state": "started",
+                "launch_claim_token": None,
+                "launch_claimed_at": None,
+                "launch_lease_expires_at": None,
                 "started_at": now_iso,
                 "comments_run_id": str((comments_result or {}).get("run_id") or "").strip() or None,
                 "runtime_version": legacy._metadata_dict((comments_result or {}).get("runtime_version"))
@@ -398,7 +488,31 @@ def _maybe_start_deferred_comments_followup(
                 or dict(legacy._resolve_runtime_version_stamp()),
             },
         }
-        _merge_run_config(run_id, config_updates=config_updates, conn=conn)
+        if launch_claim_token:
+            committed = _cas_deferred_comments_followup_state(
+                run_id=run_id,
+                expected_state="pending",
+                followup=config_updates["deferred_comments_followup"],
+                config_updates={"attached_followups": config_updates["attached_followups"]},
+                expected_launch_claim_token=launch_claim_token,
+                expected_launch_claimed_at=launch_claimed_at or None,
+                conn=conn,
+            )
+            if committed is None:
+                child_run_id = str((comments_result or {}).get("run_id") or "").strip()
+                _cancel_deferred_comments_child_durably(
+                    run_id=run_id,
+                    followup=followup,
+                    child_run_id=child_run_id,
+                    cancelled_by="parent_run_cancelled_during_deferred_followup_launch",
+                    cancel_reason="parent_run_cancelled_during_deferred_followup_launch",
+                    attached_followups=None,
+                    preserve_current_followup=True,
+                    conn=conn,
+                )
+                return None
+        else:
+            _merge_run_config(run_id, config_updates=config_updates, conn=conn)
         return config_updates
     except Exception as exc:  # noqa: BLE001
         error_message = str(exc)
@@ -429,6 +543,9 @@ def _maybe_start_deferred_comments_followup(
             "deferred_comments_followup": {
                 **followup,
                 "state": "failed",
+                "launch_claim_token": None,
+                "launch_claimed_at": None,
+                "launch_lease_expires_at": None,
                 "failed_at": now_iso,
                 "error_message": error_message,
                 "retryable": retryable,
@@ -436,7 +553,18 @@ def _maybe_start_deferred_comments_followup(
                 "failure_history": prior_failures[-5:],
             },
         }
-        _merge_run_config(run_id, config_updates=config_updates, conn=conn)
+        if launch_claim_token:
+            _cas_deferred_comments_followup_state(
+                run_id=run_id,
+                expected_state="pending",
+                followup=config_updates["deferred_comments_followup"],
+                config_updates={"attached_followups": config_updates["attached_followups"]},
+                expected_launch_claim_token=launch_claim_token,
+                expected_launch_claimed_at=launch_claimed_at or None,
+                conn=conn,
+            )
+        else:
+            _merge_run_config(run_id, config_updates=config_updates, conn=conn)
         legacy.logger.exception(
             "Failed to auto-start deferred Instagram comments followup after run finalization: run=%s",
             run_id,
@@ -454,10 +582,89 @@ def _maybe_start_deferred_comments_followup(
 _DEFERRED_FOLLOWUP_RETRY_ENABLED_ENV = "SOCIAL_DEFERRED_COMMENTS_FOLLOWUP_RETRY_ENABLED"
 _DEFERRED_FOLLOWUP_RETRY_MAX_ATTEMPTS = 5
 _DEFERRED_FOLLOWUP_RETRY_BACKOFF_SECONDS = 600
+_DEFERRED_FOLLOWUP_CLAIM_LEASE_SECONDS = 300
+_DEFERRED_CHILD_CANCELLATION_CLAIM_LEASE_SECONDS = 300
+_DEFERRED_CHILD_CANCELLATION_MAX_BACKOFF_SECONDS = 3600
 
 
 def _deferred_comments_followup_retry_enabled() -> bool:
     return bool(legacy._env_truthy(_DEFERRED_FOLLOWUP_RETRY_ENABLED_ENV, default=False))
+
+
+def _deferred_comments_followup_claim_is_stale(
+    followup: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> bool:
+    claimed_at = legacy._coerce_dt(followup.get("launch_claimed_at"))
+    if claimed_at is None:
+        return False
+    current = now or legacy._now_utc()
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=UTC)
+    if claimed_at.tzinfo is None:
+        claimed_at = claimed_at.replace(tzinfo=UTC)
+    lease_expires_at = legacy._coerce_dt(followup.get("launch_lease_expires_at"))
+    if lease_expires_at is not None:
+        if lease_expires_at.tzinfo is None:
+            lease_expires_at = lease_expires_at.replace(tzinfo=UTC)
+        return lease_expires_at <= current
+    return (current - claimed_at).total_seconds() >= _DEFERRED_FOLLOWUP_CLAIM_LEASE_SECONDS
+
+
+def _deferred_comments_followup_claim_identity(followup: dict[str, Any]) -> tuple[str, str]:
+    return (
+        str(followup.get("launch_claim_token") or "").strip(),
+        str(followup.get("launch_claimed_at") or "").strip(),
+    )
+
+
+def recover_stale_deferred_comments_followup_claims(*, limit: int = 25) -> dict[str, Any]:
+    """Ungated recovery for completed parents whose launch claim lease expired.
+
+    Re-finalization reuses the normal advisory lock and stale-claim CAS, so this
+    sweep never creates a second ownership path for deferred launches.
+    """
+    try:
+        candidates = (
+            legacy.pg.fetch_all(
+                """
+                select id::text as run_id
+                from social.scrape_runs
+                where status = 'completed'
+                  and config->'deferred_comments_followup'->>'state' = 'pending'
+                  and nullif(config->'deferred_comments_followup'->>'launch_claimed_at', '') is not null
+                  and coalesce(
+                    nullif(config->'deferred_comments_followup'->>'launch_lease_expires_at', '')::timestamptz,
+                    nullif(config->'deferred_comments_followup'->>'launch_claimed_at', '')::timestamptz
+                      + interval '300 seconds'
+                  ) <= now()
+                order by completed_at asc nulls first
+                limit %s
+                """,
+                [max(1, min(int(limit), 500))],
+                pool_name=SOCIAL_CONTROL_POOL_NAME,
+            )
+            or []
+        )
+    except (legacy.pg.DatabaseServiceUnavailableError, InterfaceError, OperationalError, PoolError) as exc:
+        legacy.logger.warning("[deferred_followup_claim_recovery] candidate scan deferred: %s", exc)
+        return {"scanned": 0, "refinalized": 0, "failed": 0, "deferred": True}
+
+    refinalized = 0
+    failed = 0
+    for row in candidates:
+        run_id = str(row.get("run_id") or "").strip()
+        if not run_id:
+            continue
+        try:
+            _finalize_run_status(run_id, force_recompute=True)
+        except Exception:  # noqa: BLE001 - candidates must be isolated
+            failed += 1
+            legacy.logger.exception("[deferred_followup_claim_recovery] re-finalize failed run=%s", run_id)
+            continue
+        refinalized += 1
+    return {"scanned": len(candidates), "refinalized": refinalized, "failed": failed}
 
 
 def _cas_deferred_comments_followup_state(
@@ -465,8 +672,15 @@ def _cas_deferred_comments_followup_state(
     run_id: str,
     expected_state: str,
     followup: dict[str, Any],
+    config_updates: dict[str, Any] | None = None,
+    expected_launch_claim_token: str | None = None,
+    expected_launch_claimed_at: str | None = None,
     conn: Any | None = None,
 ) -> dict[str, Any] | None:
+    payload = {
+        "deferred_comments_followup": legacy._metadata_dict(followup),
+        **legacy._metadata_dict(config_updates),
+    }
     row = (
         _call_with_optional_conn(
             legacy.pg.fetch_one,
@@ -475,12 +689,25 @@ def _cas_deferred_comments_followup_state(
             set config = coalesce(config, '{}'::jsonb) || %s::jsonb
             where id = %s::uuid
               and config->'deferred_comments_followup'->>'state' = %s
+              and status not in ('cancelling', 'cancelled')
+              and (
+                %s::text is null
+                or nullif(config->'deferred_comments_followup'->>'launch_claim_token', '') = %s
+              )
+              and (
+                %s::text is null
+                or nullif(config->'deferred_comments_followup'->>'launch_claimed_at', '') = %s
+              )
             returning status, config, summary
             """,
             [
-                legacy._json_dumps({"deferred_comments_followup": legacy._metadata_dict(followup)}),
+                legacy._json_dumps(payload),
                 run_id,
                 expected_state,
+                expected_launch_claim_token,
+                expected_launch_claim_token,
+                expected_launch_claimed_at,
+                expected_launch_claimed_at,
             ],
             conn=conn,
         )
@@ -493,6 +720,661 @@ def _cas_deferred_comments_followup_state(
         "status": str(row.get("status") or "").strip().lower(),
         "config": legacy._metadata_dict(row.get("config")),
         "summary": legacy._metadata_dict(row.get("summary")),
+    }
+
+
+def _find_recovered_deferred_comments_child(
+    *,
+    run_id: str,
+    followup: dict[str, Any],
+) -> dict[str, Any] | None:
+    launch_group_id = str(followup.get("launch_group_id") or "").strip()
+    existing_child_id = str(followup.get("comments_run_id") or "").strip()
+    if not launch_group_id and not existing_child_id:
+        return None
+    platform = str(followup.get("platform") or "").strip().lower()
+    account_handle = str(followup.get("account_handle") or "").strip().lower().lstrip("@")
+    row = (
+        legacy.pg.fetch_one(
+            """
+            select id::text as run_id, status, config, summary
+            from social.scrape_runs
+            where id <> %s::uuid
+              and (
+                (
+                  nullif(%s, '') is not null
+                  and id::text = %s
+                )
+                or (
+                  nullif(%s, '') is not null
+                  and coalesce(config->>'launch_group_id', '') = %s
+                  and lower(coalesce(config->>'stage', '')) = 'instagram_comments_scrapling'
+                  and lower(coalesce(config->>'platform', '')) = %s
+                  and ltrim(lower(coalesce(config->>'account', '')), '@') = %s
+                )
+              )
+            order by created_at desc
+            limit 1
+            """,
+            [
+                run_id,
+                existing_child_id,
+                existing_child_id,
+                launch_group_id,
+                launch_group_id,
+                platform,
+                account_handle,
+            ],
+            pool_name=SOCIAL_CONTROL_POOL_NAME,
+        )
+        or {}
+    )
+    child_run_id = str(row.get("run_id") or "").strip()
+    if not child_run_id:
+        return None
+    return {
+        "run_id": child_run_id,
+        "status": str(row.get("status") or "").strip().lower() or "queued",
+        "config": legacy._metadata_dict(row.get("config")),
+        "summary": legacy._metadata_dict(row.get("summary")),
+    }
+
+
+def _cancel_deferred_comments_child(
+    *,
+    followup: dict[str, Any],
+    child_run_id: str | None = None,
+    cancelled_by: str | None = None,
+) -> dict[str, Any] | None:
+    normalized_child_run_id = str(child_run_id or followup.get("comments_run_id") or "").strip()
+    if not normalized_child_run_id:
+        return None
+    platform = str(followup.get("platform") or "").strip()
+    account_handle = str(followup.get("account_handle") or "").strip()
+    try:
+        return legacy.cancel_social_account_comments_run(
+            platform=platform,
+            account_handle=account_handle,
+            run_id=normalized_child_run_id,
+            cancelled_by=cancelled_by,
+        )
+    except LookupError:
+        return {"run_id": normalized_child_run_id, "status": "not_found"}
+    except Exception as exc:  # noqa: BLE001
+        legacy.logger.exception(
+            "[deferred_followup] failed to cancel child after parent cancellation race child_run=%s",
+            normalized_child_run_id,
+        )
+        return {"run_id": normalized_child_run_id, "status": "cancel_failed", "error": str(exc)}
+
+
+def _deferred_child_cancellation_backoff_seconds(attempt_count: int) -> int:
+    return min(
+        _DEFERRED_CHILD_CANCELLATION_MAX_BACKOFF_SECONDS,
+        30 * (2 ** max(0, min(int(attempt_count), 8) - 1)),
+    )
+
+
+def _persist_deferred_child_cancellation_intent(
+    *,
+    run_id: str,
+    followup: dict[str, Any],
+    child_run_id: str,
+    cancelled_by: str | None,
+    cancel_reason: str,
+    attached_followups: dict[str, Any] | None = None,
+    preserve_current_followup: bool = False,
+    conn: Any | None = None,
+) -> dict[str, Any]:
+    """Durably record the exact child and cancellation intent before I/O."""
+    now_iso = legacy._iso(legacy._now_utc())
+    prior = legacy._metadata_dict(followup.get("child_cancellation"))
+    cancellation = {
+        **prior,
+        "state": "pending",
+        "child_run_id": child_run_id,
+        "intent_at": str(prior.get("intent_at") or now_iso),
+        "updated_at": now_iso,
+        "attempt_count": legacy._normalize_non_negative_int(prior.get("attempt_count")) + 1,
+        "last_attempt_at": now_iso,
+        "cancelled_by": cancelled_by,
+        "cancel_reason": cancel_reason,
+        "claim_token": None,
+        "claimed_at": None,
+        "claim_lease_expires_at": None,
+        "next_attempt_at": None,
+        "last_error": None,
+    }
+    persisted_followup = {
+        **followup,
+        "state": "cancelled",
+        "launch_claim_token": None,
+        "launch_claimed_at": None,
+        "launch_lease_expires_at": None,
+        "cancelled_at": str(followup.get("cancelled_at") or now_iso),
+        "cancelled_by": cancelled_by,
+        "cancel_reason": cancel_reason,
+        "child_cancellation": cancellation,
+    }
+    updates: dict[str, Any] = {"deferred_comments_followup": persisted_followup}
+    if attached_followups is not None:
+        updates["attached_followups"] = {
+            **attached_followups,
+            "comments": legacy._build_attached_comments_followup(
+                run_id=child_run_id,
+                status="cancelling",
+                source="deferred_after_catalog",
+                state="cancelling",
+            ),
+        }
+    if preserve_current_followup:
+        row = _call_with_optional_conn(
+            legacy.pg.fetch_one,
+            """
+            update social.scrape_runs
+            set config = jsonb_set(
+              coalesce(config, '{}'::jsonb),
+              '{deferred_comments_followup}',
+              coalesce(config->'deferred_comments_followup', '{}'::jsonb) || %s::jsonb,
+              true
+            )
+            where id = %s::uuid
+            returning id::text
+            """,
+            [legacy._json_dumps({"child_cancellation": cancellation}), run_id],
+            conn=conn,
+        )
+        if not row:
+            raise RuntimeError(f"Failed to persist deferred child cancellation intent for run {run_id}")
+        legacy._invalidate_queue_status_cache()
+    else:
+        _merge_run_config(run_id, config_updates=updates, conn=conn)
+    return persisted_followup
+
+
+def _persist_deferred_child_cancellation_outcome(
+    *,
+    run_id: str,
+    followup: dict[str, Any],
+    outcome: dict[str, Any] | None,
+    attached_followups: dict[str, Any] | None = None,
+    expected_claim_token: str | None = None,
+    preserve_current_followup: bool = False,
+    conn: Any | None = None,
+) -> bool:
+    cancellation = legacy._metadata_dict(followup.get("child_cancellation"))
+    child_run_id = str(cancellation.get("child_run_id") or "").strip()
+    status = str((outcome or {}).get("status") or "").strip().lower()
+    now = legacy._now_utc()
+    now_iso = legacy._iso(now)
+    terminal_state = status if status in {"cancelled", "not_found"} else None
+    if terminal_state:
+        updated_cancellation = {
+            **cancellation,
+            "state": terminal_state,
+            "completed_at": now_iso,
+            "updated_at": now_iso,
+            "claim_token": None,
+            "claimed_at": None,
+            "claim_lease_expires_at": None,
+            "next_attempt_at": None,
+            "last_error": None,
+        }
+    else:
+        attempts = max(1, legacy._normalize_non_negative_int(cancellation.get("attempt_count")))
+        error = str((outcome or {}).get("error") or f"non-terminal cancellation outcome: {status or 'unknown'}")
+        updated_cancellation = {
+            **cancellation,
+            "state": "retryable",
+            "updated_at": now_iso,
+            "last_error": error,
+            "last_error_at": now_iso,
+            "claim_token": None,
+            "claimed_at": None,
+            "claim_lease_expires_at": None,
+            "next_attempt_at": legacy._iso(
+                now + timedelta(seconds=_deferred_child_cancellation_backoff_seconds(attempts))
+            ),
+        }
+    persisted_followup = {**followup, "child_cancellation": updated_cancellation}
+    updates: dict[str, Any] = {"deferred_comments_followup": persisted_followup}
+    attached_comments = legacy._metadata_dict(
+        legacy._normalize_attached_followups(attached_followups).get("comments")
+        if attached_followups is not None
+        else None
+    )
+    attached_child_run_id = str(attached_comments.get("run_id") or "").strip()
+    if terminal_state and attached_followups is not None and attached_child_run_id == child_run_id:
+        updates["attached_followups"] = {
+            **attached_followups,
+            "comments": legacy._build_attached_comments_followup(
+                run_id=child_run_id,
+                status=terminal_state,
+                source="deferred_after_catalog",
+                state=terminal_state,
+            ),
+        }
+    if preserve_current_followup and expected_claim_token is None:
+        row = _call_with_optional_conn(
+            legacy.pg.fetch_one,
+            """
+            update social.scrape_runs
+            set config = jsonb_set(
+              coalesce(config, '{}'::jsonb),
+              '{deferred_comments_followup}',
+              coalesce(config->'deferred_comments_followup', '{}'::jsonb) || %s::jsonb,
+              true
+            )
+            where id = %s::uuid
+            returning id::text
+            """,
+            [legacy._json_dumps({"child_cancellation": updated_cancellation}), run_id],
+            conn=conn,
+        )
+        if row:
+            legacy._invalidate_queue_status_cache()
+        return bool(row)
+    if expected_claim_token is None:
+        _merge_run_config(run_id, config_updates=updates, conn=conn)
+        return True
+    row = _call_with_optional_conn(
+        legacy.pg.fetch_one,
+        """
+        update social.scrape_runs
+        set config = coalesce(config, '{}'::jsonb) || %s::jsonb
+        where id = %s::uuid
+          and config #>> '{deferred_comments_followup,child_cancellation,claim_token}' = %s
+        returning id::text
+        """,
+        [legacy._json_dumps(updates), run_id, expected_claim_token],
+        conn=conn,
+    )
+    if row:
+        legacy._invalidate_queue_status_cache()
+    return bool(row)
+
+
+def _cancel_deferred_comments_child_durably(
+    *,
+    run_id: str,
+    followup: dict[str, Any],
+    child_run_id: str,
+    cancelled_by: str | None,
+    cancel_reason: str,
+    attached_followups: dict[str, Any] | None = None,
+    preserve_current_followup: bool = False,
+    conn: Any | None = None,
+) -> dict[str, Any] | None:
+    persisted = _persist_deferred_child_cancellation_intent(
+        run_id=run_id,
+        followup=followup,
+        child_run_id=child_run_id,
+        cancelled_by=cancelled_by,
+        cancel_reason=cancel_reason,
+        attached_followups=attached_followups,
+        preserve_current_followup=preserve_current_followup,
+        conn=conn,
+    )
+    if conn is not None:
+        # The caller owns this transaction. Do not perform an external cancel
+        # before its durable intent commit; the ungated recovery sweep drains it
+        # immediately after commit instead.
+        return {"run_id": child_run_id, "status": "pending"}
+    outcome = _cancel_deferred_comments_child(
+        followup=persisted,
+        child_run_id=child_run_id,
+        cancelled_by=cancelled_by,
+    )
+    _persist_deferred_child_cancellation_outcome(
+        run_id=run_id,
+        followup=persisted,
+        outcome=outcome,
+        attached_followups=attached_followups,
+        preserve_current_followup=preserve_current_followup,
+        conn=conn,
+    )
+    return outcome
+
+
+def cancel_deferred_comments_followup(
+    run_id: str,
+    *,
+    cancelled_by: str | None = None,
+    conn: Any | None = None,
+) -> dict[str, Any]:
+    """Close a claimed/started deferred followup after its parent is cancelled.
+
+    The parent status transition happens in the caller. Once that commit exists,
+    the launcher CAS below cannot attach a new child. Any child already attached is
+    cancelled here without holding the parent finalization lock.
+    """
+    current = (
+        _call_with_optional_conn(
+            legacy.pg.fetch_one,
+            "select status, config from social.scrape_runs where id = %s::uuid",
+            [run_id],
+            conn=conn,
+        )
+        or {}
+    )
+    current_config = legacy._metadata_dict(current.get("config"))
+    followup = legacy._metadata_dict(current_config.get("deferred_comments_followup"))
+    if not followup:
+        return {"cancelled": False, "child_run_id": None, "child_cancellation": None}
+
+    child_run_id = str(followup.get("comments_run_id") or "").strip() or None
+    cancelled_at = legacy._iso(legacy._now_utc())
+    cancelled_followup = {**followup, "cancelled_at": cancelled_at}
+    attached_followups = legacy._normalize_attached_followups(current_config.get("attached_followups"))
+    if child_run_id:
+        child_cancellation = _cancel_deferred_comments_child_durably(
+            run_id=run_id,
+            followup=cancelled_followup,
+            child_run_id=child_run_id,
+            cancelled_by=cancelled_by,
+            cancel_reason="parent_run_cancelled",
+            attached_followups=attached_followups,
+            conn=conn,
+        )
+    else:
+        child_cancellation = None
+        _merge_run_config(
+            run_id,
+            config_updates={
+                "deferred_comments_followup": {
+                    **cancelled_followup,
+                    "state": "cancelled",
+                    "launch_claim_token": None,
+                    "launch_claimed_at": None,
+                    "launch_lease_expires_at": None,
+                    "cancelled_by": cancelled_by,
+                    "cancel_reason": "parent_run_cancelled",
+                }
+            },
+            conn=conn,
+        )
+    return {
+        "cancelled": True,
+        "child_run_id": child_run_id,
+        "child_cancellation": child_cancellation,
+    }
+
+
+def _claim_deferred_child_cancellation(
+    *,
+    run_id: str,
+    followup: dict[str, Any],
+) -> dict[str, Any] | None:
+    cancellation = legacy._metadata_dict(followup.get("child_cancellation"))
+    state = str(cancellation.get("state") or "").strip().lower()
+    child_run_id = str(cancellation.get("child_run_id") or "").strip()
+    if state not in {"pending", "retryable", "claimed"} or not child_run_id:
+        return None
+    now = legacy._now_utc()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    if state == "retryable":
+        next_attempt_at = legacy._coerce_dt(cancellation.get("next_attempt_at"))
+        if next_attempt_at is not None:
+            if next_attempt_at.tzinfo is None:
+                next_attempt_at = next_attempt_at.replace(tzinfo=UTC)
+            if next_attempt_at > now:
+                return None
+    if state == "claimed":
+        lease_expires_at = legacy._coerce_dt(cancellation.get("claim_lease_expires_at"))
+        if lease_expires_at is not None:
+            if lease_expires_at.tzinfo is None:
+                lease_expires_at = lease_expires_at.replace(tzinfo=UTC)
+            if lease_expires_at > now:
+                return None
+
+    claim_token = str(legacy.uuid4())
+    claimed_at = legacy._iso(now)
+    claimed = {
+        **cancellation,
+        "state": "claimed",
+        "claim_token": claim_token,
+        "claimed_at": claimed_at,
+        "claim_lease_expires_at": legacy._iso(
+            now + timedelta(seconds=_DEFERRED_CHILD_CANCELLATION_CLAIM_LEASE_SECONDS)
+        ),
+        "attempt_count": legacy._normalize_non_negative_int(cancellation.get("attempt_count")) + 1,
+        "last_attempt_at": claimed_at,
+    }
+    claimed_followup = {**followup, "child_cancellation": claimed}
+    row = (
+        legacy.pg.fetch_one(
+            """
+            update social.scrape_runs
+            set config = coalesce(config, '{}'::jsonb) || %s::jsonb
+            where id = %s::uuid
+              and config #>> '{deferred_comments_followup,child_cancellation,state}' = %s
+              and config #>> '{deferred_comments_followup,child_cancellation,child_run_id}' = %s
+              and coalesce(config #>> '{deferred_comments_followup,child_cancellation,claim_token}', '') = %s
+              and (
+                %s <> 'retryable'
+                or nullif(config #>> '{deferred_comments_followup,child_cancellation,next_attempt_at}', '') is null
+                or (config #>> '{deferred_comments_followup,child_cancellation,next_attempt_at}')::timestamptz <= now()
+              )
+              and (
+                %s <> 'claimed'
+                or nullif(
+                  config #>> '{deferred_comments_followup,child_cancellation,claim_lease_expires_at}',
+                  ''
+                ) is null
+                or (
+                  config #>> '{deferred_comments_followup,child_cancellation,claim_lease_expires_at}'
+                )::timestamptz <= now()
+              )
+            returning config
+            """,
+            [
+                legacy._json_dumps({"deferred_comments_followup": claimed_followup}),
+                run_id,
+                state,
+                child_run_id,
+                str(cancellation.get("claim_token") or ""),
+                state,
+                state,
+            ],
+            pool_name=SOCIAL_CONTROL_POOL_NAME,
+        )
+        or {}
+    )
+    if not row:
+        return None
+    legacy._invalidate_queue_status_cache()
+    config = legacy._metadata_dict(row.get("config"))
+    return {
+        "run_id": run_id,
+        "claim_token": claim_token,
+        "followup": legacy._metadata_dict(config.get("deferred_comments_followup")) or claimed_followup,
+        "attached_followups": legacy._normalize_attached_followups(config.get("attached_followups")),
+    }
+
+
+def recover_deferred_comments_child_cancellations(*, limit: int = 25) -> dict[str, Any]:
+    """Drain any committed due child-cancellation intent without holding locks.
+
+    Parent status is intentionally not a selector: attach-CAS loss can leave an
+    orphan intent on a completed parent when a newer launch claimant won.
+    """
+    safe_limit = max(1, min(int(limit), 500))
+    try:
+        candidates = (
+            legacy.pg.fetch_all(
+                """
+                select id::text as run_id, config
+                from social.scrape_runs
+                where config #>> '{deferred_comments_followup,child_cancellation,child_run_id}' <> ''
+                  and (
+                    config #>> '{deferred_comments_followup,child_cancellation,state}' = 'pending'
+                    or (
+                      config #>> '{deferred_comments_followup,child_cancellation,state}' = 'retryable'
+                      and (
+                        nullif(config #>> '{deferred_comments_followup,child_cancellation,next_attempt_at}', '') is null
+                        or (
+                          config #>> '{deferred_comments_followup,child_cancellation,next_attempt_at}'
+                        )::timestamptz <= now()
+                      )
+                    )
+                    or (
+                      config #>> '{deferred_comments_followup,child_cancellation,state}' = 'claimed'
+                      and (
+                        nullif(
+                          config #>> '{deferred_comments_followup,child_cancellation,claim_lease_expires_at}',
+                          ''
+                        ) is null
+                        or (
+                          config #>> '{deferred_comments_followup,child_cancellation,claim_lease_expires_at}'
+                        )::timestamptz <= now()
+                      )
+                    )
+                  )
+                order by coalesce(cancelled_at, completed_at, created_at) asc nulls first
+                limit %s
+                """,
+                [safe_limit],
+                pool_name=SOCIAL_CONTROL_POOL_NAME,
+            )
+            or []
+        )
+    except (legacy.pg.DatabaseServiceUnavailableError, InterfaceError, OperationalError, PoolError) as exc:
+        legacy.logger.warning("[deferred_child_cancellation] candidate scan deferred: %s", exc)
+        return {
+            "scanned": 0,
+            "claimed": 0,
+            "cancelled": 0,
+            "not_found": 0,
+            "retryable": 0,
+            "skipped": 0,
+            "deferred": True,
+        }
+
+    summary = {
+        "scanned": len(candidates),
+        "claimed": 0,
+        "cancelled": 0,
+        "not_found": 0,
+        "retryable": 0,
+        "skipped": 0,
+    }
+    for row in candidates:
+        run_id = str(row.get("run_id") or "").strip()
+        config = legacy._metadata_dict(row.get("config"))
+        followup = legacy._metadata_dict(config.get("deferred_comments_followup"))
+        if not run_id:
+            summary["skipped"] += 1
+            continue
+        try:
+            claim = _claim_deferred_child_cancellation(run_id=run_id, followup=followup)
+        except Exception:  # noqa: BLE001 - one corrupt/colliding candidate must not stop the sweep
+            summary["skipped"] += 1
+            legacy.logger.exception("[deferred_child_cancellation] claim failed parent_run=%s", run_id)
+            continue
+        if claim is None:
+            summary["skipped"] += 1
+            continue
+        summary["claimed"] += 1
+        claimed_followup = legacy._metadata_dict(claim.get("followup"))
+        cancellation = legacy._metadata_dict(claimed_followup.get("child_cancellation"))
+        child_run_id = str(cancellation.get("child_run_id") or "").strip()
+        outcome = _cancel_deferred_comments_child(
+            followup=claimed_followup,
+            child_run_id=child_run_id,
+            cancelled_by=str(cancellation.get("cancelled_by") or "").strip() or None,
+        )
+        outcome_status = str((outcome or {}).get("status") or "").strip().lower()
+        try:
+            persisted = _persist_deferred_child_cancellation_outcome(
+                run_id=run_id,
+                followup=claimed_followup,
+                outcome=outcome,
+                attached_followups=legacy._normalize_attached_followups(claim.get("attached_followups")),
+                expected_claim_token=str(claim.get("claim_token") or ""),
+            )
+        except Exception:  # noqa: BLE001 - expired claim makes persistence failure retryable
+            persisted = False
+            legacy.logger.exception("[deferred_child_cancellation] outcome persist failed parent_run=%s", run_id)
+        if not persisted:
+            summary["skipped"] += 1
+        elif outcome_status in {"cancelled", "not_found"}:
+            summary[outcome_status] += 1
+        else:
+            summary["retryable"] += 1
+    return summary
+
+
+def _claim_deferred_comments_followup_locked(
+    *,
+    run_id: str,
+    run_config: dict[str, Any],
+    conn: Any,
+) -> dict[str, Any] | None:
+    """Atomically reserve a pending followup before releasing the finalize lock."""
+    followup = legacy._metadata_dict(run_config.get("deferred_comments_followup"))
+    if str(followup.get("state") or "").strip().lower() != "pending":
+        return None
+    existing_claimed_at = str(followup.get("launch_claimed_at") or "").strip()
+    claim_reclaimed = bool(existing_claimed_at and _deferred_comments_followup_claim_is_stale(followup))
+    if existing_claimed_at and not claim_reclaimed:
+        return None
+    claimed_at_dt = legacy._now_utc()
+    claimed_at = legacy._iso(claimed_at_dt)
+    launch_claim_token = str(legacy.uuid4())
+    lease_expires_at = legacy._iso(claimed_at_dt + timedelta(seconds=_DEFERRED_FOLLOWUP_CLAIM_LEASE_SECONDS))
+    claimed_followup = {
+        **followup,
+        "launch_claim_token": launch_claim_token,
+        "launch_claimed_at": claimed_at,
+        "launch_lease_expires_at": lease_expires_at,
+    }
+    if claim_reclaimed:
+        claimed_followup.update(
+            {
+                "launch_recovered_at": claimed_at,
+                "launch_recovered_from_token": str(followup.get("launch_claim_token") or "").strip() or None,
+                "launch_recovery_count": (
+                    legacy._normalize_non_negative_int(followup.get("launch_recovery_count")) or 0
+                )
+                + 1,
+            }
+        )
+    row = (
+        _call_with_optional_conn(
+            legacy.pg.fetch_one,
+            """
+            update social.scrape_runs
+            set config = coalesce(config, '{}'::jsonb) || %s::jsonb
+            where id = %s::uuid
+              and status in ('completed', 'queued', 'running')
+              and config->'deferred_comments_followup'->>'state' = 'pending'
+              and (
+                nullif(config->'deferred_comments_followup'->>'launch_claimed_at', '') is null
+                or coalesce(
+                  nullif(config->'deferred_comments_followup'->>'launch_lease_expires_at', '')::timestamptz,
+                  nullif(config->'deferred_comments_followup'->>'launch_claimed_at', '')::timestamptz
+                    + interval '300 seconds'
+                ) <= now()
+              )
+            returning status, config, summary
+            """,
+            [legacy._json_dumps({"deferred_comments_followup": claimed_followup}), run_id],
+            conn=conn,
+        )
+        or {}
+    )
+    if not row:
+        return None
+    legacy._invalidate_queue_status_cache()
+    return {
+        "status": str(row.get("status") or "").strip().lower(),
+        "config": legacy._metadata_dict(row.get("config")),
+        "summary": legacy._metadata_dict(row.get("summary")),
+        "launch_claimed_at": claimed_at,
+        "launch_claim_token": launch_claim_token,
+        "launch_lease_expires_at": lease_expires_at,
+        "launch_reclaimed": claim_reclaimed,
     }
 
 
@@ -516,6 +1398,7 @@ def _restore_deferred_comments_followup_failed_after_skipped_retry(
     restored = {
         **followup,
         "state": "failed",
+        "launch_claimed_at": None,
         "failed_at": now_iso,
         "error_message": error_message,
         "retryable": True,
@@ -546,7 +1429,7 @@ def _retry_deferred_comments_followup_locked(*, run_id: str) -> str:
         with legacy.pg.advisory_session_lock(
             lock_key,
             label="run-finalize-lock",
-            pool_name=SOCIAL_CONTROL_POOL_NAME,
+            pool_name="session_control",
         ) as lock_conn:
             run_row = legacy.pg.fetch_one(
                 "select id::text as run_id, status, config, summary from social.scrape_runs where id = %s",
@@ -573,6 +1456,11 @@ def _retry_deferred_comments_followup_locked(*, run_id: str) -> str:
             repended = {
                 **followup,
                 "state": "pending",
+                "launch_claim_token": str(legacy.uuid4()),
+                "launch_claimed_at": legacy._iso(legacy._now_utc()),
+                "launch_lease_expires_at": legacy._iso(
+                    legacy._now_utc() + timedelta(seconds=_DEFERRED_FOLLOWUP_CLAIM_LEASE_SECONDS)
+                ),
                 "retry_attempts": attempts + 1,
                 "last_retry_at": legacy._iso(legacy._now_utc()),
                 # Clear stale failure fields so the new attempt starts clean. Shallow
@@ -609,6 +1497,8 @@ def _retry_deferred_comments_followup_locked(*, run_id: str) -> str:
         summary=legacy._metadata_dict(launch_payload.get("summary")),
         conn=None,
     )
+    if result and result.get("_deferred_followup_parent_cancelled"):
+        return "skipped"
     if result is not None:
         return "retried"
     _restore_deferred_comments_followup_failed_after_skipped_retry(
@@ -682,6 +1572,125 @@ def recover_failed_deferred_comments_followups(*, limit: int = 25) -> dict[str, 
         "retried": retried,
         "exhausted": exhausted,
         "skipped": skipped,
+    }
+
+
+def recover_catalog_run_deadline_exceeded_jobs(*, limit: int = 25) -> dict[str, Any]:
+    """Fail queued catalog jobs for runs whose operator deadline has elapsed."""
+    safe_limit = max(1, min(int(limit), 500))
+    try:
+        candidates = (
+            legacy.pg.fetch_all(
+                """
+                select id::text as run_id, status, config
+                from social.scrape_runs
+                where status in ('queued', 'pending', 'retrying', 'running')
+                  and coalesce(config->>'pipeline_ingest_mode', '') = %s
+                  and nullif(config->>'catalog_run_deadline_at', '') is not null
+                order by started_at asc nulls first, created_at asc
+                limit %s
+                """,
+                [legacy.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE, safe_limit],
+                pool_name=SOCIAL_CONTROL_POOL_NAME,
+            )
+            or []
+        )
+    except (legacy.pg.DatabaseServiceUnavailableError, InterfaceError, OperationalError, PoolError) as exc:
+        legacy.logger.warning("[catalog_run_deadline] candidate scan deferred: %s", exc)
+        return {
+            "scanned": 0,
+            "expired_runs": 0,
+            "failed_jobs": 0,
+            "finalized_runs": 0,
+            "affected_run_ids": [],
+            "deferred": True,
+        }
+
+    now = legacy._now_utc()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    failed_rows: list[dict[str, Any]] = []
+    affected_run_ids: set[str] = set()
+    expired_runs = 0
+    skipped_invalid_deadline = 0
+    for row in candidates:
+        run_id = str(row.get("run_id") or "").strip()
+        config = legacy._metadata_dict(row.get("config"))
+        deadline_at = legacy._coerce_dt(config.get("catalog_run_deadline_at"))
+        if not run_id or deadline_at is None:
+            skipped_invalid_deadline += 1
+            continue
+        if deadline_at.tzinfo is None:
+            deadline_at = deadline_at.replace(tzinfo=UTC)
+        if deadline_at > now:
+            continue
+        expired_runs += 1
+        deadline_seconds = legacy._normalize_non_negative_int(config.get("catalog_run_deadline_seconds")) or None
+        rows = (
+            legacy.pg.fetch_all(
+                """
+                update social.scrape_jobs j
+                set
+                  status = 'failed',
+                  error_message = 'Catalog run deadline exceeded before queued job dispatch.',
+                  completed_at = now(),
+                  heartbeat_at = now(),
+                  last_error_code = 'run_deadline_exceeded',
+                  last_error_class = 'CatalogRunDeadlineExceeded',
+                  metadata = coalesce(j.metadata, '{}'::jsonb) || jsonb_build_object(
+                    'retryable', false,
+                    'job_error_code', 'run_deadline_exceeded',
+                    'run_deadline', jsonb_build_object(
+                      'source', 'catalog_run_deadline_sweep',
+                      'deadline_at', %s,
+                      'deadline_seconds', %s,
+                      'exceeded_at', %s,
+                      'prior_status', j.status,
+                      'run_status', %s
+                    )
+                  )
+                where j.run_id = %s::uuid
+                  and j.status in ('queued', 'pending', 'retrying')
+                returning
+                  j.id::text as id,
+                  j.run_id::text as run_id,
+                  j.platform,
+                  coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type, 'unknown') as stage,
+                  j.status
+                """,
+                [
+                    legacy._iso(deadline_at),
+                    deadline_seconds,
+                    legacy._iso(now),
+                    str(row.get("status") or "").strip().lower() or None,
+                    run_id,
+                ],
+                pool_name=SOCIAL_CONTROL_POOL_NAME,
+            )
+            or []
+        )
+        if not rows:
+            continue
+        failed_rows.extend(rows)
+        affected_run_ids.add(run_id)
+
+    if failed_rows:
+        legacy._invalidate_queue_status_cache()
+    finalized_runs = 0
+    for run_id in sorted(affected_run_ids):
+        try:
+            _finalize_run_status(run_id, force_recompute=True)
+        except Exception:  # noqa: BLE001
+            legacy.logger.exception("[catalog_run_deadline] re-finalize failed run=%s", run_id)
+            continue
+        finalized_runs += 1
+    return {
+        "scanned": len(candidates),
+        "expired_runs": expired_runs,
+        "failed_jobs": len(failed_rows),
+        "finalized_runs": finalized_runs,
+        "affected_run_ids": sorted(affected_run_ids),
+        "skipped_invalid_deadline": skipped_invalid_deadline,
     }
 
 
@@ -1116,6 +2125,7 @@ def _increment_run_counters_on_job_finish(
     new_status: str,
     prior_items_found: int,
     new_items_found: int,
+    conn: Any | None = None,
 ) -> None:
     if not run_id or not legacy._run_counter_columns_ready():
         return
@@ -1127,58 +2137,62 @@ def _increment_run_counters_on_job_finish(
         prior_items_found
     )
 
-    with legacy.pg.db_connection() as conn:
-        with legacy.pg.db_cursor(conn=conn) as cur:
-            row = (
-                legacy.pg.fetch_one_with_cursor(
-                    cur,
-                    """
-                select
-                  total_jobs,
-                  completed_jobs,
-                  failed_jobs,
-                  active_jobs,
-                  items_found_total,
-                  stage_counts
-                from social.scrape_runs
-                where id = %s
-                for update
-                """,
-                    [run_id],
-                )
-                or {}
+    def _increment_with_connection(write_conn: Any) -> None:
+        with legacy.pg.db_cursor(conn=write_conn) as cur:
+            row = legacy.pg.fetch_one_with_cursor(
+                cur,
+                """
+            select
+              total_jobs,
+              completed_jobs,
+              failed_jobs,
+              active_jobs,
+              items_found_total,
+              stage_counts
+            from social.scrape_runs
+            where id = %s
+            for update
+            """,
+                [run_id],
             )
             if not row:
                 return
-            total_jobs = legacy._normalize_non_negative_int(row.get("total_jobs"))
-            completed_jobs = max(0, legacy._normalize_non_negative_int(row.get("completed_jobs")) + completed_delta)
-            failed_jobs = max(0, legacy._normalize_non_negative_int(row.get("failed_jobs")) + failed_delta)
-            active_jobs = max(0, legacy._normalize_non_negative_int(row.get("active_jobs")) + active_delta)
-            items_found_total = max(0, legacy._normalize_non_negative_int(row.get("items_found_total")) + items_delta)
-            stage_counts = _normalize_stage_counts(row.get("stage_counts"))
-            stage_counts = _increment_stage_counter(stage_counts, stage=stage_key, key="active", delta=active_delta)
-            stage_counts = _increment_stage_counter(
-                stage_counts,
-                stage=stage_key,
-                key="completed",
-                delta=completed_delta,
-            )
-            stage_counts = _increment_stage_counter(stage_counts, stage=stage_key, key="failed", delta=failed_delta)
-            _persist_run_counters_and_summary(
-                conn=conn,
-                run_id=run_id,
-                total_jobs=total_jobs,
-                completed_jobs=completed_jobs,
-                failed_jobs=failed_jobs,
-                active_jobs=active_jobs,
-                items_found_total=items_found_total,
-                stage_counts=stage_counts,
-            )
+        total_jobs = legacy._normalize_non_negative_int(row.get("total_jobs"))
+        completed_jobs = max(0, legacy._normalize_non_negative_int(row.get("completed_jobs")) + completed_delta)
+        failed_jobs = max(0, legacy._normalize_non_negative_int(row.get("failed_jobs")) + failed_delta)
+        active_jobs = max(0, legacy._normalize_non_negative_int(row.get("active_jobs")) + active_delta)
+        items_found_total = max(0, legacy._normalize_non_negative_int(row.get("items_found_total")) + items_delta)
+        stage_counts = _normalize_stage_counts(row.get("stage_counts"))
+        stage_counts = _increment_stage_counter(stage_counts, stage=stage_key, key="active", delta=active_delta)
+        stage_counts = _increment_stage_counter(
+            stage_counts,
+            stage=stage_key,
+            key="completed",
+            delta=completed_delta,
+        )
+        stage_counts = _increment_stage_counter(stage_counts, stage=stage_key, key="failed", delta=failed_delta)
+        _persist_run_counters_and_summary(
+            conn=write_conn,
+            run_id=run_id,
+            total_jobs=total_jobs,
+            completed_jobs=completed_jobs,
+            failed_jobs=failed_jobs,
+            active_jobs=active_jobs,
+            items_found_total=items_found_total,
+            stage_counts=stage_counts,
+        )
+
+    if conn is not None:
+        _increment_with_connection(conn)
+        return
+    with legacy.pg.db_connection() as write_conn:
+        _increment_with_connection(write_conn)
 
 
-def _recompute_run_summary_from_jobs(run_id: str) -> dict[str, Any]:
+def _recompute_run_summary_from_jobs(run_id: str, *, conn: Any | None = None) -> dict[str, Any]:
     summary_row = (
-        legacy.pg.fetch_one(
+        _call_with_optional_conn(
+            legacy.pg.fetch_one,
             """
         with job_rows as (
           select
@@ -1242,6 +2256,7 @@ def _recompute_run_summary_from_jobs(run_id: str) -> dict[str, Any]:
           )) from stage_stats), '{}'::jsonb) as stage_counts
         """,
             [legacy.INSTAGRAM_COMMENTS_SCRAPLING_STAGE, run_id],
+            conn=conn,
         )
         or {}
     )
@@ -1305,7 +2320,7 @@ def _update_run_summary(
         )
         return summary
 
-    summary = _recompute_run_summary_from_jobs(run_id)
+    summary = _recompute_run_summary_from_jobs(run_id, conn=conn)
     if legacy._run_counter_columns_ready():
         if conn is not None:
             _persist_run_counters_and_summary(
@@ -1423,7 +2438,7 @@ def _finalize_run_status(run_id: str, *, force_recompute: bool = False) -> dict[
         with legacy.pg.advisory_session_lock(
             lock_key,
             label="run-finalize-lock",
-            pool_name=SOCIAL_CONTROL_POOL_NAME,
+            pool_name="session_control",
         ) as lock_conn:
             locked_result = _finalize_run_status_locked(run_id, lock_conn, force_recompute=force_recompute)
     except legacy.pg.AdvisoryLockUnavailable:
@@ -1527,17 +2542,65 @@ def _finalize_run_status_locked(
         next_status = "failed"
     else:
         next_status = "completed"
-    _set_run_status(run_id, next_status, conn=lock_conn)
+    try:
+        status_update = _set_run_status(
+            run_id,
+            next_status,
+            conn=lock_conn,
+            expected_status=current_status,
+        )
+    except TypeError as exc:
+        if "unexpected keyword argument 'expected_status'" not in str(exc):
+            raise
+        # Compatibility for older injected lifecycle shims. The real
+        # implementation above always uses the conditional transition.
+        status_update = _set_run_status(run_id, next_status, conn=lock_conn)
+    if status_update is False:
+        # Cancellation is intentionally outside the advisory lock in some
+        # callers. If it wins this conditional transition, do not launch any
+        # followup based on the stale pre-cancellation snapshot.
+        refreshed = (
+            legacy.pg.fetch_one(
+                "select status, config from social.scrape_runs where id = %s::uuid",
+                [run_id],
+                conn=lock_conn,
+            )
+            or {}
+        )
+        return {
+            "summary": summary,
+            "status": str(refreshed.get("status") or current_status).strip().lower(),
+            "skip_followups": True,
+        }
+
+    deferred_followup_claimed = False
+    deferred_followup_claimed_at: str | None = None
+    if status_update is True and next_status in {"completed", "queued", "running"}:
+        claim = _claim_deferred_comments_followup_locked(
+            run_id=run_id,
+            run_config=current_config,
+            conn=lock_conn,
+        )
+        if claim is not None:
+            deferred_followup_claimed = True
+            deferred_followup_claimed_at = str(claim.get("launch_claimed_at") or "").strip() or None
+            current_config = legacy._metadata_dict(claim.get("config")) or current_config
     # B1: do NOT run the deferred-comments followup or sync-session evaluation while
     # holding the run-finalize advisory lock + lock_conn. Both launch nested work that
     # acquires its own advisory locks / pooled connections; running them under this lock
     # is the stall class that pinned runs in "finalizing". The caller runs them via
     # _run_post_finalize_followups after releasing the lock, with fresh connections.
-    return {
+    result = {
         "summary": summary,
         "next_status": next_status,
         "run_config": current_config,
     }
+    # A None return is retained as a compatibility affordance for tests and
+    # legacy shims that replace _set_run_status. Production writes return bool.
+    if status_update is not None:
+        result["deferred_followup_claimed"] = deferred_followup_claimed
+        result["deferred_followup_claimed_at"] = deferred_followup_claimed_at
+    return result
 
 
 def _run_post_finalize_followups(
@@ -1558,14 +2621,18 @@ def _run_post_finalize_followups(
     if next_status == "cancelled":
         return summary
     current_config = legacy._metadata_dict(locked_result.get("run_config"))
-    followup_updates = _maybe_start_deferred_comments_followup(
-        run_id=run_id,
-        run_status=next_status,
-        run_config=current_config,
-        summary=summary,
-        conn=None,
-    )
-    if followup_updates:
+    followup_claimed = locked_result.get("deferred_followup_claimed")
+    if followup_claimed is False:
+        followup_updates = None
+    else:
+        followup_updates = _maybe_start_deferred_comments_followup(
+            run_id=run_id,
+            run_status=next_status,
+            run_config=current_config,
+            summary=summary,
+            conn=None,
+        )
+    if followup_updates and not followup_updates.get("_deferred_followup_parent_cancelled"):
         summary = _update_run_summary(run_id, force_recompute=True, conn=None)
         refreshed_config = dict(current_config)
         refreshed_config.update(followup_updates)

@@ -26,6 +26,59 @@ def _base_worker_payload(stale_after_seconds: int | None) -> dict[str, Any]:
     }
 
 
+def test_worker_auth_capabilities_uses_source_only_non_instagram_cookie_loaders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_loads: list[str] = []
+
+    monkeypatch.setattr(core, "_load_instagram_cookies_from_sources", lambda: {"sessionid": "instagram"})
+    monkeypatch.setattr(core, "_inspect_instagram_cookie_health", lambda _cookies: {"valid": True})
+    monkeypatch.setattr(core, "_load_twitter_auth", lambda: ({}, None))
+    monkeypatch.setattr(core, "_load_twikit_credentials", lambda _cookies: {})
+
+    source_cookies = {
+        "tiktok": {"sessionid": "tiktok"},
+        "facebook": {"c_user": "user", "xs": "token"},
+        "threads": {"sessionid": "threads", "csrftoken": "csrf"},
+    }
+    for platform in source_cookies:
+        monkeypatch.setattr(
+            core,
+            f"_load_{platform}_cookies_from_sources",
+            lambda platform=platform: source_loads.append(platform) or source_cookies[platform],
+        )
+        monkeypatch.setattr(
+            core,
+            f"_load_{platform}_cookies",
+            lambda platform=platform: pytest.fail(f"{platform} freshness loader must not run"),
+        )
+
+    payload = worker_health.get_worker_auth_capabilities()
+
+    assert source_loads == ["tiktok", "facebook", "threads"]
+    assert payload["instagram_authenticated"] is True
+    assert payload["tiktok_authenticated"] is True
+    assert payload["facebook_authenticated"] is True
+    assert payload["threads_authenticated"] is True
+
+
+def test_worker_auth_capabilities_can_skip_instagram_live_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(core, "_load_instagram_cookies_from_sources", lambda: {"sessionid": "instagram"})
+    monkeypatch.setattr(core, "_inspect_instagram_cookie_health", lambda _cookies: pytest.fail("live inspector ran"))
+    monkeypatch.setattr(core, "_instagram_cookie_schema_result", lambda _cookies: {"valid": True})
+    monkeypatch.setattr(core, "_load_tiktok_cookies_from_sources", lambda: {})
+    monkeypatch.setattr(core, "_load_twitter_auth", lambda: ({}, None))
+    monkeypatch.setattr(core, "_load_twikit_credentials", lambda _cookies: {})
+    monkeypatch.setattr(core, "_load_facebook_cookies_from_sources", lambda: {})
+    monkeypatch.setattr(core, "_load_threads_cookies_from_sources", lambda: {})
+
+    payload = worker_health.get_worker_auth_capabilities(validate_instagram=False)
+
+    assert payload["instagram_authenticated"] is True
+
+
 @pytest.mark.parametrize(
     ("get_health", "query_owner"),
     [
@@ -42,7 +95,11 @@ def test_worker_health_cache_does_not_hide_modal_executor_mode(
     monkeypatch.setenv("SOCIAL_WORKER_HEALTH_CACHE_TTL_SECONDS", "60")
     monkeypatch.setattr(core, "_worker_health_cache", None)
     monkeypatch.setattr(core, "_build_worker_health_alerts", lambda _payload: [])
-    monkeypatch.setattr(core, "_touch_modal_social_dispatcher_heartbeat", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        core,
+        "_touch_modal_social_dispatcher_heartbeat",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("worker-health reads must not write heartbeats")),
+    )
     monkeypatch.setattr(core, "_modal_social_dispatch_ready", lambda: (True, None))
     monkeypatch.setattr(
         query_owner,

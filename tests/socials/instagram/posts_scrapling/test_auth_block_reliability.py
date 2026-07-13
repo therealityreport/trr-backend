@@ -11,12 +11,12 @@ Covers:
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
-from unittest.mock import MagicMock
 
 
 @pytest.fixture(autouse=True)
@@ -36,6 +36,59 @@ def _mock_scrapling(monkeypatch):
     mock_module.ProxyRotator = MagicMock()
     monkeypatch.setitem(__import__("sys").modules, "scrapling.fetchers", mock_module)
     return mock_module
+
+
+# ---------------------------------------------------------------------------
+# Identity-level auth cooldown helpers
+# ---------------------------------------------------------------------------
+
+
+def test_record_identity_auth_block_uses_reserved_sentinel_handle(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.socials.instagram import auth_cooldown
+
+    calls: list[tuple[str, str, str | None]] = []
+    expected = object()
+
+    def _record(platform: str, account_handle: str, error_code: str | None):
+        calls.append((platform, account_handle, error_code))
+        return expected
+
+    monkeypatch.setattr(auth_cooldown, "record_auth_block", _record)
+
+    result = auth_cooldown.record_identity_auth_block(
+        platform=" Instagram ",
+        error_code="http_401",
+    )
+
+    assert result is expected
+    assert calls == [("instagram", "__identity__:instagram", "http_401")]
+
+
+def test_identity_auth_cooldown_helpers_use_existing_get_and_clear(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.socials.instagram import auth_cooldown
+
+    calls: list[tuple[Any, ...]] = []
+    expected = object()
+
+    def _get(platform: str, account_handle: str):
+        calls.append(("get", platform, account_handle))
+        return expected
+
+    def _clear(platform: str, account_handle: str, *, force: bool = False) -> bool:
+        calls.append(("clear", platform, account_handle, force))
+        return force
+
+    monkeypatch.setattr(auth_cooldown, "get_active_cooldown", _get)
+    monkeypatch.setattr(auth_cooldown, "clear_cooldown", _clear)
+
+    assert auth_cooldown.get_active_identity_cooldown(platform="Instagram") is expected
+    assert auth_cooldown.clear_identity_cooldown(platform="Instagram") is False
+    assert auth_cooldown.clear_identity_cooldown(platform="Instagram", force=True) is True
+    assert calls == [
+        ("get", "instagram", "__identity__:instagram"),
+        ("clear", "instagram", "__identity__:instagram", False),
+        ("clear", "instagram", "__identity__:instagram", True),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -63,13 +116,13 @@ def test_proxy_session_key_generation_zero_is_unsuffixed() -> None:
 def test_proxy_session_key_generation_suffix_changes_key() -> None:
     from trr_backend.socials.instagram.posts_scrapling.job_runner import _posts_proxy_session_key
 
-    kwargs = dict(
-        account_handle="thetraitorsus",
-        stage="posts_scrapling",
-        config={"shard_count": 2, "shard_index": 1},
-        job_metadata={},
-        browser_account_id="thetraitorsus",
-    )
+    kwargs = {
+        "account_handle": "thetraitorsus",
+        "stage": "posts_scrapling",
+        "config": {"shard_count": 2, "shard_index": 1},
+        "job_metadata": {},
+        "browser_account_id": "thetraitorsus",
+    }
     gen0 = _posts_proxy_session_key(**kwargs, rotation_generation=0)
     gen1 = _posts_proxy_session_key(**kwargs, rotation_generation=1)
     gen2 = _posts_proxy_session_key(**kwargs, rotation_generation=2)
@@ -229,12 +282,22 @@ def test_auth_block_rotates_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> No
             self._calls += 1
             if self._calls == 1:
                 return SimpleNamespace(
-                    auth_failed=True, fetch_failed=True, retryable=False,
-                    fetch_reason="http_401", posts=[], has_next_page=False, end_cursor=None,
+                    auth_failed=True,
+                    fetch_failed=True,
+                    retryable=False,
+                    fetch_reason="http_401",
+                    posts=[],
+                    has_next_page=False,
+                    end_cursor=None,
                 )
             return SimpleNamespace(
-                auth_failed=False, fetch_failed=False, retryable=False, fetch_reason=None,
-                posts=[{"shortcode": "ok1"}], has_next_page=False, end_cursor=None,
+                auth_failed=False,
+                fetch_failed=False,
+                retryable=False,
+                fetch_reason=None,
+                posts=[{"shortcode": "ok1"}],
+                has_next_page=False,
+                end_cursor=None,
             )
 
         async def set_api_proxy_config(self, _cfg, *, reason: str) -> None:
@@ -291,8 +354,13 @@ def test_auth_block_records_cooldown_when_budget_exhausted(monkeypatch: pytest.M
             del cursor, direction
             fetch_attempts.append(1)
             return SimpleNamespace(
-                auth_failed=True, fetch_failed=True, retryable=False,
-                fetch_reason="http_403", posts=[], has_next_page=False, end_cursor=None,
+                auth_failed=True,
+                fetch_failed=True,
+                retryable=False,
+                fetch_reason="http_403",
+                posts=[],
+                has_next_page=False,
+                end_cursor=None,
             )
 
         async def set_api_proxy_config(self, _cfg, *, reason: str) -> None:
@@ -314,8 +382,7 @@ def test_auth_block_records_cooldown_when_budget_exhausted(monkeypatch: pytest.M
     monkeypatch.setattr(
         auth_cooldown,
         "record_auth_block",
-        lambda *a, **k: recorded.append(a)
-        or SimpleNamespace(to_metadata=lambda: {"blocker_kind": "auth"}),
+        lambda *a, **k: recorded.append(a) or SimpleNamespace(to_metadata=lambda: {"blocker_kind": "auth"}),
     )
 
     job = {
@@ -362,8 +429,13 @@ def test_checkpoint_block_skips_rotation_and_records_cooldown(monkeypatch: pytes
         async def fetch_posts_page(self, _a: str, *, cursor=None, direction="forward"):  # noqa: ANN001
             del cursor, direction
             return SimpleNamespace(
-                auth_failed=True, fetch_failed=True, retryable=False,
-                fetch_reason="redirect_to_checkpoint", posts=[], has_next_page=False, end_cursor=None,
+                auth_failed=True,
+                fetch_failed=True,
+                retryable=False,
+                fetch_reason="redirect_to_checkpoint",
+                posts=[],
+                has_next_page=False,
+                end_cursor=None,
             )
 
         async def set_api_proxy_config(self, _cfg, *, reason: str) -> None:
@@ -384,8 +456,7 @@ def test_checkpoint_block_skips_rotation_and_records_cooldown(monkeypatch: pytes
     monkeypatch.setattr(
         auth_cooldown,
         "record_auth_block",
-        lambda *a, **k: recorded.append(a)
-        or SimpleNamespace(to_metadata=lambda: {"blocker_kind": "checkpoint"}),
+        lambda *a, **k: recorded.append(a) or SimpleNamespace(to_metadata=lambda: {"blocker_kind": "checkpoint"}),
     )
 
     job = {"id": "job-1", "run_id": "run-1", "config": {"account": "thetraitorsus", "stage": "posts_scrapling"}}

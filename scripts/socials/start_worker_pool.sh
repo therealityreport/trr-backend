@@ -117,7 +117,7 @@ stop_all() {
   fi
   echo "[social-worker-pool] stopping workers..."
   for pid in "${PIDS[@]}"; do
-    kill -TERM "$pid" >/dev/null 2>&1 || true
+    kill -TERM "-${pid}" >/dev/null 2>&1 || kill -TERM "$pid" >/dev/null 2>&1 || true
   done
   wait || true
 }

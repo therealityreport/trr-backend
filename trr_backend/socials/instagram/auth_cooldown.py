@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 _COOLDOWN_POOL_NAME = "social_control"
 _COOLDOWN_TABLE = "social.account_auth_cooldown"
+_IDENTITY_COOLDOWN_HANDLE_PREFIX = "__identity__"
 
 # Escalation curve for cooldown_until = now() + exponential_backoff_delay(n).
 # Defaults: 1st block ~60s, 2nd ~120s, 3rd ~240s, ... capped at 1h. Jitter is
@@ -110,6 +111,10 @@ def _normalize_platform(platform: str | None) -> str:
 
 def _normalize_handle(account_handle: str | None) -> str:
     return str(account_handle or "").strip().lower().lstrip("@")
+
+
+def _identity_cooldown_handle(platform: str | None = "instagram") -> str:
+    return f"{_IDENTITY_COOLDOWN_HANDLE_PREFIX}:{_normalize_platform(platform)}"
 
 
 def classify_blocker_kind(error_code: str | None) -> str:
@@ -264,6 +269,19 @@ def record_auth_block(
     return cooldown
 
 
+def record_identity_auth_block(
+    platform: str | None = "instagram",
+    error_code: str | None = None,
+) -> AccountAuthCooldown | None:
+    """Record a platform identity-level auth block via the reserved handle."""
+    normalized_platform = _normalize_platform(platform)
+    return record_auth_block(
+        normalized_platform,
+        _identity_cooldown_handle(normalized_platform),
+        error_code,
+    )
+
+
 def get_active_cooldown(
     platform: str,
     account_handle: str,
@@ -308,6 +326,17 @@ def get_active_cooldown(
         return None
 
     return _row_to_cooldown(row)
+
+
+def get_active_identity_cooldown(
+    platform: str | None = "instagram",
+) -> AccountAuthCooldown | None:
+    """Return an active identity-level cooldown for the platform, if any."""
+    normalized_platform = _normalize_platform(platform)
+    return get_active_cooldown(
+        normalized_platform,
+        _identity_cooldown_handle(normalized_platform),
+    )
 
 
 def clear_cooldown(
@@ -381,3 +410,17 @@ def clear_cooldown(
             },
         )
     return cleared
+
+
+def clear_identity_cooldown(
+    platform: str | None = "instagram",
+    *,
+    force: bool = False,
+) -> bool:
+    """Clear a platform identity-level cooldown via the reserved handle."""
+    normalized_platform = _normalize_platform(platform)
+    return clear_cooldown(
+        normalized_platform,
+        _identity_cooldown_handle(normalized_platform),
+        force=force,
+    )

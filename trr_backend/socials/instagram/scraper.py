@@ -9,6 +9,7 @@ Supports:
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -73,6 +74,7 @@ from trr_backend.socials.instagram.constants import (
     QUERY_TYPE_GRAPHQL_PROFILE_POSTS,
     QUERY_TYPE_LEGACY,
     QUERY_TYPE_PROFILE_INFO,
+    is_instagram_graphql_auth_blocking_error,
     resolve_comment_sort_order,
     resolve_profile_page_content_doc_ids,
 )
@@ -92,6 +94,14 @@ from trr_backend.socials.instagram.request_client import InstagramRequestClient,
 from trr_backend.socials.instagram.resume_state import InstagramResumeState
 
 logger = logging.getLogger(__name__)
+
+
+def _sessionid_fingerprint(cookies: Mapping[str, Any]) -> str:
+    raw = str((cookies or {}).get("sessionid") or "")
+    if not raw:
+        return "none"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+
 
 INSTAGRAM_AUTH_REPAIR_CONFIRMATION = "I UNDERSTAND INSTAGRAM AUTH RISK"
 INSTAGRAM_AUTH_REPAIR_CONFIRMATION_ENV = "SOCIAL_INSTAGRAM_AUTH_REPAIR_CONFIRMATION"
@@ -874,8 +884,8 @@ class InstagramScraper:
                 self.session.cookies.set(k, v, domain=".instagram.com")
             self._clear_profile_page_context_cache()
             logger.info(
-                "[instagram] confirmed cookie repair succeeded - sessionid=%s...",
-                fresh_cookies["sessionid"][:8],
+                "[instagram] confirmed cookie repair succeeded - sessionid_fp=%s",
+                _sessionid_fingerprint(fresh_cookies),
             )
             return {"refreshed": True, "reason": None, "cookie_file": str(cookie_path)}
         except Exception as exc:  # noqa: BLE001
@@ -968,7 +978,10 @@ class InstagramScraper:
             for k, v in fresh_cookies.items():
                 self.session.cookies.set(k, v, domain=".instagram.com")
             self._clear_profile_page_context_cache()
-            logger.info("[instagram] interactive login succeeded — sessionid=%s…", fresh_cookies["sessionid"][:8])
+            logger.info(
+                "[instagram] interactive login succeeded - sessionid_fp=%s",
+                _sessionid_fingerprint(fresh_cookies),
+            )
             return {"refreshed": True, "reason": None, "method": "interactive_chrome"}
         except Exception as exc:  # noqa: BLE001
             logger.warning("[instagram] interactive login failed: %s", exc)
@@ -1456,11 +1469,7 @@ class InstagramScraper:
                     error_code = "instagram_graphql_initial_request_failed"
                     if status_code == 400 and failure_message == "checkpoint_required":
                         error_code = "instagram_graphql_checkpoint_required"
-                auth_fatal = error_code in {
-                    "instagram_graphql_cursor_unauthorized",
-                    "instagram_graphql_cursor_forbidden",
-                    "instagram_graphql_checkpoint_required",
-                }
+                auth_fatal = is_instagram_graphql_auth_blocking_error(error_code)
                 self.last_retrieval_meta.update(
                     {
                         "error_code": error_code,
@@ -1608,9 +1617,7 @@ class InstagramScraper:
                 error_code = "instagram_graphql_checkpoint_required"
             else:
                 error_code = "instagram_graphql_initial_request_failed"
-        auth_fatal = error_code in {
-            "instagram_graphql_checkpoint_required",
-        }
+        auth_fatal = is_instagram_graphql_auth_blocking_error(error_code)
         return {
             "error_code": error_code,
             "error_class": error.__class__.__name__ if error is not None else "RequestException",

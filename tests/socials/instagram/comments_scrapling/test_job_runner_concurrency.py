@@ -165,6 +165,8 @@ def _patch_runner(
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_kwargs: fetcher)
     monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {})
     monkeypatch.setattr(jr, "_load_comment_target_metadata", lambda **_kwargs: {})
+    monkeypatch.setattr(jr, "_load_public_replay_guard_rows", lambda **_kwargs: {})
+    monkeypatch.setattr(jr, "_completion_residual_gap_targets_from_health", lambda **_kwargs: [])
     monkeypatch.setattr(jr, "_load_persisted_replies_by_parent", lambda **_kwargs: {})
     monkeypatch.setattr(jr, "_insert_instagram_post_comments_audit", lambda **_kwargs: None)
     monkeypatch.setattr(jr.pg, "fetch_one", fake_fetch_one)

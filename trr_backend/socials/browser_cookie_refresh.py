@@ -290,7 +290,12 @@ def resolve_chrome_profile_selection(profile_name: str) -> ChromeProfileSelectio
     if not normalized_profile:
         raise ChromeProfileNotAvailableError("Chrome profile name is empty")
 
-    for entry in chrome_base.iterdir():
+    try:
+        profile_entries = tuple(chrome_base.iterdir())
+    except OSError as exc:
+        raise ChromeProfileNotAvailableError(f"Chrome profile directory is not readable: {chrome_base}") from exc
+
+    for entry in profile_entries:
         prefs_file = entry / "Preferences"
         if not prefs_file.is_file():
             continue

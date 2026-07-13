@@ -89,12 +89,14 @@ def test_instagram_cookie_validation_username_uses_public_fallback_not_login_ide
 
 def test_instagram_cookie_health_probe_disables_repair_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
     observed_env: dict[str, str | None] = {}
+    observed_kwargs: dict[str, object] = {}
 
     class _FakeInstagramScraper:
         def __init__(self, **_kwargs: object) -> None:
             self.last_retrieval_meta: dict[str, object] = {}
 
-        def fetch_posts_graphql(self, *_args: object, **_kwargs: object) -> None:
+        def fetch_posts_graphql(self, *_args: object, **kwargs: object) -> None:
+            observed_kwargs.update(kwargs)
             observed_env["auto_refresh"] = os.getenv("SOCIAL_INSTAGRAM_COOKIE_AUTO_REFRESH")
             observed_env["graphql_recovery_disabled"] = os.getenv("SOCIAL_INSTAGRAM_GRAPHQL_RECOVERY_DISABLED")
             observed_env["interactive_login"] = os.getenv("SOCIAL_INSTAGRAM_INTERACTIVE_LOGIN")
@@ -122,6 +124,8 @@ def test_instagram_cookie_health_probe_disables_repair_side_effects(monkeypatch:
         "graphql_recovery_disabled": "true",
         "interactive_login": "false",
     }
+    assert observed_kwargs["allow_browser_fallback"] is False
+    assert observed_kwargs["allow_recovery"] is False
     assert os.getenv("SOCIAL_INSTAGRAM_COOKIE_AUTO_REFRESH") == "true"
     assert os.getenv("SOCIAL_INSTAGRAM_GRAPHQL_RECOVERY_DISABLED") is None
     assert os.getenv("SOCIAL_INSTAGRAM_INTERACTIVE_LOGIN") == "1"

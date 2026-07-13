@@ -62,6 +62,21 @@ BOUNDED_DEPTH_PLATFORMS = {"tiktok", "facebook", "threads", "twitter"}
 DEFAULT_SYNC_MAX_COMMENTS_PER_POST = 5_000
 DEFAULT_SYNC_MAX_REPLIES_PER_POST = 1_000
 
+_INSTAGRAM_SYNC_POST_PAYLOAD_COLUMNS: tuple[str, ...] = (
+    "thumbnail_url",
+    "media_urls",
+    "hosted_thumbnail_url",
+    "hosted_media_urls",
+    "media_mirror_status",
+    "media_mirror_error",
+    "asset_manifest",
+    "raw_data",
+    "owner_profile_pic_url",
+    "hosted_owner_profile_pic_url",
+    "hosted_tagged_profile_pics",
+    "mentions",
+)
+
 
 def _social_repo() -> Any:
     from trr_backend.repositories import social_season_analytics as social_repo
@@ -261,6 +276,21 @@ def _call_with_optional_conn(
         if "unexpected keyword argument 'conn'" not in str(exc):
             raise
         return loader(*args, **kwargs)
+
+
+def _instagram_sync_post_payload_columns(social_repo: Any, *, conn: Any | None = None) -> list[str]:
+    """Return only deployed columns needed by Instagram repair classifiers."""
+    return [
+        column
+        for column in _INSTAGRAM_SYNC_POST_PAYLOAD_COLUMNS
+        if _call_with_optional_conn(
+            social_repo._column_exists,  # noqa: SLF001
+            "social",
+            "instagram_posts",
+            column,
+            conn=conn,
+        )
+    ]
 
 
 def _fetch_sync_session_row(
@@ -1104,28 +1134,59 @@ def _build_missing_detail_target_groups(
         params: list[Any] = [season_id, date_start, date_end]
         if account_handles:
             params.append(account_handles)
-        rows = _call_with_optional_conn(
-            pg.fetch_all,
-            f"""
-            select
-              p.{source_id_column}::text as source_id,
-              to_jsonb(p) as post_json
-            from social.{post_table} p
-            where p.season_id = %s::uuid
-              and p.{posted_at_column} >= %s
-              and p.{posted_at_column} <= %s
-              {account_filter}
-            order by p.{posted_at_column} desc
-            limit 5000
-            """,
-            params,
-            conn=conn,
-        )
+        if platform == "instagram":
+            payload_columns = _instagram_sync_post_payload_columns(social_repo, conn=conn)
+            payload_projection = "".join(f",\n              p.{column} as {column}" for column in payload_columns)
+            rows = _call_with_optional_conn(
+                pg.fetch_all,
+                f"""
+                select
+                  candidate_posts.source_id
+                  {payload_projection}
+                from (
+                  select
+                    p.id,
+                    p.{source_id_column}::text as source_id,
+                    p.{posted_at_column} as posted_at
+                  from social.{post_table} p
+                  where p.season_id = %s::uuid
+                    and p.{posted_at_column} >= %s
+                    and p.{posted_at_column} <= %s
+                    {account_filter}
+                  order by p.{posted_at_column} desc
+                  limit 5000
+                ) candidate_posts
+                join social.{post_table} p on p.id = candidate_posts.id
+                order by candidate_posts.posted_at desc
+                """,
+                params,
+                conn=conn,
+            )
+        else:
+            rows = _call_with_optional_conn(
+                pg.fetch_all,
+                f"""
+                select
+                  p.{source_id_column}::text as source_id,
+                  to_jsonb(p) as post_json
+                from social.{post_table} p
+                where p.season_id = %s::uuid
+                  and p.{posted_at_column} >= %s
+                  and p.{posted_at_column} <= %s
+                  {account_filter}
+                order by p.{posted_at_column} desc
+                limit 5000
+                """,
+                params,
+                conn=conn,
+            )
         for row in rows:
             source_id = str(row.get("source_id") or "").strip()
-            post_json = row.get("post_json") if isinstance(row.get("post_json"), dict) else {}
+            post_json = row.get("post_json") if isinstance(row.get("post_json"), dict) else dict(row)
             if not source_id:
                 continue
+            if platform == "instagram":
+                post_json[source_id_column] = source_id
             post_json["_platform"] = platform
             if social_repo._platform_post_needs_media_mirror(platform, post_json):  # noqa: SLF001
                 _add_group_target("assets", platform, source_id)

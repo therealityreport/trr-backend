@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import signal
 import subprocess
 from types import SimpleNamespace
+
+import pytest
 
 import scripts.socials.worker as worker
 
@@ -15,6 +18,23 @@ def test_requires_media_mirror_s3_preflight() -> None:
     assert worker._requires_media_mirror_s3_preflight(stage="media_mirror", platform="twitter") is True  # noqa: SLF001
     assert worker._requires_media_mirror_s3_preflight(stage="posts", platform=None) is False  # noqa: SLF001
     assert worker._requires_media_mirror_s3_preflight(stage="comments", platform="instagram") is False  # noqa: SLF001
+
+
+def test_install_graceful_shutdown_maps_sigterm_to_keyboard_interrupt() -> None:
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    try:
+        worker._install_graceful_shutdown()  # noqa: SLF001
+        handler = signal.getsignal(signal.SIGTERM)
+
+        assert handler not in {signal.SIG_DFL, signal.SIG_IGN}
+        assert handler == signal.getsignal(signal.SIGINT)
+        assert callable(handler)
+        with pytest.raises(KeyboardInterrupt):
+            handler(signal.SIGTERM, None)
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        signal.signal(signal.SIGINT, previous_sigint)
 
 
 def test_claim_stage_candidates_supports_comments_scrapling() -> None:
@@ -263,7 +283,8 @@ def test_main_queue_parallel_fanout_spawns_child_workers(monkeypatch) -> None:
         def wait(self) -> int:
             return 0
 
-    def _fake_popen(cmd, cwd=None, env=None):  # noqa: ANN001
+    def _fake_popen(cmd, cwd=None, env=None, start_new_session=False):  # noqa: ANN001, FBT002
+        del start_new_session
         spawned_cmds.append(list(cmd))
         return _FakeProc()
 
@@ -333,8 +354,8 @@ def test_main_queue_parallel_fanout_stops_siblings_on_child_failure(monkeypatch)
 
     spawned: list[_FakeProc] = []
 
-    def _fake_popen(cmd, cwd=None, env=None):  # noqa: ANN001
-        del cmd, cwd, env
+    def _fake_popen(cmd, cwd=None, env=None, start_new_session=False):  # noqa: ANN001, FBT002
+        del cmd, cwd, env, start_new_session
         rc = 4 if not spawned else 0
         proc = _FakeProc(rc=rc)
         spawned.append(proc)
@@ -1112,10 +1133,11 @@ def test_execute_run_with_caps_stops_after_runtime_cap(monkeypatch) -> None:
 def test_spawn_child_worker_propagates_caps_for_run_id_children(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
-    def _fake_popen(cmd, cwd=None, env=None):  # noqa: ANN001
+    def _fake_popen(cmd, cwd=None, env=None, start_new_session=False):  # noqa: ANN001, FBT002
         captured["cmd"] = list(cmd)
         captured["cwd"] = cwd
         captured["env"] = env
+        captured["start_new_session"] = start_new_session
         return SimpleNamespace(pid=1234)
 
     monkeypatch.setattr(worker.subprocess, "Popen", _fake_popen)
@@ -1134,3 +1156,4 @@ def test_spawn_child_worker_propagates_caps_for_run_id_children(monkeypatch) -> 
     assert "--run-id" in cmd
     assert "--max-jobs-per-invocation" in cmd
     assert "--max-run-seconds" in cmd
+    assert captured["start_new_session"] is True

@@ -436,6 +436,109 @@ def test_build_missing_detail_targets_includes_instagram_comment_media_gaps(monk
     assert targets["instagram"] == ["abc123"]
 
 
+def test_instagram_sync_post_payload_lookup_limits_keys_before_narrow_hydration(monkeypatch) -> None:
+    captured_post_queries: list[tuple[str, list[object]]] = []
+    seen_payloads: list[dict[str, object]] = []
+    fake_repo = _FakeSocialRepo()
+
+    def fake_needs_media(_platform: str, post_row: dict[str, object]) -> bool:
+        seen_payloads.append(dict(post_row))
+        return post_row.get("media_mirror_status") == "pending"
+
+    fake_repo._platform_post_needs_media_mirror = fake_needs_media  # type: ignore[method-assign]
+    fake_repo._platform_post_avatar_repair_state = (  # type: ignore[method-assign]
+        lambda _platform, post_row: {"needs_repair": not bool(post_row.get("hosted_owner_profile_pic_url"))}
+    )
+
+    def fake_fetch_all(query: str, params: list[object] | None = None) -> list[dict[str, object]]:
+        if "from social.avatar_registry" in query:
+            return []
+        if "from social.instagram_posts p" in query:
+            captured_post_queries.append((query, list(params or [])))
+            return [
+                {
+                    "source_id": "newest123",
+                    "media_mirror_status": "pending",
+                    "hosted_owner_profile_pic_url": "https://cdn.example/avatar.webp",
+                    "mentions": [],
+                    "hosted_tagged_profile_pics": {},
+                },
+                {
+                    "source_id": "older456",
+                    "media_mirror_status": "mirrored",
+                    "hosted_owner_profile_pic_url": None,
+                    "mentions": [],
+                    "hosted_tagged_profile_pics": {},
+                },
+            ]
+        return []
+
+    monkeypatch.setattr(orchestrator, "_social_repo", lambda: fake_repo)
+    monkeypatch.setattr(orchestrator.pg, "fetch_all", fake_fetch_all)
+
+    groups = orchestrator._build_missing_detail_target_groups(
+        season_id="season-1",
+        platforms=["instagram"],
+        source_scope="bravo",
+        date_start=datetime(2026, 1, 1, tzinfo=UTC),
+        date_end=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    assert groups["assets"] == {"instagram": ["newest123"]}
+    assert groups["avatars"] == {"instagram": ["older456"]}
+    assert groups["details"] == {"instagram": ["newest123", "older456"]}
+    assert [payload["shortcode"] for payload in seen_payloads] == ["newest123", "older456"]
+
+    assert len(captured_post_queries) == 1
+    query, params = captured_post_queries[0]
+    normalized_sql = " ".join(query.lower().split())
+    assert "to_jsonb(" not in normalized_sql
+    assert "p.*" not in normalized_sql
+    assert "from ( select p.id, p.shortcode::text as source_id, p.posted_at as posted_at" in normalized_sql
+    assert normalized_sql.index("limit 5000") < normalized_sql.index(") candidate_posts join social.instagram_posts")
+    assert "order by candidate_posts.posted_at desc" in normalized_sql
+    assert params == [
+        "season-1",
+        datetime(2026, 1, 1, tzinfo=UTC),
+        datetime(2026, 1, 2, tzinfo=UTC),
+        ["bravoaccount"],
+    ]
+
+
+def test_instagram_sync_post_payload_lookup_omits_optional_columns_missing_from_schema(monkeypatch) -> None:
+    captured_queries: list[str] = []
+    fake_repo = _FakeSocialRepo()
+    available_columns = {"media_mirror_status", "mentions"}
+    fake_repo._column_exists = (  # type: ignore[method-assign]
+        lambda _schema, table, column: table == "instagram_posts" and column in available_columns
+    )
+
+    def fake_fetch_all(query: str, _params: list[object] | None = None) -> list[dict[str, object]]:
+        if "from social.instagram_posts p" in query:
+            captured_queries.append(query)
+            return [{"source_id": "abc123", "media_mirror_status": "mirrored", "mentions": []}]
+        return []
+
+    monkeypatch.setattr(orchestrator, "_social_repo", lambda: fake_repo)
+    monkeypatch.setattr(orchestrator.pg, "fetch_all", fake_fetch_all)
+
+    groups = orchestrator._build_missing_detail_target_groups(
+        season_id="season-1",
+        platforms=["instagram"],
+        source_scope="bravo",
+        date_start=datetime(2026, 1, 1, tzinfo=UTC),
+        date_end=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    assert groups == {"details": {}, "assets": {}, "avatars": {}, "comment_media": {}}
+    assert len(captured_queries) == 1
+    normalized_sql = " ".join(captured_queries[0].lower().split())
+    assert "p.media_mirror_status as media_mirror_status" in normalized_sql
+    assert "p.mentions as mentions" in normalized_sql
+    assert "hosted_owner_profile_pic_url" not in normalized_sql
+    assert "asset_manifest" not in normalized_sql
+
+
 def test_build_missing_comment_targets_uses_threads_reply_and_quote_counts(monkeypatch) -> None:
     fake_repo = _FakeSocialRepo()
     fake_repo.PLATFORM_POST_TABLES = {"threads": "meta_threads_posts"}

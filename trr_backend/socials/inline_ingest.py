@@ -7,7 +7,26 @@ social analytics router without owning repository/database behavior.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from concurrent.futures import CancelledError, Future, wait
 from typing import Any
+
+
+def _raise_first_with_all_failures(futures: list[Future]) -> None:
+    wait(futures)
+    failures: list[tuple[int, BaseException]] = []
+    for idx, future in enumerate(futures):
+        try:
+            failure = future.exception()
+        except CancelledError as exc:
+            failure = exc
+        if failure is not None:
+            failures.append((idx, failure))
+    if not failures:
+        return
+
+    summary = "; ".join(f"future[{idx}]: {type(exc).__name__}: {exc}" for idx, exc in failures)
+    first_exc = failures[0][1]
+    raise RuntimeError(f"inline ingest had {len(failures)} platform failure(s): {summary}") from first_exc
 
 
 def normalize_target_platforms(
@@ -52,8 +71,7 @@ def run_inline_season_ingest_execution(
                 )
                 for platform in target_platforms
             ]
-            for future in futures:
-                future.result()
+            _raise_first_with_all_failures(futures)
         return
 
     if len(target_platforms) > 1:
@@ -67,8 +85,7 @@ def run_inline_season_ingest_execution(
                 )
                 for platform in target_platforms
             ]
-            for future in futures:
-                future.result()
+            _raise_first_with_all_failures(futures)
         return
 
     execute_run(

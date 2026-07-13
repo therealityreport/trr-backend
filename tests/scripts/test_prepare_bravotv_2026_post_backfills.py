@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from scripts.socials import prepare_bravotv_2026_post_backfills as prep
 
 
@@ -31,8 +33,8 @@ def test_build_prepared_commands_defaults_to_three_separate_platforms() -> None:
             "network",
             "--action",
             "backfill",
-            "--selected-task",
-            "post_details",
+            "--execution-owner",
+            "queue",
             "--date-start",
             "2026-01-01T00:00:00Z",
             "--date-end",
@@ -85,3 +87,32 @@ def test_run_executes_selected_platform(monkeypatch) -> None:
         "bravo",
         "--source-scope",
     )
+
+
+def test_prepared_commands_do_not_limit_catalog_post_discovery_to_details() -> None:
+    args = SimpleNamespace(
+        platform=["twitter"],
+        date_start="2026-01-01T00:00:00Z",
+        date_end="2026-12-31T23:59:59Z",
+        tiktok_account="bravotv",
+        twitter_account="bravotv",
+        youtube_account="bravo",
+    )
+
+    command = prep.build_prepared_commands(args)[0]
+
+    assert "--selected-task" not in command.run_argv
+    assert command.run_argv[command.run_argv.index("--execution-owner") + 1] == "queue"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--date-start", "invalid"],
+        ["--date-start", "2026-01-01T00:00:00Z", "--date-end", "2026-01-01T00:00:00Z"],
+        ["--date-start", "2026-01-02T00:00:00Z", "--date-end", "2026-01-01T00:00:00Z"],
+    ],
+)
+def test_prepared_commands_reject_invalid_windows(args: list[str]) -> None:
+    with pytest.raises(SystemExit):
+        prep.main(args)

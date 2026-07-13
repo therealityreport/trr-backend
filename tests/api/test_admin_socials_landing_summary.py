@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from psycopg2.pool import PoolError
+
 from api.routers import socials
 from trr_backend.socials.api.handlers import live_status
 
@@ -316,6 +318,42 @@ def test_social_live_status_serves_stale_snapshot_when_refresh_fails(monkeypatch
     assert stale["snapshot"]["stale"] is True
     assert stale["snapshot"]["refresh_error"] == "RuntimeError"
     assert stale["snapshot"]["cache_age_ms"] == 6000
+
+
+def test_social_live_status_preserves_last_good_snapshot_on_pool_exhaustion(monkeypatch) -> None:
+    now = {"value": 100.0}
+    queue_reads = {"count": 0}
+    monkeypatch.setattr(live_status, "_LIVE_STATUS_SNAPSHOT_CACHE", None)
+    monkeypatch.setattr(live_status, "_LIVE_STATUS_SNAPSHOT_TTL_SECONDS", 5.0)
+    monkeypatch.setattr(live_status, "_LIVE_STATUS_SNAPSHOT_STALE_SECONDS", 30.0)
+    monkeypatch.setattr(live_status, "monotonic", lambda: now["value"])
+
+    def fake_get_queue_status(**_kwargs):
+        queue_reads["count"] += 1
+        if queue_reads["count"] > 1:
+            raise PoolError("connection pool exhausted")
+        return {
+            "queue_enabled": True,
+            "workers": {"healthy": True, "healthy_workers": 2},
+            "queue": {"by_status": {"running": 4}},
+        }
+
+    monkeypatch.setattr("trr_backend.repositories.social_season_analytics.get_queue_status", fake_get_queue_status)
+    monkeypatch.setattr(
+        "trr_backend.repositories.admin_operations.get_admin_operations_health",
+        lambda: {"summary": {"active_total": 4}},
+    )
+
+    fresh = live_status.build_live_status_payload()
+    now["value"] = 106.0
+    under_pressure = live_status.build_live_status_payload()
+
+    assert under_pressure["sequence"] == fresh["sequence"]
+    assert under_pressure["queue_status"]["queue_enabled"] is True
+    assert under_pressure["queue_status"]["queue"]["by_status"]["running"] == 4
+    assert under_pressure["snapshot"]["cache_status"] == "stale"
+    assert under_pressure["snapshot"]["stale"] is True
+    assert under_pressure["snapshot"]["refresh_error"] == "PoolError"
 
 
 def test_social_live_status_serves_stale_snapshot_when_refresh_in_progress(monkeypatch) -> None:
