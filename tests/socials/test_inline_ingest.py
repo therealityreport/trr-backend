@@ -1,10 +1,38 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 
 import pytest
 
-from trr_backend.socials.inline_ingest import run_inline_season_ingest_execution
+from trr_backend.socials.inline_ingest import _raise_first_with_all_failures, run_inline_season_ingest_execution
+
+
+class _CountingFuture(Future):
+    def __init__(self) -> None:
+        super().__init__()
+        self.exception_calls = 0
+
+    def exception(self, timeout: float | None = None):  # noqa: ANN201
+        self.exception_calls += 1
+        return super().exception(timeout=timeout)
+
+
+def test_inline_failure_aggregation_inspects_cancelled_futures_once() -> None:
+    cancelled = _CountingFuture()
+    failed = _CountingFuture()
+    succeeded = _CountingFuture()
+    assert cancelled.cancel() is True
+    assert cancelled.set_running_or_notify_cancel() is False
+    failed.set_exception(ValueError("youtube failed"))
+    succeeded.set_result(None)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        _raise_first_with_all_failures([cancelled, failed, succeeded])
+
+    assert "inline ingest had 2 platform failure(s)" in str(exc_info.value)
+    assert "future[0]: CancelledError" in str(exc_info.value)
+    assert "future[1]: ValueError: youtube failed" in str(exc_info.value)
+    assert [future.exception_calls for future in (cancelled, failed, succeeded)] == [1, 1, 1]
 
 
 def test_inline_ingest_runs_each_target_platform() -> None:

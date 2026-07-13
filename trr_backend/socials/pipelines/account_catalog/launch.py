@@ -2629,7 +2629,6 @@ def launch_social_account_catalog_backfill(
     )
     comments_deferred_until_catalog_complete = False
     catalog_comments_streaming_enabled = False
-    comments_reused_existing_run = False
     media_attachment_id = _catalog_media_attachment_id(launch_group_id) if "media" in effective_selected_tasks else None
     force_detail_fetch = (
         "post_details" in effective_selected_tasks and _instagram_catalog_backfill_force_detail_fetch_enabled()
@@ -3067,7 +3066,6 @@ def launch_social_account_catalog_backfill(
         "comments_run_id": comments_run_id,
         "catalog_status": str((catalog_result or {}).get("status") or "").strip() or None,
         "comments_status": str((comments_result or {}).get("status") or "").strip() or None,
-        "comments_reused_existing_run": comments_reused_existing_run,
         "catalog_action": normalized_catalog_action,
         "catalog_action_scope": normalized_catalog_action_scope,
         "catalog_bootstrap_required": requires_catalog_bootstrap if catalog_selected else False,

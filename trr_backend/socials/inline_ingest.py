@@ -7,13 +7,20 @@ social analytics router without owning repository/database behavior.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from concurrent.futures import Future, wait
+from concurrent.futures import CancelledError, Future, wait
 from typing import Any
 
 
 def _raise_first_with_all_failures(futures: list[Future]) -> None:
     wait(futures)
-    failures = [(idx, future.exception()) for idx, future in enumerate(futures) if future.exception() is not None]
+    failures: list[tuple[int, BaseException]] = []
+    for idx, future in enumerate(futures):
+        try:
+            failure = future.exception()
+        except CancelledError as exc:
+            failure = exc
+        if failure is not None:
+            failures.append((idx, failure))
     if not failures:
         return
 
