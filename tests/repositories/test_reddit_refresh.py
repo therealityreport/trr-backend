@@ -81,6 +81,54 @@ def test_reddit_http_client_reuses_cached_oauth_token(monkeypatch) -> None:
     assert session.post_calls == 1
 
 
+def test_reddit_http_client_coalesces_concurrent_cold_oauth_refreshes(monkeypatch) -> None:
+    monkeypatch.setenv("REDDIT_CLIENT_ID", "client-id")
+    monkeypatch.setenv("REDDIT_CLIENT_SECRET", "client-secret")
+
+    class TokenResponse:
+        status_code = 200
+        content = b"{}"
+
+        def json(self) -> dict[str, object]:
+            return {"access_token": "shared-access-token", "expires_in": 3600}
+
+    class TokenSession:
+        def __init__(self) -> None:
+            self.post_calls = 0
+            self.post_started = threading.Event()
+            self.release_post = threading.Event()
+
+        def post(self, *_args, **_kwargs) -> TokenResponse:  # noqa: ANN002, ANN003
+            self.post_calls += 1
+            self.post_started.set()
+            assert self.release_post.wait(timeout=5)
+            return TokenResponse()
+
+    client = reddit_refresh.RedditHttpClient()
+    session = TokenSession()
+    client.session = session
+    caller_count = 12
+    start = threading.Barrier(caller_count + 1)
+    tokens: list[str | None] = []
+
+    def fetch_token() -> None:
+        start.wait(timeout=5)
+        tokens.append(client._get_oauth_token())  # noqa: SLF001
+
+    threads = [threading.Thread(target=fetch_token) for _ in range(caller_count)]
+    for thread in threads:
+        thread.start()
+    start.wait(timeout=5)
+    assert session.post_started.wait(timeout=5)
+    session.release_post.set()
+    for thread in threads:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+    assert tokens == ["shared-access-token"] * caller_count
+    assert session.post_calls == 1
+
+
 def test_reddit_http_client_cooldown_lock_concurrency_smoke() -> None:
     client = reddit_refresh.RedditHttpClient()
     client._adaptive_cooldown = 0.05  # noqa: SLF001
@@ -2134,7 +2182,7 @@ def test_run_reddit_refresh_worker_loop_continues_after_run_failure(monkeypatch)
     claim_calls = 0
     execute_calls: list[dict] = []
 
-    class StopLoop(Exception):
+    class StopLoopError(Exception):
         pass
 
     def fake_claim_next_refresh_run(**kwargs):  # noqa: ANN001
@@ -2148,9 +2196,9 @@ def test_run_reddit_refresh_worker_loop_continues_after_run_failure(monkeypatch)
 
     monkeypatch.setattr(reddit_refresh, "claim_next_refresh_run", fake_claim_next_refresh_run)
     monkeypatch.setattr(reddit_refresh, "execute_refresh_run", fake_execute_refresh_run)
-    monkeypatch.setattr(reddit_refresh.time, "sleep", lambda _seconds: (_ for _ in ()).throw(StopLoop))
+    monkeypatch.setattr(reddit_refresh.time, "sleep", lambda _seconds: (_ for _ in ()).throw(StopLoopError))
 
-    with pytest.raises(StopLoop):
+    with pytest.raises(StopLoopError):
         reddit_refresh.run_reddit_refresh_worker_loop(worker_id="worker-1", once=False, poll_seconds=0.2)
 
     assert claim_calls == 2

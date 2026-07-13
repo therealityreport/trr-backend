@@ -1030,6 +1030,7 @@ class RedditHttpClient:
         self._oauth_token: str | None = None
         self._oauth_expires_at: float = 0.0
         self._state_lock = threading.Lock()
+        self._oauth_refresh_lock = threading.Lock()
         # Adaptive cooldown: starts at configured minimum, increases on 429s, decays on success
         self._adaptive_cooldown: float = self.page_cooldown
         self._adaptive_cooldown_min: float = self.page_cooldown
@@ -1052,33 +1053,38 @@ class RedditHttpClient:
     def _get_oauth_token(self) -> str | None:
         if not self.client_id or not self.client_secret:
             return None
-        now = time.time()
+
         with self._state_lock:
-            if self._oauth_token and now < (self._oauth_expires_at - 30):
+            if self._oauth_token and time.time() < (self._oauth_expires_at - 30):
                 return self._oauth_token
-        try:
-            response = self.session.post(
-                "https://www.reddit.com/api/v1/access_token",
-                headers={"User-Agent": self.user_agent},
-                auth=(self.client_id, self.client_secret),
-                data={"grant_type": "client_credentials"},
-                timeout=self.timeout_seconds,
-            )
-            if response.status_code >= 400:
-                logger.warning("[reddit_refresh_oauth_failed] status=%s", response.status_code)
-                return None
-            payload = response.json() if response.content else {}
-            token = str(payload.get("access_token") or "").strip()
-            expires_in = float(payload.get("expires_in") or 3600)
-            if not token:
-                return None
+
+        with self._oauth_refresh_lock:
             with self._state_lock:
-                self._oauth_token = token
-                self._oauth_expires_at = time.time() + max(60.0, expires_in)
-            return token
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[reddit_refresh_oauth_exception] %s", exc)
-            return None
+                if self._oauth_token and time.time() < (self._oauth_expires_at - 30):
+                    return self._oauth_token
+            try:
+                response = self.session.post(
+                    "https://www.reddit.com/api/v1/access_token",
+                    headers={"User-Agent": self.user_agent},
+                    auth=(self.client_id, self.client_secret),
+                    data={"grant_type": "client_credentials"},
+                    timeout=self.timeout_seconds,
+                )
+                if response.status_code >= 400:
+                    logger.warning("[reddit_refresh_oauth_failed] status=%s", response.status_code)
+                    return None
+                payload = response.json() if response.content else {}
+                token = str(payload.get("access_token") or "").strip()
+                expires_in = float(payload.get("expires_in") or 3600)
+                if not token:
+                    return None
+                with self._state_lock:
+                    self._oauth_token = token
+                    self._oauth_expires_at = time.time() + max(60.0, expires_in)
+                return token
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[reddit_refresh_oauth_exception] %s", exc)
+                return None
 
     def get_json(self, path: str, *, params: dict[str, Any]) -> dict[str, Any]:
         supports_oauth = bool(self.client_id and self.client_secret)

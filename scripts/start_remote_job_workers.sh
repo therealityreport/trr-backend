@@ -85,8 +85,12 @@ start_worker() {
     while true; do
       "$@" &
       child_pid="$!"
-      wait "$child_pid"
-      local rc=$?
+      local rc
+      if wait "$child_pid"; then
+        rc=0
+      else
+        rc=$?
+      fi
       child_pid=""
       if [[ "$rc" -eq 0 ]]; then
         break
