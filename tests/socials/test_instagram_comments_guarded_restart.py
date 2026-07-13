@@ -25,6 +25,7 @@ class _FakePg:
 
     def __init__(self) -> None:
         self.audit_updates: list[tuple[str, list[Any]]] = []
+        self.events: list[str] = []
 
     @contextmanager
     def db_connection(self, *, label: str = "", pool_name: str = "default"):  # noqa: ARG002
@@ -39,6 +40,7 @@ class _FakePg:
         if "pg_try_advisory_lock" in sql:
             return {"locked": True}
         if "pg_advisory_unlock" in sql:
+            self.events.append("unlock")
             return {"unlocked": True}
         return {}
 
@@ -72,6 +74,7 @@ def _install_guarded_restart_fakes(
         }
 
     def _fake_cancel(*, platform: str, account_handle: str, run_id: str, cancelled_by=None, conn=None):  # noqa: ARG001
+        fake_pg.events.append("cancel")
         captured["cancel"] = {
             "platform": platform,
             "account_handle": account_handle,
@@ -81,6 +84,7 @@ def _install_guarded_restart_fakes(
         return {"run_id": run_id, "status": "cancelled", "accepted": True, "cancelled_jobs": 3}
 
     def _fake_start(platform: str, account_handle: str, **kwargs: Any):
+        fake_pg.events.append("start")
         captured["start"] = {"platform": platform, "account_handle": account_handle, **kwargs}
         return {
             "run_id": "new-run-77777777-7777-7777-7777-777777777777",
@@ -124,6 +128,7 @@ def test_guarded_restart_cancels_old_and_starts_public_relay_with_original_windo
     assert captured["cancel"]["cancelled_by"] == "comments_guarded_restart"
     assert captured["cancel"]["platform"] == "instagram"
     assert captured["cancel"]["account_handle"] == "bravotv"
+    assert captured["pg"].events == ["cancel", "unlock", "start"]
 
     # New run is public-relay only with the original window preserved and the
     # public-only worker cap / batch size forced.

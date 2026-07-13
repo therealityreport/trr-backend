@@ -290,7 +290,12 @@ def resolve_chrome_profile_selection(profile_name: str) -> ChromeProfileSelectio
     if not normalized_profile:
         raise ChromeProfileNotAvailableError("Chrome profile name is empty")
 
-    for entry in chrome_base.iterdir():
+    try:
+        profile_entries = tuple(chrome_base.iterdir())
+    except OSError as exc:
+        raise ChromeProfileNotAvailableError(f"Chrome profile directory is not readable: {chrome_base}") from exc
+
+    for entry in profile_entries:
         prefs_file = entry / "Preferences"
         if not prefs_file.is_file():
             continue
@@ -351,7 +356,9 @@ def open_cookie_refresh_context(
         reserve_social_auth_refresh_attempt(platform)
 
     resolved_profile = resolve_social_auth_chrome_profile(platform, profile_name)
-    effective_require_profile = social_auth_requires_chrome_profile(platform) if require_profile is None else require_profile
+    effective_require_profile = (
+        social_auth_requires_chrome_profile(platform) if require_profile is None else require_profile
+    )
     profile_selection: ChromeProfileSelection | None = None
     if resolved_profile:
         try:
@@ -413,7 +420,11 @@ def open_cookie_refresh_context(
         )
 
     browser = launch_browser(playwright, headless=headless)
-    context = browser.new_context(**context_kwargs)
+    try:
+        context = browser.new_context(**context_kwargs)
+    except Exception:
+        browser.close()
+        raise
     return CookieRefreshBrowserContext(context=context, browser=browser)
 
 
@@ -639,7 +650,8 @@ def refresh_simple_login_cookies(
                     reuse_valid, reuse_reason = validator(existing_cookies)
                     if not reuse_valid:
                         logger.info(
-                            "%s Chrome-profile cookies failed in-protocol validation (%s); falling through to scripted login",
+                            "%s Chrome-profile cookies failed in-protocol validation (%s); "
+                            "falling through to scripted login",
                             spec.platform,
                             reuse_reason or "unknown",
                         )

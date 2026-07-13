@@ -142,7 +142,7 @@ def test_extract_page_tokens_missing_values():
     assert tokens == {}
 
 
-def test_advisory_api_pacing_uses_social_control_pool(monkeypatch):
+def test_advisory_api_pacing_uses_session_control_pool(monkeypatch):
     from trr_backend.db import pg
     from trr_backend.socials.instagram.posts_scrapling.fetcher import _try_advisory_lock_pace
 
@@ -175,7 +175,7 @@ def test_advisory_api_pacing_uses_social_control_pool(monkeypatch):
     assert result["acquired"] is True
     assert result["paced"] is True
     assert result["error"] is None
-    assert calls == [("instagram-posts-rate-limit-pace", "social_control")]
+    assert calls == [("instagram-posts-rate-limit-pace", "session_control")]
     assert any("social.ig_posts_rate_pace" in query for query in queries)
     assert not any("pg_advisory_lock" in query for query in queries)
 
@@ -247,7 +247,7 @@ def test_advisory_pacing_returns_connection_before_scheduled_sleep(monkeypatch, 
 
     @contextmanager
     def fake_db_connection(*, label: str, pool_name: str = "default"):
-        assert (label, pool_name) == ("instagram-posts-rate-limit-pace", "social_control")
+        assert (label, pool_name) == ("instagram-posts-rate-limit-pace", "session_control")
         events.append(("connect_enter", clock.current, None))
         try:
             yield object()
@@ -546,6 +546,93 @@ def test_warmup_transport_error_activates_requests_fallback(_mock_scrapling, mon
     assert fetcher.runtime_metadata["requests_fallback"]["warmup_error_class"] == "RuntimeError"
     assert created["cookies"]["sessionid"] == "existing"
     assert created["browser_account_id"] == "t"
+
+
+def test_warmup_redirect_loop_stops_after_one_document_without_graphql(_mock_scrapling, monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import (
+        InstagramPostsScraplingFetcher,
+        InstagramPostsWarmupError,
+    )
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_REQUESTS_FALLBACK_ENABLED", "1")
+    fetcher = InstagramPostsScraplingFetcher(
+        cookies=[],
+        raw_cookies={"sessionid": "existing", "csrftoken": "csrf"},
+        browser_account_id="t",
+    )
+    fetcher._fetcher.async_fetch = AsyncMock(
+        side_effect=RuntimeError(
+            "Page.goto: net::ERR_TOO_MANY_REDIRECTS at "
+            "https://www.instagram.com/accounts/login/?next=%2Fbravotv%2F; Exceeded 30 redirects"
+        )
+    )
+    fetcher._fetch_graphql = AsyncMock()
+
+    with pytest.raises(InstagramPostsWarmupError) as exc_info:
+        asyncio.run(fetcher.warmup("bravotv"))
+
+    assert exc_info.value.error_code == "instagram_posts_redirect_loop"
+    assert exc_info.value.retryable is False
+    assert fetcher._fetcher.async_fetch.await_count == 1
+    assert fetcher._fetcher.async_fetch.await_args.kwargs["retries"] == 1
+    fetcher._fetch_graphql.assert_not_awaited()
+    metadata = fetcher.runtime_metadata
+    assert metadata["requests_fallback"]["active"] is False
+    assert metadata["warmup_failure"] == {
+        "phase": "document_warmup",
+        "attempt_count": 1,
+        "final_origin_class": "instagram",
+        "final_path_class": "login",
+        "proxy_fingerprint": "none",
+        "error_code": "instagram_posts_redirect_loop",
+    }
+    assert "next=" not in json.dumps(metadata)
+
+
+@pytest.mark.parametrize(
+    ("final_url", "path_class"),
+    [
+        ("https://www.instagram.com/accounts/login/?next=%2Fbravotv%2F", "login"),
+        ("https://www.instagram.com/challenge/", "checkpoint"),
+        ("https://www.instagram.com/", "home"),
+    ],
+)
+def test_warmup_terminal_redirect_signals_do_not_fallback_or_fetch_graphql(
+    _mock_scrapling,
+    monkeypatch,
+    final_url,
+    path_class,
+):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import (
+        InstagramPostsScraplingFetcher,
+        InstagramPostsWarmupError,
+    )
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_REQUESTS_FALLBACK_ENABLED", "1")
+    fetcher = InstagramPostsScraplingFetcher(
+        cookies=[],
+        raw_cookies={"sessionid": "existing"},
+        browser_account_id="t",
+    )
+    response = MagicMock(status_code=200, text="<html></html>", cookies={})
+    response.url = final_url
+    fetcher._fetcher.async_fetch = AsyncMock(return_value=response)
+    fetcher._fetch_graphql = AsyncMock()
+
+    with pytest.raises(InstagramPostsWarmupError) as exc_info:
+        asyncio.run(fetcher.warmup("bravotv"))
+
+    assert exc_info.value.retryable is False
+    assert fetcher._fetcher.async_fetch.await_count == 1
+    fetcher._fetch_graphql.assert_not_awaited()
+    assert fetcher.runtime_metadata["requests_fallback"]["active"] is False
+    assert fetcher.runtime_metadata["warmup_failure"]["final_path_class"] == path_class
 
 
 def test_warmup_raises_no_cookie_when_no_prior_session(_mock_scrapling):

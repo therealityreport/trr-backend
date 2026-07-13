@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from enum import StrEnum
 
 
@@ -38,9 +39,53 @@ COMMENTS_URL = "https://www.instagram.com/api/v1/media/{media_id}/comments/"
 COMMENT_REPLIES_URL = "https://www.instagram.com/api/v1/media/{media_id}/comments/{comment_id}/child_comments/"
 PROFILE_PAGE_URL = "https://www.instagram.com/{username}/"
 PERMALINK_URL = "https://www.instagram.com/p/{shortcode}/"
+REEL_PERMALINK_URL = "https://www.instagram.com/reels/{shortcode}/"
 COMMENT_SORT_ORDER_ENV = "SOCIAL_INSTAGRAM_COMMENTS_SORT_ORDER"
 DEFAULT_COMMENT_SORT_ORDER = "recent"
 VALID_COMMENT_SORT_ORDERS = frozenset({"popular", "recent"})
+_REEL_MARKERS = frozenset({"clip", "clips", "reel", "reels"})
+
+
+def instagram_post_permalink(
+    shortcode: str,
+    *,
+    post_format: object | None = None,
+    media_type: object | None = None,
+    explicit: object | None = None,
+    raw_data: Mapping[str, object] | None = None,
+) -> str | None:
+    explicit_url = str(explicit or "").strip()
+    if explicit_url.startswith(("http://", "https://")):
+        return explicit_url
+    normalized_shortcode = str(shortcode or "").strip().strip("/")
+    if not normalized_shortcode:
+        return None
+    if _instagram_post_is_reel(post_format=post_format, media_type=media_type, raw_data=raw_data):
+        return REEL_PERMALINK_URL.format(shortcode=normalized_shortcode)
+    return PERMALINK_URL.format(shortcode=normalized_shortcode)
+
+
+def _instagram_post_is_reel(
+    *,
+    post_format: object | None,
+    media_type: object | None,
+    raw_data: Mapping[str, object] | None,
+) -> bool:
+    candidates = [post_format, media_type]
+    if isinstance(raw_data, Mapping):
+        candidates.extend(
+            raw_data.get(key)
+            for key in (
+                "post_format",
+                "media_type",
+                "product_type",
+                "productType",
+                "productTypeName",
+                "__typename",
+            )
+        )
+    return any(str(value or "").strip().lower() in _REEL_MARKERS for value in candidates)
+
 
 PROFILE_POSTS_DOC_IDS_ENV = "SOCIAL_INSTAGRAM_PROFILE_POSTS_DOC_IDS"
 PROFILE_POSTS_FRIENDLY_NAME = "PolarisProfilePostsQuery"
@@ -123,6 +168,29 @@ AUTH_FATAL_MESSAGES = {
     "consent_required",
     "sentry_block",
 }
+
+GRAPHQL_AUTH_BLOCKING_ERROR_CODES = frozenset(
+    {
+        "checkpoint_required",
+        "challenge_required",
+        "login_required",
+        "redirect_login",
+        "unauthorized",
+        "forbidden",
+        "instagram_graphql_auth_required",
+        "instagram_graphql_challenge_required",
+        "instagram_graphql_checkpoint_required",
+        "instagram_graphql_cursor_auth_repair_required",
+        "instagram_graphql_cursor_forbidden",
+        "instagram_graphql_cursor_unauthorized",
+        "instagram_graphql_forbidden",
+        "instagram_graphql_login_required",
+    }
+)
+
+
+def is_instagram_graphql_auth_blocking_error(error_code: object) -> bool:
+    return str(error_code or "").strip().lower() in GRAPHQL_AUTH_BLOCKING_ERROR_CODES
 
 
 def resolve_comment_sort_order(raw_value: str | None = None) -> str | None:

@@ -10,6 +10,7 @@ import re
 import time as time_module
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
 
@@ -124,6 +125,7 @@ _PUBLIC_COMMENTS_WORKER_CAP_REBALANCE_SLOW_ELAPSED_SECONDS = 240
 _PUBLIC_COMMENTS_WORKER_CAP_REBALANCE_SLOW_POSTS_PER_MINUTE = 0.5
 _PUBLIC_COMMENTS_WORKER_CAP_REBALANCE_MIN_REMAINING_TARGETS = 10
 _PUBLIC_COMMENTS_WORKER_CAP_REBALANCE_MAX_RETRY_SHARD_SIZE = 10
+_INSTAGRAM_COMMENTS_NONTERMINAL_REMOTE_INVOCATION_STATUSES = frozenset({"pending", "running", "queued", "unknown"})
 
 
 def _sync_core_overrides() -> None:
@@ -137,6 +139,54 @@ def _room_callable(name: str, local_impl: Any) -> Any:
     if callable(candidate) and candidate is not _CORE_ROOM_WRAPPERS.get(name):
         return candidate
     return local_impl
+
+
+def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = None) -> dict[str, Any]:
+    """Dispatch comments jobs through the cap-aware control-plane owner."""
+    from trr_backend.socials.control_plane.dispatch_runtime import dispatch_due_social_jobs as impl
+
+    return impl(run_id=run_id, limit=limit)
+
+
+def _dispatch_due_social_jobs_in_background(*, run_id: str) -> None:
+    """Run comments dispatch through the cap-aware owner from a background task."""
+    normalized_run_id = str(run_id or "").strip()
+    if normalized_run_id:
+        try:
+            dispatch_due_social_jobs(run_id=normalized_run_id)
+        except Exception:
+            logger.exception(
+                "[comments-dispatch] background dispatch failed: run_id=%s",
+                normalized_run_id,
+            )
+
+
+@contextmanager
+def _session_advisory_lock_connection(*, label: str, pool_name: str):
+    """Keep a session advisory lock on one pooled connection for the context."""
+    discard_state = {"discarded": False, "preserve_outcome": False}
+    try:
+        with pg.db_connection(label=label, pool_name=pool_name) as conn:
+            yield conn, discard_state
+    except Exception:
+        if discard_state["discarded"] and discard_state["preserve_outcome"]:
+            return
+        raise
+
+
+def _discard_session_advisory_lock_connection(
+    conn: Any,
+    *,
+    discard_state: dict[str, bool],
+    preserve_outcome: bool,
+) -> None:
+    """Close a connection whose session advisory lock could not be released."""
+    discard_state["discarded"] = True
+    discard_state["preserve_outcome"] = bool(preserve_outcome)
+    try:
+        conn.close()
+    except Exception:  # noqa: BLE001 - the pool context still attempts disposal
+        logger.debug("[advisory-lock] failed closing connection after unlock failure", exc_info=True)
 
 
 def _instagram_comments_stale_after_hours() -> int:
@@ -1483,30 +1533,75 @@ def _instagram_filter_incomplete_comment_targets(
     if not normalized_account or not requested:
         return requested
 
-    owner_match_clause = _social_account_profile_owner_match_sql("instagram", alias="p")
+    # Preserve the generic Instagram matcher exactly, but point it at explicit
+    # queryable columns instead of serializing each wide post row with
+    # ``to_jsonb(p)``.  The raw-data and collaborator fallbacks remain because
+    # older posts may not have every typed ownership field populated.
+    owner_account_ref = "_ig_account_match.account_handle"
+    owner_direct_candidates = (
+        "p.source_account",
+        "p.owner_username",
+        "p.username",
+        "p.raw_data ->> 'source_account'",
+        "p.raw_data ->> 'owner_username'",
+        "p.raw_data ->> 'username'",
+    )
+    owner_direct_array = ",\n                ".join(
+        "nullif(ltrim(lower(trim(coalesce(" + expr + ", ''))), '@'), '')" for expr in owner_direct_candidates
+    )
+    owner_collaborator_paths = (
+        "p.collaborators",
+        "p.collaborators_detail",
+        "p.raw_data -> 'collaborators'",
+        "p.raw_data -> 'collaborators_detail'",
+    )
+    owner_collaborator_match = "\n              or ".join(
+        _instagram_account_jsonb_array_match_sql(
+            alias=f"_ig_incomplete_target_collaborator_{index}",
+            path_sql=path_sql,
+            account_ref=owner_account_ref,
+        )
+        for index, path_sql in enumerate(owner_collaborator_paths, start=1)
+    )
+    owner_match_clause = f"""
+        exists (
+          select 1
+          from (select %s::text as account_handle) _ig_account_match
+          where {owner_account_ref} = any(
+            array_remove(
+              array[
+                {owner_direct_array}
+              ],
+              null
+            )
+          )
+          or {owner_collaborator_match}
+        )
+    """
     reported_comments_expr = _instagram_reported_comments_sql("p")
     facebook_comments_expr = _instagram_external_facebook_comments_sql("p")
     lifecycle_supported = _comment_lifecycle_supported("instagram_comments")
     active_condition = "c.is_missing is not true" if lifecycle_supported else "true"
     missing_condition = "c.is_missing is true" if lifecycle_supported else "false"
-    parent_external_expr = "nullif(coalesce(to_jsonb(c) ->> 'parent_comment_external_id', ''), '')"
-    reply_depth_expr = """
-        case
-          when coalesce(to_jsonb(c) ->> 'reply_depth', '') ~ '^[0-9]+$'
-          then (to_jsonb(c) ->> 'reply_depth')::int
-          else 0
-        end
-    """
-    reply_condition = f"""
-        (
-          coalesce(c.is_reply, false)
-          or c.parent_comment_id is not null
-          or {parent_external_expr} is not null
-          or ({reply_depth_expr}) > 0
-        )
-    """
-    rows = pg.fetch_all(
-        f"""
+    parent_external_expr = "nullif(coalesce(c.parent_comment_external_id, ''), '')"
+    reply_depth_expr = "coalesce(c.reply_depth, 0)"
+
+    def _fetch_verification_rows(
+        *,
+        account_match_sql: str,
+        parent_external_sql: str,
+        reply_depth_sql: str,
+    ) -> list[dict[str, Any]]:
+        reply_condition = f"""
+            (
+              coalesce(c.is_reply, false)
+              or c.parent_comment_id is not null
+              or {parent_external_sql} is not null
+              or ({reply_depth_sql}) > 0
+            )
+        """
+        return pg.fetch_all(
+            f"""
         with requested as (
           select
             nullif(shortcode, '')::text as shortcode,
@@ -1526,7 +1621,7 @@ def _instagram_filter_incomplete_comment_targets(
             ) as row_number
           from social.instagram_posts p
           join requested r on r.shortcode = p.shortcode
-          where {owner_match_clause}
+          where {account_match_sql}
         ),
         selected_posts as (
           select post_id, shortcode, reported_comments, facebook_comments
@@ -1560,8 +1655,31 @@ def _instagram_filter_incomplete_comment_targets(
         left join saved_comment_counts scc on scc.shortcode = r.shortcode
         order by r.sort_order
         """,
-        [requested, normalized_account],
-    )
+            [requested, normalized_account],
+        )
+
+    try:
+        rows = _fetch_verification_rows(
+            account_match_sql=owner_match_clause,
+            parent_external_sql=parent_external_expr,
+            reply_depth_sql=reply_depth_expr,
+        )
+    except psycopg_errors.UndefinedColumn:
+        # An additive-schema deployment may briefly run this code before the
+        # queryable post/comment columns exist. Preserve the prior tolerant
+        # behavior only for that compatibility path; current schemas keep the
+        # narrow query above and never serialize whole rows.
+        rows = _fetch_verification_rows(
+            account_match_sql=_social_account_profile_owner_match_sql("instagram", alias="p"),
+            parent_external_sql="nullif(coalesce(to_jsonb(c) ->> 'parent_comment_external_id', ''), '')",
+            reply_depth_sql="""
+                case
+                  when coalesce(to_jsonb(c) ->> 'reply_depth', '') ~ '^[0-9]+$'
+                  then (to_jsonb(c) ->> 'reply_depth')::int
+                  else 0
+                end
+            """,
+        )
     if not rows:
         logger.warning(
             "Instagram comments incomplete-target filter returned no verification rows; preserving requested targets: "
@@ -2085,6 +2203,7 @@ def start_social_account_comments_scrape(
     cancel_active_before_relaunch: bool | None = None,
     date_start: str | None = None,
     date_end: str | None = None,
+    reserved_db_session_capacity: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     _sync_core_overrides()
     normalized_platform = _normalize_social_account_profile_platform(platform)
@@ -2162,7 +2281,9 @@ def start_social_account_comments_scrape(
     run_id: str | None = None
     payload: dict[str, Any] | None = None
     cancelled_active_run: dict[str, Any] | None = None
-    with pg.db_connection(label=lock_label, pool_name="social_control") as lock_conn:
+    active_run_to_cancel: dict[str, Any] | None = None
+    with _session_advisory_lock_connection(label=lock_label, pool_name="session_control") as lock_state:
+        lock_conn, discard_state = lock_state
         with pg.db_cursor(conn=lock_conn, label=lock_label) as cur:
             lock_row = pg.fetch_one_with_cursor(cur, "select pg_try_advisory_lock(%s) as locked", [lock_key]) or {}
         if not bool(lock_row.get("locked")):
@@ -2212,13 +2333,7 @@ def start_social_account_comments_scrape(
                         ),
                         detail=active_run,
                     )
-                cancelled_active_run = cancel_social_account_comments_run(
-                    platform=normalized_platform,
-                    account_handle=normalized_account,
-                    run_id=str(active_run.get("run_id") or ""),
-                    cancelled_by="comments_relaunch_guard",
-                    conn=lock_conn,
-                )
+                active_run_to_cancel = dict(active_run)
             target_source_ids: list[str]
             target_enumeration_started_at = time_module.perf_counter()
             if normalized_mode == "single_post":
@@ -2353,6 +2468,62 @@ def start_social_account_comments_scrape(
                     effective_shard_count=comments_shard_count,
                 )
                 strategy_warnings = _instagram_comments_load_strategy_warnings(strategy_metadata)
+            comments_worker_cap_config = _instagram_comments_worker_cap_launch_config(
+                public_mode=public_comments_mode,
+                requested_comments_worker_count=requested_comments_worker_count,
+            )
+            effective_capacity_worker_count = max(
+                1,
+                _normalize_non_negative_int(comments_worker_cap_config.get("comments_worker_cap_current"))
+                or requested_comments_worker_count
+                or comments_shard_count,
+            )
+            raw_capacity_worker_count = max(
+                1,
+                _normalize_non_negative_int(comments_worker_count) or effective_capacity_worker_count,
+            )
+            db_session_capacity = _metadata_dict(reserved_db_session_capacity) or None
+            if db_session_capacity is None:
+                from trr_backend.socials.control_plane.budget import get_instagram_db_session_capacity
+
+                db_session_capacity = get_instagram_db_session_capacity(
+                    requested_workers=effective_capacity_worker_count,
+                    raw_requested_workers=raw_capacity_worker_count,
+                    backend_effective_requested_workers=effective_capacity_worker_count,
+                    conn=lock_conn,
+                )
+                if db_session_capacity.get("session_pool_blocked") or not db_session_capacity.get("available"):
+                    read_error = str(db_session_capacity.get("read_error") or "")
+                    reason = (
+                        "session_pool_capacity"
+                        if db_session_capacity.get("session_pool_blocked")
+                        or "emaxconnsession" in read_error.lower()
+                        or "maxclientsinsessionmode" in read_error.lower()
+                        else "database_unavailable"
+                    )
+                    raise pg.DatabaseServiceUnavailableError(
+                        read_error or str(db_session_capacity.get("block_reason") or "Database capacity unavailable."),
+                        reason=reason,
+                    )
+                if db_session_capacity.get("blocked"):
+                    raise SocialIngestConflictError(
+                        "INSTAGRAM_DB_SESSION_WORKER_BUDGET_EXCEEDED",
+                        (
+                            "Instagram comments launch needs "
+                            f"{db_session_capacity.get('requested_workers') or effective_capacity_worker_count} "
+                            "workers "
+                            f"but only {db_session_capacity.get('remaining_workers') or 0} DB-safe slots remain."
+                        ),
+                        detail={"db_session_capacity": db_session_capacity},
+                    )
+            if active_run_to_cancel:
+                cancelled_active_run = cancel_social_account_comments_run(
+                    platform=normalized_platform,
+                    account_handle=normalized_account,
+                    run_id=str(active_run_to_cancel.get("run_id") or ""),
+                    cancelled_by="comments_relaunch_guard",
+                    conn=lock_conn,
+                )
             comments_max_attempts = _instagram_comments_job_max_attempts(
                 {
                     "target_filter": normalized_target_filter,
@@ -2394,10 +2565,8 @@ def start_social_account_comments_scrape(
                 "instagram_scrape_mode": PUBLIC_COMMENTS_SCRAPE_MODE if public_comments_mode else "authenticated",
                 "comments_worker_count": requested_comments_worker_count,
                 "comments_target_batch_size": effective_comments_target_batch_size,
-                **_instagram_comments_worker_cap_launch_config(
-                    public_mode=public_comments_mode,
-                    requested_comments_worker_count=requested_comments_worker_count,
-                ),
+                **comments_worker_cap_config,
+                "db_session_capacity": db_session_capacity,
                 "date_start": normalized_date_start,
                 "date_end": normalized_date_end,
                 "target_window": (
@@ -2529,6 +2698,7 @@ def start_social_account_comments_scrape(
                 },
                 "comments_enable_media_followups": bool(comments_enable_media_followups),
                 "comments_worker_count": requested_comments_worker_count,
+                "db_session_capacity": db_session_capacity,
                 "job_creation": job_creation_payload,
                 "launch_group_id": str(launch_group_id or "").strip() or None,
                 "required_worker_lane": required_worker_lane,
@@ -2552,6 +2722,11 @@ def start_social_account_comments_scrape(
                     normalized_platform,
                     normalized_account,
                     exc_info=True,
+                )
+                _discard_session_advisory_lock_connection(
+                    lock_conn,
+                    discard_state=discard_state,
+                    preserve_outcome=payload is not None,
                 )
     if queue_enabled and dispatch_immediately and run_id:
         dispatch_due_social_jobs(run_id=run_id)
@@ -2993,23 +3168,24 @@ def _split_instagram_comments_audit_cursor_targets_into_active_run(
             continue
         config = _public_comments_config_overlay(_metadata_dict(row.get("config")))
         metadata = _metadata_dict(row.get("metadata"))
-        dispatch = _metadata_dict(metadata.get("dispatch"))
-        remote_invocation_id = str(dispatch.get("remote_invocation_id") or "").strip()
-        remote_status = str(dispatch.get("remote_invocation_status") or "").strip().lower()
-        if remote_invocation_id and remote_status in {"pending", "running", "queued"}:
-            if not force_rerun_existing or remote_status == "running":
-                skipped_sources.append(
-                    {
-                        "job_id": source_job_id,
-                        "reason": "remote_invocation_active",
-                        "remote_invocation_status": remote_status,
-                    }
-                )
-                continue
         source_targets = [
             str(target or "").strip() for target in config.get("target_source_ids") or [] if str(target or "").strip()
         ]
         matched_targets = [target for target in source_targets if target in target_set]
+        dispatch = _metadata_dict(metadata.get("dispatch"))
+        remote_invocation_id = str(dispatch.get("remote_invocation_id") or "").strip()
+        remote_status = str(dispatch.get("remote_invocation_status") or "").strip().lower()
+        if remote_invocation_id and remote_status in _INSTAGRAM_COMMENTS_NONTERMINAL_REMOTE_INVOCATION_STATUSES:
+            matched_target_set = set(matched_targets)
+            remaining_targets = [target for target in remaining_targets if target not in matched_target_set]
+            skipped_sources.append(
+                {
+                    "job_id": source_job_id,
+                    "reason": "remote_invocation_active",
+                    "remote_invocation_status": remote_status,
+                }
+            )
+            continue
         retry_targets = [target for target in matched_targets if target in remaining_targets]
         if not retry_targets:
             continue
@@ -3245,6 +3421,7 @@ def _append_instagram_comments_public_recovery_targets_to_active_run(
     batch_size: int,
     initiated_by: str | None,
     dispatch_immediately: bool,
+    exclude_active_job_id: str | None = None,
 ) -> dict[str, Any]:
     normalized_run_id = str(run_id or "").strip()
     normalized_account = _normalize_social_account_profile_handle(account_handle)
@@ -3266,10 +3443,17 @@ def _append_instagram_comments_public_recovery_targets_to_active_run(
         cross join lateral jsonb_array_elements_text(coalesce(j.config->'target_source_ids', '[]'::jsonb)) value
         where j.run_id = %s::uuid
           and j.status in ('queued', 'pending', 'retrying', 'running')
+          and (%s::uuid is null or j.id <> %s::uuid)
           and coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type) = %s
           and (j.config->'target_source_ids') ?| %s::text[]
         """,
-        [normalized_run_id, INSTAGRAM_COMMENTS_SCRAPLING_STAGE, list(seen_targets)],
+        [
+            normalized_run_id,
+            str(exclude_active_job_id or "").strip() or None,
+            str(exclude_active_job_id or "").strip() or None,
+            INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+            list(seen_targets),
+        ],
     )
     active_targets = {
         str(row.get("target_source_id") or "").strip()
@@ -4112,75 +4296,203 @@ def rebalance_failed_instagram_comments_shard(
     max_retry_shard_size: int = 10,
 ) -> dict[str, Any]:
     _sync_core_overrides()
-    row = pg.fetch_one(
-        """
-        select
-          j.id::text as job_id,
-          j.run_id::text as run_id,
-          j.platform,
-          j.source_scope,
-          j.config,
-          j.metadata,
-          j.initiated_by,
-          j.items_found
-        from social.scrape_jobs j
-        where j.id = %s::uuid
-          and j.status = 'failed'
-          and coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type) = %s
-        """,
-        [failed_job_id, INSTAGRAM_COMMENTS_SCRAPLING_STAGE],
-    )
-    if not row:
-        return {"created_job_ids": [], "reason": "failed_job_not_found"}
-    config = _canonicalize_instagram_comments_config_metadata(_metadata_dict(row.get("config")))
-    metadata = _metadata_dict(row.get("metadata"))
-    retry_rebalance = _metadata_dict(metadata.get("retry_rebalance"))
-    remaining_targets = [
-        str(item or "").strip()
-        for item in retry_rebalance.get("remaining_target_source_ids") or []
-        if str(item or "").strip()
-    ]
-    if not remaining_targets:
-        remaining_targets = _comments_job_remaining_target_source_ids(
-            row=row,
-            config=config,
-            metadata=metadata,
-            require_items_found_for_progress=True,
+    lock_label = f"comments-failed-rebalance:{str(failed_job_id or '')[:48]}"
+    with pg.db_connection(label=lock_label) as conn:
+        row = pg.fetch_one(
+            """
+            select
+              j.id::text as job_id,
+              j.run_id::text as run_id,
+              j.status,
+              j.platform,
+              j.source_scope,
+              j.config,
+              j.metadata,
+              j.initiated_by,
+              j.items_found
+            from social.scrape_jobs j
+            where j.id = %s::uuid
+              and (
+                j.status = 'failed'
+                or (
+                  j.status = 'cancelled'
+                  and j.metadata->>'comments_retry_rebalance_claimed_at' is not null
+                )
+              )
+              and coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type) = %s
+            for update
+            """,
+            [failed_job_id, INSTAGRAM_COMMENTS_SCRAPLING_STAGE],
+            conn=conn,
         )
-    if not remaining_targets:
-        return {"created_job_ids": [], "reason": "no_remaining_targets"}
-    safe_max_retry_shard_size = max(1, int(max_retry_shard_size or 10))
-    retry_shard_count = max(1, (len(remaining_targets) + safe_max_retry_shard_size - 1) // safe_max_retry_shard_size)
-    chunks = _chunk_instagram_comment_targets(remaining_targets, retry_shard_count)
-    created_job_ids: list[str] = []
-    retry_group_id = str(uuid4())
-    for index, chunk in enumerate(chunks, start=1):
-        retry_config = {
-            **config,
-            "target_source_ids": chunk,
-            "comments_retry_rebalance": True,
-            "comments_retry_rebalance_source_job_id": str(row.get("job_id") or ""),
-            "comments_retry_rebalance_group_id": retry_group_id,
-            "comments_retry_rebalance_index": index,
-            "comments_retry_rebalance_count": len(chunks),
-            "comments_shard_target_count": len(chunk),
-        }
-        created_job_ids.append(
-            _create_job(
-                None,
-                run_id=str(row.get("run_id") or ""),
-                platform="instagram",
-                source_scope=str(row.get("source_scope") or "network"),
-                job_type="comments",
-                stage=INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
-                config=retry_config,
-                initiated_by=str(row.get("initiated_by") or "") or None,
-                status="queued",
-                priority=110,
-                max_attempts=_instagram_comments_job_max_attempts(retry_config),
+        if not row:
+            return {"created_job_ids": [], "reason": "failed_job_not_found"}
+        config = _canonicalize_instagram_comments_config_metadata(_metadata_dict(row.get("config")))
+        metadata = _metadata_dict(row.get("metadata"))
+        source_job_id = str(row.get("job_id") or "").strip()
+        normalized_run_id = str(row.get("run_id") or "").strip()
+        source_already_claimed = str(row.get("status") or "").strip().lower() == "cancelled" and bool(
+            metadata.get("comments_retry_rebalance_claimed_at")
+        )
+        dispatch = _metadata_dict(metadata.get("dispatch"))
+        remote_invocation_id = str(dispatch.get("remote_invocation_id") or "").strip()
+        remote_status = str(dispatch.get("remote_invocation_status") or "").strip().lower()
+        if remote_invocation_id and remote_status in _INSTAGRAM_COMMENTS_NONTERMINAL_REMOTE_INVOCATION_STATUSES:
+            return {
+                "created_job_ids": [],
+                "failed_job_id": source_job_id,
+                "reason": "remote_invocation_active",
+                "remote_invocation_status": remote_status,
+            }
+        retry_rebalance = _metadata_dict(metadata.get("retry_rebalance"))
+        remaining_targets = [
+            str(item or "").strip()
+            for item in retry_rebalance.get("remaining_target_source_ids") or []
+            if str(item or "").strip()
+        ]
+        if not remaining_targets:
+            remaining_targets = _comments_job_remaining_target_source_ids(
+                row=row,
+                config=config,
+                metadata=metadata,
+                require_items_found_for_progress=True,
             )
+        if not remaining_targets:
+            return {"created_job_ids": [], "reason": "no_remaining_targets"}
+
+        safe_max_retry_shard_size = max(1, int(max_retry_shard_size or 10))
+        requested_shard_count = max(
+            1,
+            (len(remaining_targets) + safe_max_retry_shard_size - 1) // safe_max_retry_shard_size,
         )
-    return {"created_job_ids": created_job_ids, "retry_group_id": retry_group_id}
+        persisted_shard_count = _normalize_non_negative_int(metadata.get("comments_retry_rebalance_shard_count"))
+        retry_shard_count = persisted_shard_count or requested_shard_count
+        chunks = _chunk_instagram_comment_targets(remaining_targets, retry_shard_count)
+        retry_group_id = (
+            str(metadata.get("comments_retry_rebalance_group_id") or "").strip()
+            if source_already_claimed
+            else str(uuid4())
+        )
+        if not retry_group_id:
+            return {
+                "created_job_ids": [],
+                "failed_job_id": source_job_id,
+                "reason": "claimed_source_missing_retry_group",
+            }
+
+        if not source_already_claimed:
+            claimed = pg.fetch_one(
+                """
+                update social.scrape_jobs
+                set
+                  status = 'cancelled',
+                  completed_at = now(),
+                  error_message = coalesce(error_message, 'Rebalanced failed comments shard'),
+                  metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object(
+                    'comments_retry_rebalance_claimed_at', %s,
+                    'comments_retry_rebalance_group_id', %s,
+                    'comments_retry_rebalance_remaining_targets', %s,
+                    'comments_retry_rebalance_shard_count', %s
+                  )
+                where id = %s::uuid
+                  and status = 'failed'
+                  and metadata->>'comments_retry_rebalance_claimed_at' is null
+                returning id::text
+                """,
+                [
+                    _iso(_now_utc()),
+                    retry_group_id,
+                    len(remaining_targets),
+                    len(chunks),
+                    source_job_id,
+                ],
+                conn=conn,
+            )
+            if not claimed:
+                return {
+                    "created_job_ids": [],
+                    "failed_job_id": source_job_id,
+                    "reason": "source_status_changed",
+                }
+
+        existing_rows = pg.fetch_all(
+            """
+            select
+              id::text as job_id,
+              config->>'comments_retry_rebalance_index' as retry_index
+            from social.scrape_jobs
+            where run_id = %s::uuid
+              and coalesce(config->>'stage', metadata->>'stage', job_type) = %s
+              and config->>'comments_retry_rebalance_source_job_id' = %s
+              and config->>'comments_retry_rebalance_group_id' = %s
+            order by created_at asc, id asc
+            """,
+            [
+                normalized_run_id,
+                INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+                source_job_id,
+                retry_group_id,
+            ],
+            conn=conn,
+        )
+        existing_indexes = {
+            _normalize_non_negative_int(existing_row.get("retry_index"))
+            for existing_row in existing_rows
+            if _normalize_non_negative_int(existing_row.get("retry_index")) > 0
+        }
+        missing_indexes = [index for index in range(1, len(chunks) + 1) if index not in existing_indexes]
+        if not missing_indexes:
+            return {
+                "created_job_ids": [],
+                "failed_job_id": source_job_id,
+                "retry_group_id": retry_group_id,
+                "reason": "already_rebalanced",
+            }
+
+        created_job_ids: list[str] = []
+        for index in missing_indexes:
+            chunk = chunks[index - 1]
+            retry_config = {
+                **config,
+                "target_source_ids": chunk,
+                "comments_retry_rebalance": True,
+                "comments_retry_rebalance_source_job_id": source_job_id,
+                "comments_retry_rebalance_group_id": retry_group_id,
+                "comments_retry_rebalance_index": index,
+                "comments_retry_rebalance_count": len(chunks),
+                "comments_shard_target_count": len(chunk),
+            }
+            created_job_ids.append(
+                _create_job(
+                    None,
+                    run_id=normalized_run_id,
+                    platform="instagram",
+                    source_scope=str(row.get("source_scope") or "network"),
+                    job_type="comments",
+                    stage=INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+                    config=retry_config,
+                    initiated_by=str(row.get("initiated_by") or "") or None,
+                    status="queued",
+                    priority=110,
+                    max_attempts=_instagram_comments_job_max_attempts(retry_config),
+                    conn=conn,
+                    track_run_counters=False,
+                )
+            )
+        _increment_run_counters_on_job_create_batch(
+            run_id=normalized_run_id,
+            stage=INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+            status="queued",
+            count=len(created_job_ids),
+            conn=conn,
+        )
+        result: dict[str, Any] = {
+            "created_job_ids": created_job_ids,
+            "retry_group_id": retry_group_id,
+        }
+        if source_already_claimed:
+            result["resumed_from_claimed_source"] = True
+        return result
 
 
 def rebalance_waiting_instagram_comments_shards(
@@ -4239,7 +4551,7 @@ def rebalance_waiting_instagram_comments_shards(
         dispatch = _metadata_dict(metadata.get("dispatch"))
         remote_invocation_id = str(dispatch.get("remote_invocation_id") or "").strip()
         remote_status = str(dispatch.get("remote_invocation_status") or "").strip().lower()
-        if remote_invocation_id and remote_status in {"pending", "running", "queued"}:
+        if remote_invocation_id and remote_status in _INSTAGRAM_COMMENTS_NONTERMINAL_REMOTE_INVOCATION_STATUSES:
             skipped_sources.append(
                 {
                     "job_id": str(row.get("job_id") or ""),
@@ -4408,6 +4720,31 @@ def _comments_job_remaining_target_source_ids(
     return original_targets[min(processed_posts, len(original_targets)) :]
 
 
+def _instagram_comments_repair_run_config_value(
+    run_config: Mapping[str, Any],
+    run_metadata: Mapping[str, Any],
+    key: str,
+) -> str | None:
+    sources = [
+        run_config,
+        _metadata_dict(run_config.get("metadata")),
+        run_metadata,
+        _metadata_dict(run_metadata.get("metadata")),
+    ]
+    if key in {"date_start", "date_end"}:
+        sources.extend(
+            _metadata_dict(source.get("target_window")) for source in list(sources) if isinstance(source, Mapping)
+        )
+    for source in sources:
+        value = source.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
 def repair_instagram_comments_scrape_run_target_gaps(
     *,
     run_id: str,
@@ -4423,7 +4760,8 @@ def repair_instagram_comments_scrape_run_target_gaps(
           id::text as run_id,
           source_scope,
           initiated_by,
-          config
+          config,
+          summary as run_metadata
         from social.scrape_runs
         where id = %s::uuid
           and coalesce(config->>'stage', '') = %s
@@ -4438,11 +4776,32 @@ def repair_instagram_comments_scrape_run_target_gaps(
         return {"created_job_ids": [], "reason": "account_missing"}
     refresh_policy = str(run_config.get("refresh_policy") or "stale_or_missing").strip().lower() or "stale_or_missing"
     max_posts = run_config.get("max_posts")
-    target_source_ids = _instagram_social_account_comment_target_shortcodes(
-        account_handle,
-        limit=None if max_posts is None else max(1, int(max_posts)),
-        refresh_policy=refresh_policy,
+    run_metadata = _metadata_dict(run_row.get("run_metadata"))
+    repair_target_filter = _normalize_instagram_comments_target_filter(
+        _instagram_comments_repair_run_config_value(run_config, run_metadata, "target_filter")
     )
+    repair_window_start, repair_window_end = _normalize_comment_date_window(
+        _instagram_comments_repair_run_config_value(run_config, run_metadata, "date_start"),
+        _instagram_comments_repair_run_config_value(run_config, run_metadata, "date_end"),
+    )
+    repair_date_start = repair_window_start.isoformat() if repair_window_start is not None else None
+    repair_date_end = repair_window_end.isoformat() if repair_window_end is not None else None
+    target_limit = None if max_posts is None else max(1, int(max_posts))
+    if repair_target_filter == "incomplete":
+        target_source_ids = _instagram_social_account_incomplete_comment_target_shortcodes(
+            account_handle,
+            limit=target_limit,
+            date_start=repair_date_start,
+            date_end=repair_date_end,
+        )
+    else:
+        target_source_ids = _instagram_social_account_comment_target_shortcodes(
+            account_handle,
+            limit=target_limit,
+            refresh_policy=refresh_policy,
+            date_start=repair_date_start,
+            date_end=repair_date_end,
+        )
     job_rows = pg.fetch_all(
         """
         select status, config
@@ -4910,12 +5269,25 @@ def rebalance_slow_instagram_comments_shards(
     )
     created_job_ids: list[str] = []
     rebalanced_sources: list[str] = []
+    skipped_sources: list[dict[str, Any]] = []
     rebalance_group_id = str(uuid4())
     for row in rows:
         if len(rebalanced_sources) >= safe_max_rebalanced_shards:
             break
         config = _canonicalize_instagram_comments_config_metadata(_metadata_dict(row.get("config")))
         metadata = _metadata_dict(row.get("metadata"))
+        dispatch = _metadata_dict(metadata.get("dispatch"))
+        remote_invocation_id = str(dispatch.get("remote_invocation_id") or "").strip()
+        remote_status = str(dispatch.get("remote_invocation_status") or "").strip().lower()
+        if remote_invocation_id and remote_status in _INSTAGRAM_COMMENTS_NONTERMINAL_REMOTE_INVOCATION_STATUSES:
+            skipped_sources.append(
+                {
+                    "job_id": str(row.get("job_id") or ""),
+                    "reason": "remote_invocation_active",
+                    "remote_invocation_status": remote_status,
+                }
+            )
+            continue
         rebalance_depth = _normalize_non_negative_int(config.get("comments_slow_rebalance_depth"))
         if config.get("comments_slow_rebalance") and rebalance_depth <= 0:
             rebalance_depth = 1
@@ -4957,7 +5329,7 @@ def rebalance_slow_instagram_comments_shards(
         source_job_id = str(row.get("job_id") or "").strip()
         original_shard_count = _normalize_non_negative_int(config.get("comments_shard_count")) or len(rows) or 1
         effective_shard_count = original_shard_count + len(chunks)
-        pg.fetch_one(
+        cancelled = pg.fetch_one(
             """
             update social.scrape_jobs
             set
@@ -4984,6 +5356,9 @@ def rebalance_slow_instagram_comments_shards(
                 source_job_id,
             ],
         )
+        if not cancelled:
+            skipped_sources.append({"job_id": source_job_id, "reason": "source_status_changed"})
+            continue
         for index, chunk in enumerate(chunks, start=1):
             root_job_id = str(
                 config.get("comments_slow_rebalance_root_job_id")
@@ -5028,6 +5403,7 @@ def rebalance_slow_instagram_comments_shards(
         "created_job_ids": created_job_ids,
         "created_job_count": len(created_job_ids),
         "rebalanced_source_job_ids": rebalanced_sources,
+        "skipped_sources": skipped_sources,
         "rebalance_group_id": rebalance_group_id if created_job_ids else None,
     }
 
@@ -7513,7 +7889,8 @@ def guarded_restart_social_account_comments_run(
 
     lock_key = _social_account_comments_start_lock_key(normalized_platform, normalized_account)
     lock_label = f"comments-guarded-restart-lock:{normalized_platform}:{normalized_account[:48]}"
-    with pg.db_connection(label=lock_label, pool_name="social_control") as lock_conn:
+    lock_held = False
+    with pg.db_connection(label=lock_label, pool_name="session_control") as lock_conn:
         with pg.db_cursor(conn=lock_conn, label=lock_label) as cur:
             lock_row = pg.fetch_one_with_cursor(cur, "select pg_try_advisory_lock(%s) as locked", [lock_key]) or {}
         if not bool(lock_row.get("locked")):
@@ -7527,6 +7904,7 @@ def guarded_restart_social_account_comments_run(
                     "retryable": True,
                 },
             )
+        lock_held = True
         try:
             run_row = _load_social_account_comments_run_row(
                 platform=normalized_platform,
@@ -7568,6 +7946,16 @@ def guarded_restart_social_account_comments_run(
                 conn=lock_conn,
             )
 
+            # The normal launcher owns this same account lock. Release our
+            # cancel/read lock before handing off so it does not reject itself.
+            with pg.db_cursor(conn=lock_conn, label=lock_label) as cur:
+                unlock_row = (
+                    pg.fetch_one_with_cursor(cur, "select pg_advisory_unlock(%s) as unlocked", [lock_key]) or {}
+                )
+            if not bool(unlock_row.get("unlocked")):
+                raise RuntimeError(f"Failed to release comments restart lock for @{normalized_account}.")
+            lock_held = False
+
             new_run_payload = start_social_account_comments_scrape(
                 normalized_platform,
                 normalized_account,
@@ -7599,16 +7987,17 @@ def guarded_restart_social_account_comments_run(
                 conn=lock_conn,
             )
         finally:
-            try:
-                with pg.db_cursor(conn=lock_conn, label=lock_label) as cur:
-                    pg.fetch_one_with_cursor(cur, "select pg_advisory_unlock(%s) as unlocked", [lock_key])
-            except Exception:  # noqa: BLE001
-                logger.debug(
-                    "[comments-guarded-restart-lock] advisory unlock failed for %s/%s",
-                    normalized_platform,
-                    normalized_account,
-                    exc_info=True,
-                )
+            if lock_held:
+                try:
+                    with pg.db_cursor(conn=lock_conn, label=lock_label) as cur:
+                        pg.fetch_one_with_cursor(cur, "select pg_advisory_unlock(%s) as unlocked", [lock_key])
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "[comments-guarded-restart-lock] advisory unlock failed for %s/%s",
+                        normalized_platform,
+                        normalized_account,
+                        exc_info=True,
+                    )
 
     public_only_proof = {
         "no_cookies": True,
@@ -7787,6 +8176,10 @@ def cancel_social_account_comments_job(
 
 
 _LOCAL_ROOM_NAMES = {
+    "dispatch_due_social_jobs",
+    "_dispatch_due_social_jobs_in_background",
+    "_session_advisory_lock_connection",
+    "_discard_session_advisory_lock_connection",
     "_instagram_comments_stale_after_hours",
     "_instagram_comments_target_count_expr",
     "_instagram_social_account_comments_coverage_diagnostics",

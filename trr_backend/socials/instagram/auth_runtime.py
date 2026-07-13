@@ -284,6 +284,7 @@ def _inspect_instagram_cookie_health(cookies: dict[str, str]) -> dict[str, Any]:
                 delay=0.0,
                 request_timeout=(10, 20),
                 allow_browser_fallback=False,
+                allow_recovery=False,
             )
         payload_data = (payload or {}).get("data") if isinstance(payload, dict) else {}
         connection = (

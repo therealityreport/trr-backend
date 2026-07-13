@@ -183,6 +183,13 @@ def _comments_auto_refill_dispatch_limit(config: Mapping[str, Any]) -> int:
     return max(1, min(requested, 2000))
 
 
+def _dispatch_due_social_jobs(*, run_id: str, limit: int) -> dict[str, Any]:
+    """Refill comments jobs through the cap-aware control-plane owner."""
+    from trr_backend.socials.control_plane.dispatch_runtime import dispatch_due_social_jobs as impl
+
+    return impl(run_id=run_id, limit=limit)
+
+
 def _ramp_public_comments_worker_cap(*, run_id: str) -> dict[str, Any]:
     """Recompute the run's public-blocked ratio and ramp its active worker cap.
 
@@ -1310,16 +1317,16 @@ def _load_comment_target_metadata(
             p.id::text as materialized_post_id,
             nullif(p.source_account, '') as source_account,
             nullif(p.username, '') as username,
-            nullif(coalesce(to_jsonb(p) ->> 'owner_username', ''), '') as owner_username,
+            nullif(p.owner_username, '') as owner_username,
             coalesce(p.collaborators, '[]'::jsonb) as collaborators,
-            coalesce(to_jsonb(p) -> 'collaborators_detail', '[]'::jsonb) as collaborators_detail,
+            coalesce(p.collaborators_detail, '[]'::jsonb) as collaborators_detail,
             nullif(p.media_type, '') as media_type,
-            nullif(coalesce(to_jsonb(p) ->> 'product_type', p.raw_data ->> 'product_type', ''), '') as product_type,
+            nullif(coalesce(p.product_type, p.raw_data ->> 'product_type', ''), '') as product_type,
             'materialized'::text as profile_source_surface,
             case
               when ltrim(lower(coalesce(nullif(p.source_account, ''), '')), '@') = %s then 'profile_source_account'
               when ltrim(
-                lower(coalesce(nullif(p.username, ''), nullif(to_jsonb(p) ->> 'owner_username', ''), '')),
+                lower(coalesce(nullif(p.username, ''), nullif(p.owner_username, ''), '')),
                 '@'
               ) = %s
                 then 'owner_username'
@@ -1330,7 +1337,7 @@ def _load_comment_target_metadata(
             case
               when ltrim(lower(coalesce(nullif(p.source_account, ''), '')), '@') = %s then 4
               when ltrim(
-                lower(coalesce(nullif(p.username, ''), nullif(to_jsonb(p) ->> 'owner_username', ''), '')),
+                lower(coalesce(nullif(p.username, ''), nullif(p.owner_username, ''), '')),
                 '@'
               ) = %s then 3
               else 1
@@ -1356,12 +1363,11 @@ def _load_comment_target_metadata(
             ) as owner_username,
             coalesce(nullif(cp.collaborators, '[]'::jsonb), jsonb_build_array(m.collaborator_handle)) as collaborators,
             coalesce(
-              nullif(to_jsonb(cp) -> 'collaborators_detail', '[]'::jsonb),
               nullif(cp.raw_data -> 'collaborators_detail', '[]'::jsonb),
               jsonb_build_array(jsonb_build_object('username', m.collaborator_handle, 'source', m.collaborator_source))
             ) as collaborators_detail,
             nullif(cp.media_type, '') as media_type,
-            nullif(coalesce(to_jsonb(cp) ->> 'product_type', cp.raw_data ->> 'product_type', ''), '') as product_type,
+            nullif(coalesce(cp.raw_data ->> 'product_type', ''), '') as product_type,
             'catalog'::text as profile_source_surface,
             'catalog_collaborator'::text as profile_match_mode,
             nullif(m.collaborator_handle, '') as catalog_collaborator_handle,
@@ -1536,8 +1542,7 @@ def _load_public_replay_guard_rows(
             and a.cursor_param is null
             and (
               a.cursor_stop_reason = any(%s::text[])
-              or coalesce(a.cursor_payload ->> 'fallback_blocked_reason', '') =
-                'public_comments_partial_requires_approval'
+              or coalesce(a.cursor_payload ->> 'fallback_blocked_reason', '') = any(%s::text[])
             )
           group by a.shortcode
         )
@@ -1554,7 +1559,11 @@ def _load_public_replay_guard_rows(
           on ac.shortcode = r.shortcode
         order by r.sort_order
         """,
-        [requested, sorted(_PUBLIC_REPLAY_GUARD_AUDIT_STOP_REASONS)],
+        [
+            requested,
+            sorted(_PUBLIC_REPLAY_GUARD_AUDIT_STOP_REASONS),
+            sorted(_PUBLIC_REPLAY_GUARD_AUDIT_STOP_REASONS),
+        ],
     )
     guard_rows: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -1883,6 +1892,10 @@ def _public_blocked_pause_should_trigger(
         if ratio >= _PUBLIC_BLOCKED_PAUSE_RATIO:
             return True
     return False
+
+
+def _public_blocked_shard_should_stop(*, signal: str, consecutive: int) -> bool:
+    return signal == "http_429" or consecutive >= _PUBLIC_BLOCKED_EARLY_STOP_CONSECUTIVE
 
 
 def _recommend_public_blocked_pause(
@@ -3124,7 +3137,7 @@ def _enqueue_auto_auth_fallback_targets(
 ) -> dict[str, Any]:
     from trr_backend.socials.pipelines.comments.instagram import enqueue_instagram_comments_audit_cursor_retries
 
-    targets = [str(item or "").strip() for item in source_ids if str(item or "").strip()]
+    targets = list(dict.fromkeys(str(item or "").strip() for item in source_ids if str(item or "").strip()))
     if not targets:
         return {"requested": False, "created_job_count": 0, "target_source_ids": []}
     return enqueue_instagram_comments_audit_cursor_retries(
@@ -3150,27 +3163,26 @@ def _auto_public_recovery_enabled(config: Mapping[str, Any]) -> bool:
 
 def _enqueue_auto_public_recovery_targets(
     *,
+    run_id: str,
+    source_job_id: str,
     account_handle: str,
     source_ids: Sequence[str],
 ) -> dict[str, Any]:
-    from trr_backend.socials.pipelines.comments.instagram import enqueue_instagram_comments_audit_cursor_retries
+    from trr_backend.socials.pipelines.comments.instagram import (
+        _append_instagram_comments_public_recovery_targets_to_active_run,
+    )
 
-    targets = [str(item or "").strip() for item in source_ids if str(item or "").strip()]
+    targets = list(dict.fromkeys(str(item or "").strip() for item in source_ids if str(item or "").strip()))
     if not targets:
         return {"requested": False, "created_job_count": 0, "target_source_ids": []}
-    return enqueue_instagram_comments_audit_cursor_retries(
+    return _append_instagram_comments_public_recovery_targets_to_active_run(
+        run_id=run_id,
         account_handle=account_handle,
-        limit=len(targets),
-        shortcodes=targets,
+        target_source_ids=targets,
         batch_size=1,
-        max_comments_per_post=0,
-        comments_load_strategy="public_relay",
-        skip_launch_auth_probe=True,
-        dry_run=False,
-        attach_to_active_run=True,
         dispatch_immediately=True,
-        force_rerun_existing=True,
         initiated_by="comments-public-auto-recovery",
+        exclude_active_job_id=source_job_id,
     )
 
 
@@ -4673,9 +4685,23 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                 # mid-run-warmup post counter. Skip-paths above continued before
                 # this point so they do not advance the counter spuriously.
                 posts_since_last_warmup += 1
+                normalized_result_shortcode = str(shortcode or "").strip()
+                normalized_result_fetch_reason = str(result.fetch_reason or "retryable_post_fetch_failed").strip()
+                public_block_signal = str(getattr(result, "public_block_signal", "none") or "none").strip().lower()
+                is_genuine_public_block = public_comments_mode and public_block_signal != "none"
+                if is_genuine_public_block and normalized_result_shortcode:
+                    if normalized_result_shortcode not in incomplete_target_source_ids:
+                        incomplete_target_source_ids.append(normalized_result_shortcode)
+                    incomplete_fetch_reasons[normalized_result_shortcode] = normalized_result_fetch_reason
+                    if normalized_result_shortcode not in public_blocked_target_source_ids:
+                        public_blocked_target_source_ids.append(normalized_result_shortcode)
+                    public_blocked_fetch_reasons[normalized_result_shortcode] = normalized_result_fetch_reason
+                    public_blocked_genuine_signals[normalized_result_shortcode] = public_block_signal
+                    if normalized_result_shortcode not in public_blocked_genuine_target_source_ids:
+                        public_blocked_genuine_target_source_ids.append(normalized_result_shortcode)
                 if result.fetch_failed and not result.comments:
-                    normalized_incomplete_shortcode = str(shortcode or "").strip()
-                    normalized_fetch_reason = str(result.fetch_reason or "retryable_post_fetch_failed").strip()
+                    normalized_incomplete_shortcode = normalized_result_shortcode
+                    normalized_fetch_reason = normalized_result_fetch_reason
                     result_metadata = _fetch_result_diagnostic_metadata(result)
                     public_comments_metadata = _fetch_result_public_comments_metadata(result)
                     target_metadata = target_metadata_by_shortcode.get(shortcode) or {}
@@ -4693,7 +4719,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                     ):
                         coauthor_status_only_target_source_ids.append(normalized_incomplete_shortcode)
                     consecutive_post_fetch_failures += 1
-                    if bool(result.retryable):
+                    if bool(result.retryable) and not is_genuine_public_block:
                         if normalized_incomplete_shortcode:
                             incomplete_target_source_ids.append(normalized_incomplete_shortcode)
                             incomplete_fetch_reasons[normalized_incomplete_shortcode] = normalized_fetch_reason
@@ -4752,7 +4778,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                             extra_metadata=progress_metadata_common(),
                         )
                         continue
-                    if public_comments_mode and normalized_fetch_reason == "public_blocked":
+                    if is_genuine_public_block:
                         # A public_blocked post stays retryable. It is appended to
                         # BOTH the incomplete-target metadata AND the public-blocked
                         # accumulators, never written as a missing-comment marker, and
@@ -4764,19 +4790,10 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                         # ordering with the fetcher. "none" => SOFT miss (retry with
                         # backoff); any other value => GENUINE source block that may
                         # gate early-stop / run-pause.
-                        public_block_signal = (
-                            str(getattr(result, "public_block_signal", "none") or "none").strip().lower()
-                        )
-                        is_genuine_public_block = public_block_signal != "none"
                         if normalized_incomplete_shortcode:
-                            incomplete_target_source_ids.append(normalized_incomplete_shortcode)
                             incomplete_fetch_reasons[normalized_incomplete_shortcode] = normalized_fetch_reason
                             zero_comment_incomplete_target_source_ids.append(normalized_incomplete_shortcode)
-                            public_blocked_target_source_ids.append(normalized_incomplete_shortcode)
                             public_blocked_fetch_reasons[normalized_incomplete_shortcode] = normalized_fetch_reason
-                            if is_genuine_public_block:
-                                public_blocked_genuine_signals[normalized_incomplete_shortcode] = public_block_signal
-                                public_blocked_genuine_target_source_ids.append(normalized_incomplete_shortcode)
                         public_blocked_checked_count += 1
                         public_blocked_recovered_comments += recovered_comments
                         if recovered_comments <= 0:
@@ -4878,13 +4895,15 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                             force=index == len(target_source_ids),
                             extra_metadata=progress_metadata_common(),
                         )
-                        # Early stop: bail out of the current shard only after enough
-                        # consecutive GENUINE-block posts (public_block_signal != none)
-                        # — a soft-empty streak no longer breaks the loop, so soft
+                        # A genuine 429 stops immediately; other genuine public
+                        # blocks retain the bounded consecutive threshold. Soft
                         # misses keep being attempted instead of abandoning the shard.
                         # The remaining targets stay retryable (resume re-adds them
                         # from public_blocked_target_source_ids).
-                        if public_blocked_genuine_consecutive_count >= _PUBLIC_BLOCKED_EARLY_STOP_CONSECUTIVE:
+                        if _public_blocked_shard_should_stop(
+                            signal=public_block_signal,
+                            consecutive=public_blocked_genuine_consecutive_count,
+                        ):
                             logger.warning(
                                 "Stopping Instagram comments shard early after %s consecutive GENUINE public-blocked "
                                 "posts: job_id=%s run_id=%s checked=%s genuine_blocked=%s last_signal=%s",
@@ -5200,6 +5219,19 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                     force=index == len(target_source_ids),
                     extra_metadata=progress_metadata_common(),
                 )
+                if is_genuine_public_block and _public_blocked_shard_should_stop(
+                    signal=public_block_signal,
+                    consecutive=public_blocked_genuine_consecutive_count,
+                ):
+                    logger.warning(
+                        "Stopping Instagram comments shard immediately after persisting partial comments from "
+                        "a GENUINE public block: job_id=%s run_id=%s shortcode=%s signal=%s",
+                        job_id,
+                        run_id,
+                        shortcode,
+                        public_block_signal,
+                    )
+                    break
 
             retryable_incomplete_targets = _retryable_incomplete_target_source_ids(
                 incomplete_target_source_ids=incomplete_target_source_ids,
@@ -5324,12 +5356,43 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                                 },
                             )
 
+                        if has_genuine_block and attempts_remaining:
+                            logger.info(
+                                "Instagram public comments blocked; requeuing saved partial/cursor work after "
+                                "cooldown: job_id=%s attempt=%s/%s targets=%s signals=%s",
+                                job_id,
+                                attempt_count,
+                                max_attempts,
+                                retryable_incomplete_targets,
+                                sorted(unresolved_genuine_block_signals),
+                            )
+                            raise CommentsScraplingRuntimeError(
+                                "Instagram public comments blocked; retrying after cooldown.",
+                                error_code="instagram_comments_public_retryable",
+                                retryable=True,
+                                runtime_metadata={
+                                    "incomplete_target_source_ids": retryable_incomplete_targets,
+                                    "incomplete_fetch_reasons": retry_fetch_reasons,
+                                    "retry_target_source_ids": retryable_incomplete_targets,
+                                    "completion_status": "public_comments_blocked_retryable",
+                                    "current_comments_fetched": comments_fetched,
+                                    "fallback_policy": "public_retry_after_cooldown",
+                                    "auth_fallback_policy": "not_considered",
+                                    "public_block_signal_values": sorted(unresolved_genuine_block_signals),
+                                    "attempt_count": attempt_count,
+                                    "max_attempts": max_attempts,
+                                    "target_source_ids_count": len(target_source_ids),
+                                },
+                            )
+
                         public_recovery_targets = (
                             retryable_incomplete_targets if _auto_public_recovery_enabled(config) else []
                         )
                         public_recovery_result: dict[str, Any] | None = None
                         if public_recovery_targets:
                             public_recovery_result = _enqueue_auto_public_recovery_targets(
+                                run_id=run_id,
+                                source_job_id=job_id,
                                 account_handle=account_handle,
                                 source_ids=public_recovery_targets,
                             )
@@ -5588,7 +5651,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
         auto_refill_limit = _comments_auto_refill_dispatch_limit(config)
         if auto_refill_limit > 0 and run_id:
             try:
-                dispatch_result = repo.dispatch_due_social_jobs(run_id=run_id, limit=auto_refill_limit)
+                dispatch_result = _dispatch_due_social_jobs(run_id=run_id, limit=auto_refill_limit)
                 logger.info(
                     "Auto-refilled Instagram comments workers after shard completion: job_id=%s run_id=%s "
                     "limit=%s dispatched=%s",
@@ -5714,10 +5777,13 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
             auth_failed_target_source_ids=[] if single_session_load_all else auth_failed_target_source_ids,
             public_blocked_target_source_ids=public_blocked_target_source_ids,
         )
-        retry_target_source_ids = retry_incomplete_targets or [
-            str(item or "").strip()
-            for item in ((retry_rebalance or {}).get("remaining_target_source_ids") or [])
-            if str(item or "").strip()
+        retry_target_source_ids = [
+            *retry_incomplete_targets,
+            *[
+                str(item or "").strip()
+                for item in ((retry_rebalance or {}).get("remaining_target_source_ids") or [])
+                if str(item or "").strip()
+            ],
         ]
         retry_target_source_ids = list(dict.fromkeys(retry_target_source_ids))
         if can_retry and retry_target_source_ids:

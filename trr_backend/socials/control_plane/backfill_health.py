@@ -48,7 +48,7 @@ from trr_backend.socials.control_plane.worker_health import (
     get_worker_health,
     is_queue_enabled,
 )
-from trr_backend.socials.instagram.auth_cooldown import get_active_cooldown
+from trr_backend.socials.instagram.auth_cooldown import get_active_cooldown, get_active_identity_cooldown
 from trr_backend.socials.pipelines.account_catalog.progress import (
     get_social_account_catalog_run_progress,
 )
@@ -314,6 +314,32 @@ def _build_run_entry(target: dict[str, Any], *, recent_log_limit: int) -> dict[s
     return entry
 
 
+def _instagram_identity_auth_cooldown() -> dict[str, Any]:
+    base = {
+        "platform": "instagram",
+        "active": False,
+        "state": "inactive",
+        "last_error_code": None,
+        "cooldown_until": None,
+        "authenticated_instagram_lanes_paused": False,
+    }
+    try:
+        cooldown = get_active_identity_cooldown("instagram")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("backfill_health: identity auth cooldown read failed: %s", exc)
+        return {**base, "error": f"{type(exc).__name__}: {exc}"}
+    if cooldown is None:
+        return base
+    metadata = cooldown.to_metadata()
+    return {
+        **base,
+        **metadata,
+        "active": True,
+        "state": "active",
+        "authenticated_instagram_lanes_paused": True,
+    }
+
+
 def get_backfill_health(
     *,
     run_limit: int = _DEFAULT_RUN_LIMIT,
@@ -363,6 +389,11 @@ def get_backfill_health(
     except Exception as exc:  # noqa: BLE001
         logger.warning("backfill_health: worker auth capabilities read failed: %s", exc)
         worker_auth = {"error": f"{type(exc).__name__}: {exc}"}
+    instagram_identity_cooldown = _instagram_identity_auth_cooldown()
+    worker_auth["instagram_identity_auth_cooldown"] = instagram_identity_cooldown
+    worker_auth["authenticated_instagram_lanes_paused"] = bool(
+        instagram_identity_cooldown.get("authenticated_instagram_lanes_paused")
+    )
 
     worker_health: dict[str, Any]
     try:
@@ -424,6 +455,7 @@ def get_backfill_health(
         "totals": totals,
         "runs": run_entries,
         "cooldowns": cooldowns,
+        "instagram_identity_auth_cooldown": instagram_identity_cooldown,
         "worker_auth": worker_auth,
         "worker_health": worker_health,
         "queue": queue_section,
