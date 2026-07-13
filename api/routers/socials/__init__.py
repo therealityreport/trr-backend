@@ -146,13 +146,12 @@ from .reddit import (
 logger = logging.getLogger(__name__)
 
 
-def _internal_error_response(exc: Exception, *, status_code: int = 500) -> HTTPException:
-    """Log the full exception server-side; return a non-reflective client error.
+def _internal_error_response(_exc: Exception, *, status_code: int = 500) -> HTTPException:
+    """Return a non-reflective client error after the caller logs context.
 
     Never surface raw internal exception text (DB/driver messages, hostnames,
     proxy/upstream detail) to clients. Callers do `raise _internal_error_response(exc) from exc`.
     """
-    logger.exception("socials_router_internal_error status_code=%s", status_code)
     message = "Upstream request failed." if status_code == 502 else "Internal server error."
     return HTTPException(status_code=status_code, detail={"code": "INTERNAL_ERROR", "message": message})
 
@@ -4751,6 +4750,11 @@ async def refresh_social_account_profile_socialblade_route(
             force=body.force,
         )
     except SocialBladeRefreshError as exc:
+        logger.exception(
+            "Failed to refresh SocialBlade account: platform=%s account=%s",
+            normalized_platform,
+            safe_handle,
+        )
         raise _internal_error_response(exc, status_code=502) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception(
