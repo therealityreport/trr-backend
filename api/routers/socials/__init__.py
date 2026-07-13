@@ -145,6 +145,18 @@ from .reddit import (
 
 logger = logging.getLogger(__name__)
 
+
+def _internal_error_response(exc: Exception, *, status_code: int = 500) -> HTTPException:
+    """Log the full exception server-side; return a non-reflective client error.
+
+    Never surface raw internal exception text (DB/driver messages, hostnames,
+    proxy/upstream detail) to clients. Callers do `raise _internal_error_response(exc) from exc`.
+    """
+    logger.exception("socials_router_internal_error status_code=%s", status_code)
+    message = "Upstream request failed." if status_code == 502 else "Internal server error."
+    return HTTPException(status_code=status_code, detail={"code": "INTERNAL_ERROR", "message": message})
+
+
 router = APIRouter(prefix="/admin/socials", tags=["admin-socials"])
 
 SourceScopeParam = Literal["bravo", "network", "creator", "community", "news"]
@@ -3739,7 +3751,7 @@ async def put_season_targets(
         raise _value_error_to_bad_request(exc) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to write season social targets: season=%s", season_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.post("/seasons/{season_id}/ingest")
@@ -4024,7 +4036,7 @@ async def ingest_season_social(
         raise _value_error_to_bad_request(exc) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to enqueue social ingest: season=%s", sid)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.post("/seasons/{season_id}/ingest/orchestrations")
@@ -4129,7 +4141,7 @@ async def orchestrate_season_social_ingest(
         raise _value_error_to_bad_request(exc) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to orchestrate social ingest: season=%s", sid)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.post("/seasons/{season_id}/sync-sessions")
@@ -4254,7 +4266,7 @@ async def create_season_sync_session(
         logger.exception("Failed to create sync session: season=%s", sid)
         if is_database_service_unavailable_error(exc):
             raise HTTPException(status_code=503, detail=database_service_unavailable_detail(exc)) from exc
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 def _social_sync_sse_chunk(event_type: str, payload: dict[str, Any]) -> bytes:
@@ -4306,7 +4318,7 @@ async def get_season_sync_session(
         raise _value_error_to_bad_request(exc) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch sync session: season=%s sync_session=%s", season_id, sync_session_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/seasons/{season_id}/sync-sessions/{sync_session_id}/stream")
@@ -4393,7 +4405,7 @@ async def cancel_season_sync_session(
         raise _value_error_to_bad_request(exc) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to cancel sync session: season=%s sync_session=%s", season_id, sync_session_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.post("/seasons/{season_id}/sync-sessions/{sync_session_id}/retry")
@@ -4420,7 +4432,7 @@ async def retry_season_sync_session(
         raise _value_error_to_bad_request(exc) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to retry sync session: season=%s sync_session=%s", season_id, sync_session_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/seasons/{season_id}/ingest/schedule-preview")
@@ -4482,7 +4494,7 @@ async def get_season_ingest_schedule_preview(
         raise _value_error_to_bad_request(exc) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to build social ingest schedule preview: season=%s", season_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/shared/sources")
@@ -4739,7 +4751,7 @@ async def refresh_social_account_profile_socialblade_route(
             force=body.force,
         )
     except SocialBladeRefreshError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise _internal_error_response(exc, status_code=502) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception(
             "Failed to refresh social account SocialBlade data: platform=%s account=%s",
@@ -5990,7 +6002,7 @@ def get_social_account_catalog_verification_route(
             account_handle,
             run_id,
         )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/profiles/{platform}/{account_handle}/catalog/gap-analysis")
@@ -7331,7 +7343,7 @@ def get_social_ingest_worker_detail(worker_id: str, _: InternalAdminUser = None)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch social ingest worker detail: worker_id=%s", worker_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.post("/ingest/workers/purge-inactive")
@@ -7345,7 +7357,7 @@ def purge_social_ingest_inactive_workers(
         return purge_inactive_workers(stale_after_seconds=(payload.stale_after_seconds if payload else None))
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to purge inactive social ingest workers")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/ingest/queue-status")
@@ -7400,7 +7412,7 @@ def cancel_social_ingest_stuck_jobs(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to cancel stuck social ingest jobs")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.post("/ingest/media-mirror/recover-stale")
@@ -7459,7 +7471,7 @@ def recover_stale_social_media_mirror_jobs(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to recover stale social media mirror jobs")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.post("/ingest/media-mirror/drain-account")
@@ -7495,7 +7507,7 @@ def drain_social_media_mirror_account_jobs(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to drain social media mirror account jobs")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.post("/ingest/dispatch-blocked-jobs/cancel")
@@ -7515,7 +7527,7 @@ def cancel_social_ingest_dispatch_blocked_jobs(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to cancel dispatch-blocked social ingest jobs")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.post("/ingest/active-jobs/cancel")
@@ -7530,7 +7542,7 @@ def cancel_social_ingest_active_jobs(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to cancel active social ingest jobs")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.post("/ingest/recent-failures/dismiss")
@@ -7551,7 +7563,7 @@ def dismiss_social_ingest_recent_failures(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to dismiss recent social ingest failures")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.post("/ingest/reset-health")
@@ -7568,7 +7580,7 @@ def reset_social_ingest_health_route(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to reset social ingest health")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.post("/ingest/jobs/{job_id}/debug")
@@ -7596,7 +7608,7 @@ def debug_social_ingest_job(
         raise HTTPException(status_code=400, detail=error_code) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to debug social ingest job: job_id=%s", job_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/ingest/health-dot")
@@ -7616,7 +7628,7 @@ def get_social_ingest_health_dot(_: InternalAdminUser = None) -> dict[str, Any]:
         return payload
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch social ingest health dot payload")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/live-status")
@@ -7676,7 +7688,7 @@ async def start_reddit_refresh_run(
             payload.season_id,
             payload.period_key,
         )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.post("/reddit/runs/backfill")
@@ -7721,7 +7733,7 @@ async def backfill_reddit_refresh_runs(
             payload.community_id,
             payload.season_id,
         )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/reddit/runs")
@@ -7756,7 +7768,7 @@ async def list_reddit_refresh_runs(
             period_key,
             status,
         )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/reddit/runs/{run_id}")
@@ -7769,7 +7781,7 @@ async def get_reddit_refresh_run(run_id: UUID, _: InternalAdminUser = None) -> d
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch reddit refresh run: run_id=%s", run_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/reddit/cache")
@@ -7820,7 +7832,7 @@ async def get_reddit_cached_period_payload(
             season_id,
             period_key,
         )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.post("/reddit/cache/bulk")
@@ -7946,7 +7958,7 @@ async def get_reddit_cached_period_payload_bulk(
             payload.season_id,
             len(payload.period_keys),
         )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/reddit/analytics/community/{community_id}/summary")
@@ -7978,7 +7990,7 @@ async def get_reddit_community_analytics_summary(
             scope,
             season_id,
         )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/reddit/analytics/community/{community_id}/shows")
@@ -8010,7 +8022,7 @@ async def get_reddit_community_analytics_shows(
             scope,
             season_id,
         )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/reddit/analytics/community/{community_id}/flairs")
@@ -8042,7 +8054,7 @@ async def get_reddit_community_analytics_flairs(
             scope,
             season_id,
         )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/reddit/analytics/community/{community_id}/flairs/{flair_key}")
@@ -8083,7 +8095,7 @@ async def get_reddit_community_analytics_flair_detail(
             scope,
             season_id,
         )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/reddit/analytics/community/{community_id}/posts")
@@ -8128,7 +8140,7 @@ async def get_reddit_community_analytics_posts(
             container_key,
             flair_key,
         )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -8167,7 +8179,7 @@ async def auto_categorize_community_flairs(
         raise _value_error_to_bad_request(exc) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to auto-categorize flairs: community_id=%s show_id=%s", community_id, body.show_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.post("/reddit/auto-categorize-flairs-batch")
@@ -8186,7 +8198,7 @@ async def auto_categorize_flairs_batch(
         raise _value_error_to_bad_request(exc) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to batch auto-categorize flairs: show_id=%s", body.show_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/seasons/{season_id}/ingest/jobs")
@@ -8405,7 +8417,7 @@ async def get_season_ingest_run_progress(
             run_id,
             duration_ms,
         )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.post("/seasons/{season_id}/ingest/runs/{run_id}/cancel")
@@ -8428,7 +8440,7 @@ async def cancel_season_ingest_run(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to cancel social ingest run: season=%s run_id=%s", season_id, run_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/seasons/{season_id}/analytics/week/{week_index}/live-health")
@@ -8873,7 +8885,7 @@ async def get_season_comments_coverage(
         raise _value_error_to_bad_request(exc) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to compute comments coverage: season=%s", season_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/seasons/{season_id}/analytics/mirror-coverage")
@@ -8928,7 +8940,7 @@ async def get_season_mirror_coverage(
         raise _value_error_to_bad_request(exc) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to compute mirror coverage: season=%s", season_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/seasons/{season_id}/analytics/posts/{platform}/{source_id}")
@@ -8951,7 +8963,7 @@ async def get_post_comments(
             platform,
             source_id,
         )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/seasons/{season_id}/tiktok/overview")
@@ -8982,7 +8994,7 @@ async def get_season_tiktok_overview(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch TikTok overview: season=%s", season_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/seasons/{season_id}/tiktok/cast-members")
@@ -9003,7 +9015,7 @@ async def get_season_tiktok_cast_members(
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch TikTok cast members: season=%s", season_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/seasons/{season_id}/tiktok/hashtags")
@@ -9028,7 +9040,7 @@ async def get_season_tiktok_hashtags(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch TikTok hashtag/keyword trends: season=%s", season_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/seasons/{season_id}/tiktok/sounds")
@@ -9055,7 +9067,7 @@ async def get_season_tiktok_sounds(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch TikTok sounds: season=%s", season_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/seasons/{season_id}/tiktok/content-health")
@@ -9088,7 +9100,7 @@ async def get_season_tiktok_content_health(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch TikTok content health: season=%s", season_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/seasons/{season_id}/tiktok/sounds/{sound_id}")
@@ -9105,7 +9117,7 @@ async def get_season_tiktok_sound_detail(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch TikTok sound detail: season=%s sound_id=%s", season_id, sound_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/seasons/{season_id}/tiktok/sounds/{sound_id}/posts")
@@ -9123,7 +9135,7 @@ async def get_season_tiktok_sound_posts(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch TikTok sound posts: season=%s sound_id=%s", season_id, sound_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/seasons/{season_id}/tiktok/posts/{post_id}/detail")
@@ -9140,7 +9152,7 @@ async def get_season_tiktok_post_detail(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch TikTok post detail: season=%s post_id=%s", season_id, post_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/seasons/{season_id}/tiktok/sentiment-trends")
@@ -9161,7 +9173,7 @@ async def get_season_tiktok_sentiment_trends(
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch TikTok sentiment trends: season=%s", season_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.post("/seasons/{season_id}/analytics/posts/{platform}/{source_id}/refresh")
@@ -9208,7 +9220,7 @@ async def refresh_post_comments_for_post(
             platform,
             source_id,
         )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.post("/seasons/{season_id}/instagram/mirror/requeue")
@@ -9241,7 +9253,7 @@ async def requeue_instagram_mirror_jobs(
             season_id,
             source_scope,
         )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.post("/seasons/{season_id}/{platform}/mirror/requeue")
@@ -9278,7 +9290,7 @@ async def requeue_platform_mirror_jobs(
             season_id,
             source_scope,
         )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/seasons/{season_id}/analytics/export.csv")
@@ -9316,7 +9328,7 @@ async def export_season_analytics_csv(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to export social CSV: season=%s", season_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc
 
 
 @router.get("/seasons/{season_id}/analytics/export.pdf")
@@ -9362,4 +9374,4 @@ async def export_season_analytics_pdf(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to export social PDF: season=%s", season_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _internal_error_response(exc) from exc

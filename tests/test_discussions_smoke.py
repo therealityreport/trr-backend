@@ -6,6 +6,7 @@ These tests verify basic functionality with mocked Supabase.
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -13,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from api import auth, deps
 from api.main import app
+from api.routers import discussions
 
 
 def create_chainable_mock(return_data=None, single_data=None):
@@ -224,6 +226,41 @@ def authenticated_client():
 
 
 # --- Thread tests ---
+
+
+class TestRealtimePublish:
+    """Test discussion realtime publish helper behavior."""
+
+    def test_publish_event_sync_reports_publish_failure_without_payload(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class _Broker:
+            async def publish(self, room: str, event: dict) -> None:
+                raise RuntimeError("broker down")
+
+        monkeypatch.setattr(discussions, "get_broker", lambda: _Broker())
+
+        with caplog.at_level(logging.ERROR, logger=discussions.logger.name):
+            ok = discussions.publish_event_sync("discussion:episode-1", {"body": "private user text"})
+
+        assert ok is False
+        assert caplog.records[0].exc_info is not None
+        assert "discussion:episode-1" in caplog.text
+        assert "private user text" not in caplog.text
+
+    def test_publish_event_sync_reports_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        published: list[tuple[str, dict]] = []
+
+        class _Broker:
+            async def publish(self, room: str, event: dict) -> None:
+                published.append((room, event))
+
+        monkeypatch.setattr(discussions, "get_broker", lambda: _Broker())
+
+        assert discussions.publish_event_sync("discussion:episode-1", {"type": "thread_created"}) is True
+        assert published == [("discussion:episode-1", {"type": "thread_created"})]
 
 
 class TestListThreads:

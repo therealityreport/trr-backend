@@ -21,6 +21,9 @@ RUN test -f requirements.lock.txt && pip install --no-cache-dir -r requirements.
 
 # Copy application code
 COPY . .
+RUN groupadd --system trr && \
+    useradd --system --gid trr --home-dir /app --shell /usr/sbin/nologin trr && \
+    chown -R trr:trr /app
 
 # Cloud Run/Render use PORT; keep container launches single-process by default.
 ENV PORT=8080 \
@@ -28,5 +31,7 @@ ENV PORT=8080 \
     TRR_BACKEND_RELOAD=0
 
 EXPOSE ${PORT}
+
+USER trr
 
 CMD ["./start-api.sh"]

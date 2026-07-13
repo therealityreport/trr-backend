@@ -40,6 +40,7 @@ def _force_deployed_runtime(monkeypatch):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED", "1")
     monkeypatch.setenv("TRR_MODAL_RUNTIME_SCHEDULER_ENABLED", "0")
+    monkeypatch.setenv("CORS_ALLOW_ORIGINS", "https://thereality.report")
 
 
 class TestStartupLaneValidation:

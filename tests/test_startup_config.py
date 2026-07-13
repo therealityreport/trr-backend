@@ -10,12 +10,15 @@ from api import main as api_main
 
 def _clear_runtime_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in (
+        "CI",
+        "GITHUB_ACTIONS",
         "TRR_LOCAL_DEV",
         "APP_ENV",
         "ENVIRONMENT",
         "TRR_ENV",
         "TRR_ENVIRONMENT",
         "PYTHON_ENV",
+        "CORS_ALLOW_ORIGINS",
         "TRR_INTERNAL_ADMIN_SHARED_SECRET",
         "SUPABASE_JWT_SECRET",
         "TRR_MODAL_MAINTENANCE_OWNER_REQUIRED",
@@ -45,6 +48,7 @@ def test_validate_startup_config_requires_deployed_only_secrets_for_deployed_run
 ) -> None:
     _clear_runtime_env(monkeypatch)
     monkeypatch.setenv("TRR_MODAL_RUNTIME_SCHEDULER_ENABLED", "1")
+    monkeypatch.setenv("CORS_ALLOW_ORIGINS", "https://thereality.report")
     monkeypatch.setattr(api_main, "log_database_resolution_summary", lambda: None)
     monkeypatch.setattr(
         api_main,
@@ -65,6 +69,7 @@ def test_validate_startup_config_does_not_require_retired_screenalytics_envs_for
 ) -> None:
     _clear_runtime_env(monkeypatch)
     monkeypatch.setenv("TRR_MODAL_RUNTIME_SCHEDULER_ENABLED", "1")
+    monkeypatch.setenv("CORS_ALLOW_ORIGINS", "https://thereality.report")
     monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret")
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "jwt-secret")
     monkeypatch.setattr(api_main, "log_database_resolution_summary", lambda: None)
@@ -75,6 +80,24 @@ def test_validate_startup_config_does_not_require_retired_screenalytics_envs_for
     )
 
     api_main._validate_startup_config()
+
+
+def test_validate_startup_config_allows_local_wildcard_cors_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_runtime_env(monkeypatch)
+    monkeypatch.setenv("TRR_LOCAL_DEV", "1")
+
+    assert api_main._cors_allow_origins_for_runtime([]) == ["*"]
+    api_main._validate_cors_config()
+
+
+def test_validate_startup_config_rejects_deployed_runtime_without_cors_origins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_runtime_env(monkeypatch)
+
+    assert api_main._cors_allow_origins_for_runtime([]) == []
+    with pytest.raises(RuntimeError, match="CORS_ALLOW_ORIGINS"):
+        api_main._validate_cors_config()
 
 
 def test_modal_runtime_scheduler_is_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
