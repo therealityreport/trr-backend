@@ -351,7 +351,9 @@ def open_cookie_refresh_context(
         reserve_social_auth_refresh_attempt(platform)
 
     resolved_profile = resolve_social_auth_chrome_profile(platform, profile_name)
-    effective_require_profile = social_auth_requires_chrome_profile(platform) if require_profile is None else require_profile
+    effective_require_profile = (
+        social_auth_requires_chrome_profile(platform) if require_profile is None else require_profile
+    )
     profile_selection: ChromeProfileSelection | None = None
     if resolved_profile:
         try:
@@ -413,7 +415,14 @@ def open_cookie_refresh_context(
         )
 
     browser = launch_browser(playwright, headless=headless)
-    context = browser.new_context(**context_kwargs)
+    try:
+        context = browser.new_context(**context_kwargs)
+    except Exception:
+        try:
+            browser.close()
+        except Exception:  # noqa: BLE001 - teardown must not mask the launch error
+            logger.warning("Failed to close browser after context creation failed", exc_info=True)
+        raise
     return CookieRefreshBrowserContext(context=context, browser=browser)
 
 
@@ -439,6 +448,34 @@ def ensure_private_file_mode(path: str | Path) -> None:
         target.chmod(0o600)
     except OSError:
         logger.debug("Failed to chmod private cookie/session file %s", target, exc_info=True)
+
+
+def reconcile_private_paths(*roots: str | Path, dir_mode: int = 0o700, file_mode: int = 0o600) -> int:
+    """Best-effort chmod for private credential/session roots."""
+    hardened = 0
+    for root in roots:
+        base = Path(root).expanduser()
+        if base.is_symlink() or not base.exists():
+            continue
+        try:
+            for path in base.rglob("*"):
+                try:
+                    if path.is_symlink():
+                        continue
+                    if path.is_dir():
+                        path.chmod(dir_mode, follow_symlinks=False)
+                    elif path.is_file():
+                        path.chmod(file_mode, follow_symlinks=False)
+                        hardened += 1
+                except OSError:
+                    logger.debug("Failed to chmod %s during private-path reconcile", path, exc_info=True)
+            try:
+                base.chmod(dir_mode, follow_symlinks=False)
+            except OSError:
+                logger.debug("Failed to chmod root %s during private-path reconcile", base, exc_info=True)
+        except OSError:
+            logger.debug("Failed to walk %s during private-path reconcile", base, exc_info=True)
+    return hardened
 
 
 def write_private_json_file(path: str | Path, payload: Any) -> None:
@@ -639,7 +676,8 @@ def refresh_simple_login_cookies(
                     reuse_valid, reuse_reason = validator(existing_cookies)
                     if not reuse_valid:
                         logger.info(
-                            "%s Chrome-profile cookies failed in-protocol validation (%s); falling through to scripted login",
+                            "%s Chrome-profile cookies failed in-protocol validation (%s); "
+                            "falling through to scripted login",
                             spec.platform,
                             reuse_reason or "unknown",
                         )

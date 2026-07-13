@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+
 import scripts.socials.retire_stale_instagram_media_mirror_failures as mod
 
 
@@ -15,6 +17,11 @@ def _base_args(**overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def test_parse_args_rejects_apply_with_dry_run() -> None:
+    with pytest.raises(SystemExit):
+        mod._parse_args(["--apply", "--dry-run"])
 
 
 def test_fetch_matches_keeps_non_retryable_failures_and_skips_retryable() -> None:
@@ -112,6 +119,8 @@ def test_retire_matches_updates_only_selected_ids(monkeypatch) -> None:
     params = calls[0]["params"]
     assert "status = 'cancelled'" in query
     assert "where id::text = any(%s)" in query.lower()
+    assert "and status = %s" in query.lower()
+    assert "and status = 'failed'" not in query.lower()
     assert params[0] == mod.OBSOLETE_ERROR_MESSAGE
     assert params[1] == mod.OBSOLETE_ERROR_CODE
     assert params[2] == mod.OBSOLETE_ERROR_CLASS
@@ -121,3 +130,4 @@ def test_retire_matches_updates_only_selected_ids(monkeypatch) -> None:
         "obsolete_failure_resolution": "retired_from_retry_backlog",
     }
     assert params[4] == ["job-1", "job-3"]
+    assert params[5] == "failed"

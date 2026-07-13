@@ -21,6 +21,7 @@ except ModuleNotFoundError:  # pragma: no cover - script execution convenience
 DUPLICATE_ERROR_CODE = "duplicate_comment_media_mirror_job_retired"
 DUPLICATE_ERROR_CLASS = "DuplicateCommentMediaMirrorJobRetired"
 DUPLICATE_ERROR_MESSAGE = "duplicate_active_comment_media_mirror_job_retired"
+ACTIVE_DUPLICATE_STATUSES = ("queued", "pending", "retrying", "running")
 IDENTITY_SQL = """
 coalesce(
   nullif(config->>'comment_db_id', ''),
@@ -58,8 +59,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--season-id", action="append", default=[], help="Optional season UUID filter.")
     parser.add_argument("--show-id", action="append", default=[], help="Optional show UUID filter.")
     parser.add_argument("--account", action="append", default=[], help="Optional Instagram account handle filter.")
-    parser.add_argument("--dry-run", action="store_true", help="Preview matching duplicate rows (default).")
-    parser.add_argument("--apply", action="store_true", help="Retire duplicate rows by marking them cancelled.")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="Preview matching duplicate rows (default).")
+    mode.add_argument("--apply", action="store_true", help="Retire duplicate rows by marking them cancelled.")
     parser.add_argument(
         "--confirm-destructive",
         action="store_true",
@@ -199,9 +201,17 @@ def _retire_matches(*, season_ids: list[str], show_ids: list[str], accounts: lis
           last_error_class = %s,
           metadata = coalesce(metadata, '{}'::jsonb) || %s::jsonb
         where id::text = any(%s)
+          and status = any(%s)
         returning id::text as id
         """,
-        [DUPLICATE_ERROR_MESSAGE, DUPLICATE_ERROR_CODE, DUPLICATE_ERROR_CLASS, payload, duplicate_ids],
+        [
+            DUPLICATE_ERROR_MESSAGE,
+            DUPLICATE_ERROR_CODE,
+            DUPLICATE_ERROR_CLASS,
+            payload,
+            duplicate_ids,
+            list(ACTIVE_DUPLICATE_STATUSES),
+        ],
     )
 
 

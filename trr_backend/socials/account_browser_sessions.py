@@ -16,6 +16,7 @@ from trr_backend.socials.browser_cookie_refresh import (
     cookie_payload,
     ensure_private_file_mode,
     launch_browser,
+    reconcile_private_paths,
     write_cookie_file,
     write_private_json_file,
 )
@@ -25,9 +26,11 @@ logger = logging.getLogger(__name__)
 _SESSION_LOCKS: dict[str, threading.RLock] = {}
 _SESSION_LOCKS_GUARD = threading.Lock()
 _DEFAULT_BROWSER_SESSION_DIR_NAME = "social-browser-sessions"
+_PRIVATE_PATHS_RECONCILED = False
+_PRIVATE_PATHS_RECONCILE_LOCK = threading.Lock()
 
 
-class BrowserSessionExecutionLockTimeout(TimeoutError):
+class BrowserSessionExecutionLockTimeout(TimeoutError):  # noqa: N818 - retained public API
     """Raised when an account-scoped browser session lock cannot be acquired."""
 
     def __init__(self, *, platform: str, account_id: str, timeout_seconds: float) -> None:
@@ -35,8 +38,7 @@ class BrowserSessionExecutionLockTimeout(TimeoutError):
         self.account_id = account_id
         self.timeout_seconds = timeout_seconds
         super().__init__(
-            f"Timed out acquiring {platform} browser-session lock for {account_id} "
-            f"after {timeout_seconds:.1f}s"
+            f"Timed out acquiring {platform} browser-session lock for {account_id} after {timeout_seconds:.1f}s"
         )
 
 
@@ -51,12 +53,21 @@ def _project_root() -> Path:
 
 
 def _storage_root() -> Path:
+    global _PRIVATE_PATHS_RECONCILED
+
     raw = str(os.getenv("SOCIAL_BROWSER_SESSION_DIR") or "").strip()
     if raw:
         root = Path(raw).expanduser()
     else:
         root = _project_root() / "data" / _DEFAULT_BROWSER_SESSION_DIR_NAME
     root.mkdir(parents=True, exist_ok=True)
+    if not _PRIVATE_PATHS_RECONCILED:
+        with _PRIVATE_PATHS_RECONCILE_LOCK:
+            if not _PRIVATE_PATHS_RECONCILED:
+                # keys/ is deferred until the backend has a central keys-dir resolver.
+                hardened = reconcile_private_paths(root)
+                logger.info("Reconciled private social-session paths: hardened_files=%s", hardened)
+                _PRIVATE_PATHS_RECONCILED = True
     return root
 
 
