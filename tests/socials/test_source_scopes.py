@@ -31,4 +31,3 @@ def test_social_analytics_module_reexports_source_scope_helpers() -> None:
     assert legacy.normalize_source_scope("bravo") == "network"
     assert legacy._normalize_source_scope_input("bravo") == "bravo"
     assert legacy._source_scope_is_network_family("creator") is False
-

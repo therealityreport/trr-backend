@@ -344,9 +344,7 @@ def test_backfill_response_surfaces_comments_not_selected_skip_reason() -> None:
 
     assert skip["comments_skip_reason"] == "comments_not_selected"
     assert skip["comments_skip_detail"] == "comments task not selected for this run"
-    assert skip["comments_operator_action"] == (
-        "Relaunch with the comments task selected to scrape comments."
-    )
+    assert skip["comments_operator_action"] == ("Relaunch with the comments task selected to scrape comments.")
 
 
 def test_backfill_response_surfaces_posts_auth_blocked_skip_reason() -> None:

@@ -207,8 +207,7 @@ def test_main_dispatches_selected_task_backfill_through_launch_orchestrator(monk
         "trr_backend.socials.control_plane",
         SimpleNamespace(
             execute_run_with_inline_worker_registration=lambda run_id, **kwargs: (
-                executed.append((run_id, kwargs["worker_id"]))
-                or {"run_id": run_id, "status": "completed"}
+                executed.append((run_id, kwargs["worker_id"])) or {"run_id": run_id, "status": "completed"}
             )
         ),
     )

@@ -157,4 +157,3 @@ def test_bounded_target_preview_is_read_only_and_preserves_zero(
         "completion_target_posts": bounded_total,
         "completion_target_source": "bounded_catalog",
     }
-

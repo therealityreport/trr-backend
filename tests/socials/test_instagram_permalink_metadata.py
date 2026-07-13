@@ -30,10 +30,7 @@ def _data_sjs_html(payload: dict[str, object]) -> str:
 
 
 def test_instagram_post_permalink_uses_plural_reels_for_known_reels() -> None:
-    assert (
-        instagram_post_permalink("DaCAsaUhOYw", post_format="reel")
-        == "https://www.instagram.com/reels/DaCAsaUhOYw/"
-    )
+    assert instagram_post_permalink("DaCAsaUhOYw", post_format="reel") == "https://www.instagram.com/reels/DaCAsaUhOYw/"
     assert (
         instagram_post_permalink("DaCAsaUhOYw", raw_data={"product_type": "clips"})
         == "https://www.instagram.com/reels/DaCAsaUhOYw/"

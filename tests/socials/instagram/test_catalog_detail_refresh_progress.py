@@ -224,4 +224,3 @@ def test_bounded_detail_refresh_shard_progress_and_completion_use_enumerated_row
         assert progress_updates[-1]["total_posts"] == enumerated_total
     else:
         assert enumerated_total == 0
-

@@ -195,9 +195,7 @@ def _selected_tasks(args: argparse.Namespace) -> list[str]:
 
 def _comment_anchor_source_ids(args: argparse.Namespace) -> list[str]:
     return [
-        str(item).strip()
-        for item in list(getattr(args, "comment_anchor_source_ids", []) or [])
-        if str(item).strip()
+        str(item).strip() for item in list(getattr(args, "comment_anchor_source_ids", []) or []) if str(item).strip()
     ]
 
 
@@ -227,8 +225,7 @@ def _dry_run_payload(args: argparse.Namespace) -> dict[str, Any]:
         "date_end": str(getattr(args, "date_end", "") or "").strip() or None,
         "catalog_action_scope": (
             "bounded_window"
-            if str(getattr(args, "date_start", "") or "").strip()
-            and str(getattr(args, "date_end", "") or "").strip()
+            if str(getattr(args, "date_start", "") or "").strip() and str(getattr(args, "date_end", "") or "").strip()
             else "full_history"
         ),
         "confirmation_required": _is_bravotv_instagram_backfill(args),

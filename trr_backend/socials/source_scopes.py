@@ -26,4 +26,3 @@ def normalize_source_scope_input(value: Any, *, default: str = "network") -> str
 
 def source_scope_is_network_family(value: Any) -> bool:
     return normalize_source_scope(value) == "network"
-
