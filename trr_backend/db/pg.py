@@ -294,10 +294,14 @@ def database_service_unavailable_detail(error: Exception) -> dict[str, Any]:
     }
 
 
-def probe_fresh_session_capacity(*, requested_sessions: int = 1) -> dict[str, Any]:
+def probe_fresh_session_capacity(
+    *,
+    requested_sessions: int = 1,
+    max_probe_sessions: int = 10,
+) -> dict[str, Any]:
     """Reserve fresh Supavisor session slots briefly without initializing a named pool."""
 
-    safe_requested = max(0, min(int(requested_sessions), 10))
+    safe_requested = max(0, min(int(requested_sessions), max(0, int(max_probe_sessions))))
     candidates = resolve_session_database_url_candidate_details()
     candidate = candidates[0] if candidates else {}
     target = {

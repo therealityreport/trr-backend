@@ -1218,6 +1218,36 @@ def test_resolve_application_name_rejects_secret_like_values(monkeypatch: pytest
     assert resolved["application_name_source"] == "default:pool"
 
 
+def test_fresh_session_capacity_probe_honors_configured_limit_above_ten(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _ProbeConnection(_FakeConnection):
+        def close(self) -> None:
+            self.closed = True
+
+    connections: list[_ProbeConnection] = []
+
+    def _connect(**_kwargs: object) -> _ProbeConnection:
+        connection = _ProbeConnection()
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(
+        pg,
+        "resolve_session_database_url_candidate_details",
+        lambda: (_detail("postgresql://db.example.com/postgres"),),
+    )
+    monkeypatch.setattr(pg.psycopg2, "connect", _connect)
+
+    result = pg.probe_fresh_session_capacity(requested_sessions=15, max_probe_sessions=15)
+
+    assert result["available"] is True
+    assert result["requested_sessions"] == 15
+    assert result["reserved_sessions"] == 15
+    assert len(connections) == 15
+    assert all(connection.closed for connection in connections)
+
+
 def test_local_pool_pressure_summary_does_not_expose_pool_details(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         pg,
