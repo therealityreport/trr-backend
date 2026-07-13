@@ -418,7 +418,10 @@ def open_cookie_refresh_context(
     try:
         context = browser.new_context(**context_kwargs)
     except Exception:
-        browser.close()
+        try:
+            browser.close()
+        except Exception:  # noqa: BLE001 - teardown must not mask the launch error
+            logger.warning("Failed to close browser after context creation failed", exc_info=True)
         raise
     return CookieRefreshBrowserContext(context=context, browser=browser)
 

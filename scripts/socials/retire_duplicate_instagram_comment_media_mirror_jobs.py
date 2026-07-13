@@ -59,8 +59,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--season-id", action="append", default=[], help="Optional season UUID filter.")
     parser.add_argument("--show-id", action="append", default=[], help="Optional show UUID filter.")
     parser.add_argument("--account", action="append", default=[], help="Optional Instagram account handle filter.")
-    parser.add_argument("--dry-run", action="store_true", help="Preview matching duplicate rows (default).")
-    parser.add_argument("--apply", action="store_true", help="Retire duplicate rows by marking them cancelled.")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="Preview matching duplicate rows (default).")
+    mode.add_argument("--apply", action="store_true", help="Retire duplicate rows by marking them cancelled.")
     parser.add_argument(
         "--confirm-destructive",
         action="store_true",

@@ -58,12 +58,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=[],
         help="Optional show UUID filter. Repeat to target multiple shows.",
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--dry-run",
         action="store_true",
         help="Preview matching stale failure rows without mutating them (default).",
     )
-    parser.add_argument(
+    mode.add_argument(
         "--apply",
         action="store_true",
         help="Retire the matching stale failures by marking them cancelled with obsolete-failure metadata.",

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+
 import scripts.socials.retire_stale_instagram_media_mirror_failures as mod
 
 
@@ -15,6 +17,11 @@ def _base_args(**overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def test_parse_args_rejects_apply_with_dry_run() -> None:
+    with pytest.raises(SystemExit):
+        mod._parse_args(["--apply", "--dry-run"])
 
 
 def test_fetch_matches_keeps_non_retryable_failures_and_skips_retryable() -> None:

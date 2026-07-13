@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+
 import scripts.socials.retire_duplicate_instagram_comment_media_mirror_jobs as mod
 
 
@@ -18,6 +20,11 @@ def _base_args(**overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def test_parse_args_rejects_apply_with_dry_run() -> None:
+    with pytest.raises(SystemExit):
+        mod._parse_args(["--apply", "--dry-run"])
 
 
 def test_main_apply_retires_duplicate_comment_media_rows(monkeypatch, capsys) -> None:

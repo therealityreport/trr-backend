@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+
 import scripts.socials.retire_duplicate_instagram_media_mirror_jobs as mod
 
 
@@ -10,6 +12,11 @@ def _base_args(**overrides):
     values = {"season_id": [], "show_id": [], "dry_run": False, "apply": False}
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def test_parse_args_rejects_apply_with_dry_run() -> None:
+    with pytest.raises(SystemExit):
+        mod._parse_args(["--apply", "--dry-run"])
 
 
 def test_main_dry_run_reports_duplicate_rows_without_retiring(monkeypatch, capsys) -> None:
