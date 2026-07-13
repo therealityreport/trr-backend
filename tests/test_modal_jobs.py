@@ -321,10 +321,7 @@ def test_inject_modal_runtime_defaults_keeps_safety_clamps_pinned(
 
 
 def test_operator_tunable_runtime_default_keys_exist_in_canonical_defaults() -> None:
-    assert (
-        modal_jobs._OPERATOR_TUNABLE_RUNTIME_DEFAULT_KEYS
-        <= modal_jobs._CANONICAL_MODAL_RUNTIME_DEFAULTS.keys()
-    )
+    assert modal_jobs._OPERATOR_TUNABLE_RUNTIME_DEFAULT_KEYS <= modal_jobs._CANONICAL_MODAL_RUNTIME_DEFAULTS.keys()
 
 
 def test_inject_modal_runtime_defaults_clears_object_storage_profile_when_static_creds_present(

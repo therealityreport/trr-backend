@@ -272,9 +272,7 @@ def test_account_lane_pause_precedes_global_budget_pressure() -> None:
         backfill_health=_health(queue={"queue_enabled": True, "queue_depth": 500}),
         queue_status=_queue(by_status={"queued": 500, "running": 10}),
         benchmark_overrides={
-            "account_lane_pauses": [
-                {"lane": LANE, "account": ACCOUNT, "paused": True, "reason": "operator_hold"}
-            ]
+            "account_lane_pauses": [{"lane": LANE, "account": ACCOUNT, "paused": True, "reason": "operator_hold"}]
         },
         include_live=False,
         now=NOW,

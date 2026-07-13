@@ -18,9 +18,7 @@ STATE_NORMAL: LaneBudgetState = "normal"
 STATE_REDUCED: LaneBudgetState = "reduced"
 STATE_PAUSED: LaneBudgetState = "paused"
 STATE_IDENTITY_BLOCKED: LaneBudgetState = "identity_blocked"
-LANE_STATES: frozenset[str] = frozenset(
-    {STATE_NORMAL, STATE_REDUCED, STATE_PAUSED, STATE_IDENTITY_BLOCKED}
-)
+LANE_STATES: frozenset[str] = frozenset({STATE_NORMAL, STATE_REDUCED, STATE_PAUSED, STATE_IDENTITY_BLOCKED})
 
 DEFAULT_LANE = "instagram_backfill"
 DEFAULT_PLATFORM = "instagram"
@@ -128,9 +126,7 @@ def instagram_db_session_worker_budget() -> int:
 
 
 def instagram_db_session_pool_limit() -> int:
-    raw = str(
-        os.getenv(INSTAGRAM_DB_SESSION_POOL_LIMIT_ENV) or DEFAULT_INSTAGRAM_DB_SESSION_POOL_LIMIT
-    ).strip()
+    raw = str(os.getenv(INSTAGRAM_DB_SESSION_POOL_LIMIT_ENV) or DEFAULT_INSTAGRAM_DB_SESSION_POOL_LIMIT).strip()
     try:
         return max(1, int(raw))
     except ValueError:
@@ -260,13 +256,9 @@ def get_instagram_db_session_capacity(
     draining_remote_calls = len(dict.fromkeys(draining_remote_call_ids))
     occupied = active_db_jobs + dispatched_unclaimed_jobs + draining_remote_calls
     effective_requested = _to_int(
-        requested_workers
-        if backend_effective_requested_workers is None
-        else backend_effective_requested_workers
+        requested_workers if backend_effective_requested_workers is None else backend_effective_requested_workers
     )
-    raw_requested = _to_int(
-        effective_requested if raw_requested_workers is None else raw_requested_workers
-    )
+    raw_requested = _to_int(effective_requested if raw_requested_workers is None else raw_requested_workers)
     if active_workers is None:
         session_pool_usage = _instagram_db_session_pool_usage(requested_sessions=effective_requested)
     remaining = max(0, budget - occupied)
@@ -280,10 +272,7 @@ def get_instagram_db_session_capacity(
         )
     )
     blocked = worker_budget_blocked or session_pool_blocked
-    capacity_available = bool(
-        read_error is None
-        and (effective_requested == 0 or session_pool_usage.get("available"))
-    )
+    capacity_available = bool(read_error is None and (effective_requested == 0 or session_pool_usage.get("available")))
     capacity_read_error = read_error or (
         str(session_pool_usage.get("read_error") or "session_capacity_probe_failed")
         if effective_requested > 0 and not session_pool_usage.get("available")
@@ -465,9 +454,7 @@ def _resolve_limits(benchmark_overrides: Mapping[str, Any] | None) -> dict[str, 
     limits = dict(DEFAULT_LIMITS)
     override_payload = _metadata_dict(benchmark_overrides)
     nested_limits = _metadata_dict(override_payload.get("limits"))
-    cap4_canary_enabled = bool(
-        override_payload.get("enable_cap4_canary") or nested_limits.get("enable_cap4_canary")
-    )
+    cap4_canary_enabled = bool(override_payload.get("enable_cap4_canary") or nested_limits.get("enable_cap4_canary"))
     for source in (override_payload, nested_limits):
         for key, default in DEFAULT_LIMITS.items():
             if key in source:
@@ -644,9 +631,7 @@ def _identity_blocker_from_worker_auth(backfill_health: Mapping[str, Any], platf
         "platform": platform,
         "instagram_authenticated": False,
         "reason": (
-            worker_auth.get("instagram_auth_reason")
-            or worker_auth.get("reason")
-            or "instagram_identity_unavailable"
+            worker_auth.get("instagram_auth_reason") or worker_auth.get("reason") or "instagram_identity_unavailable"
         ),
         "detail": worker_auth.get("instagram_auth_detail"),
     }
@@ -932,9 +917,7 @@ def _auth_failure_pressure(
 ) -> dict[str, Any]:
     runs = _list_of_dicts(backfill_health.get("runs"))
     matching_runs = [
-        run
-        for run in runs
-        if _matches_platform(run, platform) and _matches_account(run, account, unknown_matches=True)
+        run for run in runs if _matches_platform(run, platform) and _matches_account(run, account, unknown_matches=True)
     ]
     max_rate = 0.0
     total_failures = 0
