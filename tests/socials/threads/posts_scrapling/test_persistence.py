@@ -227,4 +227,4 @@ def test_persist_threads_posts_tracks_required_shared_catalog_failures(monkeypat
 
     assert result.posts_upserted == 1
     assert result.catalog_posts_upserted == 1
-    assert result.required_catalog_upsert_failures == 1
+    assert result.required_shared_persistence_failures == 1
