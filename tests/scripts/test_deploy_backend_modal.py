@@ -11,9 +11,20 @@ from scripts.modal import deploy_backend as cli
 
 
 def test_pinned_modal_env_forces_admin_profile() -> None:
-    env = cli.pinned_modal_env({"MODAL_PROFILE": "thb-bbl", "OTHER": "1"})
+    env = cli.pinned_modal_env(
+        {
+            "MODAL_PROFILE": "thb-bbl",
+            "TRR_MODAL_APP_NAME": "other-app",
+            "TRR_MODAL_INSTAGRAM_PAYLOAD_READ_MODE": "compare",
+            "TRR_MODAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE": "0.1",
+            "OTHER": "1",
+        }
+    )
 
     assert env["MODAL_PROFILE"] == "admin-56995"
+    assert env["TRR_MODAL_APP_NAME"] == "trr-backend-jobs"
+    assert env["TRR_MODAL_INSTAGRAM_PAYLOAD_READ_MODE"] == "compare"
+    assert env["TRR_MODAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE"] == "0.1"
     assert env["OTHER"] == "1"
 
 

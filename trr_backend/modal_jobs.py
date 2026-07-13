@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import pathlib
 import socket
@@ -278,6 +279,12 @@ _MODAL_LEAN_REQUIREMENTS: Final = _BACKEND_ROOT / "requirements.modal.lean.lock.
 _MODAL_BROWSER_REQUIREMENTS: Final = _BACKEND_ROOT / "requirements.modal.browser.lock.txt"
 _MODAL_VISION_REQUIREMENTS: Final = _BACKEND_ROOT / "requirements.modal.vision.lock.txt"
 _SOCIAL_IMAGE_PIP_PACKAGES: Final[tuple[str, ...]] = ()
+_INSTAGRAM_PAYLOAD_READ_MODE_ENV: Final = "SOCIAL_INSTAGRAM_PAYLOAD_READ_MODE"
+_MODAL_INSTAGRAM_PAYLOAD_READ_MODE_ENV: Final = "TRR_MODAL_INSTAGRAM_PAYLOAD_READ_MODE"
+_INSTAGRAM_PAYLOAD_READ_MODES: Final[frozenset[str]] = frozenset({"legacy", "compare", "sidecar"})
+_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE_ENV: Final = "SOCIAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE"
+_MODAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE_ENV: Final = "TRR_MODAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE"
+_DEFAULT_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE: Final = 0.1
 _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "TRR_DB_POOL_MINCONN": "1",
     "TRR_DB_POOL_MAXCONN": "2",
@@ -708,6 +715,32 @@ def _inject_modal_runtime_defaults() -> None:
         os.environ.pop("OBJECT_STORAGE_PROFILE", None)
 
 
+def _modal_api_runtime_env() -> dict[str, str]:
+    """Return explicit, non-secret API rollout controls for Modal containers."""
+    read_mode = str(os.getenv(_MODAL_INSTAGRAM_PAYLOAD_READ_MODE_ENV) or "legacy").strip().lower()
+    if read_mode not in _INSTAGRAM_PAYLOAD_READ_MODES:
+        allowed = ", ".join(sorted(_INSTAGRAM_PAYLOAD_READ_MODES))
+        raise RuntimeError(f"{_MODAL_INSTAGRAM_PAYLOAD_READ_MODE_ENV} must be one of: {allowed}")
+    if read_mode != "compare":
+        sample_rate = 0.0
+    else:
+        raw_sample_rate = str(os.getenv(_MODAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE_ENV) or "").strip()
+        try:
+            sample_rate = float(raw_sample_rate) if raw_sample_rate else _DEFAULT_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE
+        except ValueError as exc:
+            raise RuntimeError(
+                f"{_MODAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE_ENV} must be greater than 0 and at most 1"
+            ) from exc
+        if not math.isfinite(sample_rate) or not 0.0 < sample_rate <= 1.0:
+            raise RuntimeError(
+                f"{_MODAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE_ENV} must be greater than 0 and at most 1"
+            )
+    return {
+        _INSTAGRAM_PAYLOAD_READ_MODE_ENV: read_mode,
+        _INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE_ENV: format(sample_rate, "g"),
+    }
+
+
 def _worker_id(worker_family: str) -> str:
     normalized = str(worker_family or "worker").strip().lower().replace(" ", "-")
     return f"modal:{normalized}:{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
@@ -776,6 +809,7 @@ app = modal.App(_APP_NAME, image=_image)
     timeout=60 * 60,
     min_containers=_API_MIN_CONTAINERS,
     max_containers=_API_MAX_CONTAINERS,
+    env=_modal_api_runtime_env(),
 )
 @modal.asgi_app(label=_API_LABEL, custom_domains=_api_custom_domains())
 def serve_backend_api():

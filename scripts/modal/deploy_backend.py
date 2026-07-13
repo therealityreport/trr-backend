@@ -42,6 +42,7 @@ def python_command() -> str:
 def pinned_modal_env(environ: dict[str, str] | None = None) -> dict[str, str]:
     env = dict(environ or os.environ)
     env["MODAL_PROFILE"] = REQUIRED_MODAL_PROFILE
+    env["TRR_MODAL_APP_NAME"] = DEFAULT_APP_NAME
     return env
 
 
