@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -10,6 +11,7 @@ from fastapi import HTTPException
 
 import trr_backend.socials.twitter.direct_scrape as direct_scrape
 from trr_backend.socials.twitter import Tweet
+from trr_backend.socials.twitter.scraper import TwitterScrapeConfig, TwitterScraper
 
 
 def _tweet(
@@ -307,6 +309,52 @@ def test_fetch_quotes_re_raises_http_exception_from_auth_loader() -> None:
         )
 
     assert exc_info.value.status_code == 429
+
+
+def test_syndication_filter_treats_naive_window_bounds_as_utc(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Response:
+        status_code = 200
+
+        def __init__(self, entries: list[dict[str, Any]]) -> None:
+            self.text = (
+                '<script id="__NEXT_DATA__" type="application/json">'
+                + json.dumps({"props": {"pageProps": {"timeline": {"entries": entries}}}})
+                + "</script>"
+            )
+
+        def raise_for_status(self) -> None:
+            return None
+
+    def _entry(tweet_id: str, created_at: str) -> dict[str, Any]:
+        return {
+            "content": {
+                "tweet": {
+                    "id_str": tweet_id,
+                    "created_at": created_at,
+                    "full_text": "#RHOSLC",
+                    "user": {"screen_name": "bravo", "name": "Bravo"},
+                }
+            }
+        }
+
+    scraper = TwitterScraper()
+    scraper.session = SimpleNamespace(
+        get=lambda *_args, **_kwargs: _Response(
+            [
+                _entry("before-window", "Sat Jan 31 23:59:59 +0000 2026"),
+                _entry("start-boundary", "Sun Feb 01 00:00:00 +0000 2026"),
+                _entry("end-boundary", "Mon Feb 02 00:00:00 +0000 2026"),
+            ]
+        )
+    )
+    monkeypatch.setattr(scraper, "_rate_limit", lambda *_args, **_kwargs: None)
+
+    tweets = scraper._scrape_syndication(
+        "bravo",
+        TwitterScrapeConfig(query="RHOSLC", date_start=datetime(2026, 2, 1), date_end=datetime(2026, 2, 1)),
+    )
+
+    assert [tweet.tweet_id for tweet in tweets] == ["start-boundary"]
 
 
 def test_direct_scrape_keeps_shared_catalog_and_legacy_repository_out_of_direct_module() -> None:

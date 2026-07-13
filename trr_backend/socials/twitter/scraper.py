@@ -1738,9 +1738,9 @@ class TwitterScraper:
 
             # Check date range (end bound is exclusive).
             if tweet.created_at > 0:
-                if tweet.created_at < config.date_start.timestamp():
+                if tweet.created_at < self._window_bound_timestamp(config.date_start):
                     continue
-                if tweet.created_at >= config.date_end.timestamp():
+                if tweet.created_at >= self._window_bound_timestamp(config.date_end):
                     continue
 
             tweets.append(tweet)

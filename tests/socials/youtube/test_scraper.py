@@ -35,6 +35,14 @@ def _build_video(video_id: str, *, surface: str, published_at: int) -> YouTubeVi
     )
 
 
+def test_config_treats_naive_date_start_as_utc() -> None:
+    config = YouTubeScrapeConfig(channel_handle="bravo", date_start=datetime(2026, 5, 1))
+
+    assert config.date_start is not None
+    assert config.date_start.tzinfo is UTC
+    assert config.start_timestamp == datetime(2026, 5, 1, tzinfo=UTC).timestamp()
+
+
 def test_apply_surface_guaranteed_limit_overrides_small_cap_when_both_surfaces_present() -> None:
     scraper = YouTubeScraper()
     videos = [
@@ -350,6 +358,44 @@ def test_parse_video_renderer_uses_header_avatar_fallback_when_renderer_avatar_m
 
     assert parsed is not None
     assert parsed.user_avatar_url == "https://yt3.googleusercontent.com/avatar=s1024-c-k"
+
+
+def test_parse_video_renderer_reads_runs_form_view_count() -> None:
+    scraper = YouTubeScraper()
+    config = YouTubeScrapeConfig(channel_handle="bravo", keywords=[])
+    renderer = {
+        "videoId": "abc1234",
+        "title": {"runs": [{"text": "Bravo clip"}]},
+        "descriptionSnippet": {"runs": [{"text": "episode"}]},
+        "viewCountText": {"runs": [{"text": "1,234"}, {"text": " views"}]},
+        "publishedTimeText": {"simpleText": "1 day ago"},
+        "ownerText": {"runs": [{"text": "Bravo"}]},
+        "thumbnail": {"thumbnails": [{"url": "https://img.test/thumb.jpg"}]},
+    }
+
+    parsed = scraper._parse_video_renderer(renderer, config)  # noqa: SLF001
+
+    assert parsed is not None
+    assert parsed.views == 1234
+
+
+def test_parse_video_renderer_reads_simple_text_view_count() -> None:
+    scraper = YouTubeScraper()
+    config = YouTubeScrapeConfig(channel_handle="bravo", keywords=[])
+    renderer = {
+        "videoId": "abc1234",
+        "title": {"runs": [{"text": "Bravo clip"}]},
+        "descriptionSnippet": {"runs": [{"text": "episode"}]},
+        "viewCountText": {"simpleText": "5,678 views"},
+        "publishedTimeText": {"simpleText": "1 day ago"},
+        "ownerText": {"runs": [{"text": "Bravo"}]},
+        "thumbnail": {"thumbnails": [{"url": "https://img.test/thumb.jpg"}]},
+    }
+
+    parsed = scraper._parse_video_renderer(renderer, config)  # noqa: SLF001
+
+    assert parsed is not None
+    assert parsed.views == 5678
 
 
 def test_scrape_progress_reports_non_zero_shorts_initial_pages(monkeypatch) -> None:
@@ -1087,6 +1133,56 @@ def test_fetch_comment_replies_parses_nested_comment_view_model(monkeypatch) -> 
         delay=0.0,
     )
 
+    assert len(replies) == 1
+    assert replies[0].comment_id == "reply-1"
+    assert replies[0].is_reply is True
+    assert replies[0].parent_comment_id == "parent-1"
+
+
+def test_fetch_comment_replies_stops_when_continuation_token_does_not_advance(monkeypatch) -> None:
+    scraper = YouTubeScraper()
+    calls: list[str] = []
+
+    def _fake_fetch_comment_continuation(token: str, *_args, **_kwargs):
+        calls.append(token)
+        return {
+            "onResponseReceivedActions": [
+                {
+                    "appendContinuationItemsAction": {
+                        "continuationItems": [
+                            {
+                                "commentRenderer": {
+                                    "commentId": "reply-1",
+                                    "contentText": {"runs": [{"text": "reply text"}]},
+                                    "authorText": {"simpleText": "Viewer"},
+                                    "authorEndpoint": {"browseEndpoint": {"browseId": "UCV"}},
+                                    "voteCount": {"simpleText": "1"},
+                                    "publishedTimeText": {"runs": [{"text": "1 day ago"}]},
+                                }
+                            },
+                            {
+                                "continuationItemRenderer": {
+                                    "continuationEndpoint": {"continuationCommand": {"token": token}}
+                                }
+                            },
+                        ]
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(scraper, "_rate_limit", lambda _delay, **_kw: None)
+    monkeypatch.setattr(scraper, "_fetch_comment_continuation", _fake_fetch_comment_continuation)
+
+    replies = scraper._fetch_comment_replies(
+        "reply-token",
+        "abc123",
+        "https://www.youtube.com/watch?v=abc123",
+        "parent-1",
+        delay=0.0,
+    )
+
+    assert calls == ["reply-token"]
     assert len(replies) == 1
     assert replies[0].comment_id == "reply-1"
     assert replies[0].is_reply is True
