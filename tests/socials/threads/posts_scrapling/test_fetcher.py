@@ -6,7 +6,7 @@ from typing import Any
 
 from trr_backend.socials.threads.posts_scrapling import fetcher as fetcher_module
 from trr_backend.socials.threads.posts_scrapling.fetcher import ThreadsPostsScraplingFetcher
-from trr_backend.socials.threads.scraper import ThreadsPost, ThreadsScrapeConfig
+from trr_backend.socials.threads.scraper import ThreadsPost
 
 
 class _FakeScraplingFetcher:
@@ -42,10 +42,12 @@ def test_threads_fetcher_runtime_metadata_includes_final_request_count() -> None
     fetcher._last_stop_reason = "complete"  # noqa: SLF001
     fetcher._last_retryable = False  # noqa: SLF001
     fetcher._last_complete = True  # noqa: SLF001
+    fetcher._scraper.last_retrieval_meta = {"pages_scanned": 3}  # noqa: SLF001
 
     assert fetcher.runtime_metadata["request_count"] == 4
     assert fetcher.runtime_metadata["fallback_chain"] == ["scrapling_warmup", "graphql_profile_posts"]
     assert fetcher.runtime_metadata["complete"] is True
+    assert fetcher.runtime_metadata["pages_fetched"] == 3
 
 
 def test_threads_fetcher_runtime_metadata_does_not_claim_scrapling_before_use() -> None:
@@ -162,31 +164,6 @@ def test_threads_fetcher_falls_back_to_threads_scraper_when_bootstrap_tokens_mis
     assert metadata["fallback_chain"] == ["scrapling_warmup", "legacy_threads_scraper"]
     assert metadata["request_count"] == 3
     assert metadata["stop_reason"] == "complete"
-
-
-def test_threads_fetcher_legacy_scraper_transport_error_is_not_auth_failed(monkeypatch) -> None:
-    fetcher = ThreadsPostsScraplingFetcher(
-        cookies=[{"name": "sessionid", "value": "abc", "domain": ".threads.com", "path": "/"}],
-        raw_cookies={"sessionid": "abc", "csrftoken": "csrf"},
-        proxy_config=None,
-    )
-
-    def _raise_transport_error(_config: ThreadsScrapeConfig) -> list[ThreadsPost]:
-        raise ConnectionError("connection reset")
-
-    monkeypatch.setattr(fetcher._scraper, "scrape", _raise_transport_error)  # noqa: SLF001
-
-    result = asyncio.run(
-        fetcher._fetch_with_legacy_scraper(  # noqa: SLF001
-            ThreadsScrapeConfig(username="trr", delay_seconds=0, max_pages=1),
-            reason="legacy_threads_scraper_failed",
-        )
-    )
-
-    assert result.posts == []
-    assert result.auth_failed is False
-    assert result.fetch_failed is True
-    assert result.retryable is True
 
 
 def test_threads_fetcher_fallback_does_not_claim_scrapling_when_builder_fails(monkeypatch) -> None:

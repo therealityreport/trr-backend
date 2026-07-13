@@ -351,6 +351,68 @@ def test_tiktok_job_runner_shared_mode_passes_catalog_mode_to_persistence(
     assert metadata["persist_counters"]["catalog_posts_upserted"] == 1
 
 
+def test_tiktok_job_runner_retries_incomplete_shared_catalog_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_lifecycle: _FakeLifecycle,
+) -> None:
+    from trr_backend.socials.tiktok.posts_scrapling import job_runner as jr
+
+    class _FakeFetcher:
+        runtime_metadata = {"transport": "test", "request_count": 1}
+
+        async def warmup(self, _account_handle: str) -> None:
+            return None
+
+        async def resolve_sec_uid(self, _account_handle: str) -> str:
+            return "SEC_UID"
+
+        async def fetch_posts_page(self, *, sec_uid: str, cursor: str | None = None) -> SimpleNamespace:
+            del sec_uid, cursor
+            return SimpleNamespace(
+                auth_failed=False,
+                fetch_failed=False,
+                retryable=False,
+                fetch_reason=None,
+                posts=[{"id": "tiktok-1"}],
+                has_more=False,
+                cursor=None,
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    _install_common_fakes(
+        monkeypatch,
+        jr,
+        fetcher=_FakeFetcher(),
+        persist_result=PersistedTikTokPosts(
+            posts_upserted=1,
+            catalog_posts_upserted=1,
+            required_catalog_upsert_failures=1,
+            posts_skipped=1,
+            posts_skipped_by_reason={"upsert_failed": 1},
+        ),
+    )
+    monkeypatch.setattr(jr.pg, "fetch_one", _running_status_or_final_row)
+
+    jr.run_tiktok_posts_scrapling_job(
+        {
+            "id": "job-1",
+            "run_id": "run-1",
+            "attempt_count": 1,
+            "max_attempts": 2,
+            "config": {"account": "bravotv", "pipeline_ingest_mode": "shared_account_catalog_backfill"},
+        },
+        worker_id="worker-1",
+    )
+
+    finish = fake_lifecycle.finish_calls[-1]
+    assert finish["status"] == "retrying"
+    assert finish["last_error_code"] == "tiktok_shared_catalog_persistence_incomplete"
+    assert finish["metadata"]["persist_counters"]["posts_upserted"] == 1
+    assert finish["metadata"]["persist_counters"]["required_catalog_upsert_failures"] == 1
+
+
 def test_tiktok_job_runner_recovers_non_json_posts_with_canonical_fallback(
     monkeypatch: pytest.MonkeyPatch,
     fake_lifecycle: _FakeLifecycle,

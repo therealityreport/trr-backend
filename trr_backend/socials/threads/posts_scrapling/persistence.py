@@ -12,6 +12,7 @@ class PersistedThreadsPosts:
     posts_upserted: int
     posts_skipped: int
     catalog_posts_upserted: int = 0
+    required_catalog_upsert_failures: int = 0
     posts_skipped_by_reason: dict[str, int] = field(default_factory=dict)
 
 
@@ -55,6 +56,7 @@ def persist_threads_posts(
     shared_catalog_mode = str(pipeline_ingest_mode or "").strip().lower() == "shared_account_catalog_backfill"
     posts_upserted = 0
     catalog_posts_upserted = 0
+    required_catalog_upsert_failures = 0
     posts_skipped = 0
     posts_skipped_by_reason: dict[str, int] = {}
 
@@ -63,6 +65,11 @@ def persist_threads_posts(
         normalized_reason = str(reason or "").strip() or "unknown"
         posts_skipped += 1
         posts_skipped_by_reason[normalized_reason] = int(posts_skipped_by_reason.get(normalized_reason) or 0) + 1
+
+    def _record_required_catalog_upsert_failure() -> None:
+        nonlocal required_catalog_upsert_failures
+        if shared_catalog_mode:
+            required_catalog_upsert_failures += 1
 
     with pg.db_connection(label="threads-posts-scrapling-sync") as conn:
         for index, post in enumerate(posts, start=1):
@@ -92,20 +99,24 @@ def persist_threads_posts(
             except Exception:
                 logger.exception("Failed to upsert Threads post %s via canonical helper", post_id)
                 _record_skip("upsert_failed")
+                _record_required_catalog_upsert_failure()
                 continue
             if row:
                 posts_upserted += 1
             else:
                 _record_skip("canonical_upsert_returned_none")
+                _record_required_catalog_upsert_failure()
             if shared_catalog_mode:
                 if catalog_row:
                     catalog_posts_upserted += 1
                 else:
                     _record_skip("catalog_upsert_returned_none")
+                    _record_required_catalog_upsert_failure()
 
     return PersistedThreadsPosts(
         posts_upserted=posts_upserted,
         catalog_posts_upserted=catalog_posts_upserted,
+        required_catalog_upsert_failures=required_catalog_upsert_failures,
         posts_skipped=posts_skipped,
         posts_skipped_by_reason=posts_skipped_by_reason,
     )

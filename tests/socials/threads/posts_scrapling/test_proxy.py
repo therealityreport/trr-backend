@@ -36,6 +36,7 @@ def test_select_threads_posts_proxy_returns_none_when_decodo_credentials_exist_w
     monkeypatch.setattr(threads_proxy, "build_proxy_rotator", _fake_build_proxy_rotator)
     monkeypatch.delenv("SOCIAL_THREADS_POSTS_PROXY_URLS", raising=False)
     monkeypatch.delenv("SOCIAL_THREADS_POSTS_PROXY_PROVIDER", raising=False)
+    monkeypatch.delenv("SOCIAL_THREADS_POSTS_USE_STICKY_PROXY", raising=False)
     monkeypatch.setenv("DECODO_USERNAME", "user")
     monkeypatch.setenv("DECODO_PASSWORD", "secret")
     monkeypatch.setenv("DECODO_GATEWAY", "gate.decodo.com:7000")

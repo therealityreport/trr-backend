@@ -243,78 +243,6 @@ def test_threads_job_runner_records_auth_cooldown_on_auth_failed_fetch(
     assert finish["metadata"]["runtime_metadata"]["error"]["auth_cooldown_recorded"] is True
 
 
-def test_threads_job_runner_fetch_failed_falls_back_without_auth_cooldown(
-    monkeypatch: pytest.MonkeyPatch,
-    fake_lifecycle: _FakeLifecycle,
-) -> None:
-    import trr_backend.socials.threads as threads_module
-    from trr_backend.socials.threads.posts_scrapling import job_runner as jr
-
-    class _FakeFetcher:
-        runtime_metadata = {"transport": "test", "request_count": 1, "complete": False}
-
-        async def warmup(self, _account_handle: str) -> None:
-            return None
-
-        async def fetch_posts(self, _account_handle: str, *, max_pages: int | None = None) -> Any:
-            del max_pages
-            return jr.ThreadsPostsFetchResult(
-                posts=[],
-                fetch_failed=True,
-                auth_failed=False,
-                retryable=True,
-                fetch_reason="legacy_threads_scraper_failed",
-            )
-
-        async def aclose(self) -> None:
-            return None
-
-    legacy_calls: list[str] = []
-
-    class _FakeLegacyScraper:
-        runtime_metadata = {
-            "complete": True,
-            "request_count": 1,
-            "retryable": False,
-            "stop_reason": "complete",
-        }
-
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            del args, kwargs
-
-        def scrape(self, config: Any) -> list[Any]:
-            legacy_calls.append(config.username)
-            return [_thread_post("legacy-1")]
-
-    record_calls: list[tuple[str, str, str]] = []
-    _install_common_fakes(
-        monkeypatch,
-        jr,
-        fetcher=_FakeFetcher(),
-        persist_result=PersistedThreadsPosts(posts_upserted=1, posts_skipped=0),
-    )
-    monkeypatch.setattr(threads_module, "ThreadsScraper", _FakeLegacyScraper)
-    monkeypatch.setattr(
-        jr.auth_cooldown,
-        "record_auth_block",
-        lambda platform, account, code: record_calls.append((platform, account, code)),
-    )
-    monkeypatch.setattr(jr.pg, "fetch_one", _running_status_or_final_row)
-
-    jr.run_threads_posts_scrapling_job(
-        {"id": "job-1", "run_id": "run-1", "attempt_count": 1, "max_attempts": 2, "config": {"account": "bravotv"}},
-        worker_id="worker-1",
-    )
-
-    assert record_calls == []
-    assert legacy_calls == ["bravotv"]
-    finish = fake_lifecycle.finish_calls[-1]
-    assert finish["status"] == "completed"
-    assert finish["metadata"]["fetcher_runtime"]["fallback_chain"] == [
-        "legacy_threads_scraper",
-    ]
-
-
 def test_threads_job_runner_fails_safely_when_scrapling_rollout_disabled(
     monkeypatch: pytest.MonkeyPatch,
     fake_lifecycle: _FakeLifecycle,
@@ -811,3 +739,112 @@ def test_threads_job_runner_records_terminal_runtime_metadata(
     assert metadata["activity"]["phase"] == "threads_posts_scrapling_end"
     assert metadata["runtime_metadata"]["listing_progress"]["posts_seen"] == 1
     assert "raw-session-secret" not in repr(metadata)
+
+
+def test_threads_job_runner_retries_after_persisting_incomplete_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_lifecycle: _FakeLifecycle,
+) -> None:
+    from trr_backend.socials.threads.posts_scrapling import job_runner as jr
+
+    class _FakeFetcher:
+        runtime_metadata = {
+            "transport": "graphql_profile_posts",
+            "request_count": 4,
+            "pages_fetched": 3,
+            "complete": False,
+            "retryable": True,
+            "stop_reason": "page_fetch_failed",
+        }
+
+        async def warmup(self, _account_handle: str) -> None:
+            return None
+
+        async def fetch_posts(self, _account_handle: str, *, max_pages: int | None = None) -> Any:
+            del max_pages
+            return jr.ThreadsPostsFetchResult(
+                posts=[_thread_post()],
+                fetch_failed=False,
+                auth_failed=False,
+                retryable=True,
+                fetch_reason="threads_graphql_page_fetch_failed",
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    _install_common_fakes(
+        monkeypatch,
+        jr,
+        fetcher=_FakeFetcher(),
+        persist_result=PersistedThreadsPosts(posts_upserted=1, posts_skipped=0),
+    )
+    monkeypatch.setattr(jr.pg, "fetch_one", _running_status_or_final_row)
+
+    jr.run_threads_posts_scrapling_job(
+        {
+            "id": "job-1",
+            "run_id": "run-1",
+            "attempt_count": 1,
+            "max_attempts": 2,
+            "config": {"account": "bravotv"},
+        },
+        worker_id="worker-1",
+    )
+
+    finish = fake_lifecycle.finish_calls[-1]
+    assert finish["status"] == "retrying"
+    assert finish["items_found"] == 1
+    assert finish["last_error_code"] == "threads_graphql_page_fetch_failed"
+    assert finish["metadata"]["stage_counters"] == {"posts": 1, "pages": 3}
+
+
+def test_threads_job_runner_retries_incomplete_shared_catalog_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_lifecycle: _FakeLifecycle,
+) -> None:
+    from trr_backend.socials.threads.posts_scrapling import job_runner as jr
+
+    class _FakeFetcher:
+        runtime_metadata = {"transport": "test", "request_count": 1, "complete": True, "pages_fetched": 1}
+
+        async def warmup(self, _account_handle: str) -> None:
+            return None
+
+        async def fetch_posts(self, _account_handle: str, *, max_pages: int | None = None) -> Any:
+            del max_pages
+            return jr.ThreadsPostsFetchResult(posts=[_thread_post()])
+
+        async def aclose(self) -> None:
+            return None
+
+    _install_common_fakes(
+        monkeypatch,
+        jr,
+        fetcher=_FakeFetcher(),
+        persist_result=PersistedThreadsPosts(
+            posts_upserted=1,
+            catalog_posts_upserted=1,
+            required_catalog_upsert_failures=1,
+            posts_skipped=1,
+            posts_skipped_by_reason={"upsert_failed": 1},
+        ),
+    )
+    monkeypatch.setattr(jr.pg, "fetch_one", _running_status_or_final_row)
+
+    jr.run_threads_posts_scrapling_job(
+        {
+            "id": "job-1",
+            "run_id": "run-1",
+            "attempt_count": 1,
+            "max_attempts": 2,
+            "config": {"account": "bravotv", "pipeline_ingest_mode": "shared_account_catalog_backfill"},
+        },
+        worker_id="worker-1",
+    )
+
+    finish = fake_lifecycle.finish_calls[-1]
+    assert finish["status"] == "retrying"
+    assert finish["last_error_code"] == "threads_shared_catalog_persistence_incomplete"
+    assert finish["metadata"]["persist_counters"]["posts_upserted"] == 1
+    assert finish["metadata"]["persist_counters"]["required_catalog_upsert_failures"] == 1

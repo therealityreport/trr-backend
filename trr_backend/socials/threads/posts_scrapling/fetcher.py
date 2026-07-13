@@ -110,6 +110,7 @@ class ThreadsPostsScraplingFetcher:
 
     @property
     def runtime_metadata(self) -> dict[str, Any]:
+        retrieval_metadata = dict(getattr(self._scraper, "last_retrieval_meta", {}) or {})
         cookie_metadata = safe_cookie_metadata(
             self._raw_cookies,
             self._warmup_cookie_delta,
@@ -124,6 +125,7 @@ class ThreadsPostsScraplingFetcher:
             "stop_reason": self._last_stop_reason,
             "retryable": bool(self._last_retryable),
             "complete": bool(self._last_complete),
+            "pages_fetched": int(retrieval_metadata.get("pages_scanned") or 0),
             "scrapling_used": bool(self._scrapling_used),
             "scrapling_warmup_failed_reason": self._scrapling_warmup_failed_reason,
             "selected_proxy_fingerprint": self._selected_proxy_fingerprint,
@@ -305,7 +307,7 @@ class ThreadsPostsScraplingFetcher:
             return ThreadsPostsFetchResult(
                 posts=[],
                 fetch_failed=True,
-                auth_failed=False,
+                auth_failed=bool(self._raw_cookies),
                 retryable=True,
                 fetch_reason=str(reason or "legacy_threads_scraper_failed"),
             )
