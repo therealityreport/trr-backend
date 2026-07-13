@@ -78,6 +78,15 @@ def probe_subtitle_streams(video_path: str | Path) -> list[dict[str, Any]]:
     for raw_stream in payload.get("streams", []):
         if not isinstance(raw_stream, dict) or raw_stream.get("codec_type") != "subtitle":
             continue
+        raw_index = raw_stream.get("index")
+        if isinstance(raw_index, bool):
+            continue
+        try:
+            stream_index = int(raw_index)
+        except (TypeError, ValueError):
+            continue
+        if stream_index < 0 or isinstance(raw_index, float) and not raw_index.is_integer():
+            continue
         tags = raw_stream.get("tags") if isinstance(raw_stream.get("tags"), dict) else {}
         disposition = raw_stream.get("disposition") if isinstance(raw_stream.get("disposition"), dict) else {}
         codec_name = str(raw_stream.get("codec_name") or "unknown").strip().lower()
@@ -85,7 +94,7 @@ def probe_subtitle_streams(video_path: str | Path) -> list[dict[str, Any]]:
         selection_status, extraction_status = _subtitle_selection(codec_name=codec_name, language_raw=language_raw)
         inventory.append(
             {
-                "stream_index": int(raw_stream["index"]),
+                "stream_index": stream_index,
                 "codec_name": codec_name,
                 "language_raw": language_raw,
                 "language_normalized": normalize_subtitle_language(language_raw),

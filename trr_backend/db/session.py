@@ -52,7 +52,7 @@ def _validate_identifier_list(names: str) -> str:
     return ",".join(validated)
 
 
-def _validate_mapping_keys(payload: dict[str, Any]) -> dict[str, Any]:
+def validate_mapping_keys(payload: dict[str, Any]) -> dict[str, Any]:
     for key in payload:
         _validate_identifier(key)
     return payload
@@ -127,7 +127,7 @@ class DbSchema:
         return DbQuery(self._session, self._name, _validate_identifier(name))
 
     def rpc(self, function_name: str, params: dict[str, Any] | None = None) -> DbRpc:
-        safe_params = _validate_mapping_keys(params or {})
+        safe_params = validate_mapping_keys(params or {})
         return DbRpc(self._session, self._name, _validate_identifier(function_name), safe_params)
 
 
@@ -373,7 +373,7 @@ class DbQuery:
     def _execute_update(self) -> DbResponse:
         if not isinstance(self._payload, dict):
             raise ValueError("Update payload must be a dict")
-        _validate_mapping_keys(self._payload)
+        validate_mapping_keys(self._payload)
         set_cols = sorted(self._payload.keys())
         if not set_cols:
             return DbResponse(data=[], error=None)

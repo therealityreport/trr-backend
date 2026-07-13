@@ -11,7 +11,7 @@ import psycopg2
 from psycopg2.extras import Json
 
 from trr_backend.db import pg
-from trr_backend.db.session import _validate_mapping_keys
+from trr_backend.db.session import validate_mapping_keys
 
 
 def _json_safe(value: Any) -> Any:
@@ -384,7 +384,7 @@ def upsert_subtitle_track_inventory(video_asset_id: str, tracks: list[dict[str, 
 def update_subtitle_track(track_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     if not payload:
         return pg.fetch_one("SELECT * FROM ml.analysis_media_subtitle_tracks WHERE id = %s::uuid", [track_id])
-    payload = _validate_mapping_keys(payload)
+    payload = validate_mapping_keys(payload)
     assignments: list[str] = []
     params: list[Any] = []
     for key, value in payload.items():

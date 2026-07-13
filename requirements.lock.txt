@@ -272,6 +272,8 @@ multidict==6.7.1
     #   aiohttp
     #   grpclib
     #   yarl
+numpy==1.26.4
+    # via -r requirements.in
 oauthlib==3.3.1
     # via requests-oauthlib
 orjson==3.11.9

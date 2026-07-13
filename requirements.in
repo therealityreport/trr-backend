@@ -10,6 +10,7 @@ google-auth>=2.30.0
 google-auth-oauthlib>=1.2.0
 beautifulsoup4>=4.12.0
 tenacity>=8.2.0
+numpy==1.26.4
 
 # Gemini integration (used by multiple pipeline stages)
 google-genai>=1.0.0

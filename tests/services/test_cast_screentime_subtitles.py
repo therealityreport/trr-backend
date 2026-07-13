@@ -90,6 +90,31 @@ def test_probe_subtitle_streams_inventories_all_subtitle_streams(monkeypatch):
     assert tracks[2]["selection_status"] == "skipped_unknown_language"
 
 
+def test_probe_subtitle_streams_skips_missing_or_invalid_stream_indexes(monkeypatch):
+    payload = {
+        "streams": [
+            {"codec_type": "subtitle", "codec_name": "subrip", "tags": {"language": "eng"}},
+            {"index": None, "codec_type": "subtitle", "codec_name": "subrip", "tags": {"language": "eng"}},
+            {"index": "bad", "codec_type": "subtitle", "codec_name": "subrip", "tags": {"language": "eng"}},
+            {"index": True, "codec_type": "subtitle", "codec_name": "subrip", "tags": {"language": "eng"}},
+            {"index": -1, "codec_type": "subtitle", "codec_name": "subrip", "tags": {"language": "eng"}},
+            {"index": 2.5, "codec_type": "subtitle", "codec_name": "subrip", "tags": {"language": "eng"}},
+            {"index": "7", "codec_type": "subtitle", "codec_name": "subrip", "tags": {"language": "eng"}},
+        ]
+    }
+
+    class Result:
+        returncode = 0
+        stdout = json.dumps(payload)
+        stderr = ""
+
+    monkeypatch.setattr(subtitles.subprocess, "run", lambda *args, **kwargs: Result())
+
+    tracks = subtitles.probe_subtitle_streams("fixture.mp4")
+
+    assert [track["stream_index"] for track in tracks] == [7]
+
+
 def test_primary_selection_prefers_default_non_forced_then_lowest_index():
     tracks = [
         {"stream_index": 5, "is_default": False, "is_forced": False},

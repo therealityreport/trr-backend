@@ -208,6 +208,11 @@ def test_update_subtitle_extraction_status_rejects_untrusted_column_name():
         cast_screentime.update_subtitle_extraction_status("asset-1", "failed", dropped_table_at="now")
 
 
+def test_update_subtitle_track_rejects_non_identifier_column():
+    with pytest.raises(ValueError, match="Invalid SQL identifier"):
+        cast_screentime.update_subtitle_track("track-1", {"status = 'failed'; --": "complete"})
+
+
 def test_replace_cast_screentime_evidence_dedupes_duplicate_evidence_keys(monkeypatch):
     captured = {}
 
