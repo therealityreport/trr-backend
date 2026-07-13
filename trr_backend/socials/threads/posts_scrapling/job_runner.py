@@ -559,9 +559,7 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
             posts_fetched = len(result.posts)
             materialized_posts_upserted = persisted.posts_upserted
             catalog_posts_upserted = int(getattr(persisted, "catalog_posts_upserted", 0) or 0)
-            required_catalog_upsert_failures = int(
-                getattr(persisted, "required_catalog_upsert_failures", 0) or 0
-            )
+            required_catalog_upsert_failures = int(getattr(persisted, "required_catalog_upsert_failures", 0) or 0)
             posts_upserted = max(materialized_posts_upserted, catalog_posts_upserted)
             posts_skipped = persisted.posts_skipped
             _merge_skipped_reasons(dict(getattr(persisted, "posts_skipped_by_reason", {}) or {}))
