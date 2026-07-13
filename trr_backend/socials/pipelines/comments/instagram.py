@@ -10,6 +10,7 @@ import re
 import time as time_module
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
 
@@ -158,6 +159,34 @@ def _dispatch_due_social_jobs_in_background(*, run_id: str) -> None:
                 "[comments-dispatch] background dispatch failed: run_id=%s",
                 normalized_run_id,
             )
+
+
+@contextmanager
+def _session_advisory_lock_connection(*, label: str, pool_name: str):
+    """Keep a session advisory lock on one pooled connection for the context."""
+    discard_state = {"discarded": False, "preserve_outcome": False}
+    try:
+        with pg.db_connection(label=label, pool_name=pool_name) as conn:
+            yield conn, discard_state
+    except Exception:
+        if discard_state["discarded"] and discard_state["preserve_outcome"]:
+            return
+        raise
+
+
+def _discard_session_advisory_lock_connection(
+    conn: Any,
+    *,
+    discard_state: dict[str, bool],
+    preserve_outcome: bool,
+) -> None:
+    """Close a connection whose session advisory lock could not be released."""
+    discard_state["discarded"] = True
+    discard_state["preserve_outcome"] = bool(preserve_outcome)
+    try:
+        conn.close()
+    except Exception:  # noqa: BLE001 - the pool context still attempts disposal
+        logger.debug("[advisory-lock] failed closing connection after unlock failure", exc_info=True)
 
 
 def _instagram_comments_stale_after_hours() -> int:
@@ -8149,6 +8178,8 @@ def cancel_social_account_comments_job(
 _LOCAL_ROOM_NAMES = {
     "dispatch_due_social_jobs",
     "_dispatch_due_social_jobs_in_background",
+    "_session_advisory_lock_connection",
+    "_discard_session_advisory_lock_connection",
     "_instagram_comments_stale_after_hours",
     "_instagram_comments_target_count_expr",
     "_instagram_social_account_comments_coverage_diagnostics",
