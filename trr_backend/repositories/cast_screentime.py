@@ -11,6 +11,7 @@ import psycopg2
 from psycopg2.extras import Json
 
 from trr_backend.db import pg
+from trr_backend.db.session import _validate_mapping_keys
 
 
 def _json_safe(value: Any) -> Any:
@@ -133,6 +134,409 @@ def create_video_asset(payload: dict[str, Any]) -> dict[str, Any]:
 
 def get_video_asset(video_asset_id: str) -> dict[str, Any] | None:
     return pg.fetch_one("SELECT * FROM ml.analysis_media_assets WHERE id = %s", [video_asset_id])
+
+
+def get_subtitle_summary(video_asset_id: str, include_skipped: bool = False) -> dict[str, Any] | None:
+    """Return asset-level extraction state plus the detected subtitle inventory."""
+    asset = pg.fetch_one(
+        """
+        SELECT
+          id::text AS video_asset_id,
+          subtitle_extraction_status AS status,
+          subtitle_extraction_error AS error,
+          subtitle_extraction_attempts AS attempts,
+          subtitle_extraction_requested_at AS requested_at,
+          subtitle_extraction_started_at AS started_at,
+          subtitle_extraction_completed_at AS completed_at
+        FROM ml.analysis_media_assets
+        WHERE id = %s::uuid
+        LIMIT 1
+        """,
+        [video_asset_id],
+    )
+    if not asset:
+        return None
+
+    filters = ["video_asset_id = %s::uuid"]
+    if not include_skipped:
+        filters.append("selection_status = 'eligible_english'")
+    tracks = pg.fetch_all(
+        f"""
+        SELECT
+          id::text AS id,
+          video_asset_id::text AS video_asset_id,
+          stream_index,
+          codec_name,
+          language_normalized AS language,
+          language_raw,
+          title,
+          handler_name,
+          is_default,
+          is_forced,
+          is_primary,
+          selection_status,
+          extraction_status,
+          srt_object_key,
+          cue_json_object_key,
+          srt_content_type,
+          cue_json_content_type,
+          cue_count,
+          first_cue_start_ms,
+          last_cue_end_ms,
+          srt_size_bytes,
+          cue_json_size_bytes,
+          srt_sha256,
+          cue_json_sha256,
+          error_text AS error,
+          metadata,
+          created_at,
+          updated_at
+        FROM ml.analysis_media_subtitle_tracks
+        WHERE {" AND ".join(filters)}
+        ORDER BY stream_index ASC
+        """,
+        [video_asset_id],
+    )
+    all_counts = (
+        pg.fetch_one(
+            """
+        SELECT
+          count(*)::int AS discovered_track_count,
+          count(*) FILTER (WHERE selection_status = 'eligible_english')::int AS eligible_track_count,
+          count(*) FILTER (
+            WHERE selection_status = 'eligible_english' AND extraction_status = 'complete'
+          )::int AS completed_track_count,
+          count(*) FILTER (
+            WHERE selection_status = 'eligible_english' AND extraction_status = 'failed'
+          )::int AS failed_track_count,
+          max(id::text) FILTER (WHERE is_primary) AS primary_track_id
+        FROM ml.analysis_media_subtitle_tracks
+        WHERE video_asset_id = %s::uuid
+        """,
+            [video_asset_id],
+        )
+        or {}
+    )
+    return {**asset, **all_counts, "tracks": tracks}
+
+
+def get_subtitle_track(video_asset_id: str, track_id: str) -> dict[str, Any] | None:
+    """Resolve a subtitle track while enforcing its owning video asset."""
+    return pg.fetch_one(
+        """
+        SELECT
+          t.*,
+          t.id::text AS id,
+          t.video_asset_id::text AS video_asset_id,
+          t.language_normalized AS language,
+          t.error_text AS error
+        FROM ml.analysis_media_subtitle_tracks t
+        WHERE t.video_asset_id = %s::uuid
+          AND t.id = %s::uuid
+        LIMIT 1
+        """,
+        [video_asset_id, track_id],
+    )
+
+
+def queue_subtitle_extraction(
+    video_asset_id: str,
+    force: bool = False,
+    *,
+    stale_after_seconds: int = 9000,
+) -> dict[str, Any] | None:
+    """Atomically queue extraction without overlapping an active worker.
+
+    A forced request may recover an active row only after its lease age exceeds
+    the configured worker timeout safety window.
+    """
+    with pg.db_connection(label="queue-subtitle-extraction") as conn:
+        current = pg.fetch_one(
+            """
+            SELECT
+              id::text AS video_asset_id,
+              subtitle_extraction_status AS status,
+              coalesce(
+                subtitle_extraction_started_at,
+                subtitle_extraction_requested_at,
+                updated_at,
+                created_at
+              ) <= now() - make_interval(secs => %s) AS is_stale
+            FROM ml.analysis_media_assets
+            WHERE id = %s::uuid
+            FOR UPDATE
+            """,
+            [max(int(stale_after_seconds), 60), video_asset_id],
+            conn=conn,
+        )
+        if not current:
+            return None
+        current_status = str(current.get("status") or "not_requested")
+        if current_status in {"queued", "running"} and (not force or not bool(current.get("is_stale"))):
+            return {
+                "video_asset_id": current["video_asset_id"],
+                "status": current_status,
+                "already_active": True,
+                "should_dispatch": False,
+                "force": force,
+            }
+        if current_status == "complete" and not force:
+            return {
+                "video_asset_id": current["video_asset_id"],
+                "status": current_status,
+                "already_active": False,
+                "should_dispatch": False,
+                "force": False,
+            }
+
+        rows = pg.execute_returning(
+            """
+            UPDATE ml.analysis_media_assets
+            SET subtitle_extraction_status = 'queued',
+                subtitle_extraction_error = NULL,
+                subtitle_extraction_requested_at = now(),
+                subtitle_extraction_started_at = NULL,
+                subtitle_extraction_completed_at = NULL,
+                updated_at = now()
+            WHERE id = %s::uuid
+            RETURNING id::text AS video_asset_id, subtitle_extraction_status AS status
+            """,
+            [video_asset_id],
+            conn=conn,
+        )
+        row = rows[0] if rows else current
+        return {**row, "already_active": False, "should_dispatch": True, "force": force}
+
+
+def claim_subtitle_extraction(video_asset_id: str, force: bool = False) -> dict[str, Any] | None:
+    """Claim one queued asset for a worker; duplicate workers receive no row."""
+    rows = pg.execute_returning(
+        """
+        UPDATE ml.analysis_media_assets
+        SET subtitle_extraction_status = 'running',
+            subtitle_extraction_error = NULL,
+            subtitle_extraction_attempts = subtitle_extraction_attempts + 1,
+            subtitle_extraction_started_at = now(),
+            subtitle_extraction_completed_at = NULL,
+            updated_at = now()
+        WHERE id = %s::uuid
+          AND subtitle_extraction_status = 'queued'
+        RETURNING *
+        """,
+        [video_asset_id],
+    )
+    return rows[0] if rows else None
+
+
+def upsert_subtitle_track_inventory(video_asset_id: str, tracks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Refresh probe metadata without discarding a previously completed revision."""
+    rows = [
+        (
+            video_asset_id,
+            track["stream_index"],
+            track["codec_name"],
+            track.get("language_raw"),
+            track.get("language_normalized"),
+            track.get("title"),
+            track.get("handler_name"),
+            bool(track.get("is_default")),
+            bool(track.get("is_forced")),
+            track["selection_status"],
+            track["extraction_status"],
+            _json(track.get("metadata", {})),
+        )
+        for track in tracks
+    ]
+    return pg.execute_values_returning(
+        """
+        INSERT INTO ml.analysis_media_subtitle_tracks (
+          video_asset_id, stream_index, codec_name, language_raw, language_normalized,
+          title, handler_name, is_default, is_forced, selection_status, extraction_status, metadata
+        ) VALUES %s
+        ON CONFLICT (video_asset_id, stream_index) DO UPDATE SET
+          codec_name = EXCLUDED.codec_name,
+          language_raw = EXCLUDED.language_raw,
+          language_normalized = EXCLUDED.language_normalized,
+          title = EXCLUDED.title,
+          handler_name = EXCLUDED.handler_name,
+          is_default = EXCLUDED.is_default,
+          is_forced = EXCLUDED.is_forced,
+          selection_status = EXCLUDED.selection_status,
+          is_primary = CASE
+            WHEN EXCLUDED.selection_status = 'eligible_english'
+              THEN ml.analysis_media_subtitle_tracks.is_primary
+            ELSE false
+          END,
+          extraction_status = CASE
+            WHEN ml.analysis_media_subtitle_tracks.extraction_status = 'complete'
+              AND EXCLUDED.selection_status = 'eligible_english'
+              THEN ml.analysis_media_subtitle_tracks.extraction_status
+            ELSE EXCLUDED.extraction_status
+          END,
+          metadata = EXCLUDED.metadata,
+          updated_at = now()
+        RETURNING *
+        """,
+        rows,
+    )
+
+
+def update_subtitle_track(track_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    if not payload:
+        return pg.fetch_one("SELECT * FROM ml.analysis_media_subtitle_tracks WHERE id = %s::uuid", [track_id])
+    payload = _validate_mapping_keys(payload)
+    assignments: list[str] = []
+    params: list[Any] = []
+    for key, value in payload.items():
+        assignments.append(f"{key} = %s")
+        params.append(_json(_normalize(value)))
+    assignments.append("updated_at = now()")
+    params.append(track_id)
+    rows = pg.execute_returning(
+        f"UPDATE ml.analysis_media_subtitle_tracks SET {', '.join(assignments)} WHERE id = %s::uuid RETURNING *",
+        params,
+    )
+    return rows[0] if rows else None
+
+
+def set_primary_subtitle_track(video_asset_id: str, track_id: str) -> dict[str, Any] | None:
+    with pg.db_connection(label="set-primary-subtitle-track") as conn:
+        pg.execute(
+            "UPDATE ml.analysis_media_subtitle_tracks SET is_primary = false "
+            "WHERE video_asset_id = %s::uuid AND is_primary = true",
+            [video_asset_id],
+            conn=conn,
+        )
+        rows = pg.execute_returning(
+            """
+            UPDATE ml.analysis_media_subtitle_tracks
+            SET is_primary = true, updated_at = now()
+            WHERE video_asset_id = %s::uuid
+              AND id = %s::uuid
+              AND extraction_status = 'complete'
+            RETURNING *
+            """,
+            [video_asset_id, track_id],
+            conn=conn,
+        )
+        return rows[0] if rows else None
+
+
+def clear_primary_subtitle_track(video_asset_id: str) -> None:
+    pg.execute(
+        "UPDATE ml.analysis_media_subtitle_tracks SET is_primary = false, updated_at = now() "
+        "WHERE video_asset_id = %s::uuid AND is_primary = true",
+        [video_asset_id],
+    )
+
+
+def finalize_subtitle_extraction(video_asset_id: str) -> dict[str, Any] | None:
+    """Derive terminal asset state from eligible track outcomes."""
+    rows = pg.execute_returning(
+        """
+        WITH counts AS (
+          SELECT
+            count(*) FILTER (WHERE selection_status = 'eligible_english') AS eligible,
+            count(*) FILTER (
+              WHERE selection_status = 'eligible_english' AND extraction_status = 'complete'
+            ) AS completed,
+            max(error_text) FILTER (
+              WHERE selection_status = 'eligible_english' AND extraction_status = 'failed'
+            ) AS extraction_error
+          FROM ml.analysis_media_subtitle_tracks
+          WHERE video_asset_id = %s::uuid
+        )
+        UPDATE ml.analysis_media_assets va
+        SET subtitle_extraction_status = CASE
+              WHEN counts.eligible = 0 THEN 'unavailable'
+              WHEN counts.completed = counts.eligible THEN 'complete'
+              WHEN counts.completed > 0 THEN 'partial'
+              ELSE 'failed'
+            END,
+            subtitle_extraction_error = CASE
+              WHEN counts.completed < counts.eligible
+                THEN left(coalesce(counts.extraction_error, 'subtitle_extraction_failed'), 1000)
+              ELSE NULL
+            END,
+            subtitle_extraction_completed_at = now(),
+            updated_at = now()
+        FROM counts
+        WHERE va.id = %s::uuid
+        RETURNING va.*
+        """,
+        [video_asset_id, video_asset_id],
+    )
+    return rows[0] if rows else None
+
+
+def reconcile_stale_subtitle_extractions(*, stale_after_seconds: int) -> list[dict[str, Any]]:
+    """Fail abandoned queued/running subtitle work so operators can safely retry it."""
+    return pg.execute_returning(
+        """
+        UPDATE ml.analysis_media_assets
+        SET subtitle_extraction_status = 'failed',
+            subtitle_extraction_error = 'subtitle_worker_stale',
+            subtitle_extraction_completed_at = now(),
+            updated_at = now()
+        WHERE subtitle_extraction_status IN ('queued', 'running')
+          AND coalesce(
+                subtitle_extraction_started_at,
+                subtitle_extraction_requested_at,
+                updated_at,
+                created_at
+              ) <= now() - make_interval(secs => %s)
+        RETURNING *
+        """,
+        [max(int(stale_after_seconds), 60)],
+    )
+
+
+def fail_subtitle_extraction(video_asset_id: str, error: str) -> dict[str, Any] | None:
+    rows = pg.execute_returning(
+        """
+        UPDATE ml.analysis_media_assets
+        SET subtitle_extraction_status = 'failed',
+            subtitle_extraction_error = left(%s, 1000),
+            subtitle_extraction_completed_at = now(),
+            updated_at = now()
+        WHERE id = %s::uuid
+        RETURNING *
+        """,
+        [error, video_asset_id],
+    )
+    return rows[0] if rows else None
+
+
+def update_subtitle_extraction_status(
+    video_asset_id: str,
+    status: str,
+    error: str | None = None,
+    **timestamps: Any,
+) -> dict[str, Any] | None:
+    """Update dispatcher/worker state without requiring the extraction worker to run."""
+    allowed_statuses = {"not_requested", "queued", "running", "complete", "partial", "unavailable", "failed"}
+    if status not in allowed_statuses:
+        raise ValueError(f"Unsupported subtitle extraction status: {status}")
+    allowed_timestamps = {
+        "requested_at": "subtitle_extraction_requested_at",
+        "started_at": "subtitle_extraction_started_at",
+        "completed_at": "subtitle_extraction_completed_at",
+    }
+    assignments = ["subtitle_extraction_status = %s", "subtitle_extraction_error = %s"]
+    params: list[Any] = [status, error[:1000] if error else None]
+    for key, value in timestamps.items():
+        column = allowed_timestamps.get(key)
+        if column is None:
+            raise ValueError(f"Unsupported subtitle extraction timestamp: {key}")
+        assignments.append(f"{column} = %s")
+        params.append(value)
+    assignments.append("updated_at = now()")
+    params.append(video_asset_id)
+    rows = pg.execute_returning(
+        f"UPDATE ml.analysis_media_assets SET {', '.join(assignments)} WHERE id = %s::uuid RETURNING *",
+        params,
+    )
+    return rows[0] if rows else None
 
 
 def get_video_asset_by_legacy_screenalytics_id(legacy_video_asset_id: str) -> dict[str, Any] | None:

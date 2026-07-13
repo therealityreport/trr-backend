@@ -185,6 +185,10 @@ _GOOGLE_NEWS_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_GOOGLE_NEWS_CON
 _REDDIT_REFRESH_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_REDDIT_REFRESH_CONCURRENCY_LIMIT", "2")))
 _VISION_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_VISION_CONCURRENCY_LIMIT", "4")))
 _CAST_SCREENTIME_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_CAST_SCREENTIME_CONCURRENCY_LIMIT", "2")))
+_CAST_SCREENTIME_SUBTITLE_CONCURRENCY_LIMIT = max(
+    1,
+    int(os.getenv("TRR_MODAL_CAST_SCREENTIME_SUBTITLE_CONCURRENCY_LIMIT", "2")),
+)
 _SOCIALBLADE_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_SOCIALBLADE_CONCURRENCY_LIMIT", "3")))
 _STALE_WORKER_CLEANUP_CONCURRENCY_LIMIT = max(
     1,
@@ -197,6 +201,10 @@ _VISION_TIMEOUT_SECONDS = max(5 * 60, int(os.getenv("TRR_MODAL_VISION_TIMEOUT_SE
 _CAST_SCREENTIME_TIMEOUT_SECONDS = max(
     30 * 60,
     int(os.getenv("TRR_MODAL_CAST_SCREENTIME_TIMEOUT_SECONDS", str(2 * 60 * 60))),
+)
+_CAST_SCREENTIME_SUBTITLE_TIMEOUT_SECONDS = max(
+    30 * 60,
+    int(os.getenv("TRR_MODAL_CAST_SCREENTIME_SUBTITLE_TIMEOUT_SECONDS", str(2 * 60 * 60))),
 )
 _SOCIALBLADE_TIMEOUT_SECONDS = max(5 * 60, int(os.getenv("TRR_MODAL_SOCIALBLADE_TIMEOUT_SECONDS", "900")))
 _STALE_WORKER_CLEANUP_TIMEOUT_SECONDS = max(
@@ -314,6 +322,7 @@ _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "TRR_MODAL_GETTY_REMOTE_PROBE_FUNCTION": "probe_getty_remote_access",
     "TRR_MODAL_VISION_FUNCTION": "run_admin_vision",
     "TRR_MODAL_CAST_SCREENTIME_FUNCTION": "run_cast_screentime_analysis",
+    "TRR_MODAL_CAST_SCREENTIME_SUBTITLE_FUNCTION": "run_cast_screentime_subtitle_extraction",
     "TRR_MODAL_SOCIALBLADE_FUNCTION": "run_socialblade_scrape",
     "TRR_MODAL_STALE_WORKER_CLEANUP_FUNCTION": "purge_stale_social_worker_heartbeats",
     "TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT": "8",
@@ -332,6 +341,8 @@ _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "TRR_MODAL_REDDIT_REFRESH_CONCURRENCY_LIMIT": "2",
     "TRR_MODAL_VISION_CONCURRENCY_LIMIT": "4",
     "TRR_MODAL_CAST_SCREENTIME_CONCURRENCY_LIMIT": "2",
+    "TRR_MODAL_CAST_SCREENTIME_SUBTITLE_CONCURRENCY_LIMIT": "2",
+    "TRR_MODAL_CAST_SCREENTIME_SUBTITLE_TIMEOUT_SECONDS": "7200",
     "TRR_MODAL_SOCIALBLADE_CONCURRENCY_LIMIT": "3",
     "SOCIAL_MODAL_DISPATCH_LIMIT": "12",
     "SOCIAL_INSTAGRAM_POSTS_USE_STICKY_PROXY": "true",
@@ -420,18 +431,28 @@ _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
 }
 
 
-def _build_lean_image_base(*, image_factory: object | None = None):
+def _build_lean_image_base(
+    *,
+    apt_packages: tuple[str, ...] = (),
+    image_factory: object | None = None,
+):
     factory = image_factory or modal.Image
-    image = (
-        factory.debian_slim(python_version="3.11")
-        .pip_install_from_requirements(str(_MODAL_LEAN_REQUIREMENTS))
-        .add_local_python_source("api", "trr_backend")
-    )
+    image = factory.debian_slim(python_version="3.11")
+    if apt_packages:
+        image = image.apt_install(*apt_packages)
+    image = image.pip_install_from_requirements(str(_MODAL_LEAN_REQUIREMENTS))
+    image = image.add_local_python_source("api", "trr_backend")
     for local_path, remote_path in _LEAN_IMAGE_LOCAL_FILES:
         image = image.add_local_file(local_path, remote_path=remote_path)
     for local_path, remote_path in _LEAN_IMAGE_LOCAL_DIRS:
         image = image.add_local_dir(local_path, remote_path=remote_path)
     return image
+
+
+def _build_media_image_base(*, image_factory: object | None = None):
+    """Build the lean backend runtime with FFmpeg/FFprobe for media extraction."""
+
+    return _build_lean_image_base(apt_packages=("ffmpeg",), image_factory=image_factory)
 
 
 def _build_social_image_base(*, include_browser_runtime: bool = False, image_factory: object | None = None):
@@ -492,6 +513,7 @@ def modal_completion_evidence_contract() -> dict[str, object]:
 
 
 _image = _build_lean_image_base()
+_media_image = _build_media_image_base()
 
 _vision_image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -525,6 +547,7 @@ _FUNCTION_IMAGE_BINDINGS: Final[dict[str, object]] = {
     "purge_stale_social_worker_heartbeats": _image,
     "run_admin_vision": _vision_image,
     "run_cast_screentime_analysis": _vision_image,
+    "run_cast_screentime_subtitle_extraction": _media_image,
     "probe_admin_vision_runtime": _vision_image,
 }
 
@@ -1895,6 +1918,60 @@ def run_cast_screentime_analysis(run_id: str) -> dict[str, object]:
         raise
     finally:
         _close_db_pools_after_worker("cast_screentime", run_id=normalized_run_id)
+
+
+@app.function(
+    image=_FUNCTION_IMAGE_BINDINGS["run_cast_screentime_subtitle_extraction"],
+    secrets=_secrets,
+    # The service owns bounded failure persistence. A platform retry cannot
+    # safely reclaim a row already marked running after a container crash;
+    # stale work is reconciled back to failed for explicit operator retry.
+    retries=0,
+    timeout=_CAST_SCREENTIME_SUBTITLE_TIMEOUT_SECONDS,
+    max_containers=_CAST_SCREENTIME_SUBTITLE_CONCURRENCY_LIMIT,
+)
+def run_cast_screentime_subtitle_extraction(
+    video_asset_id: str,
+    force: bool = False,
+) -> dict[str, object]:
+    from trr_backend.services import cast_screentime_subtitles
+
+    normalized_video_asset_id = str(video_asset_id or "").strip()
+    started_at = _worker_started(
+        "cast_screentime_subtitles",
+        function_name="run_cast_screentime_subtitle_extraction",
+        video_asset_id=normalized_video_asset_id,
+        force=bool(force),
+    )
+    try:
+        result = cast_screentime_subtitles.extract_video_asset_subtitles(
+            normalized_video_asset_id,
+            force=bool(force),
+        )
+        _worker_finished(
+            "cast_screentime_subtitles",
+            started_at,
+            result_status=str(result.get("status") or "completed"),
+            video_asset_id=normalized_video_asset_id,
+            force=bool(force),
+        )
+        return result
+    except Exception as exc:
+        _worker_finished(
+            "cast_screentime_subtitles",
+            started_at,
+            result_status="failed",
+            failure_class=type(exc).__name__,
+            video_asset_id=normalized_video_asset_id,
+            force=bool(force),
+        )
+        raise
+    finally:
+        _close_db_pools_after_worker(
+            "cast_screentime_subtitles",
+            video_asset_id=normalized_video_asset_id,
+            force=bool(force),
+        )
 
 
 @app.function(

@@ -9,6 +9,7 @@ import types
 
 import pytest
 
+import trr_backend.services as services_package
 from trr_backend import modal_jobs
 
 
@@ -228,6 +229,9 @@ def test_inject_modal_runtime_defaults_sets_canonical_modal_flags(
     assert os.environ["TRR_MODAL_SOCIAL_RECOVERY_CONCURRENCY_LIMIT"] == "1"
     assert os.environ["TRR_MODAL_CAST_SCREENTIME_FUNCTION"] == "run_cast_screentime_analysis"
     assert os.environ["TRR_MODAL_CAST_SCREENTIME_CONCURRENCY_LIMIT"] == "2"
+    assert os.environ["TRR_MODAL_CAST_SCREENTIME_SUBTITLE_FUNCTION"] == "run_cast_screentime_subtitle_extraction"
+    assert os.environ["TRR_MODAL_CAST_SCREENTIME_SUBTITLE_CONCURRENCY_LIMIT"] == "2"
+    assert os.environ["TRR_MODAL_CAST_SCREENTIME_SUBTITLE_TIMEOUT_SECONDS"] == "7200"
     assert os.environ["SOCIAL_MODAL_DISPATCH_LIMIT"] == "12"
     assert os.environ["SOCIAL_INSTAGRAM_POSTS_USE_STICKY_PROXY"] == "true"
     assert os.environ["SOCIAL_INSTAGRAM_POSTS_ANONYMOUS_ENABLED"] == "false"
@@ -938,6 +942,20 @@ def test_build_lean_image_base_omits_social_browser_payloads() -> None:
     assert added_dirs == dict(modal_jobs._LEAN_IMAGE_LOCAL_DIRS)
 
 
+def test_build_media_image_base_adds_ffmpeg_to_lean_runtime() -> None:
+    image = modal_jobs._build_media_image_base(image_factory=_FakeImage)
+
+    assert _ops_for(image, "pip_install_from_requirements") == [(str(modal_jobs._MODAL_LEAN_REQUIREMENTS),)]
+    assert _ops_for(image, "apt_install") == [("ffmpeg",)]
+    assert _ops_for(image, "add_local_python_source") == [("api", "trr_backend")]
+    operation_names = [name for name, _args, _kwargs in image.operations]
+    last_build_step = max(operation_names.index(name) for name in ("apt_install", "pip_install_from_requirements"))
+    first_local_source = min(
+        operation_names.index(name) for name in ("add_local_python_source", "add_local_file", "add_local_dir")
+    )
+    assert last_build_step < first_local_source
+
+
 def test_run_social_job_uses_browser_capable_image_binding() -> None:
     assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_admin_operation"] is modal_jobs._image
     assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_admin_operation_v2"] is modal_jobs._image
@@ -1144,6 +1162,7 @@ def test_modal_completion_evidence_contract_is_explicit() -> None:
 
 def test_cast_screentime_modal_function_uses_vision_image() -> None:
     assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_cast_screentime_analysis"] is modal_jobs._vision_image
+    assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_cast_screentime_subtitle_extraction"] is modal_jobs._media_image
 
 
 def test_run_cast_screentime_analysis_delegates_to_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1198,6 +1217,66 @@ def test_run_cast_screentime_analysis_delegates_to_runtime(monkeypatch: pytest.M
         ),
     ]
     assert close_calls == [("cast_screentime", {"run_id": "run-123"})]
+
+
+def test_run_cast_screentime_subtitle_extraction_delegates_to_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker_events: list[tuple[str, dict[str, object]]] = []
+    close_calls: list[tuple[str, dict[str, object]]] = []
+    service_calls: list[tuple[str, bool]] = []
+
+    def _extract(video_asset_id: str, force: bool = False) -> dict[str, object]:
+        service_calls.append((video_asset_id, force))
+        return {"video_asset_id": video_asset_id, "status": "complete"}
+
+    fake_service = types.SimpleNamespace(extract_video_asset_subtitles=_extract)
+    monkeypatch.setitem(sys.modules, "trr_backend.services.cast_screentime_subtitles", fake_service)
+    monkeypatch.setattr(services_package, "cast_screentime_subtitles", fake_service, raising=False)
+    monkeypatch.setattr(
+        modal_jobs,
+        "_worker_started",
+        lambda worker_family, **kwargs: worker_events.append(("started", {"worker_family": worker_family, **kwargs}))
+        or "started-at",
+    )
+    monkeypatch.setattr(
+        modal_jobs,
+        "_worker_finished",
+        lambda worker_family, _started_at, **kwargs: worker_events.append(
+            ("finished", {"worker_family": worker_family, **kwargs})
+        ),
+    )
+    monkeypatch.setattr(
+        modal_jobs,
+        "_close_db_pools_after_worker",
+        lambda worker_family, **kwargs: close_calls.append((worker_family, kwargs)),
+    )
+
+    result = modal_jobs.run_cast_screentime_subtitle_extraction.local("asset-123", True)
+
+    assert result == {"video_asset_id": "asset-123", "status": "complete"}
+    assert service_calls == [("asset-123", True)]
+    assert worker_events == [
+        (
+            "started",
+            {
+                "worker_family": "cast_screentime_subtitles",
+                "function_name": "run_cast_screentime_subtitle_extraction",
+                "video_asset_id": "asset-123",
+                "force": True,
+            },
+        ),
+        (
+            "finished",
+            {
+                "worker_family": "cast_screentime_subtitles",
+                "result_status": "complete",
+                "video_asset_id": "asset-123",
+                "force": True,
+            },
+        ),
+    ]
+    assert close_calls == [("cast_screentime_subtitles", {"video_asset_id": "asset-123", "force": True})]
 
 
 def test_purge_stale_social_worker_heartbeats_uses_seven_day_policy(

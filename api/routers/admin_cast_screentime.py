@@ -15,6 +15,7 @@ from uuid import UUID, uuid4
 import requests
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from api.auth import CastScreentimeAdminUser
@@ -28,8 +29,10 @@ from trr_backend.media.s3_mirror import (
 from trr_backend.repositories import cast_screentime
 from trr_backend.services import (
     cast_screentime_artifacts,
+    cast_screentime_subtitles,
     retained_cast_screentime_dispatch,
     retained_cast_screentime_review,
+    retained_cast_screentime_subtitle_dispatch,
 )
 from trr_backend.socials.youtube import YouTubeScraper, resolve_youtube_media
 
@@ -39,6 +42,7 @@ LOGGER = logging.getLogger(__name__)
 _DEFAULT_UPLOAD_EXPIRY_MINUTES = 60
 _TERMINAL_STATUSES = {"success", "failed", "cancelled"}
 _DEFAULT_STALE_AFTER_SECONDS = 1800
+_DEFAULT_SUBTITLE_STALE_AFTER_SECONDS = 9000
 _DEFAULT_SCREENALYTICS_ARTIFACT_BUCKET = "screenalytics-artifacts-prod"
 
 
@@ -72,6 +76,10 @@ class ImportVideoAssetRequest(BaseModel):
 
 class UploadSessionCompleteRequest(BaseModel):
     upload_session_id: UUID
+
+
+class SubtitleExtractionRequest(BaseModel):
+    force: bool = False
 
 
 class CreateRunRequest(BaseModel):
@@ -284,7 +292,82 @@ def _nullable_actor_uuid(raw: Any) -> str | None:
         return None
 
 
-def _annotate_video_asset_row(row: dict[str, Any] | None) -> dict[str, Any]:
+def _subtitle_extraction_enabled() -> bool:
+    return str(os.getenv("CAST_SCREENTIME_SUBTITLE_EXTRACTION_ENABLED") or "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _queue_video_asset_subtitle_extraction(
+    video_asset_id: str,
+    *,
+    force: bool = False,
+    automatic: bool = False,
+) -> dict[str, Any]:
+    """Queue source subtitles without allowing dispatch failures to invalidate the video asset."""
+    if automatic and not _subtitle_extraction_enabled():
+        summary = cast_screentime.get_subtitle_summary(video_asset_id, include_skipped=False)
+        return summary or {
+            "video_asset_id": video_asset_id,
+            "status": "not_requested",
+            "automatic_extraction_enabled": False,
+        }
+
+    queued = cast_screentime.queue_subtitle_extraction(
+        video_asset_id,
+        force=force,
+        stale_after_seconds=_subtitle_stale_after_seconds(),
+    )
+    if not queued:
+        raise HTTPException(status_code=404, detail="Video asset not found")
+    if not queued.get("should_dispatch"):
+        return queued
+
+    try:
+        dispatch = retained_cast_screentime_subtitle_dispatch.extract_video_asset_subtitles(
+            video_asset_id,
+            force=force,
+        )
+    except Exception as exc:  # noqa: BLE001 - upload promotion must remain successful
+        error = f"subtitle_dispatch_failed:{type(exc).__name__}"
+        cast_screentime.update_subtitle_extraction_status(
+            video_asset_id,
+            "failed",
+            error,
+            completed_at=datetime.now(UTC).isoformat(),
+        )
+        LOGGER.exception("[cast_screentime_subtitles] dispatch failed video_asset_id=%s", video_asset_id)
+        return {**queued, "status": "failed", "error": error, "dispatched": False}
+
+    if not dispatch.get("dispatched"):
+        reason = str(dispatch.get("reason_code") or dispatch.get("reason") or "modal_dispatch_unavailable")
+        error = f"subtitle_dispatch_failed:{reason}"[:1000]
+        cast_screentime.update_subtitle_extraction_status(
+            video_asset_id,
+            "failed",
+            error,
+            completed_at=datetime.now(UTC).isoformat(),
+        )
+        return {**queued, **dispatch, "status": "failed", "error": error}
+
+    call_id = str(dispatch.get("call_id") or "").strip()
+    return {
+        **queued,
+        **dispatch,
+        "status": "queued",
+        "job_id": f"modal:{call_id}" if call_id else None,
+        "dispatched": True,
+    }
+
+
+def _annotate_video_asset_row(
+    row: dict[str, Any] | None,
+    *,
+    include_subtitle_summary: bool = True,
+) -> dict[str, Any]:
     if not row:
         return {}
     payload = dict(row)
@@ -314,13 +397,34 @@ def _annotate_video_asset_row(row: dict[str, Any] | None) -> dict[str, Any]:
         payload["publish_block_reason"] = "non_episode_assets_are_not_canonical_publications"
     else:
         payload["publish_block_reason"] = None
+    if include_subtitle_summary:
+        summary = cast_screentime.get_subtitle_summary(str(payload.get("id") or ""), include_skipped=False)
+        payload["subtitle_summary"] = (
+            {
+                "status": summary.get("status"),
+                "primary_track_id": summary.get("primary_track_id"),
+                "eligible_track_count": int(summary.get("eligible_track_count") or 0),
+                "completed_track_count": int(summary.get("completed_track_count") or 0),
+                "failed_track_count": int(summary.get("failed_track_count") or 0),
+                "error": summary.get("error"),
+            }
+            if summary
+            else {
+                "status": str(payload.get("subtitle_extraction_status") or "not_requested"),
+                "primary_track_id": None,
+                "eligible_track_count": 0,
+                "completed_track_count": 0,
+                "failed_track_count": 0,
+                "error": payload.get("subtitle_extraction_error"),
+            }
+        )
     return payload
 
 
 def _annotate_run_row(row: dict[str, Any] | None) -> dict[str, Any]:
     if not row:
         return {}
-    return _annotate_video_asset_row(row)
+    return _annotate_video_asset_row(row, include_subtitle_summary=False)
 
 
 def _resolve_video_asset_or_404(video_asset_id: str) -> dict[str, Any]:
@@ -1016,6 +1120,7 @@ def _promote_session_to_video_asset(
     source_json = {
         "bucket": bucket,
         "object_key": canonical_key,
+        "original_filename": str(verification_json_existing.get("filename") or "").strip() or None,
         "content_type": actual_content_type,
         "size_bytes": actual_size,
         "checksum_sha256": checksum,
@@ -1066,7 +1171,15 @@ def _promote_session_to_video_asset(
             "promoted_video_asset_id": video_asset_id,
         },
     )
-    return _annotate_video_asset_row(video_asset)
+    try:
+        _queue_video_asset_subtitle_extraction(video_asset_id, automatic=True)
+    except Exception:  # noqa: BLE001 - subtitle sidecar work must never roll back video promotion
+        LOGGER.exception(
+            "[cast_screentime_subtitles] automatic queue failed video_asset_id=%s",
+            video_asset_id,
+        )
+    fresh_video_asset = cast_screentime.resolve_video_asset(video_asset_id) or video_asset
+    return _annotate_video_asset_row(fresh_video_asset)
 
 
 def _default_run_config(video_asset: dict[str, Any]) -> dict[str, Any]:
@@ -1176,13 +1289,37 @@ def _stale_after_seconds() -> int:
     return _DEFAULT_STALE_AFTER_SECONDS
 
 
+def _subtitle_stale_after_seconds() -> int:
+    timeout_raw = (os.getenv("TRR_MODAL_CAST_SCREENTIME_SUBTITLE_TIMEOUT_SECONDS") or "7200").strip()
+    try:
+        worker_timeout = max(int(timeout_raw), 60)
+    except ValueError:
+        worker_timeout = 7200
+    raw = (os.getenv("CAST_SCREENTIME_SUBTITLE_STALE_AFTER_SECONDS") or "").strip()
+    try:
+        if raw:
+            return max(int(raw), worker_timeout + 60)
+    except ValueError:
+        return max(_DEFAULT_SUBTITLE_STALE_AFTER_SECONDS, worker_timeout + 60)
+    return max(_DEFAULT_SUBTITLE_STALE_AFTER_SECONDS, worker_timeout + 60)
+
+
 def reconcile_stale_runs_once(
     *, show_id: str | None = None, stale_after_seconds: int | None = None
 ) -> list[dict[str, Any]]:
-    return cast_screentime.reconcile_stale_runs(
+    reconciled_runs = cast_screentime.reconcile_stale_runs(
         stale_after_seconds=stale_after_seconds or _stale_after_seconds(),
         show_id=show_id,
     )
+    reconciled_subtitles = cast_screentime.reconcile_stale_subtitle_extractions(
+        stale_after_seconds=_subtitle_stale_after_seconds(),
+    )
+    if reconciled_subtitles:
+        LOGGER.warning(
+            "[cast_screentime_subtitles] reconciled stale assets count=%s",
+            len(reconciled_subtitles),
+        )
+    return reconciled_runs
 
 
 @router.post("/admin/cast-screentime/upload-sessions")
@@ -1285,6 +1422,87 @@ def complete_upload_session(
 @router.get("/admin/cast-screentime/video-assets/{video_asset_id}")
 def get_video_asset(video_asset_id: UUID, _: CastScreentimeAdminUser) -> dict[str, Any]:
     return _annotate_video_asset_row(_resolve_video_asset_or_404(str(video_asset_id)))
+
+
+@router.get("/admin/cast-screentime/video-assets/{video_asset_id}/subtitles")
+def get_video_asset_subtitles(
+    video_asset_id: UUID,
+    _: CastScreentimeAdminUser,
+    include_skipped: bool = Query(default=False),
+) -> dict[str, Any]:
+    summary = cast_screentime.get_subtitle_summary(
+        str(video_asset_id),
+        include_skipped=include_skipped,
+    )
+    if not summary:
+        raise HTTPException(status_code=404, detail="Video asset not found")
+    return summary
+
+
+@router.post(
+    "/admin/cast-screentime/video-assets/{video_asset_id}/subtitles/extract",
+    status_code=202,
+    response_model=None,
+)
+def extract_video_asset_subtitles(
+    video_asset_id: UUID,
+    request: SubtitleExtractionRequest,
+    _: CastScreentimeAdminUser,
+) -> Any:
+    _resolve_video_asset_or_404(str(video_asset_id))
+    result = _queue_video_asset_subtitle_extraction(str(video_asset_id), force=request.force)
+    if result.get("status") == "failed" and not result.get("dispatched"):
+        return JSONResponse(status_code=503, content=result)
+    return result
+
+
+def _translate_subtitle_service_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, KeyError):
+        return HTTPException(status_code=404, detail="Subtitle track not found")
+    detail = str(exc).strip() or type(exc).__name__
+    if isinstance(exc, ValueError):
+        return HTTPException(status_code=422, detail=detail)
+    if isinstance(exc, ClientError) or "object_missing" in detail:
+        return HTTPException(status_code=503, detail="Subtitle object is unavailable")
+    if isinstance(exc, cast_screentime_subtitles.SubtitleExtractionError):
+        return HTTPException(status_code=409, detail=detail)
+    return HTTPException(status_code=500, detail="Subtitle request failed")
+
+
+@router.get("/admin/cast-screentime/video-assets/{video_asset_id}/subtitles/{track_id}/cues")
+def get_video_asset_subtitle_cues(
+    video_asset_id: UUID,
+    track_id: UUID,
+    _: CastScreentimeAdminUser,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=200, ge=1, le=1000),
+    q: str | None = Query(default=None, max_length=200),
+) -> dict[str, Any]:
+    try:
+        return cast_screentime_subtitles.load_subtitle_cues(
+            str(video_asset_id),
+            str(track_id),
+            offset=offset,
+            limit=limit,
+            query=q,
+        )
+    except Exception as exc:  # noqa: BLE001 - translate service/storage errors into bounded API responses
+        raise _translate_subtitle_service_error(exc) from exc
+
+
+@router.get("/admin/cast-screentime/video-assets/{video_asset_id}/subtitles/{track_id}/download-url")
+def get_video_asset_subtitle_download_url(
+    video_asset_id: UUID,
+    track_id: UUID,
+    _: CastScreentimeAdminUser,
+) -> dict[str, Any]:
+    try:
+        return cast_screentime_subtitles.generate_subtitle_download_url(
+            str(video_asset_id),
+            str(track_id),
+        )
+    except Exception as exc:  # noqa: BLE001 - translate service/storage errors into bounded API responses
+        raise _translate_subtitle_service_error(exc) from exc
 
 
 @router.post("/admin/cast-screentime/video-assets/import")
