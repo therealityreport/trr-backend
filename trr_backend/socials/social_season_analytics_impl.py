@@ -18514,16 +18514,29 @@ def _avatar_registry_failure_status(reason: str | None) -> str:
 def _download_avatar_to_tempfile(
     source_url: str,
     *,
+    platform: str,
     headers: Mapping[str, str],
     progress_cb: Callable[[], None] | None = None,
 ) -> tuple[str, str, str]:
+    from trr_backend.socials.media_url_safety import (
+        MediaUrlSafetyPolicy,
+        allowed_hosts_for_platform,
+        safe_requests_get,
+    )
+
+    media_url_policy = MediaUrlSafetyPolicy(
+        allowed_hosts_for_platform(platform),
+        allow_test_hosts=False,
+    )
     temp_path: str | None = None
     content_type = "application/octet-stream"
     total_bytes = 0
     sha256 = hashlib.sha256()
     try:
-        with requests.get(
+        with safe_requests_get(
+            requests,
             source_url,
+            policy=media_url_policy,
             timeout=(10, 30),
             headers=dict(headers),
             stream=True,
@@ -18825,6 +18838,7 @@ def _mirror_instagram_profile_pics_for_post(
         try:
             temp_path, content_type, sha256 = _download_avatar_to_tempfile(
                 source_url,
+                platform="instagram",
                 headers={
                     "user-agent": (
                         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -19046,6 +19060,7 @@ def _mirror_post_author_avatar_to_s3(
     try:
         temp_path, content_type, sha256 = _download_avatar_to_tempfile(
             source_url,
+            platform=platform,
             headers={
                 "user-agent": (
                     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
