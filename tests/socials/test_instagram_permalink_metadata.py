@@ -6,6 +6,7 @@ from urllib.parse import quote
 
 import pytest
 
+from trr_backend.socials.instagram.constants import instagram_post_permalink
 from trr_backend.socials.instagram.permalink_metadata import (
     _graphql_extract_collaborators,
     _graphql_extract_collaborators_detail,
@@ -26,6 +27,25 @@ def _fixture_json(name: str) -> dict[str, object]:
 
 def _data_sjs_html(payload: dict[str, object]) -> str:
     return f'<html><body><script type="application/json" data-sjs>{json.dumps(payload)}</script></body></html>'
+
+
+def test_instagram_post_permalink_uses_plural_reels_for_known_reels() -> None:
+    assert (
+        instagram_post_permalink("DaCAsaUhOYw", post_format="reel")
+        == "https://www.instagram.com/reels/DaCAsaUhOYw/"
+    )
+    assert (
+        instagram_post_permalink("DaCAsaUhOYw", raw_data={"product_type": "clips"})
+        == "https://www.instagram.com/reels/DaCAsaUhOYw/"
+    )
+
+
+def test_instagram_post_permalink_preserves_explicit_and_feed_fallback() -> None:
+    assert (
+        instagram_post_permalink("ABC123", explicit="https://www.instagram.com/reel/ABC123/")
+        == "https://www.instagram.com/reel/ABC123/"
+    )
+    assert instagram_post_permalink("ABC123", post_format="post") == "https://www.instagram.com/p/ABC123/"
 
 
 def test_fetch_permalink_media_item_parses_data_sjs_payload(monkeypatch: pytest.MonkeyPatch) -> None:

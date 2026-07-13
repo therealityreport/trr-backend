@@ -2152,6 +2152,10 @@ def _scrape_shared_instagram_post_details_refresh(
             _coerce_dt(config.get("date_end")),
         )
         all_existing_posts_count = len(existing_posts)
+        bounded_window = _catalog_backfill_has_bounded_window(
+            date_start=_coerce_dt(config.get("date_start")),
+            date_end=_coerce_dt(config.get("date_end")),
+        )
         if detail_shard_count > 1:
             existing_posts = [
                 post for index, post in enumerate(existing_posts) if index % detail_shard_count == detail_shard_index
@@ -2161,7 +2165,9 @@ def _scrape_shared_instagram_post_details_refresh(
             platform="instagram",
             account_handle=account_handle,
         )
-        progress_total_posts = max(all_existing_posts_count, expected_total_posts)
+        progress_total_posts = (
+            len(existing_posts) if bounded_window else max(all_existing_posts_count, expected_total_posts)
+        )
         metrics_pages_scanned = 0
         metrics_posts_checked = 0
         progress_every_posts = _instagram_detail_refresh_progress_every_posts(config)
@@ -2447,6 +2453,10 @@ def _scrape_shared_instagram_post_details_refresh(
                         error_code="metadata_enrichment_exception",
                     )
                     details_refresh_error_reasons["metadata_enrichment_exception"] += 1
+            if parsed_post is not None and not legacy_inline_enrichment:
+                if not str(getattr(parsed_post, "metadata_source", "") or "").strip():
+                    parsed_post.metadata_source = "api_permalink"
+                _mark_instagram_metadata_attempt(post=parsed_post, now_utc=now_utc, success=True)
             unresolved_required_detail_fields = detail_fetch_skipped and (
                 bool(classification.get("metrics_missing"))
                 or "missing_required_source_media" in (classification.get("reasons") or [])
@@ -2545,9 +2555,10 @@ def _scrape_shared_instagram_post_details_refresh(
     )
     retrieval_meta: dict[str, Any] = {
         "source": "db_metrics_refresh",
-        "expected_total_posts": expected_total_posts or None,
-        "total_posts": progress_total_posts or None,
-        "completion_target_posts": details_refresh_completion_target_posts or None,
+        "expected_total_posts": expected_total_posts if bounded_window else expected_total_posts or None,
+        "total_posts": progress_total_posts,
+        "completion_target_posts": details_refresh_completion_target_posts,
+        "completion_target_source": "bounded_catalog" if bounded_window else None,
         "details_refresh_account_rows_seen": all_existing_posts_count,
         "details_refreshed_posts": details_refreshed_posts,
         "details_refresh_views_updated": details_refresh_views_updated,

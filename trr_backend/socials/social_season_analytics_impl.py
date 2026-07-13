@@ -60,6 +60,7 @@ from trr_backend.modal_dispatch import (
     modal_social_job_function_names,
     resolve_modal_function,
 )
+from trr_backend.socials import source_scopes as _source_scopes
 from trr_backend.socials.crawlee_runtime import (
     AuthPreflightError,
     AuthPreflightResult,
@@ -92,10 +93,11 @@ _MODAL_REMOTE_AUTH_PROBE_CACHE: dict[tuple[str, str, str], tuple[float, dict[str
 _MODAL_REMOTE_AUTH_PROBE_CACHE_LOCK = Lock()
 
 SUPPORTED_PLATFORMS = SOCIAL_SUPPORTED_PLATFORMS
-SUPPORTED_SCOPES = ("network", "creator", "community", "news")
-LEGACY_SOURCE_SCOPE_ALIASES = {
-    "bravo": "network",
-}
+SUPPORTED_SCOPES = _source_scopes.SUPPORTED_SCOPES
+LEGACY_SOURCE_SCOPE_ALIASES = _source_scopes.LEGACY_SOURCE_SCOPE_ALIASES
+normalize_source_scope = _source_scopes.normalize_source_scope
+_normalize_source_scope_input = _source_scopes.normalize_source_scope_input
+_source_scope_is_network_family = _source_scopes.source_scope_is_network_family
 SOCIAL_ACCOUNT_PROFILE_COMMENT_FILTERS = {"commentable", "incomplete", "not_commentable"}
 SOCIAL_ACCOUNT_PROFILE_POST_SORT_FIELDS = {
     "post",
@@ -125,24 +127,6 @@ SUPPORTED_PIPELINE_INGEST_MODES = (
     "shared_account_async",
     "shared_account_catalog_backfill",
 )
-
-
-def normalize_source_scope(value: Any, *, default: str = "network") -> str:
-    normalized = str(value or default).strip().lower() or default
-    canonical = LEGACY_SOURCE_SCOPE_ALIASES.get(normalized, normalized)
-    if canonical not in SUPPORTED_SCOPES:
-        raise ValueError(f"Unsupported source scope: {value}")
-    return canonical
-
-
-def _normalize_source_scope_input(value: Any, *, default: str = "network") -> str:
-    normalized = str(value or default).strip().lower() or default
-    canonical = normalize_source_scope(normalized, default=default)
-    return normalized if normalized in LEGACY_SOURCE_SCOPE_ALIASES else canonical
-
-
-def _source_scope_is_network_family(value: Any) -> bool:
-    return normalize_source_scope(value) == "network"
 
 
 SUPPORTED_SYNC_STRATEGIES = ("incremental", "full_refresh")
@@ -1490,9 +1474,14 @@ def _build_catalog_backfill_shards(
 ) -> list[IngestTimeShard]:
     start_dt = _coerce_dt(date_start)
     end_dt = _coerce_dt(date_end)
-    span_days = _window_span_days(date_start=start_dt, date_end=end_dt)
+    window_span = end_dt - start_dt if start_dt is not None and end_dt is not None and end_dt > start_dt else None
+    span_days = (
+        max(1, window_span.days + int(bool(window_span.seconds or window_span.microseconds)))
+        if window_span is not None
+        else None
+    )
     shard_days = _catalog_backfill_window_shard_days(platform, span_days=span_days)
-    if start_dt is None or end_dt is None or end_dt < start_dt or shard_days is None:
+    if start_dt is None or end_dt is None or end_dt <= start_dt or shard_days is None:
         return [
             IngestTimeShard(
                 shard_index=0,
@@ -1510,10 +1499,8 @@ def _build_catalog_backfill_shards(
     shard_index = 0
     lanes = _catalog_backfill_run_scheduler_lanes(runner_count)
     shards: list[IngestTimeShard] = []
-    while cursor <= end_dt:
-        window_end = min(cursor + shard_delta - timedelta(microseconds=1), end_dt)
-        if window_end < cursor:
-            window_end = cursor
+    while cursor < end_dt:
+        window_end = min(cursor + shard_delta, end_dt)
         day_offset = max(0, (cursor.date() - start_dt.date()).days)
         shards.append(
             IngestTimeShard(
@@ -1526,9 +1513,7 @@ def _build_catalog_backfill_shards(
                 day_weight=1.0,
             )
         )
-        if window_end >= end_dt:
-            break
-        cursor = window_end + timedelta(microseconds=1)
+        cursor = window_end
         shard_index += 1
     return shards
 
@@ -1949,14 +1934,18 @@ def _normalize_catalog_backfill_window(
     date_start: datetime | None,
     date_end: datetime | None,
 ) -> tuple[datetime | None, datetime | None]:
+    start_supplied = date_start is not None and str(date_start).strip() != ""
+    end_supplied = date_end is not None and str(date_end).strip() != ""
+    if start_supplied != end_supplied:
+        raise ValueError("date_start and date_end must be supplied together for a bounded catalog backfill.")
+    if not start_supplied:
+        return None, None
     bounded_start = _coerce_dt(date_start)
     bounded_end = _coerce_dt(date_end)
-    if bounded_start is None or bounded_end is None or bounded_end < bounded_start:
-        return bounded_start, bounded_end
-    # Treat midnight end bounds as inclusive whole-day windows so a bounded
-    # backfill does not silently omit the final day on literal-timestamp scrapers.
-    if bounded_end.hour == 0 and bounded_end.minute == 0 and bounded_end.second == 0 and bounded_end.microsecond == 0:
-        bounded_end = bounded_end + timedelta(days=1) - timedelta(seconds=1)
+    if bounded_start is None or bounded_end is None:
+        raise ValueError("date_start and date_end must be valid timestamps for a bounded catalog backfill.")
+    if bounded_end <= bounded_start:
+        raise ValueError("date_end must be later than date_start for a bounded catalog backfill.")
     return bounded_start, bounded_end
 
 
@@ -20830,7 +20819,7 @@ def _load_existing_social_account_posts(
         conditions.append(f"{ts_col} >= %s")
         params.append(date_start)
     if date_end:
-        conditions.append(f"{ts_col} <= %s")
+        conditions.append(f"{ts_col} < %s")
         params.append(date_end)
     if source_ids is not None:
         normalized_source_ids = sorted({str(item or "").strip() for item in source_ids if str(item or "").strip()})
@@ -34391,7 +34380,7 @@ def _shared_catalog_total_posts_for_window(
         where_clauses.append(f"p.{posted_at_column} >= %s")
         params.append(start_dt)
     if end_dt is not None:
-        where_clauses.append(f"p.{posted_at_column} <= %s")
+        where_clauses.append(f"p.{posted_at_column} < %s")
         params.append(end_dt)
     try:
         row = (
@@ -38250,7 +38239,7 @@ def _filter_shared_instagram_posts_for_window(
         if start_dt is not None and posted_at < start_dt:
             crossed_start = True
             continue
-        if end_dt is not None and posted_at > end_dt:
+        if end_dt is not None and posted_at >= end_dt:
             continue
         selected_posts.append(post)
     return selected_posts, crossed_start
@@ -61920,7 +61909,7 @@ def _materialized_social_account_total_posts(
         date_clauses.append(f"and p.{posted_at_column} >= %s")
         date_params.append(start_dt)
     if end_dt is not None:
-        date_clauses.append(f"and p.{posted_at_column} <= %s")
+        date_clauses.append(f"and p.{posted_at_column} < %s")
         date_params.append(end_dt)
     sql = f"""
         select count(*)::int as total
@@ -66515,6 +66504,12 @@ def resolve_social_account_catalog_action_seed(
     catalog_action: str | None = None,
     catalog_action_scope: str | None = None,
 ) -> dict[str, Any]:
+    normalized_action = str(catalog_action or "").strip().lower() or "backfill"
+    normalized_scope = str(catalog_action_scope or "").strip().lower() or None
+    if normalized_scope == "bounded_window" and (date_start is None or date_end is None):
+        raise ValueError("date_start and date_end are required when catalog_action_scope is bounded_window.")
+    if normalized_scope == "full_history" and (date_start is not None or date_end is not None):
+        raise ValueError("date_start and date_end are not valid when catalog_action_scope is full_history.")
     normalized_date_start, normalized_date_end = _normalize_catalog_backfill_window(
         date_start=date_start,
         date_end=date_end,
@@ -66524,10 +66519,6 @@ def resolve_social_account_catalog_action_seed(
         date_start=normalized_date_start,
         date_end=normalized_date_end,
     )
-    normalized_action = str(catalog_action or "").strip().lower() or None
-    normalized_scope = str(catalog_action_scope or "").strip().lower() or None
-    if normalized_action is None:
-        normalized_action = "backfill"
     if normalized_scope is None:
         if normalized_action == "sync_recent":
             normalized_scope = "recent_window"
@@ -67938,3 +67929,37 @@ def get_social_account_profile_collaborators_tags(*args: Any, **kwargs: Any) -> 
     from trr_backend.socials.account_catalog.profile_reads import _LOCAL_ROOM_FUNCTIONS
 
     return _LOCAL_ROOM_FUNCTIONS["get_social_account_profile_collaborators_tags"](*args, **kwargs)
+def preview_social_account_catalog_backfill_target(
+    platform: str,
+    account_handle: str,
+    *,
+    date_start: datetime,
+    date_end: datetime,
+) -> dict[str, Any]:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    if normalized_platform not in set(CATALOG_SUPPORTED_PLATFORMS):
+        raise ValueError("Catalog backfill is not supported for this platform.")
+    bounded_start, bounded_end = _normalize_catalog_backfill_window(
+        date_start=date_start,
+        date_end=date_end,
+    )
+    assert bounded_start is not None and bounded_end is not None
+    catalog_total = _shared_catalog_total_posts_for_window(
+        normalized_platform,
+        normalized_account,
+        date_start=bounded_start,
+        date_end=bounded_end,
+    )
+    materialized_total = _materialized_social_account_total_posts(
+        normalized_platform,
+        normalized_account,
+        date_start=bounded_start,
+        date_end=bounded_end,
+    )
+    return {
+        "catalog_total": catalog_total,
+        "materialized_total": materialized_total,
+        "completion_target_posts": max(catalog_total, materialized_total),
+        "completion_target_source": "bounded_catalog",
+    }

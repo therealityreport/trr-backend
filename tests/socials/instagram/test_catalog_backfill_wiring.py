@@ -5,6 +5,30 @@ from trr_backend.socials.pipelines.account_catalog import launch, progress
 from trr_backend.socials.pipelines.comments import instagram as comments
 
 
+def test_comments_dispatch_stays_owned_by_control_plane_after_core_sync(monkeypatch) -> None:
+    from trr_backend.socials.control_plane import dispatch_runtime
+
+    calls: list[dict[str, object]] = []
+
+    def fake_dispatch(*, run_id=None, limit=None):
+        calls.append({"run_id": run_id, "limit": limit})
+        return {"dispatched_job_ids": ["job-1"]}
+
+    monkeypatch.setattr(dispatch_runtime, "dispatch_due_social_jobs", fake_dispatch)
+    monkeypatch.setattr(
+        comments._core,
+        "dispatch_due_social_jobs",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("legacy dispatcher restored")),
+    )
+
+    comments._sync_core_overrides()
+    result = comments.dispatch_due_social_jobs(run_id="run-1", limit=3)
+
+    assert "dispatch_due_social_jobs" in comments._LOCAL_ROOM_NAMES
+    assert result == {"dispatched_job_ids": ["job-1"]}
+    assert calls == [{"run_id": "run-1", "limit": 3}]
+
+
 def test_budget_worker_limit_caps_requested_workers() -> None:
     decision = {"state": "reduced", "limits": {"effective_max_concurrent_jobs": 1}}
 
