@@ -299,6 +299,7 @@ async def _run_cast_screentime_stale_sweeper(stop_event: asyncio.Event) -> None:
 def _validate_startup_config() -> None:
     """Validate high-impact service env configuration with actionable logs."""
     _validate_modal_maintenance_owner_config()
+    _validate_cors_config()
     admin_shared_secret = (os.getenv("TRR_INTERNAL_ADMIN_SHARED_SECRET") or "").strip()
     supabase_jwt_secret = (os.getenv("SUPABASE_JWT_SECRET") or "").strip()
     log_database_resolution_summary()
@@ -426,6 +427,24 @@ def get_cors_origins() -> list[str]:
     return [origin.strip() for origin in origins_str.split(",") if origin.strip()]
 
 
+def _cors_allow_origins_for_runtime(cors_origins: list[str] | None = None) -> list[str]:
+    origins = cors_origins if cors_origins is not None else get_cors_origins()
+    if origins:
+        return origins
+    if _is_local_or_dev_runtime():
+        return ["*"]
+    return []
+
+
+def _validate_cors_config() -> None:
+    if get_cors_origins() or _is_local_or_dev_runtime():
+        return
+    raise RuntimeError(
+        "Missing CORS_ALLOW_ORIGINS for deployed runtime. "
+        "Set it to a comma-separated list of trusted app origins before starting the API."
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup/shutdown events."""
@@ -501,16 +520,16 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS configuration
-# Set CORS_ALLOW_ORIGINS env var with comma-separated origins for production
-# If no origins configured, allows all origins but disables credentials (safer default)
+# CORS configuration.
+# Set CORS_ALLOW_ORIGINS env var with comma-separated origins for deployed runtime.
+# Local/dev may fall back to wildcard origins with credentials disabled.
 cors_origins = get_cors_origins()
 allow_credentials = len(cors_origins) > 0  # Only allow credentials with explicit origins
 
 app.add_middleware(RequestTimeoutMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=cors_origins if cors_origins else ["*"],
+    allow_origins=_cors_allow_origins_for_runtime(cors_origins),
     allow_credentials=allow_credentials,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],

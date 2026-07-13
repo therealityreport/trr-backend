@@ -135,7 +135,7 @@ See `docs/architecture/pipeline.md` for details.
 
 ## 🔐 Security
 
-Supabase JWT verification is local-only. The backend validates tokens with `SUPABASE_JWT_SECRET`, derives the expected project issuer from `SUPABASE_PROJECT_REF` or the Supabase/runtime URLs, and still accepts legacy `service_role` JWTs with `iss="supabase"` when the signature and `ref` match.
+Supabase JWT verification is local-only. The backend validates tokens with `SUPABASE_JWT_SECRET`, derives the expected project issuer from `SUPABASE_PROJECT_REF` or the Supabase/runtime URLs, and does not enforce `aud` because current Supabase token audiences are not stable across TRR environments. As of 2026-07-07, it still accepts legacy `service_role` JWTs with `iss="supabase"` when the signature and `ref` match; revisit this after all internal service-role token sources are confirmed to emit the project issuer.
 
 Never commit API keys, AWS credentials, or private keys. Rotate any exposed credentials immediately.
 
@@ -196,9 +196,17 @@ GEMINI_API_KEY=your_gemini_api_key
 # Supabase Configuration
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
+SUPABASE_JWT_SECRET=your_jwt_secret
+# Optional JWT validation overrides when project ref or issuer cannot be derived cleanly.
+SUPABASE_PROJECT_REF=
+SUPABASE_JWT_ISSUER=
 TRR_DB_URL=postgresql://postgres.<project>:password@aws-1-us-east-1.pooler.supabase.com:5432/postgres
 TRR_DB_FALLBACK_URL=
 # Optional secondary DSN. Must also be a session-mode pooler URL (pooler.supabase.com:5432).
+
+# API Server
+# Required outside local/dev runtime. Use exact app origins that should send credentials.
+CORS_ALLOW_ORIGINS=https://thereality.report,https://admin.thereality.report
 
 # Optional Configuration
 REALITEASE_TMDB_SHOW_LIMIT=5

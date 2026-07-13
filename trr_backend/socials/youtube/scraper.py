@@ -120,6 +120,10 @@ class YouTubeScrapeConfig:
                 "YouTubeScrapeConfig fast_mode enabled: delay=%.2fs",
                 self.delay_seconds,
             )
+        if self.date_start is not None and self.date_start.tzinfo is None:
+            self.date_start = self.date_start.replace(tzinfo=UTC)
+        if self.date_end is not None and self.date_end.tzinfo is None:
+            self.date_end = self.date_end.replace(tzinfo=UTC)
 
     @property
     def start_timestamp(self) -> float:
@@ -1203,9 +1207,10 @@ class YouTubeScraper:
                 description = "".join(str(r.get("text") or "") for r in desc_runs if isinstance(r, dict))
 
         # Extract view count
-        view_text = renderer.get("viewCountText", {}).get("simpleText", "0")
+        view_count_text = renderer.get("viewCountText", {})
+        view_text = view_count_text.get("simpleText") or ""
         if not view_text:
-            runs = renderer.get("viewCountText", {}).get("runs", [])
+            runs = view_count_text.get("runs", [])
             if isinstance(runs, list):
                 view_text = "".join(str(item.get("text", "")) for item in runs if isinstance(item, dict))
         views = self._parse_view_count(view_text)
@@ -4274,8 +4279,19 @@ class YouTubeScraper:
     ) -> list[YouTubeComment]:
         """Fetch replies to a comment."""
         replies = []
+        seen_tokens: set[str] = set()
+        max_reply_pages = 200
+        pages = 0
 
         while continuation_token:
+            if continuation_token in seen_tokens:
+                break
+            seen_tokens.add(continuation_token)
+            pages += 1
+            if pages > max_reply_pages:
+                logger.warning("[youtube_reply_pagination_capped] pages=%s parent_id=%s", pages, parent_id)
+                break
+
             self._rate_limit(delay, fast_mode=fast_mode)
             data = self._fetch_comment_continuation(continuation_token, delay)
             if not data:
@@ -4322,6 +4338,8 @@ class YouTubeScraper:
             except (KeyError, TypeError):
                 break
 
+            if not next_continuation or next_continuation == continuation_token:
+                break
             continuation_token = next_continuation
 
         return replies

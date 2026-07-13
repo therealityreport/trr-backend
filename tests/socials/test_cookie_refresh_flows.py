@@ -476,6 +476,32 @@ def test_cookie_refresh_context_closes_profileless_browser_when_new_context_fail
     assert captured["close_calls"] == 1
 
 
+def test_cookie_refresh_context_preserves_new_context_error_when_close_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    chrome_root = tmp_path / "Chrome"
+
+    class _FakeBrowser:
+        def new_context(self, **_kwargs: object) -> object:
+            raise RuntimeError("new context failed")
+
+        def close(self) -> None:
+            raise RuntimeError("close failed")
+
+    monkeypatch.setattr(browser_cookie_refresh, "_chrome_profile_base_dir", lambda: chrome_root)
+    monkeypatch.setattr(browser_cookie_refresh, "launch_browser", lambda *_args, **_kwargs: _FakeBrowser())
+
+    with pytest.raises(RuntimeError, match="new context failed"):
+        browser_cookie_refresh.open_cookie_refresh_context(
+            SimpleNamespace(chromium=object()),
+            platform="socialblade",
+            headless=True,
+            viewport={"width": 100, "height": 100},
+            require_profile=False,
+        )
+
+
 def test_social_auth_refresh_rate_limit_blocks_repeated_attempts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1231,3 +1257,74 @@ def test_threads_refresh_passes_in_protocol_validator(monkeypatch, tmp_path) -> 
     monkeypatch.setattr(threads_cookie_refresh_mod, "refresh_simple_login_cookies", _fake_refresh)
     threads_cookie_refresh_mod.refresh_threads_cookies(username="u", password="p", cookie_file=str(tmp_path / "t.json"))
     assert captured["validator"] is threads_cookie_refresh_mod._validate_threads_cookies_in_protocol
+
+
+def test_reconcile_private_paths_hardens_files_and_directories(tmp_path: Path) -> None:
+    nested = tmp_path / "instagram"
+    nested.mkdir()
+    cookie_file = nested / "bravo.cookies.json"
+    cookie_file.write_text("{}", encoding="utf-8")
+    tmp_path.chmod(0o755)
+    nested.chmod(0o755)
+    cookie_file.chmod(0o644)
+
+    hardened = browser_cookie_refresh.reconcile_private_paths(tmp_path)
+
+    assert hardened == 1
+    assert tmp_path.stat().st_mode & 0o777 == 0o700
+    assert nested.stat().st_mode & 0o777 == 0o700
+    assert cookie_file.stat().st_mode & 0o777 == 0o600
+
+
+def test_reconcile_private_paths_ignores_missing_root(tmp_path: Path) -> None:
+    assert browser_cookie_refresh.reconcile_private_paths(tmp_path / "missing") == 0
+
+
+def test_reconcile_private_paths_does_not_chmod_symlink_targets(tmp_path: Path) -> None:
+    private_root = tmp_path / "private"
+    private_root.mkdir()
+    outside_root = tmp_path / "outside"
+    outside_root.mkdir()
+    outside_file = outside_root / "credentials.json"
+    outside_file.write_text("{}", encoding="utf-8")
+    outside_root.chmod(0o755)
+    outside_file.chmod(0o644)
+    (private_root / "escaped-dir").symlink_to(outside_root, target_is_directory=True)
+    (private_root / "escaped-file.json").symlink_to(outside_file)
+
+    hardened = browser_cookie_refresh.reconcile_private_paths(private_root)
+
+    assert hardened == 0
+    assert outside_root.stat().st_mode & 0o777 == 0o755
+    assert outside_file.stat().st_mode & 0o777 == 0o644
+
+
+def test_reconcile_private_paths_ignores_symlink_root(tmp_path: Path) -> None:
+    outside_root = tmp_path / "outside"
+    outside_root.mkdir()
+    outside_file = outside_root / "credentials.json"
+    outside_file.write_text("{}", encoding="utf-8")
+    outside_root.chmod(0o755)
+    outside_file.chmod(0o644)
+    linked_root = tmp_path / "private-link"
+    linked_root.symlink_to(outside_root, target_is_directory=True)
+
+    assert browser_cookie_refresh.reconcile_private_paths(linked_root) == 0
+    assert outside_root.stat().st_mode & 0o777 == 0o755
+    assert outside_file.stat().st_mode & 0o777 == 0o644
+
+
+def test_reconcile_private_paths_swallows_chmod_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cookie_file = tmp_path / "bravo.cookies.json"
+    cookie_file.write_text("{}", encoding="utf-8")
+
+    def _raise_os_error(self: Path, mode: int, *, follow_symlinks: bool = True) -> None:
+        del follow_symlinks
+        raise OSError("chmod blocked")
+
+    monkeypatch.setattr(Path, "chmod", _raise_os_error)
+
+    assert browser_cookie_refresh.reconcile_private_paths(tmp_path) == 0

@@ -53,6 +53,43 @@ def test_verify_jwt_token_accepts_legacy_supabase_service_role_issuer(monkeypatc
     assert payload["ref"] == "project123"
 
 
+def test_verify_jwt_token_accepts_expected_project_issuer(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("SUPABASE_PROJECT_REF", "project123")
+    monkeypatch.delenv("SUPABASE_JWT_ISSUER", raising=False)
+
+    token = _make_token(
+        "test-secret-32-bytes-minimum-abcdef",
+        "user-1",
+        timedelta(minutes=5),
+        issuer="https://project123.supabase.co/auth/v1",
+        extra_claims={"ref": "project123", "role": "authenticated"},
+    )
+
+    payload = verify_jwt_token(token)
+
+    assert payload["iss"] == "https://project123.supabase.co/auth/v1"
+    assert payload["ref"] == "project123"
+
+
+def test_verify_jwt_token_does_not_enforce_audience_claim(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("SUPABASE_PROJECT_REF", "project123")
+    monkeypatch.delenv("SUPABASE_JWT_ISSUER", raising=False)
+
+    token = _make_token(
+        "test-secret-32-bytes-minimum-abcdef",
+        "user-1",
+        timedelta(minutes=5),
+        issuer="https://project123.supabase.co/auth/v1",
+        extra_claims={"aud": "unexpected-audience", "ref": "project123", "role": "authenticated"},
+    )
+
+    payload = verify_jwt_token(token)
+
+    assert payload["aud"] == "unexpected-audience"
+
+
 def test_verify_jwt_token_reports_bad_signature(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
 

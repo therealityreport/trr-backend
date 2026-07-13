@@ -102,6 +102,9 @@ _SOCIALBLADE_RANGE_OPTIONS = (
 _SOCIALBLADE_CHART_INTERVAL_OPTIONS = ("Daily", "Weekly", "Monthly")
 _SOCIALBLADE_CHART_METRIC_OPTIONS = ("Gained", "Total", "Averages")
 _SOCIALBLADE_AUTHENTICATED_HISTORY_LIMIT = 60
+_SOCIALBLADE_AUTHENTICATED_HISTORY_SOURCES = frozenset(
+    {"authenticated_api", "page_trpc_capture", "page_trpc_capture_short"}
+)
 _SOCIALBLADE_DAILY_TOTAL_CHART_LIMIT = 1096
 _PLATFORM_ROUTE_SEGMENTS = {
     "instagram": "user",
@@ -754,8 +757,11 @@ def _socialblade_payload_needs_login_retry(payload: dict[str, Any] | None) -> bo
         chart_points = int(chart.get("total_data_points") or 0) if isinstance(chart, dict) else 0
     except (TypeError, ValueError):
         chart_points = 0
+    history_source = str(payload.get("history_source") or "").strip()
     period = str(metrics.get("period") or "").strip()
-    if re.search(r"\b(?:14|30|31)\s+days\b", period, re.IGNORECASE):
+    if history_source not in _SOCIALBLADE_AUTHENTICATED_HISTORY_SOURCES and re.search(
+        r"\b(?:14|30|31)\s+days\b", period, re.IGNORECASE
+    ):
         return True
     if chart_points > row_count:
         return False

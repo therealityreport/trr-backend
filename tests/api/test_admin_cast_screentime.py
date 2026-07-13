@@ -35,6 +35,7 @@ def override_admin(request):
 @pytest.fixture(autouse=True)
 def set_internal_admin_auth_env(monkeypatch):
     monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret")
+    monkeypatch.setenv("CAST_SCREENTIME_SUBTITLE_EXTRACTION_ENABLED", "0")
     monkeypatch.delenv("SCREENALYTICS_SERVICE_TOKEN", raising=False)
     monkeypatch.delenv("TRR_SCREENALYTICS_ALLOW_SERVICE_TOKEN_FALLBACK", raising=False)
     yield
@@ -76,6 +77,7 @@ def fake_repo(monkeypatch):
     store: dict[str, dict] = {
         "sessions": {},
         "video_assets": {},
+        "subtitle_tracks": {},
         "runs": {},
         "segments": {},
         "evidence": {},
@@ -107,6 +109,12 @@ def fake_repo(monkeypatch):
     def create_video_asset(payload):
         record = {
             "legacy_screenalytics_video_asset_id": None,
+            "subtitle_extraction_status": "not_requested",
+            "subtitle_extraction_error": None,
+            "subtitle_extraction_attempts": 0,
+            "subtitle_extraction_requested_at": None,
+            "subtitle_extraction_started_at": None,
+            "subtitle_extraction_completed_at": None,
             **payload,
         }
         store["video_assets"][record["id"]] = record
@@ -133,6 +141,86 @@ def fake_repo(monkeypatch):
             if session.get("promoted_video_asset_id") == video_asset_id:
                 return session.get("status")
         return None
+
+    def get_subtitle_summary(video_asset_id, include_skipped=False):
+        asset = store["video_assets"].get(video_asset_id)
+        if not asset:
+            return None
+        tracks = [
+            row
+            for row in store["subtitle_tracks"].values()
+            if row.get("video_asset_id") == video_asset_id
+            and (include_skipped or row.get("selection_status") == "eligible_english")
+        ]
+        all_tracks = [row for row in store["subtitle_tracks"].values() if row.get("video_asset_id") == video_asset_id]
+        eligible = [row for row in all_tracks if row.get("selection_status") == "eligible_english"]
+        return {
+            "video_asset_id": video_asset_id,
+            "status": asset.get("subtitle_extraction_status", "not_requested"),
+            "error": asset.get("subtitle_extraction_error"),
+            "attempts": asset.get("subtitle_extraction_attempts", 0),
+            "requested_at": asset.get("subtitle_extraction_requested_at"),
+            "started_at": asset.get("subtitle_extraction_started_at"),
+            "completed_at": asset.get("subtitle_extraction_completed_at"),
+            "discovered_track_count": len(all_tracks),
+            "eligible_track_count": len(eligible),
+            "completed_track_count": sum(row.get("extraction_status") == "complete" for row in eligible),
+            "failed_track_count": sum(row.get("extraction_status") == "failed" for row in eligible),
+            "primary_track_id": next((row["id"] for row in eligible if row.get("is_primary")), None),
+            "tracks": sorted(tracks, key=lambda row: int(row.get("stream_index") or 0)),
+        }
+
+    def queue_subtitle_extraction(video_asset_id, force=False, **_kwargs):
+        asset = store["video_assets"].get(video_asset_id)
+        if not asset:
+            return None
+        status = str(asset.get("subtitle_extraction_status") or "not_requested")
+        if status in {"queued", "running"}:
+            return {
+                "video_asset_id": video_asset_id,
+                "status": status,
+                "already_active": True,
+                "should_dispatch": False,
+                "force": force,
+            }
+        if status == "complete" and not force:
+            return {
+                "video_asset_id": video_asset_id,
+                "status": status,
+                "already_active": False,
+                "should_dispatch": False,
+                "force": False,
+            }
+        asset.update(
+            {
+                "subtitle_extraction_status": "queued",
+                "subtitle_extraction_error": None,
+                "subtitle_extraction_requested_at": "2026-07-13T12:00:00+00:00",
+                "subtitle_extraction_started_at": None,
+                "subtitle_extraction_completed_at": None,
+            }
+        )
+        return {
+            "video_asset_id": video_asset_id,
+            "status": "queued",
+            "already_active": False,
+            "should_dispatch": True,
+            "force": force,
+        }
+
+    def update_subtitle_extraction_status(video_asset_id, status, error=None, **timestamps):
+        asset = store["video_assets"].get(video_asset_id)
+        if not asset:
+            return None
+        asset["subtitle_extraction_status"] = status
+        asset["subtitle_extraction_error"] = error
+        for key, value in timestamps.items():
+            asset[f"subtitle_extraction_{key}"] = value
+        return asset
+
+    def get_subtitle_track(video_asset_id, track_id):
+        row = store["subtitle_tracks"].get(track_id)
+        return row if row and row.get("video_asset_id") == video_asset_id else None
 
     def list_video_asset_cast_candidates(video_asset_id):
         if video_asset_id not in store["video_assets"]:
@@ -354,6 +442,23 @@ def fake_repo(monkeypatch):
             reconciled.append(run)
         return reconciled
 
+    def reconcile_stale_subtitle_extractions(*, stale_after_seconds):
+        reconciled = []
+        for asset in store["video_assets"].values():
+            if asset.get("subtitle_extraction_status") not in {"queued", "running"}:
+                continue
+            if not asset.get("subtitle_is_stale"):
+                continue
+            asset.update(
+                {
+                    "subtitle_extraction_status": "failed",
+                    "subtitle_extraction_error": "subtitle_worker_stale",
+                    "subtitle_extraction_completed_at": "2026-07-13T12:00:00+00:00",
+                }
+            )
+            reconciled.append(asset)
+        return reconciled
+
     def get_publish_version_for_run(run_id):
         return next((row for row in store["publish_versions"].values() if row["run_id"] == run_id), None)
 
@@ -502,6 +607,10 @@ def fake_repo(monkeypatch):
     monkeypatch.setattr(repo, "get_video_asset_by_legacy_screenalytics_id", get_video_asset_by_legacy_screenalytics_id)
     monkeypatch.setattr(repo, "resolve_video_asset", resolve_video_asset)
     monkeypatch.setattr(repo, "get_video_asset_upload_session_status", get_video_asset_upload_session_status)
+    monkeypatch.setattr(repo, "get_subtitle_summary", get_subtitle_summary)
+    monkeypatch.setattr(repo, "queue_subtitle_extraction", queue_subtitle_extraction)
+    monkeypatch.setattr(repo, "update_subtitle_extraction_status", update_subtitle_extraction_status)
+    monkeypatch.setattr(repo, "get_subtitle_track", get_subtitle_track)
     monkeypatch.setattr(repo, "list_video_asset_cast_candidates", list_video_asset_cast_candidates)
     monkeypatch.setattr(repo, "resolve_owner_context", resolve_owner_context)
     monkeypatch.setattr(repo, "list_target_youtube_accounts", list_target_youtube_accounts)
@@ -556,6 +665,7 @@ def fake_repo(monkeypatch):
     monkeypatch.setattr(repo, "list_suggestion_decisions_for_context", list_suggestion_decisions_for_context)
     monkeypatch.setattr(repo, "upsert_unknown_review_state", upsert_unknown_review_state)
     monkeypatch.setattr(repo, "list_unknown_review_state_for_context", list_unknown_review_state_for_context)
+    monkeypatch.setattr(repo, "reconcile_stale_subtitle_extractions", reconcile_stale_subtitle_extractions)
     monkeypatch.setattr(repo, "list_current_published_versions_for_show", list_current_published_versions_for_show)
     monkeypatch.setattr(repo, "list_current_published_versions_for_season", list_current_published_versions_for_season)
     monkeypatch.setattr(repo, "reconcile_stale_runs", reconcile_stale_runs)
@@ -704,6 +814,163 @@ def test_upload_complete_and_run_flow():
     assert payload["run"]["dispatch_status"] == "queued"
     assert payload["run"]["cast_coverage_summary_json"]["candidate_count"] == 1
     assert payload["run"]["candidate_scope_policy_json"]["preferred_facebank_coverage"] is True
+
+
+def _create_and_complete_episode_upload(client: TestClient) -> dict:
+    episode_id = uuid4()
+    created = client.post(
+        "/api/v1/admin/cast-screentime/upload-sessions",
+        json={
+            "owner_scope": "episode",
+            "owner_id": str(episode_id),
+            "filename": "Love Island.S08.E01.Episode 1.1080p.mp4",
+            "content_type": "video/mp4",
+            "expected_size_bytes": 1024,
+        },
+    )
+    assert created.status_code == 200
+    upload_session_id = created.json()["upload_session_id"]
+    completed = client.post(
+        f"/api/v1/admin/cast-screentime/upload-sessions/{upload_session_id}/complete",
+        json={"upload_session_id": upload_session_id},
+    )
+    assert completed.status_code == 200
+    return completed.json()["video_asset"]
+
+
+def test_upload_promotion_queues_subtitle_extraction_when_enabled(monkeypatch):
+    monkeypatch.setenv("CAST_SCREENTIME_SUBTITLE_EXTRACTION_ENABLED", "1")
+    captured: dict[str, object] = {}
+
+    def _dispatch(video_asset_id, force=False):
+        captured.update({"video_asset_id": video_asset_id, "force": force})
+        return {"dispatched": True, "call_id": "fc-subtitles"}
+
+    monkeypatch.setattr(
+        router_module.retained_cast_screentime_subtitle_dispatch,
+        "extract_video_asset_subtitles",
+        _dispatch,
+    )
+
+    video_asset = _create_and_complete_episode_upload(TestClient(app))
+
+    assert captured == {"video_asset_id": video_asset["id"], "force": False}
+    assert video_asset["subtitle_summary"]["status"] == "queued"
+    assert video_asset["source_json"]["original_filename"] == "Love Island.S08.E01.Episode 1.1080p.mp4"
+
+
+def test_upload_promotion_survives_subtitle_dispatch_failure(monkeypatch):
+    monkeypatch.setenv("CAST_SCREENTIME_SUBTITLE_EXTRACTION_ENABLED", "1")
+    monkeypatch.setattr(
+        router_module.retained_cast_screentime_subtitle_dispatch,
+        "extract_video_asset_subtitles",
+        lambda *_args, **_kwargs: {
+            "dispatched": False,
+            "reason_code": "modal_dispatch_unavailable",
+        },
+    )
+
+    video_asset = _create_and_complete_episode_upload(TestClient(app))
+
+    assert video_asset["subtitle_summary"]["status"] == "failed"
+    assert "modal_dispatch_unavailable" in video_asset["subtitle_summary"]["error"]
+
+
+def test_subtitle_extract_endpoint_queues_on_demand(monkeypatch):
+    client = TestClient(app)
+    video_asset = _create_and_complete_episode_upload(client)
+    monkeypatch.setattr(
+        router_module.retained_cast_screentime_subtitle_dispatch,
+        "extract_video_asset_subtitles",
+        lambda *_args, **_kwargs: {"dispatched": True, "call_id": "fc-manual"},
+    )
+
+    response = client.post(
+        f"/api/v1/admin/cast-screentime/video-assets/{video_asset['id']}/subtitles/extract",
+        json={"force": False},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "queued"
+    assert response.json()["job_id"] == "modal:fc-manual"
+
+
+def test_subtitle_extract_endpoint_returns_service_unavailable_when_dispatch_is_rejected(monkeypatch):
+    client = TestClient(app)
+    video_asset = _create_and_complete_episode_upload(client)
+    monkeypatch.setattr(
+        router_module.retained_cast_screentime_subtitle_dispatch,
+        "extract_video_asset_subtitles",
+        lambda *_args, **_kwargs: {
+            "dispatched": False,
+            "reason_code": "modal_dispatch_unavailable",
+        },
+    )
+
+    response = client.post(
+        f"/api/v1/admin/cast-screentime/video-assets/{video_asset['id']}/subtitles/extract",
+        json={"force": False},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "failed"
+    assert response.json()["dispatched"] is False
+
+
+def test_subtitle_summary_cues_and_download_endpoints(monkeypatch):
+    client = TestClient(app)
+    video_asset = _create_and_complete_episode_upload(client)
+    track_id = str(uuid4())
+    cue_payload = {
+        "video_asset_id": video_asset["id"],
+        "track_id": track_id,
+        "offset": 0,
+        "limit": 200,
+        "total_cues": 1,
+        "matched_cues": 1,
+        "items": [
+            {
+                "ordinal": 1,
+                "start_ms": 14448,
+                "end_ms": 16984,
+                "text": "[ music plays ]",
+                "plain_text": "[ music plays ]",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        router_module.cast_screentime_subtitles,
+        "load_subtitle_cues",
+        lambda *_args, **_kwargs: cue_payload,
+    )
+    monkeypatch.setattr(
+        router_module.cast_screentime_subtitles,
+        "generate_subtitle_download_url",
+        lambda *_args, **_kwargs: {
+            "video_asset_id": video_asset["id"],
+            "track_id": track_id,
+            "filename": "episode.stream-2.en.srt",
+            "content_type": "application/x-subrip; charset=utf-8",
+            "expires_in_seconds": 300,
+            "expires_at": "2026-07-13T12:05:00+00:00",
+            "download_url": "https://r2.example.test/signed",
+        },
+    )
+
+    summary = client.get(f"/api/v1/admin/cast-screentime/video-assets/{video_asset['id']}/subtitles")
+    cues = client.get(
+        f"/api/v1/admin/cast-screentime/video-assets/{video_asset['id']}/subtitles/{track_id}/cues?q=music"
+    )
+    download = client.get(
+        f"/api/v1/admin/cast-screentime/video-assets/{video_asset['id']}/subtitles/{track_id}/download-url"
+    )
+
+    assert summary.status_code == 200
+    assert summary.json()["status"] == "not_requested"
+    assert cues.status_code == 200
+    assert cues.json() == cue_payload
+    assert download.status_code == 200
+    assert download.json()["download_url"] == "https://r2.example.test/signed"
 
 
 def test_create_run_accepts_backend_dispatch_payload(monkeypatch):

@@ -1029,6 +1029,8 @@ class RedditHttpClient:
         self.user_agent = (os.getenv("REDDIT_USER_AGENT") or "").strip() or REDDIT_USER_AGENT_DEFAULT
         self._oauth_token: str | None = None
         self._oauth_expires_at: float = 0.0
+        self._state_lock = threading.Lock()
+        self._oauth_refresh_lock = threading.Lock()
         # Adaptive cooldown: starts at configured minimum, increases on 429s, decays on success
         self._adaptive_cooldown: float = self.page_cooldown
         self._adaptive_cooldown_min: float = self.page_cooldown
@@ -1051,31 +1053,38 @@ class RedditHttpClient:
     def _get_oauth_token(self) -> str | None:
         if not self.client_id or not self.client_secret:
             return None
-        now = time.time()
-        if self._oauth_token and now < (self._oauth_expires_at - 30):
-            return self._oauth_token
-        try:
-            response = self.session.post(
-                "https://www.reddit.com/api/v1/access_token",
-                headers={"User-Agent": self.user_agent},
-                auth=(self.client_id, self.client_secret),
-                data={"grant_type": "client_credentials"},
-                timeout=self.timeout_seconds,
-            )
-            if response.status_code >= 400:
-                logger.warning("[reddit_refresh_oauth_failed] status=%s", response.status_code)
+
+        with self._state_lock:
+            if self._oauth_token and time.time() < (self._oauth_expires_at - 30):
+                return self._oauth_token
+
+        with self._oauth_refresh_lock:
+            with self._state_lock:
+                if self._oauth_token and time.time() < (self._oauth_expires_at - 30):
+                    return self._oauth_token
+            try:
+                response = self.session.post(
+                    "https://www.reddit.com/api/v1/access_token",
+                    headers={"User-Agent": self.user_agent},
+                    auth=(self.client_id, self.client_secret),
+                    data={"grant_type": "client_credentials"},
+                    timeout=self.timeout_seconds,
+                )
+                if response.status_code >= 400:
+                    logger.warning("[reddit_refresh_oauth_failed] status=%s", response.status_code)
+                    return None
+                payload = response.json() if response.content else {}
+                token = str(payload.get("access_token") or "").strip()
+                expires_in = float(payload.get("expires_in") or 3600)
+                if not token:
+                    return None
+                with self._state_lock:
+                    self._oauth_token = token
+                    self._oauth_expires_at = time.time() + max(60.0, expires_in)
+                return token
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[reddit_refresh_oauth_exception] %s", exc)
                 return None
-            payload = response.json() if response.content else {}
-            token = str(payload.get("access_token") or "").strip()
-            expires_in = float(payload.get("expires_in") or 3600)
-            if not token:
-                return None
-            self._oauth_token = token
-            self._oauth_expires_at = time.time() + max(60.0, expires_in)
-            return token
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[reddit_refresh_oauth_exception] %s", exc)
-            return None
 
     def get_json(self, path: str, *, params: dict[str, Any]) -> dict[str, Any]:
         supports_oauth = bool(self.client_id and self.client_secret)
@@ -1096,10 +1105,11 @@ class RedditHttpClient:
                     )
                     if response.status_code == 429:
                         # Adaptive backoff: increase cooldown on rate limit
-                        self._adaptive_cooldown = min(
-                            self._adaptive_cooldown_max,
-                            self._adaptive_cooldown * 2,
-                        )
+                        with self._state_lock:
+                            self._adaptive_cooldown = min(
+                                self._adaptive_cooldown_max,
+                                self._adaptive_cooldown * 2,
+                            )
                         retry_after = response.headers.get("Retry-After")
                         delay = self.rate_limit_delay
                         if retry_after:
@@ -1125,12 +1135,15 @@ class RedditHttpClient:
                         )
                     payload = response.json() if response.content else {}
                     # Adaptive cooldown: use current adaptive value, decay toward minimum on success
-                    if self._adaptive_cooldown > 0:
-                        time.sleep(self._adaptive_cooldown)
-                    self._adaptive_cooldown = max(
-                        self._adaptive_cooldown_min,
-                        self._adaptive_cooldown * 0.9,
-                    )
+                    with self._state_lock:
+                        current_cooldown = self._adaptive_cooldown
+                    if current_cooldown > 0:
+                        time.sleep(current_cooldown)
+                    with self._state_lock:
+                        self._adaptive_cooldown = max(
+                            self._adaptive_cooldown_min,
+                            self._adaptive_cooldown * 0.9,
+                        )
                     return payload if isinstance(payload, dict) else {}
                 except RedditRefreshError:
                     raise
@@ -3779,6 +3792,7 @@ def execute_refresh_run(
     *,
     preclaimed_run: dict[str, Any] | None = None,
     worker_id: str | None = None,
+    raise_on_failure: bool = True,
 ) -> dict[str, Any]:
     run = (
         dict(preclaimed_run)
@@ -4342,7 +4356,9 @@ def execute_refresh_run(
             claim_token=claim_token,
             release_claim=True,
         )
-        raise
+        if raise_on_failure:
+            raise
+        return get_refresh_run(run_id)
 
 
 def run_reddit_refresh_worker_loop(
@@ -4376,7 +4392,19 @@ def run_reddit_refresh_worker_loop(
             run_id[:8] if run_id else None,
             _safe_int(claimed.get("attempt_count")),
         )
-        execute_refresh_run(run_id, preclaimed_run=claimed, worker_id=normalized_worker)
+        try:
+            execute_refresh_run(
+                run_id,
+                preclaimed_run=claimed,
+                worker_id=normalized_worker,
+                raise_on_failure=False,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[reddit_refresh_worker_run_error] worker_id=%s run_id=%s",
+                normalized_worker,
+                run_id[:8] if run_id else None,
+            )
         if once:
             logger.info("[reddit_refresh_worker_once_complete] worker_id=%s run_id=%s", normalized_worker, run_id[:8])
             return 0

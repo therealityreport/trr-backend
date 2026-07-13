@@ -79,7 +79,26 @@ start_worker() {
   local label="$1"
   shift
   echo "[remote-workers] starting ${label}: $*"
-  "$@" &
+  (
+    child_pid=""
+    trap 'if [[ -n "$child_pid" ]]; then kill -TERM "$child_pid" >/dev/null 2>&1 || true; wait "$child_pid" 2>/dev/null || true; fi; exit 143' TERM INT
+    while true; do
+      "$@" &
+      child_pid="$!"
+      local rc
+      if wait "$child_pid"; then
+        rc=0
+      else
+        rc=$?
+      fi
+      child_pid=""
+      if [[ "$rc" -eq 0 ]]; then
+        break
+      fi
+      echo "[remote-workers] ${label} exited rc=${rc}; respawning in ${RESPAWN_DELAY:-5}s"
+      sleep "${RESPAWN_DELAY:-5}"
+    done
+  ) &
   PIDS+=("$!")
 }
 

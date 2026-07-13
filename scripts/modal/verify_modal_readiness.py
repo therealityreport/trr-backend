@@ -81,8 +81,8 @@ os.environ["MODAL_PROFILE"] = REQUIRED_MODAL_PROFILE
 
 from scripts._workspace_runtime_env import apply_workspace_runtime_env
 from trr_backend.modal_dispatch import (
-    modal_social_comments_recovery_job_function_name,
     modal_social_comments_job_function_name,
+    modal_social_comments_recovery_job_function_name,
     modal_social_job_function_name,
     modal_social_job_function_names,
     modal_social_media_job_function_name,
@@ -339,6 +339,10 @@ def expected_function_names() -> tuple[str, ...]:
         str(os.getenv("TRR_MODAL_VISION_FUNCTION") or "run_admin_vision").strip() or "run_admin_vision",
         str(os.getenv("TRR_MODAL_CAST_SCREENTIME_FUNCTION") or "run_cast_screentime_analysis").strip()
         or "run_cast_screentime_analysis",
+        str(
+            os.getenv("TRR_MODAL_CAST_SCREENTIME_SUBTITLE_FUNCTION") or "run_cast_screentime_subtitle_extraction"
+        ).strip()
+        or "run_cast_screentime_subtitle_extraction",
         str(os.getenv("TRR_MODAL_SOCIALBLADE_FUNCTION") or "run_socialblade_scrape").strip()
         or "run_socialblade_scrape",
         "heartbeat_remote_executors",
@@ -392,7 +396,12 @@ def instagram_comments_auth_rate_limit_cooldown_seconds() -> int:
 def instagram_comments_auth_probe_is_rate_limited(payload: dict[str, Any]) -> bool:
     reason = str(payload.get("reason") or payload.get("comments_auth_blocker") or "").strip().lower()
     status = str(payload.get("status") or payload.get("result") or "").strip().lower()
-    return bool(payload.get("rate_limited")) or reason in {"http_429", "rate_limited"} or "429" in reason or status == "rate_limited"
+    return (
+        bool(payload.get("rate_limited"))
+        or reason in {"http_429", "rate_limited"}
+        or "429" in reason
+        or status == "rate_limited"
+    )
 
 
 def getty_remote_probe_function_name() -> str:
@@ -1058,9 +1067,8 @@ def verify_modal_readiness(
             str(instagram_comments_auth_probe.get("reason") or "instagram_comments_auth_probe_failed").strip()
             or "instagram_comments_auth_probe_failed"
         )
-        if (
-            not strict_instagram_comments_auth
-            and _instagram_comments_probe_failure_is_advisory(instagram_comments_auth_probe)
+        if not strict_instagram_comments_auth and _instagram_comments_probe_failure_is_advisory(
+            instagram_comments_auth_probe
         ):
             instagram_comments_auth_probe["advisory_continue"] = True
             advisory_probe_failures.append(comments_reason)

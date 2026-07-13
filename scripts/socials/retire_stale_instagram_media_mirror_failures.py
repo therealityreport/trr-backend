@@ -58,12 +58,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=[],
         help="Optional show UUID filter. Repeat to target multiple shows.",
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--dry-run",
         action="store_true",
         help="Preview matching stale failure rows without mutating them (default).",
     )
-    parser.add_argument(
+    mode.add_argument(
         "--apply",
         action="store_true",
         help="Retire the matching stale failures by marking them cancelled with obsolete-failure metadata.",
@@ -163,11 +164,12 @@ def _retire_matches(*, season_ids: list[str], show_ids: list[str]) -> list[dict[
           last_error_class = %s,
           metadata = coalesce(metadata, '{}'::jsonb) || %s::jsonb
         where id::text = any(%s)
+          and status = %s
         returning id::text as id,
                   season_id::text as season_id,
                   show_id::text as show_id
         """,
-        [OBSOLETE_ERROR_MESSAGE, OBSOLETE_ERROR_CODE, OBSOLETE_ERROR_CLASS, payload, job_ids],
+        [OBSOLETE_ERROR_MESSAGE, OBSOLETE_ERROR_CODE, OBSOLETE_ERROR_CLASS, payload, job_ids, "failed"],
     )
 
 

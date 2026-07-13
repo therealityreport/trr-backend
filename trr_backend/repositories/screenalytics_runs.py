@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -9,6 +10,8 @@ from uuid import UUID
 from psycopg2.extras import Json
 
 from trr_backend.db import pg
+
+_SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class ScreenalyticsRepositoryError(RuntimeError):
@@ -25,6 +28,14 @@ def _normalize(value: Any) -> Any:
     if isinstance(value, UUID):
         return str(value)
     return value
+
+
+def _validate_update_columns(payload: dict[str, Any]) -> dict[str, Any]:
+    """Reject dynamic update keys that are not safe SQL identifiers."""
+    for column in payload:
+        if not _SQL_IDENTIFIER_RE.fullmatch(column):
+            raise ValueError(f"Invalid SQL identifier: {column}")
+    return payload
 
 
 def create_video_asset(payload: dict[str, Any]) -> dict[str, Any]:
@@ -194,6 +205,7 @@ def mark_result_ingest_status(
 def update_run(run_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     if not payload:
         return get_run(run_id)
+    payload = _validate_update_columns(payload)
 
     assignments = []
     params: list[Any] = []

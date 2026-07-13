@@ -7,7 +7,10 @@ import socket
 import sys
 import traceback
 from contextvars import ContextVar, Token
+from copy import copy
 from datetime import UTC, datetime
+from logging.handlers import QueueHandler, QueueListener
+from queue import Full, Queue
 from threading import Lock
 from typing import Any
 from urllib import request as urllib_request
@@ -17,8 +20,10 @@ _SERVICE_NAME = os.getenv("TRR_METRICS_SERVICE_NAME", "trr_backend_api")
 _LOGGING_LOCK = Lock()
 _STREAM_HANDLER_NAME = "trr-stream"
 _BETTER_STACK_HANDLER_NAME = "trr-better-stack"
+_BETTER_STACK_QUEUE_MAXSIZE = 1000
 _SENTRY_LOCK = Lock()
 _sentry_initialized = False
+_better_stack_listener: QueueListener | None = None
 
 try:  # pragma: no cover - optional dependency in local/test envs
     from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
@@ -141,7 +146,7 @@ def _resolve_better_stack_endpoint() -> str:
 
 
 def _build_better_stack_event(record: logging.LogRecord, *, service_name: str) -> dict[str, Any]:
-    trace_id = get_trace_id()
+    trace_id = str(getattr(record, "trr_trace_id", "") or get_trace_id() or "")
     event: dict[str, Any] = {
         "dt": datetime.fromtimestamp(record.created, tz=UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
         "message": record.getMessage(),
@@ -161,9 +166,40 @@ def _build_better_stack_event(record: logging.LogRecord, *, service_name: str) -
         event["environment"] = environment
     if trace_id:
         event["trace_id"] = trace_id
-    if record.exc_info:
+    queued_exception = str(getattr(record, "trr_exception", "") or "")
+    if queued_exception:
+        event["exception"] = queued_exception
+    elif record.exc_info:
         event["exception"] = "".join(traceback.format_exception(*record.exc_info)).strip()
     return event
+
+
+class NonBlockingQueueHandler(QueueHandler):
+    """Queue logs without making request threads wait for remote shipping."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name == "urllib3":
+            return False
+        return super().filter(record)
+
+    def prepare(self, record: logging.LogRecord) -> logging.LogRecord:
+        prepared = copy(record)
+        prepared.trr_trace_id = get_trace_id() or ""
+        prepared.trr_exception = (
+            "".join(traceback.format_exception(*record.exc_info)).strip() if record.exc_info else ""
+        )
+        prepared.msg = record.getMessage()
+        prepared.args = None
+        prepared.exc_info = None
+        prepared.exc_text = None
+        return prepared
+
+    def enqueue(self, record: logging.LogRecord) -> None:
+        try:
+            self.queue.put_nowait(record)
+        except Full:
+            # Drop remote-only overflow; the local stream remains authoritative.
+            pass
 
 
 class BetterStackHTTPHandler(logging.Handler):
@@ -294,6 +330,7 @@ def configure_sentry(*, service_name: str | None = None) -> None:
 
 def configure_runtime_observability(*, service_name: str | None = None) -> None:
     """Configure local stdout logging, optional Better Stack log shipping, and optional Sentry once per process."""
+    global _better_stack_listener
     level = _resolve_log_level()
     runtime_name = _resolve_runtime_name(service_name)
     root_logger = logging.getLogger()
@@ -324,7 +361,13 @@ def configure_runtime_observability(*, service_name: str | None = None) -> None:
             failure_cooldown_seconds=_env_float("BETTER_STACK_FAILURE_COOLDOWN_SECONDS", default=60.0),
         )
         better_stack_handler.setLevel(level)
-        root_logger.addHandler(better_stack_handler)
+        log_queue: Queue[logging.LogRecord] = Queue(maxsize=_BETTER_STACK_QUEUE_MAXSIZE)
+        queue_handler = NonBlockingQueueHandler(log_queue)
+        queue_handler.set_name(_BETTER_STACK_HANDLER_NAME)
+        queue_handler.setLevel(level)
+        _better_stack_listener = QueueListener(log_queue, better_stack_handler, respect_handler_level=True)
+        _better_stack_listener.start()
+        root_logger.addHandler(queue_handler)
 
 
 def bind_trace_id(trace_id: str) -> Token[str]:

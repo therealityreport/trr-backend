@@ -165,6 +165,8 @@ def verify_jwt_token(token: str) -> dict[str, Any]:
     role = str(payload.get("role") or "").strip().lower()
     token_issuer = str(payload.get("iss") or "").strip()
     if expected_issuer and token_issuer and token_issuer != expected_issuer:
+        # 2026-07-07: Keep this legacy service_role issuer until all internal
+        # service-role token sources are confirmed to emit the project issuer.
         if not (role == "service_role" and token_issuer == "supabase"):
             raise InvalidTokenError(
                 "Supabase JWT issuer does not match the configured backend project issuer",

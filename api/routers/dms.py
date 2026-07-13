@@ -34,7 +34,7 @@ router = APIRouter(prefix="/dms", tags=["dms"])
 # --- Helper for publishing events ---
 
 
-def publish_event_sync(room: str, event: dict) -> None:
+def publish_event_sync(room: str, event: dict) -> bool:
     """
     Publish an event to a room (sync wrapper for background task).
 
@@ -44,8 +44,10 @@ def publish_event_sync(room: str, event: dict) -> None:
     try:
         broker = get_broker()
         asyncio.run(broker.publish(room, event))
-    except Exception as e:
-        logger.error(f"Failed to publish event to {room}: {e}")
+    except Exception:
+        logger.exception("Failed to publish realtime event to %s", room)
+        return False
+    return True
 
 
 # --- Pydantic models ---

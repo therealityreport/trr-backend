@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 
 import pytest
@@ -771,6 +772,40 @@ def test_account_socialblade_refresh_route_uses_platform_specific_scraper(monkey
         "allow_login_fallback": False,
         "allow_visible_browser_retry": False,
     }
+
+
+def test_account_socialblade_refresh_route_logs_sanitized_failure_once(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import api.routers.socials as router_module
+    import trr_backend.socials.socialblade.service as service_module
+
+    sentinel = "PRIVATE-UPSTREAM-DETAIL"
+
+    async def fake_run_in_threadpool(_func, /, *args, **kwargs):  # noqa: ANN001, ARG001
+        raise service_module.SocialBladeRefreshError(sentinel)
+
+    monkeypatch.setattr(router_module, "run_in_threadpool", fake_run_in_threadpool)
+
+    client = TestClient(app)
+    with caplog.at_level(logging.ERROR, logger=router_module.logger.name):
+        response = client.post(
+            "/api/v1/admin/socials/profiles/youtube/@Bravo/socialblade/refresh",
+            json={"force": True},
+        )
+
+    assert response.status_code == 502
+    assert sentinel not in response.text
+    assert response.json()["detail"] == {
+        "code": "INTERNAL_ERROR",
+        "message": "Upstream request failed.",
+    }
+    error_records = [
+        record for record in caplog.records if record.name == router_module.logger.name and record.exc_info
+    ]
+    assert len(error_records) == 1
+    assert error_records[0].getMessage() == "Failed to refresh SocialBlade account: platform=youtube account=bravo"
 
 
 def test_account_socialblade_refresh_route_uses_visible_retry_without_login_fallback(

@@ -7,6 +7,7 @@ All DM endpoints require authentication.
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from api import auth, deps
 from api.main import app
+from api.routers import dms
 
 
 def create_chainable_mock(return_data=None, single_data=None):
@@ -121,6 +123,41 @@ def client(mock_supabase):
 
 
 # --- Auth requirement tests ---
+
+
+class TestRealtimePublish:
+    """Test DM realtime publish helper behavior."""
+
+    def test_publish_event_sync_reports_publish_failure_without_payload(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class _Broker:
+            async def publish(self, room: str, event: dict) -> None:
+                raise RuntimeError("broker down")
+
+        monkeypatch.setattr(dms, "get_broker", lambda: _Broker())
+
+        with caplog.at_level(logging.ERROR, logger=dms.logger.name):
+            ok = dms.publish_event_sync("dm:conversation-1", {"body": "private user text"})
+
+        assert ok is False
+        assert caplog.records[0].exc_info is not None
+        assert "dm:conversation-1" in caplog.text
+        assert "private user text" not in caplog.text
+
+    def test_publish_event_sync_reports_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        published: list[tuple[str, dict]] = []
+
+        class _Broker:
+            async def publish(self, room: str, event: dict) -> None:
+                published.append((room, event))
+
+        monkeypatch.setattr(dms, "get_broker", lambda: _Broker())
+
+        assert dms.publish_event_sync("dm:conversation-1", {"type": "dm_message_created"}) is True
+        assert published == [("dm:conversation-1", {"type": "dm_message_created"})]
 
 
 class TestAuthRequired:
