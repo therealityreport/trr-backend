@@ -7431,7 +7431,10 @@ def test_purge_inactive_workers_endpoint_returns_500_on_unhandled_error(
         )
 
     assert response.status_code == 500
-    assert response.json()["detail"] == "purge workers failed"
+    assert response.json()["detail"] == {
+        "code": "INTERNAL_ERROR",
+        "message": "Internal server error.",
+    }
 
 
 def test_get_queue_status_endpoint_returns_payload(
@@ -8233,7 +8236,10 @@ def test_get_health_dot_endpoint_returns_500_on_unhandled_error(
         )
 
     assert response.status_code == 500
-    assert response.json()["detail"] == "health dot failed"
+    assert response.json()["detail"] == {
+        "code": "INTERNAL_ERROR",
+        "message": "Internal server error.",
+    }
 
 
 def test_get_live_status_aggregates_health_queue_and_operations(
@@ -8426,7 +8432,10 @@ def test_cancel_stuck_jobs_endpoint_returns_500_on_unhandled_error(
         )
 
     assert response.status_code == 500
-    assert response.json()["detail"] == "cancel stuck failed"
+    assert response.json()["detail"] == {
+        "code": "INTERNAL_ERROR",
+        "message": "Internal server error.",
+    }
 
 
 def test_cancel_dispatch_blocked_jobs_endpoint_accepts_targeted_job_ids(
@@ -8502,7 +8511,10 @@ def test_cancel_active_jobs_endpoint_returns_500_on_unhandled_error(
         )
 
     assert response.status_code == 500
-    assert response.json()["detail"] == "cancel active failed"
+    assert response.json()["detail"] == {
+        "code": "INTERNAL_ERROR",
+        "message": "Internal server error.",
+    }
 
 
 def test_dismiss_recent_failures_endpoint_returns_payload(
@@ -8583,7 +8595,10 @@ def test_dismiss_recent_failures_endpoint_returns_500_on_unhandled_error(
         )
 
     assert response.status_code == 500
-    assert response.json()["detail"] == "dismiss failed"
+    assert response.json()["detail"] == {
+        "code": "INTERNAL_ERROR",
+        "message": "Internal server error.",
+    }
 
 
 def test_reset_social_ingest_health_endpoint_returns_payload(
@@ -8634,7 +8649,10 @@ def test_reset_social_ingest_health_endpoint_returns_500_on_unhandled_error(
         )
 
     assert response.status_code == 500
-    assert response.json()["detail"] == "reset failed"
+    assert response.json()["detail"] == {
+        "code": "INTERNAL_ERROR",
+        "message": "Internal server error.",
+    }
 
 
 def test_get_worker_detail_endpoint_returns_payload(
@@ -8698,7 +8716,10 @@ def test_get_worker_detail_endpoint_returns_500_on_unhandled_error(
         )
 
     assert response.status_code == 500
-    assert response.json()["detail"] == "worker detail failed"
+    assert response.json()["detail"] == {
+        "code": "INTERNAL_ERROR",
+        "message": "Internal server error.",
+    }
 
 
 def test_debug_job_endpoint_returns_payload(
@@ -8888,7 +8909,10 @@ def test_debug_job_endpoint_returns_500_on_unhandled_error(
         )
 
     assert response.status_code == 500
-    assert response.json()["detail"] == "debug failed"
+    assert response.json()["detail"] == {
+        "code": "INTERNAL_ERROR",
+        "message": "Internal server error.",
+    }
 
 
 def test_get_comments_coverage_endpoint(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
