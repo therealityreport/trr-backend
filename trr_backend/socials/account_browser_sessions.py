@@ -30,7 +30,7 @@ _PRIVATE_PATHS_RECONCILED = False
 _PRIVATE_PATHS_RECONCILE_LOCK = threading.Lock()
 
 
-class BrowserSessionExecutionLockTimeout(TimeoutError):
+class BrowserSessionExecutionLockTimeout(TimeoutError):  # noqa: N818 - retained public API
     """Raised when an account-scoped browser session lock cannot be acquired."""
 
     def __init__(self, *, platform: str, account_id: str, timeout_seconds: float) -> None:
@@ -38,8 +38,7 @@ class BrowserSessionExecutionLockTimeout(TimeoutError):
         self.account_id = account_id
         self.timeout_seconds = timeout_seconds
         super().__init__(
-            f"Timed out acquiring {platform} browser-session lock for {account_id} "
-            f"after {timeout_seconds:.1f}s"
+            f"Timed out acquiring {platform} browser-session lock for {account_id} after {timeout_seconds:.1f}s"
         )
 
 
