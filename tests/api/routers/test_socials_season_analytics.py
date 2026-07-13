@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from threading import Event
@@ -6945,10 +6945,6 @@ def test_ingest_comments_only_inline_fallback_spawns_per_platform_workers() -> N
     worker_counts: list[int] = []
     execute_calls: list[dict[str, object]] = []
 
-    class _FakeFuture:
-        def result(self) -> None:
-            return None
-
     class _FakeThreadPoolExecutor:
         def __init__(self, *, max_workers: int):
             worker_counts.append(max_workers)
@@ -6961,7 +6957,9 @@ def test_ingest_comments_only_inline_fallback_spawns_per_platform_workers() -> N
 
         def submit(self, fn, *args, **kwargs):  # noqa: ANN001
             fn(*args, **kwargs)
-            return _FakeFuture()
+            future: Future[None] = Future()
+            future.set_result(None)
+            return future
 
     def _record_execute(
         run_id: str, *, worker_id: str | None = None, stage: str | None = None, platform: str | None = None
