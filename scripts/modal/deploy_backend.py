@@ -13,6 +13,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from dotenv import dotenv_values
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -27,6 +29,13 @@ DEFAULT_INCIDENT_NOTE = (
 INCIDENT_NOTES_DIR = REPO_ROOT / "docs" / "observability"
 REQUIRED_MODAL_PROFILE = "admin-56995"
 REQUIRED_MODAL_WORKSPACE = "admin-56995"
+MODAL_OWNERSHIP_ENV_KEYS = frozenset(
+    {
+        "TRR_MODAL_MAINTENANCE_OWNER_REQUIRED",
+        "TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED",
+        "TRR_MODAL_RUNTIME_SCHEDULER_ENABLED",
+    }
+)
 DEFAULT_HISTORY_LIMIT = 5
 HISTORY_STAMP_START = "<!-- modal-deploy-history:start -->"
 HISTORY_STAMP_END = "<!-- modal-deploy-history:end -->"
@@ -39,8 +48,28 @@ def python_command() -> str:
     return sys.executable or "python3.11"
 
 
+def modal_source_env_path(
+    environ: dict[str, str] | None = None,
+    *,
+    repo_root: Path = REPO_ROOT,
+) -> Path:
+    env = os.environ if environ is None else environ
+    configured = str(env.get("TRR_MODAL_SOURCE_ENV") or "").strip()
+    candidate = Path(configured).expanduser() if configured else repo_root / ".env"
+    if not candidate.is_absolute():
+        candidate = (repo_root / candidate).resolve()
+    return candidate
+
+
 def pinned_modal_env(environ: dict[str, str] | None = None) -> dict[str, str]:
-    env = dict(environ or os.environ)
+    env = dict(os.environ if environ is None else environ)
+    source_env = modal_source_env_path(env)
+    if source_env.is_file():
+        configured = dotenv_values(source_env)
+        for key in MODAL_OWNERSHIP_ENV_KEYS:
+            value = configured.get(key)
+            if key not in env and value is not None:
+                env[key] = str(value)
     env["MODAL_PROFILE"] = REQUIRED_MODAL_PROFILE
     env["TRR_MODAL_APP_NAME"] = DEFAULT_APP_NAME
     return env

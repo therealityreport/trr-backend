@@ -73,11 +73,11 @@ def _maybe_reexec_with_repo_venv() -> None:
 if __name__ == "__main__":
     _maybe_reexec_with_repo_venv()
 
-from scripts.modal.deploy_backend import REQUIRED_MODAL_PROFILE, pinned_modal_env
+from scripts.modal.deploy_backend import pinned_modal_env
 
 # Pin the Modal workspace before the trr_backend imports below load the Modal
 # SDK, which resolves MODAL_PROFILE at import time.
-os.environ["MODAL_PROFILE"] = REQUIRED_MODAL_PROFILE
+os.environ.update(pinned_modal_env())
 
 from scripts._workspace_runtime_env import apply_workspace_runtime_env
 from trr_backend.modal_dispatch import (

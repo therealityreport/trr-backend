@@ -196,7 +196,8 @@ def modal_fingerprint_files(repo_root: Path = REPO_ROOT) -> list[Path]:
 
 
 def build_modal_fingerprint(repo_root: Path = REPO_ROOT) -> str:
-    source_env = prepare_named_secrets._load_source_env(repo_root / ".env")
+    source_env_path = deploy_backend.modal_source_env_path(repo_root=repo_root)
+    source_env = prepare_named_secrets._load_source_env(source_env_path)
     runtime_values, social_values = prepare_named_secrets._split_env(source_env)
     runtime_values = prepare_named_secrets._apply_runtime_overrides(
         runtime_values,
