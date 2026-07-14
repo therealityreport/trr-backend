@@ -399,6 +399,26 @@ def test_save_and_load_fingerprint_round_trip(tmp_path) -> None:
     assert saved["fingerprint"] == "abc123"
 
 
+def test_modal_fingerprint_uses_explicit_source_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    repo_root = tmp_path / "backend"
+    repo_root.mkdir()
+    source_env = tmp_path / "canonical.env"
+    source_env.write_text(
+        "TRR_DB_URL=postgresql://user:pass@localhost:5432/trr\n"
+        "TRR_MODAL_RUNTIME_SCHEDULER_ENABLED=1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TRR_MODAL_SOURCE_ENV", str(source_env))
+
+    fingerprint = cli.build_modal_fingerprint(repo_root)
+
+    assert isinstance(fingerprint, str)
+    assert len(fingerprint) == 64
+
+
 def test_modal_fingerprint_changes_when_instagram_comments_fetcher_changes(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,

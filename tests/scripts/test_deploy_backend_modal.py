@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 from contextlib import contextmanager
 
 import pytest
@@ -26,6 +28,97 @@ def test_pinned_modal_env_forces_admin_profile() -> None:
     assert env["TRR_MODAL_INSTAGRAM_PAYLOAD_READ_MODE"] == "compare"
     assert env["TRR_MODAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE"] == "0.1"
     assert env["OTHER"] == "1"
+
+
+def test_pinned_modal_env_hydrates_only_missing_ownership_settings(
+    tmp_path,
+) -> None:
+    source_env = tmp_path / "modal.env"
+    source_env.write_text(
+        "TRR_MODAL_MAINTENANCE_OWNER_REQUIRED=1\n"
+        "TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED=0\n"
+        "TRR_MODAL_RUNTIME_SCHEDULER_ENABLED=1\n"
+        "DATABASE_URL=must-not-leak\n",
+        encoding="utf-8",
+    )
+
+    env = cli.pinned_modal_env(
+        {
+            "TRR_MODAL_SOURCE_ENV": str(source_env),
+            "TRR_MODAL_RUNTIME_SCHEDULER_ENABLED": "0",
+        }
+    )
+
+    assert env["TRR_MODAL_MAINTENANCE_OWNER_REQUIRED"] == "1"
+    assert env["TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED"] == "0"
+    assert env["TRR_MODAL_RUNTIME_SCHEDULER_ENABLED"] == "0"
+    assert "DATABASE_URL" not in env
+
+
+def test_pinned_modal_env_respects_an_explicit_empty_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("TRR_MODAL_RUNTIME_SCHEDULER_ENABLED", "1")
+
+    env = cli.pinned_modal_env({"TRR_MODAL_SOURCE_ENV": str(tmp_path / "missing.env")})
+
+    assert "TRR_MODAL_RUNTIME_SCHEDULER_ENABLED" not in env
+
+
+def test_pinned_modal_env_resolves_relative_source_from_repo_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    source_dir = cli.REPO_ROOT / f".tmp-test-modal-env-{tmp_path.name}"
+    source_dir.mkdir()
+    source_env = source_dir / "modal.env"
+    source_env.write_text(
+        "TRR_MODAL_MAINTENANCE_OWNER_REQUIRED=1\n"
+        "TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED=0\n"
+        "TRR_MODAL_RUNTIME_SCHEDULER_ENABLED=1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    try:
+        env = cli.pinned_modal_env(
+            {"TRR_MODAL_SOURCE_ENV": str(source_env.relative_to(cli.REPO_ROOT))}
+        )
+    finally:
+        source_env.unlink(missing_ok=True)
+        source_dir.rmdir()
+
+    assert env["TRR_MODAL_MAINTENANCE_OWNER_REQUIRED"] == "1"
+    assert env["TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED"] == "0"
+    assert env["TRR_MODAL_RUNTIME_SCHEDULER_ENABLED"] == "1"
+
+
+def test_readiness_import_hydrates_ownership_before_modal_jobs_import(tmp_path) -> None:
+    source_env = tmp_path / "modal.env"
+    source_env.write_text(
+        "TRR_MODAL_MAINTENANCE_OWNER_REQUIRED=1\n"
+        "TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED=0\n"
+        "TRR_MODAL_RUNTIME_SCHEDULER_ENABLED=1\n",
+        encoding="utf-8",
+    )
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in cli.MODAL_OWNERSHIP_ENV_KEYS
+    }
+    env["TRR_MODAL_SOURCE_ENV"] = str(source_env)
+
+    completed = subprocess.run(
+        [sys.executable, "-c", "import scripts.modal.verify_modal_readiness"],
+        cwd=cli.REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_verify_required_workspace_accepts_admin_workspace(monkeypatch: pytest.MonkeyPatch) -> None:
