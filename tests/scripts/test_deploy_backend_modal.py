@@ -81,9 +81,7 @@ def test_pinned_modal_env_resolves_relative_source_from_repo_root(
     )
     monkeypatch.chdir(tmp_path)
     try:
-        env = cli.pinned_modal_env(
-            {"TRR_MODAL_SOURCE_ENV": str(source_env.relative_to(cli.REPO_ROOT))}
-        )
+        env = cli.pinned_modal_env({"TRR_MODAL_SOURCE_ENV": str(source_env.relative_to(cli.REPO_ROOT))})
     finally:
         source_env.unlink(missing_ok=True)
         source_dir.rmdir()
@@ -101,11 +99,7 @@ def test_readiness_import_hydrates_ownership_before_modal_jobs_import(tmp_path) 
         "TRR_MODAL_RUNTIME_SCHEDULER_ENABLED=1\n",
         encoding="utf-8",
     )
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if key not in cli.MODAL_OWNERSHIP_ENV_KEYS
-    }
+    env = {key: value for key, value in os.environ.items() if key not in cli.MODAL_OWNERSHIP_ENV_KEYS}
     env["TRR_MODAL_SOURCE_ENV"] = str(source_env)
 
     completed = subprocess.run(

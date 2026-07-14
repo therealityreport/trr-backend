@@ -407,8 +407,7 @@ def test_modal_fingerprint_uses_explicit_source_env(
     repo_root.mkdir()
     source_env = tmp_path / "canonical.env"
     source_env.write_text(
-        "TRR_DB_URL=postgresql://user:pass@localhost:5432/trr\n"
-        "TRR_MODAL_RUNTIME_SCHEDULER_ENABLED=1\n",
+        "TRR_DB_URL=postgresql://user:pass@localhost:5432/trr\nTRR_MODAL_RUNTIME_SCHEDULER_ENABLED=1\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("TRR_MODAL_SOURCE_ENV", str(source_env))
