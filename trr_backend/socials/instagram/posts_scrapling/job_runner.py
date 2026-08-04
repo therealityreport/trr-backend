@@ -281,7 +281,7 @@ def _public_scraper_runtime_metadata(scraper: Any | None = None) -> dict[str, An
         "proxy_session_key": None,
         "transport": retrieval_meta.get("retrieval_transport")
         or retrieval_meta.get("transport")
-        or "requests_enriched",  # noqa: E501
+        or "requests_enriched",
         "retrieval_transport": retrieval_meta.get("retrieval_transport") or retrieval_meta.get("transport"),
         "graphql_cursor": retrieval_meta.get("graphql_cursor"),
         "request_count": int(getattr(scraper, "_request_count", 0) or 0) if scraper is not None else 0,
@@ -757,7 +757,7 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                         error_code=error_code or "public_graphql_no_connection",
                         retryable=bool(
                             retrieval_meta.get("retryable") or retrieval_meta.get("request_error_retryable")
-                        ),  # noqa: E501
+                        ),
                         runtime_metadata={
                             **fetcher_metadata,
                             "fallback_requires_approval": True,
