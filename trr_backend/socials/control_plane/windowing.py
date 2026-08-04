@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
-from trr_backend.socials.social_season_analytics_impl import resolve_week_window
+import sys as _sys
 
-__all__ = ["resolve_week_window"]
+from trr_backend.socials import windowing as _windowing
+
+_sys.modules[__name__] = _windowing

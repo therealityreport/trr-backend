@@ -36,7 +36,7 @@ def test_scrape_tiktok_returns_safe_diagnostics_subset(monkeypatch) -> None:
         return {"sessionid": "cookie"}
 
     monkeypatch.setattr(socials_router, "_load_social_auth_or_503", _fake_preflight)
-    monkeypatch.setattr("trr_backend.socials.tiktok.TikTokScraper", _FakeScraper)
+    monkeypatch.setattr("trr_backend.socials.tiktok.scraper.TikTokScraper", _FakeScraper)
 
     payload = asyncio.run(
         socials_router.scrape_tiktok(

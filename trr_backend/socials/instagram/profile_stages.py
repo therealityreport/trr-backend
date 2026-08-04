@@ -1,6 +1,6 @@
 # ruff: noqa: E501, F821, I001
-# fmt: off
 """Instagram profile snapshot and relationship stage room."""
+
 from __future__ import annotations
 import json
 import logging
@@ -13,9 +13,17 @@ from decimal import Decimal
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 from trr_backend.db import pg as _local_pg
-from trr_backend.socials.instagram.auth_runtime import _coerce_dt as _local_coerce_dt, _iso as _local_iso, _load_instagram_cookies as _local_load_instagram_cookies, _now_utc as _local_now_utc
-from trr_backend.socials.post_persist_truthfulness import _normalize_non_negative_int as _local_normalize_non_negative_int
+from trr_backend.socials.instagram.auth_runtime import (
+    _coerce_dt as _local_coerce_dt,
+    _iso as _local_iso,
+    _load_instagram_cookies as _local_load_instagram_cookies,
+    _now_utc as _local_now_utc,
+)
+from trr_backend.socials.post_persist_truthfulness import (
+    _normalize_non_negative_int as _local_normalize_non_negative_int,
+)
 from trr_backend.socials.source_scopes import normalize_source_scope
+
 logger = logging.getLogger(__name__)
 INSTAGRAM_PROFILE_SNAPSHOT_STAGE = "instagram_profile_snapshot"
 INSTAGRAM_PROFILE_FOLLOWING_STAGE = "instagram_profile_following"
@@ -24,11 +32,15 @@ _SOCIAL_ACCOUNT_PROFILE_MAX_PAGE_SIZE = 100
 _LEGACY_NAMESPACE: dict[str, Any] | None = None
 _LEGACY_ORIGINALS: dict[str, Any] = {}
 _MISSING = object()
+
+
 def _configure_legacy_provider(namespace: dict[str, Any], originals: Mapping[str, Any]) -> None:
     """Bind the supported monolith patch surface without importing it."""
     global _LEGACY_NAMESPACE, _LEGACY_ORIGINALS
     _LEGACY_NAMESPACE = namespace
     _LEGACY_ORIGINALS = dict(originals)
+
+
 def _legacy_value(name: str, local_value: Any = _MISSING) -> Any:
     namespace = _LEGACY_NAMESPACE
     if namespace is not None and name in namespace:
@@ -36,41 +48,74 @@ def _legacy_value(name: str, local_value: Any = _MISSING) -> Any:
     if local_value is not _MISSING:
         return local_value
     raise RuntimeError(f"Instagram profile-stages provider is not configured: {name}")
+
+
 def _legacy_callable(name: str, local_impl: Any = _MISSING) -> Any:
     candidate = _legacy_value(name, local_impl)
     if not callable(candidate):
         raise TypeError(f"Instagram profile-stages provider is not callable: {name}")
     return candidate
+
+
 def _room_callable(name: str, local_impl: Any) -> Any:
     candidate = _legacy_value(name, None)
     if callable(candidate) and candidate is not _LEGACY_ORIGINALS.get(name):
         return candidate
     return local_impl
+
+
 def _room(name: str) -> Any:
     local_impl = _LOCAL_ROOM_FUNCTIONS[name]
     live_impl = globals().get(name)
     return live_impl if callable(live_impl) and live_impl is not local_impl else _room_callable(name, local_impl)
+
+
 def _legacy_proxy(name: str, local_impl: Any = _MISSING) -> Any:
     def proxy(*args: Any, **kwargs: Any) -> Any:
         return _legacy_callable(name, local_impl)(*args, **kwargs)
+
     return proxy
+
+
 class _LocalSharedStageRuntimeError(RuntimeError):
-    def __init__(self, message: str, *, error_code: str, retryable: bool = False, error_class: str | None = None, runtime_metadata: Mapping[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: str,
+        retryable: bool = False,
+        error_class: str | None = None,
+        runtime_metadata: Mapping[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.error_code = str(error_code or "").strip().lower() or "shared_stage_failed"
         self.error_class = str(error_class or self.__class__.__name__).strip() or self.__class__.__name__
         self.retryable = bool(retryable)
         self.runtime_metadata = dict(runtime_metadata or {})
+
+
 def _local_json_serializer(value: Any) -> Any:
     if isinstance(value, Decimal):
         return int(value) if value == value.to_integral_value() else float(value)
     if hasattr(value, "isoformat"):
         return value.isoformat()
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 def _local_adapt_payload_json_values(payload: Mapping[str, Any]) -> dict[str, Any]:
     from psycopg2.extras import Json as PgJson
-    return {key: PgJson(value, dumps=lambda item: json.dumps(item, default=_local_json_serializer)) if isinstance(value, (dict, list)) else value for key, value in payload.items()}
+
+    return {
+        key: PgJson(value, dumps=lambda item: json.dumps(item, default=_local_json_serializer))
+        if isinstance(value, (dict, list))
+        else value
+        for key, value in payload.items()
+    }
+
+
 _PROFILE_COLUMN_EXISTS_CACHE: dict[tuple[str, str, str], bool] = {}
+
+
 def _local_column_exists(schema: str, table: str, column: str, *, conn: Any | None = None) -> bool:
     key = (schema, table, column)
     if key in _PROFILE_COLUMN_EXISTS_CACHE:
@@ -83,6 +128,8 @@ def _local_column_exists(schema: str, table: str, column: str, *, conn: Any | No
             row = _local_pg.fetch_one_with_cursor(cur, sql, [schema, table, column]) or {}
     _PROFILE_COLUMN_EXISTS_CACHE[key] = bool(row.get("exists"))
     return _PROFILE_COLUMN_EXISTS_CACHE[key]
+
+
 def _local_normalize_account_handle(value: Any) -> str:
     raw = str(value or "").strip()
     candidate = raw
@@ -92,15 +139,33 @@ def _local_normalize_account_handle(value: Any) -> str:
         candidate = parts[0] if parts else str(parsed.netloc or "")
     candidate = candidate.strip().lstrip("@").split("?")[0].split("#")[0].split("/")[0].strip().lower()
     return candidate if re.fullmatch(r"[a-z0-9._-]{1,64}", candidate) else ""
+
+
 def _local_normalize_social_account_profile_handle(value: Any) -> str:
     normalized = _local_normalize_account_handle(value)
     if not normalized:
         raise ValueError("Invalid account handle.")
     return {"wwhlbravo": "bravowwhl"}.get(normalized, normalized)
-def _local_load_shared_account_source_row(*, source_scope: str, platform: str, account_handle: str) -> dict[str, Any] | None:
+
+
+def _local_load_shared_account_source_row(
+    *, source_scope: str, platform: str, account_handle: str
+) -> dict[str, Any] | None:
     account = _local_normalize_account_handle(account_handle) or str(account_handle or "").strip()
-    return _local_pg.fetch_one("select id::text as id, platform, source_scope, account_handle, is_active, scrape_priority, metadata, last_scrape_status, last_scrape_run_id::text as last_scrape_run_id, last_scrape_job_id::text as last_scrape_job_id, last_scrape_at, last_classified_at, updated_by, created_at, updated_at from social.shared_account_sources where source_scope = %s and platform = %s and account_handle = %s limit 1", [source_scope, platform, account])
-def _local_pg_upsert(table: str, payload: dict[str, Any], *, conflict_col: str | Sequence[str], conn: Any | None = None, include_inserted_flag: bool = False) -> dict[str, Any] | None:
+    return _local_pg.fetch_one(
+        "select id::text as id, platform, source_scope, account_handle, is_active, scrape_priority, metadata, last_scrape_status, last_scrape_run_id::text as last_scrape_run_id, last_scrape_job_id::text as last_scrape_job_id, last_scrape_at, last_classified_at, updated_by, created_at, updated_at from social.shared_account_sources where source_scope = %s and platform = %s and account_handle = %s limit 1",
+        [source_scope, platform, account],
+    )
+
+
+def _local_pg_upsert(
+    table: str,
+    payload: dict[str, Any],
+    *,
+    conflict_col: str | Sequence[str],
+    conn: Any | None = None,
+    include_inserted_flag: bool = False,
+) -> dict[str, Any] | None:
     adapted = _local_adapt_payload_json_values(payload)
     columns = list(adapted)
     conflicts = [conflict_col] if isinstance(conflict_col, str) else list(conflict_col)
@@ -114,29 +179,71 @@ def _local_pg_upsert(table: str, payload: dict[str, Any], *, conflict_col: str |
     sql = f"INSERT INTO social.{table} ({', '.join(columns)}) VALUES ({', '.join(['%s'] * len(columns))}) ON CONFLICT ({', '.join(conflicts)}) DO UPDATE SET {updates} RETURNING {returning}"
     with _local_pg.db_cursor(conn=conn) as cur:
         return _local_pg.fetch_one_with_cursor(cur, sql, list(adapted.values()))
-def _local_touch_shared_account_source(*, source_scope: str, platform: str, account_handle: str, run_id: str | None = None, job_id: str | None = None, last_scrape_status: str | None = None, last_classified_at: datetime | None = None, metadata_updates: Mapping[str, Any] | None = None) -> None:
+
+
+def _local_touch_shared_account_source(
+    *,
+    source_scope: str,
+    platform: str,
+    account_handle: str,
+    run_id: str | None = None,
+    job_id: str | None = None,
+    last_scrape_status: str | None = None,
+    last_classified_at: datetime | None = None,
+    metadata_updates: Mapping[str, Any] | None = None,
+) -> None:
     account = _local_normalize_account_handle(account_handle) or str(account_handle or "").strip()
     metadata_json = json.dumps(dict(metadata_updates or {}), default=_local_json_serializer)
     sql = "update social.shared_account_sources set last_scrape_status = coalesce(%s, last_scrape_status), last_scrape_run_id = coalesce(%s::uuid, last_scrape_run_id), last_scrape_job_id = coalesce(%s::uuid, last_scrape_job_id), last_scrape_at = case when %s is not null then now() else last_scrape_at end, last_classified_at = coalesce(%s, last_classified_at), metadata = case when %s::jsonb = '{}'::jsonb then metadata else coalesce(metadata, '{}'::jsonb) || %s::jsonb end, updated_at = now() where source_scope = %s and platform = %s and account_handle = %s"
-    _local_pg.execute(sql, [last_scrape_status, run_id, job_id, last_scrape_status, last_classified_at, metadata_json, metadata_json, source_scope, platform, account])
+    _local_pg.execute(
+        sql,
+        [
+            last_scrape_status,
+            run_id,
+            job_id,
+            last_scrape_status,
+            last_classified_at,
+            metadata_json,
+            metadata_json,
+            source_scope,
+            platform,
+            account,
+        ],
+    )
+
+
 for _provider_name, _local_provider in (
-    ("_adapt_payload_json_values", _local_adapt_payload_json_values), ("_coerce_dt", _local_coerce_dt),
-    ("_column_exists", _local_column_exists), ("_iso", _local_iso), ("_load_instagram_cookies", _local_load_instagram_cookies),
-    ("_load_shared_account_source_row", _local_load_shared_account_source_row), ("_metadata_dict", lambda value: dict(value) if isinstance(value, dict) else {}),
-    ("_normalize_account_handle", _local_normalize_account_handle), ("_normalize_non_negative_int", _local_normalize_non_negative_int),
-    ("_normalize_social_account_profile_handle", _local_normalize_social_account_profile_handle), ("_now_utc", _local_now_utc),
-    ("_pg_upsert", _local_pg_upsert), ("_touch_shared_account_source", _local_touch_shared_account_source),
+    ("_adapt_payload_json_values", _local_adapt_payload_json_values),
+    ("_coerce_dt", _local_coerce_dt),
+    ("_column_exists", _local_column_exists),
+    ("_iso", _local_iso),
+    ("_load_instagram_cookies", _local_load_instagram_cookies),
+    ("_load_shared_account_source_row", _local_load_shared_account_source_row),
+    ("_metadata_dict", lambda value: dict(value) if isinstance(value, dict) else {}),
+    ("_normalize_account_handle", _local_normalize_account_handle),
+    ("_normalize_non_negative_int", _local_normalize_non_negative_int),
+    ("_normalize_social_account_profile_handle", _local_normalize_social_account_profile_handle),
+    ("_now_utc", _local_now_utc),
+    ("_pg_upsert", _local_pg_upsert),
+    ("_touch_shared_account_source", _local_touch_shared_account_source),
 ):
     globals()[_provider_name] = _legacy_proxy(_provider_name, _local_provider)
+
+
 def _pg_runtime() -> Any:
     return _legacy_value("pg", _local_pg)
+
+
 def _instagram_profile_scraper(config: Mapping[str, Any], *, account_handle: str) -> Any:
     from trr_backend.socials.instagram import InstagramScraper
+
     cookies = _load_instagram_cookies()
     return InstagramScraper(
         cookies=cookies,
         browser_account_id=str(config.get("browser_account_id") or account_handle),
     )
+
+
 def _run_instagram_profile_snapshot_stage(
     *,
     run_id: str,
@@ -188,6 +295,8 @@ def _run_instagram_profile_snapshot_stage(
             "activity": {"phase": "instagram_profile_snapshot_end"},
         },
     )
+
+
 def _instagram_following_rows_from_payload(
     payload: Mapping[str, Any],
     *,
@@ -213,6 +322,8 @@ def _instagram_following_rows_from_payload(
     next_cursor = str(payload.get("next_max_id") or payload.get("next_cursor") or "").strip() or None
     has_more = bool(payload.get("has_more") or payload.get("big_list") or next_cursor)
     return rows, next_cursor, has_more
+
+
 def _fetch_instagram_following_rows(
     *,
     account_handle: str,
@@ -322,6 +433,8 @@ def _fetch_instagram_following_rows(
         "rows_fetched": len(returned_rows),
         "profile_following_count": _instagram_profile_following_count_from_payload(profile_payload),
     }
+
+
 def _run_instagram_profile_following_stage(
     *,
     run_id: str,
@@ -373,6 +486,8 @@ def _run_instagram_profile_following_stage(
         metadata_updates={"profile_following": metadata},
     )
     return 0, 0, metadata
+
+
 def _instagram_profile_tables_ready(*, conn: Any | None = None) -> bool:
     try:
         return all(
@@ -385,11 +500,15 @@ def _instagram_profile_tables_ready(*, conn: Any | None = None) -> bool:
     except Exception:
         logger.debug("[instagram] Profile queryable tables are not ready", exc_info=True)
         return False
+
+
 def _normalize_instagram_profile_source_scope(source_scope: Any) -> str:
     try:
         return normalize_source_scope(source_scope)
     except ValueError as exc:
         raise ValueError(f"Unsupported Instagram profile source_scope: {source_scope}") from exc
+
+
 def _instagram_profile_fetch_one(
     sql: str,
     params: Sequence[Any],
@@ -402,6 +521,8 @@ def _instagram_profile_fetch_one(
         return pg.fetch_one(sql, list(params))
     with pg.db_cursor(conn=conn, label=label) as cur:
         return pg.fetch_one_with_cursor(cur, sql, list(params))
+
+
 def _instagram_profile_fetch_all(
     sql: str,
     params: Sequence[Any],
@@ -414,6 +535,8 @@ def _instagram_profile_fetch_all(
         return pg.fetch_all(sql, list(params))
     with pg.db_cursor(conn=conn, label=label) as cur:
         return pg.fetch_all_with_cursor(cur, sql, list(params))
+
+
 def _instagram_profile_execute_one(
     sql: str,
     params: Sequence[Any],
@@ -422,6 +545,8 @@ def _instagram_profile_execute_one(
     label: str = "instagram_profile_execute_one",
 ) -> dict[str, Any] | None:
     return _room("_instagram_profile_fetch_one")(sql, params, conn=conn, label=label)
+
+
 def _instagram_profile_execute(
     sql: str,
     params: Sequence[Any],
@@ -430,6 +555,8 @@ def _instagram_profile_execute(
 ) -> None:
     pg = _pg_runtime()
     pg.execute(sql, list(params), conn=conn)
+
+
 def _instagram_profile_snapshot_tables_ready(*, conn: Any | None = None) -> bool:
     try:
         return all(
@@ -447,6 +574,8 @@ def _instagram_profile_snapshot_tables_ready(*, conn: Any | None = None) -> bool
     except Exception:
         logger.debug("[instagram] Profile following snapshot tables are not ready", exc_info=True)
         return False
+
+
 def _instagram_following_snapshot_is_complete(snapshot_metadata: Mapping[str, Any] | None) -> bool:
     if not isinstance(snapshot_metadata, Mapping) or not snapshot_metadata:
         return False
@@ -484,12 +613,16 @@ def _instagram_following_snapshot_is_complete(snapshot_metadata: Mapping[str, An
     if profile_following_count is not None and rows_fetched is not None and profile_following_count > rows_fetched:
         return False
     return True
+
+
 def _first_instagram_completeness_count(metadata: Mapping[str, Any], *keys: str) -> int | None:
     for key in keys:
         parsed = _coerce_instagram_completeness_count(metadata.get(key))
         if parsed is not None:
             return parsed
     return None
+
+
 def _coerce_instagram_completeness_count(value: Any) -> int | None:
     if value is None or isinstance(value, bool):
         return None
@@ -507,6 +640,8 @@ def _coerce_instagram_completeness_count(value: Any) -> int | None:
         return None
     parsed = int(re.sub(r"[^0-9]", "", text))
     return parsed if parsed >= 0 else None
+
+
 def _instagram_profile_following_count_from_payload(profile_payload: Any) -> int | None:
     payload = _metadata_dict(profile_payload or {})
     data = _metadata_dict(payload.get("data"))
@@ -519,6 +654,7 @@ def _instagram_profile_following_count_from_payload(profile_payload: Any) -> int
             return parsed
     return None
 
+
 def _instagram_relationship_identity_key(row: Mapping[str, Any]) -> tuple[str, str] | None:
     related_user_id = str(row.get("related_user_id") or "").strip()
     if related_user_id:
@@ -530,10 +666,12 @@ def _instagram_relationship_identity_key(row: Mapping[str, Any]) -> tuple[str, s
         return ("username", normalized_username)
     return None
 
+
 def _safe_instagram_following_snapshot_meta(snapshot_metadata: Mapping[str, Any] | None) -> dict[str, Any]:
     if not isinstance(snapshot_metadata, Mapping):
         return {}
     return {key: value for key, value in dict(snapshot_metadata).items() if key != "profile_payload"}
+
 
 def _create_instagram_profile_following_snapshot(
     *,
@@ -586,6 +724,7 @@ def _create_instagram_profile_following_snapshot(
         conn=conn,
         label="instagram_profile_following_snapshot_insert",
     )
+
 
 def _insert_instagram_profile_relationship_snapshot_item(
     *,
@@ -643,6 +782,7 @@ def _insert_instagram_profile_relationship_snapshot_item(
         label="instagram_profile_relationship_snapshot_item_insert",
     )
 
+
 def _active_instagram_profile_relationship_rows(
     *,
     owner_profile_id: str,
@@ -678,6 +818,7 @@ def _active_instagram_profile_relationship_rows(
         conn=conn,
         label="instagram_profile_relationship_active_rows",
     )
+
 
 def _mark_instagram_profile_relationship_missing(
     *,
@@ -722,6 +863,7 @@ def _mark_instagram_profile_relationship_missing(
         label="instagram_profile_relationship_mark_missing",
     )
 
+
 def _instagram_profile_parse_about_timestamp(about_raw: Mapping[str, Any], *keys: str) -> datetime | None:
     for key in keys:
         raw_value = about_raw.get(key)
@@ -735,12 +877,14 @@ def _instagram_profile_parse_about_timestamp(about_raw: Mapping[str, Any], *keys
                 return parsed
     return None
 
+
 def _instagram_profile_domain(url: Any) -> str | None:
     parsed = urlparse(str(url or "").strip())
     host = parsed.netloc.lower()
     if host.startswith("www."):
         host = host[4:]
     return host or None
+
 
 def _instagram_profile_normalized_url(url: Any) -> str | None:
     raw = str(url or "").strip()
@@ -751,6 +895,7 @@ def _instagram_profile_normalized_url(url: Any) -> str | None:
         return raw
     path = parsed.path.rstrip("/") or "/"
     return urlunparse((parsed.scheme.lower(), parsed.netloc.lower(), path, "", parsed.query, ""))
+
 
 def _instagram_profile_merge_rows(*, keep_id: str, discard_id: str, conn: Any | None) -> None:
     if keep_id == discard_id:
@@ -814,6 +959,7 @@ def _instagram_profile_merge_rows(*, keep_id: str, discard_id: str, conn: Any | 
     for sql, params in statements:
         _room("_instagram_profile_execute")(sql, params, conn=conn)
 
+
 def _instagram_profile_existing_row(
     *,
     profile_id: str | None,
@@ -858,6 +1004,7 @@ def _instagram_profile_existing_row(
         return by_profile_id
     return by_profile_id or by_username
 
+
 def _sync_instagram_profile_external_links(
     *,
     profile_row_id: str,
@@ -900,6 +1047,7 @@ def _sync_instagram_profile_external_links(
         )
         rows.append(payload)
     return rows
+
 
 def persist_instagram_profile_snapshot(
     profile_payload: Mapping[str, Any],
@@ -1036,6 +1184,7 @@ def persist_instagram_profile_snapshot(
         )
     return dict(row or {})
 
+
 def _instagram_profile_row_for_username(
     account_handle: str,
     *,
@@ -1059,6 +1208,7 @@ def _instagram_profile_row_for_username(
         conn=conn,
         label="instagram_profile_row_for_username",
     )
+
 
 def persist_instagram_profile_relationships(
     relationship_payloads: Mapping[str, Any] | Sequence[Mapping[str, Any]],
@@ -1264,6 +1414,7 @@ def persist_instagram_profile_relationships(
         "page_info": result.page_info,
     }
 
+
 def _instagram_profile_response(row: Mapping[str, Any], links: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     username = str(row.get("username") or row.get("normalized_username") or "").strip()
     profile_id = str(row.get("profile_id") or "").strip() or None
@@ -1319,6 +1470,7 @@ def _instagram_profile_response(row: Mapping[str, Any], links: Sequence[Mapping[
         "last_seen_at": _iso(_coerce_dt(row.get("last_seen_at"))),
     }
 
+
 def get_instagram_profile_detail(
     account_handle: str,
     *,
@@ -1349,6 +1501,7 @@ def get_instagram_profile_detail(
         label="instagram_profile_detail_links",
     )
     return {"profile": _room("_instagram_profile_response")(row, links)}
+
 
 def get_instagram_profile_relationships(
     account_handle: str,
@@ -1454,14 +1607,29 @@ def get_instagram_profile_relationships(
 
 
 __all__ = [
-    "_instagram_profile_scraper", "_run_instagram_profile_snapshot_stage", "_instagram_following_rows_from_payload",
-    "_fetch_instagram_following_rows", "_run_instagram_profile_following_stage", "_instagram_profile_tables_ready",
-    "_normalize_instagram_profile_source_scope", "_instagram_profile_fetch_one", "_instagram_profile_fetch_all",
-    "_instagram_profile_execute_one", "_instagram_profile_execute", "_instagram_profile_parse_about_timestamp",
-    "_instagram_profile_domain", "_instagram_profile_normalized_url", "_instagram_profile_merge_rows",
-    "_instagram_profile_existing_row", "_sync_instagram_profile_external_links", "persist_instagram_profile_snapshot",
-    "_instagram_profile_row_for_username", "persist_instagram_profile_relationships", "_instagram_profile_response",
-    "get_instagram_profile_detail", "get_instagram_profile_relationships",
+    "_instagram_profile_scraper",
+    "_run_instagram_profile_snapshot_stage",
+    "_instagram_following_rows_from_payload",
+    "_fetch_instagram_following_rows",
+    "_run_instagram_profile_following_stage",
+    "_instagram_profile_tables_ready",
+    "_normalize_instagram_profile_source_scope",
+    "_instagram_profile_fetch_one",
+    "_instagram_profile_fetch_all",
+    "_instagram_profile_execute_one",
+    "_instagram_profile_execute",
+    "_instagram_profile_parse_about_timestamp",
+    "_instagram_profile_domain",
+    "_instagram_profile_normalized_url",
+    "_instagram_profile_merge_rows",
+    "_instagram_profile_existing_row",
+    "_sync_instagram_profile_external_links",
+    "persist_instagram_profile_snapshot",
+    "_instagram_profile_row_for_username",
+    "persist_instagram_profile_relationships",
+    "_instagram_profile_response",
+    "get_instagram_profile_detail",
+    "get_instagram_profile_relationships",
 ]
 _LOCAL_ROOM_NAMES = set(__all__)
 _LOCAL_ROOM_FUNCTIONS = {_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES}

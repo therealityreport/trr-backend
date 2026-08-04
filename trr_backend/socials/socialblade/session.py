@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from trr_backend.socials.socialblade.auth import normalize_socialblade_cookies
+from trr_backend.socials.socialblade.cookies import normalize_socialblade_cookies
 
 
 @dataclass(slots=True)

@@ -1,6 +1,7 @@
 """Threads session adapter for the posts Scrapling lane.
 
-Delegates to the canonical Threads cookie loader in social_season_analytics.
+Delegates through the configured canonical Threads cookie-loader port. Cookie
+selection, paired validation, fallback, and refresh remain in social_season_analytics.
 """
 
 from __future__ import annotations
@@ -8,6 +9,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from trr_backend.socials.pipelines.threads_cookie_loader import (
+    load_threads_cookies as _load_threads_cookies,
+)
 from trr_backend.socials.scrapling_transport import cookies_to_scrapling
 
 
@@ -20,12 +24,6 @@ class ThreadsPostsScraplingSession:
 
 def _cookies_to_scrapling(cookies: dict[str, str]) -> list[dict[str, Any]]:
     return cookies_to_scrapling(cookies, ".threads.com")
-
-
-def _load_threads_cookies() -> dict[str, str]:
-    from trr_backend.socials.social_season_analytics_impl import _load_threads_cookies as _canonical_load
-
-    return _canonical_load()
 
 
 def resolve_threads_posts_session() -> ThreadsPostsScraplingSession:

@@ -1,12 +1,59 @@
 from __future__ import annotations
 
+import ast
+import subprocess
+import sys
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+import trr_backend.socials.control_plane.queue_status as queue_status
 import trr_backend.socials.control_plane.worker_health as worker_health
 import trr_backend.socials.social_season_analytics_impl as core
+
+_REQUIRED_PROVIDER_NAMES = (
+    "SOCIAL_WORKER_HEALTH_CACHE_TTL_SECONDS_DEFAULT",
+    "SOCIAL_WORKER_HEARTBEAT_STALE_SECONDS_DEFAULT",
+    "SocialWorkerUnavailableError",
+    "TRUSTED_LOCAL_WORKER_LANE",
+    "_build_modal_executor_health_payload",
+    "_build_worker_health_alerts",
+    "_inspect_instagram_cookie_health",
+    "_instagram_cookie_schema_result",
+    "_iso",
+    "_load_facebook_cookies_from_sources",
+    "_load_instagram_cookies_from_sources",
+    "_load_threads_cookies_from_sources",
+    "_load_tiktok_cookies_from_sources",
+    "_load_twikit_credentials",
+    "_load_twitter_auth",
+    "_metadata_dict",
+    "_modal_social_dispatch_ready",
+    "_normalize_platform_name",
+    "_normalize_required_worker_lane",
+    "_normalize_worker_stage",
+    "_normalize_worker_status",
+    "_now_utc",
+    "_query_worker_health",
+    "_queue_status_cache",
+    "_queue_status_cache_lock",
+    "_resolve_positive_int_env",
+    "_touch_modal_social_dispatcher_heartbeat",
+    "_worker_health_cache",
+    "_worker_health_cache_lock",
+    "_worker_heartbeat_schema_ready",
+    "get_worker_detail",
+    "is_modal_remote_executor_enabled",
+    "pg",
+    "probe_remote_auth_health",
+    "time_module",
+)
+_LEGACY_MODULES = {
+    "trr_backend.repositories.social_season_analytics",
+    "trr_backend.socials.social_season_analytics_impl",
+}
 
 
 def _base_worker_payload(stale_after_seconds: int | None) -> dict[str, Any]:
@@ -24,6 +71,115 @@ def _base_worker_payload(stale_after_seconds: int | None) -> dict[str, Any]:
         "workers": [],
         "reason": "no_workers",
     }
+
+
+def test_worker_health_source_reuses_queue_status_proxy_without_legacy_import() -> None:
+    source_path = Path(worker_health.__file__).resolve()
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    imported_names: set[tuple[str, str]] = set()
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            assert not ({alias.name for alias in node.names} & _LEGACY_MODULES)
+        elif isinstance(node, ast.ImportFrom):
+            assert node.module not in _LEGACY_MODULES
+            if node.module == "trr_backend.socials.control_plane.queue_status":
+                imported_names.update((node.module, alias.name) for alias in node.names)
+        elif isinstance(node, ast.Call) and node.args:
+            function_name = (
+                node.func.id
+                if isinstance(node.func, ast.Name)
+                else node.func.attr
+                if isinstance(node.func, ast.Attribute)
+                else ""
+            )
+            if function_name in {"import_module", "__import__"}:
+                first_argument = node.args[0]
+                assert not (isinstance(first_argument, ast.Constant) and first_argument.value in _LEGACY_MODULES)
+
+    assert imported_names == {
+        ("trr_backend.socials.control_plane.queue_status", "_legacy_repo"),
+        ("trr_backend.socials.control_plane.queue_status", "get_queue_status"),
+    }
+
+
+def test_worker_health_uses_exact_live_queue_status_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert worker_health._core is queue_status._legacy_repo()
+    assert queue_status._LEGACY_NAMESPACE is core.__dict__
+    assert set(_REQUIRED_PROVIDER_NAMES) <= core.__dict__.keys()
+    for name in _REQUIRED_PROVIDER_NAMES:
+        assert getattr(worker_health._core, name) is core.__dict__[name]
+
+    replacement = object()
+    monkeypatch.setattr(core, "_build_worker_health_alerts", replacement)
+    assert worker_health._core._build_worker_health_alerts is replacement
+
+
+def test_worker_health_shared_provider_writes_through_both_caches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker_cache = object()
+    queue_cache = object()
+    monkeypatch.setattr(core, "_worker_health_cache", worker_cache)
+    monkeypatch.setattr(core, "_queue_status_cache", queue_cache)
+
+    assert worker_health._core._worker_health_cache is worker_cache
+    assert worker_health._core._queue_status_cache is queue_cache
+
+    worker_health._clear_worker_health_caches()
+
+    assert core._worker_health_cache is None
+    assert core._queue_status_cache is None
+
+
+def test_worker_health_shared_provider_fails_deterministically_when_unconfigured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(queue_status, "_LEGACY_NAMESPACE", None)
+
+    with pytest.raises(
+        RuntimeError,
+        match="Queue-status provider is not configured for read: pg",
+    ):
+        _ = worker_health._core.pg
+    with pytest.raises(
+        RuntimeError,
+        match="Queue-status provider is not configured for write: _worker_health_cache",
+    ):
+        worker_health._core._worker_health_cache = None
+
+
+def test_worker_health_ordinary_import_truthfully_loads_package_root_legacy_debt() -> None:
+    backend_root = Path(__file__).resolve().parents[2]
+    script = "\n".join(
+        (
+            "import sys",
+            "legacy_name = 'trr_backend.socials.social_season_analytics_impl'",
+            "assert legacy_name not in sys.modules",
+            "import trr_backend.socials.control_plane.worker_health as leaf",
+            "import trr_backend.socials.control_plane.queue_status as queue_status",
+            "import trr_backend.socials.control_plane as control_plane",
+            "legacy = sys.modules[legacy_name]",
+            "assert leaf._core is queue_status._legacy_repo()",
+            "assert queue_status._LEGACY_NAMESPACE is legacy.__dict__",
+            "assert control_plane.get_worker_health is leaf.get_worker_health",
+            f"required_names = {tuple(_REQUIRED_PROVIDER_NAMES)!r}",
+            "for name in required_names:",
+            "    assert getattr(leaf._core, name) is legacy.__dict__[name]",
+        )
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=backend_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_worker_auth_capabilities_uses_source_only_non_instagram_cookie_loaders(

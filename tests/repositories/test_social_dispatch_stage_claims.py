@@ -4,7 +4,15 @@ from types import SimpleNamespace
 
 from trr_backend.repositories import social_season_analytics as repo
 from trr_backend.socials.instagram.comments_scrapling import job_runner as comments_job_runner
-from trr_backend.socials.pipelines.job_handlers import resolve_platform_job_handler
+from trr_backend.socials.pipelines.job_handler_types import (
+    FunctionPlatformJobHandler as LeafFunctionPlatformJobHandler,
+)
+from trr_backend.socials.pipelines.job_handler_types import PlatformJobHandler as LeafPlatformJobHandler
+from trr_backend.socials.pipelines.job_handlers import (
+    FunctionPlatformJobHandler,
+    PlatformJobHandler,
+    resolve_platform_job_handler,
+)
 
 
 def test_stage_claim_candidates_do_not_let_comments_workers_borrow_posts() -> None:
@@ -66,6 +74,11 @@ def test_platform_job_handler_registry_resolves_known_stages_once() -> None:
         assert handler.supports(platform, stage)
 
     assert resolve_platform_job_handler("instagram", "unknown_stage") is None
+
+
+def test_platform_job_handler_types_preserve_public_reexport_identity() -> None:
+    assert FunctionPlatformJobHandler is LeafFunctionPlatformJobHandler
+    assert PlatformJobHandler is LeafPlatformJobHandler
 
 
 def test_comments_scrapling_completion_uses_flattened_reply_count() -> None:

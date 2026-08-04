@@ -13,7 +13,6 @@ from typing import Any
 from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
-from trr_backend.repositories import social_season_analytics as social_repo
 from trr_backend.socials.browser_cookie_refresh import (
     _body_text,
     cookie_payload,
@@ -22,6 +21,18 @@ from trr_backend.socials.browser_cookie_refresh import (
     resolve_social_auth_chrome_profile,
     write_cookie_file,
 )
+from trr_backend.socials.cookie_sources import (
+    _default_platform_cookie_file_path,
+    _platform_cookie_file_candidates,
+    _platform_cookie_refresh_target_path,
+    _select_preferred_cookie_candidate,
+)
+from trr_backend.socials.socialblade.cookies import normalize_socialblade_cookies as normalize_socialblade_cookies
+from trr_backend.socials.socialblade.parser import (
+    SOCIALBLADE_STEALTH_INIT_SCRIPT,
+    SOCIALBLADE_STEALTH_USER_AGENT,
+)
+from trr_backend.socials.socialblade.runtime_fetch import run_socialblade_scrapling_fetch
 
 SOCIALBLADE_COOKIE_DOMAINS = (".socialblade.com", "socialblade.com")
 SOCIALBLADE_REQUIRED_COOKIE_NAMES_ANY = ("cf_clearance",)
@@ -31,17 +42,6 @@ SOCIALBLADE_ACCESS_DENIED_PATTERNS = (
     r"Error reference number:\s*1020",
     r"SOCIAL BLADE ACCESS DENIED",
 )
-SOCIALBLADE_STEALTH_USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/146.0.0.0 Safari/537.36"
-)
-SOCIALBLADE_STEALTH_INIT_SCRIPT = """
-Object.defineProperty(navigator, "webdriver", { get: () => undefined });
-Object.defineProperty(navigator, "platform", { get: () => "MacIntel" });
-Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
-window.chrome = window.chrome || { runtime: {} };
-"""
 _DEFAULT_SOCIALBLADE_VALIDATION_HANDLE = "bravotv"
 _DEFAULT_SHARED_CHROME_CDP_URL = "http://127.0.0.1:9422"
 _DEFAULT_VISIBLE_CHROME_CDP_URL = "http://127.0.0.1:9222"
@@ -82,11 +82,11 @@ class SocialBladeValidationBlockedError(RuntimeError):
 
 
 def _default_socialblade_cookie_file_path() -> Path:
-    return social_repo._default_platform_cookie_file_path("socialblade")  # noqa: SLF001
+    return _default_platform_cookie_file_path("socialblade")
 
 
 def socialblade_cookie_file_path() -> Path:
-    return social_repo._platform_cookie_refresh_target_path(  # noqa: SLF001
+    return _platform_cookie_refresh_target_path(
         _default_socialblade_cookie_file_path(),
         "SOCIALBLADE_COOKIES_FILE",
     )
@@ -102,6 +102,42 @@ def _normalize_socialblade_validation_handle(handle: str | None = None) -> str:
 
 def _socialblade_validation_url(handle: str | None = None) -> str:
     return f"https://socialblade.com/instagram/user/{_normalize_socialblade_validation_handle(handle)}"
+
+
+def _validate_socialblade_cookie_health_via_visible_browser(handle: str) -> dict[str, Any]:
+    from playwright.sync_api import sync_playwright
+
+    from trr_backend.socials.socialblade.parser import _extract_profile_stats_from_body_text
+
+    cdp_url = _socialblade_visible_chrome_cdp_url()
+    if not _chrome_cdp_endpoint_reachable(cdp_url):
+        raise RuntimeError(
+            "Visible shared Chrome session is not running on port 9222; "
+            "start the manual browser session before retrying SocialBlade validation"
+        )
+
+    preflight_socialblade_chrome_profile(require_visible_managed=True)
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.connect_over_cdp(cdp_url)
+        try:
+            if not browser.contexts:
+                raise RuntimeError("Visible shared Chrome session is not available for SocialBlade validation")
+            page = browser.contexts[0].new_page()
+            try:
+                page.goto(_socialblade_validation_url(handle), wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_timeout(4_000)
+                body_text = _body_text(page)
+                if _body_text_matches_access_denied(body_text):
+                    raise RuntimeError("SocialBlade blocked by Cloudflare (1020 access denied)")
+                stats, _rankings, _labels = _extract_profile_stats_from_body_text(body_text, "instagram")
+                return {
+                    "username": handle,
+                    "profile_stats": stats,
+                }
+            finally:
+                page.close()
+        finally:
+            browser.close()
 
 
 def _coerce_socialblade_cookie_map(raw_payload: Any) -> dict[str, str]:
@@ -171,7 +207,7 @@ def load_socialblade_cookies_from_sources() -> dict[str, str]:
         if cookies:
             candidates.append(cookies)
 
-    for path in social_repo._platform_cookie_file_candidates(  # noqa: SLF001
+    for path in _platform_cookie_file_candidates(
         _default_socialblade_cookie_file_path(),
         "SOCIALBLADE_COOKIES_FILE",
     ):
@@ -184,7 +220,7 @@ def load_socialblade_cookies_from_sources() -> dict[str, str]:
         if cookies:
             candidates.append(cookies)
 
-    return social_repo._select_preferred_cookie_candidate(  # noqa: SLF001
+    return _select_preferred_cookie_candidate(
         candidates,
         required_cookie_names_any=SOCIALBLADE_REQUIRED_COOKIE_NAMES_ANY,
         required_cookie_names_all=SOCIALBLADE_REQUIRED_COOKIE_NAMES_ALL,
@@ -209,17 +245,18 @@ def validate_socialblade_cookie_health(
 
     handle = _normalize_socialblade_validation_handle(validation_handle)
     try:
-        from trr_backend.socials.socialblade.scraper import scrape_socialblade
-
-        payload = scrape_socialblade(
+        payload = run_socialblade_scrapling_fetch(
             handle,
             cookies,
             platform="instagram",
-            allow_login_fallback=False,
-            allow_visible_browser_retry=allow_visible_browser_retry,
         )
     except Exception as exc:  # noqa: BLE001
-        return False, f"validation_scrape_failed:{str(exc) or type(exc).__name__}"
+        if not allow_visible_browser_retry:
+            return False, f"validation_scrape_failed:{str(exc) or type(exc).__name__}"
+        try:
+            payload = _validate_socialblade_cookie_health_via_visible_browser(handle)
+        except Exception as retry_exc:  # noqa: BLE001
+            return False, f"validation_scrape_failed:{str(retry_exc) or type(retry_exc).__name__}"
 
     username = str(payload.get("username") or "").strip().lstrip("@").lower() if isinstance(payload, dict) else ""
     if username and username != handle:
@@ -469,37 +506,6 @@ def is_socialblade_cloudflare_block_reason(reason: str | None) -> bool:
     if "1020" in text or "blocked by cloudflare" in text:
         return True
     return _body_text_matches_access_denied(text)
-
-
-def normalize_socialblade_cookies(raw_payload: Any) -> list[dict[str, Any]]:
-    if isinstance(raw_payload, list):
-        normalized: list[dict[str, Any]] = []
-        for cookie in raw_payload:
-            if not isinstance(cookie, dict):
-                continue
-            name = str(cookie.get("name") or "").strip()
-            value = str(cookie.get("value") or "")
-            if not name or not value:
-                continue
-            rendered = dict(cookie)
-            rendered.setdefault("domain", ".socialblade.com")
-            rendered.setdefault("path", "/")
-            normalized.append(rendered)
-        return normalized
-
-    cookie_map = social_repo._coerce_cookie_map(raw_payload)  # noqa: SLF001
-    normalized = []
-    for name, value in cookie_map.items():
-        normalized.append(
-            {
-                "name": name,
-                "value": value,
-                "domain": ".socialblade.com",
-                "path": "/",
-                "secure": True,
-            }
-        )
-    return normalized
 
 
 def _chrome_cdp_endpoint_reachable(cdp_url: str, *, timeout_seconds: float = 1.0) -> bool:

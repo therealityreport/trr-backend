@@ -99,7 +99,7 @@ def test_scrape_tiktok_uses_loader_and_shapes_route_payload(monkeypatch: pytest.
         captured["surface"] = surface
         return {"sessionid": "cookie"}
 
-    monkeypatch.setattr("trr_backend.socials.tiktok.TikTokScraper", _FakeScraper)
+    monkeypatch.setattr("trr_backend.socials.tiktok.scraper.TikTokScraper", _FakeScraper)
 
     request = _request()
     payload = direct_scrape.scrape_tiktok(request, load_cookies=_load_cookies)
@@ -159,7 +159,7 @@ def test_scrape_tiktok_returns_error_payload_on_unexpected_failure(monkeypatch: 
         def scrape(self, config):  # noqa: ANN001
             raise RuntimeError("scrape exploded")
 
-    monkeypatch.setattr("trr_backend.socials.tiktok.TikTokScraper", _FailingScraper)
+    monkeypatch.setattr("trr_backend.socials.tiktok.scraper.TikTokScraper", _FailingScraper)
 
     payload = direct_scrape.scrape_tiktok(_request(), load_cookies=lambda _surface: {"sessionid": "cookie"})
 
@@ -217,7 +217,7 @@ def test_preview_tiktok_profile_uses_loader_and_shapes_payload(monkeypatch: pyte
         captured["surface"] = surface
         return {"sessionid": "cookie"}
 
-    monkeypatch.setattr("trr_backend.socials.tiktok.TikTokScraper", _FakeScraper)
+    monkeypatch.setattr("trr_backend.socials.tiktok.scraper.TikTokScraper", _FakeScraper)
 
     payload = direct_scrape.preview_tiktok_profile("creator", load_cookies=_load_cookies)
 
@@ -249,7 +249,7 @@ def test_preview_tiktok_profile_raises_404_when_profile_missing(monkeypatch: pyt
         def fetch_user_detail(self, username: str, *, delay: float) -> dict[str, Any]:
             return {"userInfo": {"stats": {"followerCount": 10}}}
 
-    monkeypatch.setattr("trr_backend.socials.tiktok.TikTokScraper", _FakeScraper)
+    monkeypatch.setattr("trr_backend.socials.tiktok.scraper.TikTokScraper", _FakeScraper)
 
     with pytest.raises(HTTPException) as exc_info:
         direct_scrape.preview_tiktok_profile("missing", load_cookies=lambda _surface: {"sessionid": "cookie"})
@@ -266,7 +266,7 @@ def test_preview_tiktok_profile_raises_500_on_unexpected_failure(monkeypatch: py
         def fetch_user_detail(self, username: str, *, delay: float) -> dict[str, Any]:
             raise RuntimeError("preview exploded")
 
-    monkeypatch.setattr("trr_backend.socials.tiktok.TikTokScraper", _FailingScraper)
+    monkeypatch.setattr("trr_backend.socials.tiktok.scraper.TikTokScraper", _FailingScraper)
 
     with pytest.raises(HTTPException) as exc_info:
         direct_scrape.preview_tiktok_profile("creator", load_cookies=lambda _surface: {"sessionid": "cookie"})
@@ -283,5 +283,7 @@ def test_direct_scrape_imports_stay_out_of_repository_and_posts_scrapling_lanes(
         node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module is not None
     )
 
+    assert "from trr_backend.socials import tiktok as tiktok_module" not in source
+    assert source.count("import trr_backend.socials.tiktok.scraper as tiktok_module") == 3
     assert "trr_backend.repositories.social_season_analytics" not in imported_modules
     assert all("posts_scrapling" not in module for module in imported_modules)

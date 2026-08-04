@@ -1169,9 +1169,9 @@ def test_interactive_login_runs_sync_playwright_outside_active_async_loop(
         captured["kwargs"] = kwargs
         return {"sessionid": "fresh-session", "csrftoken": "fresh-csrf", "ds_user_id": "123"}
 
-    from trr_backend.socials.instagram import cookie_refresh
+    from trr_backend.socials.instagram import cookie_refresh_runtime
 
-    monkeypatch.setattr(cookie_refresh, "interactive_chrome_login", fake_interactive_chrome_login)
+    monkeypatch.setattr(cookie_refresh_runtime, "interactive_chrome_login", fake_interactive_chrome_login)
 
     async def run_login() -> dict[str, Any]:
         return scraper._try_interactive_login()

@@ -90,7 +90,7 @@ ScraplingJobCancelled = ScraplingJobCancelledError
 
 
 @dataclass(slots=True)
-class PostsAuthCooldownActive(Exception):  # noqa: N818
+class PostsAuthCooldownError(Exception):
     """Soft-stop signal: an account-scoped auth cooldown is active.
 
     Raised when ``auth_cooldown.get_active_cooldown`` reports a future deadline at
@@ -459,7 +459,7 @@ def _raise_if_auth_cooldown_active(
     """A4 READ: soft-stop the job when an account-scoped auth cooldown is active.
 
     Reads the cross-process cooldown (Postgres-backed, social_control pool). When
-    a future deadline is set, raise PostsAuthCooldownActive so the outer handler
+    a future deadline is set, raise PostsAuthCooldownError so the outer handler
     requeues with available_at = cooldown_until instead of issuing more
     authenticated requests. Fails open: any read error means "no cooldown".
     """
@@ -480,7 +480,7 @@ def _raise_if_auth_cooldown_active(
             "last_error_code": cooldown.last_error_code,
         },
     )
-    raise PostsAuthCooldownActive(
+    raise PostsAuthCooldownError(
         f"Instagram posts auth cooldown active for @{account_handle} until {cooldown.cooldown_until.isoformat()}.",
         cooldown_until=cooldown.cooldown_until,
         error_code=cooldown.last_error_code or "instagram_posts_auth_cooldown_active",
@@ -1205,9 +1205,9 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                             if is_checkpoint
                             else f"Instagram auth failed while fetching posts for @{account_handle}."
                         ),
-                        error_code=(
-                            "instagram_posts_checkpoint_required" if is_checkpoint else "instagram_posts_auth_failed"
-                        ),
+                        error_code="instagram_posts_checkpoint_required"
+                        if is_checkpoint
+                        else "instagram_posts_auth_failed",
                         retryable=False,
                         runtime_metadata={
                             **_fetcher_runtime_metadata(),
@@ -1564,7 +1564,7 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
         )
         terminal_status = "cancelled"
         terminal_error_message = str(exc)
-    except PostsAuthCooldownActive as exc:
+    except PostsAuthCooldownError as exc:
         # A4 soft-stop: an account-scoped auth cooldown is active. Requeue the job
         # with available_at = cooldown_until (mirrors the frontier cooldown
         # pattern) so a sibling container picks it up after the cooldown rather

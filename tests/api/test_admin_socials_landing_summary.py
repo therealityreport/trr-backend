@@ -269,7 +269,7 @@ def test_social_live_status_reuses_cached_snapshot(monkeypatch) -> None:
         calls["operations"] += 1
         return {"summary": {"active_total": 0}}
 
-    monkeypatch.setattr("trr_backend.repositories.social_season_analytics.get_queue_status", fake_get_queue_status)
+    monkeypatch.setattr("trr_backend.socials.control_plane.queue_status.get_queue_status", fake_get_queue_status)
     monkeypatch.setattr(
         "trr_backend.repositories.admin_operations.get_admin_operations_health",
         fake_get_admin_operations_health,
@@ -299,7 +299,7 @@ def test_social_live_status_serves_stale_snapshot_when_refresh_fails(monkeypatch
             "queue": {"by_status": {"running": 1}},
         }
 
-    monkeypatch.setattr("trr_backend.repositories.social_season_analytics.get_queue_status", fake_get_queue_status)
+    monkeypatch.setattr("trr_backend.socials.control_plane.queue_status.get_queue_status", fake_get_queue_status)
     monkeypatch.setattr(
         "trr_backend.repositories.admin_operations.get_admin_operations_health",
         lambda: {"summary": {"active_total": 0}},
@@ -338,7 +338,7 @@ def test_social_live_status_preserves_last_good_snapshot_on_pool_exhaustion(monk
             "queue": {"by_status": {"running": 4}},
         }
 
-    monkeypatch.setattr("trr_backend.repositories.social_season_analytics.get_queue_status", fake_get_queue_status)
+    monkeypatch.setattr("trr_backend.socials.control_plane.queue_status.get_queue_status", fake_get_queue_status)
     monkeypatch.setattr(
         "trr_backend.repositories.admin_operations.get_admin_operations_health",
         lambda: {"summary": {"active_total": 4}},

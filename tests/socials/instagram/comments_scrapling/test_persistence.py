@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -10,6 +13,181 @@ from trr_backend.socials import social_season_analytics_impl as social_repo
 from trr_backend.socials.instagram import persistence as instagram_persistence
 from trr_backend.socials.instagram.comments_scrapling import persistence
 from trr_backend.socials.instagram.scraper import InstagramComment
+
+_REQUIRED_PROVIDER_NAMES = (
+    "_fetch_shared_catalog_rows",
+    "get_season_context",
+    "_upsert_instagram_post",
+    "_new_comment_persist_stats",
+    "_batch_upsert_instagram_comments",
+    "_mark_missing_comments_for_anchor",
+    "_reconcile_post_comment_count",
+    "_count_stored_comments",
+    "_column_exists",
+    "_comment_lifecycle_supported",
+    "_flatten_instagram_comment_tree",
+    "_now_utc",
+    "_parse_instagram_time",
+    "_apply_instagram_comment_queryable_columns",
+    "_pg_upsert_many",
+)
+_OPTIONAL_PROVIDER_NAMES = (
+    "_instagram_comment_raw_data_for_write",
+    "_dedupe_instagram_comment_payloads_for_upsert",
+    "_load_instagram_comment_write_baseline",
+    "_count_new_or_changed_instagram_comment_payloads",
+    "_preserve_existing_ranked_instagram_comment_values",
+)
+
+
+def test_persistence_import_does_not_load_legacy_social_modules() -> None:
+    backend_root = Path(__file__).resolve().parents[4]
+    code = "\n".join(
+        [
+            "import importlib",
+            "import sys",
+            "before = set(sys.modules)",
+            ("leaf = importlib.import_module('trr_backend.socials.instagram.comments_scrapling.persistence')"),
+            "assert callable(leaf.persist_instagram_comments_for_post)",
+            "loaded = set(sys.modules) - before",
+            "forbidden = {",
+            "    'trr_backend.socials.social_season_analytics_impl',",
+            "    'trr_backend.repositories.social_season_analytics',",
+            "}",
+            "assert not (loaded & forbidden), sorted(loaded & forbidden)",
+        ]
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=backend_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_late_monolith_import_configures_preloaded_persistence_leaf() -> None:
+    backend_root = Path(__file__).resolve().parents[4]
+    code = "\n".join(
+        [
+            "import importlib",
+            "import sys",
+            ("leaf = importlib.import_module('trr_backend.socials.instagram.comments_scrapling.persistence')"),
+            "legacy_name = 'trr_backend.socials.social_season_analytics_impl'",
+            "assert legacy_name not in sys.modules",
+            "assert leaf._LEGACY_NAMESPACE is None",
+            "legacy = importlib.import_module(legacy_name)",
+            "assert leaf._LEGACY_NAMESPACE is legacy.__dict__",
+            "proxy = leaf._load_repo_helpers()",
+            f"for name in {(_REQUIRED_PROVIDER_NAMES + _OPTIONAL_PROVIDER_NAMES)!r}:",
+            "    assert getattr(proxy, name) is legacy.__dict__[name]",
+            "    assert getattr(proxy, name) is getattr(legacy, name)",
+        ]
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=backend_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_provider_configuration_is_same_namespace_idempotent_and_conflict_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    namespace: dict[str, Any] = {}
+    monkeypatch.setattr(persistence, "_LEGACY_NAMESPACE", None)
+
+    persistence._configure_legacy_provider(namespace)
+    persistence._configure_legacy_provider(namespace)
+
+    assert persistence._LEGACY_NAMESPACE is namespace
+    with pytest.raises(
+        RuntimeError,
+        match="Instagram comments-persistence provider is already configured",
+    ):
+        persistence._configure_legacy_provider({})
+
+
+def test_provider_proxy_is_singleton_and_reads_exact_live_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = object()
+    second = object()
+    namespace = {"provider": first}
+    monkeypatch.setattr(persistence, "_LEGACY_NAMESPACE", None)
+    persistence._configure_legacy_provider(namespace)
+
+    proxy = persistence._load_repo_helpers()
+    assert proxy is persistence._load_repo_helpers()
+    assert proxy is persistence._LEGACY_PROVIDER
+    assert proxy.provider is first
+
+    namespace["provider"] = second
+    namespace["late_provider"] = first
+
+    assert proxy.provider is second
+    assert proxy.late_provider is first
+
+
+def test_provider_proxy_unconfigured_and_missing_names_fail_deterministically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proxy = persistence._load_repo_helpers()
+    monkeypatch.setattr(persistence, "_LEGACY_NAMESPACE", None)
+
+    with pytest.raises(
+        RuntimeError,
+        match="Instagram comments-persistence provider is not configured: _fetch_shared_catalog_rows",
+    ):
+        _ = proxy._fetch_shared_catalog_rows
+
+    persistence._configure_legacy_provider({})
+    with pytest.raises(
+        AttributeError,
+        match="Instagram comments-persistence provider has no attribute: _fetch_shared_catalog_rows",
+    ):
+        _ = proxy._fetch_shared_catalog_rows
+
+
+def test_provider_proxy_preserves_optional_getattr_fallback_and_noncallable_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    namespace: dict[str, Any] = {}
+    monkeypatch.setattr(persistence, "_LEGACY_NAMESPACE", None)
+    persistence._configure_legacy_provider(namespace)
+    proxy = persistence._load_repo_helpers()
+    sentinel = object()
+
+    for name in _OPTIONAL_PROVIDER_NAMES:
+        assert getattr(proxy, name, sentinel) is sentinel
+        namespace[name] = None
+        assert getattr(proxy, name, sentinel) is None
+
+
+def test_provider_proxy_observes_all_live_repository_alias_patches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.repositories import social_season_analytics as repo
+
+    assert repo.__dict__ is social_repo.__dict__
+    monkeypatch.setattr(persistence, "_LEGACY_NAMESPACE", None)
+    persistence._configure_legacy_provider(repo.__dict__)
+    proxy = persistence._load_repo_helpers()
+
+    provider_names = _REQUIRED_PROVIDER_NAMES + _OPTIONAL_PROVIDER_NAMES
+    assert len(provider_names) == 20
+    for name in provider_names:
+        replacement = object()
+        monkeypatch.setattr(repo, name, replacement)
+        assert getattr(proxy, name) is replacement
 
 
 def _comment(
