@@ -10,7 +10,7 @@ import copy
 import json
 import os
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 from trr_backend.socials.control_plane.queue_status import _legacy_repo, get_queue_status
 
@@ -208,7 +208,7 @@ def get_worker_health(*, stale_after_seconds: int | None = None) -> dict[str, An
                 and cached_context in {None, executor_cache_context}
                 and (now - cached_at) < cache_ttl_seconds
             ):
-                return copy.deepcopy(cached_payload)
+                return cast(dict[str, Any], copy.deepcopy(cached_payload))
 
     payload = _query_worker_health(stale_after_seconds=stale_after_seconds)
     if modal_executor_enabled:
