@@ -329,42 +329,16 @@ def test_checked_in_allowlist_exactly_matches_current_modal_invocations() -> Non
             "app_stop",
         ): 1,
         ("TRR-Backend/scripts/modal/deploy_backend.py", "build_deploy_command", "deploy"): 1,
-        (
-            "TRR-Backend/scripts/modal/diagnose_instagram_comments_remote.py",
-            "_invoke_deployed_comments_lane",
-            "sdk_function_from_name",
-        ): 1,
         ("TRR-Backend/scripts/modal/prepare_named_secrets.py", "_modal_secret_create_command", "secret_create"): 1,
         ("TRR-Backend/scripts/modal/reconcile_modal_runtime.py", "deploy_modal_app", "deploy"): 1,
         ("TRR-Backend/scripts/modal/refresh_instagram_cookies_from_chrome.py", "_deploy_modal", "deploy"): 1,
-        (
-            "TRR-Backend/scripts/modal/refresh_instagram_cookies_from_chrome.py",
-            "_verify_remote_auth",
-            "sdk_function_from_name",
-        ): 1,
-        ("TRR-Backend/scripts/modal/render_cutover_commands.py", "main", "deploy"): 1,
         ("TRR-Backend/scripts/modal/repair_instagram_auth.py", "_deploy_modal_command", "deploy"): 1,
-        (
-            "TRR-Backend/scripts/modal/verify_instagram_posts_auth.py",
-            "verify_instagram_posts_auth",
-            "sdk_function_from_name",
-        ): 1,
-        (
-            "TRR-Backend/scripts/modal/verify_instagram_public_history.py",
-            "verify_instagram_public_history",
-            "sdk_function_from_name",
-        ): 1,
         (
             "TRR-Backend/scripts/socials/instagram/one_post_media_mirror.py",
             "_run_modal",
             "sdk_function_from_name",
         ): 1,
         ("TRR-Backend/trr_backend/modal_dispatch.py", "get_trr_modal_function_handle", "sdk_function_from_name"): 1,
-        (
-            "TRR-Backend/trr_backend/vision/people_count_service.py",
-            "_invoke_people_count_modal",
-            "sdk_function_from_name",
-        ): 1,
     }
     observed = Counter(item.approval_key for item in guard.scan_invocations(guard.WORKSPACE_ROOT))
     allowlist_payload = json.loads(guard.DEFAULT_ALLOWLIST.read_text(encoding="utf-8"))

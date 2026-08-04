@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any, Literal
 
+from trr_backend.modal_dispatch import get_trr_modal_function_handle
+
 DetectorMode = Literal["faces_then_yolo", "faces", "yolo"]
 
 logger = logging.getLogger(__name__)
@@ -365,7 +367,7 @@ def _invoke_people_count_batch_local(payload: dict[str, object]) -> dict[str, ob
 
 def _invoke_people_count_modal(payload: dict[str, object], *, batch: bool = False) -> dict[str, object]:
     try:
-        import modal
+        import modal  # noqa: F401
     except Exception as exc:  # noqa: BLE001
         raise PeopleCountServiceUnavailableError(
             "Modal client is not available for vision execution",
@@ -373,7 +375,11 @@ def _invoke_people_count_modal(payload: dict[str, object], *, batch: bool = Fals
         ) from exc
 
     try:
-        fn = modal.Function.from_name(_modal_app_name(), _modal_vision_function_name())
+        fn = get_trr_modal_function_handle(
+            _modal_vision_function_name(),
+            app_name=_modal_app_name(),
+            environment_name=str(os.getenv("MODAL_ENVIRONMENT") or "").strip() or None,
+        )
         response = fn.remote(payload, batch=batch)
     except Exception as exc:  # noqa: BLE001
         raise PeopleCountServiceUnavailableError(

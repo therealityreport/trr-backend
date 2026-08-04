@@ -21,6 +21,114 @@ def _isolated_auth_repair_cooldown(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     monkeypatch.setattr(cli, "_cooldown_state_path", lambda: tmp_path / "instagram-auth-repair-cooldown.json")
 
 
+def test_run_repair_rejects_non_main_environment_before_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subprocess_called = False
+
+    def fake_run(*_args, **_kwargs):
+        nonlocal subprocess_called
+        subprocess_called = True
+        return _completed(stdout='{"platform":"instagram","validated":true,"reason":null}\n')
+
+    monkeypatch.setattr(cli, "load_env", lambda: None)
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    with pytest.raises(ValueError, match="environment=staging"):
+        cli.run_repair(
+            source_env=Path("/tmp/source.env"),
+            modal_environment="staging",
+            dry_run=True,
+        )
+
+    assert subprocess_called is False
+
+
+def test_run_repair_passes_full_pinned_identity_to_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_envs: list[dict[str, str]] = []
+    pinned = {
+        "MODAL_PROFILE": "admin-56995",
+        "MODAL_WORKSPACE": "admin-56995",
+        "MODAL_ENVIRONMENT": "main",
+        "TRR_MODAL_APP_NAME": "trr-backend-jobs",
+        "TRR_MODAL_APP_REF": "trr_backend.modal_jobs",
+    }
+
+    def fake_run(
+        _command: list[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        cwd: Path,
+        text: bool,
+        timeout: int | None = None,
+        env: dict[str, str],
+    ) -> cli.subprocess.CompletedProcess[str]:
+        assert check is False
+        assert capture_output is True
+        assert cwd == cli.REPO_ROOT
+        assert text is True
+        assert timeout is not None
+        captured_envs.append(dict(env))
+        return _completed(stdout='{"platform":"instagram","validated":true,"reason":null}\n')
+
+    monkeypatch.setattr(cli, "load_env", lambda: None)
+    monkeypatch.setattr(cli, "pinned_modal_env", lambda: dict(pinned))
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    summary = cli.run_repair(
+        source_env=Path("/tmp/source.env"),
+        modal_environment="main",
+        dry_run=True,
+    )
+
+    assert summary["ok"] is True
+    assert captured_envs == [pinned]
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("TRR_MODAL_APP_NAME", "other-app"),
+        ("TRR_MODAL_APP_REF", "other.module"),
+    ],
+)
+def test_run_repair_rejects_wrong_app_or_module_before_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+    key: str,
+    value: str,
+) -> None:
+    subprocess_called = False
+    pinned = {
+        "MODAL_PROFILE": "admin-56995",
+        "MODAL_WORKSPACE": "admin-56995",
+        "MODAL_ENVIRONMENT": "main",
+        "TRR_MODAL_APP_NAME": "trr-backend-jobs",
+        "TRR_MODAL_APP_REF": "trr_backend.modal_jobs",
+    }
+    pinned[key] = value
+
+    def fake_run(*_args, **_kwargs):
+        nonlocal subprocess_called
+        subprocess_called = True
+        return _completed(stdout='{"platform":"instagram","validated":true,"reason":null}\n')
+
+    monkeypatch.setattr(cli, "load_env", lambda: None)
+    monkeypatch.setattr(cli, "pinned_modal_env", lambda: dict(pinned))
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    with pytest.raises(ValueError, match=key):
+        cli.run_repair(
+            source_env=Path("/tmp/source.env"),
+            modal_environment="main",
+            dry_run=True,
+        )
+
+    assert subprocess_called is False
+
+
 def test_parse_last_json_line_accepts_pretty_json_stdout() -> None:
     payload = cli._parse_last_json_line('{\n  "ok": true,\n  "value": 1\n}\n', step_name="verify")
 
@@ -71,6 +179,7 @@ def test_run_repair_stops_when_local_validation_fails(monkeypatch: pytest.Monkey
         cwd: Path,
         text: bool,
         timeout: int | None = None,
+        env: dict[str, str] | None = None,
     ) -> cli.subprocess.CompletedProcess[str]:
         assert check in {True, False}
         assert capture_output is True
@@ -131,6 +240,7 @@ def test_validate_local_only_does_not_apply_deploy_verify_or_write_cooldown(
         cwd: Path,
         text: bool,
         timeout: int | None = None,
+        env: dict[str, str] | None = None,
     ) -> cli.subprocess.CompletedProcess[str]:
         assert check is False
         assert capture_output is True
@@ -179,6 +289,7 @@ def test_run_repair_allows_one_explicit_cookie_refresh_for_non_auth_validation_f
         cwd: Path,
         text: bool,
         timeout: int | None = None,
+        env: dict[str, str] | None = None,
     ) -> cli.subprocess.CompletedProcess[str]:
         assert check in {True, False}
         assert capture_output is True
@@ -257,6 +368,7 @@ def test_run_repair_does_not_refresh_when_validation_reports_checkpoint(
         cwd: Path,
         text: bool,
         timeout: int | None = None,
+        env: dict[str, str] | None = None,
     ) -> cli.subprocess.CompletedProcess[str]:
         assert check is False
         assert capture_output is True
@@ -302,6 +414,7 @@ def test_run_repair_dry_run_plans_modal_steps_without_side_effects(
         cwd: Path,
         text: bool,
         timeout: int | None = None,
+        env: dict[str, str] | None = None,
     ) -> cli.subprocess.CompletedProcess[str]:
         assert check is False
         assert capture_output is True
@@ -362,6 +475,7 @@ def test_run_repair_dry_run_checkpoint_does_not_write_cooldown(
         cwd: Path,
         text: bool,
         timeout: int | None = None,
+        env: dict[str, str] | None = None,
     ) -> cli.subprocess.CompletedProcess[str]:
         assert check is False
         assert capture_output is True
@@ -405,6 +519,7 @@ def test_run_repair_blocks_login_prompt_even_when_cookie_refresh_is_allowed(
         cwd: Path,
         text: bool,
         timeout: int | None = None,
+        env: dict[str, str] | None = None,
     ) -> cli.subprocess.CompletedProcess[str]:
         assert check is False
         assert capture_output is True
@@ -461,6 +576,7 @@ def test_run_repair_blocks_manual_challenge_and_verification_states(
         cwd: Path,
         text: bool,
         timeout: int | None = None,
+        env: dict[str, str] | None = None,
     ) -> cli.subprocess.CompletedProcess[str]:
         assert check is False
         assert capture_output is True
@@ -512,6 +628,7 @@ def test_run_repair_stops_when_remote_probe_fails(monkeypatch: pytest.MonkeyPatc
         cwd: Path,
         text: bool,
         timeout: int | None = None,
+        env: dict[str, str] | None = None,
     ) -> cli.subprocess.CompletedProcess[str]:
         assert check in {True, False}
         assert capture_output is True
@@ -610,6 +727,7 @@ def test_run_repair_keeps_infra_remote_failures_retryable_without_cooldown(
         cwd: Path,
         text: bool,
         timeout: int | None = None,
+        env: dict[str, str] | None = None,
     ) -> cli.subprocess.CompletedProcess[str]:
         assert check in {True, False}
         assert capture_output is True
@@ -660,6 +778,7 @@ def test_run_repair_ignores_unrelated_missing_getty_probe_when_instagram_remote_
         cwd: Path,
         text: bool,
         timeout: int | None = None,
+        env: dict[str, str] | None = None,
     ) -> cli.subprocess.CompletedProcess[str]:
         assert check in {True, False}
         assert capture_output is True
@@ -728,6 +847,7 @@ def test_run_repair_verifies_instagram_posts_endpoint_when_account_is_supplied(
         cwd: Path,
         text: bool,
         timeout: int | None = None,
+        env: dict[str, str] | None = None,
     ) -> cli.subprocess.CompletedProcess[str]:
         assert check in {True, False}
         assert capture_output is True
@@ -804,6 +924,7 @@ def test_run_repair_blocks_browser_session_invalidated_comments_probe(
         cwd: Path,
         text: bool,
         timeout: int | None = None,
+        env: dict[str, str] | None = None,
     ) -> cli.subprocess.CompletedProcess[str]:
         assert check in {True, False}
         assert capture_output is True
@@ -912,6 +1033,7 @@ def test_clear_auth_repair_cooldown_requires_passing_local_validation(
         cwd: Path,
         text: bool,
         timeout: int | None = None,
+        env: dict[str, str] | None = None,
     ) -> cli.subprocess.CompletedProcess[str]:
         assert check is False
         assert capture_output is True
@@ -955,6 +1077,7 @@ def test_clear_auth_repair_cooldown_clears_after_passing_local_validation(
         cwd: Path,
         text: bool,
         timeout: int | None = None,
+        env: dict[str, str] | None = None,
     ) -> cli.subprocess.CompletedProcess[str]:
         assert check is False
         assert capture_output is True
