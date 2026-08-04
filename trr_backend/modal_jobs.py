@@ -10,6 +10,8 @@ import socket
 import sys
 import time
 import uuid
+from datetime import UTC, datetime
+from importlib.metadata import version as package_version
 from typing import Final
 
 from trr_backend.observability import configure_runtime_observability
@@ -240,8 +242,6 @@ _SOCIAL_IMAGE_LOCAL_DIRS: Final[tuple[tuple[str, str], ...]] = (
     (str(_BACKEND_ROOT / "scripts" / "socials" / "instagram"), "/root/scripts/socials/instagram"),
     (str(_BACKEND_ROOT / "scripts" / "socials" / "tiktok"), "/root/scripts/socials/tiktok"),
     (str(_BACKEND_ROOT / "scripts" / "socials" / "twitter"), "/root/scripts/socials/twitter"),
-    (str(_BACKEND_ROOT / "scripts" / "socials" / "threads"), "/root/scripts/socials/threads"),
-    (str(_BACKEND_ROOT / "scripts" / "socials" / "facebook"), "/root/scripts/socials/facebook"),
 )
 _LEAN_IMAGE_LOCAL_FILES: Final[tuple[tuple[str, str], ...]] = (
     (str(_BACKEND_ROOT / "scripts" / "__init__.py"), "/root/scripts/__init__.py"),
@@ -294,6 +294,7 @@ _INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE_ENV: Final = "SOCIAL_INSTAGRAM_PAYLOAD_CO
 _MODAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE_ENV: Final = "TRR_MODAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE"
 _DEFAULT_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE: Final = 0.1
 _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
+    "TRR_RUNTIME_CAPACITY_CONTEXT": "hosted_modal",
     "TRR_DB_POOL_MINCONN": "1",
     "TRR_DB_POOL_MAXCONN": "2",
     "TRR_SOCIAL_PROFILE_DB_POOL_MINCONN": "1",
@@ -567,6 +568,7 @@ _FUNCTION_IMAGE_BINDINGS: Final[dict[str, object]] = {
     "run_social_comments_recovery_job": _browser_image,
     "run_socialblade_scrape": _browser_image,
     "probe_socialblade_runtime": _browser_image,
+    "probe_browser_image_runtime": _browser_image,
     "heartbeat_remote_executors": _image,
     "sync_nbcumv_official_images": _image,
     "purge_stale_social_worker_heartbeats": _image,
@@ -814,7 +816,6 @@ def _close_db_pools_after_worker(worker_family: str, **metadata: object) -> None
         logger.exception("[modal_worker_db_cleanup_failed] family=%s metadata=%s", worker_family, metadata)
 
 
-_validate_modal_maintenance_owner_config()
 _secrets = _resolve_modal_secrets()
 _inject_modal_runtime_defaults()
 # Phase 2: surface a comments-lane DB session-budget breach at container startup
@@ -826,6 +827,60 @@ configure_runtime_observability(service_name="trr-backend-modal-jobs")
 app = modal.App(_APP_NAME, image=_image)
 
 
+@app.function(
+    name="probe_browser_image_runtime",
+    image=_FUNCTION_IMAGE_BINDINGS["probe_browser_image_runtime"],
+    retries=0,
+    timeout=2 * 60,
+)
+def probe_browser_image_runtime() -> dict[str, object]:
+    """Prove the browser image can import and launch Chromium without state."""
+    # Keep this probe deliberately state-free: no Secret, database, Volume, Queue,
+    # cookie, external URL, or browser storage is involved.
+    from patchright.sync_api import sync_playwright as patchright_sync_playwright
+    from playwright.sync_api import sync_playwright
+    from scrapling.fetchers import StealthyFetcher
+
+    started = time.monotonic()
+    try:
+        # Importing the concrete fetcher catches Scrapling/Patchright integration
+        # drift without constructing a session or making a network request.
+        _ = StealthyFetcher, patchright_sync_playwright
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            try:
+                browser_version = str(browser.version)
+            finally:
+                # A Playwright Browser must be closed before its owning
+                # sync_playwright context shuts down. Closing it afterward
+                # attempts to use an event loop that Playwright already ended.
+                browser.close()
+        return {
+            "healthy": True,
+            "reason": "ok",
+            "worker_family": "browser_image",
+            "state_free": True,
+            "timestamp": datetime.now(UTC).isoformat(),
+            "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+            "versions": {
+                "python": sys.version.split()[0],
+                "modal": package_version("modal"),
+                "scrapling": package_version("scrapling"),
+                "playwright": package_version("playwright"),
+                "patchright": package_version("patchright"),
+                "chromium": browser_version,
+            },
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "healthy": False,
+            "reason": "browser_image_probe_failed",
+            "state_free": True,
+            "timestamp": datetime.now(UTC).isoformat(),
+            "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+            "error_class": type(exc).__name__,
+            "error": str(exc),
+        }
 @app.function(
     name=_API_FUNCTION_NAME,
     secrets=_secrets,
@@ -1553,6 +1608,7 @@ def _recover_stale_pending_social_catalog_launches(
     **_modal_cron_schedule_kwargs("*/2 * * * *"),
 )
 def sweep_social_dispatch_queue() -> dict[str, object]:
+    _validate_modal_maintenance_owner_config()
     from trr_backend.socials.control_plane import recover_and_dispatch_due_social_jobs
 
     started_at = _worker_started(
@@ -1603,6 +1659,7 @@ def poll_decodo_proxy_usage() -> dict[str, object]:
     WARNING (shipped to Better Stack) and, if available, a Sentry message. Fail-open:
     poll/parse errors are caught inside ``poll_decodo_usage`` and never crash the cron.
     """
+    _validate_modal_maintenance_owner_config()
     from trr_backend.socials.decodo_usage import poll_decodo_usage
 
     started_at = _worker_started(
@@ -1636,6 +1693,7 @@ def poll_decodo_proxy_usage() -> dict[str, object]:
     **_modal_cron_schedule_kwargs("15 14 * * *"),
 )
 def sync_nbcumv_official_images() -> dict[str, object]:
+    _validate_modal_maintenance_owner_config()
     from api.routers.admin_show_sync import run_official_images_auto_sync
 
     started_at = _worker_started(
@@ -1670,6 +1728,7 @@ def sync_nbcumv_official_images() -> dict[str, object]:
     **_modal_cron_schedule_kwargs("* * * * *"),
 )
 def heartbeat_remote_executors(heartbeat_source: str = "backend_runtime_scheduler") -> dict[str, object]:
+    _validate_modal_maintenance_owner_config()
     from trr_backend.modal_dispatch import _record_dispatcher_heartbeat
     from trr_backend.socials.control_plane import get_worker_auth_capabilities, is_queue_enabled
 
@@ -1816,6 +1875,7 @@ def heartbeat_remote_executors(heartbeat_source: str = "backend_runtime_schedule
     **_modal_cron_schedule_kwargs("17 4 * * *"),
 )
 def purge_stale_social_worker_heartbeats() -> dict[str, object]:
+    _validate_modal_maintenance_owner_config()
     from collections import Counter
 
     from trr_backend.db import pg

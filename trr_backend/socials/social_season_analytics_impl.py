@@ -51,6 +51,7 @@ from trr_backend.job_plane import (
 )
 from trr_backend.modal_dispatch import (
     dispatch_social_job,
+    get_trr_modal_function_handle,
     inspect_modal_function_call,
     modal_app_name,
     modal_dispatch_enabled,
@@ -60,7 +61,15 @@ from trr_backend.modal_dispatch import (
     modal_social_job_function_names,
     resolve_modal_function,
 )
+from trr_backend.runtime_version import build_runtime_version_stamp
 from trr_backend.socials import source_scopes as _source_scopes
+from trr_backend.socials import windowing as _windowing
+from trr_backend.socials.cookie_sources import (
+    _default_platform_cookie_file_path,
+    _platform_cookie_file_candidates,
+    _platform_cookie_refresh_target_path,
+    _select_preferred_cookie_candidate,
+)
 from trr_backend.socials.crawlee_runtime import (
     AuthPreflightError,
     AuthPreflightResult,
@@ -72,6 +81,19 @@ from trr_backend.socials.crawlee_runtime import (
     should_use_crawlee,
 )
 from trr_backend.socials.instagram.constants import instagram_post_permalink
+from trr_backend.socials.model_types import (
+    COMMENT_MEDIA_MIRROR_STAGE,
+    DEFAULT_COMMENT_REFRESH_POLICY,
+    DEFAULT_YOUTUBE_SOURCE_MODE,
+    IngestOptions,
+    SeasonContext,
+    SentimentAnalyzerContext,
+    WeekWindow,
+)
+from trr_backend.socials.pipelines.facebook_cookie_loader import configure_facebook_cookie_loader
+from trr_backend.socials.pipelines.shared_job_executor import configure_shared_claimed_job_executor
+from trr_backend.socials.pipelines.threads_cookie_loader import configure_threads_cookie_loader
+from trr_backend.socials.pipelines.tiktok_cookie_loader import configure_tiktok_cookie_loader
 from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
 from trr_backend.socials.twitter import Tweet, TwitterScrapeConfig, TwitterScraper
 
@@ -143,11 +165,9 @@ SUPPORTED_RUNNER_STRATEGIES = ("single_runner", "adaptive_dual_runner")
 SUPPORTED_DAY_WEIGHT_PROFILES = ("default", "rhoslc_default")
 SUPPORTED_PRIORITY_MODES = ("default", "episode_peak_weighted")
 SUPPORTED_YOUTUBE_SOURCE_MODES = ("hybrid", "api_only", "scraper_only")
-DEFAULT_COMMENT_REFRESH_POLICY = "balanced"
 DEFAULT_RUNNER_STRATEGY = "single_runner"
 DEFAULT_DAY_WEIGHT_PROFILE = "default"
 DEFAULT_PRIORITY_MODE = "default"
-DEFAULT_YOUTUBE_SOURCE_MODE = "hybrid"
 DEFAULT_RUNNER_COUNT = 1
 DEFAULT_WINDOW_SHARD_HOURS = 2
 MAX_WINDOW_SHARD_HOURS = 24
@@ -234,7 +254,6 @@ SOCIAL_INSTAGRAM_PUBLIC_FIRST_MODE_ALIASES = frozenset(
     {"", "public", "public-first", "public_first", "no_login", "nologin"}
 )
 INSTAGRAM_MEDIA_MIRROR_STAGE = "media_mirror"
-COMMENT_MEDIA_MIRROR_STAGE = "comment_media_mirror"
 INSTAGRAM_COMMENTS_SCRAPLING_STAGE = "comments_scrapling"
 INSTAGRAM_POSTS_SCRAPLING_STAGE = "posts_scrapling"
 INSTAGRAM_PROFILE_SNAPSHOT_STAGE = "instagram_profile_snapshot"
@@ -758,25 +777,6 @@ SENTIMENT_GEMINI_BATCH_SIZE_CAP = 25
 
 
 @dataclass(slots=True)
-class SeasonContext:
-    season_id: str
-    show_id: str
-    show_name: str | None
-    season_number: int
-    anchor_date: date
-    show_slug: str | None = None
-
-
-@dataclass(slots=True)
-class WeekWindow:
-    week_index: int
-    start_local: datetime
-    end_local: datetime
-    week_type: str = "episode"
-    episode_number: int | None = None
-
-
-@dataclass(slots=True)
 class IngestResult:
     platform: str
     source_scope: str
@@ -786,31 +786,6 @@ class IngestResult:
     posts: int
     comments: int
     error: str | None = None
-
-
-@dataclass(slots=True)
-class IngestOptions:
-    platforms: set[str] | None
-    source_scope: str
-    sync_strategy: str
-    max_posts_per_target: int
-    max_comments_per_post: int
-    max_replies_per_post: int
-    fetch_replies: bool
-    ingest_mode: str
-    date_start: datetime | None
-    date_end: datetime | None
-    comment_refresh_policy: str = DEFAULT_COMMENT_REFRESH_POLICY
-    comment_anchor_source_ids: dict[str, set[str]] | None = None
-    sound_ids: list[str] | None = None
-    youtube_source_mode: str = DEFAULT_YOUTUBE_SOURCE_MODE
-    youtube_force_reindex: bool = False
-    youtube_force_media_refresh: bool = False
-    youtube_force_comment_refresh: bool = False
-    comments_enable_media_followups: bool = False
-    details_refresh_skip_detail_fetch: bool = False
-    details_refresh_force_detail_fetch: bool = False
-    details_refresh_skip_media_followups: bool = False
 
 
 def _apply_assignment_payload(payload: dict[str, Any], context: SeasonContext | None) -> None:
@@ -1823,14 +1798,6 @@ class CommentRefreshDecision:
 class EpisodeSentimentContext:
     summary: str
     terms: set[str]
-
-
-@dataclass(slots=True)
-class SentimentAnalyzerContext:
-    cast_terms: set[str]
-    cast_phrases: set[str]
-    episode_terms: set[str]
-    episode_summary: str
 
 
 @dataclass(slots=True)
@@ -3463,7 +3430,7 @@ def _probe_modal_remote_auth_health_uncached(platform: str) -> dict[str, Any] | 
         return None
 
     try:
-        import modal
+        import modal  # noqa: F401
     except Exception:  # noqa: BLE001
         return None
 
@@ -3472,10 +3439,10 @@ def _probe_modal_remote_auth_health_uncached(platform: str) -> dict[str, Any] | 
         return None
 
     try:
-        handle = modal.Function.from_name(
-            modal_app_name(),
+        handle = get_trr_modal_function_handle(
             probe_function_name,
-            environment_name=modal_environment_name() or None,
+            app_name=modal_app_name(),
+            environment_name=modal_environment_name(),
         )
         timeout_seconds = _modal_instagram_auth_probe_timeout_seconds(
             env_name=f"TRR_MODAL_{normalized_platform.upper()}_REMOTE_AUTH_PROBE_TIMEOUT_SECONDS",
@@ -3578,7 +3545,7 @@ def probe_modal_instagram_posts_auth_health(account_handle: str) -> dict[str, An
         }
 
     try:
-        import modal
+        import modal  # noqa: F401
     except Exception as exc:  # noqa: BLE001
         return {
             "platform": "instagram",
@@ -3602,10 +3569,10 @@ def probe_modal_instagram_posts_auth_health(account_handle: str) -> dict[str, An
         }
 
     try:
-        handle = modal.Function.from_name(
-            modal_app_name(),
+        handle = get_trr_modal_function_handle(
             probe_function_name,
-            environment_name=modal_environment_name() or None,
+            app_name=modal_app_name(),
+            environment_name=modal_environment_name(),
         )
         timeout_seconds = _modal_instagram_auth_probe_timeout_seconds(
             env_name="TRR_MODAL_INSTAGRAM_POSTS_AUTH_PROBE_TIMEOUT_SECONDS",
@@ -3795,7 +3762,7 @@ def probe_modal_instagram_comments_auth_health(
             return cached_rate_limit
 
     try:
-        import modal
+        import modal  # noqa: F401
     except Exception as exc:  # noqa: BLE001
         return {
             "platform": "instagram",
@@ -3821,10 +3788,10 @@ def probe_modal_instagram_comments_auth_health(
         }
 
     try:
-        handle = modal.Function.from_name(
-            modal_app_name(),
+        handle = get_trr_modal_function_handle(
             probe_function_name,
-            environment_name=modal_environment_name() or None,
+            app_name=modal_app_name(),
+            environment_name=modal_environment_name(),
         )
         timeout_seconds = _modal_instagram_auth_probe_timeout_seconds(
             env_name="TRR_MODAL_INSTAGRAM_COMMENTS_AUTH_PROBE_TIMEOUT_SECONDS",
@@ -8814,19 +8781,56 @@ def get_instagram_auth_repair_signal(*args: Any, **kwargs: Any) -> Any:
     return _LOCAL_ROOM_FUNCTIONS["get_instagram_auth_repair_signal"](*args, **kwargs)
 
 
-def _default_platform_cookie_file_path(platform: str) -> Path:
-    return Path(__file__).resolve().parents[2] / "scripts" / "socials" / platform / f"{platform}_cookies.json"
+_INSTAGRAM_AUTH_RUNTIME_LEGACY_OVERRIDE_NAMES = (
+    "_default_instagram_cookie_file_path",
+    "_instagram_cookie_file_candidates",
+    "_instagram_cookie_refresh_target_path",
+    "_instagram_auth_credentials",
+    "_instagram_cookie_auto_refresh_enabled",
+    "_instagram_cookie_validation_username",
+    "_load_instagram_cookies_from_sources",
+    "_instagram_cookie_fingerprint",
+    "_instagram_cookie_structure_detail",
+    "_instagram_cookie_schema_result",
+    "_instagram_cookie_validation_detail",
+    "_inspect_instagram_cookie_health",
+    "_validate_instagram_cookie_health",
+    "_refresh_instagram_cookies",
+    "_ensure_instagram_cookies_fresh",
+    "_load_instagram_cookies_legacy",
+    "_build_legacy_instagram_auth_session",
+    "_load_instagram_cookies",
+    "get_instagram_auth_repair_signal",
+    "_now_utc",
+    "_env_truthy",
+    "_resolve_positive_int_env",
+    "_coerce_dt",
+    "_iso",
+    "_relation_exists",
+)
 
 
-def _platform_cookie_file_candidates(default_path: Path, *env_keys: str) -> list[Path]:
-    raw_candidates = [str(os.getenv(key) or "").strip() for key in env_keys]
-    raw_candidates.append(str(default_path))
-    return [Path(raw_path).expanduser() for raw_path in raw_candidates if raw_path]
+def _configure_instagram_auth_runtime_legacy_overrides() -> None:
+    global _instagram_cookie_refresh_lock
+
+    from trr_backend.socials.instagram.auth_runtime import (
+        _configure_legacy_overrides,
+    )
+    from trr_backend.socials.instagram.auth_runtime import (
+        _instagram_cookie_refresh_lock as auth_runtime_refresh_lock,
+    )
+
+    _configure_legacy_overrides(
+        globals(),
+        {
+            name: globals()[name]
+            for name in _INSTAGRAM_AUTH_RUNTIME_LEGACY_OVERRIDE_NAMES
+        },
+    )
+    _instagram_cookie_refresh_lock = auth_runtime_refresh_lock
 
 
-def _platform_cookie_refresh_target_path(default_path: Path, *env_keys: str) -> Path:
-    candidates = _platform_cookie_file_candidates(default_path, *env_keys)
-    return candidates[0] if candidates else default_path
+_configure_instagram_auth_runtime_legacy_overrides()
 
 
 def _serialize_cookie_env_json(cookies: Mapping[str, Any]) -> str:
@@ -8921,40 +8925,6 @@ def _platform_cookie_auto_refresh_enabled(toggle_env: str, username_env: str, pa
         return raw not in {"0", "false", "off", "no"}
     username, password = _platform_auth_credentials(username_env, password_env)
     return bool(username and password)
-
-
-def _select_preferred_cookie_candidate(
-    candidates: list[dict[str, str]],
-    *,
-    required_cookie_names_any: tuple[str, ...] = (),
-    required_cookie_names_all: tuple[str, ...] = (),
-) -> dict[str, str]:
-    if not candidates:
-        return {}
-    if not required_cookie_names_any and not required_cookie_names_all:
-        return dict(candidates[0])
-
-    def _score(candidate: dict[str, str]) -> tuple[int, int]:
-        has_all = int(
-            all(str(candidate.get(name) or "").strip() for name in required_cookie_names_all)
-            if required_cookie_names_all
-            else True
-        )
-        has_any = int(
-            any(str(candidate.get(name) or "").strip() for name in required_cookie_names_any)
-            if required_cookie_names_any
-            else True
-        )
-        return (has_all, has_any)
-
-    best_score: tuple[int, int] | None = None
-    best_candidate: dict[str, str] | None = None
-    for candidate in candidates:
-        score = _score(candidate)
-        if best_score is None or score > best_score:
-            best_score = score
-            best_candidate = candidate
-    return dict(best_candidate or {})
 
 
 def _load_cookie_map_from_json_or_file(
@@ -9593,6 +9563,13 @@ def _load_tiktok_cookies() -> dict[str, str]:
     return _ensure_tiktok_cookies_fresh(cookies)
 
 
+def _load_tiktok_cookies_adapter() -> dict[str, str]:
+    return _load_tiktok_cookies()
+
+
+configure_tiktok_cookie_loader(_load_tiktok_cookies_adapter)
+
+
 def _default_facebook_cookie_file_path() -> Path:
     return _default_platform_cookie_file_path("facebook")
 
@@ -9687,16 +9664,15 @@ def _ensure_facebook_cookies_fresh(cookies: dict[str, str]) -> dict[str, str]:
             refreshed_valid, refreshed_reason = _validate_facebook_cookie_health(refreshed)
             if refreshed_valid:
                 return refreshed
-            logger.warning(
-                "Facebook cookies refreshed but validation still failed (%s)",
-                refreshed_reason or "unknown",
-            )
+            logger.warning("Facebook cookies refreshed but validation still failed (%s)", refreshed_reason or "unknown")
         return cookies
 
 
 def _load_facebook_cookies() -> dict[str, str]:
-    cookies = _load_facebook_cookies_from_sources()
-    return _ensure_facebook_cookies_fresh(cookies)
+    return _ensure_facebook_cookies_fresh(_load_facebook_cookies_from_sources())
+
+
+configure_facebook_cookie_loader(lambda: _load_facebook_cookies())
 
 
 def _default_threads_cookie_file_path() -> Path:
@@ -9758,9 +9734,7 @@ def _refresh_threads_cookies(stale_reason: str | None = None) -> dict[str, str]:
             username=username,
             password=password,
             cookie_file=_platform_cookie_refresh_target_path(
-                _default_threads_cookie_file_path(),
-                "SOCIAL_THREADS_COOKIES_FILE",
-                "THREADS_COOKIES_FILE",
+                _default_threads_cookie_file_path(), "SOCIAL_THREADS_COOKIES_FILE", "THREADS_COOKIES_FILE"
             ),
             headless=(os.getenv("SOCIAL_THREADS_COOKIE_REFRESH_HEADLESS") or "true").strip().lower()
             not in {"0", "false", "off", "no"},
@@ -9808,9 +9782,10 @@ def _ensure_threads_cookies_fresh(cookies: dict[str, str]) -> dict[str, str]:
 
 
 def _load_threads_cookies() -> dict[str, str]:
-    cookies = _load_threads_cookies_from_sources()
-    return _ensure_threads_cookies_fresh(cookies)
+    return _ensure_threads_cookies_fresh(_load_threads_cookies_from_sources())
 
+
+configure_threads_cookie_loader(lambda: _load_threads_cookies())
 
 # ---------------------------------------------------------------------------
 # Platform cookie handler registry (shared by API + CLI)
@@ -21174,41 +21149,12 @@ def _adapt_payload_json_values(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 @lru_cache(maxsize=1)
 def _resolve_runtime_version_stamp() -> dict[str, Any]:
-    commit_sha = ""
-    for env_name in (
-        "TRR_RUNTIME_VERSION",
-        "TRR_DEPLOY_VERSION",
-        "RENDER_GIT_COMMIT",
-        "VERCEL_GIT_COMMIT_SHA",
-        "RAILWAY_GIT_COMMIT_SHA",
-        "COMMIT_SHA",
-        "GIT_COMMIT_SHA",
-    ):
-        value = str(os.getenv(env_name) or "").strip()
-        if value:
-            commit_sha = value
-            break
-    modal_image = str(os.getenv("MODAL_IMAGE_ID") or os.getenv("MODAL_IMAGE_TAG") or "").strip() or None
-    modal_env = modal_environment_name() or None
-    modal_function = modal_social_job_function_name() or None
-    execution_backend = execution_backend_canonical()
-    return {
-        "commit_sha": commit_sha or None,
-        "modal_image": modal_image,
-        "modal_environment": modal_env,
-        "modal_function": modal_function,
-        "execution_backend": execution_backend,
-        "label": " · ".join(
-            part
-            for part in (
-                (commit_sha[:12] if commit_sha else None),
-                (f"modal:{modal_env}" if modal_env else None),
-                modal_image,
-            )
-            if part
-        )
-        or execution_backend,
-    }
+    return build_runtime_version_stamp(
+        getenv=os.getenv,
+        modal_environment=modal_environment_name() or None,
+        modal_function=modal_social_job_function_name() or None,
+        execution_backend=execution_backend_canonical(),
+    )
 
 
 def _resolve_runtime_version_stamp_for_stage(stage: str | None = None) -> dict[str, Any]:
@@ -22701,7 +22647,6 @@ def _batch_upsert_instagram_posts(*args: Any, **kwargs: Any) -> Any:
 
 def _instagram_post_source_urls(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.media_mirror import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["_instagram_post_source_urls"](*args, **kwargs)
 
 
@@ -23240,7 +23185,6 @@ def _platform_post_needs_media_mirror(
 
 def _instagram_post_needs_media_mirror(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.media_mirror import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["_instagram_post_needs_media_mirror"](*args, **kwargs)
 
 
@@ -23368,7 +23312,6 @@ def _update_platform_post_media_mirror_fields(
 
 def _update_instagram_post_media_mirror_fields(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.media_mirror import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["_update_instagram_post_media_mirror_fields"](*args, **kwargs)
 
 
@@ -23422,7 +23365,6 @@ def _update_platform_post_media_asset_meta(
 
 def _update_instagram_post_source_media_fields(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.media_mirror import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["_update_instagram_post_source_media_fields"](*args, **kwargs)
 
 
@@ -23800,7 +23742,6 @@ def _bulk_enqueue_platform_media_mirror_jobs(
 
 def _enqueue_instagram_media_mirror_job(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.media_mirror import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["_enqueue_instagram_media_mirror_job"](*args, **kwargs)
 
 
@@ -25548,9 +25489,8 @@ _core_upsert_instagram_comment_tree_impl = _upsert_instagram_comment_tree
 _core_batch_upsert_instagram_comments_impl = _batch_upsert_instagram_comments
 
 
-# Compatibility wrappers: Instagram comment persistence is owned by
-# trr_backend.socials.instagram.persistence. Keep these names for legacy imports
-# and for older tests that patch the repository facade.
+# Compatibility wrappers owned by trr_backend.socials.instagram.persistence;
+# retained for legacy imports and repository-facade monkeypatch tests.
 def _upsert_instagram_comment_tree(*args: Any, **kwargs: Any) -> Any:
     return _core_upsert_instagram_comment_tree_impl(*args, **kwargs)
 
@@ -30828,8 +30768,8 @@ def _ingest_threads(
     job_id: str,
     stage: str = "posts",
 ) -> tuple[int, int, dict[str, Any]]:
-    from trr_backend.socials.threads import ThreadsScrapeConfig, ThreadsScraper
     from trr_backend.socials.threads.posts_scrapling.proxy import select_threads_posts_proxy
+    from trr_backend.socials.threads.scraper import ThreadsScrapeConfig, ThreadsScraper
 
     proxy_config = select_threads_posts_proxy()
     scraper = ThreadsScraper(
@@ -31620,7 +31560,7 @@ def _run_platform_media_mirror_stage(
         if needs_re_resolve and source_id:
             _heartbeat()
             try:
-                from trr_backend.socials.threads import resolve_threads_media
+                from trr_backend.socials.threads.media_resolver import resolve_threads_media
 
                 raw_data = config.get("_raw_data")
                 if not isinstance(raw_data, dict) or not raw_data:
@@ -32625,7 +32565,7 @@ def _run_generic_comment_media_mirror_stage(
         raw_data = comment_row.get("raw_data") if isinstance(comment_row.get("raw_data"), dict) else {}
         if raw_data:
             try:
-                from trr_backend.socials.threads import resolve_threads_media
+                from trr_backend.socials.threads.media_resolver import resolve_threads_media
 
                 resolution = resolve_threads_media(raw_data, validate_urls=False)
                 source_media_urls = _normalize_unique_terms(list(resolution.media_urls or []))
@@ -32749,7 +32689,6 @@ def _run_generic_comment_media_mirror_stage(
 
 def _run_instagram_media_mirror_stage(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.media_mirror import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["_run_instagram_media_mirror_stage"](*args, **kwargs)
 
 
@@ -34263,6 +34202,19 @@ def _upsert_shared_catalog_post(
             conn=conn,
         )
     raise ValueError(f"Unsupported catalog platform: {platform}")
+
+
+def _configure_posts_persistence_legacy_providers() -> None:
+    from trr_backend.socials.instagram import persistence as instagram_persistence
+    from trr_backend.socials.instagram.comments_scrapling import persistence as comments_persistence
+    from trr_backend.socials.threads.posts_scrapling import persistence as threads_persistence
+    from trr_backend.socials.tiktok.posts_scrapling import persistence as tiktok_persistence
+
+    for provider in (instagram_persistence, comments_persistence, threads_persistence, tiktok_persistence):
+        provider._configure_legacy_provider(globals())
+
+
+_configure_posts_persistence_legacy_providers()
 
 
 def _fetch_shared_catalog_rows(
@@ -41325,16 +41277,16 @@ def _scrape_shared_threads_posts(
     job_id: str,
     progress_cb: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    import trr_backend.socials.threads as threads_module
     from trr_backend.socials.threads.posts_catalog import (
         ThreadsPostsCatalogDependencies,
     )
     from trr_backend.socials.threads.posts_catalog import (
         scrape_shared_threads_posts as _scrape_threads_posts_catalog,
     )
+    from trr_backend.socials.threads.scraper import ThreadsScraper
 
     dependencies = ThreadsPostsCatalogDependencies(
-        scraper_factory=threads_module.ThreadsScraper,
+        scraper_factory=ThreadsScraper,
         load_cookies=_load_threads_cookies,
         coerce_dt=_coerce_dt,
         shared_stage_post_limit=_shared_stage_post_limit,
@@ -43475,31 +43427,26 @@ def _run_shared_account_posts_stage(
 
 def _instagram_profile_scraper(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["_instagram_profile_scraper"](*args, **kwargs)
 
 
 def _run_instagram_profile_snapshot_stage(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["_run_instagram_profile_snapshot_stage"](*args, **kwargs)
 
 
 def _instagram_following_rows_from_payload(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["_instagram_following_rows_from_payload"](*args, **kwargs)
 
 
 def _fetch_instagram_following_rows(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["_fetch_instagram_following_rows"](*args, **kwargs)
 
 
 def _run_instagram_profile_following_stage(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["_run_instagram_profile_following_stage"](*args, **kwargs)
 
 
@@ -44455,6 +44402,17 @@ def _execute_shared_claimed_job(job: Mapping[str, Any], *, worker_id: str | None
         if run_id:
             _finalize_run_status(run_id)
     return _load_current_job_row(job_id)
+
+
+def _execute_shared_claimed_job_adapter(
+    job: Mapping[str, Any],
+    *,
+    worker_id: str | None = None,
+) -> dict[str, Any]:
+    return _execute_shared_claimed_job(job, worker_id=worker_id)
+
+
+configure_shared_claimed_job_executor(_execute_shared_claimed_job_adapter)
 
 
 def _job_stage_from_row(job: Mapping[str, Any]) -> str:
@@ -48943,7 +48901,6 @@ def requeue_media_mirror_jobs(
                 queued += 1
             else:
                 skipped += 1
-
     return {
         "season_id": season_id,
         "platform": normalized_platform,
@@ -48964,8 +48921,15 @@ def requeue_media_mirror_jobs(
 
 def requeue_instagram_media_mirror_jobs(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.media_mirror import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["requeue_instagram_media_mirror_jobs"](*args, **kwargs)
+
+
+def _configure_instagram_media_mirror_legacy_provider() -> None:
+    from trr_backend.socials.instagram.media_mirror import _LOCAL_ROOM_NAMES, _configure_legacy_provider
+    _configure_legacy_provider(globals(), {name: globals()[name] for name in _LOCAL_ROOM_NAMES})
+
+
+_configure_instagram_media_mirror_legacy_provider()
 
 
 def list_jobs(
@@ -49096,7 +49060,7 @@ def list_runs(
     date_start: datetime | None = None,
     date_end: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    from trr_backend.socials.control_plane.dispatch import list_runs as impl
+    from trr_backend.socials.control_plane.run_reads import list_runs as impl
 
     source_scope = normalize_source_scope(source_scope) if source_scope is not None else None
     return impl(
@@ -49126,7 +49090,7 @@ def list_run_summaries(
     date_start: datetime | None = None,
     date_end: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    from trr_backend.socials.control_plane.dispatch import list_run_summaries as impl
+    from trr_backend.socials.control_plane.run_reads import list_run_summaries as impl
 
     source_scope = normalize_source_scope(source_scope) if source_scope is not None else None
     return impl(
@@ -50468,7 +50432,7 @@ def get_run_progress_snapshot(
     *,
     recent_log_limit: int = 20,
 ) -> dict[str, Any]:
-    from trr_backend.socials.control_plane.dispatch import get_run_progress_snapshot as impl
+    from trr_backend.socials.control_plane.run_reads import get_run_progress_snapshot as impl
 
     return impl(season_id, run_id, recent_log_limit=recent_log_limit)
 
@@ -51248,7 +51212,7 @@ def _build_terminal_catalog_run_progress_payload(
 
 
 def get_social_account_catalog_run_progress(*args: Any, **kwargs: Any) -> Any:
-    from trr_backend.socials.account_catalog.catalog_progress import _LOCAL_ROOM_FUNCTIONS
+    from trr_backend.socials.pipelines.account_catalog.progress import _LOCAL_ROOM_FUNCTIONS
 
     return _LOCAL_ROOM_FUNCTIONS["get_social_account_catalog_run_progress"](*args, **kwargs)
 
@@ -52171,6 +52135,7 @@ def _week_window_label(window: WeekWindow, *, timezone: str) -> str:
     return f"Week {window.week_index}"
 
 
+@_windowing.configure_week_window_resolver
 def resolve_week_window(
     season_id: str,
     *,
@@ -52180,9 +52145,8 @@ def resolve_week_window(
     now_utc: datetime | None = None,
 ) -> dict[str, Any]:
     """Resolve a canonical UTC window for a season week."""
-    context = get_season_context(season_id)
     week_windows, _week_zero_start_local = _resolve_week_windows(
-        context,
+        get_season_context(season_id),
         timezone=timezone,
         source_scope=source_scope,
         now_utc=now_utc or _now_utc(),
@@ -52190,7 +52154,6 @@ def resolve_week_window(
     window = next((candidate for candidate in week_windows if candidate.week_index == int(week_index)), None)
     if window is None:
         raise ValueError(f"Week {week_index} is not available for this season")
-
     week_end_inclusive = window.end_local - timedelta(microseconds=1)
     return {
         "week_index": int(window.week_index),
@@ -58378,8 +58341,8 @@ def _refresh_threads_post_detail_sync(
     row_json: dict[str, Any],
     detail_job_id: str | None,
 ) -> dict[str, Any]:
-    from trr_backend.socials.threads import ThreadsScraper
     from trr_backend.socials.threads.posts_scrapling.proxy import select_threads_posts_proxy
+    from trr_backend.socials.threads.scraper import ThreadsScraper
 
     proxy_config = select_threads_posts_proxy()
     scraper = ThreadsScraper(
@@ -59177,8 +59140,8 @@ def refresh_post_comments(
         )
         if not row:
             raise ValueError("Post not found")
-        from trr_backend.socials.threads import ThreadsScraper
         from trr_backend.socials.threads.posts_scrapling.proxy import select_threads_posts_proxy
+        from trr_backend.socials.threads.scraper import ThreadsScraper
 
         account = str(row.get("account") or "")
         proxy_config = select_threads_posts_proxy()
@@ -63126,7 +63089,7 @@ def _resolve_social_account_comments_coverage_status(
 
 
 def get_social_account_profile_summary(*args: Any, **kwargs: Any) -> Any:
-    from trr_backend.socials.account_catalog.profile_reads import _LOCAL_ROOM_FUNCTIONS
+    from trr_backend.socials.read_models.account_profile.common import _LOCAL_ROOM_FUNCTIONS
 
     return _LOCAL_ROOM_FUNCTIONS["get_social_account_profile_summary"](*args, **kwargs)
 
@@ -63146,7 +63109,7 @@ def get_social_account_live_profile_total(platform: str, account_handle: str) ->
 
 
 def get_social_account_profile_posts(*args: Any, **kwargs: Any) -> Any:
-    from trr_backend.socials.account_catalog.profile_reads import _LOCAL_ROOM_FUNCTIONS
+    from trr_backend.socials.read_models.account_profile.common import _LOCAL_ROOM_FUNCTIONS
 
     return _LOCAL_ROOM_FUNCTIONS["get_social_account_profile_posts"](*args, **kwargs)
 
@@ -64152,6 +64115,45 @@ def start_instagram_posts_scrapling_scrape(*args: Any, **kwargs: Any) -> Any:
     return _LOCAL_ROOM_FUNCTIONS["start_instagram_posts_scrapling_scrape"](*args, **kwargs)
 
 
+_INSTAGRAM_POSTS_CONTROL_LEGACY_PROVIDER_NAMES = (
+    "_social_account_posts_scrapling_start_lock_key",
+    "get_active_social_account_posts_scrapling_run",
+    "start_instagram_posts_scrapling_scrape",
+    "_normalize_social_account_profile_platform",
+    "_normalize_social_account_profile_handle",
+    "_assert_social_account_profile_exists",
+    "_active_posts_auth_cooldown",
+    "is_queue_enabled",
+    "assert_worker_available_when_queue_enabled",
+    "_create_run",
+    "_create_job",
+    "_set_run_status",
+    "dispatch_due_social_jobs",
+    "INSTAGRAM_POSTS_SCRAPLING_STAGE",
+    "TIKTOK_POSTS_SCRAPLING_STAGE",
+    "INSTAGRAM_POSTS_SCRAPLING_WORKER_LANE",
+    "SocialIngestValidationError",
+    "SocialIngestConflictError",
+    "pg",
+    "logger",
+)
+
+
+def _configure_instagram_posts_control_legacy_provider() -> None:
+    from trr_backend.socials.instagram.posts_control import _configure_legacy_provider
+
+    _configure_legacy_provider(
+        globals(),
+        {
+            name: globals()[name]
+            for name in _INSTAGRAM_POSTS_CONTROL_LEGACY_PROVIDER_NAMES
+        },
+    )
+
+
+_configure_instagram_posts_control_legacy_provider()
+
+
 def start_tiktok_posts_scrapling_scrape(
     *,
     account_handle: str,
@@ -64348,121 +64350,111 @@ def _format_instagram_profile_comment_row(row: Mapping[str, Any]) -> dict[str, A
 
 
 def get_social_account_profile_comments(*args: Any, **kwargs: Any) -> Any:
-    from trr_backend.socials.account_catalog.profile_reads import _LOCAL_ROOM_FUNCTIONS
+    from trr_backend.socials.read_models.account_profile.common import _LOCAL_ROOM_FUNCTIONS
 
     return _LOCAL_ROOM_FUNCTIONS["get_social_account_profile_comments"](*args, **kwargs)
 
 
 def _instagram_profile_tables_ready(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["_instagram_profile_tables_ready"](*args, **kwargs)
 
 
 def _normalize_instagram_profile_source_scope(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["_normalize_instagram_profile_source_scope"](*args, **kwargs)
 
 
 def _instagram_profile_fetch_one(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["_instagram_profile_fetch_one"](*args, **kwargs)
 
 
 def _instagram_profile_fetch_all(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["_instagram_profile_fetch_all"](*args, **kwargs)
 
 
 def _instagram_profile_execute_one(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["_instagram_profile_execute_one"](*args, **kwargs)
 
 
 def _instagram_profile_execute(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["_instagram_profile_execute"](*args, **kwargs)
 
 
 def _instagram_profile_parse_about_timestamp(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["_instagram_profile_parse_about_timestamp"](*args, **kwargs)
 
 
 def _instagram_profile_domain(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["_instagram_profile_domain"](*args, **kwargs)
 
 
 def _instagram_profile_normalized_url(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["_instagram_profile_normalized_url"](*args, **kwargs)
 
 
 def _instagram_profile_merge_rows(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["_instagram_profile_merge_rows"](*args, **kwargs)
 
 
 def _instagram_profile_existing_row(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["_instagram_profile_existing_row"](*args, **kwargs)
 
 
 def _sync_instagram_profile_external_links(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["_sync_instagram_profile_external_links"](*args, **kwargs)
 
 
 def persist_instagram_profile_snapshot(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["persist_instagram_profile_snapshot"](*args, **kwargs)
 
 
 def _instagram_profile_row_for_username(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["_instagram_profile_row_for_username"](*args, **kwargs)
 
 
 def persist_instagram_profile_relationships(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["persist_instagram_profile_relationships"](*args, **kwargs)
 
 
 def _instagram_profile_response(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["_instagram_profile_response"](*args, **kwargs)
 
 
 def get_instagram_profile_detail(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["get_instagram_profile_detail"](*args, **kwargs)
 
 
 def get_instagram_profile_relationships(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
-
     return _LOCAL_ROOM_FUNCTIONS["get_instagram_profile_relationships"](*args, **kwargs)
 
 
+def _configure_instagram_profile_stages_legacy_provider() -> None:
+    from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_NAMES, _configure_legacy_provider
+    _configure_legacy_provider(globals(), {name: globals()[name] for name in _LOCAL_ROOM_NAMES})
+
+
+_configure_instagram_profile_stages_legacy_provider()
+
+
 def get_social_account_profile_hashtags(*args: Any, **kwargs: Any) -> Any:
-    from trr_backend.socials.account_catalog.profile_reads import _LOCAL_ROOM_FUNCTIONS
+    from trr_backend.socials.read_models.account_profile.common import _LOCAL_ROOM_FUNCTIONS
 
     return _LOCAL_ROOM_FUNCTIONS["get_social_account_profile_hashtags"](*args, **kwargs)
 
@@ -65755,140 +65747,6 @@ def get_social_account_catalog_gap_analysis(platform: str, account_handle: str) 
     return payload
 
 
-SOCIAL_CATALOG_GAP_ANALYSIS_OPERATION_TYPE = "social_catalog_gap_analysis"
-
-
-def _social_catalog_gap_analysis_request_payload(platform: str, account_handle: str) -> dict[str, str]:
-    normalized_platform = _normalize_social_account_profile_platform(platform)
-    normalized_account = _normalize_social_account_profile_handle(account_handle)
-    return {
-        "platform": normalized_platform,
-        "account_handle": normalized_account,
-    }
-
-
-def _normalize_gap_analysis_operation_status(value: Any) -> str:
-    normalized = str(value or "").strip().lower()
-    if normalized == "pending":
-        return "queued"
-    if normalized in {"running", "cancelling"}:
-        return "running"
-    if normalized == "completed":
-        return "completed"
-    if normalized in {"failed", "cancelled"}:
-        return "failed"
-    return "idle"
-
-
-def _extract_gap_analysis_operation_result(row: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not isinstance(row, dict):
-        return None
-    result_payload = row.get("result_payload")
-    if not isinstance(result_payload, dict):
-        return None
-    nested = result_payload.get("result")
-    if isinstance(nested, dict):
-        return nested
-    if isinstance(result_payload.get("gap_type"), str):
-        return result_payload
-    return None
-
-
-def _extract_gap_analysis_operation_error(row: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not isinstance(row, dict):
-        return None
-    error_payload = row.get("error_payload")
-    if isinstance(error_payload, dict):
-        return error_payload
-    progress_payload = row.get("progress_payload")
-    if isinstance(progress_payload, dict) and str(progress_payload.get("status") or "").strip().lower() == "failed":
-        return progress_payload
-    return None
-
-
-def get_social_account_catalog_gap_analysis_status(platform: str, account_handle: str) -> dict[str, Any]:
-    from trr_backend.repositories import admin_operations as admin_operations_repo
-
-    request_payload = _social_catalog_gap_analysis_request_payload(platform, account_handle)
-    normalized_platform = request_payload["platform"]
-    normalized_account = request_payload["account_handle"]
-    _assert_social_account_profile_exists(normalized_platform, normalized_account)
-
-    latest_operation = admin_operations_repo.get_latest_operation_for_request_payload(
-        operation_type=SOCIAL_CATALOG_GAP_ANALYSIS_OPERATION_TYPE,
-        request_payload=request_payload,
-    )
-    latest_completed_operation = admin_operations_repo.get_latest_operation_for_request_payload(
-        operation_type=SOCIAL_CATALOG_GAP_ANALYSIS_OPERATION_TYPE,
-        request_payload=request_payload,
-        statuses=["completed"],
-    )
-
-    if not latest_operation:
-        return {
-            "platform": normalized_platform,
-            "account_handle": normalized_account,
-            "status": "idle",
-            "operation_id": None,
-            "result": None,
-            "stale": False,
-            "duration_ms": None,
-            "stage_timings": None,
-            "last_requested_at": None,
-            "last_completed_at": None,
-            "last_error": None,
-        }
-
-    normalized_status = _normalize_gap_analysis_operation_status(latest_operation.get("status"))
-    latest_result = _extract_gap_analysis_operation_result(latest_operation)
-    completed_result = _extract_gap_analysis_operation_result(latest_completed_operation)
-    current_result = latest_result
-    stale = False
-
-    if normalized_status in {"queued", "running"} and completed_result:
-        current_result = completed_result
-        stale = True
-
-    result_payload = (
-        latest_operation.get("result_payload") if isinstance(latest_operation.get("result_payload"), dict) else {}
-    )
-    completed_payload = (
-        latest_completed_operation.get("result_payload")
-        if isinstance((latest_completed_operation or {}).get("result_payload"), dict)
-        else {}
-    )
-
-    return {
-        "platform": normalized_platform,
-        "account_handle": normalized_account,
-        "status": normalized_status,
-        "operation_id": str(latest_operation.get("id") or "").strip() or None,
-        "result": current_result,
-        "stale": stale,
-        "duration_ms": (
-            result_payload.get("duration_ms")
-            if normalized_status == "completed"
-            else completed_payload.get("duration_ms")
-            if stale
-            else None
-        ),
-        "stage_timings": (
-            result_payload.get("stage_timings")
-            if normalized_status == "completed"
-            else completed_payload.get("stage_timings")
-            if stale
-            else None
-        ),
-        "last_requested_at": latest_operation.get("created_at"),
-        "last_completed_at": (
-            latest_operation.get("completed_at")
-            if normalized_status == "completed"
-            else (latest_completed_operation or {}).get("completed_at")
-        ),
-        "last_error": _extract_gap_analysis_operation_error(latest_operation),
-    }
-
-
 def build_social_account_catalog_gap_analysis_operation_producer(
     *,
     request_payload: dict[str, Any],
@@ -65933,172 +65791,6 @@ def build_social_account_catalog_gap_analysis_operation_producer(
             yield f"event: error\ndata: {json.dumps(error_payload, ensure_ascii=True, default=str)}\n\n"
 
     return _producer
-
-
-def get_social_account_catalog_freshness(
-    platform: str,
-    account_handle: str,
-    *,
-    use_cached_live_total_only: bool = False,
-    statement_timeout_ms: int = 3000,
-) -> dict[str, Any]:
-    normalized_platform = _normalize_social_account_profile_platform(platform)
-    normalized_account = _normalize_social_account_profile_handle(account_handle)
-    if normalized_platform != "instagram":
-        raise ValueError("Catalog freshness checks are currently only supported for Instagram.")
-    _assert_social_account_profile_exists(normalized_platform, normalized_account)
-
-    safe_statement_timeout_ms = max(1000, min(int(statement_timeout_ms), 30000))
-    freshness_error: dict[str, Any] | None = None
-    with pg.db_connection(label="catalog-freshness", pool_name="social_profile") as conn:
-        with pg.db_cursor(conn=conn, label="catalog-freshness-timeout") as cur:
-            cur.execute("set local statement_timeout = %s", [str(safe_statement_timeout_ms)])
-        try:
-            latest_run = (_catalog_recent_runs(normalized_platform, normalized_account, limit=1, conn=conn) or [{}])[0]
-        except Exception as exc:  # noqa: BLE001
-            if not _catalog_freshness_degradable_error(exc):
-                raise
-            logger.warning(
-                "[catalog-freshness] recent_runs_unavailable platform=%s account=%s error=%s",
-                normalized_platform,
-                normalized_account,
-                exc,
-            )
-            latest_run = {}
-            freshness_error = _catalog_freshness_degraded_error_payload(exc)
-        latest_run_status = str(latest_run.get("status") or "").strip().lower() or None
-        active_run = None
-        if freshness_error is None:
-            try:
-                active_run = get_active_social_account_catalog_run(normalized_platform, normalized_account, conn=conn)
-            except Exception as exc:  # noqa: BLE001
-                if not _catalog_freshness_degradable_error(exc):
-                    raise
-                logger.warning(
-                    "[catalog-freshness] active_run_unavailable platform=%s account=%s error=%s",
-                    normalized_platform,
-                    normalized_account,
-                    exc,
-                )
-                freshness_error = _catalog_freshness_degraded_error_payload(exc)
-        active_run_status = str((active_run or {}).get("status") or "").strip().lower() or None
-        stored_total_posts = _shared_catalog_total_posts(normalized_platform, normalized_account, conn=conn)
-        catalog_newest_at = _catalog_newest_stored_post_at(normalized_platform, normalized_account, conn=conn)
-        catalog_oldest_at = _catalog_oldest_stored_post_at(normalized_platform, normalized_account, conn=conn)
-        frontier = _latest_account_frontier(normalized_platform, normalized_account, conn=conn)
-    has_resumable_frontier = bool(frontier.get("next_cursor") and not frontier.get("exhausted"))
-    checked_at = _now_utc().isoformat()
-
-    if freshness_error is not None:
-        return {
-            "platform": normalized_platform,
-            "account_handle": normalized_account,
-            "eligible": False,
-            "reason": "catalog_recent_runs_unavailable",
-            "checked_at": checked_at,
-            "stored_total_posts": stored_total_posts,
-            "live_total_posts_current": None,
-            "delta_posts": 0,
-            "needs_recent_sync": False,
-            "latest_catalog_run_status": latest_run_status,
-            "active_run_status": active_run_status,
-            "catalog_newest_post_at": _iso(catalog_newest_at),
-            "catalog_oldest_post_at": _iso(catalog_oldest_at),
-            "has_resumable_frontier": has_resumable_frontier,
-            "frontier_pages_scanned": frontier.get("pages_scanned") if has_resumable_frontier else None,
-            "frontier_posts_checked": frontier.get("posts_checked") if has_resumable_frontier else None,
-            "degraded": True,
-            "recent_runs_available": False,
-            "freshness_error": freshness_error,
-        }
-
-    if active_run:
-        return {
-            "platform": normalized_platform,
-            "account_handle": normalized_account,
-            "eligible": False,
-            "reason": "active_run",
-            "checked_at": checked_at,
-            "stored_total_posts": stored_total_posts,
-            "live_total_posts_current": None,
-            "delta_posts": 0,
-            "needs_recent_sync": False,
-            "latest_catalog_run_status": latest_run_status,
-            "active_run_status": active_run_status,
-            "catalog_newest_post_at": _iso(catalog_newest_at),
-            "catalog_oldest_post_at": _iso(catalog_oldest_at),
-            "has_resumable_frontier": has_resumable_frontier,
-            "frontier_pages_scanned": frontier.get("pages_scanned") if has_resumable_frontier else None,
-            "frontier_posts_checked": frontier.get("posts_checked") if has_resumable_frontier else None,
-        }
-    if latest_run_status != "completed":
-        return {
-            "platform": normalized_platform,
-            "account_handle": normalized_account,
-            "eligible": False,
-            "reason": "latest_run_not_completed",
-            "checked_at": checked_at,
-            "stored_total_posts": stored_total_posts,
-            "live_total_posts_current": None,
-            "delta_posts": 0,
-            "needs_recent_sync": False,
-            "latest_catalog_run_status": latest_run_status,
-            "active_run_status": active_run_status,
-            "catalog_newest_post_at": _iso(catalog_newest_at),
-            "catalog_oldest_post_at": _iso(catalog_oldest_at),
-            "has_resumable_frontier": has_resumable_frontier,
-            "frontier_pages_scanned": frontier.get("pages_scanned") if has_resumable_frontier else None,
-            "frontier_posts_checked": frontier.get("posts_checked") if has_resumable_frontier else None,
-        }
-
-    live_total_posts = (
-        _cached_live_profile_total_posts_cached_only(normalized_platform, normalized_account)
-        if use_cached_live_total_only
-        else _cached_live_profile_total_posts(normalized_platform, normalized_account)
-    )
-    delta_posts = 0
-    needs_recent_sync = False
-    if live_total_posts is not None and live_total_posts > stored_total_posts:
-        delta_posts = live_total_posts - stored_total_posts
-        needs_recent_sync = True
-    return {
-        "platform": normalized_platform,
-        "account_handle": normalized_account,
-        "eligible": True,
-        "reason": None,
-        "checked_at": checked_at,
-        "stored_total_posts": stored_total_posts,
-        "live_total_posts_current": live_total_posts,
-        "delta_posts": delta_posts,
-        "needs_recent_sync": needs_recent_sync,
-        "latest_catalog_run_status": latest_run_status,
-        "active_run_status": active_run_status,
-        "catalog_newest_post_at": _iso(catalog_newest_at),
-        "catalog_oldest_post_at": _iso(catalog_oldest_at),
-        "has_resumable_frontier": has_resumable_frontier,
-        "frontier_pages_scanned": frontier.get("pages_scanned") if has_resumable_frontier else None,
-        "frontier_posts_checked": frontier.get("posts_checked") if has_resumable_frontier else None,
-    }
-
-
-def _catalog_freshness_degradable_error(error: Exception) -> bool:
-    if pg._is_statement_timeout_error(error):
-        return True
-    if isinstance(error, pg.DatabaseServiceUnavailableError):
-        return error.reason in {"statement_timeout", "pool_capacity", "session_pool_capacity", "pool_initialization"}
-    return False
-
-
-def _catalog_freshness_degraded_error_payload(error: Exception) -> dict[str, Any]:
-    detail = pg.database_service_unavailable_detail(error)
-    reason = str(detail.get("reason") or "database_unavailable")
-    return {
-        "code": "CATALOG_RECENT_RUNS_UNAVAILABLE",
-        "reason": reason,
-        "message": "Recent catalog-run state is temporarily unavailable; stored catalog totals are still shown.",
-        "retryable": True,
-        "retry_after_ms": detail.get("retry_after_ms", 1000),
-    }
 
 
 def get_active_social_account_catalog_run(
@@ -66612,19 +66304,19 @@ def resolve_social_account_catalog_action_seed(
 
 
 def start_social_account_catalog_backfill(*args: Any, **kwargs: Any) -> Any:
-    from trr_backend.socials.account_catalog.catalog_launch import _LOCAL_ROOM_FUNCTIONS
+    from trr_backend.socials.pipelines.account_catalog.launch import _LOCAL_ROOM_FUNCTIONS
 
     return _LOCAL_ROOM_FUNCTIONS["start_social_account_catalog_backfill"](*args, **kwargs)
 
 
 def begin_social_account_catalog_backfill_launch(*args: Any, **kwargs: Any) -> Any:
-    from trr_backend.socials.account_catalog.catalog_launch import _LOCAL_ROOM_FUNCTIONS
+    from trr_backend.socials.pipelines.account_catalog.launch import _LOCAL_ROOM_FUNCTIONS
 
     return _LOCAL_ROOM_FUNCTIONS["begin_social_account_catalog_backfill_launch"](*args, **kwargs)
 
 
 def finalize_social_account_catalog_backfill_launch(*args: Any, **kwargs: Any) -> Any:
-    from trr_backend.socials.account_catalog.catalog_launch import _LOCAL_ROOM_FUNCTIONS
+    from trr_backend.socials.pipelines.account_catalog.launch import _LOCAL_ROOM_FUNCTIONS
 
     return _LOCAL_ROOM_FUNCTIONS["finalize_social_account_catalog_backfill_launch"](*args, **kwargs)
 
@@ -66680,7 +66372,7 @@ def _complete_catalog_launch_no_work(
 
 
 def launch_social_account_catalog_backfill(*args: Any, **kwargs: Any) -> Any:
-    from trr_backend.socials.account_catalog.catalog_launch import _LOCAL_ROOM_FUNCTIONS
+    from trr_backend.socials.pipelines.account_catalog.launch import _LOCAL_ROOM_FUNCTIONS
 
     return _LOCAL_ROOM_FUNCTIONS["launch_social_account_catalog_backfill"](*args, **kwargs)
 
@@ -68000,7 +67692,7 @@ def put_social_account_profile_hashtags(
 
 
 def get_social_account_profile_collaborators_tags(*args: Any, **kwargs: Any) -> Any:
-    from trr_backend.socials.account_catalog.profile_reads import _LOCAL_ROOM_FUNCTIONS
+    from trr_backend.socials.read_models.account_profile.common import _LOCAL_ROOM_FUNCTIONS
 
     return _LOCAL_ROOM_FUNCTIONS["get_social_account_profile_collaborators_tags"](*args, **kwargs)
 
@@ -68570,3 +68262,59 @@ def _instagram_catalog_gallery_total_posts(
     except psycopg_errors.UndefinedTable:
         return 0
     return _normalize_non_negative_int(row.get("total"))
+
+
+from trr_backend.socials.pipelines.account_catalog.freshness import SOCIAL_CATALOG_GAP_ANALYSIS_OPERATION_TYPE as _CANONICAL_SOCIAL_CATALOG_GAP_ANALYSIS_OPERATION_TYPE  # noqa: E402, E501, I001
+from trr_backend.socials.pipelines.account_catalog.freshness import AccountCatalogFreshnessDependencies as _AccountCatalogFreshnessDependencies  # noqa: E402, E501
+from trr_backend.socials.pipelines.account_catalog.freshness import _catalog_freshness_degradable_error as _canonical_catalog_freshness_degradable_error  # noqa: E402, E501
+from trr_backend.socials.pipelines.account_catalog.freshness import _catalog_freshness_degraded_error_payload as _canonical_catalog_freshness_degraded_error_payload  # noqa: E402, E501
+from trr_backend.socials.pipelines.account_catalog.freshness import _extract_gap_analysis_operation_error as _canonical_extract_gap_analysis_operation_error  # noqa: E402, E501
+from trr_backend.socials.pipelines.account_catalog.freshness import _extract_gap_analysis_operation_result as _canonical_extract_gap_analysis_operation_result  # noqa: E402, E501
+from trr_backend.socials.pipelines.account_catalog.freshness import _normalize_gap_analysis_operation_status as _canonical_normalize_gap_analysis_operation_status  # noqa: E402, E501
+from trr_backend.socials.pipelines.account_catalog.freshness import _social_catalog_gap_analysis_request_payload as _canonical_social_catalog_gap_analysis_request_payload  # noqa: E402, E501
+from trr_backend.socials.pipelines.account_catalog.freshness import configure_account_catalog_freshness_dependencies as _configure_account_catalog_freshness_dependencies  # noqa: E402, E501
+from trr_backend.socials.pipelines.account_catalog.freshness import get_social_account_catalog_freshness as _canonical_get_social_account_catalog_freshness  # noqa: E402, E501
+from trr_backend.socials.pipelines.account_catalog.freshness import get_social_account_catalog_gap_analysis_status as _canonical_get_social_account_catalog_gap_analysis_status  # noqa: E402, E501
+
+SOCIAL_CATALOG_GAP_ANALYSIS_OPERATION_TYPE = _CANONICAL_SOCIAL_CATALOG_GAP_ANALYSIS_OPERATION_TYPE
+_social_catalog_gap_analysis_request_payload = _canonical_social_catalog_gap_analysis_request_payload
+_normalize_gap_analysis_operation_status = _canonical_normalize_gap_analysis_operation_status
+_extract_gap_analysis_operation_result = _canonical_extract_gap_analysis_operation_result
+_extract_gap_analysis_operation_error = _canonical_extract_gap_analysis_operation_error
+_catalog_freshness_degradable_error = _canonical_catalog_freshness_degradable_error
+_catalog_freshness_degraded_error_payload = _canonical_catalog_freshness_degraded_error_payload
+
+_configure_account_catalog_freshness_dependencies(
+    _AccountCatalogFreshnessDependencies(
+        normalize_platform=lambda value: _normalize_social_account_profile_platform(value),
+        normalize_handle=lambda value: _normalize_social_account_profile_handle(value),
+        assert_profile_exists=lambda platform, account_handle: _assert_social_account_profile_exists(platform, account_handle),  # noqa: E501
+        catalog_recent_runs=lambda platform, account_handle, **kwargs: _catalog_recent_runs(platform, account_handle, **kwargs),  # noqa: E501
+        get_active_run=lambda platform, account_handle, **kwargs: get_active_social_account_catalog_run(platform, account_handle, **kwargs),  # noqa: E501
+        shared_catalog_total_posts=lambda platform, account_handle, **kwargs: _shared_catalog_total_posts(platform, account_handle, **kwargs),  # noqa: E501
+        catalog_newest_stored_post_at=lambda platform, account_handle, **kwargs: _catalog_newest_stored_post_at(platform, account_handle, **kwargs),  # noqa: E501
+        catalog_oldest_stored_post_at=lambda platform, account_handle, **kwargs: _catalog_oldest_stored_post_at(platform, account_handle, **kwargs),  # noqa: E501
+        latest_account_frontier=lambda platform, account_handle, **kwargs: _latest_account_frontier(platform, account_handle, **kwargs),  # noqa: E501
+        cached_live_profile_total_posts=lambda platform, account_handle: _cached_live_profile_total_posts(platform, account_handle),  # noqa: E501
+        cached_live_profile_total_posts_cached_only=lambda platform, account_handle: _cached_live_profile_total_posts_cached_only(platform, account_handle),  # noqa: E501
+        now_utc=lambda: _now_utc(),
+        iso=lambda value: _iso(value),
+        gap_analysis_operation_type=lambda: SOCIAL_CATALOG_GAP_ANALYSIS_OPERATION_TYPE,
+        gap_analysis_request_payload=lambda platform, account_handle: _social_catalog_gap_analysis_request_payload(platform, account_handle),  # noqa: E501
+        normalize_gap_analysis_operation_status=lambda value: _normalize_gap_analysis_operation_status(value),
+        extract_gap_analysis_operation_result=lambda row: _extract_gap_analysis_operation_result(row),
+        extract_gap_analysis_operation_error=lambda row: _extract_gap_analysis_operation_error(row),
+        freshness_degradable_error=lambda error: _catalog_freshness_degradable_error(error),
+        freshness_degraded_error_payload=lambda error: _catalog_freshness_degraded_error_payload(error),
+    )
+)
+
+get_social_account_catalog_freshness = _canonical_get_social_account_catalog_freshness
+get_social_account_catalog_gap_analysis_status = _canonical_get_social_account_catalog_gap_analysis_status
+from trr_backend.socials.control_plane import queue_status as _queue_status  # noqa: E402, I001
+_queue_status._configure_legacy_provider(globals())
+del _queue_status
+__import__(
+    "trr_backend.socials.read_models.account_profile.common",
+    fromlist=["_configure_legacy_provider"],
+)._configure_legacy_provider(globals())

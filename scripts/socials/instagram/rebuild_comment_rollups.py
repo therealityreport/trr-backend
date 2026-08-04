@@ -20,6 +20,8 @@ if str(REPO_ROOT) not in sys.path:
 if load_dotenv is not None:
     load_dotenv(REPO_ROOT / ".env", override=False)
 
+import trr_backend.socials.social_season_analytics_impl as _account_profile_provider  # noqa: E402
+
 from trr_backend.socials.read_models.account_profile.common import (  # noqa: E402
     rebuild_instagram_post_comment_rollups,
 )

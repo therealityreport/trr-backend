@@ -208,6 +208,16 @@ def _parse_args() -> argparse.Namespace:
         help="Create/update the named secrets via `python -m modal secret create --force`.",
     )
     parser.add_argument(
+        "--runtime-only",
+        action="store_true",
+        help="Render/apply only the runtime secret without materializing or updating social auth.",
+    )
+    parser.add_argument(
+        "--cors-allow-origins",
+        default="",
+        help="Optional CORS_ALLOW_ORIGINS value to add to the rendered runtime secret.",
+    )
+    parser.add_argument(
         "--keep-rendered-files",
         action="store_true",
         help="Keep the rendered env files after `--apply` instead of deleting them.",
@@ -382,16 +392,23 @@ def _overlay_shell_runtime_env_values(values: dict[str, str]) -> dict[str, str]:
     return rendered
 
 
-def _split_env(values: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+def _runtime_values_from_source(values: dict[str, str]) -> dict[str, str]:
     runtime_values: dict[str, str] = {}
+    for key, value in values.items():
+        if _is_local_only_env_key(key) or _is_social_auth_env_key(key):
+            continue
+        runtime_values[key] = value
+    return runtime_values
+
+
+def _split_env(values: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+    runtime_values = _runtime_values_from_source(values)
     social_values: dict[str, str] = {}
     for key, value in values.items():
         if _is_local_only_env_key(key):
             continue
         if _is_social_auth_env_key(key):
             social_values[key] = value
-            continue
-        runtime_values[key] = value
     return runtime_values, _materialize_file_backed_social_auth(values, social_values)
 
 
@@ -416,7 +433,16 @@ def _apply_runtime_overrides(values: dict[str, str], *, disabled: bool) -> dict[
 def _write_env_file(path: Path, values: dict[str, str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [f"{key}={json.dumps(str(value))}" for key, value in sorted(values.items())]
-    path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    payload = "\n".join(lines) + ("\n" if lines else "")
+    file_descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(file_descriptor, 0o600)
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
+            file_descriptor = -1
+            handle.write(payload)
+    finally:
+        if file_descriptor >= 0:
+            os.close(file_descriptor)
 
 
 def _modal_secret_create_command(secret_name: str, env_file: Path, *, modal_environment: str) -> list[str]:
@@ -449,41 +475,57 @@ def _cleanup_rendered_files(*paths: Path) -> None:
 def main() -> int:
     args = _parse_args()
     source_values = _overlay_shell_runtime_env_values(_load_source_env(args.source_env))
-    runtime_values, social_values = _split_env(source_values)
+    if args.runtime_only:
+        runtime_values = _runtime_values_from_source(source_values)
+        social_values = None
+    else:
+        runtime_values, social_values = _split_env(source_values)
     runtime_values = _apply_runtime_overrides(
         runtime_values,
         disabled=args.no_canonical_remote_overrides,
     )
+    cors_allow_origins = str(args.cors_allow_origins or "").strip()
+    if cors_allow_origins:
+        runtime_values["CORS_ALLOW_ORIGINS"] = cors_allow_origins
     runtime_file = args.output_dir / "trr-backend-runtime.env"
     social_file = args.output_dir / "trr-social-auth.env"
     _write_env_file(runtime_file, runtime_values)
-    _write_env_file(social_file, social_values)
+    if social_values is not None:
+        _write_env_file(social_file, social_values)
 
     print(f"Source env: {args.source_env}")
     print(f"Runtime secret env file: {runtime_file} ({len(runtime_values)} keys)")
-    print(f"Social auth env file: {social_file} ({len(social_values)} keys)")
+    if social_values is not None:
+        print(f"Social auth env file: {social_file} ({len(social_values)} keys)")
 
     runtime_command = _modal_secret_create_command(
         args.runtime_secret_name,
         runtime_file,
         modal_environment=args.modal_environment,
     )
-    social_command = _modal_secret_create_command(
-        args.social_secret_name,
-        social_file,
-        modal_environment=args.modal_environment,
-    )
+    social_command = None
+    if social_values is not None:
+        social_command = _modal_secret_create_command(
+            args.social_secret_name,
+            social_file,
+            modal_environment=args.modal_environment,
+        )
 
     print("\nModal secret commands:")
     print("  " + shlex.join(runtime_command))
-    print("  " + shlex.join(social_command))
+    if social_command is not None:
+        print("  " + shlex.join(social_command))
 
     if args.apply:
         _run_command(runtime_command)
-        _run_command(social_command)
-        print("\nModal secrets updated.")
+        if social_command is not None:
+            _run_command(social_command)
+        print("\nModal runtime secret updated." if args.runtime_only else "\nModal secrets updated.")
         if not args.keep_rendered_files:
-            _cleanup_rendered_files(runtime_file, social_file)
+            rendered_files = [runtime_file]
+            if social_values is not None:
+                rendered_files.append(social_file)
+            _cleanup_rendered_files(*rendered_files)
             print("Rendered env files deleted after apply.")
 
     return 0

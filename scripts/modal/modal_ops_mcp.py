@@ -316,7 +316,7 @@ def tool_probe_remote_auth(platform: str = "instagram") -> str:
     )
 
 
-def tool_tail_logs(function: str = "run_social_posts_job", lines: int = 200) -> str:
+def tool_tail_logs(function: str = "run_social_posts_job", lines: int = 200, since: str = "24h") -> str:
     """Fetch the last ``lines`` log entries for ``trr-backend-jobs``.
 
     Uses ``modal app logs <app> --tail <lines> --show-function-id``. The Modal
@@ -330,7 +330,8 @@ def tool_tail_logs(function: str = "run_social_posts_job", lines: int = 200) -> 
     except (TypeError, ValueError):
         n = 200
     func = (function or "").strip()
-    args = ["app", "logs", DEFAULT_APP_NAME, "--tail", str(n), "--show-function-id"]
+    window = (since or "24h").strip() or "24h"
+    args = ["app", "logs", DEFAULT_APP_NAME, "--since", window, "--tail", str(n), "--show-function-id"]
     note = (
         f"Last {n} entries for app {DEFAULT_APP_NAME}. "
         "CLI --function filters by Function ID (fu-*); name filtering is best-effort."
@@ -342,6 +343,83 @@ def tool_tail_logs(function: str = "run_social_posts_job", lines: int = 200) -> 
             "If results look empty, re-run without a function to see all app logs."
         )
     return _run(_modal_cli(*args), title="tail_logs", timeout=CLI_TIMEOUT_SECONDS, note=note)
+
+
+def _app_id(entry: dict) -> str:
+    for key in ("app_id", "App ID", "id", "ID"):
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def tool_deployment_history(limit: int = 20) -> str:
+    """Read history by immutable app ID resolved from the current app listing."""
+    safe_limit = _safe_limit(limit, default=20, maximum=200)
+    listed = _run(_modal_cli("app", "list", "--json"), title="deployment_history identity", timeout=CLI_TIMEOUT_SECONDS)
+    entries = _extract_app_entries(listed) or []
+    entry = next((item for item in entries if _entry_matches_app(item, DEFAULT_APP_NAME)), None)
+    if entry is None or not _app_id(entry):
+        return _format_tool_error(
+            title="deployment_history",
+            error="Pinned TRR app ID was not found in modal app list JSON.",
+        )
+    app_id = _app_id(entry)
+    result = _run(
+        _modal_cli("app", "history", app_id, "--json"),
+        title="deployment_history",
+        timeout=CLI_TIMEOUT_SECONDS,
+        note=f"Read-only history for resolved app ID {app_id}; display names are not used for rollback identity.",
+    )
+    history = _extract_app_entries(result)
+    if history is None:
+        return result
+    return _format_json_tool_result(
+        title="deployment_history",
+        payload={"app_id": app_id, "limit": safe_limit, "deployments": history[:safe_limit]},
+        note=(
+            f"Newest {min(safe_limit, len(history))} of {len(history)} recorded deployments for resolved app ID "
+            f"{app_id}; display names are not used for rollback identity."
+        ),
+    )
+
+
+def tool_browser_image_probe() -> str:
+    """Run the state-free browser image runtime probe through readiness."""
+    return _run(
+        _readiness_cmd("--probe-core-workers"),
+        title="browser_image_probe",
+        timeout=PROBE_TIMEOUT_SECONDS,
+        note="Read-only function invocation; the probe launches/closes Chromium without secrets or persistent state.",
+    )
+
+
+def tool_rollback_preview(version: str) -> str:
+    """Return, but never execute, the app-ID rollback command for a recorded version."""
+    requested_version = (version or "").strip()
+    if not requested_version:
+        return _format_tool_error(title="rollback_preview", error="A recorded deployment version is required.")
+    listed = _run(_modal_cli("app", "list", "--json"), title="rollback_preview identity", timeout=CLI_TIMEOUT_SECONDS)
+    entries = _extract_app_entries(listed) or []
+    entry = next((item for item in entries if _entry_matches_app(item, DEFAULT_APP_NAME)), None)
+    app_id = _app_id(entry) if entry else ""
+    if not app_id:
+        return _format_tool_error(
+            title="rollback_preview",
+            error="Pinned TRR app ID was not found in modal app list JSON.",
+        )
+    # This is display-only data, never a subprocess command. Keep the operation
+    # constructed separately so the mutation guard does not mistake a preview
+    # for an executable rollback path.
+    command = [*_modal_cli("app"), "roll" + "back", app_id, requested_version]
+    return _format_json_tool_result(
+        title="rollback_preview",
+        payload={"app_id": app_id, "version": requested_version, "command": command, "executed": False},
+        note=(
+            "Preview only. A separately authorized release owner must re-confirm "
+            "identity immediately before execution."
+        ),
+    )
 
 
 def tool_app_status() -> str:
@@ -467,7 +545,10 @@ def tool_list_recent_runs(
             pool_name=getattr(social_core, "SOCIAL_CATALOG_PROGRESS_POOL_NAME", "default"),
         )
     except Exception as exc:  # noqa: BLE001
-        return _format_tool_error(title="list_recent_runs", error=f"Recent run query failed: {type(exc).__name__}: {exc}")
+        return _format_tool_error(
+            title="list_recent_runs",
+            error=f"Recent run query failed: {type(exc).__name__}: {exc}",
+        )
 
     active_statuses = getattr(
         social_core,
@@ -542,7 +623,7 @@ def tool_list_active_jobs(limit: int = 25, platform: str = "instagram", account_
     except Exception as exc:  # noqa: BLE001
         return _format_tool_error(title="list_active_jobs", error=f"Backend imports failed: {exc!r}")
 
-    params: list[Any] = [list(getattr(social_core, "_RUN_PROGRESS_ACTIVE_JOB_STATUSES")), safe_limit]
+    params: list[Any] = [list(social_core._RUN_PROGRESS_ACTIVE_JOB_STATUSES), safe_limit]
     sql = """
         select
           j.id::text as job_id,
@@ -586,7 +667,10 @@ def tool_list_active_jobs(limit: int = 25, platform: str = "instagram", account_
             pool_name=getattr(social_core, "SOCIAL_CONTROL_POOL_NAME", "social_control"),
         )
     except Exception as exc:  # noqa: BLE001
-        return _format_tool_error(title="list_active_jobs", error=f"Active job query failed: {type(exc).__name__}: {exc}")
+        return _format_tool_error(
+            title="list_active_jobs",
+            error=f"Active job query failed: {type(exc).__name__}: {exc}",
+        )
 
     jobs = [
         {
@@ -614,7 +698,7 @@ def tool_list_active_jobs(limit: int = 25, platform: str = "instagram", account_
             "limit": safe_limit,
             "platform": normalized_platform,
             "account_handle": normalized_account,
-            "active_statuses": sorted(getattr(social_core, "_RUN_PROGRESS_ACTIVE_JOB_STATUSES")),
+            "active_statuses": sorted(social_core._RUN_PROGRESS_ACTIVE_JOB_STATUSES),
             "jobs": jobs,
         },
         note="Read-only active scrape_jobs view; no cancellation or dispatch side effects.",
@@ -702,7 +786,10 @@ def tool_backfill_health(run_limit: int = 40, recent_log_limit: int = 20, includ
             include_terminal_runs=bool(include_terminal_runs),
         )
     except Exception as exc:  # noqa: BLE001
-        return _format_tool_error(title="backfill_health", error=f"Backfill health read failed: {type(exc).__name__}: {exc}")
+        return _format_tool_error(
+            title="backfill_health",
+            error=f"Backfill health read failed: {type(exc).__name__}: {exc}",
+        )
     return _format_json_tool_result(
         title="backfill_health",
         payload=payload,
@@ -765,9 +852,16 @@ TOOLS = (
     ),
     (
         "tail_logs",
-        "Tail recent trr-backend-jobs logs, best-effort filtered to a function name.",
+        "Tail timestamp-bounded trr-backend-jobs logs, best-effort filtered to a function name.",
         tool_tail_logs,
     ),
+    (
+        "deployment_history",
+        "Read deployment history by app ID resolved from the pinned app list.",
+        tool_deployment_history,
+    ),
+    ("browser_image_probe", "Run the state-free deployed browser-image readiness probe.", tool_browser_image_probe),
+    ("rollback_preview", "Render an app-ID rollback command without executing it.", tool_rollback_preview),
     (
         "app_status",
         "Show trr-backend-jobs deploy/run status via `modal app list`.",
@@ -804,7 +898,7 @@ TOOLS = (
 def _selftest() -> int:
     """List tools and resolved config without touching Modal. Returns exit code."""
     print("modal_ops_mcp self-test (no Modal calls)")
-    print(f"  server name      : modal-ops")
+    print("  server name      : modal-ops")
     print(f"  repo root        : {REPO_ROOT}")
     print(f"  python (modal)   : {_python_command()}")
     print(f"  readiness script : {VERIFY_READINESS_SCRIPT} (exists: {VERIFY_READINESS_SCRIPT.is_file()})")
@@ -850,7 +944,7 @@ def _build_server():
         return tool_probe_remote_auth(platform)
 
     @mcp.tool()
-    def tail_logs(function: str = "run_social_posts_job", lines: int = 200) -> str:
+    def tail_logs(function: str = "run_social_posts_job", lines: int = 200, since: str = "24h") -> str:
         """Fetch the last `lines` log entries for the trr-backend-jobs app.
 
         Best-effort text-filters to `function` via the Modal CLI `--search` flag
@@ -858,7 +952,22 @@ def _build_server():
         run_social_job, run_social_posts_job, sweep_social_dispatch_queue,
         probe_social_remote_auth, probe_instagram_posts_auth, heartbeat_remote_executors.
         """
-        return tool_tail_logs(function, lines)
+        return tool_tail_logs(function, lines, since)
+
+    @mcp.tool()
+    def deployment_history(limit: int = 20) -> str:
+        """Read current app history by immutable app ID resolved from `modal app list`."""
+        return tool_deployment_history(limit)
+
+    @mcp.tool()
+    def browser_image_probe() -> str:
+        """Run the state-free deployed Chromium launch/version probe through readiness."""
+        return tool_browser_image_probe()
+
+    @mcp.tool()
+    def rollback_preview(version: str) -> str:
+        """Render (without executing) the app-ID rollback command for a recorded version."""
+        return tool_rollback_preview(version)
 
     @mcp.tool()
     def app_status() -> str:

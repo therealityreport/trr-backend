@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import subprocess
 import sys
 import types
 
@@ -256,6 +257,7 @@ def test_inject_modal_runtime_defaults_sets_canonical_modal_flags(
 
     modal_jobs._inject_modal_runtime_defaults()
 
+    assert os.environ["TRR_RUNTIME_CAPACITY_CONTEXT"] == "hosted_modal"
     assert os.environ["TRR_JOB_PLANE_MODE"] == "remote"
     assert os.environ["TRR_REMOTE_EXECUTOR"] == "modal"
     assert os.environ["TRR_MODAL_MAINTENANCE_OWNER_REQUIRED"] == "1"
@@ -978,6 +980,57 @@ def test_modal_maintenance_owner_required_accepts_modal_singleton_owner(monkeypa
     assert modal_jobs._validate_modal_maintenance_owner_config() == "modal_singleton_cron"
 
 
+def test_state_free_modal_module_import_does_not_require_maintenance_owner() -> None:
+    env = os.environ.copy()
+    for key in (
+        "PYTEST_CURRENT_TEST",
+        "TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED",
+        "TRR_MODAL_RUNTIME_SCHEDULER_ENABLED",
+        "TRR_MODAL_MAINTENANCE_OWNER_REQUIRED",
+        "TRR_MODAL_RUNTIME_SECRET_NAME",
+        "TRR_MODAL_SOCIAL_SECRET_NAME",
+    ):
+        env.pop(key, None)
+    env["APP_ENV"] = "production"
+    env["TRR_MODAL_ENABLED"] = "0"
+
+    completed = subprocess.run(
+        [sys.executable, "-c", "import trr_backend.modal_jobs; print('imported')"],
+        cwd=modal_jobs._BACKEND_ROOT,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "imported"
+
+
+@pytest.mark.parametrize(
+    "function_name",
+    [
+        "sweep_social_dispatch_queue",
+        "poll_decodo_proxy_usage",
+        "sync_nbcumv_official_images",
+        "heartbeat_remote_executors",
+        "purge_stale_social_worker_heartbeats",
+    ],
+)
+def test_maintenance_functions_validate_owner_when_invoked(
+    monkeypatch: pytest.MonkeyPatch,
+    function_name: str,
+) -> None:
+    def _reject() -> None:
+        raise RuntimeError("owner guard invoked")
+
+    monkeypatch.setattr(modal_jobs, "_validate_modal_maintenance_owner_config", _reject)
+
+    with pytest.raises(RuntimeError, match="owner guard invoked"):
+        getattr(modal_jobs, function_name).local()
+
+
 def test_build_social_image_base_includes_shared_script_payloads() -> None:
     image = modal_jobs._build_social_image_base(image_factory=_FakeImage)
 
@@ -991,6 +1044,9 @@ def test_build_social_image_base_includes_shared_script_payloads() -> None:
     assert _ops_for(image, "add_local_python_source") == [("api", "trr_backend")]
     assert added_files == dict(modal_jobs._SOCIAL_IMAGE_LOCAL_FILES)
     assert added_dirs == dict(modal_jobs._SOCIAL_IMAGE_LOCAL_DIRS)
+    assert not any(path.endswith(("/facebook", "/threads")) for path in added_dirs)
+    assert all(os.path.isfile(path) for path in added_files)
+    assert all(os.path.isdir(path) for path in added_dirs)
     assert _ops_for(image, "pip_install_from_requirements") == [(str(modal_jobs._MODAL_BROWSER_REQUIREMENTS),)]
     assert _ops_for(image, "pip_install") == []
     assert _ops_for(image, "apt_install") == []
@@ -1238,6 +1294,64 @@ def test_modal_completion_evidence_contract_is_explicit() -> None:
     assert any(
         "tests/api/test_health.py tests/test_modal_jobs.py" in command for command in contract["local_verification"]
     )
+
+
+def test_browser_image_runtime_probe_is_bound_without_secrets() -> None:
+    assert modal_jobs._FUNCTION_IMAGE_BINDINGS["probe_browser_image_runtime"] is modal_jobs._browser_image
+    source = modal_jobs.probe_browser_image_runtime.get_raw_f().__doc__ or ""
+    assert "state" in source.lower()
+
+
+def test_browser_image_runtime_probe_closes_browser_before_playwright_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class _Browser:
+        version = "test-chromium"
+
+        def close(self) -> None:
+            assert context.active is True
+            events.append("close")
+
+    class _Chromium:
+        def launch(self, *, headless: bool) -> _Browser:
+            assert headless is True
+            events.append("launch")
+            return _Browser()
+
+    class _Playwright:
+        chromium = _Chromium()
+
+    class _PlaywrightContext:
+        active = False
+
+        def __enter__(self) -> _Playwright:
+            self.active = True
+            events.append("enter")
+            return _Playwright()
+
+        def __exit__(self, *_args: object) -> None:
+            events.append("exit")
+            self.active = False
+
+    context = _PlaywrightContext()
+    playwright_sync_api = types.ModuleType("playwright.sync_api")
+    playwright_sync_api.sync_playwright = lambda: context
+    patchright_sync_api = types.ModuleType("patchright.sync_api")
+    patchright_sync_api.sync_playwright = lambda: None
+    scrapling_fetchers = types.ModuleType("scrapling.fetchers")
+    scrapling_fetchers.StealthyFetcher = object
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", playwright_sync_api)
+    monkeypatch.setitem(sys.modules, "patchright.sync_api", patchright_sync_api)
+    monkeypatch.setitem(sys.modules, "scrapling.fetchers", scrapling_fetchers)
+    monkeypatch.setattr(modal_jobs, "package_version", lambda package: f"test-{package}")
+
+    result = modal_jobs.probe_browser_image_runtime.get_raw_f()()
+
+    assert result["healthy"] is True
+    assert result["versions"]["chromium"] == "test-chromium"
+    assert events == ["enter", "launch", "close", "exit"]
 
 
 def test_cast_screentime_modal_function_uses_vision_image() -> None:

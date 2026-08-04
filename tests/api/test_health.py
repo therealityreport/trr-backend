@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from contextlib import contextmanager
+from pathlib import Path
+from textwrap import dedent
 from unittest.mock import MagicMock, patch
 
 from fastapi import FastAPI
@@ -282,6 +286,112 @@ def test_admin_health_instagram_comment_rollups_returns_snapshot() -> None:
         "sample_limit": 7,
         "mismatch_count": 0,
     }
+
+
+def test_api_main_registers_instagram_comment_rollup_health_only_after_provider_ready() -> None:
+    source = dedent(
+        """
+        import importlib
+        import sys
+        from fastapi import FastAPI
+
+        common_name = "trr_backend.socials.read_models.account_profile.common"
+        provider_name = "trr_backend.socials.social_season_analytics_impl"
+        events = []
+        original_get = FastAPI.get
+
+        def tracked_get(self, path, *args, **kwargs):
+            decorator = original_get(self, path, *args, **kwargs)
+            if path not in {
+                "/admin/health/instagram-comment-rollups",
+                "/api/v1/admin/health/instagram-comment-rollups",
+            }:
+                return decorator
+
+            def tracked_decorator(function):
+                common = sys.modules.get(common_name)
+                events.append(
+                    (
+                        path,
+                        getattr(common, "_PROVIDER_STATE", None),
+                        provider_name in sys.modules,
+                        function.__name__,
+                    )
+                )
+                return decorator(function)
+
+            return tracked_decorator
+
+        FastAPI.get = tracked_get
+        try:
+            api_main = importlib.import_module("api.main")
+        finally:
+            FastAPI.get = original_get
+        common = sys.modules[common_name]
+        provider = sys.modules[provider_name]
+        assert common._PROVIDER_STATE == "READY"
+        assert common._PROVIDER_NAMESPACE is provider.__dict__
+        assert api_main.instagram_comment_rollup_health is common.instagram_comment_rollup_health
+        assert events == [
+            (
+                "/api/v1/admin/health/instagram-comment-rollups",
+                "READY",
+                True,
+                "admin_health_instagram_comment_rollups",
+            ),
+            (
+                "/admin/health/instagram-comment-rollups",
+                "READY",
+                True,
+                "admin_health_instagram_comment_rollups",
+            ),
+        ]
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", source],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_admin_health_instagram_comment_rollups_calls_ready_common_export_offline() -> None:
+    import trr_backend.socials.read_models.account_profile.common as common
+    import trr_backend.socials.social_season_analytics_impl as provider
+
+    assert common._PROVIDER_STATE == "READY"
+    assert common._PROVIDER_NAMESPACE is provider.__dict__
+    assert api_main.instagram_comment_rollup_health is common.instagram_comment_rollup_health
+    connection = object()
+    db_calls: list[dict[str, object]] = []
+    availability_calls: list[object] = []
+
+    @contextmanager
+    def fake_read_connection(**kwargs):
+        db_calls.append(kwargs)
+        yield connection
+
+    def fake_available(*, conn):
+        availability_calls.append(conn)
+        return False
+
+    with (
+        patch.object(provider.pg, "db_read_connection", fake_read_connection),
+        patch.object(provider, "_instagram_post_comment_rollups_available", fake_available),
+    ):
+        result = api_main.admin_health_instagram_comment_rollups(sample_limit=7, _=None)
+
+    assert result == {
+        "status": "unavailable",
+        "reason": "rollup_table_missing",
+        "rollup_table": "social.instagram_post_comment_rollups",
+        "sample_limit": 7,
+    }
+    assert db_calls == [{"label": "instagram-comment-rollup-health", "pool_name": "health"}]
+    assert availability_calls == [connection]
 
 
 def test_health_runtime_ignores_database_failure():

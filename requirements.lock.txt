@@ -261,7 +261,7 @@ mdurl==0.1.2
     # via markdown-it-py
 mmh3==5.2.1
     # via pyiceberg
-modal==1.5.1
+modal==1.5.3
     # via -r requirements.in
 more-itertools==11.1.0
     # via
@@ -288,14 +288,14 @@ packaging==26.2
     #   deprecation
     #   gunicorn
     #   pytest
-patchright==1.60.1
+patchright==1.61.2
     # via scrapling
 pillow==12.2.0
     # via
     #   -r requirements.in
     #   cairosvg
     #   reportlab
-playwright==1.60.0
+playwright==1.61.0
     # via
     #   -r requirements.in
     #   scrapling
@@ -433,7 +433,7 @@ rpds-py==2026.5.1
     #   referencing
 s3transfer==0.19.0
     # via boto3
-scrapling==0.4.9
+scrapling==0.4.12
     # via -r requirements.in
 secretstorage==3.5.0
     # via keyring

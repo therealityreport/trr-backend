@@ -6,7 +6,8 @@
 # Scrapling 0.4.x). The second step is the one that's easy to miss: `pip
 # install scrapling[fetchers]` does NOT ship the browser binaries. Without
 # this step, the first live fetch crashes with "browser binary not found".
-# Scrapling 0.4.9 also refreshed browsers/fingerprints, so force the asset
+# Scrapling 0.4.12 follows the system locale unless configured, so this
+# repository pins the shared browser locale and force-refreshes assets after
 # refresh after dependency upgrades.
 #
 # Usage:

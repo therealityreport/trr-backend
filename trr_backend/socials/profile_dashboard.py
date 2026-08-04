@@ -6,13 +6,24 @@ from time import perf_counter
 from types import SimpleNamespace
 from typing import Any
 
-from trr_backend.socials.pipelines.account_catalog.progress import get_social_account_catalog_run_progress
-from trr_backend.socials.read_models.account_profile.common import get_social_account_profile_summary
+from trr_backend.socials.read_models.account_profile.common import (
+    _require_provider_ready,
+    get_social_account_profile_summary,
+)
+
+
+def _deferred_get_social_account_catalog_run_progress(*args: Any, **kwargs: Any) -> Any:
+    _require_provider_ready()
+    from trr_backend.socials.pipelines.account_catalog.progress import (
+        get_social_account_catalog_run_progress,
+    )
+
+    return get_social_account_catalog_run_progress(*args, **kwargs)
 
 logger = logging.getLogger(__name__)
 
 analytics_repo = SimpleNamespace(
-    get_social_account_catalog_run_progress=get_social_account_catalog_run_progress,
+    get_social_account_catalog_run_progress=_deferred_get_social_account_catalog_run_progress,
     get_social_account_profile_summary=get_social_account_profile_summary,
 )
 

@@ -14,6 +14,7 @@ from urllib.parse import urlencode
 import requests
 from bs4 import BeautifulSoup
 
+from trr_backend.socials.scrapling_transport import SCRAPLING_BROWSER_LOCALE
 from trr_backend.utils.playwright_runtime import exclusive_runtime_lock
 
 _IMDB_TITLE_ID_RE = re.compile(r"^(tt[0-9]+)$")
@@ -371,6 +372,7 @@ def _fetch_episodes_page_via_scrapling(
         with exclusive_runtime_lock(_SCRAPLING_RUNTIME_LOCK_NAME):
             page = StealthyFetcher.fetch(
                 url,
+                locale=SCRAPLING_BROWSER_LOCALE,
                 headless=True,
                 network_idle=True,
                 wait_selector=wait_selector,

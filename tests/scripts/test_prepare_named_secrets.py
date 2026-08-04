@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import argparse
+import stat
+
 import pytest
 
 from scripts.modal import prepare_named_secrets as cli
@@ -366,3 +369,56 @@ def test_split_env_raises_for_missing_file_backed_social_auth() -> None:
                 "SOCIAL_INSTAGRAM_COOKIES_FILE": "/tmp/does-not-exist-instagram-cookies.json",
             }
         )
+
+
+def test_write_env_file_uses_owner_only_permissions(tmp_path) -> None:
+    output = tmp_path / "runtime.env"
+
+    cli._write_env_file(output, {"TRR_DB_URL": "postgresql://example"})
+
+    assert stat.S_IMODE(output.stat().st_mode) == 0o600
+
+
+def test_main_runtime_only_never_materializes_or_selects_social_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    source_env = tmp_path / "source.env"
+    source_env.write_text(
+        "TRR_DB_URL=postgresql://example\n"
+        "SOCIAL_INSTAGRAM_COOKIES_FILE=/tmp/missing-social-auth.json\n",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "rendered"
+    commands: list[list[str]] = []
+    monkeypatch.setattr(
+        cli,
+        "_parse_args",
+        lambda: argparse.Namespace(
+            source_env=source_env,
+            output_dir=output_dir,
+            runtime_secret_name=cli.DEFAULT_RUNTIME_SECRET,
+            social_secret_name=cli.DEFAULT_SOCIAL_SECRET,
+            modal_environment="main",
+            apply=True,
+            runtime_only=True,
+            cors_allow_origins="https://thereality.report,https://admin.thereality.report",
+            keep_rendered_files=True,
+            no_canonical_remote_overrides=False,
+        ),
+    )
+    monkeypatch.setattr(cli, "_run_command", lambda command: commands.append(command))
+
+    assert cli.main() == 0
+
+    runtime_file = output_dir / "trr-backend-runtime.env"
+    assert runtime_file.is_file()
+    assert stat.S_IMODE(runtime_file.stat().st_mode) == 0o600
+    assert not (output_dir / "trr-social-auth.env").exists()
+    assert len(commands) == 1
+    assert cli.DEFAULT_RUNTIME_SECRET in commands[0]
+    assert cli.DEFAULT_SOCIAL_SECRET not in commands[0]
+    assert (
+        'CORS_ALLOW_ORIGINS="https://thereality.report,https://admin.thereality.report"'
+        in runtime_file.read_text(encoding="utf-8")
+    )

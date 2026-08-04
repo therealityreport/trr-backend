@@ -225,13 +225,27 @@ def test_proxy_conflict_guard_rejects_mixed_proxy_modes() -> None:
         )
 
 
-def test_resolve_scrapling_fetcher_options_returns_empty_without_env() -> None:
-    from trr_backend.socials.scrapling_transport import resolve_scrapling_fetcher_options
+def test_resolve_scrapling_fetcher_options_defaults_browser_locale_without_env() -> None:
+    from trr_backend.socials.scrapling_transport import (
+        SCRAPLING_BROWSER_LOCALE,
+        resolve_scrapling_fetcher_options,
+    )
 
     resolved = resolve_scrapling_fetcher_options("SOCIAL_TEST", allowed_keys={"headless", "additional_args"})
 
-    assert resolved.kwargs == {}
-    assert resolved.metadata == {"configured_options": [], "invalid_options": []}
+    assert resolved.kwargs == {"locale": SCRAPLING_BROWSER_LOCALE}
+    assert resolved.metadata == {"configured_options": ["locale"], "invalid_options": [], "locale": "en-US"}
+
+
+def test_resolve_scrapling_fetcher_options_accepts_validated_locale_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.socials.scrapling_transport import resolve_scrapling_fetcher_options
+
+    monkeypatch.setenv("SOCIAL_TEST_LOCALE", "en-GB")
+
+    resolved = resolve_scrapling_fetcher_options("SOCIAL_TEST", allowed_keys={"locale"})
+
+    assert resolved.kwargs == {"locale": "en-GB"}
+    assert resolved.metadata == {"configured_options": ["locale"], "invalid_options": [], "locale": "en-GB"}
 
 
 def test_resolve_scrapling_fetcher_options_parses_allowed_shapes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -250,8 +264,9 @@ def test_resolve_scrapling_fetcher_options_parses_allowed_shapes(monkeypatch: py
         "additional_args": ["--disable-gpu", "--lang=en-US"],
         "extra_headers": {"x-test": "1"},
         "headless": False,
+        "locale": "en-US",
     }
-    assert resolved.metadata["configured_options"] == ["additional_args", "extra_headers", "headless"]
+    assert resolved.metadata["configured_options"] == ["additional_args", "extra_headers", "headless", "locale"]
     assert resolved.metadata["additional_args"] == {"count": 2, "values": ["--disable-gpu", "--lang=en-US"]}
     assert resolved.metadata["extra_headers"] == {"keys": ["x-test"]}
 
@@ -271,7 +286,7 @@ def test_resolve_scrapling_fetcher_options_uses_bundle_and_fails_closed(
         allowed_keys={"network_idle", "additional_args", "unknown"},
     )
 
-    assert resolved.kwargs == {"network_idle": True}
+    assert resolved.kwargs == {"locale": "en-US", "network_idle": True}
     assert resolved.metadata["invalid_options"] == ["additional_args", "unknown"]
 
 

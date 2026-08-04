@@ -153,6 +153,7 @@ def test_scrapling_fetcher_uses_direct_instagram_user_url_without_raw_init_scrip
     assert "init_script" not in captured["kwargs"]
     assert callable(captured["kwargs"]["page_action"])
     assert captured["kwargs"]["capture_xhr"] == r"/api/trpc/"
+    assert captured["kwargs"]["locale"] == "en-US"
     assert captured["kwargs"]["wait"] == 2_000
 
 
