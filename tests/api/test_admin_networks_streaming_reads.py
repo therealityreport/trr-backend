@@ -66,7 +66,7 @@ def test_summary_returns_contract_and_caches(monkeypatch: pytest.MonkeyPatch) ->
         )
 
     monkeypatch.setattr(
-        router_module.networks_streaming_reads_repo,
+        router_module.networks_streaming_reads_service.repository,
         "get_networks_streaming_summary",
         fake_summary,
     )
@@ -104,7 +104,7 @@ def test_summary_collapses_concurrent_cold_misses(monkeypatch: pytest.MonkeyPatc
         )
 
     monkeypatch.setattr(
-        router_module.networks_streaming_reads_repo,
+        router_module.networks_streaming_reads_service.repository,
         "get_networks_streaming_summary",
         fake_summary,
     )
@@ -140,7 +140,7 @@ def test_invalidate_summary_cache_clears_cached_entries(monkeypatch: pytest.Monk
         )
 
     monkeypatch.setattr(
-        router_module.networks_streaming_reads_repo,
+        router_module.networks_streaming_reads_service.repository,
         "get_networks_streaming_summary",
         fake_summary,
     )
@@ -160,7 +160,7 @@ def test_invalidate_summary_cache_clears_cached_entries(monkeypatch: pytest.Monk
 
 def test_detail_returns_contract_with_family_enrichment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        router_module.networks_streaming_reads_repo,
+        router_module.networks_streaming_reads_service.repository,
         "get_networks_streaming_detail",
         lambda **kwargs: (
             {
@@ -193,27 +193,27 @@ def test_detail_returns_contract_with_family_enrichment(monkeypatch: pytest.Monk
         ),
     )
     monkeypatch.setattr(
-        router_module.networks_streaming_reads_repo,
+        router_module.networks_streaming_reads_service.repository,
         "get_networks_streaming_suggestions",
         lambda **kwargs: ([], 1),
     )
     monkeypatch.setattr(
-        router_module.brand_families,
+        router_module.networks_streaming_reads_service.brand_families,
         "list_family_suggestions",
         lambda: {"rows": [{"id": "family-1"}]},
     )
     monkeypatch.setattr(
-        router_module.brand_families,
+        router_module.networks_streaming_reads_service.brand_families,
         "get_family_by_entity",
         lambda **kwargs: {"id": "family-1", "display_name": "NBCUniversal"},
     )
     monkeypatch.setattr(
-        router_module.brand_families,
+        router_module.networks_streaming_reads_service.brand_families,
         "list_family_links",
         lambda **kwargs: {"rows": [{"id": "link-1"}]},
     )
     monkeypatch.setattr(
-        router_module.brand_families,
+        router_module.networks_streaming_reads_service.brand_families,
         "list_family_wikipedia_show_links",
         lambda **kwargs: {"rows": [{"id": "wiki-1"}]},
     )
@@ -232,12 +232,12 @@ def test_detail_returns_contract_with_family_enrichment(monkeypatch: pytest.Monk
 
 def test_detail_not_found_returns_suggestions(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        router_module.networks_streaming_reads_repo,
+        router_module.networks_streaming_reads_service.repository,
         "get_networks_streaming_detail",
         lambda **kwargs: (None, 1),
     )
     monkeypatch.setattr(
-        router_module.networks_streaming_reads_repo,
+        router_module.networks_streaming_reads_service.repository,
         "get_networks_streaming_suggestions",
         lambda **kwargs: (
             [
@@ -266,7 +266,7 @@ def test_detail_not_found_returns_suggestions(monkeypatch: pytest.MonkeyPatch) -
 
 def test_detail_returns_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        router_module.networks_streaming_reads_repo,
+        router_module.networks_streaming_reads_service.repository,
         "get_networks_streaming_detail",
         lambda **kwargs: (
             {
@@ -290,22 +290,22 @@ def test_detail_returns_contract(monkeypatch: pytest.MonkeyPatch) -> None:
         ),
     )
     monkeypatch.setattr(
-        router_module.brand_families,
+        router_module.networks_streaming_reads_service.brand_families,
         "list_family_suggestions",
         lambda: {"rows": [{"id": "family-1"}]},
     )
     monkeypatch.setattr(
-        router_module.brand_families,
+        router_module.networks_streaming_reads_service.brand_families,
         "get_family_by_entity",
         lambda **kwargs: {"id": "family-1", "name": "Bravo Family"},
     )
     monkeypatch.setattr(
-        router_module.brand_families,
+        router_module.networks_streaming_reads_service.brand_families,
         "list_family_links",
         lambda **kwargs: {"rows": [{"id": "link-1"}]},
     )
     monkeypatch.setattr(
-        router_module.brand_families,
+        router_module.networks_streaming_reads_service.brand_families,
         "list_family_wikipedia_show_links",
         lambda **kwargs: {"rows": [{"url": "https://en.wikipedia.org/wiki/Top_Chef"}]},
     )
@@ -322,12 +322,12 @@ def test_detail_returns_contract(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_detail_returns_not_found_with_suggestions(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        router_module.networks_streaming_reads_repo,
+        router_module.networks_streaming_reads_service.repository,
         "get_networks_streaming_detail",
         lambda **kwargs: (None, 1),
     )
     monkeypatch.setattr(
-        router_module.networks_streaming_reads_repo,
+        router_module.networks_streaming_reads_service.repository,
         "get_networks_streaming_suggestions",
         lambda **kwargs: (
             [
@@ -361,3 +361,29 @@ def test_detail_returns_not_found_with_suggestions(monkeypatch: pytest.MonkeyPat
             }
         ],
     }
+
+
+@pytest.mark.parametrize(
+    ("params", "detail"),
+    [
+        (
+            {"entity_type": "channel", "entity_key": "bravo"},
+            "entity_type must be network, streaming, or production",
+        ),
+        (
+            {"entity_type": "network"},
+            "entity_key or entity_slug is required",
+        ),
+    ],
+)
+def test_detail_validation_wire_shape_is_unchanged(
+    params: dict[str, str],
+    detail: str,
+) -> None:
+    response = TestClient(app).get(
+        "/api/v1/admin/shows/networks-streaming/detail",
+        params=params,
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": detail}

@@ -273,6 +273,12 @@ def _to_string_or_none(value: Any) -> str | None:
     return None
 
 
+def _to_datetime_string_or_none(value: Any) -> str | None:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return _to_string_or_none(value)
+
+
 def _normalize_resolution_status(value: Any) -> str | None:
     if value in {"resolved", "manual_required", "failed"}:
         return str(value)
@@ -305,7 +311,7 @@ def get_networks_streaming_summary() -> tuple[dict[str, Any], int]:
                 "homepage_url": _to_string_or_none(row.get("homepage_url")),
                 "resolution_status": _normalize_resolution_status(row.get("resolution_status")),
                 "resolution_reason": _to_string_or_none(row.get("resolution_reason")),
-                "last_attempt_at": _to_string_or_none(row.get("last_attempt_at")),
+                "last_attempt_at": _to_datetime_string_or_none(row.get("last_attempt_at")),
                 "has_logo": hosted_logo_url is not None,
                 "has_bw_variants": hosted_logo_black_url is not None and hosted_logo_white_url is not None,
                 "has_links": wikidata_id is not None and wikipedia_url is not None,
@@ -433,7 +439,16 @@ entity_registry AS (
     ng.name,
     ng.available_show_count,
     ng.added_show_count,
-    regexp_replace(lower(ng.name), '[^a-z0-9]+', '-', 'g') AS entity_slug
+    lower(
+      trim(
+        both '-' FROM regexp_replace(
+          regexp_replace(ng.name, '&', ' and ', 'gi'),
+          '[^a-z0-9]+',
+          '-',
+          'gi'
+        )
+      )
+    ) AS entity_slug
   FROM network_grouped ng
   UNION ALL
   SELECT
@@ -442,7 +457,16 @@ entity_registry AS (
     pg.name,
     pg.available_show_count,
     pg.added_show_count,
-    regexp_replace(lower(pg.name), '[^a-z0-9]+', '-', 'g') AS entity_slug
+    lower(
+      trim(
+        both '-' FROM regexp_replace(
+          regexp_replace(pg.name, '&', ' and ', 'gi'),
+          '[^a-z0-9]+',
+          '-',
+          'gi'
+        )
+      )
+    ) AS entity_slug
   FROM provider_grouped pg
   UNION ALL
   SELECT
@@ -451,7 +475,16 @@ entity_registry AS (
     pcg.name,
     pcg.available_show_count,
     pcg.added_show_count,
-    regexp_replace(lower(pcg.name), '[^a-z0-9]+', '-', 'g') AS entity_slug
+    lower(
+      trim(
+        both '-' FROM regexp_replace(
+          regexp_replace(pcg.name, '&', ' and ', 'gi'),
+          '[^a-z0-9]+',
+          '-',
+          'gi'
+        )
+      )
+    ) AS entity_slug
   FROM production_grouped pcg
 )
 """
@@ -481,26 +514,21 @@ def _to_string_array(value: Any) -> list[str]:
     return [item.strip() for item in value if isinstance(item, str) and item.strip()]
 
 
-def _normalize_brand_identity(value: Any) -> str:
-    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
-
-
-def _logo_asset_matches_entity(display_name: str, row: dict[str, Any]) -> bool:
-    brand_identity = _normalize_brand_identity(display_name)
-    if not brand_identity:
-        return True
-    source_url = _to_string_or_none(row.get("source_url")) or ""
-    source = _to_string_or_none(row.get("source")) or ""
-    if source in {"tmdb", "override"}:
-        return True
-    haystack = _normalize_brand_identity(f"{source} {source_url}")
-    if not haystack:
-        return True
-    if brand_identity in haystack:
-        return True
-    if brand_identity.endswith("tv") and brand_identity[:-2] and brand_identity[:-2] in haystack:
-        return True
-    return False
+def _to_override_logo_urls(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    urls: list[str] = []
+    for entry in value:
+        candidate: Any
+        if isinstance(entry, str):
+            candidate = entry
+        elif isinstance(entry, dict):
+            candidate = entry.get("url")
+        else:
+            continue
+        if isinstance(candidate, str) and candidate.strip():
+            urls.append(candidate.strip())
+    return urls
 
 
 @lru_cache(maxsize=16)
@@ -805,10 +833,6 @@ def get_networks_streaming_detail(
             }
             for row in logo_asset_rows
             if _to_string_or_none(row.get("id"))
-            and _logo_asset_matches_entity(
-                str(entity_row.get("display_name") or ""),
-                row,
-            )
         ]
     else:
         query_count += 1
@@ -845,7 +869,7 @@ def get_networks_streaming_detail(
             "display_name_override": _to_string_or_none(entity_row.get("display_name_override")),
             "wikidata_id_override": _to_string_or_none(entity_row.get("wikidata_id_override")),
             "wikipedia_url_override": _to_string_or_none(entity_row.get("wikipedia_url_override")),
-            "logo_source_urls_override": _to_string_array(entity_row.get("logo_source_urls_override")),
+            "logo_source_urls_override": _to_override_logo_urls(entity_row.get("logo_source_urls_override")),
             "source_priority_override": _to_string_array(entity_row.get("source_priority_override")),
             "aliases_override": _to_string_array(entity_row.get("aliases_override")),
             "notes": _to_string_or_none(entity_row.get("override_notes")),

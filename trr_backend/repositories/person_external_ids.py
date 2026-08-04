@@ -321,7 +321,7 @@ def _map_primary_person_external_id_row(row: Mapping[str, Any]) -> dict[str, Any
     }
 
 
-def _map_primary_person_external_id_rows(rows: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def map_primary_person_external_id_rows(rows: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
     mapped: list[dict[str, Any]] = []
     for row in rows:
         record = _map_primary_person_external_id_row(row)
@@ -459,7 +459,7 @@ def sync_person_external_ids(person_id: str, inputs: list[Mapping[str, Any]]) ->
                     """,
                     [person_id],
                 )
-                active_records = _map_primary_person_external_id_rows([dict(row) for row in cur.fetchall()])
+                active_records = map_primary_person_external_id_rows([dict(row) for row in cur.fetchall()])
 
                 existing_external_ids = current_person.get("external_ids")
                 if not isinstance(existing_external_ids, Mapping):
