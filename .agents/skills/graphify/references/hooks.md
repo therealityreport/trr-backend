@@ -1,33 +1,25 @@
-# graphify reference: commit hook and native AGENTS.md integration
+# graphify reference: hooks and AGENTS.md integration
 
-Load this when the user asked to install the post-commit hook or wire graphify into a project's AGENTS.md.
+Load this only when the user explicitly asks about repository configuration.
 
-## For git commit hook
+## Read-only status
 
-Install a post-commit hook that auto-rebuilds the graph after every commit. No background process needed - triggers once per commit, works with any editor.
-
-```bash
-graphify hook install    # install
-graphify hook uninstall  # remove
-graphify hook status     # check
-```
-
-After every `git commit`, the hook detects which code files changed (via `git diff HEAD~1`), re-runs AST extraction on those files, and rebuilds `graph.json` and `GRAPH_REPORT.md`. Doc/image changes are ignored by the hook - run `/graphify --update` manually for those.
-
-If a post-commit hook already exists, graphify appends to it rather than replacing it.
-
----
-
-## For native AGENTS.md integration
-
-Run once per project to make graphify always-on in your agent sessions:
+The only routine hook operation permitted by this backend policy is a read-only
+status inspection:
 
 ```bash
-graphify agents install
+graphify hook status
 ```
 
-This writes a `## graphify` section to the local `AGENTS.md` that instructs your agent to check the graph before answering codebase questions and rebuild it after code changes. No manual `/graphify` needed in future sessions.
+Do not install, uninstall, append to, or replace a Git hook from this runbook. A
+hook must never rebuild a graph, invoke an external backend, update a manifest, or
+mutate agent configuration automatically. It may at most report that graph
+freshness should be checked.
 
-```bash
-graphify agents uninstall  # remove the section
-```
+## AGENTS.md guidance
+
+Do not run `graphify agents install` or `graphify agents uninstall`: both mutate a
+repository policy file. If a user separately authorizes a policy edit, present the
+exact diff for review and keep the resulting guidance read-only: check freshness,
+omit stale graph evidence, and require an explicit requested update. No automatic
+rebuild is allowed.

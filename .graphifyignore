@@ -1,4 +1,5 @@
 # project-manager:graphify-corpus:start
 .plan-work/
 .loom-backup/
+/graphify-out/
 # project-manager:graphify-corpus:end

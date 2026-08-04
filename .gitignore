@@ -151,4 +151,5 @@ data/twitter_cookies.json
 docs/ai/evidence/**
 !docs/ai/evidence/
 !docs/ai/evidence/README.md
+# Graphify output is local generated state and is excluded from the corpus too.
 /graphify-out/
