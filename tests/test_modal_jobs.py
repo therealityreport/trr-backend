@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import importlib
 import os
 import subprocess
@@ -1298,7 +1299,12 @@ def test_modal_completion_evidence_contract_is_explicit() -> None:
 
 def test_browser_image_runtime_probe_is_bound_without_secrets() -> None:
     assert modal_jobs._FUNCTION_IMAGE_BINDINGS["probe_browser_image_runtime"] is modal_jobs._browser_image
-    source = modal_jobs.probe_browser_image_runtime.get_raw_f().__doc__ or ""
+    probe = getattr(
+        modal_jobs.probe_browser_image_runtime,
+        "get_raw_f",
+        lambda: modal_jobs.probe_browser_image_runtime,
+    )()
+    source = probe.__doc__ or ""
     assert "state" in source.lower()
 
 
@@ -1347,11 +1353,38 @@ def test_browser_image_runtime_probe_closes_browser_before_playwright_context(
     monkeypatch.setitem(sys.modules, "scrapling.fetchers", scrapling_fetchers)
     monkeypatch.setattr(modal_jobs, "package_version", lambda package: f"test-{package}")
 
-    result = modal_jobs.probe_browser_image_runtime.get_raw_f()()
+    probe = getattr(
+        modal_jobs.probe_browser_image_runtime,
+        "get_raw_f",
+        lambda: modal_jobs.probe_browser_image_runtime,
+    )()
+    result = probe()
 
     assert result["healthy"] is True
     assert result["versions"]["chromium"] == "test-chromium"
     assert events == ["enter", "launch", "close", "exit"]
+
+
+def test_browser_image_runtime_probe_reports_import_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    original_import = builtins.__import__
+
+    def fail_patchright_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "patchright.sync_api":
+            raise ImportError("Patchright is unavailable")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fail_patchright_import)
+
+    probe = getattr(
+        modal_jobs.probe_browser_image_runtime,
+        "get_raw_f",
+        lambda: modal_jobs.probe_browser_image_runtime,
+    )()
+    result = probe()
+
+    assert result["healthy"] is False
+    assert result["error_class"] == "ImportError"
+    assert "Patchright is unavailable" in str(result["error"])
 
 
 def test_cast_screentime_modal_function_uses_vision_image() -> None:

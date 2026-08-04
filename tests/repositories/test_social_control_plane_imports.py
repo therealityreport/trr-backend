@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import ast
+import os
 import subprocess
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from textwrap import dedent
+from types import SimpleNamespace
 
 import pytest
 
@@ -753,6 +756,26 @@ def test_instagram_media_mirror_uses_import_neutral_provider_boundary() -> None:
 
     assert legacy_imports == []
     assert any(isinstance(node, ast.FunctionDef) and node.name == "_configure_legacy_provider" for node in tree.body)
+
+
+def test_instagram_media_mirror_source_update_allows_missing_provider_field_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[object, ...]] = []
+    provider = {
+        "_instagram_posts_has_column": lambda *_args, **_kwargs: True,
+        "pg": SimpleNamespace(
+            db_cursor=lambda **_kwargs: nullcontext(object()),
+            fetch_one_with_cursor=lambda *args: calls.append(args),
+        ),
+    }
+    monkeypatch.setattr(instagram_media_mirror, "_LEGACY_NAMESPACE", None)
+    monkeypatch.setattr(instagram_media_mirror, "_LEGACY_ORIGINALS", {})
+    instagram_media_mirror._configure_legacy_provider(provider, {})
+
+    instagram_media_mirror._update_instagram_post_source_media_fields(post_id="post-1")
+
+    assert calls == []
 
 
 def test_instagram_profile_stages_uses_import_neutral_provider_boundary() -> None:
@@ -1849,6 +1872,7 @@ def test_account_catalog_freshness_import_does_not_load_legacy_backed_siblings()
     code = "\n".join(
         [
             "import importlib",
+            "import os",
             "import sys",
             f"package = importlib.import_module('{package_name}')",
             f"assert '{package_name}.freshness' not in sys.modules",
@@ -1863,6 +1887,8 @@ def test_account_catalog_freshness_import_does_not_load_legacy_backed_siblings()
             f"assert '{package_name}.review_queue' not in sys.modules",
             "assert 'trr_backend.socials.social_season_analytics_impl' not in sys.modules",
             "assert 'trr_backend.repositories.social_season_analytics' not in sys.modules",
+            "assert 'DATABASE_URL' not in os.environ",
+            "assert 'TRR_SUPABASE_ACCESS_TOKEN' not in os.environ",
             "try:",
             "    freshness('tiktok', 'bravotv')",
             "except ValueError as error:",
@@ -1886,7 +1912,9 @@ def test_account_catalog_freshness_import_does_not_load_legacy_backed_siblings()
         [sys.executable, "-c", code],
         cwd=backend_root,
         capture_output=True,
+        env={"PATH": os.environ.get("PATH", ""), "PYTHONDONTWRITEBYTECODE": "1"},
         text=True,
+        timeout=120,
         check=False,
     )
 
@@ -1963,6 +1991,23 @@ def test_standalone_freshness_oldest_date_degrades_on_database_unavailable(
     assert account_catalog_freshness._default_catalog_oldest_stored_post_at("instagram", "bravotv") is None
     with pytest.raises(RuntimeError, match="database unavailable"):
         account_catalog_freshness._default_catalog_newest_stored_post_at("instagram", "bravotv")
+
+
+def test_standalone_freshness_stored_dates_match_instagram_raw_data_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fetch_one(sql: str, params: list[object], **_kwargs: object) -> dict[str, object]:
+        captured["sql"] = sql
+        captured["params"] = params
+        return {"stored_at": None}
+
+    monkeypatch.setattr(account_catalog_freshness, "_fetch_one", fetch_one)
+
+    assert account_catalog_freshness._default_catalog_newest_stored_post_at("instagram", "bravotv") is None
+    assert "to_jsonb(p) -> 'raw_data' ->> 'source_account'" in str(captured["sql"])
+    assert captured["params"] == ["bravotv"]
 
 
 def test_standalone_freshness_frontier_masks_relation_probe_failure(
@@ -2155,7 +2200,9 @@ def _run_account_profile_contract_script(source: str) -> None:
         [sys.executable, "-B", "-c", dedent(source)],
         cwd=Path(__file__).resolve().parents[2],
         capture_output=True,
+        env={"PATH": os.environ.get("PATH", ""), "PYTHONDONTWRITEBYTECODE": "1"},
         text=True,
+        timeout=120,
         check=False,
     )
     assert result.returncode == 0, (

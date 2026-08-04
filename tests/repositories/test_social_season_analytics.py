@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 import trr_backend.repositories.social_season_analytics as social_repo
+import trr_backend.socials.cookie_sources as cookie_sources
 import trr_backend.socials.instagram.auth_runtime as instagram_auth_runtime
 import trr_backend.socials.instagram.catalog_ingest as instagram_catalog_ingest
 import trr_backend.socials.pipelines.account_catalog.progress as catalog_progress
@@ -4448,6 +4449,19 @@ def test_load_instagram_cookies_prefers_env_json(monkeypatch) -> None:
     assert auth_session is not None
     assert auth_session.cookies["sessionid"] == "abc"
     assert auth_session.source == "legacy_loader"
+
+
+def test_cookie_candidate_prefers_sessionid_over_a_non_session_bundle() -> None:
+    selected = cookie_sources._select_preferred_cookie_candidate(
+        [
+            {"csrftoken": "csrf", "ds_user_id": "123"},
+            {"sessionid": "session"},
+        ],
+        required_cookie_names_any=("sessionid",),
+        required_cookie_names_all=("csrftoken", "ds_user_id"),
+    )
+
+    assert selected == {"sessionid": "session"}
 
 
 def test_load_instagram_cookies_uses_file_when_env_json_invalid(monkeypatch, tmp_path) -> None:

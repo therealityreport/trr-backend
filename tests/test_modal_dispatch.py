@@ -635,6 +635,23 @@ def test_dispatcher_runtime_version_stamp_delegates_and_preserves_cache_clear(
         modal_dispatch._resolve_dispatcher_runtime_version_stamp.cache_clear()
 
 
+def test_dispatcher_runtime_version_stamp_defaults_to_required_modal_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(modal_dispatch, "build_runtime_version_stamp", lambda **kwargs: captured.update(kwargs) or {})
+    monkeypatch.setattr(modal_dispatch, "modal_environment_name", lambda: "")
+    monkeypatch.setattr(modal_dispatch, "modal_social_job_function_name", lambda: "run_social_job")
+    monkeypatch.setattr(modal_dispatch, "execution_backend_canonical", lambda: "modal")
+    modal_dispatch._resolve_dispatcher_runtime_version_stamp.cache_clear()
+
+    try:
+        modal_dispatch._resolve_dispatcher_runtime_version_stamp()
+        assert captured["modal_environment"] == modal_dispatch._REQUIRED_MODAL_ENVIRONMENT
+    finally:
+        modal_dispatch._resolve_dispatcher_runtime_version_stamp.cache_clear()
+
+
 def test_record_dispatcher_heartbeat_preserves_existing_auth_capabilities(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
