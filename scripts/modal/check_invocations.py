@@ -131,20 +131,23 @@ class _PythonInvocationVisitor(ast.NodeVisitor):
         self.invocations.append(
             Invocation(
                 path=self.path,
-                line=node.lineno,
+                line=int(getattr(node, "lineno", 0)),
                 function=self.function_stack[-1] if self.function_stack else "<module>",
                 operation=operation,
                 column=getattr(node, "col_offset", 0) if column is None else column,
             )
         )
 
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         self.function_stack.append(node.name)
         self.generic_visit(node)
         self.function_stack.pop()
 
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function(node)
+
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:  # noqa: N802
-        self.visit_FunctionDef(node)
+        self._visit_function(node)
 
     def visit_Call(self, node: ast.Call) -> None:
         function = node.func
@@ -188,7 +191,7 @@ class _PythonInvocationVisitor(ast.NodeVisitor):
                 self._record(node, operation)
         self.generic_visit(node)
 
-    def visit_List(self, node: ast.List) -> None:
+    def _visit_sequence(self, node: ast.List | ast.Tuple) -> None:
         strings = [
             element.value
             for element in node.elts
@@ -199,8 +202,11 @@ class _PythonInvocationVisitor(ast.NodeVisitor):
             self._record(node, operation)
         self.generic_visit(node)
 
+    def visit_List(self, node: ast.List) -> None:
+        self._visit_sequence(node)
+
     def visit_Tuple(self, node: ast.Tuple) -> None:  # noqa: N802
-        self.visit_List(node)
+        self._visit_sequence(node)
 
 
 def _relative(path: Path, workspace_root: Path) -> str:

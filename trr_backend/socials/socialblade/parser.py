@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections import OrderedDict
+from collections.abc import Iterable
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -375,7 +376,7 @@ def _followers_chart_from_points(points_by_date: dict[str, int]) -> dict[str, An
     }
 
 
-def _sorted_dated_dict_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _sorted_dated_dict_rows(rows: Iterable[object]) -> list[dict[str, Any]]:
     """Keep untrusted tRPC list entries from reaching the date sort key."""
     return sorted(
         (row for row in rows if isinstance(row, dict)),
@@ -399,7 +400,7 @@ def _merge_followers_charts(*charts: dict[str, Any] | None) -> dict[str, Any] | 
 
 
 def _build_total_followers_chart_from_total_rows(
-    total_rows: list[dict[str, Any]],
+    total_rows: Iterable[object],
     *,
     metric_key: str = "followers",
 ) -> dict[str, Any] | None:
@@ -495,7 +496,7 @@ def _build_profile_stats_from_user_payload(
 
 
 def _history_rows_to_metrics(
-    history_rows: list[dict[str, Any]],
+    history_rows: Iterable[object],
     *,
     limit: int,
     platform: str = "instagram",
@@ -557,7 +558,7 @@ def _history_rows_to_metrics(
 
 def _build_total_followers_chart_from_daily_deltas(
     current_total: int,
-    daily_deltas: list[dict[str, Any]],
+    daily_deltas: Iterable[object],
 ) -> dict[str, Any] | None:
     dated_deltas = []
     for row in _sorted_dated_dict_rows(daily_deltas):

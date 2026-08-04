@@ -9,8 +9,11 @@ from typing import Any, Protocol
 class PlatformJobHandler(Protocol):
     """Executable handler for one platform/stage pair."""
 
-    platform: str
-    stage: str
+    @property
+    def platform(self) -> str: ...
+
+    @property
+    def stage(self) -> str: ...
 
     def supports(self, platform: str, stage: str) -> bool:
         """Return true when this handler owns the claimed job."""

@@ -56,7 +56,7 @@ def scrape_threads(
     username = getattr(request, "username", "")
 
     try:
-        from trr_backend.socials.threads.scraper import ThreadsScrapeConfig, ThreadsScraper
+        from trr_backend.socials.threads import ThreadsScrapeConfig, ThreadsScraper
 
         scraper = ThreadsScraper(cookies=load_cookies("scrape"))
         config = ThreadsScrapeConfig(
@@ -115,7 +115,7 @@ def preview_threads_profile(
     log = logger or _logger
 
     try:
-        from trr_backend.socials.threads.scraper import ThreadsScrapeConfig, ThreadsScraper
+        from trr_backend.socials.threads import ThreadsScrapeConfig, ThreadsScraper
 
         scraper = ThreadsScraper(cookies=load_cookies("preview"))
         posts = scraper.scrape(ThreadsScrapeConfig(username=username, max_pages=1))

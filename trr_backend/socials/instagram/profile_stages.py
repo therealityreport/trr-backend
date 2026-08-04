@@ -10,7 +10,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse, urlunparse
 from trr_backend.db import pg as _local_pg
 from trr_backend.socials.instagram.auth_runtime import _coerce_dt as _local_coerce_dt, _iso as _local_iso, _load_instagram_cookies as _local_load_instagram_cookies, _now_utc as _local_now_utc
@@ -196,9 +196,12 @@ def _instagram_following_rows_from_payload(
     source_page_ordinal: int,
     starting_rank: int,
 ) -> tuple[list[dict[str, Any]], str | None, bool]:
-    raw_rows = payload.get("users")
-    if not isinstance(raw_rows, list):
-        raw_rows = payload.get("items") if isinstance(payload.get("items"), list) else []
+    raw_rows: list[object] = []
+    for candidate_key in ("users", "items"):
+        candidate_rows = payload.get(candidate_key)
+        if isinstance(candidate_rows, list):
+            raw_rows = cast(list[object], candidate_rows)
+            break
     rows: list[dict[str, Any]] = []
     for index, raw_row in enumerate(raw_rows):
         if not isinstance(raw_row, Mapping):
@@ -1095,8 +1098,14 @@ def persist_instagram_profile_relationships(
     if not owner_profile_id:
         raise RuntimeError("Unable to materialize owner Instagram profile for relationship sync.")
 
+    normalized_relationship_payloads: dict[str, Any] | list[dict[str, Any]]
+    if isinstance(relationship_payloads, Mapping):
+        normalized_relationship_payloads = dict(relationship_payloads)
+    else:
+        normalized_relationship_payloads = [dict(payload) for payload in relationship_payloads]
+
     result = normalize_instagram_profile_relationships(
-        relationship_payloads,
+        normalized_relationship_payloads,
         owner_username=normalized_owner,
         intended_relationship_type=intended_relationship_type,
         source_cursor=source_cursor,

@@ -13,7 +13,7 @@ import time
 import uuid
 from datetime import UTC, datetime
 from importlib.metadata import version as package_version
-from typing import Final
+from typing import Any, Final
 
 from trr_backend.observability import configure_runtime_observability
 from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
@@ -552,7 +552,7 @@ _vision_image = (
 )
 
 _browser_image = _build_social_image_base(include_browser_runtime=True)
-_FUNCTION_IMAGE_BINDINGS: Final[dict[str, object]] = {
+_FUNCTION_IMAGE_BINDINGS: Final[dict[str, Any]] = {
     "serve_backend_api": _image,
     "run_admin_operation": _image,
     "run_admin_operation_v2": _image,

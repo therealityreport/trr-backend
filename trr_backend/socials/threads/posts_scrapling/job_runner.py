@@ -253,7 +253,7 @@ def _raise_if_cancelled(
 
 
 def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None = None) -> dict[str, Any]:
-    from trr_backend.socials.threads.scraper import ThreadsScrapeConfig, ThreadsScraper
+    from trr_backend.socials.threads import ThreadsScrapeConfig, ThreadsScraper
 
     job_id = str(job.get("id") or "").strip()
     run_id = str(job.get("run_id") or "").strip()

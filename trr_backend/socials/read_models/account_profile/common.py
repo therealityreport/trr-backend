@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from threading import RLock
-from typing import Any
+from typing import Any, cast
 
 from trr_backend.socials.read_models.account_profile.comment_breakdown import (
     build_instagram_comment_breakdown,
@@ -51,14 +51,14 @@ _PROVIDER_LOCK = RLock()
 _ABSENT_PROVIDER_BINDING = object()
 
 
-def _unconfigured_social_account_profile_post_item(*_args: Any, **_kwargs: Any) -> Any:
+def _unconfigured_social_account_profile_post_item(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
     raise RuntimeError(
         "ACCOUNT_PROFILE_PROVIDER_UNCONFIGURED: "
         "trr_backend.socials.social_season_analytics_impl has not finished loading"
     )
 
 
-_CORE_SOCIAL_ACCOUNT_PROFILE_POST_ITEM = _unconfigured_social_account_profile_post_item
+_CORE_SOCIAL_ACCOUNT_PROFILE_POST_ITEM: Callable[..., dict[str, Any]] = _unconfigured_social_account_profile_post_item
 
 _SOCIAL_ACCOUNT_PROFILE_COMMENT_SORT_FIELDS = {"user", "comment", "likes", "replies", "created"}
 _SOCIAL_ACCOUNT_PROFILE_COMMENT_SORT_DIRECTIONS = {"asc", "desc"}
@@ -137,7 +137,10 @@ def _configure_legacy_provider(provider: Mapping[str, Any]) -> None:
             raise RuntimeError(
                 "ACCOUNT_PROFILE_PROVIDER_INVALID: missing callable room wrappers: " + ", ".join(invalid_wrappers)
             )
-        staged_post_item = staged_room_wrappers["_social_account_profile_post_item"]
+        staged_post_item = cast(
+            Callable[..., dict[str, Any]],
+            staged_room_wrappers["_social_account_profile_post_item"],
+        )
         staged_bindings = {name: provider[name] for name in staged_imported_names - _LOCAL_ROOM_NAMES}
         prior_globals = {name: globals().get(name, _ABSENT_PROVIDER_BINDING) for name in staged_bindings}
         prior_imported_names = set(_IMPORTED_CORE_NAMES)

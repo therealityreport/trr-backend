@@ -702,9 +702,10 @@ def get_social_account_catalog_gap_analysis_status(platform: str, account_handle
         current_result = completed_result
         stale = True
 
-    result_payload = (
-        latest_operation.get("result_payload") if isinstance(latest_operation.get("result_payload"), dict) else {}
-    )
+    result_payload: dict[str, Any] = {}
+    candidate_result_payload = latest_operation.get("result_payload")
+    if isinstance(candidate_result_payload, dict):
+        result_payload = candidate_result_payload
     completed_payload: dict[str, Any] = {}
     if isinstance(latest_completed_operation, dict):
         candidate_completed_payload = latest_completed_operation.get("result_payload")

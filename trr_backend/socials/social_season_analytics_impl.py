@@ -31560,7 +31560,7 @@ def _run_platform_media_mirror_stage(
         if needs_re_resolve and source_id:
             _heartbeat()
             try:
-                from trr_backend.socials.threads.media_resolver import resolve_threads_media
+                from trr_backend.socials.threads import resolve_threads_media
 
                 raw_data = config.get("_raw_data")
                 if not isinstance(raw_data, dict) or not raw_data:
@@ -32565,7 +32565,7 @@ def _run_generic_comment_media_mirror_stage(
         raw_data = comment_row.get("raw_data") if isinstance(comment_row.get("raw_data"), dict) else {}
         if raw_data:
             try:
-                from trr_backend.socials.threads.media_resolver import resolve_threads_media
+                from trr_backend.socials.threads import resolve_threads_media
 
                 resolution = resolve_threads_media(raw_data, validate_urls=False)
                 source_media_urls = _normalize_unique_terms(list(resolution.media_urls or []))
@@ -49060,7 +49060,7 @@ def list_runs(
     date_start: datetime | None = None,
     date_end: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    from trr_backend.socials.control_plane.run_reads import list_runs as impl
+    from trr_backend.socials.control_plane.dispatch import list_runs as impl
 
     source_scope = normalize_source_scope(source_scope) if source_scope is not None else None
     return impl(
@@ -49090,7 +49090,7 @@ def list_run_summaries(
     date_start: datetime | None = None,
     date_end: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    from trr_backend.socials.control_plane.run_reads import list_run_summaries as impl
+    from trr_backend.socials.control_plane.dispatch import list_run_summaries as impl
 
     source_scope = normalize_source_scope(source_scope) if source_scope is not None else None
     return impl(
@@ -50432,7 +50432,7 @@ def get_run_progress_snapshot(
     *,
     recent_log_limit: int = 20,
 ) -> dict[str, Any]:
-    from trr_backend.socials.control_plane.run_reads import get_run_progress_snapshot as impl
+    from trr_backend.socials.control_plane.dispatch import get_run_progress_snapshot as impl
 
     return impl(season_id, run_id, recent_log_limit=recent_log_limit)
 
