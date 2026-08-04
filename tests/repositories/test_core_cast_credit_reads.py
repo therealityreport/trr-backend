@@ -35,7 +35,7 @@ def _compact(sql: str) -> str:
 )
 def test_list_show_cast_preserves_app_view_filters_order_and_limit(
     monkeypatch: pytest.MonkeyPatch,
-    view: str,
+    view: core_cast_credit_reads.ShowCastView,
     expected_sql: str,
     expected_params: list[Any],
 ) -> None:

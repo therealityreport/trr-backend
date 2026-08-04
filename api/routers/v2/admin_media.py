@@ -618,7 +618,7 @@ def list_media_links(request: Request, _: InternalAdminUser) -> AdminMediaLinksR
     )
     try:
         links, _query_count = admin_media_service.get_media_links(media_asset_id)
-        return AdminMediaLinksResponseV2(links=links)
+        return AdminMediaLinksResponseV2.model_validate({"links": links})
     except Exception as error:
         raise _unexpected_problem(error, request, operation="list-media-links") from error
 

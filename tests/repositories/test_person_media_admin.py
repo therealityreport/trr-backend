@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any, cast
 
 import pytest
 
@@ -106,19 +107,19 @@ def test_remove_cover_photo_reports_whether_a_row_was_deleted(
 )
 def test_update_thumbnail_crop_preserves_the_existing_flat_result_contract(
     monkeypatch: pytest.MonkeyPatch,
-    origin: str,
-    raw_row: dict[str, object],
+    origin: person_media_admin.ThumbnailCropOrigin,
+    raw_row: dict[str, Any],
     expected_link_id: str | None,
 ) -> None:
     calls: list[tuple[str, list[object]]] = []
 
-    def fake_execute_returning(sql: str, params: list[object]) -> list[dict[str, object]]:
+    def fake_execute_returning(sql: str, params: list[object]) -> list[dict[str, Any]]:
         calls.append((sql, params))
         return [raw_row]
 
     monkeypatch.setattr(person_media_admin.pg, "execute_returning", fake_execute_returning)
     crop = raw_row.get("metadata", raw_row.get("context"))
-    crop_payload = crop["thumbnail_crop"] if isinstance(crop, dict) else None
+    crop_payload = cast(dict[str, Any] | None, crop.get("thumbnail_crop") if isinstance(crop, dict) else None)
 
     result, query_count = person_media_admin.update_thumbnail_crop(
         origin=origin,
@@ -133,6 +134,7 @@ def test_update_thumbnail_crop_preserves_the_existing_flat_result_contract(
     assert result["photo_id"] == PHOTO_ID
     assert result["person_id"] == PERSON_ID
     assert result["link_id"] == expected_link_id
+    assert crop_payload is not None
     assert result["thumbnail_crop_mode"] == crop_payload["mode"]
     assert calls[0][1][0:2] == [PHOTO_ID, PERSON_ID]
     assert isinstance(calls[0][1][2], str)

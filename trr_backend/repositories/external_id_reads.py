@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 from trr_backend.db import pg
 from trr_backend.repositories import person_external_ids
@@ -21,8 +21,8 @@ def _unique_ids(values: Sequence[str]) -> list[str]:
     return unique
 
 
-def _map_person_records(rows: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    return person_external_ids.map_primary_person_external_id_rows(rows)
+def _map_person_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return person_external_ids.map_primary_person_external_id_rows([cast(Mapping[str, Any], row) for row in rows])
 
 
 def get_person_external_ids(

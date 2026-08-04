@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fastapi import FastAPI
@@ -377,7 +377,7 @@ def test_missing_backend_service_is_safe_503(
 
 
 def test_v2_core_show_reads_openapi_is_explicit_and_public(client: TestClient) -> None:
-    schema = client.app.openapi()
+    schema = cast(FastAPI, client.app).openapi()
     expected = {
         "/api/v2/shows": "listPublicCoreShowsV2",
         "/api/v2/shows/{show_id}": "getPublicCoreShowV2",

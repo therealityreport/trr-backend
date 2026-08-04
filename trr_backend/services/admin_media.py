@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import math
 import re
-from typing import Any
+from typing import Any, cast
 
 from trr_backend.repositories import admin_media as admin_media_repo
 from trr_backend.repositories import admin_show_reads as show_reads_repo
@@ -247,7 +247,8 @@ def update_media_link_context(
     link, query_count = admin_media_repo.update_media_link_context(link_id, patch)
     if link is None:
         return None, query_count
-    context = link.get("context") if isinstance(link.get("context"), dict) else {}
+    context_value = link.get("context")
+    context = cast(dict[str, Any], context_value) if isinstance(context_value, dict) else {}
     return (
         {
             "link_id": str(link.get("id") or ""),

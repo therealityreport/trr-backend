@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import UTC, datetime
 
 import pytest
@@ -20,7 +21,7 @@ GALLERY_KEY = f"person:{PERSON_ID}:gallery:100:0:0:1:"
 
 
 @pytest.fixture(autouse=True)
-def clear_person_read_cache() -> None:
+def clear_person_read_cache() -> Iterator[None]:
     invalidate_person_read_cache()
     yield
     invalidate_person_read_cache()

@@ -161,7 +161,7 @@ async def create_covered_show(request: Request, admin: InternalAdminUser) -> Cov
             show_name=body.show_name,
             actor_uid=_actor_uid(admin, request),
         )
-        return CoveredShowResponseV2(show=show)
+        return CoveredShowResponseV2.model_validate({"show": show})
     except HTTPException:
         raise
     except Exception as error:
@@ -188,7 +188,7 @@ def get_covered_show(request: Request, _: InternalAdminUser) -> CoveredShowRespo
             message="Show not found in covered shows list.",
         )
     try:
-        return CoveredShowResponseV2(show=show)
+        return CoveredShowResponseV2.model_validate({"show": show})
     except Exception as error:
         raise _unexpected_problem(error, request, operation="detail-response") from error
 
