@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from typing import Any
 
 import pytest
 
@@ -18,7 +19,7 @@ def _completed(command: list[str], stdout: object = None) -> subprocess.Complete
 
 
 def test_cleanup_blocks_when_authoritative_workspace_is_not_ready(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[dict[str, object]] = []
+    calls: list[dict[str, Any]] = []
 
     def fake_run(command, **kwargs):
         calls.append({"command": command, **kwargs})
@@ -42,7 +43,7 @@ def test_cleanup_blocks_when_authoritative_workspace_is_not_ready(monkeypatch: p
 
 
 def test_cleanup_stops_wrong_workspace_app_after_authoritative_readiness(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[dict[str, object]] = []
+    calls: list[dict[str, Any]] = []
 
     def fake_run(command, **kwargs):
         calls.append({"command": command, **kwargs})

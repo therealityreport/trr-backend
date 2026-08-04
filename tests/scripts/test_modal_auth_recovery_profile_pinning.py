@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -9,7 +10,7 @@ from scripts.modal import refresh_instagram_cookies_from_chrome as chrome_refres
 
 
 def test_chrome_cookie_refresh_push_to_modal_pins_admin_profile(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[dict[str, object]] = []
+    calls: list[dict[str, Any]] = []
 
     def fake_run(command, **kwargs):
         calls.append({"command": command, **kwargs})
@@ -26,7 +27,7 @@ def test_chrome_cookie_refresh_push_to_modal_pins_admin_profile(monkeypatch: pyt
 
 
 def test_chrome_cookie_refresh_deploy_uses_pinned_wrapper(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[dict[str, object]] = []
+    calls: list[dict[str, Any]] = []
 
     def fake_run(command, **kwargs):
         calls.append({"command": command, **kwargs})
