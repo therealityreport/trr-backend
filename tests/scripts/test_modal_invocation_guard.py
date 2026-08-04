@@ -41,6 +41,22 @@ def test_new_modal_deploy_call_fails_static_guard(tmp_path: Path) -> None:
     assert violations[0].function == "surprise_deploy"
 
 
+def test_scan_does_not_exclude_paths_for_a_generated_temp_parent(tmp_path: Path) -> None:
+    workspace = tmp_path / "generated" / "workspace"
+    script = workspace / "TRR-Backend" / "scripts" / "lookup.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import modal\ndef lookup():\n    return modal.Function.from_name('trr-backend-jobs', 'run_social_job')\n",
+        encoding="utf-8",
+    )
+
+    invocations = guard.scan_invocations(workspace)
+
+    assert [item.approval_key for item in invocations] == [
+        ("TRR-Backend/scripts/lookup.py", "lookup", "sdk_function_from_name")
+    ]
+
+
 def test_new_modal_secret_mutation_fails_static_guard(tmp_path: Path) -> None:
     workspace = tmp_path
     script = workspace / "scripts" / "secret.sh"
