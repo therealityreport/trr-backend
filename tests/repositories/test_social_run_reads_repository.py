@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any, cast
 
 import pytest
 
@@ -27,7 +28,7 @@ def test_legacy_list_run_summaries_delegates_to_control_plane_run_reads(
 
     monkeypatch.setattr(run_reads, "list_run_summaries", lambda *_args, **_kwargs: expected)
 
-    payload = social_repo.list_run_summaries("season-1")
+    payload = cast(Any, social_repo).list_run_summaries("season-1")
 
     assert payload is expected
 

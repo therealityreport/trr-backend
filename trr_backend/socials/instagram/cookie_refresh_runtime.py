@@ -7,7 +7,7 @@ import logging
 import os
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -67,7 +67,7 @@ def _remaining_timeout_ms(deadline: float, *, floor_ms: int = 1_000) -> int:
     return max(floor_ms, remaining)
 
 
-def _cookie_payload(cookies: list[dict[str, Any]]) -> dict[str, str]:
+def _cookie_payload(cookies: Iterable[Mapping[str, object]]) -> dict[str, str]:
     payload: dict[str, str] = {}
     for cookie in cookies:
         domain = str(cookie.get("domain") or "")
@@ -259,6 +259,8 @@ def refresh_instagram_cookies(
                             cookies = {}
                 if cookies.get("sessionid"):
                     storage_state = context.storage_state()
+                    if storage_state is None:
+                        raise RuntimeError("Instagram login completed without browser storage state")
                     session.close()
                     browser = None
                     browser_sessions.import_bootstrapped_session(

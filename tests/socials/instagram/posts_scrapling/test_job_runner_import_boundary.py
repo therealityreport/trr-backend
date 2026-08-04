@@ -36,6 +36,11 @@ def _run_fresh_process(script: str) -> None:
         ) from exc
 
 
+def _unparse_annotation(annotation: ast.expr | None) -> str:
+    assert annotation is not None
+    return ast.unparse(annotation)
+
+
 def test_runner_source_keeps_the_exact_function_scoped_import_boundary_and_signature() -> None:
     source = RUNNER_PATH.read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -59,16 +64,16 @@ def test_runner_source_keeps_the_exact_function_scoped_import_boundary_and_signa
     arguments = runner.args
     assert arguments.posonlyargs == []
     assert [argument.arg for argument in arguments.args] == ["job"]
-    assert ast.unparse(arguments.args[0].annotation) == "dict[str, Any]"
+    assert _unparse_annotation(arguments.args[0].annotation) == "dict[str, Any]"
     assert arguments.defaults == []
     assert arguments.vararg is None
     assert [argument.arg for argument in arguments.kwonlyargs] == ["worker_id"]
-    assert ast.unparse(arguments.kwonlyargs[0].annotation) == "str | None"
+    assert _unparse_annotation(arguments.kwonlyargs[0].annotation) == "str | None"
     assert len(arguments.kw_defaults) == 1
     assert isinstance(arguments.kw_defaults[0], ast.Constant)
     assert arguments.kw_defaults[0].value is None
     assert arguments.kwarg is None
-    assert ast.unparse(runner.returns) == "dict[str, Any]"
+    assert _unparse_annotation(runner.returns) == "dict[str, Any]"
 
 
 def test_cold_import_and_first_call_load_the_exact_module_proxy_without_partial_state() -> None:
