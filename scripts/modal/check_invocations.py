@@ -262,7 +262,10 @@ def scan_invocations(workspace_root: Path = WORKSPACE_ROOT) -> list[Invocation]:
         if not root.is_dir():
             continue
         for path in root.rglob("*"):
-            if not path.is_file() or any(part in EXCLUDED_PARTS for part in path.parts):
+            if not path.is_file():
+                continue
+            relative_parts = path.relative_to(workspace_root).parts
+            if any(part in EXCLUDED_PARTS for part in relative_parts):
                 continue
             if path.suffix in {".py", ".sh", ".bash", ".zsh", ".mk"} or path.name == "Makefile":
                 candidates.add(path)

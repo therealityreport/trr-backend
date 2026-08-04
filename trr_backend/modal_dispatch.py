@@ -602,7 +602,7 @@ def _dispatcher_worker_id(dispatcher_name: str) -> str:
 def _resolve_dispatcher_runtime_version_stamp() -> dict[str, Any]:
     return build_runtime_version_stamp(
         getenv=os.getenv,
-        modal_environment=modal_environment_name() or None,
+        modal_environment=modal_environment_name() or _REQUIRED_MODAL_ENVIRONMENT,
         modal_function=modal_social_job_function_name() or None,
         execution_backend=execution_backend_canonical(),
     )

@@ -375,6 +375,14 @@ def _followers_chart_from_points(points_by_date: dict[str, int]) -> dict[str, An
     }
 
 
+def _sorted_dated_dict_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep untrusted tRPC list entries from reaching the date sort key."""
+    return sorted(
+        (row for row in rows if isinstance(row, dict)),
+        key=lambda item: str(item.get("date") or ""),
+    )
+
+
 def _merge_followers_charts(*charts: dict[str, Any] | None) -> dict[str, Any] | None:
     merged_points: dict[str, int] = {}
     for chart in charts:
@@ -396,7 +404,7 @@ def _build_total_followers_chart_from_total_rows(
     metric_key: str = "followers",
 ) -> dict[str, Any] | None:
     points_by_date: dict[str, int] = {}
-    for row in sorted(total_rows, key=lambda item: str(item.get("date") or "")):
+    for row in _sorted_dated_dict_rows(total_rows):
         if not isinstance(row, dict):
             continue
         date = str(row.get("date") or "")[:10]
@@ -495,7 +503,7 @@ def _history_rows_to_metrics(
     ordered_totals: OrderedDict[str, dict[str, int]] = OrderedDict()
     third_metric_keys = _history_third_metric_keys(platform)
     third_metric_label = _history_third_metric_label(platform)
-    for row in sorted(history_rows, key=lambda item: str(item.get("date") or "")):
+    for row in _sorted_dated_dict_rows(history_rows):
         date = str(row.get("date") or "")[:10]
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
             continue
@@ -552,7 +560,7 @@ def _build_total_followers_chart_from_daily_deltas(
     daily_deltas: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
     dated_deltas = []
-    for row in sorted(daily_deltas, key=lambda item: str(item.get("date") or "")):
+    for row in _sorted_dated_dict_rows(daily_deltas):
         date = str(row.get("date") or "")[:10]
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
             continue

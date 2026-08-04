@@ -32,7 +32,8 @@ def _select_preferred_cookie_candidate(
     if not required_cookie_names_any and not required_cookie_names_all:
         return dict(candidates[0])
 
-    def _score(candidate: dict[str, str]) -> tuple[int, int]:
+    def _score(candidate: dict[str, str]) -> tuple[int, int, int]:
+        has_session = int(bool(str(candidate.get("sessionid") or "").strip()))
         has_all = int(
             all(str(candidate.get(name) or "").strip() for name in required_cookie_names_all)
             if required_cookie_names_all
@@ -43,9 +44,9 @@ def _select_preferred_cookie_candidate(
             if required_cookie_names_any
             else True
         )
-        return (has_all, has_any)
+        return (has_session, has_all, has_any)
 
-    best_score: tuple[int, int] | None = None
+    best_score: tuple[int, int, int] | None = None
     best_candidate: dict[str, str] | None = None
     for candidate in candidates:
         score = _score(candidate)
