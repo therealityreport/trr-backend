@@ -5,7 +5,10 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any
 
-import trr_backend.socials.social_season_analytics_impl as legacy
+from trr_backend.socials.control_plane.run_lifecycle import _legacy_module as _load_legacy_module
+
+legacy = _load_legacy_module()
+del _load_legacy_module
 
 
 def _call_extracted_override(name: str, local_impl: Any, /, *args: Any, **kwargs: Any) -> Any:
@@ -88,7 +91,6 @@ def _reconcile_terminal_frontier_modal_call(
     worker_id = str(row.get("worker_id") or "").strip()
     if lease_owner and lease_owner not in {job_id, worker_id}:
         return None
-
     enqueue_result = legacy._coerce_shared_posts_enqueue_result(
         legacy._enqueue_shared_posts_job(
             run_id=run_id,
@@ -146,7 +148,6 @@ def _reconcile_terminal_frontier_modal_call(
         old_job_status = "cancelled"
         error_code = "terminal_modal_frontier_requeued"
         next_available_at = None
-
     legacy._release_shared_account_run_frontier(
         run_id=run_id,
         platform=platform,
@@ -376,7 +377,6 @@ def reconcile_terminal_modal_running_jobs(
     )
     if not rows:
         return []
-
     reconciled_rows: list[dict[str, Any]] = []
     now_utc = legacy._now_utc()
     for row in rows:

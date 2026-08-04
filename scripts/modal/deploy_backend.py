@@ -23,6 +23,7 @@ from scripts.modal.api_canary import DEFAULT_CANARY_TIMEOUT_SECONDS, run_api_col
 
 DEFAULT_APP_REF = "trr_backend.modal_jobs"
 DEFAULT_APP_NAME = "trr-backend-jobs"
+REQUIRED_MODAL_ENVIRONMENT = "main"
 DEFAULT_INCIDENT_NOTE = (
     REPO_ROOT / "docs" / "observability" / "modal-v439-v440-serve-backend-api-crash-loop-2026-05-28.md"
 )
@@ -71,7 +72,10 @@ def pinned_modal_env(environ: dict[str, str] | None = None) -> dict[str, str]:
             if key not in env and value is not None:
                 env[key] = str(value)
     env["MODAL_PROFILE"] = REQUIRED_MODAL_PROFILE
+    env["MODAL_WORKSPACE"] = REQUIRED_MODAL_WORKSPACE
+    env["MODAL_ENVIRONMENT"] = REQUIRED_MODAL_ENVIRONMENT
     env["TRR_MODAL_APP_NAME"] = DEFAULT_APP_NAME
+    env["TRR_MODAL_APP_REF"] = DEFAULT_APP_REF
     return env
 
 
@@ -125,6 +129,30 @@ def build_deploy_command(args: argparse.Namespace) -> list[str]:
     return command
 
 
+def validate_target_identity(args: argparse.Namespace) -> None:
+    observed = {
+        "app_ref": str(args.app_ref or "").strip(),
+        "app_name": str(args.app_name or "").strip(),
+        "environment": str(args.env or "").strip(),
+        "deployment_name": str(args.name or "").strip(),
+    }
+    expected = {
+        "app_ref": DEFAULT_APP_REF,
+        "app_name": DEFAULT_APP_NAME,
+        "environment": REQUIRED_MODAL_ENVIRONMENT,
+    }
+    for key, expected_value in expected.items():
+        if observed[key] != expected_value:
+            raise RuntimeError(
+                f"Modal target override blocked: {key}={observed[key] or '<empty>'}; expected {expected_value}."
+            )
+    if observed["deployment_name"] and observed["deployment_name"] != DEFAULT_APP_NAME:
+        raise RuntimeError(
+            "Modal target override blocked: "
+            f"deployment_name={observed['deployment_name']}; expected empty or {DEFAULT_APP_NAME}."
+        )
+
+
 def build_readiness_command(args: argparse.Namespace) -> list[str]:
     command = [
         python_command(),
@@ -171,9 +199,48 @@ def build_deploy_history_command(args: argparse.Namespace) -> list[str]:
     return command
 
 
-def fetch_deploy_history(args: argparse.Namespace, *, env: dict[str, str]) -> list[dict[str, Any]]:
+def _row_text(row: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def resolve_modal_app_id(args: argparse.Namespace, *, env: dict[str, str]) -> str:
+    """Resolve the immutable app ID from the app listing before history/rollback."""
+    command = [python_command(), "-m", "modal", "app", "list", "--json"]
+    if args.env:
+        command.extend(["--env", args.env])
     completed = subprocess.run(
-        build_deploy_history_command(args),
+        command,
+        cwd=REPO_ROOT,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(completed.stdout or "[]")
+    for row in payload if isinstance(payload, list) else []:
+        if not isinstance(row, dict):
+            continue
+        names = {
+            _row_text(row, "name", "Name", "app_name", "App Name"),
+            _row_text(row, "description", "Description"),
+        }
+        if args.app_name in names:
+            app_id = _row_text(row, "app_id", "App ID", "id", "ID")
+            if app_id:
+                return app_id
+    raise RuntimeError(f"Modal app ID not found for {args.app_name!r} in the pinned app listing.")
+
+
+def fetch_deploy_history(args: argparse.Namespace, *, env: dict[str, str]) -> list[dict[str, Any]]:
+    app_id = resolve_modal_app_id(args, env=env)
+    history_args = argparse.Namespace(**vars(args))
+    history_args.app_name = app_id
+    completed = subprocess.run(
+        build_deploy_history_command(history_args),
         cwd=REPO_ROOT,
         env=env,
         check=True,
@@ -209,11 +276,11 @@ def format_deploy_history_stamp(
     for row in history_rows[: max(1, limit)]:
         lines.append(
             "| "
-            f"{row.get('Version') or ''} | "
-            f"{row.get('Time deployed') or ''} | "
-            f"{row.get('Deployed by') or ''} | "
-            f"{row.get('Commit') or ''} | "
-            f"{row.get('Client') or ''} |"
+            f"{_row_text(row, 'version', 'Version')} | "
+            f"{_row_text(row, 'time_deployed', 'Time deployed', 'deployed_at')} | "
+            f"{_row_text(row, 'deployed_by', 'Deployed by')} | "
+            f"{_row_text(row, 'commit', 'Commit')} | "
+            f"{_row_text(row, 'client', 'Client')} |"
         )
     lines.extend(["", HISTORY_STAMP_END, ""])
     return "\n".join(lines)
@@ -259,7 +326,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_APP_REF,
         help=f"Modal app module to deploy (default: {DEFAULT_APP_REF})",
     )
-    parser.add_argument("--env", default="", help="Optional Modal environment name.")
+    parser.add_argument(
+        "--env",
+        default=REQUIRED_MODAL_ENVIRONMENT,
+        help=f"Pinned Modal environment name (required: {REQUIRED_MODAL_ENVIRONMENT}).",
+    )
     parser.add_argument("--app-name", default=DEFAULT_APP_NAME, help=f"Modal app name (default: {DEFAULT_APP_NAME}).")
     parser.add_argument("--name", default="", help="Optional Modal deployment name override.")
     parser.add_argument("--tag", default="", help="Optional Modal deployment tag.")
@@ -293,13 +364,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    try:
+        validate_target_identity(args)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr, flush=True)
+        return 2
     env = pinned_modal_env()
     context = verify_required_workspace(env=env)
     command = build_deploy_command(args)
     print(
         "Modal deploy target: "
         f"profile={context['active_profile']} workspace={context['active_workspace']} "
-        f"app_ref={args.app_ref}",
+        f"environment={args.env} app_name={args.app_name} app_ref={args.app_ref}",
         flush=True,
     )
     if args.dry_run:

@@ -1,0 +1,103 @@
+{
+  "version": 1,
+  "allowed": [
+    {
+      "path": "TRR-Backend/scripts/modal/cleanup_wrong_workspace_deploy.py",
+      "function": "cleanup_wrong_workspace_deploy",
+      "operation": "app_stop",
+      "max_occurrences": 1,
+      "reason": "Purpose-built cleanup only; stop is rejected before subprocess unless profile, workspace, environment, app, and app ref exactly match the known mistaken deployment."
+    },
+    {
+      "path": "TRR-Backend/scripts/modal/deploy_backend.py",
+      "function": "build_deploy_command",
+      "operation": "deploy",
+      "max_occurrences": 1,
+      "reason": "Canonical guarded TRR deploy entrypoint; validates immutable profile, workspace, environment, app, and app ref."
+    },
+    {
+      "path": "TRR-Backend/scripts/modal/diagnose_instagram_comments_remote.py",
+      "function": "_invoke_deployed_comments_lane",
+      "operation": "sdk_function_from_name",
+      "max_occurrences": 1,
+      "reason": "Read-only diagnostics resolve the deployed comments lane by name before a bounded probe."
+    },
+    {
+      "path": "TRR-Backend/scripts/modal/prepare_named_secrets.py",
+      "function": "_modal_secret_create_command",
+      "operation": "secret_create",
+      "max_occurrences": 1,
+      "reason": "Explicit secret preparation stage; main is mandatory, subprocess identity is fully pinned, and apply requires an explicit flag."
+    },
+    {
+      "path": "TRR-Backend/scripts/modal/reconcile_modal_runtime.py",
+      "function": "deploy_modal_app",
+      "operation": "deploy",
+      "max_occurrences": 1,
+      "reason": "Bounded runtime reconciler; fixed app ref and main plus fully pinned subprocess identity, gated by WORKSPACE_RUNTIME_MODAL_AUTO_DEPLOY."
+    },
+    {
+      "path": "TRR-Backend/scripts/modal/refresh_instagram_cookies_from_chrome.py",
+      "function": "_deploy_modal",
+      "operation": "deploy",
+      "max_occurrences": 1,
+      "reason": "Explicit auth-repair deploy stage; fixed app ref and main plus fully pinned subprocess identity and separate deploy confirmation."
+    },
+    {
+      "path": "TRR-Backend/scripts/modal/refresh_instagram_cookies_from_chrome.py",
+      "function": "_verify_remote_auth",
+      "operation": "sdk_function_from_name",
+      "max_occurrences": 1,
+      "reason": "The bounded auth-repair verifier resolves the canonical remote auth probe by name."
+    },
+    {
+      "path": "TRR-Backend/scripts/modal/render_cutover_commands.py",
+      "function": "main",
+      "operation": "deploy",
+      "max_occurrences": 1,
+      "reason": "The cutover helper renders the reviewed deploy command for an operator; it does not execute it."
+    },
+    {
+      "path": "TRR-Backend/scripts/modal/repair_instagram_auth.py",
+      "function": "_deploy_modal_command",
+      "operation": "deploy",
+      "max_occurrences": 1,
+      "reason": "Bounded auth-repair orchestration; rejects any noncanonical profile, workspace, environment, app, or app ref before subprocess and supports dry-run."
+    },
+    {
+      "path": "TRR-Backend/scripts/modal/verify_instagram_posts_auth.py",
+      "function": "verify_instagram_posts_auth",
+      "operation": "sdk_function_from_name",
+      "max_occurrences": 1,
+      "reason": "Read-only Instagram posts auth verification resolves its configured deployed probe by name."
+    },
+    {
+      "path": "TRR-Backend/scripts/modal/verify_instagram_public_history.py",
+      "function": "verify_instagram_public_history",
+      "operation": "sdk_function_from_name",
+      "max_occurrences": 1,
+      "reason": "Read-only public-history verification resolves the configured deployed function by name."
+    },
+    {
+      "path": "TRR-Backend/scripts/socials/instagram/one_post_media_mirror.py",
+      "function": "_run_modal",
+      "operation": "sdk_function_from_name",
+      "max_occurrences": 1,
+      "reason": "The explicit one-post media mirror resolves its Modal worker function by name."
+    },
+    {
+      "path": "TRR-Backend/trr_backend/modal_dispatch.py",
+      "function": "get_trr_modal_function_handle",
+      "operation": "sdk_function_from_name",
+      "max_occurrences": 1,
+      "reason": "Sole Modal SDK resolver; rejects noncanonical profile, workspace, environment, app, and app ref before lookup."
+    },
+    {
+      "path": "TRR-Backend/trr_backend/vision/people_count_service.py",
+      "function": "_invoke_people_count_modal",
+      "operation": "sdk_function_from_name",
+      "max_occurrences": 1,
+      "reason": "The explicit people-count service resolves its Modal worker function by name."
+    }
+  ]
+}

@@ -285,10 +285,7 @@ def tool_modal_readiness(probe_remote_auth: str | None = None) -> str:
             return _format_result(
                 title="modal_readiness",
                 command=_readiness_cmd(),
-                error=(
-                    f"Unsupported platform {platform!r}. "
-                    f"Choose one of: {', '.join(REMOTE_AUTH_PLATFORMS)}."
-                ),
+                error=(f"Unsupported platform {platform!r}. Choose one of: {', '.join(REMOTE_AUTH_PLATFORMS)}."),
             )
         extra = ["--probe-remote-auth", platform]
         timeout = PROBE_TIMEOUT_SECONDS
@@ -416,8 +413,7 @@ def tool_rollback_preview(version: str) -> str:
         title="rollback_preview",
         payload={"app_id": app_id, "version": requested_version, "command": command, "executed": False},
         note=(
-            "Preview only. A separately authorized release owner must re-confirm "
-            "identity immediately before execution."
+            "Preview only. A separately authorized release owner must re-confirm identity immediately before execution."
         ),
     )
 

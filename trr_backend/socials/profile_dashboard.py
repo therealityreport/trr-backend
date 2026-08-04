@@ -20,6 +20,7 @@ def _deferred_get_social_account_catalog_run_progress(*args: Any, **kwargs: Any)
 
     return get_social_account_catalog_run_progress(*args, **kwargs)
 
+
 logger = logging.getLogger(__name__)
 
 analytics_repo = SimpleNamespace(

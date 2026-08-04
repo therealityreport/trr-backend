@@ -8,6 +8,7 @@ from typing import Any
 
 from trr_backend.db import pg
 from trr_backend.modal_dispatch import cancel_modal_function_call
+from trr_backend.socials.control_plane.dispatch_runtime import legacy as _legacy
 from trr_backend.socials.control_plane.shared_status_reads import (
     get_season_shared_status,
     list_shared_runs,
@@ -21,31 +22,29 @@ from trr_backend.socials.read_models.account_profile.common import (
     get_social_account_profile_posts,
     get_social_account_profile_summary,
 )
-from trr_backend.socials.social_season_analytics_impl import (
-    _default_targets,
-    _normalize_catalog_backfill_window,
-    _shared_account_catalog_requires_modal_executor,
-    cancel_shared_run,
-    dismiss_social_account_catalog_run,
-    get_season_context,
-    get_shared_account_sources,
-    get_social_account_catalog_freshness,
-    get_social_account_catalog_gap_analysis_status,
-    get_social_account_catalog_posts,
-    get_social_account_catalog_review_queue,
-    get_social_account_catalog_verification,
-    get_social_account_profile_hashtag_timeline,
-    get_targets,
-    list_shared_review_queue,
-    put_shared_account_sources,
-    put_social_account_profile_hashtags,
-    put_targets,
-    resolve_shared_review_queue_item,
-    resolve_social_account_catalog_review_queue_item,
-)
-from trr_backend.socials.social_season_analytics_impl import (
-    cancel_social_account_catalog_run as _legacy_cancel_social_account_catalog_run,
-)
+
+_default_targets = _legacy._default_targets
+_normalize_catalog_backfill_window = _legacy._normalize_catalog_backfill_window
+_shared_account_catalog_requires_modal_executor = _legacy._shared_account_catalog_requires_modal_executor
+cancel_shared_run = _legacy.cancel_shared_run
+dismiss_social_account_catalog_run = _legacy.dismiss_social_account_catalog_run
+get_season_context = _legacy.get_season_context
+get_shared_account_sources = _legacy.get_shared_account_sources
+get_social_account_catalog_freshness = _legacy.get_social_account_catalog_freshness
+get_social_account_catalog_gap_analysis_status = _legacy.get_social_account_catalog_gap_analysis_status
+get_social_account_catalog_posts = _legacy.get_social_account_catalog_posts
+get_social_account_catalog_review_queue = _legacy.get_social_account_catalog_review_queue
+get_social_account_catalog_verification = _legacy.get_social_account_catalog_verification
+get_social_account_profile_hashtag_timeline = _legacy.get_social_account_profile_hashtag_timeline
+get_targets = _legacy.get_targets
+list_shared_review_queue = _legacy.list_shared_review_queue
+put_shared_account_sources = _legacy.put_shared_account_sources
+put_social_account_profile_hashtags = _legacy.put_social_account_profile_hashtags
+put_targets = _legacy.put_targets
+resolve_shared_review_queue_item = _legacy.resolve_shared_review_queue_item
+resolve_social_account_catalog_review_queue_item = _legacy.resolve_social_account_catalog_review_queue_item
+_legacy_cancel_social_account_catalog_run = _legacy.cancel_social_account_catalog_run
+del _legacy
 
 batch_upsert_shared_catalog_instagram_posts = _batch_upsert_shared_catalog_instagram_posts
 default_targets = _default_targets

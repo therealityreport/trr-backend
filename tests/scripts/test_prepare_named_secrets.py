@@ -385,8 +385,7 @@ def test_main_runtime_only_never_materializes_or_selects_social_secret(
 ) -> None:
     source_env = tmp_path / "source.env"
     source_env.write_text(
-        "TRR_DB_URL=postgresql://example\n"
-        "SOCIAL_INSTAGRAM_COOKIES_FILE=/tmp/missing-social-auth.json\n",
+        "TRR_DB_URL=postgresql://example\nSOCIAL_INSTAGRAM_COOKIES_FILE=/tmp/missing-social-auth.json\n",
         encoding="utf-8",
     )
     output_dir = tmp_path / "rendered"
@@ -418,7 +417,6 @@ def test_main_runtime_only_never_materializes_or_selects_social_secret(
     assert len(commands) == 1
     assert cli.DEFAULT_RUNTIME_SECRET in commands[0]
     assert cli.DEFAULT_SOCIAL_SECRET not in commands[0]
-    assert (
-        'CORS_ALLOW_ORIGINS="https://thereality.report,https://admin.thereality.report"'
-        in runtime_file.read_text(encoding="utf-8")
+    assert 'CORS_ALLOW_ORIGINS="https://thereality.report,https://admin.thereality.report"' in runtime_file.read_text(
+        encoding="utf-8"
     )

@@ -395,12 +395,14 @@ def _install_exact_account_profile_provider_repairs(
 
     bindings = set(calls)
     if "_instagram_post_comment_rollups_available" in bindings:
+
         def fake_rollups_available(*, conn: Any | None = None) -> bool:
             return record("_instagram_post_comment_rollups_available", {"conn": conn_classification(conn)})
 
         monkeypatch.setattr(provider, "_instagram_post_comment_rollups_available", fake_rollups_available)
 
     if "_catalog_recent_runs_header" in bindings:
+
         def fake_catalog_header(
             platform: str,
             account_handle: str,
@@ -421,6 +423,7 @@ def _install_exact_account_profile_provider_repairs(
         monkeypatch.setattr(provider, "_catalog_recent_runs_header", fake_catalog_header)
 
     if "_tiktok_social_account_lite_header_stats" in bindings:
+
         def fake_tiktok_header(account_handle: str, *, conn: Any | None = None) -> dict[str, Any]:
             return record(
                 "_tiktok_social_account_lite_header_stats",
@@ -430,6 +433,7 @@ def _install_exact_account_profile_provider_repairs(
         monkeypatch.setattr(provider, "_tiktok_social_account_lite_header_stats", fake_tiktok_header)
 
     if "_instagram_social_account_detail_rollup" in bindings:
+
         def fake_instagram_detail(account_handle: str, *, conn: Any | None = None) -> None:
             return record(
                 "_instagram_social_account_detail_rollup",
@@ -439,6 +443,7 @@ def _install_exact_account_profile_provider_repairs(
         monkeypatch.setattr(provider, "_instagram_social_account_detail_rollup", fake_instagram_detail)
 
     if "_social_account_comments_recent_runs" in bindings:
+
         def fake_comments_runs(
             platform: str,
             account_handle: str,
@@ -459,6 +464,7 @@ def _install_exact_account_profile_provider_repairs(
         monkeypatch.setattr(provider, "_social_account_comments_recent_runs", fake_comments_runs)
 
     if "_social_account_profile_summary_totals" in bindings:
+
         def fake_summary_totals(
             platform: str,
             account_handle: str,
@@ -477,6 +483,7 @@ def _install_exact_account_profile_provider_repairs(
         monkeypatch.setattr(provider, "_social_account_profile_summary_totals", fake_summary_totals)
 
     if "_instagram_social_account_comments_target_counts" in bindings:
+
         def fake_comment_target_counts(
             account_handle: str,
             *,
@@ -496,9 +503,7 @@ def _install_exact_account_profile_provider_repairs(
     yield
 
     for binding, binding_calls in calls.items():
-        assert len(binding_calls) == 1, (
-            f"provider repair fake {binding} expected one call, got {len(binding_calls)}"
-        )
+        assert len(binding_calls) == 1, f"provider repair fake {binding} expected one call, got {len(binding_calls)}"
 
 
 def _patch_shared_catalog_fetch_terminal_error(monkeypatch: pytest.MonkeyPatch, func: Any) -> None:
@@ -1212,13 +1217,13 @@ def test_instagram_profile_page_call_sites_use_ready_payload_bindings_and_log_sc
         fetch_calls: list[str] = []
 
         def fake_sidecar_sql(*, row_kind: str, row_alias: str, mode: str) -> tuple[str, str]:
-            sidecar_calls.append((row_kind, row_alias, mode))
+            sidecar_calls.append((row_kind, row_alias, mode))  # noqa: B023
             if mode == "legacy":
                 return "", ""
             return "left join missing_payload_sidecar on true", ", null::jsonb as payload_probe"
 
         def fake_log_schema_unavailable(*, surface: str, entity_identity: object) -> None:
-            log_calls.append((surface, entity_identity))
+            log_calls.append((surface, entity_identity))  # noqa: B023
 
         def fake_rows_for_read(
             rows: list[dict[str, object]],
@@ -1227,14 +1232,14 @@ def test_instagram_profile_page_call_sites_use_ready_payload_bindings_and_log_sc
             mode: str,
             surface: str,
         ) -> list[dict[str, object]]:
-            row_calls.append((rows, row_kind, mode, surface))
+            row_calls.append((rows, row_kind, mode, surface))  # noqa: B023
             return rows
 
         def fake_fetch_all(sql: str, _params: list[object]) -> list[dict[str, object]]:
-            fetch_calls.append(sql)
-            if len(fetch_calls) == 1:
+            fetch_calls.append(sql)  # noqa: B023
+            if len(fetch_calls) == 1:  # noqa: B023
                 raise profile_common.psycopg_errors.UndefinedTable("payload sidecar missing")
-            return [{"id": f"{case_name}-row", "_total_count": 1}]
+            return [{"id": f"{case_name}-row", "_total_count": 1}]  # noqa: B023
 
         monkeypatch.setattr(profile_common, "_instagram_payload_sidecar_sql", fake_sidecar_sql)
         monkeypatch.setattr(
@@ -1248,9 +1253,7 @@ def test_instagram_profile_page_call_sites_use_ready_payload_bindings_and_log_sc
         rows, total = loader(**kwargs)
 
         expected_sidecar_calls = [
-            (*binding, mode)
-            for mode in ("sidecar", "legacy")
-            for binding in expected_sidecar_bindings
+            (*binding, mode) for mode in ("sidecar", "legacy") for binding in expected_sidecar_bindings
         ]
         assert sidecar_calls == expected_sidecar_calls
         assert log_calls == [(surface, "bravotv")]

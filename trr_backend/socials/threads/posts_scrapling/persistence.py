@@ -4,7 +4,32 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from trr_backend.db import pg
+
 logger = logging.getLogger("socials.threads.posts_scrapling.persistence")
+
+_LEGACY_NAMESPACE: dict[str, Any] | None = None
+
+
+def _configure_legacy_provider(namespace: dict[str, Any]) -> None:
+    """Bind the live monolith patch surface without importing it."""
+
+    global _LEGACY_NAMESPACE
+
+    configured = _LEGACY_NAMESPACE
+    if configured is not None and configured is not namespace:
+        raise RuntimeError("Threads posts-persistence provider is already configured")
+    _LEGACY_NAMESPACE = namespace
+
+
+def _legacy_callable(name: str) -> Any:
+    namespace = _LEGACY_NAMESPACE
+    if namespace is None or name not in namespace:
+        raise RuntimeError(f"Threads posts-persistence provider is not configured: {name}")
+    candidate = namespace[name]
+    if not callable(candidate):
+        raise TypeError(f"Threads posts-persistence provider is not callable: {name}")
+    return candidate
 
 
 @dataclass(slots=True)
@@ -49,11 +74,11 @@ def persist_threads_posts(
     season_id: str | None = None,
     pipeline_ingest_mode: str | None = None,
 ) -> PersistedThreadsPosts:
-    from trr_backend.db import pg
-    from trr_backend.repositories import social_season_analytics as repo
-
-    context = repo.get_season_context(season_id) if season_id else None
     shared_catalog_mode = str(pipeline_ingest_mode or "").strip().lower() == "shared_account_catalog_backfill"
+    get_season_context = _legacy_callable("get_season_context") if season_id else None
+    upsert_meta_threads_post = _legacy_callable("_upsert_meta_threads_post")
+    upsert_shared_catalog_post = _legacy_callable("_upsert_shared_catalog_post") if shared_catalog_mode else None
+    context = get_season_context(season_id) if get_season_context is not None else None
     posts_upserted = 0
     catalog_posts_upserted = 0
     required_shared_persistence_failures = 0
@@ -81,7 +106,7 @@ def persist_threads_posts(
             catalog_row: dict[str, Any] | None = None
             try:
                 with _PostSavepoint(conn=conn, index=index):
-                    row = repo._upsert_meta_threads_post(
+                    row = upsert_meta_threads_post(
                         context,
                         job_id=job_id,
                         account=account_handle,
@@ -89,7 +114,8 @@ def persist_threads_posts(
                         conn=conn,
                     )
                     if shared_catalog_mode:
-                        catalog_row = repo._upsert_shared_catalog_post(
+                        assert upsert_shared_catalog_post is not None
+                        catalog_row = upsert_shared_catalog_post(
                             platform="threads",
                             run_id=run_id,
                             account_handle=account_handle,

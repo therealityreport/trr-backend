@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
+from trr_backend.socials.control_plane.run_lifecycle import legacy as _legacy
 from trr_backend.socials.control_plane.run_lifecycle import reconcile_run_summaries
-from trr_backend.socials.social_season_analytics_impl import (
-    cancel_active_jobs,
-    cancel_claimed_job_before_processing,
-    cancel_dispatch_blocked_jobs,
-    cancel_stuck_jobs,
-    debug_ingest_job_with_openai,
-    dismiss_recent_failures,
-    recover_stale_running_jobs,
-    reset_social_ingest_health,
-)
+
+cancel_active_jobs = _legacy.cancel_active_jobs
+cancel_claimed_job_before_processing = _legacy.cancel_claimed_job_before_processing
+cancel_dispatch_blocked_jobs = _legacy.cancel_dispatch_blocked_jobs
+cancel_stuck_jobs = _legacy.cancel_stuck_jobs
+debug_ingest_job_with_openai = _legacy.debug_ingest_job_with_openai
+dismiss_recent_failures = _legacy.dismiss_recent_failures
+recover_stale_running_jobs = _legacy.recover_stale_running_jobs
+reset_social_ingest_health = _legacy.reset_social_ingest_health
+del _legacy
 
 __all__ = [
     "cancel_active_jobs",

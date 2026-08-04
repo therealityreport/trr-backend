@@ -6,13 +6,13 @@ from typing import Any, Literal
 
 
 def normalize_profile_summary_detail(value: str | None) -> str:
-    import trr_backend.socials.social_season_analytics_impl as social_core
+    from trr_backend.socials.control_plane.dispatch_runtime import legacy as social_core
 
     return social_core._normalize_social_account_profile_summary_detail(value)
 
 
 def get_profile_summary(*, platform: str, account_handle: str, detail: str) -> dict[str, Any]:
-    import trr_backend.socials.social_season_analytics_impl as social_core
+    from trr_backend.socials.control_plane.dispatch_runtime import legacy as social_core
 
     return social_core.get_social_account_profile_summary(
         platform=platform,
@@ -22,7 +22,7 @@ def get_profile_summary(*, platform: str, account_handle: str, detail: str) -> d
 
 
 def get_live_profile_total(*, platform: str, account_handle: str) -> dict[str, Any]:
-    import trr_backend.socials.social_season_analytics_impl as social_core
+    from trr_backend.socials.control_plane.dispatch_runtime import legacy as social_core
 
     return social_core.get_social_account_live_profile_total(platform=platform, account_handle=account_handle)
 
@@ -39,7 +39,7 @@ def get_profile_posts(
     sort_by: str | None,
     sort_dir: str | None,
 ) -> dict[str, Any]:
-    import trr_backend.socials.social_season_analytics_impl as social_core
+    from trr_backend.socials.control_plane.dispatch_runtime import legacy as social_core
 
     return social_core.get_social_account_profile_posts(
         platform=platform,
@@ -65,7 +65,7 @@ def get_profile_comments(
     sort_by: str | None,
     sort_dir: str | None,
 ) -> dict[str, Any]:
-    import trr_backend.socials.social_season_analytics_impl as social_core
+    from trr_backend.socials.control_plane.dispatch_runtime import legacy as social_core
 
     return social_core.get_social_account_profile_comments(
         platform=platform,
@@ -86,7 +86,7 @@ def get_profile_hashtags(
     window: Literal["all", "30d", "365d"] | None,
     assignment_status: Literal["all", "assigned", "unassigned"] | None,
 ) -> dict[str, Any]:
-    import trr_backend.socials.social_season_analytics_impl as social_core
+    from trr_backend.socials.control_plane.dispatch_runtime import legacy as social_core
 
     return social_core.get_social_account_profile_hashtags(
         platform=platform,
@@ -102,7 +102,7 @@ def get_profile_hashtag_timeline(
     account_handle: str,
     window: Literal["all", "30d", "365d"] | None,
 ) -> dict[str, Any]:
-    import trr_backend.socials.social_season_analytics_impl as social_core
+    from trr_backend.socials.control_plane.dispatch_runtime import legacy as social_core
 
     return social_core.get_social_account_profile_hashtag_timeline(
         platform=platform,
@@ -112,7 +112,7 @@ def get_profile_hashtag_timeline(
 
 
 def get_profile_collaborators_tags(*, platform: str, account_handle: str) -> dict[str, Any]:
-    import trr_backend.socials.social_season_analytics_impl as social_core
+    from trr_backend.socials.control_plane.dispatch_runtime import legacy as social_core
 
     return social_core.get_social_account_profile_collaborators_tags(
         platform=platform,
@@ -128,7 +128,7 @@ def get_catalog_posts(
     page_size: int,
     assignment_status: Literal["assigned", "unassigned", "ambiguous", "needs_review"] | None,
 ) -> dict[str, Any]:
-    import trr_backend.socials.social_season_analytics_impl as social_core
+    from trr_backend.socials.control_plane.dispatch_runtime import legacy as social_core
 
     return social_core.get_social_account_catalog_posts(
         platform=platform,
@@ -140,7 +140,7 @@ def get_catalog_posts(
 
 
 def get_catalog_post_detail(*, platform: str, account_handle: str, source_id: str) -> dict[str, Any]:
-    import trr_backend.socials.social_season_analytics_impl as social_core
+    from trr_backend.socials.control_plane.dispatch_runtime import legacy as social_core
 
     return social_core.get_social_account_catalog_post_detail(
         platform=platform,
@@ -150,7 +150,7 @@ def get_catalog_post_detail(*, platform: str, account_handle: str, source_id: st
 
 
 def get_catalog_review_queue(*, platform: str, account_handle: str) -> dict[str, Any]:
-    import trr_backend.socials.social_season_analytics_impl as social_core
+    from trr_backend.socials.control_plane.dispatch_runtime import legacy as social_core
 
     return social_core.get_social_account_catalog_review_queue(platform=platform, account_handle=account_handle)
 
@@ -163,7 +163,7 @@ def get_catalog_run_progress(
     recent_log_limit: int,
     fast: bool,
 ) -> dict[str, Any]:
-    import trr_backend.socials.social_season_analytics_impl as social_core
+    from trr_backend.socials.control_plane.dispatch_runtime import legacy as social_core
 
     return social_core.get_social_account_catalog_run_progress(
         platform=platform,
@@ -203,7 +203,7 @@ def get_catalog_run_diagnostics(
 
 
 def get_catalog_verification(*, platform: str, account_handle: str, run_id: str | None) -> dict[str, Any]:
-    import trr_backend.socials.social_season_analytics_impl as social_core
+    from trr_backend.socials.control_plane.dispatch_runtime import legacy as social_core
 
     return social_core.get_social_account_catalog_verification(
         platform=platform,
@@ -213,7 +213,7 @@ def get_catalog_verification(*, platform: str, account_handle: str, run_id: str 
 
 
 def get_catalog_gap_analysis_status(*, platform: str, account_handle: str) -> dict[str, Any]:
-    import trr_backend.socials.social_season_analytics_impl as social_core
+    from trr_backend.socials.control_plane.dispatch_runtime import legacy as social_core
 
     return social_core.get_social_account_catalog_gap_analysis_status(platform=platform, account_handle=account_handle)
 
@@ -225,7 +225,7 @@ def get_catalog_freshness(
     use_cached_live_total_only: bool = False,
     statement_timeout_ms: int = 3000,
 ) -> dict[str, Any]:
-    import trr_backend.socials.social_season_analytics_impl as social_core
+    from trr_backend.socials.control_plane.dispatch_runtime import legacy as social_core
 
     return social_core.get_social_account_catalog_freshness(
         platform=platform,

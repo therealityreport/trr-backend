@@ -195,11 +195,11 @@ def test_get_queue_status_endpoint_returns_503_on_pool_init_failure(
         ),
         (
             "/api/v1/admin/socials/seasons/{season_id}/analytics?source_scope=bravo",
-            "trr_backend.repositories.social_season_analytics.get_analytics",
+            "trr_backend.socials.analytics.get_analytics",
         ),
         (
             "/api/v1/admin/socials/seasons/{season_id}/analytics/week/3?source_scope=bravo",
-            "trr_backend.repositories.social_season_analytics.get_week_detail",
+            "trr_backend.socials.analytics.get_week_detail",
         ),
     ],
 )
@@ -4363,11 +4363,11 @@ def test_ingest_maps_structured_validation_errors_to_400(
     [
         (
             "/api/v1/admin/socials/seasons/{season_id}/analytics?source_scope=bravo",
-            "trr_backend.repositories.social_season_analytics.get_analytics",
+            "trr_backend.socials.analytics.get_analytics",
         ),
         (
             "/api/v1/admin/socials/seasons/{season_id}/analytics/week/3?source_scope=bravo",
-            "trr_backend.repositories.social_season_analytics.get_week_detail",
+            "trr_backend.socials.analytics.get_week_detail",
         ),
         (
             "/api/v1/admin/socials/seasons/{season_id}/analytics/comments-coverage?source_scope=bravo",
@@ -4972,7 +4972,7 @@ def test_get_week_detail_endpoint_returns_youtube_comment_totals(
         "totals": {"posts": 1, "total_comments": 420, "total_engagement": 1000},
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.get_week_detail", return_value=payload):
+    with patch("trr_backend.socials.analytics.get_week_detail", return_value=payload):
         response = client.get(
             f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3?source_scope=bravo",
             headers={"Authorization": f"Bearer {token}"},
@@ -5011,7 +5011,7 @@ def test_get_week_detail_endpoint_includes_additive_week_metadata(
         "totals": {"posts": 0, "total_comments": 0, "total_engagement": 0},
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.get_week_detail", return_value=payload):
+    with patch("trr_backend.socials.analytics.get_week_detail", return_value=payload):
         response = client.get(
             f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3?source_scope=bravo",
             headers={"Authorization": f"Bearer {token}"},
@@ -5063,7 +5063,7 @@ def test_get_week_detail_endpoint_includes_additive_diagnostics(
         },
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.get_week_detail", return_value=payload):
+    with patch("trr_backend.socials.analytics.get_week_detail", return_value=payload):
         response = client.get(
             f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3?source_scope=bravo",
             headers={"Authorization": f"Bearer {token}"},
@@ -5114,7 +5114,7 @@ def test_get_week_detail_endpoint_passes_threads_topic_field(
         "totals": {"posts": 1, "total_comments": 3, "total_engagement": 36},
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.get_week_detail", return_value=payload):
+    with patch("trr_backend.socials.analytics.get_week_detail", return_value=payload):
         response = client.get(
             f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3?source_scope=bravo",
             headers={"Authorization": f"Bearer {token}"},
@@ -5168,7 +5168,7 @@ def test_get_week_detail_endpoint_defaults_to_25_comments_and_paginated_page(
         "totals": {"posts": 25, "total_comments": 0, "total_engagement": 0},
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.get_week_detail", return_value=payload) as mocked:
+    with patch("trr_backend.socials.analytics.get_week_detail", return_value=payload) as mocked:
         response = client.get(
             f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3?source_scope=bravo",
             headers={"Authorization": f"Bearer {token}"},
@@ -5219,7 +5219,7 @@ def test_get_week_detail_endpoint_forwards_include_status_false(
     from api.routers import socials as socials_router
 
     socials_router.invalidate_week_detail_cache()
-    with patch("trr_backend.repositories.social_season_analytics.get_week_detail", return_value=payload) as mocked:
+    with patch("trr_backend.socials.analytics.get_week_detail", return_value=payload) as mocked:
         response = client.get(
             f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3?source_scope=bravo&include_status=false",
             headers={"Authorization": f"Bearer {token}"},
@@ -5254,9 +5254,7 @@ def test_get_week_summary_endpoint_forwards_defaults_and_shape(
     from api.routers import socials as socials_router
 
     socials_router.invalidate_week_summary_cache()
-    with patch(
-        "trr_backend.repositories.social_season_analytics.get_week_detail_summary_fast", return_value=payload
-    ) as mocked:
+    with patch("trr_backend.socials.analytics.get_week_detail_summary_fast", return_value=payload) as mocked:
         response = client.get(
             f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3/summary?source_scope=bravo",
             headers={"Authorization": f"Bearer {token}"},
@@ -5265,7 +5263,7 @@ def test_get_week_summary_endpoint_forwards_defaults_and_shape(
     assert response.status_code == 200
     body = response.json()
     assert body["platforms"]["instagram"]["totals"]["posts"] == 12
-    assert mocked.call_args.kwargs["source_scope"] == "bravo"
+    assert mocked.call_args.kwargs["source_scope"] == "network"
 
 
 def test_get_week_summary_endpoint_include_full_uses_legacy_path(
@@ -5292,10 +5290,8 @@ def test_get_week_summary_endpoint_include_full_uses_legacy_path(
     from api.routers import socials as socials_router
 
     socials_router.invalidate_week_summary_cache()
-    with patch(
-        "trr_backend.repositories.social_season_analytics.get_week_detail_summary", return_value=payload
-    ) as full_mock:
-        with patch("trr_backend.repositories.social_season_analytics.get_week_detail_summary_fast") as fast_mock:
+    with patch("trr_backend.socials.analytics.get_week_detail_summary", return_value=payload) as full_mock:
+        with patch("trr_backend.socials.analytics.get_week_detail_summary_fast") as fast_mock:
             response = client.get(
                 f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3/summary?source_scope=bravo&include=full",
                 headers={"Authorization": f"Bearer {token}"},
@@ -5434,7 +5430,7 @@ def test_get_week_detail_endpoint_supports_page_offset_and_de_duplicated_newest_
     from api.routers import socials as socials_router
 
     socials_router.invalidate_week_detail_cache()
-    with patch("trr_backend.repositories.social_season_analytics.get_week_detail", return_value=payload) as mocked:
+    with patch("trr_backend.socials.analytics.get_week_detail", return_value=payload) as mocked:
         response_page1 = client.get(
             f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3?source_scope=bravo",
             headers={"Authorization": f"Bearer {token}"},
@@ -5490,7 +5486,7 @@ def test_get_week_detail_endpoint_forwards_sort_params_to_repository(
         "totals": {"posts": 0, "total_comments": 0, "total_engagement": 0},
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.get_week_detail", return_value=payload) as mocked:
+    with patch("trr_backend.socials.analytics.get_week_detail", return_value=payload) as mocked:
         response = client.get(
             (
                 f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3"
@@ -5540,7 +5536,7 @@ def test_get_week_detail_endpoint_sorts_page_by_requested_metric(
     from api.routers import socials as socials_router
 
     socials_router.invalidate_week_detail_cache()
-    with patch("trr_backend.repositories.social_season_analytics.get_week_detail", return_value=payload):
+    with patch("trr_backend.socials.analytics.get_week_detail", return_value=payload):
         response = client.get(
             (
                 f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3"
@@ -5593,7 +5589,7 @@ def test_get_week_detail_endpoint_uses_cached_payload_when_repeating_same_page_r
     from api.routers import socials as socials_router
 
     socials_router.invalidate_week_detail_cache()
-    with patch("trr_backend.repositories.social_season_analytics.get_week_detail", return_value=payload) as mocked:
+    with patch("trr_backend.socials.analytics.get_week_detail", return_value=payload) as mocked:
         response_first = client.get(
             f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3?source_scope=bravo",
             headers={"Authorization": f"Bearer {token}"},
@@ -5632,7 +5628,7 @@ def test_get_week_detail_endpoint_cache_key_includes_sort_signature(
     from api.routers import socials as socials_router
 
     socials_router.invalidate_week_detail_cache()
-    with patch("trr_backend.repositories.social_season_analytics.get_week_detail", return_value=payload) as mocked:
+    with patch("trr_backend.socials.analytics.get_week_detail", return_value=payload) as mocked:
         response_a = client.get(
             (
                 f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3"
@@ -5732,7 +5728,7 @@ def test_get_analytics_endpoint_includes_additive_week_metadata(
         "jobs": [],
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.get_analytics", return_value=expected):
+    with patch("trr_backend.socials.analytics.get_analytics", return_value=expected):
         response = client.get(
             f"/api/v1/admin/socials/seasons/{season_id}/analytics",
             headers={"Authorization": f"Bearer {token}"},
@@ -8128,9 +8124,7 @@ def test_get_week_live_health_endpoint_returns_payload(
         ],
     }
 
-    with patch(
-        "trr_backend.repositories.social_season_analytics.get_week_live_health_snapshot", return_value=expected
-    ) as mocked:
+    with patch("trr_backend.socials.analytics.get_week_live_health_snapshot", return_value=expected) as mocked:
         response = client.get(
             f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/11/live-health?platforms=instagram,tiktok&timezone=America/New_York&source_scope=bravo",
             headers={"Authorization": f"Bearer {token}"},
@@ -8961,7 +8955,7 @@ def test_get_analytics_endpoint_accepts_facebook_threads_platform_filters(
         "rows": [],
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.get_analytics", return_value=expected) as mocked:
+    with patch("trr_backend.socials.analytics.get_analytics", return_value=expected) as mocked:
         response = client.get(
             f"/api/v1/admin/socials/seasons/{season_id}/analytics"
             "?source_scope=bravo&platforms=facebook,threads&timezone=America/New_York",
@@ -9005,7 +8999,7 @@ def test_get_analytics_endpoint_returns_additive_reddit_block(
         },
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.get_analytics", return_value=expected):
+    with patch("trr_backend.socials.analytics.get_analytics", return_value=expected):
         response = client.get(
             f"/api/v1/admin/socials/seasons/{season_id}/analytics?source_scope=bravo",
             headers={"Authorization": f"Bearer {token}"},
@@ -9034,7 +9028,7 @@ def test_get_week_detail_endpoint_returns_facebook_threads_platform_maps(
         "totals": {"posts": 0, "total_comments": 0, "total_engagement": 0},
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.get_week_detail", return_value=payload):
+    with patch("trr_backend.socials.analytics.get_week_detail", return_value=payload):
         response = client.get(
             f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/2?source_scope=bravo",
             headers={"Authorization": f"Bearer {token}"},
@@ -9098,7 +9092,7 @@ def test_get_analytics_allows_week_zero(client: TestClient, monkeypatch: pytest.
         "jobs": [],
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.get_analytics", return_value=expected) as mocked:
+    with patch("trr_backend.socials.analytics.get_analytics", return_value=expected) as mocked:
         response = client.get(
             f"/api/v1/admin/socials/seasons/{season_id}/analytics?week=0",
             headers={"Authorization": f"Bearer {token}"},
@@ -9129,7 +9123,7 @@ def test_get_analytics_include_slices_forwarded(client: TestClient, monkeypatch:
         "benchmark": {"week_index": 1},
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.get_analytics", return_value=expected) as mocked:
+    with patch("trr_backend.socials.analytics.get_analytics", return_value=expected) as mocked:
         response = client.get(
             f"/api/v1/admin/socials/seasons/{season_id}/analytics?include=rows,benchmark",
             headers={"Authorization": f"Bearer {token}"},
@@ -9168,7 +9162,7 @@ def test_get_analytics_endpoint_uses_threadpool(client: TestClient, monkeypatch:
 
     with (
         patch("api.routers.socials.run_in_threadpool", side_effect=_fake_run_in_threadpool) as mocked_threadpool,
-        patch("trr_backend.repositories.social_season_analytics.get_analytics") as mocked_get_analytics,
+        patch("trr_backend.socials.analytics.get_analytics") as mocked_get_analytics,
     ):
         response = client.get(
             f"/api/v1/admin/socials/seasons/{season_id}/analytics?include=rows,benchmark",

@@ -314,8 +314,7 @@ def _fetch_fullcredits_page_via_scrapling(
 
     url = f"https://www.imdb.com/title/{imdb_series_id}/fullcredits/"
     wait_selector = (
-        "[data-testid='name-credits-list-item'], [data-testid^='sub-section-'], "
-        ".full-credits-page-container"
+        "[data-testid='name-credits-list-item'], [data-testid^='sub-section-'], .full-credits-page-container"
     )
     timeout_ms = max(int(timeout_seconds * 1000), 30_000)
 

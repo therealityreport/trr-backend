@@ -7,9 +7,12 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import timedelta
 from typing import Any
 
-import trr_backend.socials.social_season_analytics_impl as _core
+from trr_backend.socials.control_plane.run_lifecycle import _legacy_module as _load_legacy_module
 from trr_backend.socials.instagram import payload_sidecars as _payload_sidecars
 from trr_backend.socials.instagram.post_normalizer import _REPOST_COUNT_ALIASES, _extract_repost_count
+
+_core = _load_legacy_module()
+del _load_legacy_module
 
 _RESERVED_CORE_EXPORTS = {
     "__builtins__",
@@ -396,7 +399,6 @@ def _instagram_post_payload(
         duration_seconds = int(duration_seconds) if duration_seconds is not None else None
     except (TypeError, ValueError):
         duration_seconds = None
-
     raw_data_raw = post.to_dict() if hasattr(post, "to_dict") else {}
     raw_data = dict(raw_data_raw) if isinstance(raw_data_raw, dict) else {}
     incoming_raw_data_is_thin = _instagram_raw_data_is_thin_comments_header(raw_data)
@@ -445,7 +447,6 @@ def _instagram_post_payload(
     resolved_views = (
         existing_views if normalized_incoming_views is None else max(existing_views, normalized_incoming_views)
     )
-
     resolved_repost_count = _instagram_repost_count_from_post(post, raw_data)
     view_metrics_source = str(getattr(post, "video_views_source", "") or "").strip() or None
     view_metrics_observed_at = _coerce_dt(getattr(post, "metadata_scraped_at", None)) or _now_utc()
@@ -475,7 +476,6 @@ def _instagram_post_payload(
             view_metrics_payload["raw_candidates"] = compact_candidates
     if len(view_metrics_payload) > 1:
         raw_data["view_metrics"] = view_metrics_payload
-
     media_retrieval_meta = getattr(post, "media_retrieval_meta", None)
     if isinstance(media_retrieval_meta, dict):
         raw_data["media_retrieval_meta"] = {

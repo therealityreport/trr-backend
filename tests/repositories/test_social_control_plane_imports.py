@@ -58,15 +58,9 @@ import trr_backend.socials.social_season_analytics_impl as canonical_social_anal
 
 CONTROL_PLANE_DIR = Path(__file__).resolve().parents[2] / "trr_backend" / "socials" / "control_plane"
 SOCIALS_DIR = Path(__file__).resolve().parents[2] / "trr_backend" / "socials"
-ANALYTICS_CACHE_PATH = (
-    Path(__file__).resolve().parents[2] / "api" / "routers" / "socials" / "_analytics_cache.py"
-)
-SOCIALS_ROUTER_PATH = (
-    Path(__file__).resolve().parents[2] / "api" / "routers" / "socials" / "__init__.py"
-)
-ACCOUNT_CATALOG_REVIEW_QUEUE_PATH = (
-    SOCIALS_DIR / "pipelines" / "account_catalog" / "review_queue.py"
-)
+ANALYTICS_CACHE_PATH = Path(__file__).resolve().parents[2] / "api" / "routers" / "socials" / "_analytics_cache.py"
+SOCIALS_ROUTER_PATH = Path(__file__).resolve().parents[2] / "api" / "routers" / "socials" / "__init__.py"
+ACCOUNT_CATALOG_REVIEW_QUEUE_PATH = SOCIALS_DIR / "pipelines" / "account_catalog" / "review_queue.py"
 SHARED_ACCOUNTS_PATH = CONTROL_PLANE_DIR / "shared_accounts.py"
 ACCOUNT_CATALOG_RUNTIME_CALLER_PATHS = (
     SOCIALS_DIR / "social_season_analytics_impl.py",
@@ -158,18 +152,10 @@ INSTAGRAM_MEDIA_MIRROR_PATH = SOCIALS_DIR / "instagram" / "media_mirror.py"
 INSTAGRAM_PROFILE_STAGES_PATH = SOCIALS_DIR / "instagram" / "profile_stages.py"
 INSTAGRAM_CATALOG_INGEST_PATH = SOCIALS_DIR / "instagram" / "catalog_ingest.py"
 INSTAGRAM_PERSISTENCE_PATH = SOCIALS_DIR / "instagram" / "persistence.py"
-INSTAGRAM_COMMENTS_PERSISTENCE_PATH = (
-    SOCIALS_DIR / "instagram" / "comments_scrapling" / "persistence.py"
-)
-INSTAGRAM_POSTS_PERSISTENCE_PATH = (
-    SOCIALS_DIR / "instagram" / "posts_scrapling" / "persistence.py"
-)
-THREADS_POSTS_PERSISTENCE_PATH = (
-    SOCIALS_DIR / "threads" / "posts_scrapling" / "persistence.py"
-)
-TIKTOK_POSTS_PERSISTENCE_PATH = (
-    SOCIALS_DIR / "tiktok" / "posts_scrapling" / "persistence.py"
-)
+INSTAGRAM_COMMENTS_PERSISTENCE_PATH = SOCIALS_DIR / "instagram" / "comments_scrapling" / "persistence.py"
+INSTAGRAM_POSTS_PERSISTENCE_PATH = SOCIALS_DIR / "instagram" / "posts_scrapling" / "persistence.py"
+THREADS_POSTS_PERSISTENCE_PATH = SOCIALS_DIR / "threads" / "posts_scrapling" / "persistence.py"
+TIKTOK_POSTS_PERSISTENCE_PATH = SOCIALS_DIR / "tiktok" / "posts_scrapling" / "persistence.py"
 TIKTOK_OPS_PATH = SOCIALS_DIR / "tiktok" / "ops.py"
 COOKIE_REFRESH_OPS_PATH = SOCIALS_DIR / "ops" / "cookie_refresh.py"
 PROFILE_READS_HANDLER_PATH = SOCIALS_DIR / "api" / "handlers" / "profile_reads.py"
@@ -519,8 +505,7 @@ def test_threads_direct_scrape_lazily_imports_canonical_scraper_leaf() -> None:
         for node in ast.walk(tree)
     )
     assert not any(
-        isinstance(node, ast.ImportFrom) and node.module == THREADS_SCRAPER_LEAF_MODULE
-        for node in tree.body
+        isinstance(node, ast.ImportFrom) and node.module == THREADS_SCRAPER_LEAF_MODULE for node in tree.body
     )
 
     for helper_name, helper_node in runtime_helpers.items():
@@ -556,18 +541,13 @@ def test_threads_runtime_callers_lazily_import_only_canonical_leaf_owners() -> N
                 isinstance(node, ast.ImportFrom)
                 and (
                     node.module == "trr_backend.socials.threads"
-                    or (
-                        node.module == "trr_backend.socials"
-                        and any(alias.name == "threads" for alias in node.names)
-                    )
+                    or (node.module == "trr_backend.socials" and any(alias.name == "threads" for alias in node.names))
                 )
             )
             if imports_package_root:
                 package_root_imports.append((path, node.lineno))
 
-        for function_node in (
-            node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        ):
+        for function_node in (node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))):
             for node in ast.walk(function_node):
                 if not isinstance(node, ast.ImportFrom):
                     continue
@@ -591,8 +571,7 @@ def test_central_job_handler_registry_lazily_imports_canonical_threads_runner() 
     registry_function = next(
         node
         for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name == "registered_platform_job_handlers"
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "registered_platform_job_handlers"
     )
 
     compatibility_imports = [
@@ -626,16 +605,14 @@ def test_central_job_handler_registry_lazily_imports_canonical_tiktok_runner() -
     registry_function = next(
         node
         for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name == "registered_platform_job_handlers"
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "registered_platform_job_handlers"
     )
 
     compatibility_imports = [
         node
         for node in ast.walk(tree)
         if (
-            isinstance(node, ast.Import)
-            and any(alias.name == TIKTOK_COMPATIBILITY_JOBS_MODULE for alias in node.names)
+            isinstance(node, ast.Import) and any(alias.name == TIKTOK_COMPATIBILITY_JOBS_MODULE for alias in node.names)
         )
         or (isinstance(node, ast.ImportFrom) and node.module == TIKTOK_COMPATIBILITY_JOBS_MODULE)
     ]
@@ -661,8 +638,7 @@ def test_central_job_handler_registry_lazily_imports_canonical_instagram_executo
     registry_function = next(
         node
         for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name == "registered_platform_job_handlers"
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "registered_platform_job_handlers"
     )
     expected_imports = {
         (INSTAGRAM_COMMENTS_JOB_RUNNER_MODULE, frozenset({"run_instagram_comments_scrapling_job"})),
@@ -701,9 +677,7 @@ def test_central_job_handler_registry_lazily_imports_canonical_instagram_executo
             SHARED_JOB_EXECUTOR_MODULE,
         }
     ]
-    actual_imports = {
-        (node.module, frozenset(alias.name for alias in node.names)) for node in canonical_imports
-    }
+    actual_imports = {(node.module, frozenset(alias.name for alias in node.names)) for node in canonical_imports}
 
     assert compatibility_imports == []
     assert len(canonical_imports) == 3
@@ -754,22 +728,12 @@ def test_instagram_posts_control_uses_import_neutral_provider_boundary() -> None
     legacy_imports = [
         node
         for node in ast.walk(tree)
-        if (
-            isinstance(node, ast.ImportFrom)
-            and node.module in forbidden_modules
-        )
-        or (
-            isinstance(node, ast.Import)
-            and any(alias.name in forbidden_modules for alias in node.names)
-        )
+        if (isinstance(node, ast.ImportFrom) and node.module in forbidden_modules)
+        or (isinstance(node, ast.Import) and any(alias.name in forbidden_modules for alias in node.names))
     ]
 
     assert legacy_imports == []
-    assert any(
-        isinstance(node, ast.FunctionDef)
-        and node.name == "_configure_legacy_provider"
-        for node in tree.body
-    )
+    assert any(isinstance(node, ast.FunctionDef) and node.name == "_configure_legacy_provider" for node in tree.body)
     monolith_source = (SOCIALS_DIR / "social_season_analytics_impl.py").read_text()
     assert "_configure_instagram_posts_control_legacy_provider()" in monolith_source
 
@@ -783,22 +747,12 @@ def test_instagram_media_mirror_uses_import_neutral_provider_boundary() -> None:
     legacy_imports = [
         node
         for node in ast.walk(tree)
-        if (
-            isinstance(node, ast.ImportFrom)
-            and node.module in forbidden_modules
-        )
-        or (
-            isinstance(node, ast.Import)
-            and any(alias.name in forbidden_modules for alias in node.names)
-        )
+        if (isinstance(node, ast.ImportFrom) and node.module in forbidden_modules)
+        or (isinstance(node, ast.Import) and any(alias.name in forbidden_modules for alias in node.names))
     ]
 
     assert legacy_imports == []
-    assert any(
-        isinstance(node, ast.FunctionDef)
-        and node.name == "_configure_legacy_provider"
-        for node in tree.body
-    )
+    assert any(isinstance(node, ast.FunctionDef) and node.name == "_configure_legacy_provider" for node in tree.body)
 
 
 def test_instagram_profile_stages_uses_import_neutral_provider_boundary() -> None:
@@ -810,22 +764,12 @@ def test_instagram_profile_stages_uses_import_neutral_provider_boundary() -> Non
     legacy_imports = [
         node
         for node in ast.walk(tree)
-        if (
-            isinstance(node, ast.ImportFrom)
-            and node.module in forbidden_modules
-        )
-        or (
-            isinstance(node, ast.Import)
-            and any(alias.name in forbidden_modules for alias in node.names)
-        )
+        if (isinstance(node, ast.ImportFrom) and node.module in forbidden_modules)
+        or (isinstance(node, ast.Import) and any(alias.name in forbidden_modules for alias in node.names))
     ]
 
     assert legacy_imports == []
-    assert any(
-        isinstance(node, ast.FunctionDef)
-        and node.name == "_configure_legacy_provider"
-        for node in tree.body
-    )
+    assert any(isinstance(node, ast.FunctionDef) and node.name == "_configure_legacy_provider" for node in tree.body)
     monolith_source = (SOCIALS_DIR / "social_season_analytics_impl.py").read_text()
     assert "_configure_instagram_profile_stages_legacy_provider()" in monolith_source
 
@@ -839,14 +783,8 @@ def test_threads_posts_persistence_uses_import_neutral_provider_boundary() -> No
     legacy_imports = [
         node
         for node in ast.walk(tree)
-        if (
-            isinstance(node, ast.ImportFrom)
-            and node.module in forbidden_modules
-        )
-        or (
-            isinstance(node, ast.Import)
-            and any(alias.name in forbidden_modules for alias in node.names)
-        )
+        if (isinstance(node, ast.ImportFrom) and node.module in forbidden_modules)
+        or (isinstance(node, ast.Import) and any(alias.name in forbidden_modules for alias in node.names))
     ]
     canonical_pg_imports = [
         node
@@ -858,11 +796,7 @@ def test_threads_posts_persistence_uses_import_neutral_provider_boundary() -> No
 
     assert legacy_imports == []
     assert len(canonical_pg_imports) == 1
-    assert any(
-        isinstance(node, ast.FunctionDef)
-        and node.name == "_configure_legacy_provider"
-        for node in tree.body
-    )
+    assert any(isinstance(node, ast.FunctionDef) and node.name == "_configure_legacy_provider" for node in tree.body)
     monolith_source = (SOCIALS_DIR / "social_season_analytics_impl.py").read_text()
     assert "_configure_posts_persistence_legacy_providers()" in monolith_source
 
@@ -876,14 +810,8 @@ def test_tiktok_posts_persistence_uses_import_neutral_provider_boundary() -> Non
     legacy_imports = [
         node
         for node in ast.walk(tree)
-        if (
-            isinstance(node, ast.ImportFrom)
-            and node.module in forbidden_modules
-        )
-        or (
-            isinstance(node, ast.Import)
-            and any(alias.name in forbidden_modules for alias in node.names)
-        )
+        if (isinstance(node, ast.ImportFrom) and node.module in forbidden_modules)
+        or (isinstance(node, ast.Import) and any(alias.name in forbidden_modules for alias in node.names))
     ]
     canonical_pg_imports = [
         node
@@ -895,11 +823,7 @@ def test_tiktok_posts_persistence_uses_import_neutral_provider_boundary() -> Non
 
     assert legacy_imports == []
     assert len(canonical_pg_imports) == 1
-    assert any(
-        isinstance(node, ast.FunctionDef)
-        and node.name == "_configure_legacy_provider"
-        for node in tree.body
-    )
+    assert any(isinstance(node, ast.FunctionDef) and node.name == "_configure_legacy_provider" for node in tree.body)
     monolith_source = (SOCIALS_DIR / "social_season_analytics_impl.py").read_text()
     assert "_configure_posts_persistence_legacy_providers()" in monolith_source
 
@@ -913,14 +837,8 @@ def test_instagram_comments_persistence_uses_import_neutral_provider_boundary() 
     legacy_imports = [
         node
         for node in ast.walk(tree)
-        if (
-            isinstance(node, ast.ImportFrom)
-            and node.module in forbidden_modules
-        )
-        or (
-            isinstance(node, ast.Import)
-            and any(alias.name in forbidden_modules for alias in node.names)
-        )
+        if (isinstance(node, ast.ImportFrom) and node.module in forbidden_modules)
+        or (isinstance(node, ast.Import) and any(alias.name in forbidden_modules for alias in node.names))
     ]
     canonical_pg_imports = [
         node
@@ -932,16 +850,8 @@ def test_instagram_comments_persistence_uses_import_neutral_provider_boundary() 
 
     assert legacy_imports == []
     assert len(canonical_pg_imports) == 1
-    assert any(
-        isinstance(node, ast.FunctionDef)
-        and node.name == "_configure_legacy_provider"
-        for node in tree.body
-    )
-    assert any(
-        isinstance(node, ast.FunctionDef)
-        and node.name == "_load_repo_helpers"
-        for node in tree.body
-    )
+    assert any(isinstance(node, ast.FunctionDef) and node.name == "_configure_legacy_provider" for node in tree.body)
+    assert any(isinstance(node, ast.FunctionDef) and node.name == "_load_repo_helpers" for node in tree.body)
     monolith_source = (SOCIALS_DIR / "social_season_analytics_impl.py").read_text()
     assert "_configure_posts_persistence_legacy_providers()" in monolith_source
 
@@ -950,19 +860,11 @@ def test_instagram_persistence_uses_import_neutral_read_write_provider_boundary(
     source = INSTAGRAM_PERSISTENCE_PATH.read_text()
     tree = ast.parse(source)
     provider_class = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.ClassDef) and node.name == "_LegacyProviderProxy"
+        node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "_LegacyProviderProxy"
     )
-    provider_methods = {
-        node.name
-        for node in provider_class.body
-        if isinstance(node, ast.FunctionDef)
-    }
+    provider_methods = {node.name for node in provider_class.body if isinstance(node, ast.FunctionDef)}
     loader = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "_catalog_ingest_module"
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_catalog_ingest_module"
     )
     top_level_catalog_imports = [
         node
@@ -982,22 +884,14 @@ def test_instagram_persistence_uses_import_neutral_read_write_provider_boundary(
     assert "trr_backend.repositories.social_season_analytics" not in source
     assert "trr_backend.socials.social_season_analytics_impl" not in source
     assert {"__getattr__", "__setattr__"} <= provider_methods
-    assert any(
-        isinstance(node, ast.FunctionDef)
-        and node.name == "_configure_legacy_provider"
-        for node in tree.body
-    )
+    assert any(isinstance(node, ast.FunctionDef) and node.name == "_configure_legacy_provider" for node in tree.body)
     assert top_level_catalog_imports == []
     assert len(lazy_catalog_imports) == 1
 
     monolith_source = (SOCIALS_DIR / "social_season_analytics_impl.py").read_text()
+    assert "from trr_backend.socials.instagram import persistence as instagram_persistence" in monolith_source
     assert (
-        "from trr_backend.socials.instagram import persistence as instagram_persistence"
-        in monolith_source
-    )
-    assert (
-        "for provider in (instagram_persistence, comments_persistence, "
-        "threads_persistence, tiktok_persistence):"
+        "for provider in (instagram_persistence, comments_persistence, threads_persistence, tiktok_persistence):"
     ) in monolith_source
 
 
@@ -1005,28 +899,20 @@ def test_instagram_posts_persistence_uses_import_neutral_shared_provider_boundar
     source = INSTAGRAM_POSTS_PERSISTENCE_PATH.read_text()
     tree = ast.parse(source)
     persist_function = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "persist_instagram_posts"
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "persist_instagram_posts"
     )
     provider_imports = [
         node
         for node in ast.walk(tree)
         if isinstance(node, ast.ImportFrom)
-        and node.module
-        == "trr_backend.socials.instagram.comments_scrapling.persistence"
+        and node.module == "trr_backend.socials.instagram.comments_scrapling.persistence"
         and {alias.name for alias in node.names} == {"_load_repo_helpers"}
     ]
     provider_bindings = [
         node
         for node in ast.walk(persist_function)
         if isinstance(node, ast.Assign)
-        and any(
-            isinstance(target, ast.Name)
-            and target.id == "repo"
-            for target in node.targets
-        )
+        and any(isinstance(target, ast.Name) and target.id == "repo" for target in node.targets)
         and isinstance(node.value, ast.Call)
         and isinstance(node.value.func, ast.Name)
         and node.value.func.id == "_load_repo_helpers"
@@ -1104,8 +990,7 @@ def test_recovery_dispatch_and_runtime_surfaces_reuse_existing_exact_module_prox
     runtime_proxy_imports = [
         alias
         for node in ast.walk(runtime_tree)
-        if isinstance(node, ast.ImportFrom)
-        and node.module == "trr_backend.socials.control_plane.dispatch_runtime"
+        if isinstance(node, ast.ImportFrom) and node.module == "trr_backend.socials.control_plane.dispatch_runtime"
         for alias in node.names
         if alias.name == "legacy" and alias.asname == "_core"
     ]
@@ -1140,25 +1025,20 @@ def test_dispatch_runtime_reuses_run_lifecycle_exact_loader_without_legacy_impor
         node
         for node in ast.walk(tree)
         if (isinstance(node, ast.ImportFrom) and node.module in forbidden_modules)
-        or (
-            isinstance(node, ast.Import)
-            and any(alias.name in forbidden_modules for alias in node.names)
-        )
+        or (isinstance(node, ast.Import) and any(alias.name in forbidden_modules for alias in node.names))
     ]
     provider_imports = [
         node
         for node in tree.body
         if isinstance(node, ast.ImportFrom)
         and node.module == "trr_backend.socials.control_plane.run_lifecycle"
-        and [(alias.name, alias.asname) for alias in node.names]
-        == [("_legacy_module", "_load_legacy_module")]
+        and [(alias.name, alias.asname) for alias in node.names] == [("_legacy_module", "_load_legacy_module")]
     ]
     provider_assignments = [
         node
         for node in tree.body
         if isinstance(node, ast.Assign)
-        and [target.id for target in node.targets if isinstance(target, ast.Name)]
-        == ["legacy"]
+        and [target.id for target in node.targets if isinstance(target, ast.Name)] == ["legacy"]
         and isinstance(node.value, ast.Call)
         and isinstance(node.value.func, ast.Name)
         and node.value.func.id == "_load_legacy_module"
@@ -1193,25 +1073,20 @@ def test_instagram_catalog_ingest_reuses_run_lifecycle_exact_loader_without_lega
         node
         for node in ast.walk(tree)
         if (isinstance(node, ast.ImportFrom) and node.module in forbidden_modules)
-        or (
-            isinstance(node, ast.Import)
-            and any(alias.name in forbidden_modules for alias in node.names)
-        )
+        or (isinstance(node, ast.Import) and any(alias.name in forbidden_modules for alias in node.names))
     ]
     provider_imports = [
         node
         for node in tree.body
         if isinstance(node, ast.ImportFrom)
         and node.module == "trr_backend.socials.control_plane.run_lifecycle"
-        and [(alias.name, alias.asname) for alias in node.names]
-        == [("_legacy_module", "_load_legacy_module")]
+        and [(alias.name, alias.asname) for alias in node.names] == [("_legacy_module", "_load_legacy_module")]
     ]
     provider_assignments = [
         node
         for node in tree.body
         if isinstance(node, ast.Assign)
-        and [target.id for target in node.targets if isinstance(target, ast.Name)]
-        == ["_core"]
+        and [target.id for target in node.targets if isinstance(target, ast.Name)] == ["_core"]
         and isinstance(node.value, ast.Call)
         and isinstance(node.value.func, ast.Name)
         and node.value.func.id == "_load_legacy_module"
@@ -1241,8 +1116,7 @@ def test_analytics_cache_registration_reuses_live_dispatch_runtime_proxy() -> No
     proxy_imports = [
         alias
         for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
-        and node.module == "trr_backend.socials.control_plane.dispatch_runtime"
+        if isinstance(node, ast.ImportFrom) and node.module == "trr_backend.socials.control_plane.dispatch_runtime"
         for alias in node.names
         if alias.name == "legacy" and alias.asname == "social_repo"
     ]
@@ -1268,8 +1142,7 @@ def test_account_catalog_review_queue_reuses_dispatch_runtime_proxy_without_lega
     proxy_imports = [
         alias
         for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
-        and node.module == "trr_backend.socials.control_plane.dispatch_runtime"
+        if isinstance(node, ast.ImportFrom) and node.module == "trr_backend.socials.control_plane.dispatch_runtime"
         for alias in node.names
         if alias.name == "legacy" and alias.asname == "_core"
     ]
@@ -1289,9 +1162,7 @@ def test_account_catalog_review_queue_reuses_dispatch_runtime_proxy_without_lega
     assert len(proxy_imports) == 1
     assert copied_bindings == {
         "get_social_account_catalog_review_queue": "get_social_account_catalog_review_queue",
-        "resolve_social_account_catalog_review_queue_item": (
-            "resolve_social_account_catalog_review_queue_item"
-        ),
+        "resolve_social_account_catalog_review_queue_item": ("resolve_social_account_catalog_review_queue_item"),
     }
 
 
@@ -1301,8 +1172,7 @@ def test_shared_accounts_reuses_import_time_dispatch_runtime_copies_without_lega
     proxy_imports = [
         alias
         for node in tree.body
-        if isinstance(node, ast.ImportFrom)
-        and node.module == "trr_backend.socials.control_plane.dispatch_runtime"
+        if isinstance(node, ast.ImportFrom) and node.module == "trr_backend.socials.control_plane.dispatch_runtime"
         for alias in node.names
         if alias.name == "legacy" and alias.asname == "_legacy"
     ]
@@ -1360,16 +1230,12 @@ def test_tiktok_ops_reuses_lazy_dispatch_runtime_proxy_without_legacy_import() -
     source = TIKTOK_OPS_PATH.read_text()
     tree = ast.parse(source)
     smoke_function = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "run_posts_scrapling_smoke"
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_posts_scrapling_smoke"
     )
     proxy_imports = [
         alias
         for node in ast.walk(smoke_function)
-        if isinstance(node, ast.ImportFrom)
-        and node.module == "trr_backend.socials.control_plane.dispatch_runtime"
+        if isinstance(node, ast.ImportFrom) and node.module == "trr_backend.socials.control_plane.dispatch_runtime"
         for alias in node.names
         if alias.name == "legacy" and alias.asname == "repo"
     ]
@@ -1385,8 +1251,7 @@ def test_cookie_refresh_ops_reuses_dispatch_runtime_proxy_without_legacy_import(
     proxy_imports = [
         alias
         for node in tree.body
-        if isinstance(node, ast.ImportFrom)
-        and node.module == "trr_backend.socials.control_plane.dispatch_runtime"
+        if isinstance(node, ast.ImportFrom) and node.module == "trr_backend.socials.control_plane.dispatch_runtime"
         for alias in node.names
         if alias.name == "legacy" and alias.asname == "social_repo"
     ]
@@ -1402,16 +1267,14 @@ def test_profile_reads_reuses_function_scoped_dispatch_runtime_proxy_without_leg
     proxy_imports = [
         (node, alias)
         for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
-        and node.module == "trr_backend.socials.control_plane.dispatch_runtime"
+        if isinstance(node, ast.ImportFrom) and node.module == "trr_backend.socials.control_plane.dispatch_runtime"
         for alias in node.names
         if alias.name == "legacy" and alias.asname == "social_core"
     ]
     module_level_imports = [
         node
         for node in tree.body
-        if isinstance(node, ast.ImportFrom)
-        and node.module == "trr_backend.socials.control_plane.dispatch_runtime"
+        if isinstance(node, ast.ImportFrom) and node.module == "trr_backend.socials.control_plane.dispatch_runtime"
     ]
 
     assert "trr_backend.repositories.social_season_analytics" not in source
@@ -1431,10 +1294,7 @@ def test_queue_status_does_not_import_either_legacy_social_module() -> None:
 def test_social_health_dot_reuses_queue_status_provider_without_legacy_import() -> None:
     tree = ast.parse(SOCIALS_ROUTER_PATH.read_text())
     functions = [
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "get_social_ingest_health_dot"
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "get_social_ingest_health_dot"
     ]
     assert len(functions) == 1
     function = functions[0]
@@ -1446,18 +1306,14 @@ def test_social_health_dot_reuses_queue_status_provider_without_legacy_import() 
         node
         for node in ast.walk(function)
         if (isinstance(node, ast.ImportFrom) and node.module in forbidden_modules)
-        or (
-            isinstance(node, ast.Import)
-            and any(alias.name in forbidden_modules for alias in node.names)
-        )
+        or (isinstance(node, ast.Import) and any(alias.name in forbidden_modules for alias in node.names))
     ]
     provider_imports = [
         node
         for node in ast.walk(function)
         if isinstance(node, ast.ImportFrom)
         and node.module == "trr_backend.socials.control_plane.queue_status"
-        and [(alias.name, alias.asname) for alias in node.names]
-        == [("_legacy_repo", None)]
+        and [(alias.name, alias.asname) for alias in node.names] == [("_legacy_repo", None)]
     ]
     provider_calls = [
         node
@@ -1489,8 +1345,7 @@ def test_social_queue_status_reuses_queue_status_provider_without_legacy_import(
     functions = [
         node
         for node in tree.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "get_social_ingest_queue_status"
+        if isinstance(node, ast.FunctionDef) and node.name == "get_social_ingest_queue_status"
     ]
     assert len(functions) == 1
     function = functions[0]
@@ -1502,18 +1357,14 @@ def test_social_queue_status_reuses_queue_status_provider_without_legacy_import(
         node
         for node in ast.walk(function)
         if (isinstance(node, ast.ImportFrom) and node.module in forbidden_modules)
-        or (
-            isinstance(node, ast.Import)
-            and any(alias.name in forbidden_modules for alias in node.names)
-        )
+        or (isinstance(node, ast.Import) and any(alias.name in forbidden_modules for alias in node.names))
     ]
     provider_imports = [
         node
         for node in ast.walk(function)
         if isinstance(node, ast.ImportFrom)
         and node.module == "trr_backend.socials.control_plane.queue_status"
-        and [(alias.name, alias.asname) for alias in node.names]
-        == [("_legacy_repo", None)]
+        and [(alias.name, alias.asname) for alias in node.names] == [("_legacy_repo", None)]
     ]
     provider_calls = [
         node
@@ -1547,8 +1398,7 @@ def test_social_worker_detail_reuses_queue_status_provider_without_legacy_import
     functions = [
         node
         for node in tree.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "get_social_ingest_worker_detail"
+        if isinstance(node, ast.FunctionDef) and node.name == "get_social_ingest_worker_detail"
     ]
     assert len(functions) == 1
     function = functions[0]
@@ -1561,18 +1411,14 @@ def test_social_worker_detail_reuses_queue_status_provider_without_legacy_import
         node
         for node in ast.walk(function)
         if (isinstance(node, ast.ImportFrom) and node.module in forbidden_modules)
-        or (
-            isinstance(node, ast.Import)
-            and any(alias.name in forbidden_modules for alias in node.names)
-        )
+        or (isinstance(node, ast.Import) and any(alias.name in forbidden_modules for alias in node.names))
     ]
     provider_imports = [
         node
         for node in ast.walk(function)
         if isinstance(node, ast.ImportFrom)
         and node.module == "trr_backend.socials.control_plane.queue_status"
-        and [(alias.name, alias.asname) for alias in node.names]
-        == [("_legacy_repo", None)]
+        and [(alias.name, alias.asname) for alias in node.names] == [("_legacy_repo", None)]
     ]
     provider_calls = [
         node
@@ -1603,8 +1449,7 @@ def test_social_purge_inactive_workers_reuses_queue_status_provider_without_lega
     functions = [
         node
         for node in tree.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "purge_social_ingest_inactive_workers"
+        if isinstance(node, ast.FunctionDef) and node.name == "purge_social_ingest_inactive_workers"
     ]
     assert len(functions) == 1
     function = functions[0]
@@ -1617,18 +1462,14 @@ def test_social_purge_inactive_workers_reuses_queue_status_provider_without_lega
         node
         for node in ast.walk(function)
         if (isinstance(node, ast.ImportFrom) and node.module in forbidden_modules)
-        or (
-            isinstance(node, ast.Import)
-            and any(alias.name in forbidden_modules for alias in node.names)
-        )
+        or (isinstance(node, ast.Import) and any(alias.name in forbidden_modules for alias in node.names))
     ]
     provider_imports = [
         node
         for node in ast.walk(function)
         if isinstance(node, ast.ImportFrom)
         and node.module == "trr_backend.socials.control_plane.queue_status"
-        and [(alias.name, alias.asname) for alias in node.names]
-        == [("_legacy_repo", "_repo")]
+        and [(alias.name, alias.asname) for alias in node.names] == [("_legacy_repo", "_repo")]
     ]
     provider_calls = [
         node
@@ -1648,9 +1489,8 @@ def test_social_purge_inactive_workers_reuses_queue_status_provider_without_lega
     assert len(provider_imports) == 1
     assert len(provider_calls) == 1
     assert provider_calls[0].args == []
-    assert [keyword.arg for keyword in provider_calls[0].keywords] == [
-        "stale_after_seconds"
-    ]
+    assert [keyword.arg for keyword in provider_calls[0].keywords] == ["stale_after_seconds"]
+
 
 def test_worker_health_reuses_queue_status_provider_without_legacy_import() -> None:
     source = (CONTROL_PLANE_DIR / "worker_health.py").read_text()
@@ -1741,21 +1581,17 @@ def test_instagram_posts_job_runner_lazily_uses_exact_dispatch_runtime_proxy() -
     runner = next(
         node
         for node in tree.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "run_instagram_posts_scrapling_job"
+        if isinstance(node, ast.FunctionDef) and node.name == "run_instagram_posts_scrapling_job"
     )
     boundary_imports = [
         node
         for node in ast.walk(runner)
-        if isinstance(node, ast.ImportFrom)
-        and node.module == "trr_backend.socials.control_plane.dispatch_runtime"
+        if isinstance(node, ast.ImportFrom) and node.module == "trr_backend.socials.control_plane.dispatch_runtime"
     ]
 
     assert len(boundary_imports) == 1
     assert runner.body[0] is boundary_imports[0]
-    assert [(alias.name, alias.asname) for alias in boundary_imports[0].names] == [
-        ("legacy", "repo")
-    ]
+    assert [(alias.name, alias.asname) for alias in boundary_imports[0].names] == [("legacy", "repo")]
     assert "trr_backend.repositories.social_season_analytics" not in source
     assert "trr_backend.socials.social_season_analytics_impl" not in source
 
@@ -1767,21 +1603,17 @@ def test_instagram_comments_job_runner_lazily_uses_exact_dispatch_runtime_proxy(
     runner = next(
         node
         for node in tree.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "run_instagram_comments_scrapling_job"
+        if isinstance(node, ast.FunctionDef) and node.name == "run_instagram_comments_scrapling_job"
     )
     boundary_imports = [
         node
         for node in ast.walk(runner)
-        if isinstance(node, ast.ImportFrom)
-        and node.module == "trr_backend.socials.control_plane.dispatch_runtime"
+        if isinstance(node, ast.ImportFrom) and node.module == "trr_backend.socials.control_plane.dispatch_runtime"
     ]
 
     assert len(boundary_imports) == 1
     assert runner.body[0] is boundary_imports[0]
-    assert [(alias.name, alias.asname) for alias in boundary_imports[0].names] == [
-        ("legacy", "repo")
-    ]
+    assert [(alias.name, alias.asname) for alias in boundary_imports[0].names] == [("legacy", "repo")]
     assert "trr_backend.repositories.social_season_analytics" not in source
     assert "trr_backend.socials.social_season_analytics_impl" not in source
 

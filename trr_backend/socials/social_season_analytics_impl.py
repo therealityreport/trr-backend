@@ -5,6 +5,7 @@ aliases this module for backwards compatibility while ownership moves under
 `trr_backend.socials`.
 """
 
+# fmt: off
 from __future__ import annotations
 
 import asyncio
@@ -98,7 +99,6 @@ from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
 from trr_backend.socials.twitter import Tweet, TwitterScrapeConfig, TwitterScraper
 
 logger = logging.getLogger(__name__)
-
 SOCIAL_CATALOG_PROGRESS_POOL_NAME = "social_progress"
 
 _INSTAGRAM_PAYLOAD_PRIVATE_KEYS = (

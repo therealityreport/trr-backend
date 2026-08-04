@@ -7,10 +7,10 @@ module is the package-routing owner so callers can move to
 
 from __future__ import annotations
 
-from trr_backend.socials.social_season_analytics_impl import (
-    get_social_account_catalog_review_queue,
-    resolve_social_account_catalog_review_queue_item,
-)
+from trr_backend.socials.control_plane.dispatch_runtime import legacy as _core
+
+get_social_account_catalog_review_queue = _core.get_social_account_catalog_review_queue
+resolve_social_account_catalog_review_queue_item = _core.resolve_social_account_catalog_review_queue_item
 
 __all__ = [
     "get_social_account_catalog_review_queue",

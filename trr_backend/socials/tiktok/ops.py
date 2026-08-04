@@ -85,7 +85,7 @@ def write_diagnostics_json(path: str | None, diagnostics: dict[str, object]) -> 
 def run_posts_scrapling_smoke(*, account: str, max_pages: int) -> dict[str, Any]:
     """Create and run a TikTok posts Scrapling smoke job."""
     from trr_backend.db import pg
-    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.control_plane.dispatch_runtime import legacy as repo
     from trr_backend.socials.tiktok.posts_scrapling.job_runner import (
         run_tiktok_posts_scrapling_job,
     )

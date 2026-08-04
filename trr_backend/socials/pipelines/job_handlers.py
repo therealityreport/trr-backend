@@ -2,47 +2,30 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any, Protocol
-
-
-class PlatformJobHandler(Protocol):
-    """Executable handler for one platform/stage pair."""
-
-    platform: str
-    stage: str
-
-    def supports(self, platform: str, stage: str) -> bool:
-        """Return true when this handler owns the claimed job."""
-
-    def execute(self, job: dict[str, Any], *, worker_id: str | None = None) -> dict[str, Any]:
-        """Execute the claimed job and return the persisted job row."""
-
-
-@dataclass(frozen=True)
-class FunctionPlatformJobHandler:
-    platform: str
-    stage: str
-    execute_func: Callable[[dict[str, Any]], dict[str, Any]]
-
-    def supports(self, platform: str, stage: str) -> bool:
-        return self.platform == _normalize_key(platform) and self.stage == _normalize_key(stage)
-
-    def execute(self, job: dict[str, Any], *, worker_id: str | None = None) -> dict[str, Any]:
-        return self.execute_func(job, worker_id=worker_id)  # type: ignore[misc]
-
-
-def _normalize_key(value: Any) -> str:
-    return str(value or "").strip().lower()
+from trr_backend.socials.pipelines.job_handler_types import (
+    FunctionPlatformJobHandler,
+    PlatformJobHandler,
+    _normalize_key,
+)
 
 
 def registered_platform_job_handlers() -> tuple[PlatformJobHandler, ...]:
-    from trr_backend.socials.instagram.jobs import instagram_job_handlers
-    from trr_backend.socials.threads.jobs import threads_job_handlers
-    from trr_backend.socials.tiktok.jobs import tiktok_job_handlers
+    from trr_backend.socials.instagram.comments_scrapling.job_runner import (
+        run_instagram_comments_scrapling_job,
+    )
+    from trr_backend.socials.instagram.posts_scrapling.job_runner import run_instagram_posts_scrapling_job
+    from trr_backend.socials.pipelines.shared_job_executor import execute_shared_claimed_job
+    from trr_backend.socials.threads.posts_scrapling.job_runner import run_threads_posts_scrapling_job
+    from trr_backend.socials.tiktok.posts_scrapling.job_runner import run_tiktok_posts_scrapling_job
 
-    return (*instagram_job_handlers(), *tiktok_job_handlers(), *threads_job_handlers())
+    return (
+        FunctionPlatformJobHandler("instagram", "comments_scrapling", run_instagram_comments_scrapling_job),
+        FunctionPlatformJobHandler("instagram", "posts_scrapling", run_instagram_posts_scrapling_job),
+        FunctionPlatformJobHandler("instagram", "instagram_profile_snapshot", execute_shared_claimed_job),
+        FunctionPlatformJobHandler("instagram", "instagram_profile_following", execute_shared_claimed_job),
+        FunctionPlatformJobHandler("tiktok", "tiktok_posts_scrapling", run_tiktok_posts_scrapling_job),
+        FunctionPlatformJobHandler("threads", "threads_posts_scrapling", run_threads_posts_scrapling_job),
+    )
 
 
 def resolve_platform_job_handler(platform: str, stage: str) -> PlatformJobHandler | None:

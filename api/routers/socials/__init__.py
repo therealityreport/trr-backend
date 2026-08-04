@@ -7335,10 +7335,10 @@ def get_social_ingest_backfill_health(
 
 @router.get("/ingest/workers/{worker_id}/detail")
 def get_social_ingest_worker_detail(worker_id: str, _: InternalAdminUser = None) -> dict[str, Any]:
-    from trr_backend.repositories.social_season_analytics import get_worker_detail
+    from trr_backend.socials.control_plane.queue_status import _legacy_repo
 
     try:
-        return get_worker_detail(worker_id)
+        return _legacy_repo().get_worker_detail(worker_id)
     except ValueError as exc:
         if str(exc) == "worker_not_found":
             raise HTTPException(status_code=404, detail="Worker not found") from exc
@@ -7355,10 +7355,10 @@ def purge_social_ingest_inactive_workers(
     payload: PurgeInactiveWorkersRequest | None = None,
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
-    from trr_backend.repositories.social_season_analytics import purge_inactive_workers
+    from trr_backend.socials.control_plane.queue_status import _legacy_repo as _repo
 
     try:
-        return purge_inactive_workers(stale_after_seconds=(payload.stale_after_seconds if payload else None))
+        return _repo().purge_inactive_workers(stale_after_seconds=(payload.stale_after_seconds if payload else None))
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to purge inactive social ingest workers")
         raise _internal_error_response(exc) from exc
@@ -7378,7 +7378,7 @@ def get_social_ingest_queue_status(
     statement_timeout_ms: int = Query(default=2000, ge=1000, le=30000),
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
-    from trr_backend.repositories.social_season_analytics import get_queue_status
+    from trr_backend.socials.control_plane.queue_status import _legacy_repo
 
     try:
         full_diagnostics = detail == "full" or (fresh and detail != "summary")
@@ -7386,7 +7386,7 @@ def get_social_ingest_queue_status(
         effective_include_recent_failures = include_recent_failures or full_diagnostics
         effective_include_stuck_jobs = include_stuck_jobs or full_diagnostics
         effective_include_runs_summary = include_runs_summary or full_diagnostics
-        return get_queue_status(
+        return _legacy_repo().get_queue_status(
             fresh=fresh,
             include_recent_failures=effective_include_recent_failures,
             include_stuck_jobs=effective_include_stuck_jobs,
@@ -7617,10 +7617,10 @@ def debug_social_ingest_job(
 
 @router.get("/ingest/health-dot")
 def get_social_ingest_health_dot(_: InternalAdminUser = None) -> dict[str, Any]:
-    import trr_backend.socials.social_season_analytics_impl as social_core
+    from trr_backend.socials.control_plane.queue_status import _legacy_repo
 
     try:
-        status_payload = social_core.get_queue_status(
+        status_payload = _legacy_repo().get_queue_status(
             include_recent_failures=False,
             include_stuck_jobs=False,
             include_runs_summary=False,
@@ -8456,9 +8456,10 @@ async def get_season_analytics_week_live_health(
     platforms: str | None = Query(default=None, description="Comma-separated platform list"),
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
-    from trr_backend.repositories.social_season_analytics import get_week_live_health_snapshot
+    from trr_backend.socials.analytics import get_week_live_health_snapshot
 
     parsed_platforms = _parse_platform_query(platforms)
+    canonical_source_scope = normalize_source_scope_param(source_scope)
     cache_key = _week_live_health_cache_key(
         season_id=str(season_id),
         week_index=week_index,
@@ -8481,7 +8482,7 @@ async def get_season_analytics_week_live_health(
             week_index=week_index,
             platforms=parsed_platforms,
             timezone=timezone,
-            source_scope=source_scope,
+            source_scope=canonical_source_scope,
         )
         _set_ttl_cached_payload(
             _WEEK_LIVE_HEALTH_CACHE,
@@ -8529,10 +8530,11 @@ async def get_season_analytics(
     ),
     _: InternalAdminUser = None,
 ) -> dict:
-    from trr_backend.repositories.social_season_analytics import get_analytics
+    from trr_backend.socials.analytics import get_analytics
 
     parsed_platforms = _parse_platform_query(platforms)
     include_options = parse_analytics_include(include)
+    canonical_source_scope = normalize_source_scope_param(source_scope)
 
     started_at = perf_counter()
     try:
@@ -8571,7 +8573,7 @@ async def get_season_analytics(
             platforms=parsed_platforms,
             timezone=timezone,
             week=week,
-            source_scope=source_scope,
+            source_scope=canonical_source_scope,
             include_rows=include_options.include_rows,
             include_jobs=False,
             include_flags=include_options.include_flags,
@@ -8635,9 +8637,10 @@ async def get_season_analytics_week_summary(
     sort_dir: WeekDetailSortDir = Query(default="desc"),
     _: InternalAdminUser = None,
 ) -> dict:
-    from trr_backend.repositories.social_season_analytics import get_week_detail_summary, get_week_detail_summary_fast
+    from trr_backend.socials.analytics import get_week_detail_summary, get_week_detail_summary_fast
 
     parsed_platforms = _parse_platform_query(platforms)
+    canonical_source_scope = normalize_source_scope_param(source_scope)
     cache_key = _week_summary_cache_key(
         season_id=str(season_id),
         week_index=week_index,
@@ -8663,7 +8666,7 @@ async def get_season_analytics_week_summary(
                 week_index=week_index,
                 platforms=parsed_platforms,
                 timezone=timezone,
-                source_scope=source_scope,
+                source_scope=canonical_source_scope,
                 max_comments_per_post=max_comments_per_post,
                 sort_field=sort_field,
                 sort_dir=sort_dir,
@@ -8675,7 +8678,7 @@ async def get_season_analytics_week_summary(
                 week_index=week_index,
                 platforms=parsed_platforms,
                 timezone=timezone,
-                source_scope=source_scope,
+                source_scope=canonical_source_scope,
             )
         _set_week_summary_cached_payload(cache_key, payload)
         duration_ms = int((perf_counter() - started_at) * 1000)
@@ -8730,11 +8733,12 @@ async def get_season_analytics_week_detail(
     include_status: bool = Query(default=True),
     _: InternalAdminUser = None,
 ) -> dict:
-    from trr_backend.repositories.social_season_analytics import get_week_detail
+    from trr_backend.socials.analytics import get_week_detail
 
     parsed_platforms = _parse_platform_query(platforms)
     normalized_platforms = _normalize_target_platforms(parsed_platforms)
     normalized_timezone = str(timezone or "").strip() or "America/New_York"
+    canonical_source_scope = normalize_source_scope_param(source_scope)
     cache_key = _week_detail_cache_key(
         season_id=str(season_id),
         week_index=week_index,
@@ -8760,7 +8764,7 @@ async def get_season_analytics_week_detail(
                 week_index=week_index,
                 platforms=parsed_platforms,
                 timezone=normalized_timezone,
-                source_scope=source_scope,
+                source_scope=canonical_source_scope,
                 max_comments_per_post=max_comments_per_post,
                 post_limit=requested_end,
                 post_offset=0,
@@ -8779,7 +8783,7 @@ async def get_season_analytics_week_detail(
                     week_index=week_index,
                     platforms=parsed_platforms,
                     timezone=normalized_timezone,
-                    source_scope=source_scope,
+                    source_scope=canonical_source_scope,
                     max_comments_per_post=max_comments_per_post,
                     post_limit=requested_end,
                     post_offset=0,

@@ -42,7 +42,7 @@ from trr_backend.socials.scrapling_transport import (
     scrapling_runtime_metadata,
 )
 
-from .auth import SOCIALBLADE_STEALTH_USER_AGENT
+from . import parser as socialblade_parser
 
 logger = logging.getLogger("socials.socialblade.fetcher")
 _SOCIALBLADE_HISTORY_LIMIT = 60
@@ -75,7 +75,7 @@ def _build_nav_headers(referer: str) -> dict[str, str]:
         "accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
         "accept-language": "en-US,en;q=0.9",
         "referer": referer,
-        "user-agent": SOCIALBLADE_STEALTH_USER_AGENT,
+        "user-agent": socialblade_parser.SOCIALBLADE_STEALTH_USER_AGENT,
     }
 
 
@@ -84,7 +84,7 @@ def _build_trpc_headers(referer: str) -> dict[str, str]:
         "accept": "application/json, text/plain, */*",
         "accept-language": "en-US,en;q=0.9",
         "referer": referer,
-        "user-agent": SOCIALBLADE_STEALTH_USER_AGENT,
+        "user-agent": socialblade_parser.SOCIALBLADE_STEALTH_USER_AGENT,
         "x-requested-with": "XMLHttpRequest",
     }
 
@@ -166,31 +166,16 @@ class SocialBladeScraplingFetcher:
         }
 
     async def scrape(self, handle: str) -> dict[str, Any]:
-        from trr_backend.socials.socialblade.scraper import (
-            _build_profile_stats_from_user_payload,
-            _build_total_followers_chart_from_daily_deltas,
-            _build_total_followers_chart_from_total_rows,
-            _default_profile_stat_labels,
-            _extract_profile_stats_from_body_text,
-            _followers_chart_from_table,
-            _format_scrape_failure_message,
-            _history_rows_to_metrics,
-            _merge_followers_charts,
-            _normalize_table_data,
-            _page_access_denied,
-            _socialblade_profile_url,
-        )
-
         safe_handle = str(handle or "").strip().lstrip("@")
         if not safe_handle:
             raise RuntimeError("SocialBlade handle is required")
 
-        sb_url = _socialblade_profile_url(self._platform, safe_handle)
+        sb_url = socialblade_parser._socialblade_profile_url(self._platform, safe_handle)
         response = await self._fetch_page(sb_url)
         html = _response_text(response)
         body_text = self._html_body_text(html)
         status_code = _status_code(response)
-        if status_code in {401, 403} or _page_access_denied(body_text):
+        if status_code in {401, 403} or socialblade_parser._page_access_denied(body_text):
             raise RuntimeError("SocialBlade blocked by Cloudflare (1020 access denied)")
 
         self._merge_warmup_cookies(response)
@@ -243,21 +228,24 @@ class SocialBladeScraplingFetcher:
 
             def apply_captured_payload() -> None:
                 nonlocal stats, rankings, metrics, chart_data, history_source
-                stats, rankings = _build_profile_stats_from_user_payload(captured_user, platform=self._platform)
-                metrics = _history_rows_to_metrics(
+                stats, rankings = socialblade_parser._build_profile_stats_from_user_payload(
+                    captured_user,
+                    platform=self._platform,
+                )
+                metrics = socialblade_parser._history_rows_to_metrics(
                     captured_history_rows,
                     limit=len(captured_history_rows),
                     platform=self._platform,
                 )
-                table_chart = _followers_chart_from_table(metrics, metric_label="Followers")
+                table_chart = socialblade_parser._followers_chart_from_table(metrics, metric_label="Followers")
                 if isinstance(captured_daily_total_rows, list):
-                    chart_data = _merge_followers_charts(
-                        _build_total_followers_chart_from_total_rows(captured_daily_total_rows),
+                    chart_data = socialblade_parser._merge_followers_charts(
+                        socialblade_parser._build_total_followers_chart_from_total_rows(captured_daily_total_rows),
                         table_chart,
                     )
                 elif isinstance(captured_daily_deltas, list):
-                    chart_data = _merge_followers_charts(
-                        _build_total_followers_chart_from_daily_deltas(
+                    chart_data = socialblade_parser._merge_followers_charts(
+                        socialblade_parser._build_total_followers_chart_from_daily_deltas(
                             stats["followers"],
                             captured_daily_deltas,
                         ),
@@ -296,15 +284,18 @@ class SocialBladeScraplingFetcher:
                         apply_captured_payload()
 
         if not stats or not rankings:
-            stats, rankings, profile_labels = _extract_profile_stats_from_body_text(body_text, self._platform)
+            stats, rankings, profile_labels = socialblade_parser._extract_profile_stats_from_body_text(
+                body_text,
+                self._platform,
+            )
             if stats or rankings:
                 self._profile_source = "html_body_fallback"
         if not profile_labels:
-            profile_labels = _default_profile_stat_labels(self._platform)
+            profile_labels = socialblade_parser._default_profile_stat_labels(self._platform)
 
         if not metrics:
             table_data = self._extract_table_data(html)
-            metrics = _normalize_table_data(table_data, body_text)
+            metrics = socialblade_parser._normalize_table_data(table_data, body_text)
             if metrics.get("row_count"):
                 if history_source == "unavailable":
                     history_source = "table_fallback"
@@ -313,7 +304,7 @@ class SocialBladeScraplingFetcher:
                 self._last_transport = "html_table_fallback"
 
         if not chart_data:
-            chart_data = _followers_chart_from_table(
+            chart_data = socialblade_parser._followers_chart_from_table(
                 metrics,
                 metric_label=str(profile_labels.get("chart_metric_label") or "Followers"),
             )
@@ -324,7 +315,9 @@ class SocialBladeScraplingFetcher:
 
         stats_refreshed = bool(stats.get("followers", 0) > 0 and int(metrics.get("row_count") or 0) > 0)
         if not stats_refreshed:
-            raise RuntimeError(_format_scrape_failure_message(authenticated_api_error)) from authenticated_api_error
+            raise RuntimeError(
+                socialblade_parser._format_scrape_failure_message(authenticated_api_error)
+            ) from authenticated_api_error
 
         return {
             "username": safe_handle,
@@ -372,7 +365,7 @@ class SocialBladeScraplingFetcher:
             proxy=self._api_proxy_url,
             follow_redirects=False,
             trust_env=False,
-            headers={"user-agent": SOCIALBLADE_STEALTH_USER_AGENT},
+            headers={"user-agent": socialblade_parser.SOCIALBLADE_STEALTH_USER_AGENT},
         )
 
     async def _fetch_page(self, url: str) -> Any:
@@ -396,8 +389,6 @@ class SocialBladeScraplingFetcher:
         )
 
     async def _capture_platform_page_trpc(self, page: Any) -> None:
-        from trr_backend.socials.socialblade.scraper import _SOCIALBLADE_DAILY_TOTAL_CHART_LIMIT
-
         await page.evaluate(
             """async ({ platform, chartLimit }) => {
                 const captureId = "trr-socialblade-capture";
@@ -575,19 +566,13 @@ class SocialBladeScraplingFetcher:
                 }
                 appendCapture();
             }""",
-            {"platform": self._platform, "chartLimit": _SOCIALBLADE_DAILY_TOTAL_CHART_LIMIT},
+            {"platform": self._platform, "chartLimit": socialblade_parser._SOCIALBLADE_DAILY_TOTAL_CHART_LIMIT},
         )
 
     async def _capture_instagram_page_trpc(self, page: Any) -> None:
         await self._capture_platform_page_trpc(page)
 
     async def _fetch_trpc_result(self, endpoint: str, *, referer: str, index: int | None = None) -> Any:
-        from trr_backend.socials.socialblade.scraper import (
-            SocialBladeEndpointError,
-            _coerce_trpc_json,
-            _unwrap_trpc_result,
-        )
-
         attempt = 0
         while True:
             attempt += 1
@@ -605,15 +590,15 @@ class SocialBladeScraplingFetcher:
                 raise RuntimeError(f"SocialBlade redirected tRPC request to {location or '/'}")
             if status == 429 or 500 <= status < 600:
                 if attempt > self._MAX_TRANSIENT_RETRIES:
-                    raise SocialBladeEndpointError(endpoint, status)
+                    raise socialblade_parser.SocialBladeEndpointError(endpoint, status)
                 await asyncio.sleep(self._BASE_BACKOFF_SECONDS * (2 ** (attempt - 1)))
                 continue
 
-            payload = _coerce_trpc_json(_response_text(response), endpoint=endpoint)
+            payload = socialblade_parser._coerce_trpc_json(_response_text(response), endpoint=endpoint)
             if status != 200:
-                raise SocialBladeEndpointError(endpoint, status)
+                raise socialblade_parser.SocialBladeEndpointError(endpoint, status)
             self._last_transport = "httpx_after_scrapling_warmup"
-            return _unwrap_trpc_result(payload, endpoint=endpoint, index=index)
+            return socialblade_parser._unwrap_trpc_result(payload, endpoint=endpoint, index=index)
 
     async def _fetch_http(self, endpoint: str, *, referer: str) -> httpx.Response:
         if self._http_client is None:
@@ -629,32 +614,25 @@ class SocialBladeScraplingFetcher:
         handle: str,
         referer: str,
     ) -> tuple[dict[str, Any], dict[str, str], dict[str, Any], dict[str, Any] | None]:
-        from trr_backend.socials.socialblade.scraper import (
-            _SOCIALBLADE_DAILY_TOTAL_CHART_LIMIT,
-            _build_profile_stats_from_user_payload,
-            _build_total_followers_chart_from_total_rows,
-            _default_profile_stat_labels,
-            _followers_chart_from_table,
-            _history_rows_to_metrics,
-            _merge_followers_charts,
-        )
-
         profile = await self._search_profile(handle, referer=referer)
         creator_id = str(profile.get("id") or "").strip()
         user_payload = await self._fetch_user(creator_id, referer=referer)
-        stats, rankings = _build_profile_stats_from_user_payload(user_payload, platform=self._platform)
+        stats, rankings = socialblade_parser._build_profile_stats_from_user_payload(
+            user_payload,
+            platform=self._platform,
+        )
         history_rows = await self._fetch_history(creator_id, referer=referer, limit=60)
-        metrics = _history_rows_to_metrics(history_rows, limit=60, platform=self._platform)
+        metrics = socialblade_parser._history_rows_to_metrics(history_rows, limit=60, platform=self._platform)
         daily_total_rows = await self._fetch_daily_total_rows(
             creator_id,
             referer=referer,
-            limit=_SOCIALBLADE_DAILY_TOTAL_CHART_LIMIT,
+            limit=socialblade_parser._SOCIALBLADE_DAILY_TOTAL_CHART_LIMIT,
         )
-        chart_data = _merge_followers_charts(
-            _build_total_followers_chart_from_total_rows(daily_total_rows),
-            _followers_chart_from_table(
+        chart_data = socialblade_parser._merge_followers_charts(
+            socialblade_parser._build_total_followers_chart_from_total_rows(daily_total_rows),
+            socialblade_parser._followers_chart_from_table(
                 metrics,
-                metric_label=_default_profile_stat_labels(self._platform)["chart_metric_label"],
+                metric_label=socialblade_parser._default_profile_stat_labels(self._platform)["chart_metric_label"],
             ),
         )
         return stats, rankings, metrics, chart_data
@@ -852,8 +830,6 @@ class SocialBladeScraplingFetcher:
         if not isinstance(responses, dict):
             return {}
 
-        from trr_backend.socials.socialblade.scraper import _coerce_trpc_json, _unwrap_trpc_result
-
         def unwrap_response(name: str, *, index: int | None = None) -> Any:
             response = responses.get(name)
             if not isinstance(response, dict) or int(response.get("status") or 0) != 200:
@@ -861,8 +837,8 @@ class SocialBladeScraplingFetcher:
             raw_text = str(response.get("text") or "")
             if not raw_text:
                 return None
-            payload = _coerce_trpc_json(raw_text, endpoint=f"captured:{name}")
-            return _unwrap_trpc_result(payload, endpoint=f"captured:{name}", index=index)
+            payload = socialblade_parser._coerce_trpc_json(raw_text, endpoint=f"captured:{name}")
+            return socialblade_parser._unwrap_trpc_result(payload, endpoint=f"captured:{name}", index=index)
 
         user = unwrap_response("history60", index=0)
         if not isinstance(user, dict):

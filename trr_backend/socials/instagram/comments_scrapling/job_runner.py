@@ -3410,7 +3410,7 @@ def _abort_queued_sibling_shards_after_run_fatal_error(
 
 
 def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str | None = None) -> dict[str, Any]:
-    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.control_plane.dispatch_runtime import legacy as repo
 
     job_runner_started_at = lifecycle.now_utc()
     job_id = str(job.get("id") or "").strip()

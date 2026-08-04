@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-import trr_backend.socials.social_season_analytics_impl as _core
+from trr_backend.socials.control_plane.dispatch_runtime import legacy as _core
 from trr_backend.socials.instagram.auth_runtime import _load_instagram_cookies
 
 SocialIngestConflictError = _core.SocialIngestConflictError

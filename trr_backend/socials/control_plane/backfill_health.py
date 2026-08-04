@@ -41,8 +41,7 @@ import os
 from time import perf_counter
 from typing import Any
 
-import trr_backend.socials.social_season_analytics_impl as _core
-from trr_backend.socials.control_plane.queue_status import get_queue_status
+from trr_backend.socials.control_plane.queue_status import _legacy_repo, get_queue_status
 from trr_backend.socials.control_plane.worker_health import (
     get_worker_auth_capabilities,
     get_worker_health,
@@ -53,6 +52,7 @@ from trr_backend.socials.pipelines.account_catalog.progress import (
     get_social_account_catalog_run_progress,
 )
 
+_core = _legacy_repo()
 logger = logging.getLogger(__name__)
 
 # Decodo bills on decimal GB (1 GB = 1e9 bytes) — mirror decodo_usage._BYTES_PER_GB

@@ -109,39 +109,25 @@ def _configure_legacy_provider(provider: Mapping[str, Any]) -> None:
             raise RuntimeError("ACCOUNT_PROFILE_PROVIDER_CONFIGURING: provider publication is already in progress")
         if _PROVIDER_NAMESPACE is not None and provider is not _PROVIDER_NAMESPACE:
             raise RuntimeError(
-                "ACCOUNT_PROFILE_PROVIDER_MISMATCH: "
-                "account-profile provider identity changed before publication"
+                "ACCOUNT_PROFILE_PROVIDER_MISMATCH: account-profile provider identity changed before publication"
             )
 
-        staged_imported_names = {
-            name for name in provider if name not in _RESERVED_CORE_EXPORTS
-        }
-        staged_room_wrappers = {
-            name: provider.get(name) for name in _LOCAL_ROOM_NAMES
-        }
+        staged_imported_names = {name for name in provider if name not in _RESERVED_CORE_EXPORTS}
+        staged_room_wrappers = {name: provider.get(name) for name in _LOCAL_ROOM_NAMES}
         required_provider_wrappers = _LOCAL_ROOM_NAMES - {
             "instagram_comment_rollup_health",
             "rebuild_instagram_post_comment_rollups",
         }
         invalid_wrappers = sorted(
-            name
-            for name in required_provider_wrappers
-            if not callable(staged_room_wrappers.get(name))
+            name for name in required_provider_wrappers if not callable(staged_room_wrappers.get(name))
         )
         if invalid_wrappers:
             raise RuntimeError(
-                "ACCOUNT_PROFILE_PROVIDER_INVALID: missing callable room wrappers: "
-                + ", ".join(invalid_wrappers)
+                "ACCOUNT_PROFILE_PROVIDER_INVALID: missing callable room wrappers: " + ", ".join(invalid_wrappers)
             )
         staged_post_item = staged_room_wrappers["_social_account_profile_post_item"]
-        staged_bindings = {
-            name: provider[name]
-            for name in staged_imported_names - _LOCAL_ROOM_NAMES
-        }
-        prior_globals = {
-            name: globals().get(name, _ABSENT_PROVIDER_BINDING)
-            for name in staged_bindings
-        }
+        staged_bindings = {name: provider[name] for name in staged_imported_names - _LOCAL_ROOM_NAMES}
+        prior_globals = {name: globals().get(name, _ABSENT_PROVIDER_BINDING) for name in staged_bindings}
         prior_imported_names = set(_IMPORTED_CORE_NAMES)
         prior_room_wrappers = dict(_CORE_ROOM_WRAPPERS)
         prior_post_item = _CORE_SOCIAL_ACCOUNT_PROFILE_POST_ITEM
@@ -358,9 +344,7 @@ def _fetch_materialized_comments_only_profile_rows_page(
 ) -> tuple[list[dict[str, Any]], int]:
     normalized_platform = _normalize_social_account_profile_platform(platform)
     if normalized_platform not in {"tiktok", "youtube"}:
-        return _require_provider_ready()[
-            "_fetch_materialized_comments_only_profile_rows_page"
-        ](
+        return _require_provider_ready()["_fetch_materialized_comments_only_profile_rows_page"](
             platform,
             account_handle,
             page=page,

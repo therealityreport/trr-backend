@@ -306,9 +306,9 @@ def invalidate_week_detail_cache() -> None:
 
 def _register_week_detail_cache_invalidator() -> None:
     try:
-        from trr_backend.repositories.social_season_analytics import register_week_detail_cache_invalidator
+        from trr_backend.socials.control_plane.dispatch_runtime import legacy as social_repo
 
-        register_week_detail_cache_invalidator(invalidate_week_detail_cache)
+        social_repo.register_week_detail_cache_invalidator(invalidate_week_detail_cache)
     except Exception:  # noqa: BLE001
         logger.debug("Failed to register week-detail cache invalidator hook", exc_info=True)
 

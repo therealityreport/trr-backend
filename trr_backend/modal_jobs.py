@@ -1,5 +1,6 @@
 """Modal app for on-demand TRR backend long-running jobs."""
 
+# fmt: off
 from __future__ import annotations
 
 import logging
@@ -69,7 +70,6 @@ def _build_modal_stub_module():
                 func._modal_function_args = args
                 func._modal_function_options = dict(kwargs)
                 return func
-
             return _decorator
 
     class _ModalModule:
