@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -24,17 +23,28 @@ class PlatformJobHandler(Protocol):
         ...
 
 
+class PlatformJobExecutor(Protocol):
+    """Callable contract for a claimed social job executor."""
+
+    def __call__(
+        self,
+        job: dict[str, Any],
+        *,
+        worker_id: str | None,
+    ) -> dict[str, Any]: ...
+
+
 @dataclass(frozen=True)
 class FunctionPlatformJobHandler:
     platform: str
     stage: str
-    execute_func: Callable[[dict[str, Any]], dict[str, Any]]
+    execute_func: PlatformJobExecutor
 
     def supports(self, platform: str, stage: str) -> bool:
         return self.platform == _normalize_key(platform) and self.stage == _normalize_key(stage)
 
     def execute(self, job: dict[str, Any], *, worker_id: str | None = None) -> dict[str, Any]:
-        return self.execute_func(job, worker_id=worker_id)  # type: ignore[misc]
+        return self.execute_func(job, worker_id=worker_id)
 
 
 def _normalize_key(value: Any) -> str:
