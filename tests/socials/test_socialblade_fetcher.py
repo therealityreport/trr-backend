@@ -6,6 +6,7 @@ from datetime import date, timedelta
 
 import pytest
 
+from trr_backend.socials.socialblade import parser as socialblade_parser
 from trr_backend.socials.socialblade.fetcher import SocialBladeScraplingFetcher
 
 
@@ -43,6 +44,24 @@ def _trpc_payload(result: object) -> str:
 
 def _trpc_batch_payload(*results: object) -> str:
     return json.dumps([{"result": {"data": {"json": item}}} for item in results])
+
+
+def test_trpc_row_helpers_ignore_non_mapping_rows_before_sorting() -> None:
+    total_chart = socialblade_parser._build_total_followers_chart_from_total_rows(
+        [None, {"date": "2026-03-02", "followers": "20"}, {"date": "2026-03-01", "followers": "10"}]
+    )
+    metrics = socialblade_parser._history_rows_to_metrics(
+        [None, {"date": "2026-03-01", "followers": "10", "following": "1", "media": "2"}],
+        limit=14,
+    )
+    delta_chart = socialblade_parser._build_total_followers_chart_from_daily_deltas(
+        20,
+        [None, {"date": "2026-03-01", "followers": "1"}],
+    )
+
+    assert total_chart is not None and total_chart["total_data_points"] == 2
+    assert metrics["row_count"] == 1
+    assert delta_chart is not None and delta_chart["total_data_points"] == 1
 
 
 SOCIALBLADE_HTML = """

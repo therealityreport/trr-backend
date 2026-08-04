@@ -15,6 +15,7 @@ _LOCAL_ROOM_FUNCTIONS: dict[str, Any] = {}
 _LEGACY_NAMESPACE: dict[str, Any] | None = None
 _LEGACY_ORIGINALS: dict[str, Any] = {}
 _MISSING = object()
+_NO_LEGACY_FALLBACK = object()
 
 
 def _configure_legacy_provider(
@@ -29,16 +30,16 @@ def _configure_legacy_provider(
     _LEGACY_ORIGINALS = dict(originals)
 
 
-def _legacy_value(name: str, local_value: Any = _MISSING) -> Any:
+def _legacy_value(name: str, local_value: Any = _NO_LEGACY_FALLBACK) -> Any:
     namespace = _LEGACY_NAMESPACE
     if namespace is not None and name in namespace:
         return namespace[name]
-    if local_value is not _MISSING:
+    if local_value is not _NO_LEGACY_FALLBACK:
         return local_value
     raise RuntimeError(f"Instagram media-mirror provider is not configured: {name}")
 
 
-def _legacy_callable(name: str, local_impl: Any = _MISSING) -> Any:
+def _legacy_callable(name: str, local_impl: Any = _NO_LEGACY_FALLBACK) -> Any:
     candidate = _legacy_value(name, local_impl)
     if not callable(candidate):
         raise TypeError(f"Instagram media-mirror provider is not callable: {name}")
@@ -106,7 +107,7 @@ def _update_instagram_post_source_media_fields(
     media_urls: list[str] | object = _MISSING,
     conn: Any | None = None,
 ) -> None:
-    field_unset = _legacy_value("FIELD_UNSET")
+    field_unset = _legacy_value("FIELD_UNSET", _MISSING)
     instagram_posts_has_column = _legacy_callable("_instagram_posts_has_column")
     pg_runtime = _legacy_value("pg", pg)
     assignments: list[str] = []
