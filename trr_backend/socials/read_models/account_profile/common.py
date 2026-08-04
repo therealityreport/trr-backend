@@ -83,6 +83,18 @@ def _require_provider_ready() -> Mapping[str, Any]:
         return _PROVIDER_NAMESPACE
 
 
+def _instagram_payload_sidecar_sql(*args: Any, **kwargs: Any) -> Any:
+    return _require_provider_ready()["_instagram_payload_sidecar_sql"](*args, **kwargs)
+
+
+def _log_instagram_payload_schema_unavailable(*args: Any, **kwargs: Any) -> Any:
+    return _require_provider_ready()["_log_instagram_payload_schema_unavailable"](*args, **kwargs)
+
+
+def _instagram_payload_rows_for_read(*args: Any, **kwargs: Any) -> Any:
+    return _require_provider_ready()["_instagram_payload_rows_for_read"](*args, **kwargs)
+
+
 def _publish_provider_binding(name: str, value: Any) -> None:
     globals()[name] = value
 
