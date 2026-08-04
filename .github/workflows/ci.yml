@@ -194,6 +194,8 @@ jobs:
     name: Modal lockfile freshness (non-blocking)
     runs-on: ubuntu-latest
     continue-on-error: true
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v5
