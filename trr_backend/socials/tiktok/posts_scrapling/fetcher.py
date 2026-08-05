@@ -41,6 +41,7 @@ from trr_backend.socials._scrapling_http_utils import (
     status_code as _status_code,
 )
 from trr_backend.socials.scrapling_transport import (
+    SCRAPLING_BROWSER_LOCALE,
     build_stealthy_fetcher,
     cookies_to_scrapling,
     merge_response_cookies,
@@ -403,6 +404,7 @@ class TikTokPostsScraplingFetcher:
         self._request_count += 1
         fetch_kwargs = {
             **self._scrapling_fetcher_options.kwargs,
+            "locale": SCRAPLING_BROWSER_LOCALE,
             "headless": self._headless,
             "network_idle": False,
             "load_dom": False,
@@ -414,7 +416,7 @@ class TikTokPostsScraplingFetcher:
             "retry_delay": 1.0,
         }
         if self._capture_xhr:
-            fetch_kwargs["capture_xhr"] = True
+            fetch_kwargs["capture_xhr"] = r"/api/(?:user/detail|post/item_list)/"
         return await self._fetcher.async_fetch(url, **fetch_kwargs)
 
     # -------------------------------------------------------------------

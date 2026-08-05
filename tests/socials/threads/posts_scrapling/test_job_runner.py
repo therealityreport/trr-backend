@@ -804,7 +804,6 @@ def test_threads_job_runner_honors_legacy_retryable_metadata(
     monkeypatch: pytest.MonkeyPatch,
     fake_lifecycle: _FakeLifecycle,
 ) -> None:
-    from trr_backend.socials import threads as threads_module
     from trr_backend.socials.threads.posts_scrapling import job_runner as jr
 
     class _FakeFetcher:
@@ -843,7 +842,11 @@ def test_threads_job_runner_honors_legacy_retryable_metadata(
         fetcher=_FakeFetcher(),
         persist_result=PersistedThreadsPosts(posts_upserted=1, posts_skipped=0),
     )
-    monkeypatch.setattr(threads_module, "ThreadsScraper", lambda **_kwargs: _FakeLegacyScraper())
+    monkeypatch.setattr(
+        "trr_backend.socials.threads.scraper.ThreadsScraper",
+        lambda **_kwargs: _FakeLegacyScraper(),
+    )
+    monkeypatch.delattr("trr_backend.socials.threads.ThreadsScraper")
     monkeypatch.setattr(jr.pg, "fetch_one", _running_status_or_final_row)
 
     jr.run_threads_posts_scrapling_job(

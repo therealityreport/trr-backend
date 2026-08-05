@@ -1,14 +1,17 @@
 """TikTok cookie resolution for the posts Scrapling lane.
 
-Delegates to the canonical _load_tiktok_cookies() from
-social_season_analytics which handles env vars, file loading,
-cookie validation, and auto-refresh.
+Delegates through the configured canonical TikTok cookie-loader port. Cookie
+selection, validation, and refresh remain owned by social_season_analytics.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+
+from trr_backend.socials.pipelines.tiktok_cookie_loader import (
+    load_tiktok_cookies as _load_tiktok_cookies,
+)
 
 
 @dataclass(slots=True)
@@ -34,19 +37,6 @@ def _cookies_to_scrapling(cookies: dict[str, str]) -> list[dict[str, Any]]:
             }
         )
     return payload
-
-
-def _load_tiktok_cookies() -> dict[str, str]:
-    """Import and call the canonical TikTok cookie loader from the repo.
-
-    Lazy import to avoid loading the 10k+ line social_season_analytics
-    module until needed, and to make the function patchable in tests.
-    """
-    from trr_backend.socials.social_season_analytics_impl import (
-        _load_tiktok_cookies as _canonical_load,
-    )
-
-    return _canonical_load()
 
 
 def resolve_tiktok_posts_session() -> TikTokPostsScraplingSession:

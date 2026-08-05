@@ -2,8 +2,8 @@
 
 This module owns the import surface for Instagram post, catalog-post, and
 comment persistence. The post/catalog implementations currently live in
-`catalog_ingest`, while comment persistence still bridges to the legacy core
-until that helper cluster can move without changing DB behavior.
+`catalog_ingest`, while comment persistence uses a late-bound provider until
+that helper cluster can move without changing DB behavior.
 """
 
 from __future__ import annotations
@@ -12,8 +12,46 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-import trr_backend.socials.social_season_analytics_impl as _core
-from trr_backend.socials.instagram import catalog_ingest as _catalog_ingest
+_LEGACY_NAMESPACE: dict[str, Any] | None = None
+
+
+class _LegacyProviderProxy:
+    def __getattr__(self, name: str) -> Any:
+        namespace = _LEGACY_NAMESPACE
+        if namespace is None:
+            raise RuntimeError(f"Instagram persistence provider is not configured: {name}")
+        try:
+            return namespace[name]
+        except KeyError:
+            raise AttributeError(f"Instagram persistence provider has no attribute: {name}") from None
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        namespace = _LEGACY_NAMESPACE
+        if namespace is None:
+            raise RuntimeError(f"Instagram persistence provider is not configured: {name}")
+        namespace[name] = value
+
+
+_LEGACY_PROVIDER = _LegacyProviderProxy()
+_core = _LEGACY_PROVIDER
+
+
+def _configure_legacy_provider(namespace: dict[str, Any]) -> None:
+    """Bind the live monolith patch surface without importing or copying it."""
+
+    global _LEGACY_NAMESPACE
+
+    configured = _LEGACY_NAMESPACE
+    if configured is not None and configured is not namespace:
+        raise RuntimeError("Instagram persistence provider is already configured")
+    _LEGACY_NAMESPACE = namespace
+
+
+def _catalog_ingest_module() -> Any:
+    from trr_backend.socials.instagram import catalog_ingest
+
+    return catalog_ingest
+
 
 _SAFE_COMMENT_COLUMN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _COMMENT_WRITE_ID_FIELDS = frozenset({"post_id", "comment_id"})
@@ -30,15 +68,15 @@ _COMMENT_WRITE_IGNORED_FIELDS = frozenset(
 
 
 def _upsert_instagram_post(*args: Any, **kwargs: Any) -> Any:
-    return _catalog_ingest._upsert_instagram_post(*args, **kwargs)
+    return _catalog_ingest_module()._upsert_instagram_post(*args, **kwargs)
 
 
 def _shared_catalog_instagram_post_payload(*args: Any, **kwargs: Any) -> Any:
-    return _catalog_ingest._shared_catalog_instagram_post_payload(*args, **kwargs)
+    return _catalog_ingest_module()._shared_catalog_instagram_post_payload(*args, **kwargs)
 
 
 def _batch_upsert_shared_catalog_instagram_posts(*args: Any, **kwargs: Any) -> Any:
-    return _catalog_ingest._batch_upsert_shared_catalog_instagram_posts(*args, **kwargs)
+    return _catalog_ingest_module()._batch_upsert_shared_catalog_instagram_posts(*args, **kwargs)
 
 
 def _instagram_comment_raw_payload(comment: Any) -> dict[str, Any]:

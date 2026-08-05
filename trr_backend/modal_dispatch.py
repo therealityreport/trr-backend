@@ -5,11 +5,13 @@ from __future__ import annotations
 import logging
 import os
 from datetime import UTC, datetime
+from functools import lru_cache
 from threading import Lock
 from time import monotonic
 from typing import Any
 
 from trr_backend.job_plane import execution_backend_canonical
+from trr_backend.runtime_version import build_runtime_version_stamp
 from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS, normalize_source_scope
 
 logger = logging.getLogger(__name__)
@@ -33,6 +35,11 @@ _SUPPORTED_ADMIN_OPERATION_TYPES = frozenset(
 _REMOTE_EXECUTION_MODE = "remote"
 _REMOTE_EXECUTION_OWNER = "remote_worker"
 _MODAL_EXECUTION_BACKEND = "modal"
+_REQUIRED_MODAL_PROFILE = "admin-56995"
+_REQUIRED_MODAL_WORKSPACE = "admin-56995"
+_REQUIRED_MODAL_ENVIRONMENT = "main"
+_REQUIRED_MODAL_APP_NAME = "trr-backend-jobs"
+_REQUIRED_MODAL_APP_REF = "trr_backend.modal_jobs"
 _REDDIT_RUNTIME_HEALTH_CACHE_TTL_SECONDS = max(
     5,
     int(str(os.getenv("TRR_MODAL_REDDIT_RUNTIME_HEALTH_CACHE_TTL_SECONDS") or "60").strip() or "60"),
@@ -208,6 +215,53 @@ def modal_environment_name() -> str | None:
     return value or None
 
 
+def get_trr_modal_function_handle(
+    function_name: str,
+    *,
+    app_name: str | None = None,
+    environment_name: str | None = None,
+) -> Any:
+    """Resolve a Modal function only after pinning the immutable TRR identity."""
+
+    normalized_function = str(function_name or "").strip()
+    if not normalized_function:
+        raise RuntimeError("Modal function name is required")
+
+    requested_environment = str(environment_name or "").strip()
+    requested_app_name = str(app_name or "").strip()
+    observed = {
+        "MODAL_PROFILE": str(os.getenv("MODAL_PROFILE") or _REQUIRED_MODAL_PROFILE).strip(),
+        "MODAL_WORKSPACE": str(os.getenv("MODAL_WORKSPACE") or _REQUIRED_MODAL_WORKSPACE).strip(),
+        "MODAL_ENVIRONMENT": requested_environment
+        or str(os.getenv("MODAL_ENVIRONMENT") or _REQUIRED_MODAL_ENVIRONMENT).strip(),
+        "TRR_MODAL_APP_NAME": str(
+            requested_app_name or os.getenv("TRR_MODAL_APP_NAME") or _REQUIRED_MODAL_APP_NAME
+        ).strip(),
+        "TRR_MODAL_APP_REF": str(os.getenv("TRR_MODAL_APP_REF") or _REQUIRED_MODAL_APP_REF).strip(),
+    }
+    expected = {
+        "MODAL_PROFILE": _REQUIRED_MODAL_PROFILE,
+        "MODAL_WORKSPACE": _REQUIRED_MODAL_WORKSPACE,
+        "MODAL_ENVIRONMENT": _REQUIRED_MODAL_ENVIRONMENT,
+        "TRR_MODAL_APP_NAME": _REQUIRED_MODAL_APP_NAME,
+        "TRR_MODAL_APP_REF": _REQUIRED_MODAL_APP_REF,
+    }
+    for key, expected_value in expected.items():
+        if observed[key] != expected_value:
+            raise RuntimeError(
+                f"Modal target override blocked: {key}={observed[key] or '<empty>'}; expected {expected_value}."
+            )
+
+    os.environ.update(expected)
+    import modal
+
+    return modal.Function.from_name(
+        _REQUIRED_MODAL_APP_NAME,
+        normalized_function,
+        environment_name=_REQUIRED_MODAL_ENVIRONMENT,
+    )
+
+
 def modal_execution_metadata() -> dict[str, str]:
     return {
         "execution_mode_canonical": _REMOTE_EXECUTION_MODE,
@@ -216,8 +270,16 @@ def modal_execution_metadata() -> dict[str, str]:
     }
 
 
+def modal_runtime_capacity_context() -> str:
+    configured = str(os.getenv("TRR_RUNTIME_CAPACITY_CONTEXT") or "").strip()
+    if configured:
+        return configured
+    return "hosted_modal" if modal_dispatch_enabled() else "local_workspace"
+
+
 def modal_dispatch_config() -> dict[str, Any]:
     return {
+        "runtime_capacity_context": modal_runtime_capacity_context(),
         "app_name": modal_app_name(),
         "modal_environment": modal_environment_name(),
         "admin_function": modal_admin_function_name(),
@@ -306,9 +368,11 @@ def resolve_modal_function(function_name: str) -> dict[str, Any]:
         return payload
 
     try:
-        import modal
-
-        fn = modal.Function.from_name(app_name, normalized_function)
+        fn = get_trr_modal_function_handle(
+            normalized_function,
+            app_name=app_name,
+            environment_name=environment_name,
+        )
         hydrate = getattr(fn, "hydrate", None)
         if _env_flag("TRR_MODAL_RESOLVE_HYDRATE", default=False) and callable(hydrate):
             hydrate()
@@ -498,9 +562,11 @@ def get_modal_reddit_runtime_health(*, force_refresh: bool = False) -> dict[str,
     else:
         app_name = modal_app_name()
         try:
-            import modal
-
-            probe = modal.Function.from_name(app_name, probe_function_name)
+            probe = get_trr_modal_function_handle(
+                probe_function_name,
+                app_name=app_name,
+                environment_name=modal_environment_name(),
+            )
             payload = _normalize_reddit_runtime_health_payload(probe.remote())
         except Exception as exc:  # noqa: BLE001
             logger.exception(
@@ -532,6 +598,16 @@ def _dispatcher_worker_id(dispatcher_name: str) -> str:
     return f"modal:{normalized}-dispatcher"
 
 
+@lru_cache(maxsize=1)
+def _resolve_dispatcher_runtime_version_stamp() -> dict[str, Any]:
+    return build_runtime_version_stamp(
+        getenv=os.getenv,
+        modal_environment=modal_environment_name() or _REQUIRED_MODAL_ENVIRONMENT,
+        modal_function=modal_social_job_function_name() or None,
+        execution_backend=execution_backend_canonical(),
+    )
+
+
 def _record_dispatcher_heartbeat(
     *,
     dispatcher_name: str,
@@ -541,7 +617,7 @@ def _record_dispatcher_heartbeat(
 ) -> None:
     try:
         from trr_backend.db import pg
-        from trr_backend.socials.control_plane import _resolve_runtime_version_stamp, update_worker_heartbeat
+        from trr_backend.socials.control_plane.worker_health import update_worker_heartbeat
 
         existing_metadata: dict[str, Any] = {}
         try:
@@ -563,7 +639,7 @@ def _record_dispatcher_heartbeat(
             "dispatcher_name": dispatcher_name,
             "execution_backend_canonical": _MODAL_EXECUTION_BACKEND,
             "execution_mode_canonical": _REMOTE_EXECUTION_MODE,
-            "runtime_version": dict(_resolve_runtime_version_stamp()),
+            "runtime_version": dict(_resolve_dispatcher_runtime_version_stamp()),
             **(metadata_updates or {}),
         }
         update_worker_heartbeat(
@@ -625,9 +701,11 @@ def _spawn_named_modal_function(
         }
 
     try:
-        import modal
-
-        fn = modal.Function.from_name(app_name, normalized_function)
+        fn = get_trr_modal_function_handle(
+            normalized_function,
+            app_name=app_name,
+            environment_name=environment_name,
+        )
         call = fn.spawn(**kwargs)
         call_id = str(getattr(call, "object_id", "") or "").strip() or None
         _record_dispatcher_heartbeat(
@@ -835,9 +913,11 @@ def dispatch_socialblade_scrape_sync(
     app_name = modal_app_name()
     normalized_source_scope = normalize_source_scope(source_scope)
     try:
-        import modal
-
-        fn = modal.Function.from_name(app_name, function_name)
+        fn = get_trr_modal_function_handle(
+            function_name,
+            app_name=app_name,
+            environment_name=modal_environment_name(),
+        )
         result = fn.remote(
             handle=handle,
             platform=platform,

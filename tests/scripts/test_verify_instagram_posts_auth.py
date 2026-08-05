@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 
 from scripts.modal import verify_instagram_posts_auth as cli
 
@@ -9,21 +8,18 @@ from scripts.modal import verify_instagram_posts_auth as cli
 def test_verify_instagram_posts_auth_calls_modal_function(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
-    class _Function:
+    class _Remote:
         @staticmethod
-        def from_name(app_name: str, function_name: str):
-            captured["app_name"] = app_name
-            captured["function_name"] = function_name
+        def remote(*, account_handle: str):
+            captured["account_handle"] = account_handle
+            return {"ready": True, "posts_seen": 33, "cookie_fingerprint": "abc123"}
 
-            class _Remote:
-                @staticmethod
-                def remote(*, account_handle: str):
-                    captured["account_handle"] = account_handle
-                    return {"ready": True, "posts_seen": 33, "cookie_fingerprint": "abc123"}
+    def fake_handle(function_name: str, *, app_name: str):
+        captured["app_name"] = app_name
+        captured["function_name"] = function_name
+        return _Remote()
 
-            return _Remote()
-
-    monkeypatch.setitem(__import__("sys").modules, "modal", SimpleNamespace(Function=_Function))
+    monkeypatch.setattr(cli, "get_trr_modal_function_handle", fake_handle)
 
     payload = cli.verify_instagram_posts_auth(
         account="@bravotv",

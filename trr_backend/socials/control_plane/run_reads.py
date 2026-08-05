@@ -7,7 +7,10 @@ from datetime import datetime
 from typing import Any
 
 import trr_backend.socials.control_plane.run_lifecycle as run_lifecycle
-import trr_backend.socials.social_season_analytics_impl as legacy
+from trr_backend.socials.control_plane.queue_status import _legacy_repo
+from trr_backend.socials.provider_registry import register_legacy_patchable_namespace
+
+legacy = _legacy_repo()
 
 
 def _fetch_all_control(sql: str, params: list[Any]) -> list[dict[str, Any]]:
@@ -407,3 +410,9 @@ def get_run_progress_snapshot(
         season_id=season_id,
         recent_log_limit=safe_recent_log_limit,
     )
+
+
+register_legacy_patchable_namespace(
+    globals(),
+    ("list_runs", "list_run_summaries", "get_run_progress_snapshot"),
+)

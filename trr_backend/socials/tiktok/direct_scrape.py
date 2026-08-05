@@ -56,7 +56,7 @@ def _request_optional_value(request: Any, name: str, default: Any = None) -> Any
 
 
 def _build_scrape_config(request: Any) -> Any:
-    from trr_backend.socials import tiktok as tiktok_module
+    import trr_backend.socials.tiktok.scraper as tiktok_module
 
     return tiktok_module.TikTokScrapeConfig(
         username=_request_value(request, "username"),
@@ -84,7 +84,7 @@ def scrape_tiktok(
     config = _build_scrape_config(request)
 
     try:
-        from trr_backend.socials import tiktok as tiktok_module
+        import trr_backend.socials.tiktok.scraper as tiktok_module
 
         tiktok_cookies = load_cookies("scrape")
         scraper = tiktok_module.TikTokScraper(cookies=tiktok_cookies)
@@ -128,7 +128,7 @@ def preview_tiktok_profile(
     active_logger = logger or globals()["logger"]
 
     try:
-        from trr_backend.socials import tiktok as tiktok_module
+        import trr_backend.socials.tiktok.scraper as tiktok_module
 
         tiktok_cookies = load_cookies("preview")
         scraper = tiktok_module.TikTokScraper(cookies=tiktok_cookies)

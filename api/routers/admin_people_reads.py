@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import copy
 import json
 import logging
 import os
 import time
-from concurrent.futures import Future
-from threading import Lock
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -19,61 +16,21 @@ from trr_backend.db.pg import (
 )
 from trr_backend.problem import problem_http_exception
 from trr_backend.repositories import admin_people_reads as people_repo
+from trr_backend.services.person_read_cache import (
+    invalidate_person_read_cache,
+)
+from trr_backend.services.person_read_cache import (
+    resolve_person_read_singleflight as _resolve_people_read_singleflight,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin/people", tags=["admin-people-reads"])
 
-_CACHE_LOCK = Lock()
-_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
-_INFLIGHT_LOCK = Lock()
-_INFLIGHT: dict[str, Future[dict[str, Any]]] = {}
 _RESOLVE_SLUG_CACHE_TTL_SECONDS = max(int(os.getenv("TRR_ADMIN_RESOLVE_SLUG_BACKEND_CACHE_TTL_SECONDS", "60")), 1)
 _PERSON_DETAIL_CACHE_TTL_SECONDS = max(int(os.getenv("TRR_ADMIN_PERSON_DETAIL_BACKEND_CACHE_TTL_SECONDS", "15")), 1)
 _PERSON_COVER_CACHE_TTL_SECONDS = max(int(os.getenv("TRR_ADMIN_PERSON_COVER_BACKEND_CACHE_TTL_SECONDS", "30")), 1)
 _PERSON_GALLERY_CACHE_TTL_SECONDS = max(int(os.getenv("TRR_ADMIN_PERSON_GALLERY_BACKEND_CACHE_TTL_SECONDS", "10")), 1)
-
-
-def _cache_get(key: str) -> dict[str, Any] | None:
-    now = time.monotonic()
-    with _CACHE_LOCK:
-        entry = _CACHE.get(key)
-        if not entry:
-            return None
-        expires_at, payload = entry
-        if expires_at <= now:
-            _CACHE.pop(key, None)
-            return None
-        return payload
-
-
-def _cache_set(key: str, payload: dict[str, Any], ttl_seconds: int) -> None:
-    with _CACHE_LOCK:
-        _CACHE[key] = (time.monotonic() + ttl_seconds, payload)
-
-
-def invalidate_person_read_cache(*, person_id: str | None = None) -> None:
-    prefixes = []
-    if person_id:
-        prefixes = [
-            f"person:{person_id}:detail",
-            f"person:{person_id}:cover-photo",
-            f"person:{person_id}:gallery:",
-        ]
-    with _CACHE_LOCK:
-        if not prefixes:
-            _CACHE.clear()
-            return
-        for key in list(_CACHE.keys()):
-            if any(key.startswith(prefix) for prefix in prefixes):
-                _CACHE.pop(key, None)
-    with _INFLIGHT_LOCK:
-        if not prefixes:
-            _INFLIGHT.clear()
-            return
-        for key in list(_INFLIGHT.keys()):
-            if any(key.startswith(prefix) for prefix in prefixes):
-                _INFLIGHT.pop(key, None)
 
 
 def _payload_size_bytes(payload: dict[str, Any]) -> int:
@@ -110,43 +67,6 @@ def _log_read(
 def _request_role(request: Request) -> str:
     raw = str(request.headers.get("x-trr-admin-request-role") or "").strip().lower()
     return raw if raw in {"primary", "secondary", "polling"} else "unspecified"
-
-
-def _resolve_people_read_singleflight(
-    *,
-    cache_key: str,
-    ttl_seconds: int,
-    loader: Any,
-) -> tuple[dict[str, Any], int, str, str]:
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached, 0, "hit", "none"
-
-    with _INFLIGHT_LOCK:
-        in_flight = _INFLIGHT.get(cache_key)
-        if in_flight is None:
-            in_flight = Future()
-            _INFLIGHT[cache_key] = in_flight
-            owns_loader = True
-        else:
-            owns_loader = False
-
-    if not owns_loader:
-        return copy.deepcopy(in_flight.result()), 0, "miss", "shared"
-
-    try:
-        payload, query_count = loader()
-        resolved_payload = copy.deepcopy(payload)
-        _cache_set(cache_key, resolved_payload, ttl_seconds)
-        in_flight.set_result(copy.deepcopy(resolved_payload))
-        return resolved_payload, query_count, "miss", "owner"
-    except Exception as exc:
-        in_flight.set_exception(exc)
-        raise
-    finally:
-        with _INFLIGHT_LOCK:
-            if _INFLIGHT.get(cache_key) is in_flight:
-                _INFLIGHT.pop(cache_key, None)
 
 
 def _to_people_read_http_exception(error: Exception, request: Request) -> HTTPException:

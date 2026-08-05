@@ -31,6 +31,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+import trr_backend.socials.social_season_analytics_impl as _social_analytics_provider
 from api.auth import InternalAdminUser
 from api.realtime.broker import broker_runtime_status, init_broker, shutdown_broker
 from trr_backend.db import pg
@@ -61,6 +62,8 @@ from trr_backend.security.jwt import (
     expected_supabase_project_ref,
 )
 from trr_backend.socials.read_models.account_profile.common import instagram_comment_rollup_health
+
+del _social_analytics_provider
 
 configure_runtime_observability(service_name="trr-backend-api")
 
@@ -628,6 +631,24 @@ from api.routers import (  # noqa: E402
     surveys,
     ws,
 )
+from api.routers.v2 import admin_flashback as admin_flashback_v2  # noqa: E402
+from api.routers.v2 import admin_media as admin_media_v2  # noqa: E402
+from api.routers.v2 import admin_people_reads as admin_people_reads_v2  # noqa: E402
+from api.routers.v2 import admin_reddit_reads as admin_reddit_reads_v2  # noqa: E402
+from api.routers.v2 import admin_show_person_writes as admin_show_person_writes_v2  # noqa: E402
+from api.routers.v2 import admin_social_catalog_runs as admin_social_catalog_runs_v2  # noqa: E402
+from api.routers.v2 import admin_social_shared_sources as admin_social_shared_sources_v2  # noqa: E402
+from api.routers.v2 import admin_typography as admin_typography_v2  # noqa: E402
+from api.routers.v2 import core_cast_credit_reads as core_cast_credit_reads_v2  # noqa: E402
+from api.routers.v2 import core_show_reads as core_show_reads_v2  # noqa: E402
+from api.routers.v2 import covered_shows as covered_shows_v2  # noqa: E402
+from api.routers.v2 import external_ids as external_ids_v2  # noqa: E402
+from api.routers.v2 import identities as identities_v2  # noqa: E402
+from api.routers.v2 import networks_streaming as networks_streaming_v2  # noqa: E402
+from api.routers.v2 import person_media as person_media_v2  # noqa: E402
+from api.routers.v2 import recent_people as recent_people_v2  # noqa: E402
+from api.routers.v2 import season_cast_survey_roles as season_cast_survey_roles_v2  # noqa: E402
+from api.routers.v2 import show_slugs as show_slugs_v2  # noqa: E402
 
 app.include_router(shows.router, prefix="/api/v1")
 app.include_router(surveys.router, prefix="/api/v1")
@@ -670,6 +691,24 @@ app.include_router(admin_social_posts.router, prefix="/api/v1")
 app.include_router(admin_socialblade.router, prefix="/api/v1")
 app.include_router(admin_show_sync.router, prefix="/api/v1")
 app.include_router(socials.router, prefix="/api/v1")
+app.include_router(identities_v2.router, prefix="/api/v2")
+app.include_router(networks_streaming_v2.router, prefix="/api/v2")
+app.include_router(covered_shows_v2.router, prefix="/api/v2")
+app.include_router(core_cast_credit_reads_v2.router, prefix="/api/v2")
+app.include_router(core_show_reads_v2.router, prefix="/api/v2")
+app.include_router(admin_media_v2.router, prefix="/api/v2")
+app.include_router(admin_people_reads_v2.router, prefix="/api/v2")
+app.include_router(admin_flashback_v2.router, prefix="/api/v2")
+app.include_router(admin_reddit_reads_v2.router, prefix="/api/v2")
+app.include_router(admin_social_catalog_runs_v2.router, prefix="/api/v2")
+app.include_router(admin_social_shared_sources_v2.router, prefix="/api/v2")
+app.include_router(admin_show_person_writes_v2.router, prefix="/api/v2")
+app.include_router(admin_typography_v2.router, prefix="/api/v2")
+app.include_router(recent_people_v2.router, prefix="/api/v2")
+app.include_router(external_ids_v2.router, prefix="/api/v2")
+app.include_router(show_slugs_v2.router, prefix="/api/v2")
+app.include_router(person_media_v2.router, prefix="/api/v2")
+app.include_router(season_cast_survey_roles_v2.router, prefix="/api/v2")
 
 
 @app.get("/")

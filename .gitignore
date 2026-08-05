@@ -151,3 +151,4 @@ data/twitter_cookies.json
 docs/ai/evidence/**
 !docs/ai/evidence/
 !docs/ai/evidence/README.md
+/graphify-out/

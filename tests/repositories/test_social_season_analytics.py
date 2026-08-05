@@ -178,6 +178,334 @@ def _disable_profile_summary_shared_connection(monkeypatch: pytest.MonkeyPatch) 
     )
 
 
+_PROVIDER_REPAIR_SPECS: dict[str, list[dict[str, Any]]] = {
+    "test_get_social_account_profile_posts_exposes_missing_comments_sort_metadata": [
+        {"binding": "_instagram_post_comment_rollups_available", "conn": "non-null", "returns": False}
+    ],
+    "test_get_social_account_profile_posts_filters_all_captions": [
+        {"binding": "_instagram_post_comment_rollups_available", "conn": "non-null", "returns": False}
+    ],
+    "test_get_social_account_profile_posts_uses_instagram_collaborator_dataset_rows": [
+        {"binding": "_instagram_post_comment_rollups_available", "conn": "non-null", "returns": False}
+    ],
+    "test_get_social_account_profile_summary_accepts_show_external_id_only_handles": [
+        {
+            "binding": "_catalog_recent_runs_header",
+            "platform": "tiktok",
+            "account_handle": "thetraitorsus",
+            "limit": 3,
+            "conn": "none",
+            "returns": [],
+        },
+        {
+            "binding": "_tiktok_social_account_lite_header_stats",
+            "account_handle": "thetraitorsus",
+            "conn": "none",
+            "returns": {},
+        },
+    ],
+    "test_get_social_account_profile_summary_does_not_force_instagram_live_profile_refresh": [
+        {
+            "binding": "_instagram_social_account_detail_rollup",
+            "account_handle": "bravotv",
+            "conn": "none",
+            "returns": None,
+        }
+    ],
+    "test_get_social_account_profile_summary_includes_avatar_url": [
+        {
+            "binding": "_instagram_social_account_detail_rollup",
+            "account_handle": "bravowwhl",
+            "conn": "none",
+            "returns": None,
+        },
+        {
+            "binding": "_social_account_comments_recent_runs",
+            "platform": "instagram",
+            "account_handle": "bravowwhl",
+            "limit": 10,
+            "conn": "none",
+            "returns": [],
+        },
+        {
+            "binding": "_instagram_social_account_comments_target_counts",
+            "account_handle": "bravowwhl",
+            "conn": "none",
+            "returns": {
+                "available_posts": 0,
+                "eligible_posts": 0,
+                "missing_posts": 0,
+                "stale_posts": 0,
+            },
+        },
+    ],
+    "test_get_social_account_profile_summary_includes_tiktok_identity_fields": [
+        {
+            "binding": "_tiktok_social_account_lite_header_stats",
+            "account_handle": "bravotv",
+            "conn": "none",
+            "returns": {},
+        }
+    ],
+    "test_get_social_account_profile_summary_lite_includes_header_stats_without_full_detail": [
+        {
+            "binding": "_catalog_recent_runs_header",
+            "platform": "instagram",
+            "account_handle": "bravotv",
+            "limit": 3,
+            "conn": "none",
+            "returns": [],
+        }
+    ],
+    "test_get_social_account_profile_summary_lite_includes_tiktok_comment_and_media_stats": [
+        {
+            "binding": "_catalog_recent_runs_header",
+            "platform": "tiktok",
+            "account_handle": "thetraitorsus",
+            "limit": 3,
+            "conn": "non-null",
+            "returns": [],
+        }
+    ],
+    "test_get_social_account_profile_summary_normalizes_wwhl_alias": [
+        {
+            "binding": "_instagram_social_account_detail_rollup",
+            "account_handle": "bravowwhl",
+            "conn": "none",
+            "returns": None,
+        },
+        {
+            "binding": "_social_account_comments_recent_runs",
+            "platform": "instagram",
+            "account_handle": "bravowwhl",
+            "limit": 10,
+            "conn": "none",
+            "returns": [],
+        },
+        {
+            "binding": "_instagram_social_account_comments_target_counts",
+            "account_handle": "bravowwhl",
+            "conn": "none",
+            "returns": {
+                "available_posts": 0,
+                "eligible_posts": 0,
+                "missing_posts": 0,
+                "stale_posts": 0,
+            },
+        },
+    ],
+    "test_get_social_account_profile_summary_reuses_loaded_instagram_rows_for_hashtags": [
+        {
+            "binding": "_instagram_social_account_detail_rollup",
+            "account_handle": "bravotv",
+            "conn": "none",
+            "returns": None,
+        },
+        {
+            "binding": "_social_account_comments_recent_runs",
+            "platform": "instagram",
+            "account_handle": "bravotv",
+            "limit": 10,
+            "conn": "none",
+            "returns": [],
+        },
+        {
+            "binding": "_social_account_profile_summary_totals",
+            "platform": "instagram",
+            "account_handle": "bravotv",
+            "conn": "none",
+            "returns": {},
+        },
+        {
+            "binding": "_instagram_social_account_comments_target_counts",
+            "account_handle": "bravotv",
+            "conn": "none",
+            "returns": {
+                "available_posts": 0,
+                "eligible_posts": 0,
+                "missing_posts": 0,
+                "stale_posts": 0,
+            },
+        },
+    ],
+    "test_get_social_account_profile_summary_uses_instagram_collaborator_dataset_rows": [
+        {
+            "binding": "_instagram_social_account_detail_rollup",
+            "account_handle": "bravodailydish",
+            "conn": "none",
+            "returns": None,
+        },
+        {
+            "binding": "_social_account_comments_recent_runs",
+            "platform": "instagram",
+            "account_handle": "bravodailydish",
+            "limit": 10,
+            "conn": "none",
+            "returns": [],
+        },
+        {
+            "binding": "_instagram_social_account_comments_target_counts",
+            "account_handle": "bravodailydish",
+            "conn": "none",
+            "returns": {
+                "available_posts": 0,
+                "eligible_posts": 0,
+                "missing_posts": 0,
+                "stale_posts": 0,
+            },
+        },
+    ],
+    "test_get_social_account_profile_summary_uses_instagram_live_total_posts_with_source_snapshot": [
+        {
+            "binding": "_instagram_social_account_detail_rollup",
+            "account_handle": "bravotv",
+            "conn": "none",
+            "returns": None,
+        }
+    ],
+}
+
+
+@pytest.fixture(autouse=True)
+def _install_exact_account_profile_provider_repairs(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+):
+    """Install only the exact provider-owned offline fakes required by 13 nodes."""
+    specs = _PROVIDER_REPAIR_SPECS.get(request.node.name)
+    if specs is None:
+        yield
+        return
+
+    import trr_backend.socials.social_season_analytics_impl as provider
+
+    calls: dict[str, list[dict[str, Any]]] = {item["binding"]: [] for item in specs}
+
+    def record(binding: str, actual: dict[str, Any]) -> Any:
+        matches = [item for item in specs if item["binding"] == binding]
+        assert len(matches) == 1, f"provider repair spec must name {binding} exactly once"
+        expected = matches[0]
+        expected_call = {key: value for key, value in expected.items() if key not in {"binding", "returns"}}
+        assert actual == expected_call
+        calls[binding].append(actual)
+        return expected["returns"]
+
+    def conn_classification(conn: Any | None) -> str:
+        return "none" if conn is None else "non-null"
+
+    bindings = set(calls)
+    if "_instagram_post_comment_rollups_available" in bindings:
+
+        def fake_rollups_available(*, conn: Any | None = None) -> bool:
+            return record("_instagram_post_comment_rollups_available", {"conn": conn_classification(conn)})
+
+        monkeypatch.setattr(provider, "_instagram_post_comment_rollups_available", fake_rollups_available)
+
+    if "_catalog_recent_runs_header" in bindings:
+
+        def fake_catalog_header(
+            platform: str,
+            account_handle: str,
+            *,
+            limit: int = 3,
+            conn: Any | None = None,
+        ) -> list[dict[str, Any]]:
+            return record(
+                "_catalog_recent_runs_header",
+                {
+                    "platform": platform,
+                    "account_handle": account_handle,
+                    "limit": limit,
+                    "conn": conn_classification(conn),
+                },
+            )
+
+        monkeypatch.setattr(provider, "_catalog_recent_runs_header", fake_catalog_header)
+
+    if "_tiktok_social_account_lite_header_stats" in bindings:
+
+        def fake_tiktok_header(account_handle: str, *, conn: Any | None = None) -> dict[str, Any]:
+            return record(
+                "_tiktok_social_account_lite_header_stats",
+                {"account_handle": account_handle, "conn": conn_classification(conn)},
+            )
+
+        monkeypatch.setattr(provider, "_tiktok_social_account_lite_header_stats", fake_tiktok_header)
+
+    if "_instagram_social_account_detail_rollup" in bindings:
+
+        def fake_instagram_detail(account_handle: str, *, conn: Any | None = None) -> None:
+            return record(
+                "_instagram_social_account_detail_rollup",
+                {"account_handle": account_handle, "conn": conn_classification(conn)},
+            )
+
+        monkeypatch.setattr(provider, "_instagram_social_account_detail_rollup", fake_instagram_detail)
+
+    if "_social_account_comments_recent_runs" in bindings:
+
+        def fake_comments_runs(
+            platform: str,
+            account_handle: str,
+            *,
+            limit: int = 10,
+            conn: Any | None = None,
+        ) -> list[dict[str, Any]]:
+            return record(
+                "_social_account_comments_recent_runs",
+                {
+                    "platform": platform,
+                    "account_handle": account_handle,
+                    "limit": limit,
+                    "conn": conn_classification(conn),
+                },
+            )
+
+        monkeypatch.setattr(provider, "_social_account_comments_recent_runs", fake_comments_runs)
+
+    if "_social_account_profile_summary_totals" in bindings:
+
+        def fake_summary_totals(
+            platform: str,
+            account_handle: str,
+            *,
+            conn: Any | None = None,
+        ) -> dict[str, Any]:
+            return record(
+                "_social_account_profile_summary_totals",
+                {
+                    "platform": platform,
+                    "account_handle": account_handle,
+                    "conn": conn_classification(conn),
+                },
+            )
+
+        monkeypatch.setattr(provider, "_social_account_profile_summary_totals", fake_summary_totals)
+
+    if "_instagram_social_account_comments_target_counts" in bindings:
+
+        def fake_comment_target_counts(
+            account_handle: str,
+            *,
+            conn: Any | None = None,
+        ) -> dict[str, int]:
+            return record(
+                "_instagram_social_account_comments_target_counts",
+                {"account_handle": account_handle, "conn": conn_classification(conn)},
+            )
+
+        monkeypatch.setattr(
+            provider,
+            "_instagram_social_account_comments_target_counts",
+            fake_comment_target_counts,
+        )
+
+    yield
+
+    for binding, binding_calls in calls.items():
+        assert len(binding_calls) == 1, f"provider repair fake {binding} expected one call, got {len(binding_calls)}"
+
+
 def _patch_shared_catalog_fetch_terminal_error(monkeypatch: pytest.MonkeyPatch, func: Any) -> None:
     from trr_backend.socials.control_plane import run_lifecycle
 
@@ -827,6 +1155,131 @@ def test_get_social_account_profile_posts_instagram_missing_sort_uses_bounded_sc
     assert captured["page_params"] == ["bravotv", "bravotv", 20, 20, 0]
 
 
+def test_instagram_profile_page_call_sites_use_ready_payload_bindings_and_log_schema_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.socials.instagram import payload_sidecars
+
+    monkeypatch.setattr(payload_sidecars, "payload_read_mode", lambda: "sidecar")
+    monkeypatch.setattr(profile_common, "_comment_lifecycle_supported", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        profile_common,
+        "_instagram_catalog_collaborator_membership_available",
+        lambda **_kwargs: False,
+    )
+    monkeypatch.setattr(profile_common, "_instagram_post_comment_rollups_available", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        profile_common.pg,
+        "fetch_one",
+        lambda *_args, **_kwargs: pytest.fail("window total should avoid a separate count query"),
+    )
+
+    cases = (
+        (
+            "search",
+            profile_common._fetch_instagram_profile_rows_page,
+            {
+                "account_handle": "BravoTV",
+                "page": 1,
+                "page_size": 2,
+                "search": "needle",
+                "sort_by": "created",
+                "sort_dir": "desc",
+            },
+            "instagram.profile.search",
+            (("mixed", "page_rows"),),
+        ),
+        (
+            "normal",
+            profile_common._fetch_instagram_profile_rows_page_no_search,
+            {
+                "account_handle": "BravoTV",
+                "page": 1,
+                "page_size": 2,
+                "sort_by": "created",
+                "sort_dir": "desc",
+            },
+            "instagram.profile.normal",
+            (("post", "p"), ("catalog", "p")),
+        ),
+        (
+            "created",
+            profile_common._fetch_instagram_profile_rows_page_no_search_created,
+            {"account_handle": "BravoTV", "page": 1, "page_size": 2},
+            "instagram.profile.created",
+            (("post", "p"), ("catalog", "p")),
+        ),
+    )
+    for case_name, loader, kwargs, surface, expected_sidecar_bindings in cases:
+        sidecar_calls: list[tuple[str, str, str]] = []
+        log_calls: list[tuple[str, object]] = []
+        row_calls: list[tuple[list[dict[str, object]], str, str, str]] = []
+        fetch_calls: list[str] = []
+
+        def fake_sidecar_sql(
+            *,
+            row_kind: str,
+            row_alias: str,
+            mode: str,
+            _sidecar_calls: list[tuple[str, str, str]] = sidecar_calls,
+        ) -> tuple[str, str]:
+            _sidecar_calls.append((row_kind, row_alias, mode))
+            if mode == "legacy":
+                return "", ""
+            return "left join missing_payload_sidecar on true", ", null::jsonb as payload_probe"
+
+        def fake_log_schema_unavailable(
+            *,
+            surface: str,
+            entity_identity: object,
+            _log_calls: list[tuple[str, object]] = log_calls,
+        ) -> None:
+            _log_calls.append((surface, entity_identity))
+
+        def fake_rows_for_read(
+            rows: list[dict[str, object]],
+            *,
+            row_kind: str,
+            mode: str,
+            surface: str,
+            _row_calls: list[tuple[list[dict[str, object]], str, str, str]] = row_calls,
+        ) -> list[dict[str, object]]:
+            _row_calls.append((rows, row_kind, mode, surface))
+            return rows
+
+        def fake_fetch_all(
+            sql: str,
+            _params: list[object],
+            _fetch_calls: list[str] = fetch_calls,
+            _case_name: str = case_name,
+        ) -> list[dict[str, object]]:
+            _fetch_calls.append(sql)
+            if len(_fetch_calls) == 1:
+                raise profile_common.psycopg_errors.UndefinedTable("payload sidecar missing")
+            return [{"id": f"{_case_name}-row", "_total_count": 1}]
+
+        monkeypatch.setattr(profile_common, "_instagram_payload_sidecar_sql", fake_sidecar_sql)
+        monkeypatch.setattr(
+            profile_common,
+            "_log_instagram_payload_schema_unavailable",
+            fake_log_schema_unavailable,
+        )
+        monkeypatch.setattr(profile_common, "_instagram_payload_rows_for_read", fake_rows_for_read)
+        monkeypatch.setattr(profile_common.pg, "fetch_all", fake_fetch_all)
+
+        rows, total = loader(**kwargs)
+
+        expected_sidecar_calls = [
+            (*binding, mode) for mode in ("sidecar", "legacy") for binding in expected_sidecar_bindings
+        ]
+        assert sidecar_calls == expected_sidecar_calls
+        assert log_calls == [(surface, "bravotv")]
+        assert len(fetch_calls) == 2
+        assert rows == [{"id": f"{case_name}-row", "_total_count": 1}]
+        assert total == 1
+        assert row_calls == [(rows, "mixed", "legacy", surface)]
+
+
 def test_get_social_account_profile_posts_instagram_comments_only_incomplete_filter_uses_accounted_breakdown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -987,17 +1440,17 @@ def test_comments_coverage_instagram_uses_post_detail_reported_comments(monkeypa
 
     monkeypatch.setattr(social_repo, "_comment_lifecycle_supported", lambda *_args, **_kwargs: False)
 
-    def _fake_fetch_one(sql: str, params: list[Any]) -> dict[str, Any]:
+    def _fake_fetch_all(sql: str, params: list[Any]) -> list[dict[str, Any]]:
         captured["sql"] = " ".join(sql.split()).lower()
         captured["params"] = params
-        return {
-            "posts_scanned": 2,
-            "stale_posts_count": 1,
-            "saved_comments": 5,
-            "reported_comments": 149,
-        }
+        return [{"id": "post-1", "reported_comments": 149}]
 
-    monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+    monkeypatch.setattr(
+        social_repo,
+        "_instagram_saved_comment_counts_by_post",
+        lambda *_args, **_kwargs: {"post-1": 5},
+    )
 
     payload = social_repo._comments_coverage_for_platform(
         "season-1",
@@ -12211,7 +12664,8 @@ def test_ingest_threads_comments_assigns_explicit_account_level_post(monkeypatch
             assert target == "https://www.threads.com/@bravowwhl/post/DUCpTSVAPrR"
             return [SimpleNamespace(comment_id="comment-1", raw_data={}, replies=[])]
 
-    monkeypatch.setattr("trr_backend.socials.threads.ThreadsScraper", _FakeThreadsScraper)
+    monkeypatch.setattr("trr_backend.socials.threads.scraper.ThreadsScraper", _FakeThreadsScraper)
+    monkeypatch.delattr("trr_backend.socials.threads.ThreadsScraper")
     monkeypatch.setattr(social_repo, "_load_threads_cookies", lambda: {"sessionid": "cookie"})
     monkeypatch.setattr(
         "trr_backend.socials.threads.posts_scrapling.proxy.select_threads_posts_proxy",
@@ -15627,7 +16081,8 @@ def test_scrape_shared_threads_posts_catalog_adds_profile_snapshot(
                 )
             ]
 
-    monkeypatch.setattr("trr_backend.socials.threads.ThreadsScraper", _FakeThreadsScraper)
+    monkeypatch.setattr("trr_backend.socials.threads.scraper.ThreadsScraper", _FakeThreadsScraper)
+    monkeypatch.delattr("trr_backend.socials.threads.ThreadsScraper")
     monkeypatch.setattr(social_repo, "_load_threads_cookies", lambda: {"sessionid": "cookie"})
     monkeypatch.setattr(
         social_repo,
@@ -25634,7 +26089,8 @@ def test_refresh_threads_post_detail_sync_upserts_without_job_fk(monkeypatch: py
             )
             return post, []
 
-    monkeypatch.setattr("trr_backend.socials.threads.ThreadsScraper", _FakeThreadsScraper)
+    monkeypatch.setattr("trr_backend.socials.threads.scraper.ThreadsScraper", _FakeThreadsScraper)
+    monkeypatch.delattr("trr_backend.socials.threads.ThreadsScraper")
 
     def _fake_upsert(*_args, **kwargs):
         captured["job_id"] = kwargs.get("job_id")

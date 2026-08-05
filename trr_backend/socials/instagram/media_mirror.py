@@ -1,53 +1,63 @@
-# ruff: noqa: F821, UP037
 """Instagram media mirror stage and queue helpers."""
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
+from datetime import datetime
 from typing import Any
 
-import trr_backend.socials.social_season_analytics_impl as _core
+from trr_backend.db import pg
+from trr_backend.socials.model_types import SeasonContext
+from trr_backend.socials.provider_registry import register_legacy_patchable_namespace
 
-_RESERVED_CORE_EXPORTS = {
-    "__builtins__",
-    "__cached__",
-    "__doc__",
-    "__file__",
-    "__loader__",
-    "__name__",
-    "__package__",
-    "__spec__",
-    "_core",
-    "_IMPORTED_CORE_NAMES",
-    "_LOCAL_ROOM_NAMES",
-    "_RESERVED_CORE_EXPORTS",
-    "_sync_core_overrides",
-}
-_IMPORTED_CORE_NAMES: set[str] = set()
-for _name, _value in _core.__dict__.items():
-    if _name in _RESERVED_CORE_EXPORTS:
-        continue
-    globals()[_name] = _value
-    _IMPORTED_CORE_NAMES.add(_name)
 _LOCAL_ROOM_NAMES: set[str] = set()
 _LOCAL_ROOM_FUNCTIONS: dict[str, Any] = {}
-_CORE_ROOM_WRAPPERS: dict[str, Any] = {}
+_LEGACY_NAMESPACE: dict[str, Any] | None = None
+_LEGACY_ORIGINALS: dict[str, Any] = {}
+_MISSING = object()
+_NO_LEGACY_FALLBACK = object()
 
 
-def _sync_core_overrides() -> None:
-    for _name in _IMPORTED_CORE_NAMES - _LOCAL_ROOM_NAMES:
-        if hasattr(_core, _name):
-            globals()[_name] = getattr(_core, _name)
+def _configure_legacy_provider(
+    namespace: dict[str, Any],
+    originals: Mapping[str, Any],
+) -> None:
+    """Bind the supported monolith patch surface without importing it."""
+
+    global _LEGACY_NAMESPACE, _LEGACY_ORIGINALS
+
+    _LEGACY_NAMESPACE = namespace
+    _LEGACY_ORIGINALS = dict(originals)
+
+
+def _legacy_value(name: str, local_value: Any = _NO_LEGACY_FALLBACK) -> Any:
+    namespace = _LEGACY_NAMESPACE
+    if namespace is not None and name in namespace:
+        return namespace[name]
+    if local_value is not _NO_LEGACY_FALLBACK:
+        return local_value
+    raise RuntimeError(f"Instagram media-mirror provider is not configured: {name}")
+
+
+def _legacy_callable(name: str, local_impl: Any = _NO_LEGACY_FALLBACK) -> Any:
+    candidate = _legacy_value(name, local_impl)
+    if not callable(candidate):
+        raise TypeError(f"Instagram media-mirror provider is not callable: {name}")
+    return candidate
 
 
 def _room_callable(name: str, local_impl: Any) -> Any:
-    candidate = getattr(_core, name, None)
-    if callable(candidate) and candidate is not _CORE_ROOM_WRAPPERS.get(name):
+    candidate = _legacy_value(name, None)
+    if callable(candidate) and candidate is not _LEGACY_ORIGINALS.get(name):
         return candidate
     return local_impl
 
 
 def _instagram_post_source_urls(post_row: dict[str, Any]) -> tuple[str, list[str]]:
-    source_media_urls = _normalize_unique_terms(_as_text_list(post_row.get("media_urls")))
+    normalize_unique_terms = _legacy_callable("_normalize_unique_terms")
+    as_text_list = _legacy_callable("_as_text_list")
+    source_media_urls = normalize_unique_terms(as_text_list(post_row.get("media_urls")))
     source_thumbnail_url = str(post_row.get("thumbnail_url") or "").strip() or (
         source_media_urls[0] if source_media_urls else ""
     )
@@ -55,31 +65,38 @@ def _instagram_post_source_urls(post_row: dict[str, Any]) -> tuple[str, list[str
 
 
 def _instagram_post_needs_media_mirror(post_row: dict[str, Any], *, conn: Any | None = None) -> bool:
-    return _platform_post_needs_media_mirror("instagram", post_row, conn=conn)
+    platform_post_needs_media_mirror = _legacy_callable("_platform_post_needs_media_mirror")
+    return platform_post_needs_media_mirror("instagram", post_row, conn=conn)
 
 
 def _update_instagram_post_media_mirror_fields(
     *,
     post_id: str,
-    hosted_thumbnail_url: str | None | object = FIELD_UNSET,
-    hosted_media_urls: list[str] | object = FIELD_UNSET,
-    media_mirror_status: str | None | object = FIELD_UNSET,
-    media_mirror_error: str | None | object = FIELD_UNSET,
-    media_mirror_attempt_count: int | object = FIELD_UNSET,
-    media_mirror_last_attempt_at: datetime | None | object = FIELD_UNSET,
-    media_mirror_last_job_id: str | None | object = FIELD_UNSET,
+    hosted_thumbnail_url: str | None | object = _MISSING,
+    hosted_media_urls: list[str] | object = _MISSING,
+    media_mirror_status: str | None | object = _MISSING,
+    media_mirror_error: str | None | object = _MISSING,
+    media_mirror_attempt_count: int | object = _MISSING,
+    media_mirror_last_attempt_at: datetime | None | object = _MISSING,
+    media_mirror_last_job_id: str | None | object = _MISSING,
     conn: Any | None = None,
 ) -> None:
-    _update_platform_post_media_mirror_fields(
+    field_unset = _legacy_value("FIELD_UNSET")
+    update_platform_post_media_mirror_fields = _legacy_callable("_update_platform_post_media_mirror_fields")
+
+    def _provider_value(value: Any) -> Any:
+        return field_unset if value is _MISSING else value
+
+    update_platform_post_media_mirror_fields(
         platform="instagram",
         post_id=post_id,
-        hosted_thumbnail_url=hosted_thumbnail_url,
-        hosted_media_urls=hosted_media_urls,
-        media_mirror_status=media_mirror_status,
-        media_mirror_error=media_mirror_error,
-        media_mirror_attempt_count=media_mirror_attempt_count,
-        media_mirror_last_attempt_at=media_mirror_last_attempt_at,
-        media_mirror_last_job_id=media_mirror_last_job_id,
+        hosted_thumbnail_url=_provider_value(hosted_thumbnail_url),
+        hosted_media_urls=_provider_value(hosted_media_urls),
+        media_mirror_status=_provider_value(media_mirror_status),
+        media_mirror_error=_provider_value(media_mirror_error),
+        media_mirror_attempt_count=_provider_value(media_mirror_attempt_count),
+        media_mirror_last_attempt_at=_provider_value(media_mirror_last_attempt_at),
+        media_mirror_last_job_id=_provider_value(media_mirror_last_job_id),
         conn=conn,
     )
 
@@ -87,10 +104,13 @@ def _update_instagram_post_media_mirror_fields(
 def _update_instagram_post_source_media_fields(
     *,
     post_id: str,
-    thumbnail_url: str | None | object = FIELD_UNSET,
-    media_urls: list[str] | object = FIELD_UNSET,
+    thumbnail_url: str | None | object = _MISSING,
+    media_urls: list[str] | object = _MISSING,
     conn: Any | None = None,
 ) -> None:
+    field_unset = _legacy_value("FIELD_UNSET", _MISSING)
+    instagram_posts_has_column = _legacy_callable("_instagram_posts_has_column")
+    pg_runtime = _legacy_value("pg", pg)
     assignments: list[str] = []
     params: list[Any] = []
 
@@ -102,9 +122,17 @@ def _update_instagram_post_source_media_fields(
         assignments.append(f"{column} = %s")
         params.append(value)
 
-    if thumbnail_url is not FIELD_UNSET and _instagram_posts_has_column("thumbnail_url", conn=conn):
+    if (
+        thumbnail_url is not _MISSING
+        and thumbnail_url is not field_unset
+        and instagram_posts_has_column("thumbnail_url", conn=conn)
+    ):
         _add("thumbnail_url", thumbnail_url)
-    if media_urls is not FIELD_UNSET and _instagram_posts_has_column("media_urls", conn=conn):
+    if (
+        media_urls is not _MISSING
+        and media_urls is not field_unset
+        and instagram_posts_has_column("media_urls", conn=conn)
+    ):
         _add("media_urls", list(media_urls or []), as_jsonb=True)
 
     if not assignments:
@@ -112,8 +140,8 @@ def _update_instagram_post_source_media_fields(
 
     sql = f"update social.instagram_posts set {', '.join(assignments)} where id = %s::uuid returning id::text"
     params.append(post_id)
-    with pg.db_cursor(conn=conn) as cur:
-        pg.fetch_one_with_cursor(cur, sql, params)
+    with pg_runtime.db_cursor(conn=conn) as cur:
+        pg_runtime.fetch_one_with_cursor(cur, sql, params)
 
 
 def _enqueue_instagram_media_mirror_job(
@@ -127,7 +155,8 @@ def _enqueue_instagram_media_mirror_job(
     parent_job_id: str | None,
     conn: Any | None = None,
 ) -> str | None:
-    return _enqueue_platform_media_mirror_job(
+    enqueue_platform_media_mirror_job = _legacy_callable("_enqueue_platform_media_mirror_job")
+    return enqueue_platform_media_mirror_job(
         context,
         platform="instagram",
         run_id=run_id,
@@ -146,7 +175,8 @@ def _run_instagram_media_mirror_stage(
     job_id: str,
     config: dict[str, Any],
 ) -> tuple[int, int, dict[str, Any]]:
-    return _run_platform_media_mirror_stage(
+    run_platform_media_mirror_stage = _legacy_callable("_run_platform_media_mirror_stage")
+    return run_platform_media_mirror_stage(
         context=context,
         platform="instagram",
         job_id=job_id,
@@ -163,6 +193,7 @@ def requeue_instagram_media_mirror_jobs(
     date_start: datetime | None = None,
     date_end: datetime | None = None,
 ) -> dict[str, Any]:
+    requeue_media_mirror_jobs = _legacy_callable("requeue_media_mirror_jobs")
     return requeue_media_mirror_jobs(
         season_id,
         platform="instagram",
@@ -184,7 +215,6 @@ _LOCAL_ROOM_NAMES = {
     "requeue_instagram_media_mirror_jobs",
 }
 _LOCAL_ROOM_FUNCTIONS = {_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES}
-_CORE_ROOM_WRAPPERS = {_name: getattr(_core, _name, None) for _name in _LOCAL_ROOM_NAMES}
 __all__ = [
     "_instagram_post_source_urls",
     "_instagram_post_needs_media_mirror",
@@ -194,3 +224,7 @@ __all__ = [
     "_run_instagram_media_mirror_stage",
     "requeue_instagram_media_mirror_jobs",
 ]
+
+# Keep the route-facing leaf callable patchable through the published legacy
+# repository namespace while the monolith is being retired.
+register_legacy_patchable_namespace(globals(), (*__all__,))

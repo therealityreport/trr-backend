@@ -304,11 +304,17 @@ def invalidate_week_detail_cache() -> None:
     _clear_ttl_cache(_MIRROR_COVERAGE_CACHE, _MIRROR_COVERAGE_CACHE_LOCK)
 
 
+def _publish_week_detail_cache_invalidator(social_repo: Any) -> None:
+    social_repo.register_week_detail_cache_invalidator(invalidate_week_detail_cache)
+
+
 def _register_week_detail_cache_invalidator() -> None:
     try:
-        from trr_backend.repositories.social_season_analytics import register_week_detail_cache_invalidator
+        from trr_backend.socials.control_plane.dispatch_runtime import (
+            register_provider_publication_callback,
+        )
 
-        register_week_detail_cache_invalidator(invalidate_week_detail_cache)
+        register_provider_publication_callback(_publish_week_detail_cache_invalidator)
     except Exception:  # noqa: BLE001
         logger.debug("Failed to register week-detail cache invalidator hook", exc_info=True)
 

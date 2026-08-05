@@ -16,7 +16,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.modal.deploy_backend import REQUIRED_MODAL_PROFILE  # noqa: E402
+from scripts.modal.deploy_backend import (  # noqa: E402
+    DEFAULT_APP_NAME,
+    DEFAULT_APP_REF,
+    REQUIRED_MODAL_ENVIRONMENT,
+    REQUIRED_MODAL_PROFILE,
+    REQUIRED_MODAL_WORKSPACE,
+    pinned_modal_env,
+)
 from trr_backend.utils.env import load_env  # noqa: E402
 
 VALIDATE_LOCAL_TIMEOUT_SECONDS = 120
@@ -80,8 +87,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--modal-environment",
-        default="",
-        help="Optional Modal environment name passed through to apply/deploy/verify steps.",
+        choices=(REQUIRED_MODAL_ENVIRONMENT,),
+        default=REQUIRED_MODAL_ENVIRONMENT,
+        help=f"Pinned Modal environment for apply/deploy/verify steps (required: {REQUIRED_MODAL_ENVIRONMENT}).",
     )
     parser.add_argument(
         "--account-handle",
@@ -139,9 +147,38 @@ def _run_command(command: list[str], *, timeout_seconds: int) -> subprocess.Comp
         check=True,
         capture_output=True,
         cwd=REPO_ROOT,
+        env=_pinned_repair_env(),
         text=True,
         timeout=timeout_seconds,
     )
+
+
+def _require_main_modal_environment(modal_environment: str) -> str:
+    normalized = str(modal_environment or REQUIRED_MODAL_ENVIRONMENT).strip()
+    if normalized != REQUIRED_MODAL_ENVIRONMENT:
+        raise ValueError(
+            "Modal target override blocked: "
+            f"environment={normalized or '<empty>'}; expected {REQUIRED_MODAL_ENVIRONMENT}."
+        )
+    return REQUIRED_MODAL_ENVIRONMENT
+
+
+def _pinned_repair_env() -> dict[str, str]:
+    env = pinned_modal_env()
+    expected = {
+        "MODAL_PROFILE": REQUIRED_MODAL_PROFILE,
+        "MODAL_WORKSPACE": REQUIRED_MODAL_WORKSPACE,
+        "MODAL_ENVIRONMENT": REQUIRED_MODAL_ENVIRONMENT,
+        "TRR_MODAL_APP_NAME": DEFAULT_APP_NAME,
+        "TRR_MODAL_APP_REF": DEFAULT_APP_REF,
+    }
+    for key, expected_value in expected.items():
+        observed = str(env.get(key) or "").strip()
+        if observed != expected_value:
+            raise ValueError(
+                f"Modal target override blocked: {key}={observed or '<empty>'}; expected {expected_value}."
+            )
+    return env
 
 
 def _run_json_command_allow_failure(
@@ -155,6 +192,7 @@ def _run_json_command_allow_failure(
         check=False,
         capture_output=True,
         cwd=REPO_ROOT,
+        env=_pinned_repair_env(),
         text=True,
         timeout=timeout_seconds,
     )
@@ -371,6 +409,7 @@ def _apply_named_secrets_command(
     source_env: Path,
     modal_environment: str,
 ) -> list[str]:
+    modal_environment = _require_main_modal_environment(modal_environment)
     command = [
         python_command,
         str(REPO_ROOT / "scripts" / "modal" / "prepare_named_secrets.py"),
@@ -378,16 +417,22 @@ def _apply_named_secrets_command(
         str(source_env),
         "--apply",
     ]
-    if modal_environment:
-        command.extend(["--modal-environment", modal_environment])
+    command.extend(["--modal-environment", modal_environment])
     return command
 
 
 def _deploy_modal_command(*, python_command: str, modal_environment: str) -> list[str]:
-    command = [python_command, "-m", "modal", "deploy", "-m", "trr_backend.modal_jobs"]
-    if modal_environment:
-        command.extend(["--env", modal_environment])
-    return command
+    modal_environment = _require_main_modal_environment(modal_environment)
+    return [
+        python_command,
+        "-m",
+        "modal",
+        "deploy",
+        "-m",
+        DEFAULT_APP_REF,
+        "--env",
+        modal_environment,
+    ]
 
 
 def _verify_remote_auth_command(
@@ -396,6 +441,7 @@ def _verify_remote_auth_command(
     modal_environment: str,
     account_handle: str | None = None,
 ) -> list[str]:
+    modal_environment = _require_main_modal_environment(modal_environment)
     command = [
         python_command,
         str(REPO_ROOT / "scripts" / "modal" / "verify_modal_readiness.py"),
@@ -408,8 +454,7 @@ def _verify_remote_auth_command(
         command.extend(["--probe-instagram-posts-auth", normalized_account])
         command.extend(["--probe-instagram-comments-auth", normalized_account])
         command.append("--strict-instagram-comments-auth")
-    if modal_environment:
-        command.extend(["--env", modal_environment])
+    command.extend(["--env", modal_environment])
     return command
 
 
@@ -533,6 +578,8 @@ def run_repair(
     confirm_instagram_refresh: str = "",
     dry_run: bool = False,
 ) -> dict[str, Any]:
+    modal_environment = _require_main_modal_environment(modal_environment)
+    _pinned_repair_env()
     load_env()
 
     python_command = _python_command()
@@ -1018,9 +1065,8 @@ def _print_text_summary(summary: dict[str, Any]) -> None:
 
 
 def main() -> int:
-    # Pin the Modal workspace so secret/deploy/verify subprocesses inherit it
-    # instead of the ambient ~/.modal.toml profile.
-    os.environ["MODAL_PROFILE"] = REQUIRED_MODAL_PROFILE
+    # Pin the full Modal identity before any secret/deploy/verify path runs.
+    os.environ.update(_pinned_repair_env())
     args = parse_args()
     if bool(args.clear_auth_repair_cooldown):
         summary = run_clear_auth_repair_cooldown()

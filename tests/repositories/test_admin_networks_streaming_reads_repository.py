@@ -1,8 +1,29 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from trr_backend.repositories import admin_networks_streaming_reads as repo
+
+
+@pytest.mark.parametrize(
+    ("display_name", "expected_slug"),
+    [
+        ("A&E", "a-and-e"),
+        ("!A&E!", "a-and-e"),
+        ("  Bravo TV  ", "bravo-tv"),
+    ],
+)
+def test_entity_registry_slug_contract_matches_canonical_app_slug(
+    display_name: str,
+    expected_slug: str,
+) -> None:
+    assert repo._to_entity_slug(display_name) == expected_slug
+    assert repo._ENTITY_REGISTRY_CTE_SQL.count("regexp_replace(ng.name, '&', ' and ', 'gi')") == 1
+    assert repo._ENTITY_REGISTRY_CTE_SQL.count("regexp_replace(pg.name, '&', ' and ', 'gi')") == 1
+    assert repo._ENTITY_REGISTRY_CTE_SQL.count("regexp_replace(pcg.name, '&', ' and ', 'gi')") == 1
+    assert repo._ENTITY_REGISTRY_CTE_SQL.count("both '-' FROM regexp_replace(") == 3
 
 
 def test_get_networks_streaming_summary_shapes_contract(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -32,7 +53,7 @@ def test_get_networks_streaming_summary_shapes_contract(monkeypatch: pytest.Monk
                 "homepage_url": "https://www.bravotv.com",
                 "resolution_status": "resolved",
                 "resolution_reason": None,
-                "last_attempt_at": "2026-03-26T00:00:00Z",
+                "last_attempt_at": datetime(2026, 3, 26, tzinfo=UTC),
             },
             {
                 "type": "production",
@@ -75,7 +96,7 @@ def test_get_networks_streaming_summary_shapes_contract(monkeypatch: pytest.Monk
             "homepage_url": "https://www.bravotv.com",
             "resolution_status": "resolved",
             "resolution_reason": None,
-            "last_attempt_at": "2026-03-26T00:00:00Z",
+            "last_attempt_at": "2026-03-26T00:00:00+00:00",
             "has_logo": True,
             "has_bw_variants": True,
             "has_links": True,
@@ -139,7 +160,12 @@ def test_get_networks_streaming_detail_shapes_contract(monkeypatch: pytest.Monke
             "display_name_override": None,
             "wikidata_id_override": None,
             "wikipedia_url_override": None,
-            "logo_source_urls_override": [],
+            "logo_source_urls_override": [
+                " https://images.example.com/bravo-string.svg ",
+                {"source": "override", "url": " https://images.example.com/bravo-object.svg "},
+                {"source": "override", "url": ""},
+                {"source": "override"},
+            ],
             "source_priority_override": [],
             "aliases_override": [],
             "override_notes": None,
@@ -203,8 +229,13 @@ def test_get_networks_streaming_detail_shapes_contract(monkeypatch: pytest.Monke
     assert payload is not None
     assert payload["entity_key"] == "bravo"
     assert payload["core"]["entity_id"] == "74"
-    assert len(payload["logo_assets"]) == 1
+    assert payload["override"]["logo_source_urls_override"] == [
+        "https://images.example.com/bravo-string.svg",
+        "https://images.example.com/bravo-object.svg",
+    ]
+    assert len(payload["logo_assets"]) == 2
     assert payload["logo_assets"][0]["mirror_status"] == "mirrored"
+    assert payload["logo_assets"][1]["source"] == "catalog"
     assert payload["shows"][0]["canonical_slug"] == "bravo-show"
 
 

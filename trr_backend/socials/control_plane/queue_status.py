@@ -3,14 +3,45 @@
 from __future__ import annotations
 
 import copy
-from importlib import import_module
 from typing import Any
 
 SOCIAL_CONTROL_POOL_NAME = "social_control"
+_LEGACY_NAMESPACE: dict[str, Any] | None = None
 
 
-def _legacy_repo():
-    return import_module("trr_backend.socials.social_season_analytics_impl")
+class _LegacyProviderProxy:
+    def __getattr__(self, name: str) -> Any:
+        namespace = _LEGACY_NAMESPACE
+        if namespace is None:
+            raise RuntimeError(f"Queue-status provider is not configured for read: {name}")
+        try:
+            return namespace[name]
+        except KeyError:
+            raise AttributeError(f"Queue-status provider has no attribute: {name}") from None
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        namespace = _LEGACY_NAMESPACE
+        if namespace is None:
+            raise RuntimeError(f"Queue-status provider is not configured for write: {name}")
+        namespace[name] = value
+
+
+_LEGACY_PROVIDER = _LegacyProviderProxy()
+
+
+def _configure_legacy_provider(namespace: dict[str, Any]) -> None:
+    """Bind the exact live monolith namespace used by compatibility patches."""
+
+    global _LEGACY_NAMESPACE
+
+    configured = _LEGACY_NAMESPACE
+    if configured is not None and configured is not namespace:
+        raise RuntimeError("Queue-status provider is already configured")
+    _LEGACY_NAMESPACE = namespace
+
+
+def _legacy_repo() -> _LegacyProviderProxy:
+    return _LEGACY_PROVIDER
 
 
 def invalidate_queue_status_cache() -> None:

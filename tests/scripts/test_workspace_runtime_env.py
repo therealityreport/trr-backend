@@ -11,6 +11,7 @@ def test_apply_workspace_runtime_env_maps_workspace_values(tmp_path) -> None:
         "WORKSPACE_TRR_JOB_PLANE_MODE=remote\n"
         "WORKSPACE_TRR_REMOTE_EXECUTOR=modal\n"
         "WORKSPACE_TRR_MODAL_ENABLED=1\n"
+        "WORKSPACE_RUNTIME_CAPACITY_CONTEXT=workspace_hybrid\n"
         'WORKSPACE_TRR_MODAL_APP_NAME="trr-backend-jobs"\n'
         "WORKSPACE_TRR_MODAL_SOCIAL_JOB_FUNCTION=run_social_job\n",
         encoding="utf-8",
@@ -23,6 +24,7 @@ def test_apply_workspace_runtime_env_maps_workspace_values(tmp_path) -> None:
     assert env["TRR_JOB_PLANE_MODE"] == "remote"
     assert env["TRR_REMOTE_EXECUTOR"] == "modal"
     assert env["TRR_MODAL_ENABLED"] == "1"
+    assert env["TRR_RUNTIME_CAPACITY_CONTEXT"] == "workspace_hybrid"
     assert env["TRR_MODAL_APP_NAME"] == "trr-backend-jobs"
     assert env["TRR_MODAL_SOCIAL_JOB_FUNCTION"] == "run_social_job"
     assert applied["TRR_REMOTE_EXECUTOR"] == "modal"

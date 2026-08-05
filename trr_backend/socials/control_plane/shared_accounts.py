@@ -1,19 +1,32 @@
+# ruff: noqa: F822
 """Shared-account catalog and profile flows for the social control plane."""
 
 from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from importlib import import_module
+from types import ModuleType
 from typing import Any
 
 from trr_backend.db import pg
 from trr_backend.modal_dispatch import cancel_modal_function_call
+from trr_backend.socials.control_plane.dispatch_runtime import legacy as _legacy
+from trr_backend.socials.control_plane.shared_source_config import (
+    get_shared_account_sources,
+    put_shared_account_sources,
+)
 from trr_backend.socials.control_plane.shared_status_reads import (
     get_season_shared_status,
     list_shared_runs,
 )
 from trr_backend.socials.instagram.persistence import _batch_upsert_shared_catalog_instagram_posts
 from trr_backend.socials.pipelines.account_catalog.progress import get_social_account_catalog_run_progress
+from trr_backend.socials.provider_registry import (
+    LateNamespaceProvider,
+    register_legacy_patchable_aliases,
+    register_legacy_patchable_namespace,
+)
 from trr_backend.socials.read_models.account_profile.common import (
     get_social_account_profile_collaborators_tags,
     get_social_account_profile_comments,
@@ -21,36 +34,79 @@ from trr_backend.socials.read_models.account_profile.common import (
     get_social_account_profile_posts,
     get_social_account_profile_summary,
 )
-from trr_backend.socials.social_season_analytics_impl import (
-    _default_targets,
-    _normalize_catalog_backfill_window,
-    _shared_account_catalog_requires_modal_executor,
-    cancel_shared_run,
-    dismiss_social_account_catalog_run,
-    get_season_context,
-    get_shared_account_sources,
-    get_social_account_catalog_freshness,
-    get_social_account_catalog_gap_analysis_status,
-    get_social_account_catalog_posts,
-    get_social_account_catalog_review_queue,
-    get_social_account_catalog_verification,
-    get_social_account_profile_hashtag_timeline,
-    get_targets,
-    list_shared_review_queue,
-    put_shared_account_sources,
-    put_social_account_profile_hashtags,
-    put_targets,
-    resolve_shared_review_queue_item,
-    resolve_social_account_catalog_review_queue_item,
-)
-from trr_backend.socials.social_season_analytics_impl import (
-    cancel_social_account_catalog_run as _legacy_cancel_social_account_catalog_run,
-)
 
 batch_upsert_shared_catalog_instagram_posts = _batch_upsert_shared_catalog_instagram_posts
-default_targets = _default_targets
-normalize_catalog_backfill_window = _normalize_catalog_backfill_window
-shared_account_catalog_requires_modal_executor = _shared_account_catalog_requires_modal_executor
+
+_PROVIDER_BINDINGS = {
+    "_default_targets": "_default_targets",
+    "_normalize_catalog_backfill_window": "_normalize_catalog_backfill_window",
+    "_shared_account_catalog_requires_modal_executor": "_shared_account_catalog_requires_modal_executor",
+    "cancel_shared_run": "cancel_shared_run",
+    "dismiss_social_account_catalog_run": "dismiss_social_account_catalog_run",
+    "get_season_context": "get_season_context",
+    "get_social_account_catalog_freshness": "get_social_account_catalog_freshness",
+    "get_social_account_catalog_gap_analysis_status": "get_social_account_catalog_gap_analysis_status",
+    "get_social_account_catalog_posts": "get_social_account_catalog_posts",
+    "get_social_account_catalog_review_queue": "get_social_account_catalog_review_queue",
+    "get_social_account_catalog_verification": "get_social_account_catalog_verification",
+    "get_social_account_profile_hashtag_timeline": "get_social_account_profile_hashtag_timeline",
+    "get_targets": "get_targets",
+    "list_shared_review_queue": "list_shared_review_queue",
+    "put_social_account_profile_hashtags": "put_social_account_profile_hashtags",
+    "put_targets": "put_targets",
+    "resolve_shared_review_queue_item": "resolve_shared_review_queue_item",
+    "resolve_social_account_catalog_review_queue_item": "resolve_social_account_catalog_review_queue_item",
+    "_legacy_cancel_social_account_catalog_run": "cancel_social_account_catalog_run",
+}
+_PUBLIC_PROVIDER_ALIASES = {
+    "default_targets": "_default_targets",
+    "normalize_catalog_backfill_window": "_normalize_catalog_backfill_window",
+    "shared_account_catalog_requires_modal_executor": "_shared_account_catalog_requires_modal_executor",
+}
+_PROVIDER_BINDING_SOURCES = _PROVIDER_BINDINGS | {
+    alias: _PROVIDER_BINDINGS[source] for alias, source in _PUBLIC_PROVIDER_ALIASES.items()
+}
+
+
+def _unconfigured_legacy_cancel_social_account_catalog_run(*args: Any, **kwargs: Any) -> Any:
+    return _require_provider_ready()["cancel_social_account_catalog_run"](*args, **kwargs)
+
+
+_legacy_cancel_social_account_catalog_run = _unconfigured_legacy_cancel_social_account_catalog_run
+
+
+def _publish_provider_binding(name: str, value: Any) -> None:
+    globals()[name] = value
+
+
+_PROVIDER = LateNamespaceProvider(
+    globals(),
+    prefix="SHARED_ACCOUNTS_PROVIDER",
+    bindings=_PROVIDER_BINDING_SOURCES,
+    publisher=lambda name, value: _publish_provider_binding(name, value),
+    unconfigured_message="SHARED_ACCOUNTS_PROVIDER_UNCONFIGURED: provider publication has not completed",
+)
+
+if isinstance(_legacy, ModuleType):
+    _PROVIDER.configure(_legacy.__dict__)
+del _legacy
+
+
+def _require_provider_ready() -> dict[str, Any]:
+    return _PROVIDER.require()  # type: ignore[return-value]
+
+
+def _configure_legacy_provider(provider: dict[str, Any]) -> None:
+    """Copy the exact compatibility bindings after provider publication."""
+
+    _PROVIDER.configure(provider)
+
+
+def __getattr__(name: str) -> Any:
+    if name in _PROVIDER_BINDINGS or name in _PUBLIC_PROVIDER_ALIASES:
+        _require_provider_ready()
+        return globals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _utcnow_iso() -> str:
@@ -68,6 +124,7 @@ def cancel_social_account_catalog_run(
 ) -> dict[str, Any]:
     """Cancel every active lane and Modal call in the catalog launch group."""
 
+    _require_provider_ready()
     normalized_platform = str(platform or "").strip().lower()
     normalized_account = str(account_handle or "").strip().lower().lstrip("@")
     parent = pg.fetch_one(
@@ -257,3 +314,24 @@ __all__ = [
     "resolve_social_account_catalog_review_queue_item",
     "shared_account_catalog_requires_modal_executor",
 ]
+
+register_legacy_patchable_namespace(globals(), ("cancel_social_account_catalog_run",))
+
+_CANONICAL_EXPORT_MODULES = {
+    "get_season_shared_status": "trr_backend.socials.control_plane.shared_status_reads",
+    "get_shared_account_sources": "trr_backend.socials.control_plane.shared_source_config",
+    "get_social_account_profile_collaborators_tags": "trr_backend.socials.read_models.account_profile.common",
+    "get_social_account_profile_comments": "trr_backend.socials.read_models.account_profile.common",
+    "get_social_account_profile_hashtags": "trr_backend.socials.read_models.account_profile.common",
+    "get_social_account_profile_posts": "trr_backend.socials.read_models.account_profile.common",
+    "get_social_account_profile_summary": "trr_backend.socials.read_models.account_profile.common",
+    "list_shared_runs": "trr_backend.socials.control_plane.shared_status_reads",
+    "put_shared_account_sources": "trr_backend.socials.control_plane.shared_source_config",
+}
+
+
+def _refresh_legacy_patchable_export(name: str) -> Any:
+    return getattr(import_module(_CANONICAL_EXPORT_MODULES[name]), name)
+
+
+register_legacy_patchable_aliases(globals(), _CANONICAL_EXPORT_MODULES, _refresh_legacy_patchable_export)

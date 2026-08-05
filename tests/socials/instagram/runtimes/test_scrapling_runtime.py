@@ -25,13 +25,59 @@ def test_healthcheck_stays_unhealthy_by_default(monkeypatch: pytest.MonkeyPatch)
     assert health.reason == "instagram_scrapling_runtime_enabled_not_enabled"
 
 
-def test_healthcheck_is_healthy_when_canary_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_healthcheck_is_healthy_when_canary_enabled_with_supported_fetcher(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("INSTAGRAM_SCRAPLING_RUNTIME_ENABLED", "true")
+    build_calls = 0
+
+    class FakeFetcher:
+        def get(self, _url: str, **_kwargs: Any) -> object:
+            return object()
+
+    def fake_build_fetcher() -> FakeFetcher:
+        nonlocal build_calls
+        build_calls += 1
+        return FakeFetcher()
+
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.runtimes.scrapling_runtime.build_fetcher",
+        fake_build_fetcher,
+    )
 
     health = ScraplingRuntime().healthcheck()
 
     assert health.healthy is True
     assert health.reason is None
+    assert build_calls == 1
+
+
+def test_healthcheck_reports_fetcher_construction_failure_without_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("INSTAGRAM_SCRAPLING_RUNTIME_ENABLED", "true")
+
+    def fail_build_fetcher() -> object:
+        raise ImportError("missing fetchers")
+
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.runtimes.scrapling_runtime.build_fetcher",
+        fail_build_fetcher,
+    )
+
+    health = ScraplingRuntime().healthcheck()
+
+    assert health.healthy is False
+    assert health.reason == "scrapling_fetcher_construction_failed: ImportError"
+
+
+def test_healthcheck_reports_unusable_fetcher_without_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("INSTAGRAM_SCRAPLING_RUNTIME_ENABLED", "true")
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.runtimes.scrapling_runtime.build_fetcher",
+        lambda: object(),
+    )
+
+    health = ScraplingRuntime().healthcheck()
+
+    assert health.healthy is False
+    assert health.reason == "scrapling_fetcher_fetch_method_unavailable"
 
 
 def test_fetch_profile_maps_web_profile_info_payload(monkeypatch: pytest.MonkeyPatch) -> None:

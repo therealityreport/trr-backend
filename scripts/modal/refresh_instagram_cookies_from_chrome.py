@@ -32,7 +32,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.modal.deploy_backend import REQUIRED_MODAL_PROFILE, pinned_modal_env  # noqa: E402
+from scripts.modal.deploy_backend import (  # noqa: E402
+    DEFAULT_APP_REF,
+    REQUIRED_MODAL_ENVIRONMENT,
+    REQUIRED_MODAL_PROFILE,
+    pinned_modal_env,
+)
+from trr_backend.modal_dispatch import get_trr_modal_function_handle  # noqa: E402
 
 CHROME_PROFILE_DIR = Path.home() / "Library" / "Application Support" / "Google" / "Chrome"
 REQUIRED_COOKIE_FIELDS = ("sessionid", "csrftoken", "ds_user_id")
@@ -276,7 +282,16 @@ def _push_to_modal(source_env: Path, *, cookies: dict[str, str] | None = None) -
 
 def _deploy_modal() -> tuple[bool, str]:
     """Deploy Modal app to pick up new secrets."""
-    cmd = [_python_command(), "-m", "modal", "deploy", "-m", "trr_backend.modal_jobs"]
+    cmd = [
+        _python_command(),
+        "-m",
+        "modal",
+        "deploy",
+        "-m",
+        DEFAULT_APP_REF,
+        "--env",
+        REQUIRED_MODAL_ENVIRONMENT,
+    ]
     try:
         subprocess.run(
             cmd, check=True, capture_output=True, cwd=REPO_ROOT, text=True, timeout=300, env=pinned_modal_env()
@@ -291,9 +306,7 @@ def _deploy_modal() -> tuple[bool, str]:
 def _verify_remote_auth() -> tuple[bool, str]:
     """Verify Instagram auth on Modal workers via probe function."""
     try:
-        import modal
-
-        fn = modal.Function.from_name("trr-backend-jobs", "probe_social_remote_auth")
+        fn = get_trr_modal_function_handle("probe_social_remote_auth")
         result = fn.remote(platform="instagram")
         if result.get("ready"):
             return True, "remote auth verified: ready"
@@ -568,8 +581,7 @@ def _emit(summary: dict[str, Any], as_json: bool) -> None:
             print(f"  Warning: {summary['compatibility_warning']}")
         if summary.get("cookie_fingerprint"):
             print(
-                "  Cookie fingerprint: "
-                f"{summary['cookie_fingerprint']} ({summary.get('cookie_fingerprint_algorithm')})"
+                f"  Cookie fingerprint: {summary['cookie_fingerprint']} ({summary.get('cookie_fingerprint_algorithm')})"
             )
         if summary.get("pushed_cookie_fingerprint"):
             print(

@@ -7,25 +7,37 @@ from datetime import UTC, datetime
 import pytest
 
 import trr_backend.repositories.social_season_analytics as social_repo
-import trr_backend.socials.control_plane.dispatch as dispatch_reads
+import trr_backend.socials.control_plane.run_reads as run_reads
 
 
-def test_legacy_list_runs_delegates_to_control_plane_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_legacy_list_runs_delegates_to_control_plane_run_reads(monkeypatch: pytest.MonkeyPatch) -> None:
     expected = [{"id": "run-1"}]
 
-    monkeypatch.setattr(dispatch_reads, "list_runs", lambda *_args, **_kwargs: expected)
+    monkeypatch.setattr(run_reads, "list_runs", lambda *_args, **_kwargs: expected)
 
     payload = social_repo.list_runs("season-1")
 
     assert payload is expected
 
 
-def test_legacy_get_run_progress_snapshot_delegates_to_control_plane_dispatch(
+def test_legacy_list_run_summaries_delegates_to_control_plane_run_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = [{"id": "run-1", "status": "running"}]
+
+    monkeypatch.setattr(run_reads, "list_run_summaries", lambda *_args, **_kwargs: expected)
+
+    payload = social_repo.list_run_summaries("season-1")
+
+    assert payload is expected
+
+
+def test_legacy_get_run_progress_snapshot_delegates_to_control_plane_run_reads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     expected = {"run_id": "run-1", "run_status": "running"}
 
-    monkeypatch.setattr(dispatch_reads, "get_run_progress_snapshot", lambda *_args, **_kwargs: expected)
+    monkeypatch.setattr(run_reads, "get_run_progress_snapshot", lambda *_args, **_kwargs: expected)
 
     payload = social_repo.get_run_progress_snapshot("season-1", "run-1")
 

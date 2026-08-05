@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from trr_backend.socials.pipelines.job_handlers import FunctionPlatformJobHandler, PlatformJobHandler
+from trr_backend.socials.pipelines.job_handler_types import FunctionPlatformJobHandler, PlatformJobHandler
 
 THREADS_POSTS_SCRAPLING_STAGE = "threads_posts_scrapling"
 

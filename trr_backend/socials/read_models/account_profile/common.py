@@ -6,7 +6,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-import trr_backend.socials.social_season_analytics_impl as _core
+from trr_backend.socials.provider_registry import (
+    LateNamespaceProvider,
+    publish_mapping_slot,
+    register_legacy_patchable_namespace,
+)
 from trr_backend.socials.read_models.account_profile.comment_breakdown import (
     build_instagram_comment_breakdown,
     instagram_comment_completeness_from_breakdown,
@@ -14,54 +18,61 @@ from trr_backend.socials.read_models.account_profile.comment_breakdown import (
     instagram_facebook_crosspost_payload_from_row,
 )
 
-_RESERVED_CORE_EXPORTS = {
-    "__builtins__",
-    "__cached__",
-    "__doc__",
-    "__file__",
-    "__loader__",
-    "__name__",
-    "__package__",
-    "__spec__",
-    "_core",
-    "_IMPORTED_CORE_NAMES",
-    "_LOCAL_ROOM_NAMES",
-    "_RESERVED_CORE_EXPORTS",
-    "_sync_core_overrides",
-}
 _IMPORTED_CORE_NAMES: set[str] = set()
-for _name, _value in _core.__dict__.items():
-    if _name in _RESERVED_CORE_EXPORTS:
-        continue
-    globals()[_name] = _value
-    _IMPORTED_CORE_NAMES.add(_name)
 _LOCAL_ROOM_NAMES: set[str] = set()
 _LOCAL_ROOM_FUNCTIONS: dict[str, Any] = {}
 _CORE_ROOM_WRAPPERS: dict[str, Any] = {}
-_CORE_SOCIAL_ACCOUNT_PROFILE_POST_ITEM = _core._social_account_profile_post_item
 
+
+def _unconfigured_social_account_profile_post_item(*_args: Any, **_kwargs: Any) -> Any:
+    raise RuntimeError(
+        "ACCOUNT_PROFILE_PROVIDER_UNCONFIGURED: "
+        "trr_backend.socials.social_season_analytics_impl has not finished loading"
+    )
+
+
+_CORE_SOCIAL_ACCOUNT_PROFILE_POST_ITEM = _unconfigured_social_account_profile_post_item
 _SOCIAL_ACCOUNT_PROFILE_COMMENT_SORT_FIELDS = {"user", "comment", "likes", "replies", "created"}
 _SOCIAL_ACCOUNT_PROFILE_COMMENT_SORT_DIRECTIONS = {"asc", "desc"}
+_SOCIAL_ACCOUNT_PROFILE_DEFAULT_PAGE_SIZE = 25
 
 
 def _instagram_owner_account_match_sql(*, alias: str = "p") -> str:
-    return _core._instagram_owner_account_match_sql(alias=alias)
+    provider = _require_provider_ready()
+    return provider["_instagram_owner_account_match_sql"](alias=alias)
 
 
 _LOCAL_ROOM_NAMES.add("_instagram_owner_account_match_sql")
 
 
-def _sync_core_overrides() -> None:
-    for _name in _IMPORTED_CORE_NAMES - _LOCAL_ROOM_NAMES:
-        if hasattr(_core, _name):
-            globals()[_name] = getattr(_core, _name)
+def _publish_provider_binding(name: str, value: Any) -> None:
+    globals()[name] = value
 
 
-def _room_callable(name: str, local_impl: Any) -> Any:
-    candidate = getattr(_core, name, None)
-    if callable(candidate) and candidate is not _CORE_ROOM_WRAPPERS.get(name):
-        return candidate
-    return local_impl
+_OPTIONAL_PROVIDER_ROOM_WRAPPERS = {
+    "instagram_comment_rollup_health",
+    "rebuild_instagram_post_comment_rollups",
+}
+_PROVIDER = LateNamespaceProvider(
+    globals(),
+    prefix="ACCOUNT_PROFILE_PROVIDER",
+    room_names=_LOCAL_ROOM_NAMES,
+    imported_names=_IMPORTED_CORE_NAMES,
+    room_wrappers=_CORE_ROOM_WRAPPERS,
+    required_room_names=lambda: _LOCAL_ROOM_NAMES - _OPTIONAL_PROVIDER_ROOM_WRAPPERS,
+    publisher=lambda name, value: _publish_provider_binding(name, value),
+    commit=publish_mapping_slot(
+        globals(), "_CORE_SOCIAL_ACCOUNT_PROFILE_POST_ITEM", "_social_account_profile_post_item"
+    ),  # noqa: E501
+    unconfigured_message="ACCOUNT_PROFILE_PROVIDER_UNCONFIGURED: trr_backend.socials.social_season_analytics_impl has not finished loading",  # noqa: E501
+    mismatch_message=(
+        "ACCOUNT_PROFILE_PROVIDER_MISMATCH: account-profile provider is already configured with a different mapping"
+    ),
+)
+_require_provider_ready = _PROVIDER.require
+_configure_legacy_provider = _PROVIDER.configure
+_sync_core_overrides = _PROVIDER.sync
+_room_callable = _PROVIDER.room_callable
 
 
 def _normalize_social_account_profile_comment_sort_by(value: str | None) -> str:
@@ -115,7 +126,6 @@ def _instagram_profile_posts_page_search_where_sql(search: str | None, *, alias:
     normalized_search = str(search or "").strip().lower()
     if not normalized_search:
         return "", []
-
     normalized_handle_sql = (
         "nullif("
         "regexp_replace("
@@ -231,7 +241,7 @@ def _fetch_materialized_comments_only_profile_rows_page(
 ) -> tuple[list[dict[str, Any]], int]:
     normalized_platform = _normalize_social_account_profile_platform(platform)
     if normalized_platform not in {"tiktok", "youtube"}:
-        return _core._fetch_materialized_comments_only_profile_rows_page(
+        return _require_provider_ready()["_fetch_materialized_comments_only_profile_rows_page"](
             platform,
             account_handle,
             page=page,
@@ -545,7 +555,7 @@ def _fetch_instagram_profile_rows_page(
     from trr_backend.socials.instagram import payload_sidecars
 
     payload_mode = _payload_mode_override or payload_sidecars.payload_read_mode()
-    sidecar_join, sidecar_projection = _core._instagram_payload_sidecar_sql(
+    sidecar_join, sidecar_projection = _instagram_payload_sidecar_sql(
         row_kind="mixed", row_alias="page_rows", mode=payload_mode
     )
     collaborator_rows_sql = (
@@ -812,7 +822,7 @@ def _fetch_instagram_profile_rows_page(
     except psycopg_errors.UndefinedTable:
         if payload_mode == "legacy":
             raise
-        _core._log_instagram_payload_schema_unavailable(
+        _log_instagram_payload_schema_unavailable(
             surface="instagram.profile.search",
             entity_identity=normalized_account,
         )
@@ -845,7 +855,7 @@ def _fetch_instagram_profile_rows_page(
             """
             with pg.db_cursor(conn=conn, label="instagram_profile_posts_total") as cur:
                 total_row = pg.fetch_one_with_cursor(cur, total_sql, params) or {}
-    rows = _core._instagram_payload_rows_for_read(
+    rows = _instagram_payload_rows_for_read(
         rows,
         row_kind="mixed",
         mode=payload_mode,
@@ -888,10 +898,10 @@ def _fetch_instagram_profile_rows_page_no_search(
     from trr_backend.socials.instagram import payload_sidecars
 
     payload_mode = _payload_mode_override or payload_sidecars.payload_read_mode()
-    post_sidecar_join, post_sidecar_projection = _core._instagram_payload_sidecar_sql(
+    post_sidecar_join, post_sidecar_projection = _instagram_payload_sidecar_sql(
         row_kind="post", row_alias="p", mode=payload_mode
     )
-    catalog_sidecar_join, catalog_sidecar_projection = _core._instagram_payload_sidecar_sql(
+    catalog_sidecar_join, catalog_sidecar_projection = _instagram_payload_sidecar_sql(
         row_kind="catalog", row_alias="p", mode=payload_mode
     )
     collaborator_rows_sql = (
@@ -1194,7 +1204,7 @@ def _fetch_instagram_profile_rows_page_no_search(
     except psycopg_errors.UndefinedTable:
         if payload_mode == "legacy":
             raise
-        _core._log_instagram_payload_schema_unavailable(
+        _log_instagram_payload_schema_unavailable(
             surface="instagram.profile.normal",
             entity_identity=normalized_account,
         )
@@ -1226,7 +1236,7 @@ def _fetch_instagram_profile_rows_page_no_search(
             """
             with pg.db_cursor(conn=conn, label="instagram_profile_posts_total") as cur:
                 total_row = pg.fetch_one_with_cursor(cur, total_sql, params) or {}
-    rows = _core._instagram_payload_rows_for_read(
+    rows = _instagram_payload_rows_for_read(
         rows,
         row_kind="mixed",
         mode=payload_mode,
@@ -1256,10 +1266,10 @@ def _fetch_instagram_profile_rows_page_no_search_created(
     from trr_backend.socials.instagram import payload_sidecars
 
     payload_mode = _payload_mode_override or payload_sidecars.payload_read_mode()
-    post_sidecar_join, post_sidecar_projection = _core._instagram_payload_sidecar_sql(
+    post_sidecar_join, post_sidecar_projection = _instagram_payload_sidecar_sql(
         row_kind="post", row_alias="p", mode=payload_mode
     )
-    catalog_sidecar_join, catalog_sidecar_projection = _core._instagram_payload_sidecar_sql(
+    catalog_sidecar_join, catalog_sidecar_projection = _instagram_payload_sidecar_sql(
         row_kind="catalog", row_alias="p", mode=payload_mode
     )
     collaborator_rows_sql = (
@@ -1507,7 +1517,7 @@ def _fetch_instagram_profile_rows_page_no_search_created(
                 rows = pg.fetch_all_with_cursor(cur, page_sql, [*params, safe_page_size, safe_offset])
     except psycopg_errors.UndefinedTable:
         if payload_mode != "legacy":
-            _core._log_instagram_payload_schema_unavailable(
+            _log_instagram_payload_schema_unavailable(
                 surface="instagram.profile.created",
                 entity_identity=normalized_account,
             )
@@ -1519,7 +1529,7 @@ def _fetch_instagram_profile_rows_page_no_search_created(
                 _payload_mode_override="legacy",
             )
         raise
-    rows = _core._instagram_payload_rows_for_read(
+    rows = _instagram_payload_rows_for_read(
         rows,
         row_kind="mixed",
         mode=payload_mode,
@@ -3226,25 +3236,38 @@ def get_social_account_profile_collaborators_tags(platform: str, account_handle:
     }
 
 
-_LOCAL_ROOM_NAMES = {
-    "_social_account_profile_post_item",
-    "get_social_account_profile_summary",
-    "get_social_account_profile_posts",
-    "get_social_account_profile_comments",
-    "get_social_account_profile_hashtags",
-    "get_social_account_profile_collaborators_tags",
-    "instagram_comment_rollup_health",
-    "rebuild_instagram_post_comment_rollups",
-    "_fetch_materialized_comments_only_profile_rows_page",
-}
-_LOCAL_ROOM_FUNCTIONS = {_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES}
-_CORE_ROOM_WRAPPERS = {_name: getattr(_core, _name, None) for _name in _LOCAL_ROOM_NAMES}
+def get_social_hashtag_assignment_conflict_history(*, limit: int = 25) -> dict[str, Any]:
+    """Return hashtag conflict history through the published legacy provider."""
+
+    _sync_core_overrides()
+    provider = _require_provider_ready()
+    return provider["get_social_hashtag_assignment_conflict_history"](limit=limit)
+
+
+_LOCAL_ROOM_NAMES.update(
+    {
+        "_social_account_profile_post_item",
+        "get_social_account_profile_summary",
+        "get_social_account_profile_posts",
+        "get_social_account_profile_comments",
+        "get_social_account_profile_hashtags",
+        "get_social_account_profile_collaborators_tags",
+        "get_social_hashtag_assignment_conflict_history",
+        "instagram_comment_rollup_health",
+        "rebuild_instagram_post_comment_rollups",
+        "_fetch_materialized_comments_only_profile_rows_page",
+    }
+)
+_LOCAL_ROOM_FUNCTIONS.update({_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES})
 __all__ = [
     "get_social_account_profile_summary",
     "get_social_account_profile_posts",
     "get_social_account_profile_comments",
     "get_social_account_profile_hashtags",
     "get_social_account_profile_collaborators_tags",
+    "get_social_hashtag_assignment_conflict_history",
     "instagram_comment_rollup_health",
     "rebuild_instagram_post_comment_rollups",
 ]
+
+register_legacy_patchable_namespace(globals(), __all__)

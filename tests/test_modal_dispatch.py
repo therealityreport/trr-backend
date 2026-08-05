@@ -43,6 +43,107 @@ class _FakeFunctionCall:
         self.cancel_calls.append({"terminate_containers": terminate_containers})
 
 
+def test_get_trr_modal_function_handle_pins_canonical_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    handle = object()
+
+    def from_name(
+        app_name: str,
+        function_name: str,
+        *,
+        environment_name: str,
+    ) -> object:
+        captured.update(
+            {
+                "app_name": app_name,
+                "function_name": function_name,
+                "environment_name": environment_name,
+            }
+        )
+        return handle
+
+    for key in (
+        "MODAL_PROFILE",
+        "MODAL_WORKSPACE",
+        "MODAL_ENVIRONMENT",
+        "TRR_MODAL_APP_NAME",
+        "TRR_MODAL_APP_REF",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setitem(
+        sys.modules,
+        "modal",
+        types.SimpleNamespace(Function=types.SimpleNamespace(from_name=from_name)),
+    )
+
+    resolved = modal_dispatch.get_trr_modal_function_handle("probe_social_remote_auth")
+
+    assert resolved is handle
+    assert captured == {
+        "app_name": "trr-backend-jobs",
+        "function_name": "probe_social_remote_auth",
+        "environment_name": "main",
+    }
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "kwargs"),
+    [
+        ("MODAL_PROFILE", "other-profile", {}),
+        ("MODAL_WORKSPACE", "other-workspace", {}),
+        ("MODAL_ENVIRONMENT", "staging", {}),
+        ("TRR_MODAL_APP_NAME", "other-app", {}),
+        ("TRR_MODAL_APP_REF", "other.module", {}),
+        ("argument_app_name", "other-app", {"app_name": "other-app"}),
+        ("argument_environment", "staging", {"environment_name": "staging"}),
+    ],
+)
+def test_get_trr_modal_function_handle_rejects_wrong_identity_before_sdk_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+    key: str,
+    value: str,
+    kwargs: dict[str, str],
+) -> None:
+    sdk_called = False
+
+    def from_name(*_args, **_kwargs):
+        nonlocal sdk_called
+        sdk_called = True
+        return object()
+
+    for env_key in (
+        "MODAL_PROFILE",
+        "MODAL_WORKSPACE",
+        "MODAL_ENVIRONMENT",
+        "TRR_MODAL_APP_NAME",
+        "TRR_MODAL_APP_REF",
+    ):
+        monkeypatch.delenv(env_key, raising=False)
+    if key in {
+        "MODAL_PROFILE",
+        "MODAL_WORKSPACE",
+        "MODAL_ENVIRONMENT",
+        "TRR_MODAL_APP_NAME",
+        "TRR_MODAL_APP_REF",
+    }:
+        monkeypatch.setenv(key, value)
+    monkeypatch.setitem(
+        sys.modules,
+        "modal",
+        types.SimpleNamespace(Function=types.SimpleNamespace(from_name=from_name)),
+    )
+
+    with pytest.raises(RuntimeError, match="Modal target override blocked"):
+        modal_dispatch.get_trr_modal_function_handle(
+            "probe_social_remote_auth",
+            **kwargs,
+        )
+
+    assert sdk_called is False
+
+
 def test_inspect_modal_function_call_normalizes_pending_capacity(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_modal = types.SimpleNamespace(
         FunctionCall=types.SimpleNamespace(
@@ -182,6 +283,7 @@ def test_modal_social_job_function_names_dedupes_names(monkeypatch: pytest.Monke
 
 
 def test_modal_dispatch_config_exposes_comments_lane_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRR_RUNTIME_CAPACITY_CONTEXT", "hosted_modal")
     monkeypatch.setattr(modal_dispatch, "modal_app_name", lambda: "trr-backend-jobs")
     monkeypatch.setattr(modal_dispatch, "modal_environment_name", lambda: "main")
     monkeypatch.setattr(modal_dispatch, "modal_social_job_function_name", lambda: "run_social_job")
@@ -198,6 +300,7 @@ def test_modal_dispatch_config_exposes_comments_lane_contract(monkeypatch: pytes
     config = modal_dispatch.modal_dispatch_config()
 
     assert config["app_name"] == "trr-backend-jobs"
+    assert config["runtime_capacity_context"] == "hosted_modal"
     assert config["modal_environment"] == "main"
     assert config["social_required_function_names"] == [
         "run_social_job",
@@ -324,7 +427,7 @@ def test_spawn_named_modal_function_includes_drift_visible_metadata(monkeypatch:
 
     fake_modal = types.SimpleNamespace(
         Function=types.SimpleNamespace(
-            from_name=lambda _app_name, _function_name: _FakeFunction(),
+            from_name=lambda _app_name, _function_name, **_kwargs: _FakeFunction(),
         )
     )
 
@@ -396,7 +499,7 @@ def test_inspect_modal_function_call_only_requires_modal_app_name(
 def test_resolve_modal_function_classifies_missing_app(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_modal = types.SimpleNamespace(
         Function=types.SimpleNamespace(
-            from_name=lambda _app_name, _function_name: (_ for _ in ()).throw(
+            from_name=lambda _app_name, _function_name, **_kwargs: (_ for _ in ()).throw(
                 RuntimeError("App 'trr-backend-jobs' not found in environment 'main'")
             )
         )
@@ -418,7 +521,7 @@ def test_resolve_modal_function_classifies_missing_app(monkeypatch: pytest.Monke
 def test_resolve_modal_function_classifies_missing_function(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_modal = types.SimpleNamespace(
         Function=types.SimpleNamespace(
-            from_name=lambda _app_name, _function_name: (_ for _ in ()).throw(
+            from_name=lambda _app_name, _function_name, **_kwargs: (_ for _ in ()).throw(
                 RuntimeError("Function 'run_social_job' not found in app 'trr-backend-jobs'")
             )
         )
@@ -444,7 +547,7 @@ def test_resolve_modal_function_skips_hydrate_by_default(monkeypatch: pytest.Mon
 
     fake_modal = types.SimpleNamespace(
         Function=types.SimpleNamespace(
-            from_name=lambda _app_name, _function_name: _FakeHandle(),
+            from_name=lambda _app_name, _function_name, **_kwargs: _FakeHandle(),
         )
     )
 
@@ -469,7 +572,7 @@ def test_resolve_modal_function_hydrates_when_opted_in(monkeypatch: pytest.Monke
 
     fake_modal = types.SimpleNamespace(
         Function=types.SimpleNamespace(
-            from_name=lambda _app_name, _function_name: _FakeHandle(),
+            from_name=lambda _app_name, _function_name, **_kwargs: _FakeHandle(),
         )
     )
 
@@ -488,6 +591,48 @@ def test_resolve_modal_function_hydrates_when_opted_in(monkeypatch: pytest.Monke
 
 def test_supports_admin_operation_includes_bravotv_image_runs() -> None:
     assert modal_dispatch.supports_admin_operation("admin_bravotv_image_run") is True
+
+
+def test_dispatcher_runtime_version_stamp_delegates_and_preserves_cache_clear(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_getenv(_name: str) -> str | None:
+        return None
+
+    def fake_builder(**kwargs: object) -> dict[str, str]:
+        calls.append(dict(kwargs))
+        return {"label": f"dispatcher-{len(calls)}"}
+
+    monkeypatch.setattr(modal_dispatch, "build_runtime_version_stamp", fake_builder)
+    monkeypatch.setattr(modal_dispatch.os, "getenv", fake_getenv)
+    monkeypatch.setattr(modal_dispatch, "modal_environment_name", lambda: "main")
+    monkeypatch.setattr(modal_dispatch, "modal_social_job_function_name", lambda: "run_social_job")
+    monkeypatch.setattr(modal_dispatch, "execution_backend_canonical", lambda: "modal")
+    modal_dispatch._resolve_dispatcher_runtime_version_stamp.cache_clear()
+
+    try:
+        first = modal_dispatch._resolve_dispatcher_runtime_version_stamp()
+        second = modal_dispatch._resolve_dispatcher_runtime_version_stamp()
+
+        assert first is second
+        assert first == {"label": "dispatcher-1"}
+        assert modal_dispatch._resolve_dispatcher_runtime_version_stamp.cache_info().maxsize == 1
+        assert calls == [
+            {
+                "getenv": fake_getenv,
+                "modal_environment": "main",
+                "modal_function": "run_social_job",
+                "execution_backend": "modal",
+            }
+        ]
+
+        modal_dispatch._resolve_dispatcher_runtime_version_stamp.cache_clear()
+        assert modal_dispatch._resolve_dispatcher_runtime_version_stamp() == {"label": "dispatcher-2"}
+        assert len(calls) == 2
+    finally:
+        modal_dispatch._resolve_dispatcher_runtime_version_stamp.cache_clear()
 
 
 def test_record_dispatcher_heartbeat_preserves_existing_auth_capabilities(
@@ -526,11 +671,12 @@ def test_record_dispatcher_heartbeat_preserves_existing_auth_capabilities(
         captured["supported_platforms"] = supported_platforms
 
     monkeypatch.setattr(
-        "trr_backend.socials.control_plane._resolve_runtime_version_stamp",
+        modal_dispatch,
+        "_resolve_dispatcher_runtime_version_stamp",
         lambda: {"label": "modal"},
     )
     monkeypatch.setattr(
-        "trr_backend.socials.control_plane.update_worker_heartbeat",
+        "trr_backend.socials.control_plane.worker_health.update_worker_heartbeat",
         _fake_update_worker_heartbeat,
     )
 

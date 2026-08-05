@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import sys
+from contextlib import nullcontext
 from dataclasses import dataclass
+from types import ModuleType
 
 from trr_backend.integrations.imdb import title_metadata_client as mod
 
@@ -46,3 +49,27 @@ def test_fetch_episodes_page_uses_scrapling_on_blocked_imdb_response(monkeypatch
     parsed = mod.parse_imdb_season_episodes_page(html, season=0)
     assert parsed[0].imdb_episode_id == "tt9990001"
     assert parsed[0].season == 0
+
+
+def test_scrapling_episode_fallback_passes_the_shared_browser_locale(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeStealthyFetcher:
+        @staticmethod
+        def fetch(_url: str, **kwargs: object) -> _Response:
+            captured.update(kwargs)
+            return _Response(status_code=200, text="<html></html>")
+
+    fake_fetchers = ModuleType("scrapling.fetchers")
+    fake_fetchers.StealthyFetcher = FakeStealthyFetcher
+    monkeypatch.setitem(sys.modules, "scrapling.fetchers", fake_fetchers)
+    monkeypatch.setattr(mod, "exclusive_runtime_lock", lambda _name: nullcontext())
+
+    mod._fetch_episodes_page_via_scrapling(
+        "https://www.imdb.com/title/tt6645582/episodes/?season=0",
+        extra_headers={"accept": "text/html"},
+        timeout_seconds=1,
+        verbose=False,
+    )
+
+    assert captured["locale"] == mod.SCRAPLING_BROWSER_LOCALE

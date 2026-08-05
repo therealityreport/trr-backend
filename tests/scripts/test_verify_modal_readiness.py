@@ -249,6 +249,9 @@ def test_verify_modal_readiness_passes_when_all_resources_exist(monkeypatch: pyt
             "probe_socialblade_runtime": _StubFunctionHandle(
                 remote_payload={"worker_family": "socialblade", "healthy": True, "reason": "ok"}
             ),
+            "probe_browser_image_runtime": _StubFunctionHandle(
+                remote_payload={"worker_family": "browser_image", "healthy": True, "reason": "ok", "state_free": True}
+            ),
         },
     )
 
@@ -333,7 +336,23 @@ def test_verify_modal_readiness_passes_when_all_resources_exist(monkeypatch: pyt
         "reddit_refresh",
         "admin_vision",
         "socialblade",
+        "browser_image",
     ]
+
+
+def test_readiness_accepts_lowercase_modal_app_and_secret_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        cli,
+        "_run_modal_json",
+        lambda *args, **_kwargs: (
+            [{"name": "trr-backend-runtime"}, {"name": "trr-social-auth"}]
+            if args[:2] == ("secret", "list")
+            else [{"name": "trr-backend-jobs", "id": "ap-DkLTRoSvqhbkGO7fHyHxrD"}]
+        ),
+    )
+
+    assert cli.list_secret_names() == {"trr-backend-runtime", "trr-social-auth"}
+    assert "trr-backend-jobs" in cli.list_app_descriptions()
 
 
 def test_verify_modal_readiness_passes_strict_instagram_comments_auth(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -496,6 +515,9 @@ def test_verify_modal_readiness_blocks_failed_core_runtime_probe(monkeypatch: py
             ),
             "probe_socialblade_runtime": _StubFunctionHandle(
                 remote_payload={"worker_family": "socialblade", "healthy": True, "reason": "ok"}
+            ),
+            "probe_browser_image_runtime": _StubFunctionHandle(
+                remote_payload={"worker_family": "browser_image", "healthy": True, "reason": "ok", "state_free": True}
             ),
         },
     )

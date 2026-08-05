@@ -144,8 +144,8 @@ def test_search_twitter_uses_injected_auth_mirroring_and_persistence(monkeypatch
             "error": None,
         }
 
-    monkeypatch.setattr("trr_backend.socials.twitter.TwitterScraper", FakeTwitterScraper)
-    monkeypatch.setattr("trr_backend.socials.twitter.mirror_tweet_media", _mirror)
+    monkeypatch.setattr("trr_backend.socials.twitter.scraper.TwitterScraper", FakeTwitterScraper)
+    monkeypatch.setattr("trr_backend.socials.twitter.scraper.mirror_tweet_media", _mirror)
 
     response = direct_scrape.search_twitter(
         _search_request(mirror_to_s3=True, persist=True, scrape_query="RHOSLC-S4"),
@@ -182,7 +182,7 @@ def test_search_twitter_persistence_failure_isolated_in_summary(monkeypatch: pyt
         def scrape(self, _config: Any) -> list[Tweet]:
             return [_tweet("tweet-fail")]
 
-    monkeypatch.setattr("trr_backend.socials.twitter.TwitterScraper", FakeTwitterScraper)
+    monkeypatch.setattr("trr_backend.socials.twitter.scraper.TwitterScraper", FakeTwitterScraper)
 
     response = direct_scrape.search_twitter(
         _search_request(persist=True),
@@ -233,8 +233,8 @@ def test_fetch_replies_passes_page_budgets_and_optional_mirroring(monkeypatch: p
         tweets[0].hosted_media_urls = ["https://cdn.example.com/reply-1.mp4"]
         return {tweets[0].tweet_id: tweets[0].hosted_media_urls}
 
-    monkeypatch.setattr("trr_backend.socials.twitter.TwitterScraper", FakeTwitterScraper)
-    monkeypatch.setattr("trr_backend.socials.twitter.mirror_tweet_media", _mirror)
+    monkeypatch.setattr("trr_backend.socials.twitter.scraper.TwitterScraper", FakeTwitterScraper)
+    monkeypatch.setattr("trr_backend.socials.twitter.scraper.mirror_tweet_media", _mirror)
 
     response = direct_scrape.fetch_tweet_replies(
         SimpleNamespace(
@@ -286,7 +286,7 @@ def test_fetch_quotes_preserves_source_diagnostics(monkeypatch: pytest.MonkeyPat
             captured.update({"tweet_id": tweet_id, "delay": delay, "max_pages": max_pages})
             return [quote]
 
-    monkeypatch.setattr("trr_backend.socials.twitter.TwitterScraper", FakeTwitterScraper)
+    monkeypatch.setattr("trr_backend.socials.twitter.scraper.TwitterScraper", FakeTwitterScraper)
 
     response = direct_scrape.fetch_tweet_quotes(
         SimpleNamespace(tweet_id="root-1", delay_seconds=0.5, max_pages=3, mirror_to_s3=False),
@@ -360,6 +360,8 @@ def test_syndication_filter_treats_naive_window_bounds_as_utc(monkeypatch: pytes
 def test_direct_scrape_keeps_shared_catalog_and_legacy_repository_out_of_direct_module() -> None:
     source = inspect.getsource(direct_scrape)
 
+    assert "from trr_backend.socials import twitter as twitter_module" not in source
+    assert "import trr_backend.socials.twitter.scraper as twitter_module" in source
     assert "trr_backend.repositories.social_season_analytics" not in source
     assert "from trr_backend.socials.twitter.posts_catalog" not in source
     assert "import trr_backend.socials.twitter.posts_catalog" not in source

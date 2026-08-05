@@ -1,31 +1,32 @@
+# ruff: noqa: F822
 """Run lifecycle mutation entrypoints for the social control plane."""
 
 from __future__ import annotations
 
-import importlib
 from datetime import UTC, datetime, timedelta
-from types import ModuleType
 from typing import Any
 from uuid import UUID
 
 from psycopg2 import InterfaceError, OperationalError
 from psycopg2.pool import PoolError
 
+from trr_backend.socials.provider_registry import LateModuleProvider, LateProviderProxy
+
 SOCIAL_CONTROL_POOL_NAME = "social_control"
 _SCRAPE_RUN_ALLOWED_STATUSES = {"queued", "running", "cancelling", "completed", "failed", "cancelled"}
 JobProgressState = dict[str, Any]
 
 
-def _legacy_module() -> ModuleType:
-    return importlib.import_module("trr_backend.socials.social_season_analytics_impl")
+_PROVIDER = LateModuleProvider(
+    globals(),
+    prefix="RUN_LIFECYCLE_PROVIDER",
+    unconfigured_message="RUN_LIFECYCLE_PROVIDER_UNCONFIGURED: provider publication has not completed",
+)
 
-
-class _LegacyModuleProxy:
-    def __getattr__(self, name: str) -> Any:
-        return getattr(_legacy_module(), name)
-
-
-legacy = _LegacyModuleProxy()
+_require_provider_ready = _PROVIDER.require
+_configure_legacy_provider = _PROVIDER.configure
+_legacy_module = _PROVIDER.require_module
+legacy = LateProviderProxy(_PROVIDER)
 
 
 def _normalize_scrape_run_status(status: str) -> str:
@@ -394,7 +395,6 @@ def _maybe_start_deferred_comments_followup(
         run_status = current_status
         run_config = current_config
         followup = current_followup
-
         if followup.get("launch_recovered_at"):
             recovered_child = _find_recovered_deferred_comments_child(run_id=run_id, followup=followup)
             if recovered_child:

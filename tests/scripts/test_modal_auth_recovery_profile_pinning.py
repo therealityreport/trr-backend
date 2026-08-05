@@ -44,18 +44,13 @@ def test_chrome_cookie_refresh_deploy_uses_pinned_wrapper(monkeypatch: pytest.Mo
     assert "modal" in command
     assert "deploy" in command
     assert "trr_backend.modal_jobs" in command
+    assert command[-2:] == ["--env", "main"]
     assert "deploy_backend.py" not in " ".join(command)
     assert calls[0]["env"]["MODAL_PROFILE"] == "admin-56995"
 
 
 def test_interactive_login_push_to_modal_uses_pinned_profile() -> None:
-    source = (
-        chrome_refresh.REPO_ROOT
-        / "scripts"
-        / "socials"
-        / "instagram"
-        / "interactive_login.py"
-    ).read_text()
+    source = (chrome_refresh.REPO_ROOT / "scripts" / "socials" / "instagram" / "interactive_login.py").read_text()
 
     assert "pinned_modal_env" in source
     assert "env=pinned_modal_env()" in source

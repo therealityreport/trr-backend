@@ -24,6 +24,7 @@ from trr_backend.socials._scrapling_http_utils import extract_response_cookies
 DEFAULT_TIMEOUT_MS = 45_000
 DEFAULT_MAX_TRANSIENT_RETRIES = 3
 DEFAULT_BASE_BACKOFF_SECONDS = 1.0
+SCRAPLING_BROWSER_LOCALE = "en-US"
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +61,7 @@ SCRAPLING_BROWSER_FETCHER_OPTION_SHAPES: dict[str, str] = {
     "block_ads": "bool",
     "ai_targeted": "bool",
     "load_dom": "bool",
+    "locale": "str",
     "google_search": "bool",
     "timeout": "int",
     "wait": "int",
@@ -217,6 +219,10 @@ def resolve_scrapling_fetcher_options(
             continue
         kwargs[key] = parsed
 
+    # v0.4.12 otherwise follows the host locale. Keep the browser-facing
+    # social lanes deterministic while still allowing their validated env
+    # option to supply the same explicit value.
+    kwargs.setdefault("locale", SCRAPLING_BROWSER_LOCALE)
     metadata: dict[str, Any] = {
         "configured_options": sorted(kwargs),
         "invalid_options": sorted(set(invalid)),

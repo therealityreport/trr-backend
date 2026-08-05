@@ -84,6 +84,7 @@ from trr_backend.socials.instagram.network_policy import (
 from trr_backend.socials.instagram.permalink_metadata import _graphql_doc_ids, _shortcode_to_media_id
 from trr_backend.socials.instagram.scraper import InstagramComment, InstagramScraper
 from trr_backend.socials.scrapling_transport import (
+    SCRAPLING_BROWSER_LOCALE,
     build_stealthy_fetcher,
     safe_scrapling_proxy_metadata,
     scrapling_fetcher_metadata,
@@ -5385,6 +5386,7 @@ class InstagramCommentsScraplingFetcher:
         try:
             response = await self._fetcher.async_fetch(
                 post_url,
+                locale=SCRAPLING_BROWSER_LOCALE,
                 headless=self._headless,
                 network_idle=True,
                 load_dom=True,
@@ -5740,6 +5742,7 @@ class InstagramCommentsScraplingFetcher:
         try:
             response = await self._fetcher.async_fetch(
                 post_url,
+                locale=SCRAPLING_BROWSER_LOCALE,
                 headless=self._headless,
                 network_idle=True,
                 load_dom=True,
@@ -7230,6 +7233,7 @@ class InstagramCommentsScraplingFetcher:
             try:
                 response = await self._fetcher.async_fetch(
                     post_url,
+                    locale=SCRAPLING_BROWSER_LOCALE,
                     headless=self._headless,
                     network_idle=True,
                     load_dom=True,
@@ -7765,6 +7769,7 @@ class InstagramCommentsScraplingFetcher:
         )
         response = await self._fetcher.async_fetch(
             url,
+            locale=SCRAPLING_BROWSER_LOCALE,
             headless=self._headless,
             network_idle=False,
             load_dom=False,
@@ -7974,6 +7979,7 @@ class InstagramCommentsScraplingFetcher:
 
         container_response = await self._fetcher.async_fetch(
             referer,
+            locale=SCRAPLING_BROWSER_LOCALE,
             headless=self._headless,
             network_idle=False,
             load_dom=True,
@@ -8027,6 +8033,7 @@ class InstagramCommentsScraplingFetcher:
         try:
             fetch_task = self._fetcher.async_fetch(
                 request_url,
+                locale=SCRAPLING_BROWSER_LOCALE,
                 headless=self._headless,
                 network_idle=False,
                 load_dom=False,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 from contextlib import nullcontext
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -563,3 +564,11 @@ def test_instagram_public_first_comments_job_skips_auth_resolver_and_proxy_selec
     assert metadata["comments_load_strategy"] == "public_relay"
     assert metadata["comments_strategy"]["auth_state"] == "public"
     assert metadata["comments_strategy"]["proxy_state"] == "none"
+
+
+def test_comments_scrapling_browser_calls_use_the_shared_locale_constant() -> None:
+    from trr_backend.socials.instagram.comments_scrapling.fetcher import InstagramCommentsScraplingFetcher
+
+    source = inspect.getsource(InstagramCommentsScraplingFetcher)
+
+    assert source.count("locale=SCRAPLING_BROWSER_LOCALE") == 6

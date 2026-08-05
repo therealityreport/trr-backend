@@ -24,7 +24,10 @@ def test_pinned_modal_env_forces_admin_profile() -> None:
     )
 
     assert env["MODAL_PROFILE"] == "admin-56995"
+    assert env["MODAL_WORKSPACE"] == "admin-56995"
+    assert env["MODAL_ENVIRONMENT"] == "main"
     assert env["TRR_MODAL_APP_NAME"] == "trr-backend-jobs"
+    assert env["TRR_MODAL_APP_REF"] == "trr_backend.modal_jobs"
     assert env["TRR_MODAL_INSTAGRAM_PAYLOAD_READ_MODE"] == "compare"
     assert env["TRR_MODAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE"] == "0.1"
     assert env["OTHER"] == "1"
@@ -165,7 +168,54 @@ def test_build_deploy_command_defaults_to_modal_jobs(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(cli, "python_command", lambda: "python")
     args = cli.parse_args([])
 
-    assert cli.build_deploy_command(args) == ["python", "-m", "modal", "deploy", "-m", "trr_backend.modal_jobs"]
+    assert cli.build_deploy_command(args) == [
+        "python",
+        "-m",
+        "modal",
+        "deploy",
+        "-m",
+        "trr_backend.modal_jobs",
+        "--env",
+        "main",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["--app-ref", "other.module"], "app_ref"),
+        (["--app-name", "other-app"], "app_name"),
+        (["--env", "staging"], "environment"),
+        (["--name", "other-app"], "deployment_name"),
+    ],
+)
+def test_modal_mutation_target_cannot_be_overridden(args: list[str], message: str) -> None:
+    with pytest.raises(RuntimeError, match=message):
+        cli.validate_target_identity(cli.parse_args(args))
+
+
+def test_dry_run_asserts_full_modal_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "verify_required_workspace",
+        lambda *, env=None: {
+            "active_profile": "admin-56995",
+            "active_workspace": "admin-56995",
+        },
+    )
+    monkeypatch.setattr(cli, "python_command", lambda: "python")
+
+    assert cli.main(["--dry-run"]) == 0
+
+    output = capsys.readouterr().out
+    assert "profile=admin-56995" in output
+    assert "workspace=admin-56995" in output
+    assert "environment=main" in output
+    assert "app_name=trr-backend-jobs" in output
+    assert "app_ref=trr_backend.modal_jobs" in output
 
 
 def test_build_readiness_command_passes_modal_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -254,6 +304,23 @@ def test_format_deploy_history_stamp_includes_recent_versions() -> None:
     assert cli.HISTORY_STAMP_START in stamp
     assert "| v441 | 2026-05-28 11:46:53-04:00 | admin-56995 | c150a64* | 1.4.0 |" in stamp
     assert "HTTP `200`" in stamp
+
+
+def test_format_deploy_history_stamp_accepts_lowercase_modal_json() -> None:
+    stamp = cli.format_deploy_history_stamp(
+        history_rows=[
+            {
+                "version": "v28",
+                "time_deployed": "2026-07-22",
+                "deployed_by": "admin-56995",
+                "commit": "0a3d2b5",
+                "client": "1.5.3",
+            }
+        ],
+        canary={"url": "https://example.test", "status": 200, "attempt": 1},
+        workspace_context={"active_workspace": "admin-56995", "active_profile": "admin-56995"},
+    )
+    assert "| v28 | 2026-07-22 | admin-56995 | 0a3d2b5 | 1.5.3 |" in stamp
 
 
 def test_stamp_incident_note_replaces_existing_stamp(tmp_path) -> None:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from importlib import import_module
+
 from trr_backend.socials.analytics.read_models import (
     build_csv,
     build_pdf,
@@ -24,6 +26,7 @@ from trr_backend.socials.analytics.read_models import (
     get_week_live_health_snapshot,
     pdf_filename,
 )
+from trr_backend.socials.provider_registry import register_legacy_patchable_aliases
 
 __all__ = [
     "build_csv",
@@ -47,3 +50,10 @@ __all__ = [
     "get_week_live_health_snapshot",
     "pdf_filename",
 ]
+
+
+def _refresh_legacy_patchable_export(name: str):
+    return getattr(import_module("trr_backend.socials.analytics.read_models"), name)
+
+
+register_legacy_patchable_aliases(globals(), __all__, _refresh_legacy_patchable_export)

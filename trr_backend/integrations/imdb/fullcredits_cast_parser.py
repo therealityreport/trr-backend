@@ -19,6 +19,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from trr_backend.integrations.imdb.episodic_client import IMDB_JOB_CATEGORY_SELF
+from trr_backend.socials.scrapling_transport import SCRAPLING_BROWSER_LOCALE
 from trr_backend.utils.playwright_runtime import (
     create_seeded_profile_dir,
     exclusive_runtime_lock,
@@ -312,13 +313,16 @@ def _fetch_fullcredits_page_via_scrapling(
         return None
 
     url = f"https://www.imdb.com/title/{imdb_series_id}/fullcredits/"
-    wait_selector = "[data-testid='name-credits-list-item'], [data-testid^='sub-section-'], .full-credits-page-container"
+    wait_selector = (
+        "[data-testid='name-credits-list-item'], [data-testid^='sub-section-'], .full-credits-page-container"
+    )
     timeout_ms = max(int(timeout_seconds * 1000), 30_000)
 
     try:
         with exclusive_runtime_lock(_SCRAPLING_RUNTIME_LOCK_NAME):
             page = StealthyFetcher.fetch(
                 url,
+                locale=SCRAPLING_BROWSER_LOCALE,
                 headless=True,
                 network_idle=True,
                 wait_selector=wait_selector,

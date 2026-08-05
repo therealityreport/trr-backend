@@ -259,7 +259,7 @@ def list_secret_names(*, modal_environment: str = "") -> set[str]:
     for row in payload:
         if not isinstance(row, dict):
             continue
-        name = row.get("Name")
+        name = row.get("name") or row.get("Name")
         if isinstance(name, str) and name.strip():
             names.add(name.strip())
     return names
@@ -273,9 +273,10 @@ def list_app_descriptions(*, modal_environment: str = "") -> set[str]:
     for row in payload:
         if not isinstance(row, dict):
             continue
-        description = row.get("Description")
-        if isinstance(description, str) and description.strip():
-            descriptions.add(description.strip())
+        for key in ("name", "Name", "description", "Description", "app_name", "App Name"):
+            description = row.get(key)
+            if isinstance(description, str) and description.strip():
+                descriptions.add(description.strip())
     return descriptions
 
 
@@ -321,6 +322,8 @@ def expected_function_names() -> tuple[str, ...]:
             os.getenv("TRR_MODAL_SOCIALBLADE_RUNTIME_PROBE_FUNCTION") or DEFAULT_SOCIALBLADE_RUNTIME_PROBE_FUNCTION
         ).strip()
         or DEFAULT_SOCIALBLADE_RUNTIME_PROBE_FUNCTION,
+        str(os.getenv("TRR_MODAL_BROWSER_IMAGE_RUNTIME_PROBE_FUNCTION") or "probe_browser_image_runtime").strip()
+        or "probe_browser_image_runtime",
         str(os.getenv("TRR_MODAL_SOCIAL_AUTH_PROBE_FUNCTION") or DEFAULT_SOCIAL_AUTH_PROBE_FUNCTION).strip()
         or DEFAULT_SOCIAL_AUTH_PROBE_FUNCTION,
         str(
@@ -436,6 +439,10 @@ def core_worker_runtime_probe_functions() -> dict[str, str]:
                 os.getenv("TRR_MODAL_SOCIALBLADE_RUNTIME_PROBE_FUNCTION") or DEFAULT_SOCIALBLADE_RUNTIME_PROBE_FUNCTION
             ).strip()
             or DEFAULT_SOCIALBLADE_RUNTIME_PROBE_FUNCTION
+        ),
+        "browser_image": (
+            str(os.getenv("TRR_MODAL_BROWSER_IMAGE_RUNTIME_PROBE_FUNCTION") or "probe_browser_image_runtime").strip()
+            or "probe_browser_image_runtime"
         ),
     }
 

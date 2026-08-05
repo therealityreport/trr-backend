@@ -42,12 +42,16 @@ class ScraplingRuntime:
         if not env_truthy(_ENABLED_ENV, False):
             return RuntimeHealth(healthy=False, reason=f"{_ENABLED_ENV.lower()}_not_enabled")
         try:
-            import scrapling  # noqa: F401
-        except ImportError as exc:
+            # This is the exact constructor seam used by _fetch_json. It
+            # deliberately makes no request, browser launch, or network call.
+            fetcher = build_fetcher()
+        except Exception as exc:  # noqa: BLE001
             return RuntimeHealth(
                 healthy=False,
-                reason=f"scrapling_not_installed: pip install scrapling ({exc})",
+                reason=f"scrapling_fetcher_construction_failed: {exc.__class__.__name__}",
             )
+        if not any(callable(getattr(fetcher, method_name, None)) for method_name in ("async_fetch", "fetch", "get")):
+            return RuntimeHealth(healthy=False, reason="scrapling_fetcher_fetch_method_unavailable")
         return RuntimeHealth(healthy=True)
 
     async def fetch_profile(self, username: str) -> ProfileInfo:

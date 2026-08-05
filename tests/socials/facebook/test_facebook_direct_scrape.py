@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +23,19 @@ from trr_backend.socials.facebook.scraper import (
     FacebookPost,
     FacebookShare,
 )
+
+DIRECT_SCRAPE_PATH = Path(__file__).resolve().parents[3] / "trr_backend" / "socials" / "facebook" / "direct_scrape.py"
+
+
+def test_direct_scrape_imports_scraper_leaf_without_package_root_cycle() -> None:
+    tree = ast.parse(
+        DIRECT_SCRAPE_PATH.read_text(encoding="utf-8"),
+        filename=str(DIRECT_SCRAPE_PATH),
+    )
+    import_from_modules = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
+
+    assert "trr_backend.socials.facebook" not in import_from_modules
+    assert "trr_backend.socials.facebook.scraper" in import_from_modules
 
 
 def _make_post(**overrides: Any) -> FacebookPost:
@@ -140,7 +154,7 @@ def test_scrape_facebook_calls_surface_loader_and_filters_posts(monkeypatch: pyt
                 _make_post(post_id="drop", caption="Summer House update"),
             ]
 
-    monkeypatch.setattr("trr_backend.socials.facebook.FacebookScraper", FakeFacebookScraper)
+    monkeypatch.setattr("trr_backend.socials.facebook.scraper.FacebookScraper", FakeFacebookScraper)
 
     request = SimpleNamespace(
         page_handle="BravoTV",
@@ -186,7 +200,7 @@ def test_search_facebook_posts_builds_config_and_payload(monkeypatch: pytest.Mon
             captured["config"] = config
             return [_make_post()]
 
-    monkeypatch.setattr("trr_backend.socials.facebook.FacebookScraper", FakeFacebookScraper)
+    monkeypatch.setattr("trr_backend.socials.facebook.scraper.FacebookScraper", FakeFacebookScraper)
     request = SimpleNamespace(
         search_url=None,
         profile_url="https://www.facebook.com/BravoTV",
@@ -231,7 +245,7 @@ def test_preview_facebook_page_calls_surface_loader_and_returns_latest(monkeypat
             captured["config"] = config
             return [_make_post()]
 
-    monkeypatch.setattr("trr_backend.socials.facebook.FacebookScraper", FakeFacebookScraper)
+    monkeypatch.setattr("trr_backend.socials.facebook.scraper.FacebookScraper", FakeFacebookScraper)
 
     response = preview_facebook_page(
         "BravoTV",
@@ -276,7 +290,7 @@ def test_scrape_facebook_post_passes_flags_and_shapes_comments(monkeypatch: pyte
                 [FacebookComment(comment_id="comment-1", username="Commenter", text="First", likes=3)],
             )
 
-    monkeypatch.setattr("trr_backend.socials.facebook.FacebookScraper", FakeFacebookScraper)
+    monkeypatch.setattr("trr_backend.socials.facebook.scraper.FacebookScraper", FakeFacebookScraper)
     request = SimpleNamespace(
         post_url="https://www.facebook.com/BravoTV/posts/123",
         fetch_comments=True,
@@ -314,7 +328,7 @@ def test_scrape_facebook_post_preserves_failed_post_shape(monkeypatch: pytest.Mo
         def scrape_post(self, post_url: str, **kwargs: Any) -> tuple[None, list[FacebookComment]]:
             return None, []
 
-    monkeypatch.setattr("trr_backend.socials.facebook.FacebookScraper", FakeFacebookScraper)
+    monkeypatch.setattr("trr_backend.socials.facebook.scraper.FacebookScraper", FakeFacebookScraper)
     request = SimpleNamespace(
         post_url="https://www.facebook.com/BravoTV/posts/123",
         fetch_comments=True,
@@ -342,7 +356,7 @@ def test_preview_facebook_page_preserves_http_500_error_behavior(monkeypatch: py
         def scrape(self, config: Any) -> list[FacebookPost]:
             raise RuntimeError("document fetch failed")
 
-    monkeypatch.setattr("trr_backend.socials.facebook.FacebookScraper", FakeFacebookScraper)
+    monkeypatch.setattr("trr_backend.socials.facebook.scraper.FacebookScraper", FakeFacebookScraper)
 
     with pytest.raises(HTTPException) as exc_info:
         preview_facebook_page("BravoTV", load_cookies=lambda _surface: {"c_user": "1"})
