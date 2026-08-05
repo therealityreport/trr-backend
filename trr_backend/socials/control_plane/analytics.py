@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from importlib import import_module
+
 from trr_backend.socials.analytics.read_models import (
     _build_drivers,
     _build_ingest_shard_schedule,
@@ -43,6 +45,7 @@ from trr_backend.socials.analytics.read_models import (
     pdf_filename,
     sentiment_for_text,
 )
+from trr_backend.socials.provider_registry import register_legacy_patchable_aliases
 
 __all__ = [
     "_build_drivers",
@@ -85,3 +88,10 @@ __all__ = [
     "pdf_filename",
     "sentiment_for_text",
 ]
+
+
+def _refresh_legacy_patchable_export(name: str):
+    return getattr(import_module("trr_backend.socials.analytics.read_models"), name)
+
+
+register_legacy_patchable_aliases(globals(), __all__, _refresh_legacy_patchable_export)

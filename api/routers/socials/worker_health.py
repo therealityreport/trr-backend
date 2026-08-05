@@ -188,11 +188,11 @@ def cancel_social_ingest_stuck_jobs(
     payload: CancelStuckJobsRequest | None = None,
     user: InternalAdminUser = None,
 ) -> dict[str, Any]:
-    from trr_backend.socials.control_plane import cancel_stuck_jobs
+    from trr_backend.socials.control_plane import recovery as recovery_control_plane
 
     try:
         job_ids = [str(job_id) for job_id in (payload.job_ids if payload and payload.job_ids else [])]
-        return cancel_stuck_jobs(
+        return recovery_control_plane.cancel_stuck_jobs(
             job_ids=job_ids or None,
             cancelled_by=(user or {}).get("email"),
         )
@@ -209,7 +209,7 @@ def recover_stale_social_media_mirror_jobs(
     user: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.socials.control_plane.dispatch_runtime import dispatch_due_social_jobs
-    from trr_backend.socials.control_plane import recover_stale_running_jobs
+    from trr_backend.socials.control_plane import recovery as recovery_control_plane
 
     confirm_required = "RECOVER MEDIA MIRROR JOBS"
     if payload.confirm_recovery != confirm_required:
@@ -223,7 +223,7 @@ def recover_stale_social_media_mirror_jobs(
         recovered_by_stage: dict[str, list[str]] = {}
         recovered_job_ids: list[str] = []
         for stage in stages:
-            recovered = recover_stale_running_jobs(
+            recovered = recovery_control_plane.recover_stale_running_jobs(
                 run_id=str(payload.run_id),
                 stage=stage,
                 platform="instagram",
@@ -301,11 +301,11 @@ def cancel_social_ingest_dispatch_blocked_jobs(
     payload: CancelStuckJobsRequest | None = None,
     user: InternalAdminUser = None,
 ) -> dict[str, Any]:
-    from trr_backend.socials.control_plane import cancel_dispatch_blocked_jobs
+    from trr_backend.socials.control_plane import recovery as recovery_control_plane
 
     try:
         job_ids = [str(job_id) for job_id in (payload.job_ids if payload and payload.job_ids else [])]
-        return cancel_dispatch_blocked_jobs(
+        return recovery_control_plane.cancel_dispatch_blocked_jobs(
             job_ids=job_ids or None,
             cancelled_by=(user or {}).get("email"),
         )
@@ -320,10 +320,10 @@ def cancel_social_ingest_dispatch_blocked_jobs(
 def cancel_social_ingest_active_jobs(
     user: InternalAdminUser = None,
 ) -> dict[str, Any]:
-    from trr_backend.socials.control_plane import cancel_active_jobs
+    from trr_backend.socials.control_plane import recovery as recovery_control_plane
 
     try:
-        return cancel_active_jobs(cancelled_by=(user or {}).get("email"))
+        return recovery_control_plane.cancel_active_jobs(cancelled_by=(user or {}).get("email"))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -336,11 +336,11 @@ def dismiss_social_ingest_recent_failures(
     payload: DismissRecentFailuresRequest | None = None,
     user: InternalAdminUser = None,
 ) -> dict[str, Any]:
-    from trr_backend.socials.control_plane import dismiss_recent_failures
+    from trr_backend.socials.control_plane import recovery as recovery_control_plane
 
     try:
         job_ids = [str(job_id) for job_id in (payload.job_ids if payload else [])]
-        return dismiss_recent_failures(
+        return recovery_control_plane.dismiss_recent_failures(
             job_ids=job_ids,
             dismiss_all_visible=bool(payload.dismiss_all_visible) if payload else False,
             dismissed_by=(user or {}).get("email"),
@@ -358,10 +358,10 @@ def reset_social_ingest_health_route(
     user: InternalAdminUser = None,
 ) -> dict[str, Any]:
     del payload
-    from trr_backend.socials.control_plane import reset_social_ingest_health
+    from trr_backend.socials.control_plane import recovery as recovery_control_plane
 
     try:
-        return reset_social_ingest_health(reset_by=(user or {}).get("email"))
+        return recovery_control_plane.reset_social_ingest_health(reset_by=(user or {}).get("email"))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -375,11 +375,11 @@ def debug_social_ingest_job(
     payload: JobDebugRequest | None = None,
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
-    from trr_backend.socials.control_plane import debug_ingest_job_with_openai
+    from trr_backend.socials.control_plane import recovery as recovery_control_plane
 
     try:
         request_payload = payload or JobDebugRequest()
-        return debug_ingest_job_with_openai(
+        return recovery_control_plane.debug_ingest_job_with_openai(
             str(job_id),
             apply_patch=request_payload.apply_patch,
             confirm_apply=request_payload.confirm_apply,

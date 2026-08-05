@@ -5,6 +5,8 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any
 
+from trr_backend.socials.provider_registry import register_legacy_patchable_aliases
+
 _EXPORT_GROUPS: dict[str, tuple[str, ...]] = {
     "trr_backend.socials.control_plane.analytics": (
         "_build_drivers",
@@ -186,3 +188,11 @@ def __getattr__(name: str) -> Any:
 
 def __dir__() -> list[str]:
     return sorted({*globals(), *__all__})
+
+
+def _refresh_legacy_patchable_export(name: str) -> Any:
+    module_name = _EXPORT_MODULES.get(name)
+    return getattr(import_module(module_name), name) if module_name is not None else None
+
+
+register_legacy_patchable_aliases(globals(), __all__, _refresh_legacy_patchable_export)

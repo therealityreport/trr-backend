@@ -8,7 +8,12 @@ from typing import Any
 
 import pytest
 
-from trr_backend.socials.provider_registry import LateModuleProvider, LateNamespaceProvider, LateProviderProxy
+from trr_backend.socials.provider_registry import (
+    LateModuleProvider,
+    LateNamespaceProvider,
+    LateProviderProxy,
+    LegacyPatchBridge,
+)
 
 
 def test_namespace_provider_is_fail_closed_identity_bound_and_patch_aware() -> None:
@@ -164,3 +169,28 @@ def test_failed_publication_callback_leaves_provider_ready() -> None:
         assert observed == [module]
     finally:
         sys.modules.pop(module_name, None)
+
+
+def test_legacy_patch_bridge_preserves_local_callable_and_refreshes_cached_alias() -> None:
+    bridge = LegacyPatchBridge()
+    leaf: dict[str, Any] = {}
+    cached: dict[str, Any] = {}
+
+    def local_value() -> str:
+        return "local"
+
+    def legacy_value() -> str:
+        return "legacy"
+
+    leaf["read_value"] = local_value
+    cached["read_value"] = local_value
+    bridge.register_namespace(leaf, ("read_value",))
+    bridge.register_aliases(cached, ("read_value",), leaf.__getitem__)
+    namespace = {"read_value": legacy_value}
+    bridge.publish(namespace)
+
+    assert leaf["read_value"]() == "local"
+    assert cached["read_value"] is leaf["read_value"]
+
+    namespace["read_value"] = lambda: "patched"
+    assert leaf["read_value"]() == "patched"

@@ -34,7 +34,12 @@ from trr_backend.socials.pipelines.comments.instagram import (
 from trr_backend.socials.pipelines.comments.instagram import (
     start_social_account_comments_scrape as _start_comments_scrape,
 )
-from trr_backend.socials.provider_registry import LateNamespaceProvider, LateProviderProxy, publish_module_slot
+from trr_backend.socials.provider_registry import (
+    LateNamespaceProvider,
+    LateProviderProxy,
+    publish_module_slot,
+    register_legacy_patchable_namespace,
+)
 
 _IMPORTED_CORE_NAMES: set[str] = set()
 _LOCAL_ROOM_NAMES: set[str] = set()
@@ -3117,3 +3122,17 @@ __all__ = [
     "get_instagram_catalog_launch_capacity",
     "launch_social_account_catalog_backfill",
 ]
+
+register_legacy_patchable_namespace(
+    globals(),
+    (
+        *__all__,
+        "_merge_catalog_run_config",
+        "probe_modal_instagram_comments_auth_health",
+        "probe_modal_instagram_posts_auth_health",
+        "remediate_social_account_catalog_runtime_supersession",
+        # Route-facing compatibility exports copied from the published core.
+        "request_cancel_social_account_catalog_run",
+        "drain_media_mirror_account_jobs",
+    ),
+)

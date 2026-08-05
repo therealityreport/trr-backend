@@ -526,12 +526,12 @@ async def get_season_ingest_run_progress(
     recent_log_limit: int = Query(default=20, ge=1, le=100),
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
-    from trr_backend.socials.control_plane import get_run_progress_snapshot
+    from trr_backend.socials.control_plane import run_reads as run_read_control_plane
 
     started_at = perf_counter()
     try:
         payload = await _run_admin_repo_call(
-            get_run_progress_snapshot,
+            run_read_control_plane.get_run_progress_snapshot,
             str(season_id),
             str(run_id),
             recent_log_limit=recent_log_limit,

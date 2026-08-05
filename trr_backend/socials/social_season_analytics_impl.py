@@ -68397,3 +68397,8 @@ for _provider_path in (
 ):
     __import__(_provider_path, fromlist=["_configure_legacy_provider"])._configure_legacy_provider(globals())
 del _provider_path
+
+from trr_backend.socials.provider_registry import publish_legacy_patch_namespace as _publish_legacy_patch_namespace
+
+_publish_legacy_patch_namespace(globals())
+del _publish_legacy_patch_namespace

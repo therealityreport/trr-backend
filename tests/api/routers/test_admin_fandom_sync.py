@@ -34,6 +34,10 @@ def test_preview_person_requires_auth() -> None:
 
 def test_preview_person_returns_profile_payload(monkeypatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setattr(
+        "api.routers.admin_fandom_sync.cleanup_fandom_payload_with_openai",
+        lambda **kwargs: (None, None),
+    )
     person_id = str(uuid4())
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
@@ -93,6 +97,10 @@ def test_preview_person_returns_profile_payload(monkeypatch) -> None:
 
 def test_preview_season_returns_profile_payload(monkeypatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setattr(
+        "api.routers.admin_fandom_sync.cleanup_fandom_payload_with_openai",
+        lambda **kwargs: (None, None),
+    )
     show_id = str(uuid4())
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 

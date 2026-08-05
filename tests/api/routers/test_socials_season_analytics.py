@@ -95,11 +95,11 @@ def _block_live_social_worker_launches(monkeypatch: pytest.MonkeyPatch) -> None:
         raise AssertionError("social route test attempted to launch a live inline worker")
 
     monkeypatch.setattr(
-        "trr_backend.repositories.social_season_analytics.execute_run",
+        "trr_backend.socials.control_plane.execute_run",
         _blocked_live_worker_launch,
     )
     monkeypatch.setattr(
-        "trr_backend.repositories.social_season_analytics.execute_run_with_inline_worker_registration",
+        "trr_backend.socials.control_plane.execute_run_with_inline_worker_registration",
         _blocked_live_worker_launch,
     )
 
@@ -167,7 +167,7 @@ def test_get_queue_status_endpoint_returns_503_on_pool_init_failure(
         ),
         (
             "/api/v1/admin/socials/shared/review-queue?source_scope=bravo&review_status=open&limit=100",
-            "trr_backend.repositories.social_season_analytics.list_shared_review_queue",
+            "trr_backend.socials.control_plane.shared_accounts.list_shared_review_queue",
         ),
         (
             "/api/v1/admin/socials/seasons/{season_id}/shared-status?source_scope=bravo",
@@ -183,7 +183,7 @@ def test_get_queue_status_endpoint_returns_503_on_pool_init_failure(
         ),
         (
             "/api/v1/admin/socials/seasons/{season_id}/ingest/jobs",
-            "trr_backend.repositories.social_season_analytics.list_jobs",
+            "trr_backend.socials.control_plane.list_jobs",
         ),
         (
             "/api/v1/admin/socials/seasons/{season_id}/ingest/runs?source_scope=bravo",
@@ -1039,9 +1039,9 @@ def test_post_social_account_catalog_backfill(client: TestClient, monkeypatch: p
         "catalog_action_scope": "full_history",
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
         with patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             return_value=None,
         ) as worker_guard:
             with patch(
@@ -1100,9 +1100,9 @@ def test_post_social_account_catalog_backfill_forwards_selected_tasks(
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
         with patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             return_value=None,
         ):
             with patch(
@@ -1154,9 +1154,9 @@ def test_post_social_account_catalog_backfill_2025_requires_live_apply_confirmat
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     run_id = "11111111-1111-4111-8111-111111111111"
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
         with patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             return_value=None,
         ):
             with patch(
@@ -1214,9 +1214,9 @@ def test_post_social_account_catalog_backfill_2025_rejects_bad_live_apply_confir
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     run_id = "11111111-1111-4111-8111-111111111111"
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
         with patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             return_value=None,
         ):
             with patch(
@@ -1251,9 +1251,9 @@ def test_post_social_account_catalog_backfill_2025_live_apply_queues_finalize_ta
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     run_id = "11111111-1111-4111-8111-111111111111"
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
         with patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             return_value=None,
         ):
             with patch(
@@ -1296,9 +1296,9 @@ def test_post_social_account_catalog_backfill_without_comments_uses_async_kickof
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
         with patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             return_value=None,
         ):
             with patch(
@@ -1571,9 +1571,9 @@ def test_post_social_account_catalog_backfill_ignores_date_bounds_for_full_histo
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
         with patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             return_value=None,
         ):
             with patch(
@@ -1616,9 +1616,9 @@ def test_post_social_account_catalog_backfill_twitter_full_history_uses_past_yea
 
     with (
         patch("api.routers.socials._twitter_catalog_backfill_default_window", return_value=(fixed_start, fixed_end)),
-        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True),
         patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             return_value=None,
         ),
         patch(
@@ -1651,9 +1651,9 @@ def test_post_social_account_catalog_backfill_forwards_bounded_window_dates(
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
         with patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             return_value=None,
         ):
             with patch(
@@ -1729,9 +1729,9 @@ def test_post_social_account_catalog_backfill_tiktok(client: TestClient, monkeyp
         "ingest_mode": "shared_account_catalog_backfill",
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
         with patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             return_value=None,
         ) as worker_guard:
             with patch(
@@ -1840,9 +1840,9 @@ def test_post_social_account_catalog_backfill_additional_supported_platforms(
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
         with patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             return_value=None,
         ) as worker_guard:
             with patch(
@@ -1882,13 +1882,13 @@ def test_post_social_account_catalog_backfill_requires_modal_executor(
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     with (
-        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True),
         patch(
             "api.routers.socials.is_remote_job_plane_enabled",
             return_value=False,
         ),
         patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             side_effect=SocialWorkerUnavailableError(
                 "modal executor unavailable",
                 worker_health={"healthy": False, "reason": "modal_dispatch_unavailable"},
@@ -1917,10 +1917,10 @@ def test_post_social_account_catalog_backfill_surfaces_auth_preflight_failure_wh
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     with (
-        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True),
         patch("api.routers.socials.is_remote_job_plane_enabled", return_value=True),
         patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             side_effect=SocialWorkerUnavailableError(
                 "Modal social dispatch auth preflight is not ready for instagram.",
                 worker_health={
@@ -1964,10 +1964,10 @@ def test_post_social_account_catalog_backfill_prefers_modal_when_available_even_
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     with (
-        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True),
         patch("api.routers.socials._start_runs_in_background") as mocked_background,
         patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             return_value=None,
         ) as worker_guard,
         patch(
@@ -2013,11 +2013,11 @@ def test_post_social_account_catalog_backfill_prefer_local_inline_forces_inline_
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     with (
-        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True),
         patch("api.routers.socials._is_local_or_dev_runtime", return_value=True),
         patch("api.routers.socials._start_runs_in_background") as mocked_background,
         patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             return_value=None,
         ) as worker_guard,
         patch(
@@ -2058,10 +2058,10 @@ def test_post_social_account_catalog_backfill_prefer_local_inline_returns_valida
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     with (
-        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True),
         patch("api.routers.socials._is_local_or_dev_runtime", return_value=False),
         patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             return_value=None,
         ) as worker_guard,
         patch(
@@ -2093,10 +2093,10 @@ def test_post_social_account_catalog_backfill_blocks_inline_fallback_when_modal_
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     with (
-        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True),
         patch("api.routers.socials._start_runs_in_background") as mocked_background,
         patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             side_effect=SocialWorkerUnavailableError(
                 "modal executor unavailable",
                 worker_health={"healthy": False, "reason": "modal_dispatch_unavailable"},
@@ -2151,11 +2151,11 @@ def test_post_social_account_catalog_backfill_blocks_local_admin_override_when_m
     from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
 
     with (
-        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True),
         patch("api.routers.socials.is_remote_job_plane_enabled", return_value=True),
         patch("api.routers.socials._start_runs_in_background") as mocked_background,
         patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             side_effect=SocialWorkerUnavailableError("worker unavailable", worker_health={}),
         ) as worker_guard,
         patch(
@@ -2207,9 +2207,9 @@ def test_post_social_account_catalog_backfill_returns_modal_dispatch_unavailable
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     with (
-        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True),
         patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             return_value=None,
         ),
         patch(
@@ -2253,9 +2253,9 @@ def test_post_social_account_catalog_backfill_returns_conflict_for_active_profil
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     with (
-        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True),
         patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             return_value=None,
         ),
         patch(
@@ -2290,9 +2290,9 @@ def test_post_social_account_catalog_backfill_conflict_serializes_datetime_detai
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     with (
-        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True),
         patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             return_value=None,
         ),
         patch(
@@ -2335,13 +2335,13 @@ def test_post_social_account_catalog_sync_recent(client: TestClient, monkeypatch
         "catalog_action_scope": "recent_window",
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
         with patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             return_value=None,
         ):
             with patch(
-                "trr_backend.repositories.social_season_analytics.sync_recent_social_account_catalog",
+                "trr_backend.socials.control_plane.sync_recent_social_account_catalog",
                 return_value=expected,
             ) as mocked:
                 response = client.post(
@@ -2375,13 +2375,13 @@ def test_post_social_account_catalog_sync_newer(client: TestClient, monkeypatch:
         "catalog_action_scope": "head_gap",
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
         with patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             return_value=None,
         ):
             with patch(
-                "trr_backend.repositories.social_season_analytics.sync_newer_social_account_catalog",
+                "trr_backend.socials.control_plane.sync_newer_social_account_catalog",
                 return_value=expected,
             ) as mocked:
                 response = client.post(
@@ -2408,13 +2408,13 @@ def test_post_social_account_catalog_sync_newer_returns_validation_error(
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     with (
-        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True),
         patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             return_value=None,
         ),
         patch(
-            "trr_backend.repositories.social_season_analytics.sync_newer_social_account_catalog",
+            "trr_backend.socials.control_plane.sync_newer_social_account_catalog",
             side_effect=SocialIngestValidationError(
                 "NO_STORED_POSTS",
                 "No stored posts found for this account. Run a full backfill first.",
@@ -2444,9 +2444,9 @@ def test_post_social_account_catalog_resume_tail(client: TestClient, monkeypatch
         "resumed_from_cursor": True,
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
         with patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             return_value=None,
         ):
             with patch(
@@ -2484,9 +2484,9 @@ def test_post_social_account_catalog_resume_tail_returns_validation_error(
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     with (
-        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True),
         patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             return_value=None,
         ),
         patch(
@@ -2527,11 +2527,11 @@ def test_post_social_account_catalog_repair_auth_route(
 
     with (
         patch(
-            "trr_backend.repositories.social_season_analytics.request_social_account_catalog_run_auth_repair",
+            "trr_backend.socials.control_plane.request_social_account_catalog_run_auth_repair",
             return_value=expected,
         ) as mocked_request,
         patch(
-            "trr_backend.repositories.social_season_analytics.execute_social_account_catalog_run_auth_repair",
+            "trr_backend.socials.control_plane.execute_social_account_catalog_run_auth_repair",
             return_value={"ok": True},
         ) as mocked_execute,
     ):
@@ -2571,11 +2571,11 @@ def test_post_social_account_catalog_repair_auth_route_for_tiktok_cookie_refresh
 
     with (
         patch(
-            "trr_backend.repositories.social_season_analytics.request_social_account_catalog_run_auth_repair",
+            "trr_backend.socials.control_plane.request_social_account_catalog_run_auth_repair",
             return_value=expected,
         ) as mocked_request,
         patch(
-            "trr_backend.repositories.social_season_analytics.execute_social_account_catalog_run_auth_repair",
+            "trr_backend.socials.control_plane.execute_social_account_catalog_run_auth_repair",
             return_value={"ok": True},
         ) as mocked_execute,
     ):
@@ -2607,10 +2607,10 @@ def test_post_social_account_catalog_repair_auth_route_requires_instagram_confir
 
     with (
         patch(
-            "trr_backend.repositories.social_season_analytics.request_social_account_catalog_run_auth_repair",
+            "trr_backend.socials.control_plane.request_social_account_catalog_run_auth_repair",
         ) as mocked_request,
         patch(
-            "trr_backend.repositories.social_season_analytics.execute_social_account_catalog_run_auth_repair",
+            "trr_backend.socials.control_plane.execute_social_account_catalog_run_auth_repair",
         ) as mocked_execute,
     ):
         response = client.post(
@@ -2634,7 +2634,7 @@ def test_get_social_account_cookie_health_marks_comments_auth_blocked_unhealthy(
 
     with (
         patch(
-            "trr_backend.repositories.social_season_analytics.check_platform_cookie_health",
+            "trr_backend.socials.control_plane.runtime.check_platform_cookie_health",
             return_value={
                 "platform": "instagram",
                 "required": True,
@@ -2649,7 +2649,7 @@ def test_get_social_account_cookie_health_marks_comments_auth_blocked_unhealthy(
             },
         ),
         patch(
-            "trr_backend.repositories.social_season_analytics.probe_modal_instagram_posts_auth_health",
+            "trr_backend.socials.pipelines.account_catalog.launch.probe_modal_instagram_posts_auth_health",
             return_value={
                 "platform": "instagram",
                 "account_handle": "thetraitorsus",
@@ -2660,7 +2660,7 @@ def test_get_social_account_cookie_health_marks_comments_auth_blocked_unhealthy(
             },
         ),
         patch(
-            "trr_backend.repositories.social_season_analytics.probe_modal_instagram_comments_auth_health",
+            "trr_backend.socials.pipelines.account_catalog.launch.probe_modal_instagram_comments_auth_health",
             return_value={
                 "platform": "instagram",
                 "account_handle": "thetraitorsus",
@@ -2732,7 +2732,7 @@ def test_get_social_account_cookie_health_does_not_treat_public_comments_probe_a
 
     with (
         patch(
-            "trr_backend.repositories.social_season_analytics.check_platform_cookie_health",
+            "trr_backend.socials.control_plane.runtime.check_platform_cookie_health",
             return_value={
                 "platform": "instagram",
                 "required": True,
@@ -2747,11 +2747,11 @@ def test_get_social_account_cookie_health_does_not_treat_public_comments_probe_a
             },
         ),
         patch(
-            "trr_backend.repositories.social_season_analytics.probe_modal_instagram_posts_auth_health",
+            "trr_backend.socials.pipelines.account_catalog.launch.probe_modal_instagram_posts_auth_health",
             return_value={"platform": "instagram", "account_handle": "thetraitorsus", "ready": True, "status": "valid"},
         ),
         patch(
-            "trr_backend.repositories.social_season_analytics.probe_modal_instagram_comments_auth_health",
+            "trr_backend.socials.pipelines.account_catalog.launch.probe_modal_instagram_comments_auth_health",
             return_value={
                 "platform": "instagram",
                 "account_handle": "thetraitorsus",
@@ -2798,7 +2798,7 @@ def test_get_social_account_cookie_health_marks_comments_auth_rate_limited_unhea
 
     with (
         patch(
-            "trr_backend.repositories.social_season_analytics.check_platform_cookie_health",
+            "trr_backend.socials.control_plane.runtime.check_platform_cookie_health",
             return_value={
                 "platform": "instagram",
                 "required": True,
@@ -2813,11 +2813,11 @@ def test_get_social_account_cookie_health_marks_comments_auth_rate_limited_unhea
             },
         ),
         patch(
-            "trr_backend.repositories.social_season_analytics.probe_modal_instagram_posts_auth_health",
+            "trr_backend.socials.pipelines.account_catalog.launch.probe_modal_instagram_posts_auth_health",
             return_value={"platform": "instagram", "account_handle": "thetraitorsus", "ready": True, "status": "valid"},
         ),
         patch(
-            "trr_backend.repositories.social_season_analytics.probe_modal_instagram_comments_auth_health",
+            "trr_backend.socials.pipelines.account_catalog.launch.probe_modal_instagram_comments_auth_health",
             return_value={
                 "platform": "instagram",
                 "account_handle": "thetraitorsus",
@@ -2866,7 +2866,7 @@ def test_post_social_account_cookie_refresh_route_defaults_allow_cookie_refresh_
 
     with (
         patch(
-            "trr_backend.repositories.social_season_analytics.check_platform_cookie_health",
+            "trr_backend.socials.control_plane.runtime.check_platform_cookie_health",
             return_value={
                 "platform": "instagram",
                 "required": True,
@@ -3015,7 +3015,7 @@ def test_post_social_account_cookie_refresh_route_blocks_instagram_auth_repair_o
 
     with (
         patch(
-            "trr_backend.repositories.social_season_analytics.check_platform_cookie_health",
+            "trr_backend.socials.control_plane.runtime.check_platform_cookie_health",
             return_value={
                 "platform": "instagram",
                 "required": True,
@@ -3052,7 +3052,7 @@ def test_post_social_account_cookie_refresh_route_requires_instagram_confirmatio
 
     with (
         patch(
-            "trr_backend.repositories.social_season_analytics.check_platform_cookie_health",
+            "trr_backend.socials.control_plane.runtime.check_platform_cookie_health",
             return_value={
                 "platform": "instagram",
                 "required": True,
@@ -3089,7 +3089,7 @@ def test_post_social_account_cookie_refresh_route_returns_instagram_auth_repair_
 
     with (
         patch(
-            "trr_backend.repositories.social_season_analytics.check_platform_cookie_health",
+            "trr_backend.socials.control_plane.runtime.check_platform_cookie_health",
             return_value={
                 "platform": "instagram",
                 "required": True,
@@ -3156,9 +3156,9 @@ def test_post_social_account_catalog_sync_recent_returns_modal_dispatch_unavaila
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     with (
-        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True),
         patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             return_value=None,
         ),
         patch(
@@ -3172,7 +3172,7 @@ def test_post_social_account_catalog_sync_recent_returns_modal_dispatch_unavaila
                 "modal_environment": "main",
             },
         ),
-        patch("trr_backend.repositories.social_season_analytics.sync_recent_social_account_catalog") as mocked_start,
+        patch("trr_backend.socials.control_plane.sync_recent_social_account_catalog") as mocked_start,
     ):
         response = client.post(
             "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/sync-recent",
@@ -3200,9 +3200,9 @@ def test_post_social_account_catalog_sync_recent_serializes_worker_health_on_mod
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     with (
-        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True),
         patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             side_effect=SocialWorkerUnavailableError(
                 "Modal social dispatch is required for this social ingest job.",
                 worker_health={
@@ -3212,7 +3212,7 @@ def test_post_social_account_catalog_sync_recent_serializes_worker_health_on_mod
                 },
             ),
         ),
-        patch("trr_backend.repositories.social_season_analytics.sync_recent_social_account_catalog") as mocked_start,
+        patch("trr_backend.socials.control_plane.sync_recent_social_account_catalog") as mocked_start,
     ):
         response = client.post(
             "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/sync-recent",
@@ -3237,14 +3237,14 @@ def test_post_social_account_catalog_sync_recent_prefers_modal_when_available_ev
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     with (
-        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True),
         patch("api.routers.socials._start_runs_in_background") as mocked_background,
         patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             return_value=None,
         ) as worker_guard,
         patch(
-            "trr_backend.repositories.social_season_analytics.sync_recent_social_account_catalog",
+            "trr_backend.socials.control_plane.sync_recent_social_account_catalog",
             return_value={
                 "run_id": "catalog-run-modal-2",
                 "status": "queued",
@@ -3286,7 +3286,7 @@ def test_post_social_account_catalog_run_cancel(client: TestClient, monkeypatch:
 
     with (
         patch(
-            "trr_backend.repositories.social_season_analytics.request_cancel_social_account_catalog_run",
+            "trr_backend.socials.pipelines.account_catalog.launch.request_cancel_social_account_catalog_run",
             return_value=expected,
         ) as mocked,
         patch("api.routers.socials._cancel_catalog_run_in_background", return_value=None) as background_mock,
@@ -3442,7 +3442,7 @@ def test_post_social_account_catalog_run_dismiss(client: TestClient, monkeypatch
     }
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.dismiss_social_account_catalog_run",
+        "trr_backend.socials.control_plane.shared_accounts.dismiss_social_account_catalog_run",
         return_value=expected,
     ) as mocked:
         response = client.post(
@@ -3471,7 +3471,7 @@ def test_post_social_account_catalog_review_queue_resolve(client: TestClient, mo
     }
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.resolve_social_account_catalog_review_queue_item",
+        "trr_backend.socials.control_plane.shared_accounts.resolve_social_account_catalog_review_queue_item",
         return_value=expected,
     ) as mocked:
         response = client.post(
@@ -3517,7 +3517,7 @@ def test_put_social_account_profile_hashtags(client: TestClient, monkeypatch: py
     }
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.put_social_account_profile_hashtags",
+        "trr_backend.socials.control_plane.shared_accounts.put_social_account_profile_hashtags",
         return_value=expected,
     ) as mocked:
         response = client.put(
@@ -3845,12 +3845,10 @@ def test_post_shared_ingest_returns_run_metadata(client: TestClient, monkeypatch
         "review_queue_count": 0,
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
-        with patch(
-            "trr_backend.repositories.social_season_analytics.ingest_shared_accounts", return_value=expected
-        ) as ingest_mock:
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
+        with patch("trr_backend.socials.control_plane.ingest_shared_accounts", return_value=expected) as ingest_mock:
             with patch(
-                "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+                "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
                 return_value={"healthy": True, "healthy_workers": 1},
             ):
                 response = client.post(
@@ -3886,7 +3884,7 @@ def test_get_shared_review_queue(client: TestClient, monkeypatch: pytest.MonkeyP
     }
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.list_shared_review_queue", return_value=expected
+        "trr_backend.socials.control_plane.shared_accounts.list_shared_review_queue", return_value=expected
     ) as mocked:
         response = client.get(
             "/api/v1/admin/socials/shared/review-queue?source_scope=bravo&review_status=open&limit=10",
@@ -3986,8 +3984,8 @@ def test_ingest_allows_zero_comments_limit(client: TestClient, monkeypatch: pyte
         "fetch_replies": False,
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=False):
-        with patch("trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected) as mocked:
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=False):
+        with patch("trr_backend.socials.control_plane.dispatch.ingest_season", return_value=expected) as mocked:
             response = client.post(
                 f"/api/v1/admin/socials/seasons/{season_id}/ingest",
                 headers={"Authorization": f"Bearer {token}"},
@@ -4019,10 +4017,10 @@ def test_ingest_returns_run_id_and_stage_metadata(client: TestClient, monkeypatc
         "sync_strategy": "full_refresh",
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected) as ingest_mock:
-        with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+    with patch("trr_backend.socials.control_plane.dispatch.ingest_season", return_value=expected) as ingest_mock:
+        with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
             with patch(
-                "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+                "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
                 return_value={"healthy": True, "healthy_workers": 1},
             ):
                 response = client.post(
@@ -4059,10 +4057,10 @@ def test_ingest_accepts_comments_only_mode(client: TestClient, monkeypatch: pyte
         "ingest_mode": "comments_only",
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected) as ingest_mock:
-        with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+    with patch("trr_backend.socials.control_plane.dispatch.ingest_season", return_value=expected) as ingest_mock:
+        with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
             with patch(
-                "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+                "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
                 return_value={"healthy": True, "healthy_workers": 1},
             ):
                 response = client.post(
@@ -4102,10 +4100,10 @@ def test_ingest_passes_comment_targeting_options(client: TestClient, monkeypatch
         },
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected) as ingest_mock:
-        with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+    with patch("trr_backend.socials.control_plane.dispatch.ingest_season", return_value=expected) as ingest_mock:
+        with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
             with patch(
-                "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+                "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
                 return_value={"healthy": True, "healthy_workers": 1},
             ):
                 response = client.post(
@@ -4144,10 +4142,10 @@ def test_ingest_passes_override_fields_and_details_refresh_mode(
         "sound_ids": ["7540327234013301517"],
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected) as ingest_mock:
-        with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+    with patch("trr_backend.socials.control_plane.dispatch.ingest_season", return_value=expected) as ingest_mock:
+        with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
             with patch(
-                "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+                "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
                 return_value={"healthy": True, "healthy_workers": 1},
             ):
                 response = client.post(
@@ -4197,10 +4195,10 @@ def test_ingest_accepts_scheduler_fields(client: TestClient, monkeypatch: pytest
         "date_end": "2026-01-08T00:00:00Z",
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected) as ingest_mock:
-        with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+    with patch("trr_backend.socials.control_plane.dispatch.ingest_season", return_value=expected) as ingest_mock:
+        with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
             with patch(
-                "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+                "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
                 return_value={"healthy": True, "healthy_workers": 1},
             ):
                 response = client.post(
@@ -4239,10 +4237,10 @@ def test_ingest_passes_youtube_hybrid_controls(client: TestClient, monkeypatch: 
         "youtube_force_comment_refresh": True,
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected) as ingest_mock:
-        with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+    with patch("trr_backend.socials.control_plane.dispatch.ingest_season", return_value=expected) as ingest_mock:
+        with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
             with patch(
-                "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+                "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
                 return_value={"healthy": True, "healthy_workers": 1},
             ):
                 response = client.post(
@@ -4290,15 +4288,13 @@ def test_ingest_resolves_week_index_to_canonical_window(client: TestClient, monk
     }
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.resolve_week_window",
+        "trr_backend.socials.windowing.resolve_week_window",
         return_value=resolved_week,
     ) as resolve_mock:
-        with patch(
-            "trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected
-        ) as ingest_mock:
-            with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+        with patch("trr_backend.socials.control_plane.dispatch.ingest_season", return_value=expected) as ingest_mock:
+            with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
                 with patch(
-                    "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+                    "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
                     return_value={"healthy": True, "healthy_workers": 1},
                 ):
                     response = client.post(
@@ -4342,10 +4338,10 @@ def test_ingest_maps_structured_validation_errors_to_400(
     payload = {"source_scope": "bravo", "platforms": ["instagram"]}
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.ingest_season",
+        "trr_backend.socials.control_plane.dispatch.ingest_season",
         side_effect=SocialIngestValidationError(code, message),
     ):
-        with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=False):
+        with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=False):
             response = client.post(
                 f"/api/v1/admin/socials/seasons/{season_id}/ingest",
                 headers={"Authorization": f"Bearer {token}"},
@@ -4460,13 +4456,13 @@ def test_instagram_scrape_async_creates_trackable_ingest_run(
     }
 
     with patch("trr_backend.db.pg.fetch_one", return_value={"season_id": season_id}):
-        with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+        with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
             with patch(
-                "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+                "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
                 return_value={"healthy": True, "healthy_workers": 1},
             ):
                 with patch(
-                    "trr_backend.repositories.social_season_analytics.ingest_season",
+                    "trr_backend.socials.control_plane.ingest_season",
                     return_value={"run_id": "run-ig-async"},
                 ) as ingest_mock:
                     response = client.post(
@@ -4506,12 +4502,12 @@ def test_instagram_scrape_async_starts_inline_when_queue_disabled(
     }
 
     with patch("trr_backend.db.pg.fetch_one", return_value={"season_id": season_id}):
-        with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=False):
+        with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=False):
             with patch(
-                "trr_backend.repositories.social_season_analytics.ingest_season",
+                "trr_backend.socials.control_plane.ingest_season",
                 return_value={"run_id": str(uuid4())},
             ):
-                with patch("trr_backend.repositories.social_season_analytics.execute_run") as execute_mock:
+                with patch("trr_backend.socials.control_plane.execute_run") as execute_mock:
                     response = client.post(
                         "/api/v1/admin/socials/instagram/scrape/async",
                         headers={"Authorization": f"Bearer {token}"},
@@ -4545,12 +4541,12 @@ def test_instagram_scrape_async_allows_explicit_local_dev_fallback(
     }
 
     with patch("trr_backend.db.pg.fetch_one", return_value={"season_id": season_id}):
-        with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=False):
+        with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=False):
             with patch(
-                "trr_backend.repositories.social_season_analytics.ingest_season",
+                "trr_backend.socials.control_plane.ingest_season",
                 return_value={"run_id": str(uuid4())},
             ):
-                with patch("trr_backend.repositories.social_season_analytics.execute_run"):
+                with patch("trr_backend.socials.control_plane.execute_run"):
                     response = client.post(
                         "/api/v1/admin/socials/instagram/scrape/async",
                         headers={"Authorization": f"Bearer {token}"},
@@ -4672,8 +4668,8 @@ def test_post_shared_ingest_starts_inline_when_queue_disabled(
         "review_queue_count": 0,
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=False):
-        with patch("trr_backend.repositories.social_season_analytics.ingest_shared_accounts", return_value=expected):
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=False):
+        with patch("trr_backend.socials.control_plane.ingest_shared_accounts", return_value=expected):
             with patch("api.routers.socials._start_runs_in_background") as background_mock:
                 response = client.post(
                     "/api/v1/admin/socials/shared/ingest",
@@ -4696,8 +4692,8 @@ def test_post_shared_ingest_requires_modal_when_queue_disabled(
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=False):
-        with patch("trr_backend.repositories.social_season_analytics.ingest_shared_accounts") as ingest_mock:
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=False):
+        with patch("trr_backend.socials.control_plane.ingest_shared_accounts") as ingest_mock:
             response = client.post(
                 "/api/v1/admin/socials/shared/ingest",
                 headers={"Authorization": f"Bearer {token}"},
@@ -4730,13 +4726,13 @@ def test_post_shared_ingest_accepts_internal_admin_token_without_supabase_jwt(
         "review_queue_count": 0,
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
         with patch(
-            "trr_backend.repositories.social_season_analytics.ingest_shared_accounts",
+            "trr_backend.socials.control_plane.ingest_shared_accounts",
             return_value=expected,
         ):
             with patch(
-                "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+                "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
                 return_value={"healthy": True, "healthy_workers": 1},
             ):
                 response = client.post(
@@ -4755,7 +4751,7 @@ def test_get_ingest_jobs_supports_run_filters(client: TestClient, monkeypatch: p
     season_id = str(uuid4())
     run_id = str(uuid4())
 
-    with patch("trr_backend.repositories.social_season_analytics.list_jobs", return_value=[]) as mocked:
+    with patch("trr_backend.socials.control_plane.list_jobs", return_value=[]) as mocked:
         response = client.get(
             (
                 f"/api/v1/admin/socials/seasons/{season_id}/ingest/jobs"
@@ -4845,13 +4841,13 @@ def test_orchestrate_ingest_endpoint_queues_grouped_runs(client: TestClient, mon
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
         with patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             return_value={"healthy": True, "healthy_workers": 2},
         ):
             with patch(
-                "trr_backend.repositories.social_season_analytics.orchestrate_season_ingest",
+                "trr_backend.socials.control_plane.orchestrate_season_ingest",
                 return_value={
                     "season_id": season_id,
                     "orchestration_id": "social-orch-demo",
@@ -4893,9 +4889,9 @@ def test_orchestrate_ingest_endpoint_starts_inline_when_queue_disabled(
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=False):
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=False):
         with patch(
-            "trr_backend.repositories.social_season_analytics.orchestrate_season_ingest",
+            "trr_backend.socials.control_plane.orchestrate_season_ingest",
             return_value={
                 "season_id": season_id,
                 "orchestration_id": "social-orch-demo",
@@ -5322,9 +5318,7 @@ def test_get_schedule_preview_endpoint_returns_payload(client: TestClient, monke
         "lanes": {"A": [{"shard_index": 0}], "B": [{"shard_index": 1}]},
     }
 
-    with patch(
-        "trr_backend.repositories.social_season_analytics.preview_ingest_schedule", return_value=preview_payload
-    ) as mocked:
+    with patch("trr_backend.socials.control_plane.preview_ingest_schedule", return_value=preview_payload) as mocked:
         response = client.get(
             (
                 f"/api/v1/admin/socials/seasons/{season_id}/ingest/schedule-preview"
@@ -5362,12 +5356,10 @@ def test_get_schedule_preview_endpoint_resolves_week_scope(client: TestClient, m
     }
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.resolve_week_window",
+        "trr_backend.socials.windowing.resolve_week_window",
         return_value=resolved_week,
     ) as resolve_mock:
-        with patch(
-            "trr_backend.repositories.social_season_analytics.preview_ingest_schedule", return_value=preview_payload
-        ) as mocked:
+        with patch("trr_backend.socials.control_plane.preview_ingest_schedule", return_value=preview_payload) as mocked:
             response = client.get(
                 (
                     f"/api/v1/admin/socials/seasons/{season_id}/ingest/schedule-preview"
@@ -5943,7 +5935,7 @@ def test_refresh_post_comments_endpoint_returns_latest_post_detail(
     }
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.refresh_post",
+        "trr_backend.socials.control_plane.refresh_post",
         return_value=refresh_summary,
     ) as refresh_mock:
         with patch(
@@ -6022,7 +6014,7 @@ def test_requeue_platform_mirror_jobs_endpoint(
     }
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.requeue_media_mirror_jobs",
+        "trr_backend.socials.control_plane.requeue_media_mirror_jobs",
         return_value=expected,
     ) as mocked:
         response = client.post(
@@ -6049,7 +6041,7 @@ def test_cancel_ingest_run_endpoint(client: TestClient, monkeypatch: pytest.Monk
     run_id = str(uuid4())
     expected = {"run_id": run_id, "status": "cancelled", "cancelled_jobs": 2}
 
-    with patch("trr_backend.repositories.social_season_analytics.cancel_run", return_value=expected):
+    with patch("trr_backend.socials.control_plane.cancel_run", return_value=expected):
         response = client.post(
             f"/api/v1/admin/socials/seasons/{season_id}/ingest/runs/{run_id}/cancel",
             headers={"Authorization": f"Bearer {token}"},
@@ -6067,9 +6059,9 @@ def test_ingest_returns_400_when_queue_schema_missing(client: TestClient, monkey
     season_id = str(uuid4())
     payload = {"source_scope": "bravo", "platforms": ["instagram"]}
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=False):
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=False):
         with patch(
-            "trr_backend.repositories.social_season_analytics.ingest_season",
+            "trr_backend.socials.control_plane.dispatch.ingest_season",
             side_effect=ValueError("Social ingest queue schema is not migrated"),
         ):
             response = client.post(
@@ -6094,9 +6086,9 @@ def test_ingest_returns_503_when_queue_enabled_and_worker_missing(
     season_id = str(uuid4())
     payload = {"source_scope": "bravo", "platforms": ["instagram"]}
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
         with patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             side_effect=SocialWorkerUnavailableError(
                 "No healthy social ingest workers are reporting heartbeats.",
                 worker_health={
@@ -6107,7 +6099,7 @@ def test_ingest_returns_503_when_queue_enabled_and_worker_missing(
                 },
             ),
         ):
-            with patch("trr_backend.repositories.social_season_analytics.ingest_season") as ingest_mock:
+            with patch("trr_backend.socials.control_plane.dispatch.ingest_season") as ingest_mock:
                 response = client.post(
                     f"/api/v1/admin/socials/seasons/{season_id}/ingest",
                     headers={"Authorization": f"Bearer {token}"},
@@ -6815,8 +6807,8 @@ def test_ingest_returns_503_when_remote_job_plane_enforced_and_queue_disabled(
     season_id = str(uuid4())
     payload = {"source_scope": "bravo", "platforms": ["twitter"], "allow_inline_dev_fallback": True}
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=False):
-        with patch("trr_backend.repositories.social_season_analytics.ingest_season") as ingest_mock:
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=False):
+        with patch("trr_backend.socials.control_plane.dispatch.ingest_season") as ingest_mock:
             response = client.post(
                 f"/api/v1/admin/socials/seasons/{season_id}/ingest",
                 headers={"Authorization": f"Bearer {token}"},
@@ -6838,8 +6830,8 @@ def test_ingest_returns_503_when_modal_required_platforms_and_queue_disabled(
     season_id = str(uuid4())
     payload = {"source_scope": "bravo", "platforms": ["twitter"]}
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=False):
-        with patch("trr_backend.repositories.social_season_analytics.ingest_season") as ingest_mock:
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=False):
+        with patch("trr_backend.socials.control_plane.dispatch.ingest_season") as ingest_mock:
             response = client.post(
                 f"/api/v1/admin/socials/seasons/{season_id}/ingest",
                 headers={"Authorization": f"Bearer {token}"},
@@ -6871,9 +6863,9 @@ def test_ingest_returns_503_when_remote_job_plane_enforced_and_worker_missing_ev
         "allow_inline_dev_fallback": True,
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
         with patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             side_effect=SocialWorkerUnavailableError(
                 "No healthy social ingest workers are reporting heartbeats.",
                 worker_health={
@@ -6884,7 +6876,7 @@ def test_ingest_returns_503_when_remote_job_plane_enforced_and_worker_missing_ev
                 },
             ),
         ):
-            with patch("trr_backend.repositories.social_season_analytics.ingest_season") as ingest_mock:
+            with patch("trr_backend.socials.control_plane.dispatch.ingest_season") as ingest_mock:
                 response = client.post(
                     f"/api/v1/admin/socials/seasons/{season_id}/ingest",
                     headers={"Authorization": f"Bearer {token}"},
@@ -6923,9 +6915,9 @@ def test_ingest_falls_back_inline_in_dev_when_worker_missing_and_flag_enabled(
         "summary": {"total_jobs": 2},
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
         with patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             side_effect=SocialWorkerUnavailableError(
                 "No healthy social ingest workers are reporting heartbeats.",
                 worker_health={
@@ -6937,7 +6929,7 @@ def test_ingest_falls_back_inline_in_dev_when_worker_missing_and_flag_enabled(
             ),
         ):
             with patch(
-                "trr_backend.repositories.social_season_analytics.ingest_season",
+                "trr_backend.socials.control_plane.dispatch.ingest_season",
                 return_value=expected,
             ) as ingest_mock:
                 with patch("api.routers.socials._run_inline_season_ingest") as inline_runner:
@@ -6984,9 +6976,9 @@ def test_ingest_requires_remote_worker_for_instagram_even_with_inline_fallback_e
         "allow_inline_dev_fallback": True,
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
         with patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             side_effect=SocialWorkerUnavailableError(
                 "No healthy social ingest workers are reporting heartbeats.",
                 worker_health={
@@ -6997,7 +6989,7 @@ def test_ingest_requires_remote_worker_for_instagram_even_with_inline_fallback_e
                 },
             ),
         ):
-            with patch("trr_backend.repositories.social_season_analytics.ingest_season") as ingest_mock:
+            with patch("trr_backend.socials.control_plane.dispatch.ingest_season") as ingest_mock:
                 response = client.post(
                     f"/api/v1/admin/socials/seasons/{season_id}/ingest",
                     headers={"Authorization": f"Bearer {token}"},
@@ -7115,10 +7107,10 @@ def test_ingest_inline_background_failure_runs_recovery_path(
             raise RuntimeError("inline execution failed")
         return None
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=False):
-        with patch("trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected):
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=False):
+        with patch("trr_backend.socials.control_plane.dispatch.ingest_season", return_value=expected):
             with patch(
-                "trr_backend.repositories.social_season_analytics.recover_stale_running_jobs",
+                "trr_backend.socials.control_plane.recovery.recover_stale_running_jobs",
                 return_value=[{"id": "job-stale"}],
             ) as recover_mock:
                 with patch(
@@ -7158,12 +7150,12 @@ def test_ingest_comments_only_queue_mode_does_not_spawn_inline_runners(
         "summary": {"total_jobs": 4},
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
         with patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             return_value={"healthy": True, "healthy_workers": 1},
         ):
-            with patch("trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected):
+            with patch("trr_backend.socials.control_plane.dispatch.ingest_season", return_value=expected):
                 with patch("api.routers.socials._run_inline_season_ingest") as inline_runner:
                     response = client.post(
                         f"/api/v1/admin/socials/seasons/{season_id}/ingest",
@@ -7232,9 +7224,9 @@ def test_ingest_keeps_503_when_worker_missing_outside_dev_even_with_fallback_fla
         "allow_inline_dev_fallback": True,
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
         with patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             side_effect=SocialWorkerUnavailableError(
                 "No healthy social ingest workers are reporting heartbeats.",
                 worker_health={
@@ -7245,7 +7237,7 @@ def test_ingest_keeps_503_when_worker_missing_outside_dev_even_with_fallback_fla
                 },
             ),
         ):
-            with patch("trr_backend.repositories.social_season_analytics.ingest_season") as ingest_mock:
+            with patch("trr_backend.socials.control_plane.dispatch.ingest_season") as ingest_mock:
                 response = client.post(
                     f"/api/v1/admin/socials/seasons/{season_id}/ingest",
                     headers={"Authorization": f"Bearer {token}"},
@@ -7276,12 +7268,12 @@ def test_ingest_with_queue_enabled_and_worker_present_succeeds(
         "summary": {"total_jobs": 2},
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
         with patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             return_value={"healthy": True, "healthy_workers": 1},
         ) as worker_guard:
-            with patch("trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected):
+            with patch("trr_backend.socials.control_plane.dispatch.ingest_season", return_value=expected):
                 response = client.post(
                     f"/api/v1/admin/socials/seasons/{season_id}/ingest",
                     headers={"Authorization": f"Bearer {token}"},
@@ -7313,7 +7305,7 @@ def test_get_worker_health_endpoint_returns_health_payload(
         "reason": None,
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+    with patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True):
         with patch("trr_backend.repositories.social_season_analytics.get_worker_health", return_value=expected):
             response = client.get(
                 "/api/v1/admin/socials/ingest/worker-health",
@@ -7630,7 +7622,7 @@ def test_recover_stale_media_mirror_endpoint_recovers_and_dispatches(
         return {"dispatched_job_ids": ["job-dispatched"], "dispatch_attempts": 1}
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.recover_stale_running_jobs",
+        "trr_backend.socials.control_plane.recovery.recover_stale_running_jobs",
         side_effect=_recover,
     ):
         with patch(
@@ -7681,7 +7673,7 @@ def test_recover_stale_media_mirror_endpoint_requires_confirmation(
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
-    with patch("trr_backend.repositories.social_season_analytics.recover_stale_running_jobs") as mocked:
+    with patch("trr_backend.socials.control_plane.recovery.recover_stale_running_jobs") as mocked:
         response = client.post(
             "/api/v1/admin/socials/ingest/media-mirror/recover-stale",
             headers={"Authorization": f"Bearer {token}"},
@@ -7724,7 +7716,7 @@ def test_drain_media_mirror_account_endpoint_forwards_account_scope(
         }
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.drain_media_mirror_account_jobs",
+        "trr_backend.socials.pipelines.account_catalog.launch.drain_media_mirror_account_jobs",
         side_effect=_drain,
     ):
         response = client.post(
@@ -7765,7 +7757,7 @@ def test_drain_media_mirror_account_endpoint_requires_confirmation(
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
-    with patch("trr_backend.repositories.social_season_analytics.drain_media_mirror_account_jobs") as mocked:
+    with patch("trr_backend.socials.pipelines.account_catalog.launch.drain_media_mirror_account_jobs") as mocked:
         response = client.post(
             "/api/v1/admin/socials/ingest/media-mirror/drain-account",
             headers={"Authorization": f"Bearer {token}"},
@@ -7819,7 +7811,7 @@ def test_get_run_progress_endpoint_returns_payload(
         "worker_runtime": {"active_workers_now": 1},
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.get_run_progress_snapshot", return_value=expected):
+    with patch("trr_backend.socials.control_plane.run_reads.get_run_progress_snapshot", return_value=expected):
         response = client.get(
             f"/api/v1/admin/socials/seasons/{season_id}/ingest/runs/{run_id}/progress?recent_log_limit=15",
             headers={"Authorization": f"Bearer {token}"},
@@ -7841,11 +7833,13 @@ def test_get_run_progress_endpoint_uses_threadpool(client: TestClient, monkeypat
         captured["func"] = func
         captured["args"] = args
         captured["kwargs"] = kwargs
+        # Invoke the patched canonical callable, then keep the route payload deterministic.
+        captured["func_result"] = func(*args, **kwargs)
         return expected
 
     with (
         patch("api.routers.socials._run_admin_repo_call", side_effect=_fake_run_admin_repo_call) as mocked_threadpool,
-        patch("trr_backend.repositories.social_season_analytics.get_run_progress_snapshot") as mocked_repo,
+        patch("trr_backend.socials.control_plane.run_reads.get_run_progress_snapshot") as mocked_repo,
     ):
         response = client.get(
             f"/api/v1/admin/socials/seasons/{season_id}/ingest/runs/{run_id}/progress?recent_log_limit=15",
@@ -7855,8 +7849,7 @@ def test_get_run_progress_endpoint_uses_threadpool(client: TestClient, monkeypat
     assert response.status_code == 200
     assert response.json() == expected
     assert mocked_threadpool.call_count == 1
-    mocked_repo.assert_not_called()
-    assert captured["func"] is mocked_repo
+    mocked_repo.assert_called_once_with(season_id, run_id, recent_log_limit=15)
     assert captured["args"] == (season_id, run_id)
     assert captured["kwargs"]["recent_log_limit"] == 15
 
@@ -7884,9 +7877,9 @@ def test_create_sync_session_endpoint_returns_payload(client: TestClient, monkey
             "trr_backend.repositories.social_sync_orchestrator.create_sync_session",
             return_value=expected,
         ) as mocked,
-        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True),
         patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             return_value={"healthy": True, "healthy_workers": 1},
         ),
     ):
@@ -7920,13 +7913,13 @@ def test_create_sync_session_endpoint_blocks_when_workers_unhealthy(
     season_id = str(uuid4())
 
     with (
-        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True),
         patch(
             "api.routers.socials.is_remote_job_plane_enabled",
             return_value=False,
         ),
         patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             side_effect=SocialWorkerUnavailableError(
                 "worker unavailable",
                 worker_health={"healthy": False, "healthy_workers": 0, "reason": "no_workers"},
@@ -7962,13 +7955,13 @@ def test_create_sync_session_endpoint_requires_remote_worker_for_configured_plat
     season_id = str(uuid4())
 
     with (
-        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True),
         patch(
             "api.routers.socials.is_remote_job_plane_enabled",
             return_value=False,
         ),
         patch(
-            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            "trr_backend.socials.control_plane.worker_health.assert_worker_available_when_queue_enabled",
             side_effect=SocialWorkerUnavailableError(
                 "worker unavailable",
                 worker_health={"healthy": False, "healthy_workers": 0, "reason": "no_workers"},
@@ -8445,7 +8438,7 @@ def test_cancel_stuck_jobs_endpoint_accepts_targeted_job_ids(
         "stuck_jobs_remaining": 0,
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.cancel_stuck_jobs", return_value=expected) as mocked:
+    with patch("trr_backend.socials.control_plane.recovery.cancel_stuck_jobs", return_value=expected) as mocked:
         response = client.post(
             "/api/v1/admin/socials/ingest/stuck-jobs/cancel",
             headers={"Authorization": f"Bearer {token}"},
@@ -8471,7 +8464,7 @@ def test_cancel_stuck_jobs_endpoint_defaults_to_clear_all(
         "stuck_jobs_remaining": 0,
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.cancel_stuck_jobs", return_value=expected) as mocked:
+    with patch("trr_backend.socials.control_plane.recovery.cancel_stuck_jobs", return_value=expected) as mocked:
         response = client.post(
             "/api/v1/admin/socials/ingest/stuck-jobs/cancel",
             headers={"Authorization": f"Bearer {token}"},
@@ -8491,7 +8484,7 @@ def test_cancel_stuck_jobs_endpoint_returns_500_on_unhandled_error(
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.cancel_stuck_jobs",
+        "trr_backend.socials.control_plane.recovery.cancel_stuck_jobs",
         side_effect=RuntimeError("cancel stuck failed"),
     ):
         response = client.post(
@@ -8523,7 +8516,7 @@ def test_cancel_dispatch_blocked_jobs_endpoint_accepts_targeted_job_ids(
     }
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.cancel_dispatch_blocked_jobs",
+        "trr_backend.socials.control_plane.recovery.cancel_dispatch_blocked_jobs",
         return_value=expected,
     ) as mocked:
         response = client.post(
@@ -8550,7 +8543,7 @@ def test_cancel_active_jobs_endpoint_returns_payload(
         "active_jobs_remaining": 0,
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.cancel_active_jobs", return_value=expected) as mocked:
+    with patch("trr_backend.socials.control_plane.recovery.cancel_active_jobs", return_value=expected) as mocked:
         response = client.post(
             "/api/v1/admin/socials/ingest/active-jobs/cancel",
             headers={"Authorization": f"Bearer {token}"},
@@ -8570,7 +8563,7 @@ def test_cancel_active_jobs_endpoint_returns_500_on_unhandled_error(
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.cancel_active_jobs",
+        "trr_backend.socials.control_plane.recovery.cancel_active_jobs",
         side_effect=RuntimeError("cancel active failed"),
     ):
         response = client.post(
@@ -8601,7 +8594,7 @@ def test_dismiss_recent_failures_endpoint_returns_payload(
     }
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.dismiss_recent_failures",
+        "trr_backend.socials.control_plane.recovery.dismiss_recent_failures",
         return_value=expected,
     ) as mocked:
         response = client.post(
@@ -8631,7 +8624,7 @@ def test_dismiss_recent_failures_endpoint_supports_dismiss_all_visible(
     }
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.dismiss_recent_failures",
+        "trr_backend.socials.control_plane.recovery.dismiss_recent_failures",
         return_value=expected,
     ) as mocked:
         response = client.post(
@@ -8654,7 +8647,7 @@ def test_dismiss_recent_failures_endpoint_returns_500_on_unhandled_error(
     job_id = str(uuid4())
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.dismiss_recent_failures",
+        "trr_backend.socials.control_plane.recovery.dismiss_recent_failures",
         side_effect=RuntimeError("dismiss failed"),
     ):
         response = client.post(
@@ -8686,7 +8679,7 @@ def test_reset_social_ingest_health_endpoint_returns_payload(
     }
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.reset_social_ingest_health",
+        "trr_backend.socials.control_plane.recovery.reset_social_ingest_health",
         return_value=expected,
     ) as mocked:
         response = client.post(
@@ -8708,7 +8701,7 @@ def test_reset_social_ingest_health_endpoint_returns_500_on_unhandled_error(
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.reset_social_ingest_health",
+        "trr_backend.socials.control_plane.recovery.reset_social_ingest_health",
         side_effect=RuntimeError("reset failed"),
     ):
         response = client.post(
@@ -8816,7 +8809,7 @@ def test_debug_job_endpoint_returns_payload(
     }
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.debug_ingest_job_with_openai",
+        "trr_backend.socials.control_plane.recovery.debug_ingest_job_with_openai",
         return_value=expected,
     ) as mocked:
         response = client.post(
@@ -8859,7 +8852,7 @@ def test_debug_job_endpoint_returns_apply_blocked_payload(
     }
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.debug_ingest_job_with_openai",
+        "trr_backend.socials.control_plane.recovery.debug_ingest_job_with_openai",
         return_value=expected,
     ):
         response = client.post(
@@ -8902,7 +8895,7 @@ def test_debug_job_endpoint_returns_apply_success_payload(
     }
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.debug_ingest_job_with_openai",
+        "trr_backend.socials.control_plane.recovery.debug_ingest_job_with_openai",
         return_value=expected,
     ):
         response = client.post(
@@ -8924,7 +8917,7 @@ def test_debug_job_endpoint_returns_404_for_missing_job(
     job_id = str(uuid4())
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.debug_ingest_job_with_openai",
+        "trr_backend.socials.control_plane.recovery.debug_ingest_job_with_openai",
         side_effect=ValueError("job_not_found"),
     ):
         response = client.post(
@@ -8946,7 +8939,7 @@ def test_debug_job_endpoint_returns_503_when_openai_key_missing(
     job_id = str(uuid4())
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.debug_ingest_job_with_openai",
+        "trr_backend.socials.control_plane.recovery.debug_ingest_job_with_openai",
         side_effect=ValueError("openai_api_key_missing"),
     ):
         response = client.post(
@@ -8968,7 +8961,7 @@ def test_debug_job_endpoint_returns_500_on_unhandled_error(
     job_id = str(uuid4())
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.debug_ingest_job_with_openai",
+        "trr_backend.socials.control_plane.recovery.debug_ingest_job_with_openai",
         side_effect=RuntimeError("debug failed"),
     ):
         response = client.post(

@@ -6,6 +6,7 @@ from typing import Any
 
 import trr_backend.socials.control_plane.run_lifecycle as run_lifecycle
 from trr_backend.socials.control_plane.queue_status import _legacy_repo
+from trr_backend.socials.provider_registry import register_legacy_patchable_namespace
 
 legacy = _legacy_repo()
 
@@ -199,3 +200,6 @@ def list_shared_runs(
         row["execution_backend_canonical"] = str(config.get("execution_backend_canonical") or "").strip() or None
         row["ingest_mode"] = str(config.get("pipeline_ingest_mode") or legacy.SHARED_ACCOUNT_ASYNC_INGEST_MODE)
     return rows
+
+
+register_legacy_patchable_namespace(globals(), ("get_season_shared_status", "list_shared_runs"))

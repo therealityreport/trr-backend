@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Protocol
 
+from trr_backend.socials.provider_registry import register_legacy_patchable_namespace
+
 
 class WeekWindowResolver(Protocol):
     """Resolve one canonical season week without importing the social monolith."""
@@ -55,3 +57,5 @@ __all__ = [
     "configure_week_window_resolver",
     "resolve_week_window",
 ]
+
+register_legacy_patchable_namespace(globals(), ("resolve_week_window",))

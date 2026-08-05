@@ -82,10 +82,8 @@ async def ingest_season_social(
         assert_worker_available_when_queue_enabled,
         is_queue_enabled,
     )
-    from trr_backend.socials.control_plane import (
-        ingest_season,
-        recover_stale_running_jobs,
-    )
+    from trr_backend.socials.control_plane import dispatch as dispatch_control_plane
+    from trr_backend.socials.control_plane import recovery as recovery_control_plane
 
     sid = str(season_id)
     email = user.get("email") if user else None
@@ -192,7 +190,7 @@ async def ingest_season_social(
 
         inline_worker_id = "api-background" if not queue_enabled else None
         run_payload = await _run_admin_repo_call(
-            ingest_season,
+            dispatch_control_plane.ingest_season,
             sid,
             platforms=payload.platforms,
             accounts_override=payload.accounts_override,
@@ -261,7 +259,7 @@ async def ingest_season_social(
                 except Exception:  # noqa: BLE001
                     logger.exception("Background social ingest run failed: season=%s run_id=%s", sid, run_id)
                     try:
-                        recovered = recover_stale_running_jobs(run_id=run_id, limit=250)
+                        recovered = recovery_control_plane.recover_stale_running_jobs(run_id=run_id, limit=250)
                         if recovered:
                             logger.warning(
                                 "Recovered stale inline ingest jobs after failure: season=%s run_id=%s recovered=%s",

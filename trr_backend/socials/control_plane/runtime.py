@@ -12,7 +12,11 @@ from typing import Any
 
 from trr_backend.socials.control_plane.dispatch_runtime import legacy as _core
 from trr_backend.socials.instagram.auth_runtime import _load_instagram_cookies
-from trr_backend.socials.provider_registry import LateNamespaceProvider, publish_module_slot
+from trr_backend.socials.provider_registry import (
+    LateNamespaceProvider,
+    publish_module_slot,
+    register_legacy_patchable_namespace,
+)
 
 _PROVIDER_EXPORT_NAMES = (
     "SocialIngestConflictError",
@@ -65,8 +69,8 @@ def _load_tiktok_cookies() -> dict[str, str]:
     return _core._load_tiktok_cookies()
 
 
-def _load_twikit_credentials() -> Any:
-    return _core._load_twikit_credentials()
+def _load_twikit_credentials(twitter_cookies: Any = None) -> Any:
+    return _core._load_twikit_credentials(twitter_cookies)
 
 
 def _load_twitter_auth() -> Any:
@@ -91,6 +95,14 @@ def check_platform_cookie_health(*args: Any, **kwargs: Any) -> Any:
 
 def refresh_platform_cookies_interactive(*args: Any, **kwargs: Any) -> Any:
     return _core.refresh_platform_cookies_interactive(*args, **kwargs)
+
+
+# Keep the runtime facade's copied provider bindings patchable through the
+# legacy repository namespace after the extracted provider is published.
+register_legacy_patchable_namespace(
+    globals(),
+    ("check_platform_cookie_health", "refresh_platform_cookies_interactive"),
+)
 
 
 load_facebook_cookies = _load_facebook_cookies

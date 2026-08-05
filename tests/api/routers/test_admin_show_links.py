@@ -3467,7 +3467,7 @@ def test_discover_people_links_expands_matching_fandom_person_related_pages() ->
                     return_value=(eligible_people_rows, 1),
                 ):
                     with patch(
-                        "api.routers.admin_show_links.search_fandom_community_wiki_candidates",
+                        "api.routers.admin_show_links._discover_fandom_candidates_for_person",
                         return_value=["https://real-housewives.fandom.com/wiki/Angie_Katsanevas"],
                     ):
                         with patch(
@@ -3479,10 +3479,16 @@ def test_discover_people_links_expands_matching_fandom_person_related_pages() ->
                                 "https://real-housewives.fandom.com/wiki/Angie_Katsanevas/Connections",
                             ],
                         ):
-                            with patch(
-                                "api.routers.admin_show_links._validated_person_knowledge_url",
-                                side_effect=lambda url, kind, expected_name=None, **kwargs: (
-                                    url if kind == "fandom" else None
+                            with (
+                                patch(
+                                    "api.routers.admin_show_links._validated_person_knowledge_url",
+                                    side_effect=lambda url, kind, expected_name=None, **kwargs: (
+                                        url if kind == "fandom" else None
+                                    ),
+                                ),
+                                patch(
+                                    "api.routers.admin_show_links._build_person_page_link_metadata",
+                                    return_value={},
                                 ),
                             ):
                                 links = _discover_people_links(show_id, show_fandom_seed_urls=show_fandom_urls)
@@ -3522,7 +3528,14 @@ def test_discover_season_links_prefers_wikidata_enwiki_sitelink() -> None:
                 "api.routers.admin_show_links._resolve_wikidata_enwiki_url",
                 return_value="https://en.wikipedia.org/wiki/The_Real_Housewives_of_Salt_Lake_City_season_4",
             ):
-                links = _discover_season_links(show_id)
+                with (
+                    patch("api.routers.admin_show_links._fetch_wikidata_summary", return_value=(None, False)),
+                    patch(
+                        "api.routers.admin_show_links._resolve_wikipedia_url",
+                        side_effect=lambda url: (url, None, None),
+                    ),
+                ):
+                    links = _discover_season_links(show_id)
 
     season_wiki_links = [link for link in links if link.get("link_kind") == "wikipedia"]
     assert len(season_wiki_links) == 1

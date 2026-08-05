@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from trr_backend.socials.control_plane.queue_status import _legacy_repo, get_queue_status
+from trr_backend.socials.provider_registry import register_legacy_patchable_namespace
 
 _core = _legacy_repo()
 
@@ -497,3 +498,8 @@ __all__ = [
     "purge_inactive_workers",
     "update_worker_heartbeat",
 ]
+
+register_legacy_patchable_namespace(
+    globals(),
+    (name for name in __all__ if name != "get_queue_status"),
+)

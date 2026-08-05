@@ -77,10 +77,20 @@ def test_search_twitter_includes_hosted_media_field_without_mirroring(
 
     from trr_backend.socials.twitter import TwitterScraper
 
-    monkeypatch.setattr("trr_backend.repositories.social_season_analytics._load_twitter_auth", lambda: ({}, None))
+    twitter_cookies = {"auth_token": "test-token", "ct0": "test-ct0"}
+    monkeypatch.setattr(
+        "trr_backend.repositories.social_season_analytics._load_twitter_auth",
+        lambda: (twitter_cookies, None),
+    )
+    captured_twikit_cookies: list[dict[str, str]] = []
+
+    def _load_twikit_credentials(cookies: dict[str, str]) -> dict[str, str]:
+        captured_twikit_cookies.append(cookies)
+        return {}
+
     monkeypatch.setattr(
         "trr_backend.repositories.social_season_analytics._load_twikit_credentials",
-        lambda *_args, **_kwargs: {},
+        _load_twikit_credentials,
     )
     monkeypatch.setattr(TwitterScraper, "scrape", lambda self, config: [tweet])  # noqa: ARG005
 
@@ -111,6 +121,7 @@ def test_search_twitter_includes_hosted_media_field_without_mirroring(
     assert body["tweets"][0]["is_thread_part"] is True
     assert body["tweets"][0]["twitter_context_role"] == "reply"
     assert body["tweets"][0]["hosted_media_urls"] == []
+    assert captured_twikit_cookies == [twitter_cookies]
 
 
 def test_search_twitter_runs_mirror_when_requested(

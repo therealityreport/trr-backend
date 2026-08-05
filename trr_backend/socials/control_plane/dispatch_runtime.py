@@ -8,7 +8,12 @@ from typing import Any
 
 from trr_backend.socials.control_plane.run_lifecycle import _legacy_module as _published
 from trr_backend.socials.control_plane.run_lifecycle import legacy as _legacy_proxy
-from trr_backend.socials.provider_registry import LateModuleProvider, adopt_published, publish_module_slot
+from trr_backend.socials.provider_registry import (
+    LateModuleProvider,
+    adopt_published,
+    publish_module_slot,
+    register_legacy_patchable_namespace,
+)
 
 legacy: Any = _legacy_proxy
 del _legacy_proxy
@@ -1140,3 +1145,9 @@ def claim_next_queued_jobs(
 
 def process_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -> dict[str, Any]:
     return legacy._execute_claimed_job(job, worker_id=worker_id)
+
+
+# Recovery routes import this runtime helper directly, while legacy callers
+# patch the published repository namespace. Keep that route-facing callable
+# on the universal compatibility bridge.
+register_legacy_patchable_namespace(globals(), ("dispatch_due_social_jobs",))

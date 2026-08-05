@@ -676,7 +676,7 @@ def get_social_account_profile_hashtag_conflicts_route(
     limit: int = Query(default=25, ge=1, le=100),
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
-    from trr_backend.socials.pipelines.account_catalog.launch import get_social_hashtag_assignment_conflict_history
+    from trr_backend.socials.read_models.account_profile import get_social_hashtag_assignment_conflict_history
 
     cache_key = _account_profile_cache_key(
         surface="hashtag-conflicts",

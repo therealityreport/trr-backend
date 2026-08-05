@@ -8,6 +8,7 @@ from typing import Any
 
 import trr_backend.socials.control_plane.run_lifecycle as run_lifecycle
 from trr_backend.socials.control_plane.queue_status import _legacy_repo
+from trr_backend.socials.provider_registry import register_legacy_patchable_namespace
 
 legacy = _legacy_repo()
 
@@ -409,3 +410,9 @@ def get_run_progress_snapshot(
         season_id=season_id,
         recent_log_limit=safe_recent_log_limit,
     )
+
+
+register_legacy_patchable_namespace(
+    globals(),
+    ("list_runs", "list_run_summaries", "get_run_progress_snapshot"),
+)

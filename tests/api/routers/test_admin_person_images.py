@@ -3135,6 +3135,7 @@ def test_import_nbcumv_person_media_filters_getty_fallback_rows_to_requested_sho
     )
     monkeypatch.setattr(nbcumv_integration, "build_show_image_index", lambda show_id: {})
     monkeypatch.setattr(nbcumv_integration, "fetch_image_by_identity", lambda **kwargs: None)
+    monkeypatch.setattr(nbcumv_integration, "search_images", lambda *args, **kwargs: [])
     monkeypatch.setattr(
         "trr_backend.repositories.cast_photos.upsert_cast_photos",
         lambda db, rows, dedupe_on="source_image_id": (

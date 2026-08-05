@@ -6,7 +6,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from trr_backend.socials.provider_registry import LateNamespaceProvider, publish_mapping_slot
+from trr_backend.socials.provider_registry import (
+    LateNamespaceProvider,
+    publish_mapping_slot,
+    register_legacy_patchable_namespace,
+)
 from trr_backend.socials.read_models.account_profile.comment_breakdown import (
     build_instagram_comment_breakdown,
     instagram_comment_completeness_from_breakdown,
@@ -3232,6 +3236,14 @@ def get_social_account_profile_collaborators_tags(platform: str, account_handle:
     }
 
 
+def get_social_hashtag_assignment_conflict_history(*, limit: int = 25) -> dict[str, Any]:
+    """Return hashtag conflict history through the published legacy provider."""
+
+    _sync_core_overrides()
+    provider = _require_provider_ready()
+    return provider["get_social_hashtag_assignment_conflict_history"](limit=limit)
+
+
 _LOCAL_ROOM_NAMES.update(
     {
         "_social_account_profile_post_item",
@@ -3240,6 +3252,7 @@ _LOCAL_ROOM_NAMES.update(
         "get_social_account_profile_comments",
         "get_social_account_profile_hashtags",
         "get_social_account_profile_collaborators_tags",
+        "get_social_hashtag_assignment_conflict_history",
         "instagram_comment_rollup_health",
         "rebuild_instagram_post_comment_rollups",
         "_fetch_materialized_comments_only_profile_rows_page",
@@ -3252,6 +3265,9 @@ __all__ = [
     "get_social_account_profile_comments",
     "get_social_account_profile_hashtags",
     "get_social_account_profile_collaborators_tags",
+    "get_social_hashtag_assignment_conflict_history",
     "instagram_comment_rollup_health",
     "rebuild_instagram_post_comment_rollups",
 ]
+
+register_legacy_patchable_namespace(globals(), __all__)

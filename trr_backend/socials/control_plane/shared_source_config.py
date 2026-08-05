@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 from trr_backend.db import pg
 from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
+from trr_backend.socials.provider_registry import register_legacy_patchable_namespace
 from trr_backend.socials.source_scopes import normalize_source_scope, normalize_source_scope_input
 
 _GENERIC_ACCOUNT_HANDLE_RE = re.compile(r"^[a-z0-9._-]{1,64}$")
@@ -341,3 +342,5 @@ def put_shared_account_sources(
 
 
 __all__ = ["get_shared_account_sources", "put_shared_account_sources"]
+
+register_legacy_patchable_namespace(globals(), __all__)

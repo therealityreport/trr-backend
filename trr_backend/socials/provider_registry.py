@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Callable, Iterable, Mapping, MutableMapping
+from functools import wraps
 from threading import RLock
 from types import ModuleType
 from typing import Any
@@ -63,6 +64,142 @@ Namespace = Mapping[str, Any]
 Publisher = Callable[[str, Any], None]
 CommitHook = Callable[[Namespace, ModuleType | None, Mapping[str, Any]], Callable[[], None] | None]
 PublicationCallback = Callable[[Namespace, ModuleType | None], None]
+
+
+class LegacyPatchBridge:
+    """Keep extracted call surfaces observable to legacy repository patches.
+
+    Extracted modules retain their own implementation until the published
+    legacy namespace replaces the corresponding callable. This lets existing
+    compatibility patches remain effective without importing the monolith from
+    a leaf module.
+    """
+
+    def __init__(self) -> None:
+        self._lock = RLock()
+        self._namespace: Namespace | None = None
+        self._baselines: dict[str, Any] = {}
+        self._owners: list[tuple[MutableMapping[str, Any], set[str], dict[str, Any]]] = []
+        self._aliases: list[tuple[MutableMapping[str, Any], set[str], Callable[[str], Any]]] = []
+
+    def register_namespace(self, owner: MutableMapping[str, Any], names: Iterable[str]) -> None:
+        """Register local callable exports that should observe later patches."""
+
+        requested_names = set(names)
+        with self._lock:
+            registration = next((item for item in self._owners if item[0] is owner), None)
+            if registration is None:
+                registration = (owner, set(), {})
+                self._owners.append(registration)
+            _, registered_names, fallbacks = registration
+            for name in requested_names:
+                current = owner.get(name)
+                if callable(current) and not self._is_bridge_wrapper(current):
+                    fallbacks[name] = current
+            registered_names.update(requested_names)
+            if self._namespace is not None:
+                self._install_wrappers_locked(registration)
+
+    def register_aliases(
+        self,
+        owner: MutableMapping[str, Any],
+        names: Iterable[str],
+        resolve: Callable[[str], Any],
+    ) -> None:
+        """Refresh already-cached facade exports after their leaf is bridged."""
+
+        requested_names = set(names)
+        with self._lock:
+            registration = next((item for item in self._aliases if item[0] is owner), None)
+            if registration is None:
+                registration = (owner, set(), resolve)
+                self._aliases.append(registration)
+            registration[1].update(requested_names)
+            ready = self._namespace is not None
+        if ready:
+            self._refresh_aliases((registration,))
+
+    def publish(self, namespace: Namespace) -> None:
+        """Publish a completed legacy namespace and bridge registered leaves."""
+
+        if not isinstance(namespace, Mapping):
+            raise TypeError("LEGACY_PATCH_BRIDGE_INVALID: provider must be a mapping")
+        with self._lock:
+            self._namespace = namespace
+            self._baselines = {name: value for name, value in namespace.items() if callable(value)}
+            for registration in self._owners:
+                self._install_wrappers_locked(registration)
+            aliases = tuple(self._aliases)
+        self._refresh_aliases(aliases)
+
+    def _install_wrappers_locked(self, registration: tuple[MutableMapping[str, Any], set[str], dict[str, Any]]) -> None:
+        owner, names, fallbacks = registration
+        if owner is self._namespace:
+            return
+        for name in names:
+            current = owner.get(name)
+            baseline = self._baselines.get(name)
+            if not callable(current) or not callable(baseline) or self._is_bridge_wrapper(current):
+                continue
+            fallback = fallbacks.get(name, current)
+            if callable(fallback):
+                owner[name] = self._bridge_callable(name, fallback)
+
+    def _bridge_callable(self, name: str, fallback: Callable[..., Any]) -> Callable[..., Any]:
+        @wraps(fallback)
+        def call(*args: Any, **kwargs: Any) -> Any:
+            with self._lock:
+                namespace = self._namespace
+                baseline = self._baselines.get(name)
+                candidate = namespace.get(name) if namespace is not None else None
+            if callable(candidate) and candidate is not baseline:
+                return candidate(*args, **kwargs)
+            return fallback(*args, **kwargs)
+
+        call.__trr_legacy_patch_bridge__ = self  # type: ignore[attr-defined]
+        return call
+
+    def _refresh_aliases(
+        self,
+        registrations: Iterable[tuple[MutableMapping[str, Any], set[str], Callable[[str], Any]]],
+    ) -> None:
+        for owner, names, resolve in registrations:
+            for name in names:
+                with self._lock:
+                    if name not in owner or name not in self._baselines:
+                        continue
+                value = resolve(name)
+                if callable(value):
+                    owner[name] = value
+
+    @staticmethod
+    def _is_bridge_wrapper(value: Any) -> bool:
+        return hasattr(value, "__trr_legacy_patch_bridge__")
+
+
+_LEGACY_PATCH_BRIDGE = LegacyPatchBridge()
+
+
+def register_legacy_patchable_namespace(owner: MutableMapping[str, Any], names: Iterable[str]) -> None:
+    """Register an extracted module's local compatibility exports."""
+
+    _LEGACY_PATCH_BRIDGE.register_namespace(owner, names)
+
+
+def register_legacy_patchable_aliases(
+    owner: MutableMapping[str, Any],
+    names: Iterable[str],
+    resolve: Callable[[str], Any],
+) -> None:
+    """Register cached facade exports that should follow bridged leaf values."""
+
+    _LEGACY_PATCH_BRIDGE.register_aliases(owner, names, resolve)
+
+
+def publish_legacy_patch_namespace(namespace: Namespace) -> None:
+    """Publish the final legacy namespace for extracted compatibility seams."""
+
+    _LEGACY_PATCH_BRIDGE.publish(namespace)
 
 
 def provider_module(namespace: Namespace) -> ModuleType | None:

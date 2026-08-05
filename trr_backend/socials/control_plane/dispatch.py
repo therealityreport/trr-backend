@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from importlib import import_module
 from typing import Any
 
 from trr_backend.socials.control_plane.dispatch_runtime import (
@@ -18,7 +19,7 @@ from trr_backend.socials.control_plane.run_reads import (
 )
 from trr_backend.socials.instagram.media_mirror import requeue_instagram_media_mirror_jobs
 from trr_backend.socials.pipelines.account_catalog.launch import start_social_account_catalog_backfill
-from trr_backend.socials.provider_registry import LateNamespaceProvider
+from trr_backend.socials.provider_registry import LateNamespaceProvider, register_legacy_patchable_aliases
 
 _LEGACY_EXPORT_NAMES = (
     "SOCIAL_CATALOG_GAP_ANALYSIS_OPERATION_TYPE",
@@ -101,3 +102,22 @@ __all__ = [
     "sync_newer_social_account_catalog",
     "sync_recent_social_account_catalog",
 ]
+
+_CANONICAL_EXPORT_MODULES = {
+    "claim_and_process_social_job": "trr_backend.socials.control_plane.dispatch_runtime",
+    "claim_next_queued_jobs": "trr_backend.socials.control_plane.dispatch_runtime",
+    "get_run_progress_snapshot": "trr_backend.socials.control_plane.run_reads",
+    "list_run_summaries": "trr_backend.socials.control_plane.run_reads",
+    "list_runs": "trr_backend.socials.control_plane.run_reads",
+    "process_claimed_job": "trr_backend.socials.control_plane.dispatch_runtime",
+    "recover_and_dispatch_due_social_jobs": "trr_backend.socials.control_plane.dispatch_runtime",
+    "requeue_instagram_media_mirror_jobs": "trr_backend.socials.instagram.media_mirror",
+    "start_social_account_catalog_backfill": "trr_backend.socials.pipelines.account_catalog.launch",
+}
+
+
+def _refresh_legacy_patchable_export(name: str) -> Any:
+    return getattr(import_module(_CANONICAL_EXPORT_MODULES[name]), name)
+
+
+register_legacy_patchable_aliases(globals(), _CANONICAL_EXPORT_MODULES, _refresh_legacy_patchable_export)

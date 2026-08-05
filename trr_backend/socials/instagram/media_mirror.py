@@ -9,6 +9,7 @@ from typing import Any
 
 from trr_backend.db import pg
 from trr_backend.socials.model_types import SeasonContext
+from trr_backend.socials.provider_registry import register_legacy_patchable_namespace
 
 _LOCAL_ROOM_NAMES: set[str] = set()
 _LOCAL_ROOM_FUNCTIONS: dict[str, Any] = {}
@@ -223,3 +224,7 @@ __all__ = [
     "_run_instagram_media_mirror_stage",
     "requeue_instagram_media_mirror_jobs",
 ]
+
+# Keep the route-facing leaf callable patchable through the published legacy
+# repository namespace while the monolith is being retired.
+register_legacy_patchable_namespace(globals(), (*__all__,))

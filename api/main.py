@@ -31,6 +31,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+import trr_backend.socials.social_season_analytics_impl as _social_analytics_provider
 from api.auth import InternalAdminUser
 from api.realtime.broker import broker_runtime_status, init_broker, shutdown_broker
 from trr_backend.db import pg
@@ -61,6 +62,8 @@ from trr_backend.security.jwt import (
     expected_supabase_project_ref,
 )
 from trr_backend.socials.read_models.account_profile.common import instagram_comment_rollup_health
+
+del _social_analytics_provider
 
 configure_runtime_observability(service_name="trr-backend-api")
 

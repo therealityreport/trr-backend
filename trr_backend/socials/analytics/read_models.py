@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from trr_backend.socials.provider_registry import LateNamespaceProvider
+from trr_backend.socials.provider_registry import LateNamespaceProvider, register_legacy_patchable_namespace
 
 _IMPORTED_CORE_NAMES: set[str] = set()
 _LOCAL_ROOM_NAMES: set[str] = set()
@@ -3896,3 +3896,5 @@ __all__ = [
     "build_pdf",
     "pdf_filename",
 ]
+
+register_legacy_patchable_namespace(globals(), __all__)

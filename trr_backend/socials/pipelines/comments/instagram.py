@@ -20,7 +20,12 @@ from trr_backend.socials.instagram.comments_scrapling.public_mode import (
     comments_load_strategy_for_mode,
     comments_public_mode_from_config,
 )
-from trr_backend.socials.provider_registry import LateNamespaceProvider, LateProviderProxy, publish_module_slot
+from trr_backend.socials.provider_registry import (
+    LateNamespaceProvider,
+    LateProviderProxy,
+    publish_module_slot,
+    register_legacy_patchable_namespace,
+)
 
 _IMPORTED_CORE_NAMES: set[str] = set()
 _LOCAL_ROOM_NAMES: set[str] = set()
@@ -8275,3 +8280,11 @@ __all__ = [
     "cancel_social_account_comments_run",
     "cancel_social_account_comments_job",
 ]
+
+# The API schedules this helper from the extracted comments leaf, while
+# compatibility callers still patch the legacy repository name. Bridge the
+# local launch/progress exports so those patches remain observable.
+register_legacy_patchable_namespace(
+    globals(),
+    (*__all__, "dispatch_due_social_jobs", "_dispatch_due_social_jobs_in_background"),
+)

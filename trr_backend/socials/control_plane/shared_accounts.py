@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from importlib import import_module
 from types import ModuleType
 from typing import Any
 
@@ -21,7 +22,11 @@ from trr_backend.socials.control_plane.shared_status_reads import (
 )
 from trr_backend.socials.instagram.persistence import _batch_upsert_shared_catalog_instagram_posts
 from trr_backend.socials.pipelines.account_catalog.progress import get_social_account_catalog_run_progress
-from trr_backend.socials.provider_registry import LateNamespaceProvider
+from trr_backend.socials.provider_registry import (
+    LateNamespaceProvider,
+    register_legacy_patchable_aliases,
+    register_legacy_patchable_namespace,
+)
 from trr_backend.socials.read_models.account_profile.common import (
     get_social_account_profile_collaborators_tags,
     get_social_account_profile_comments,
@@ -309,3 +314,24 @@ __all__ = [
     "resolve_social_account_catalog_review_queue_item",
     "shared_account_catalog_requires_modal_executor",
 ]
+
+register_legacy_patchable_namespace(globals(), ("cancel_social_account_catalog_run",))
+
+_CANONICAL_EXPORT_MODULES = {
+    "get_season_shared_status": "trr_backend.socials.control_plane.shared_status_reads",
+    "get_shared_account_sources": "trr_backend.socials.control_plane.shared_source_config",
+    "get_social_account_profile_collaborators_tags": "trr_backend.socials.read_models.account_profile.common",
+    "get_social_account_profile_comments": "trr_backend.socials.read_models.account_profile.common",
+    "get_social_account_profile_hashtags": "trr_backend.socials.read_models.account_profile.common",
+    "get_social_account_profile_posts": "trr_backend.socials.read_models.account_profile.common",
+    "get_social_account_profile_summary": "trr_backend.socials.read_models.account_profile.common",
+    "list_shared_runs": "trr_backend.socials.control_plane.shared_status_reads",
+    "put_shared_account_sources": "trr_backend.socials.control_plane.shared_source_config",
+}
+
+
+def _refresh_legacy_patchable_export(name: str) -> Any:
+    return getattr(import_module(_CANONICAL_EXPORT_MODULES[name]), name)
+
+
+register_legacy_patchable_aliases(globals(), _CANONICAL_EXPORT_MODULES, _refresh_legacy_patchable_export)
