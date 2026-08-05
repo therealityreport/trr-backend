@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -81,6 +82,31 @@ CLI_TIMEOUT_SECONDS = int(os.getenv("TRR_MODAL_OPS_CLI_TIMEOUT", "60"))
 
 MAX_OUTPUT_CHARS = 40_000  # Truncate very large log dumps so responses stay usable.
 _BACKEND_ENV_LOADED = False
+_MODAL_LOGS_RELATIVE_SINCE_PATTERN = re.compile(r"^\d+(?:\.\d+)?[smhdw]$")
+
+
+def _validated_modal_logs_since(value: str | None) -> str:
+    """Return a Modal-supported log time window without accepting CLI options."""
+    candidate = str(value or "").strip()
+    if _MODAL_LOGS_RELATIVE_SINCE_PATTERN.fullmatch(candidate):
+        return candidate
+    if "T" not in candidate:
+        return "24h"
+    try:
+        datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+    except ValueError:
+        return "24h"
+    return candidate
+
+
+def _active_job_statuses(social_core: Any) -> tuple[str, ...]:
+    """Read canonical active statuses while retaining a compatible fallback."""
+    statuses = getattr(
+        social_core,
+        "_RUN_PROGRESS_ACTIVE_JOB_STATUSES",
+        ("queued", "running", "retrying", "cancelling"),
+    )
+    return tuple(str(status) for status in statuses)
 
 
 def _python_command() -> str:
@@ -330,7 +356,7 @@ def tool_tail_logs(function: str = "run_social_posts_job", lines: int = 200, sin
     except (TypeError, ValueError):
         n = 200
     func = (function or "").strip()
-    window = (since or "24h").strip() or "24h"
+    window = _validated_modal_logs_since(since)
     args = ["app", "logs", DEFAULT_APP_NAME, "--since", window, "--tail", str(n), "--show-function-id"]
     note = (
         f"Last {n} entries for app {DEFAULT_APP_NAME}. "
@@ -623,7 +649,8 @@ def tool_list_active_jobs(limit: int = 25, platform: str = "instagram", account_
     except Exception as exc:  # noqa: BLE001
         return _format_tool_error(title="list_active_jobs", error=f"Backend imports failed: {exc!r}")
 
-    params: list[Any] = [list(social_core._RUN_PROGRESS_ACTIVE_JOB_STATUSES), safe_limit]
+    active_statuses = _active_job_statuses(social_core)
+    params: list[Any] = [list(active_statuses), safe_limit]
     sql = """
         select
           j.id::text as job_id,
@@ -698,7 +725,7 @@ def tool_list_active_jobs(limit: int = 25, platform: str = "instagram", account_
             "limit": safe_limit,
             "platform": normalized_platform,
             "account_handle": normalized_account,
-            "active_statuses": sorted(social_core._RUN_PROGRESS_ACTIVE_JOB_STATUSES),
+            "active_statuses": sorted(active_statuses),
             "jobs": jobs,
         },
         note="Read-only active scrape_jobs view; no cancellation or dispatch side effects.",

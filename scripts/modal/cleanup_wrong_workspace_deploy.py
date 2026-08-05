@@ -16,6 +16,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.modal.deploy_backend import (  # noqa: E402
+    DEFAULT_APP_REF,
+    REQUIRED_MODAL_ENVIRONMENT,
     REQUIRED_MODAL_PROFILE,
     REQUIRED_MODAL_WORKSPACE,
     pinned_modal_env,
@@ -33,9 +35,25 @@ def python_command() -> str:
     return sys.executable or "python3.11"
 
 
-def modal_profile_env(profile: str, environ: dict[str, str] | None = None) -> dict[str, str]:
+def modal_profile_env(
+    profile: str,
+    environ: dict[str, str] | None = None,
+    *,
+    workspace: str | None = None,
+    modal_environment: str | None = None,
+    app_name: str | None = None,
+    app_ref: str | None = None,
+) -> dict[str, str]:
     env = dict(environ or os.environ)
     env["MODAL_PROFILE"] = profile
+    for key, value in (
+        ("MODAL_WORKSPACE", workspace),
+        ("MODAL_ENVIRONMENT", modal_environment),
+        ("TRR_MODAL_APP_NAME", app_name),
+        ("TRR_MODAL_APP_REF", app_ref),
+    ):
+        if value is not None:
+            env[key] = value
     return env
 
 
@@ -103,10 +121,15 @@ def _verify_authoritative_workspace(*, modal_environment: str = "") -> dict[str,
     }
 
 
-def _app_rows(*, profile: str, modal_environment: str = "") -> list[dict[str, Any]]:
+def _app_rows(
+    *,
+    profile: str,
+    modal_environment: str = "",
+    env: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
     payload = _run_json(
         _modal_command("app", "list", modal_environment=modal_environment) + ["--json"],
-        env=modal_profile_env(profile),
+        env=modal_profile_env(profile, env),
     )
     return [row for row in payload if isinstance(row, dict)] if isinstance(payload, list) else []
 
@@ -119,14 +142,54 @@ def _app_is_present(rows: list[dict[str, Any]], app_name: str) -> bool:
     return False
 
 
+def _validate_stop_target(
+    *,
+    wrong_profile: str,
+    wrong_workspace: str,
+    app_name: str,
+    modal_environment: str,
+) -> None:
+    observed = {
+        "wrong_profile": str(wrong_profile or "").strip(),
+        "wrong_workspace": str(wrong_workspace or "").strip(),
+        "app_name": str(app_name or "").strip(),
+        "environment": str(modal_environment or "").strip(),
+    }
+    expected = {
+        "wrong_profile": DEFAULT_WRONG_PROFILE,
+        "wrong_workspace": DEFAULT_WRONG_WORKSPACE,
+        "app_name": DEFAULT_APP_NAME,
+        "environment": REQUIRED_MODAL_ENVIRONMENT,
+    }
+    for key, expected_value in expected.items():
+        if observed[key] != expected_value:
+            raise ValueError(
+                f"Modal cleanup target override blocked: {key}={observed[key] or '<empty>'}; expected {expected_value}."
+            )
+
+
 def cleanup_wrong_workspace_deploy(
     *,
     wrong_profile: str,
     wrong_workspace: str,
     app_name: str,
-    modal_environment: str = "",
+    modal_environment: str = REQUIRED_MODAL_ENVIRONMENT,
     stop: bool = False,
 ) -> dict[str, Any]:
+    if stop:
+        _validate_stop_target(
+            wrong_profile=wrong_profile,
+            wrong_workspace=wrong_workspace,
+            app_name=app_name,
+            modal_environment=modal_environment,
+        )
+    wrong_env = modal_profile_env(
+        wrong_profile,
+        workspace=wrong_workspace or None,
+        modal_environment=modal_environment or None,
+        app_name=app_name or None,
+        app_ref=DEFAULT_APP_REF,
+    )
     authoritative = _verify_authoritative_workspace(modal_environment=modal_environment)
     if not authoritative["ok"]:
         return {
@@ -138,7 +201,7 @@ def cleanup_wrong_workspace_deploy(
             "stopped": False,
         }
 
-    wrong_context = _active_workspace(wrong_profile)
+    wrong_context = _active_workspace(wrong_profile, env=wrong_env)
     if wrong_context["profile"] == REQUIRED_MODAL_PROFILE or wrong_context["workspace"] == REQUIRED_MODAL_WORKSPACE:
         return {
             "ok": False,
@@ -159,19 +222,23 @@ def cleanup_wrong_workspace_deploy(
             "stopped": False,
         }
 
-    rows = _app_rows(profile=wrong_profile, modal_environment=modal_environment)
+    rows = _app_rows(profile=wrong_profile, modal_environment=modal_environment, env=wrong_env)
     app_present = _app_is_present(rows, app_name)
-    history = _run_json(
-        _modal_command("app", "history", app_name, modal_environment=modal_environment) + ["--json"],
-        env=modal_profile_env(wrong_profile),
-    ) if app_present else []
+    history = (
+        _run_json(
+            _modal_command("app", "history", app_name, modal_environment=modal_environment) + ["--json"],
+            env=wrong_env,
+        )
+        if app_present
+        else []
+    )
 
     stopped = False
     if stop and app_present:
         _run_text(
             # `modal app stop` has no confirmation flag in the pinned CLI version.
             _modal_command("app", "stop", app_name, modal_environment=modal_environment),
-            env=modal_profile_env(wrong_profile),
+            env=wrong_env,
         )
         stopped = True
 
@@ -204,7 +271,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_APP_NAME,
         help=f"Wrong-workspace app name (default: {DEFAULT_APP_NAME}).",
     )
-    parser.add_argument("--env", default="", help="Optional Modal environment name.")
+    parser.add_argument(
+        "--env",
+        choices=(REQUIRED_MODAL_ENVIRONMENT,),
+        default=REQUIRED_MODAL_ENVIRONMENT,
+        help=f"Pinned Modal environment name (required: {REQUIRED_MODAL_ENVIRONMENT}).",
+    )
     parser.add_argument(
         "--stop",
         action="store_true",

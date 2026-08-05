@@ -20,10 +20,9 @@ from scripts.modal.deploy_backend import REQUIRED_MODAL_PROFILE  # noqa: E402
 # MODAL_PROFILE at import time.
 os.environ["MODAL_PROFILE"] = REQUIRED_MODAL_PROFILE
 
-import modal  # noqa: E402
-
 from trr_backend.db import pg  # noqa: E402
 from trr_backend.modal_dispatch import (  # noqa: E402
+    get_trr_modal_function_handle,
     modal_app_name,
     modal_environment_name,
     modal_social_comments_job_function_name,
@@ -188,7 +187,11 @@ def _invoke_deployed_comments_lane(*, job_id: str) -> dict[str, object]:
     app_name = modal_app_name()
     function_name = modal_social_comments_job_function_name()
     environment_name = modal_environment_name()
-    function_handle = modal.Function.from_name(app_name, function_name, environment_name=environment_name or None)
+    function_handle = get_trr_modal_function_handle(
+        function_name,
+        app_name=app_name,
+        environment_name=environment_name,
+    )
     return dict(function_handle.remote(job_id))
 
 

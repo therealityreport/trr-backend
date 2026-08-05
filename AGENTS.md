@@ -17,3 +17,15 @@ Inherit `../AGENTS.md`; it is authoritative for shared workspace policy.
 ## Validation
 - Run the smallest relevant backend checks from the existing `Makefile`, `pytest.ini`, or targeted test modules.
 - When SQL ownership changes, validate the SQL path and report its status as required by `../AGENTS.md`.
+
+<!-- project-manager:graphify:start -->
+## graphify
+
+- Check task-relevant graph freshness before using Graphify evidence.
+- When an existing graph is stale because relevant code changed, automatically refresh it locally only after the safety preview passes.
+- Never create a missing graph automatically, use a network or LLM backend, or use stale graph evidence.
+- If refresh is blocked, fails, or a semantic-document layer is stale, continue from current project files and report that Graphify evidence was omitted or partial.
+- Keep lifecycle hooks read-only and non-mutating; they report freshness but never rebuild graphs.
+- Keep app-managed transient planning and backup directories outside the corpus via `.graphifyignore`.
+- Keep `graphify-out/` local and ignored by Git.
+<!-- project-manager:graphify:end -->

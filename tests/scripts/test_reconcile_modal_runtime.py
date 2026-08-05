@@ -8,6 +8,34 @@ import pytest
 from scripts.modal import reconcile_modal_runtime as cli
 
 
+def test_deploy_modal_app_uses_immutable_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append({"command": command, **kwargs})
+        return cli.subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(cli.prepare_named_secrets, "_python_command", lambda: "python")
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    completed = cli.deploy_modal_app()
+
+    assert completed.returncode == 0
+    assert calls[0]["command"] == [
+        "python",
+        "-m",
+        "modal",
+        "deploy",
+        "-m",
+        "trr_backend.modal_jobs",
+        "--env",
+        "main",
+    ]
+    assert calls[0]["env"]["MODAL_PROFILE"] == "admin-56995"
+    assert calls[0]["env"]["TRR_MODAL_APP_NAME"] == "trr-backend-jobs"
+    assert calls[0]["env"]["TRR_MODAL_APP_REF"] == "trr_backend.modal_jobs"
+
+
 def test_reconcile_modal_runtime_skips_when_modal_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("WORKSPACE_TRR_MODAL_ENABLED", "0")
 

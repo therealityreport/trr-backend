@@ -16,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.modal.deploy_backend import REQUIRED_MODAL_PROFILE  # noqa: E402
+from trr_backend.modal_dispatch import get_trr_modal_function_handle  # noqa: E402
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -65,10 +66,8 @@ def verify_instagram_public_history(
     app_name: str,
     function_name: str,
 ) -> dict[str, Any]:
-    import modal
-
     normalized_account = str(account or "").strip().lstrip("@") or "bravotv"
-    fn = modal.Function.from_name(app_name, function_name)
+    fn = get_trr_modal_function_handle(function_name, app_name=app_name)
     payload = fn.remote(
         account_handle=normalized_account,
         until_date=until_date,
@@ -111,7 +110,9 @@ def main(argv: list[str] | None = None) -> int:
             function_name=args.function_name,
         )
         payload["auto_resume_attempt"] = attempt
-        state_payload = payload.get("state_payload") if isinstance(payload.get("state_payload"), dict) else state_payload
+        state_payload = (
+            payload.get("state_payload") if isinstance(payload.get("state_payload"), dict) else state_payload
+        )
         _write_json(args.state_file, state_payload)
         _write_json(args.output, payload)
         if _is_terminal(payload):

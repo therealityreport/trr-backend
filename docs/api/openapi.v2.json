@@ -4610,6 +4610,67 @@
         "title": "CreateAdminMediaLinkResponseV2",
         "type": "object"
       },
+      "DeleteSeasonCastSurveyRoleResponseV2": {
+        "additionalProperties": false,
+        "properties": {
+          "removed": {
+            "title": "Removed",
+            "type": "boolean"
+          },
+          "success": {
+            "const": true,
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "removed"
+        ],
+        "title": "DeleteSeasonCastSurveyRoleResponseV2",
+        "type": "object"
+      },
+      "ExactShowSlugResponseV2": {
+        "additionalProperties": false,
+        "properties": {
+          "show": {
+            "$ref": "#/components/schemas/ExactShowSlugV2"
+          }
+        },
+        "required": [
+          "show"
+        ],
+        "title": "ExactShowSlugResponseV2",
+        "type": "object"
+      },
+      "ExactShowSlugV2": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "slug": {
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Slug",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "slug"
+        ],
+        "title": "ExactShowSlugV2",
+        "type": "object"
+      },
       "ExternalIdsProblemDetailV2": {
         "additionalProperties": false,
         "properties": {
@@ -4977,6 +5038,106 @@
           "updated_at"
         ],
         "title": "FlashbackQuizV2",
+        "type": "object"
+      },
+      "IdentityMatchKind": {
+        "enum": [
+          "canonical",
+          "alias"
+        ],
+        "title": "IdentityMatchKind",
+        "type": "string"
+      },
+      "IdentityProblemDetail": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "retry_after_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retry After Ms"
+          },
+          "retryable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retryable"
+          },
+          "status": {
+            "title": "Status",
+            "type": "integer"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "status",
+          "message",
+          "trace_id",
+          "request_id"
+        ],
+        "title": "IdentityProblemDetail",
+        "type": "object"
+      },
+      "IdentityProblemResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/IdentityProblemDetail"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "IdentityProblemResponse",
         "type": "object"
       },
       "JsonValue": {},
@@ -7448,6 +7609,61 @@
         "title": "PersonExternalIdsResponseV2",
         "type": "object"
       },
+      "PersonIdentityResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "canonical_path": {
+            "title": "Canonical Path",
+            "type": "string"
+          },
+          "canonical_slug": {
+            "title": "Canonical Slug",
+            "type": "string"
+          },
+          "full_name": {
+            "title": "Full Name",
+            "type": "string"
+          },
+          "match_kind": {
+            "$ref": "#/components/schemas/IdentityMatchKind"
+          },
+          "person_id": {
+            "format": "uuid",
+            "title": "Person Id",
+            "type": "string"
+          },
+          "requested_slug": {
+            "title": "Requested Slug",
+            "type": "string"
+          },
+          "resource_type": {
+            "const": "person",
+            "title": "Resource Type",
+            "type": "string"
+          },
+          "show_context": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PersonShowContext"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "resource_type",
+          "person_id",
+          "full_name",
+          "requested_slug",
+          "canonical_slug",
+          "match_kind",
+          "canonical_path"
+        ],
+        "title": "PersonIdentityResponse",
+        "type": "object"
+      },
       "PersonMediaProblemDetailV2": {
         "additionalProperties": false,
         "properties": {
@@ -7538,6 +7754,31 @@
           "detail"
         ],
         "title": "PersonMediaProblemResponseV2",
+        "type": "object"
+      },
+      "PersonShowContext": {
+        "additionalProperties": false,
+        "properties": {
+          "canonical_slug": {
+            "title": "Canonical Slug",
+            "type": "string"
+          },
+          "show_id": {
+            "format": "uuid",
+            "title": "Show Id",
+            "type": "string"
+          },
+          "show_name": {
+            "title": "Show Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "show_id",
+          "show_name",
+          "canonical_slug"
+        ],
+        "title": "PersonShowContext",
         "type": "object"
       },
       "PersonThumbnailCropWriteResultV2": {
@@ -8166,6 +8407,237 @@
         "title": "SeasonCastResponseV2",
         "type": "object"
       },
+      "SeasonCastSurveyRoleListResponseV2": {
+        "additionalProperties": false,
+        "properties": {
+          "roles": {
+            "items": {
+              "$ref": "#/components/schemas/SeasonCastSurveyRoleV2"
+            },
+            "title": "Roles",
+            "type": "array"
+          }
+        },
+        "required": [
+          "roles"
+        ],
+        "title": "SeasonCastSurveyRoleListResponseV2",
+        "type": "object"
+      },
+      "SeasonCastSurveyRoleProblemDetailV2": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "retry_after_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retry After Ms"
+          },
+          "retryable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retryable"
+          },
+          "status": {
+            "title": "Status",
+            "type": "integer"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "status",
+          "message",
+          "trace_id",
+          "request_id"
+        ],
+        "title": "SeasonCastSurveyRoleProblemDetailV2",
+        "type": "object"
+      },
+      "SeasonCastSurveyRoleProblemResponseV2": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/SeasonCastSurveyRoleProblemDetailV2"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "SeasonCastSurveyRoleProblemResponseV2",
+        "type": "object"
+      },
+      "SeasonCastSurveyRoleV2": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "person_id": {
+            "format": "uuid",
+            "title": "Person Id",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "main",
+              "friend_of"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "season_number": {
+            "minimum": 1.0,
+            "title": "Season Number",
+            "type": "integer"
+          },
+          "trr_show_id": {
+            "format": "uuid",
+            "title": "Trr Show Id",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "trr_show_id",
+          "season_number",
+          "person_id",
+          "role",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "SeasonCastSurveyRoleV2",
+        "type": "object"
+      },
+      "SeasonIdentityResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "canonical_path": {
+            "title": "Canonical Path",
+            "type": "string"
+          },
+          "canonical_show_slug": {
+            "title": "Canonical Show Slug",
+            "type": "string"
+          },
+          "requested_show_slug": {
+            "title": "Requested Show Slug",
+            "type": "string"
+          },
+          "resource_type": {
+            "const": "season",
+            "title": "Resource Type",
+            "type": "string"
+          },
+          "season_id": {
+            "format": "uuid",
+            "title": "Season Id",
+            "type": "string"
+          },
+          "season_number": {
+            "minimum": 0.0,
+            "title": "Season Number",
+            "type": "integer"
+          },
+          "season_title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Season Title"
+          },
+          "show_id": {
+            "format": "uuid",
+            "title": "Show Id",
+            "type": "string"
+          },
+          "show_match_kind": {
+            "$ref": "#/components/schemas/IdentityMatchKind"
+          },
+          "show_name": {
+            "title": "Show Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "resource_type",
+          "season_id",
+          "show_id",
+          "show_name",
+          "season_number",
+          "requested_show_slug",
+          "canonical_show_slug",
+          "show_match_kind",
+          "canonical_path"
+        ],
+        "title": "SeasonIdentityResponse",
+        "type": "object"
+      },
       "SharedAccountSourceV2": {
         "additionalProperties": false,
         "properties": {
@@ -8599,6 +9071,143 @@
         "title": "ShowExternalIdsV2",
         "type": "object"
       },
+      "ShowIdentityResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "canonical_path": {
+            "title": "Canonical Path",
+            "type": "string"
+          },
+          "canonical_slug": {
+            "title": "Canonical Slug",
+            "type": "string"
+          },
+          "match_kind": {
+            "$ref": "#/components/schemas/IdentityMatchKind"
+          },
+          "requested_slug": {
+            "title": "Requested Slug",
+            "type": "string"
+          },
+          "resource_type": {
+            "const": "show",
+            "title": "Resource Type",
+            "type": "string"
+          },
+          "show_id": {
+            "format": "uuid",
+            "title": "Show Id",
+            "type": "string"
+          },
+          "show_name": {
+            "title": "Show Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "resource_type",
+          "show_id",
+          "show_name",
+          "requested_slug",
+          "canonical_slug",
+          "match_kind",
+          "canonical_path"
+        ],
+        "title": "ShowIdentityResponse",
+        "type": "object"
+      },
+      "ShowSlugProblemDetailV2": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "retry_after_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retry After Ms"
+          },
+          "retryable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retryable"
+          },
+          "status": {
+            "title": "Status",
+            "type": "integer"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "status",
+          "message",
+          "trace_id",
+          "request_id"
+        ],
+        "title": "ShowSlugProblemDetailV2",
+        "type": "object"
+      },
+      "ShowSlugProblemResponseV2": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/ShowSlugProblemDetailV2"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "ShowSlugProblemResponseV2",
+        "type": "object"
+      },
       "TypographyAssignmentResponseV2": {
         "additionalProperties": false,
         "properties": {
@@ -8884,6 +9493,19 @@
           "updated_at"
         ],
         "title": "TypographySetV2",
+        "type": "object"
+      },
+      "UpsertSeasonCastSurveyRoleResponseV2": {
+        "additionalProperties": false,
+        "properties": {
+          "role": {
+            "$ref": "#/components/schemas/SeasonCastSurveyRoleV2"
+          }
+        },
+        "required": [
+          "role"
+        ],
+        "title": "UpsertSeasonCastSurveyRoleResponseV2",
         "type": "object"
       }
     },
@@ -12064,6 +12686,86 @@
         ]
       }
     },
+    "/api/v2/admin/shows/exact-slug/{slug}": {
+      "get": {
+        "operationId": "getAdminShowByExactSlugV2",
+        "parameters": [
+          {
+            "description": "A show slug. Matching is exact after lowercase normalization.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9]+(?:-+[A-Za-z0-9]+)*$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExactShowSlugResponseV2"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShowSlugProblemResponseV2"
+                }
+              }
+            },
+            "description": "The show slug is invalid."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShowSlugProblemResponseV2"
+                }
+              }
+            },
+            "description": "The show was not found."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShowSlugProblemResponseV2"
+                }
+              }
+            },
+            "description": "The exact show-slug read failed."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShowSlugProblemResponseV2"
+                }
+              }
+            },
+            "description": "The show store is unavailable."
+          }
+        },
+        "security": [
+          {
+            "InternalAdminBearer": []
+          }
+        ],
+        "summary": "Get a show by its exact stored slug",
+        "tags": [
+          "admin-show-slugs-v2"
+        ]
+      }
+    },
     "/api/v2/admin/shows/external-ids/batch": {
       "post": {
         "operationId": "listAdminShowExternalIdsBatchV2",
@@ -12418,6 +13120,389 @@
         "summary": "Get admin assets for a show season",
         "tags": [
           "admin-media-v2"
+        ]
+      }
+    },
+    "/api/v2/admin/shows/{show_id}/seasons/{season_number}/cast-survey-roles": {
+      "delete": {
+        "operationId": "deleteAdminSeasonCastSurveyRoleV2",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "show_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "season_number",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "person_id": {
+                    "format": "uuid",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "person_id"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteSeasonCastSurveyRoleResponseV2"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeasonCastSurveyRoleProblemResponseV2"
+                }
+              }
+            },
+            "description": "The role request is invalid."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeasonCastSurveyRoleProblemResponseV2"
+                }
+              }
+            },
+            "description": "The role request failed."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeasonCastSurveyRoleProblemResponseV2"
+                }
+              }
+            },
+            "description": "The role store is unavailable."
+          }
+        },
+        "security": [
+          {
+            "InternalAdminBearer": []
+          }
+        ],
+        "summary": "Delete Role",
+        "tags": [
+          "admin-season-cast-survey-roles-v2"
+        ]
+      },
+      "get": {
+        "operationId": "listAdminSeasonCastSurveyRolesV2",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "show_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "season_number",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeasonCastSurveyRoleListResponseV2"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeasonCastSurveyRoleProblemResponseV2"
+                }
+              }
+            },
+            "description": "The role request is invalid."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeasonCastSurveyRoleProblemResponseV2"
+                }
+              }
+            },
+            "description": "The role request failed."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeasonCastSurveyRoleProblemResponseV2"
+                }
+              }
+            },
+            "description": "The role store is unavailable."
+          }
+        },
+        "security": [
+          {
+            "InternalAdminBearer": []
+          }
+        ],
+        "summary": "List Roles",
+        "tags": [
+          "admin-season-cast-survey-roles-v2"
+        ]
+      },
+      "patch": {
+        "operationId": "replaceAdminSeasonCastSurveyRolesV2",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "show_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "season_number",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "roles": {
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "person_id": {
+                          "format": "uuid",
+                          "type": "string"
+                        },
+                        "role": {
+                          "enum": [
+                            "main",
+                            "friend_of"
+                          ],
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "person_id",
+                        "role"
+                      ],
+                      "type": "object"
+                    },
+                    "maxItems": 500,
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "roles"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeasonCastSurveyRoleListResponseV2"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeasonCastSurveyRoleProblemResponseV2"
+                }
+              }
+            },
+            "description": "The role request is invalid."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeasonCastSurveyRoleProblemResponseV2"
+                }
+              }
+            },
+            "description": "The role request failed."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeasonCastSurveyRoleProblemResponseV2"
+                }
+              }
+            },
+            "description": "The role store is unavailable."
+          }
+        },
+        "security": [
+          {
+            "InternalAdminBearer": []
+          }
+        ],
+        "summary": "Replace Roles",
+        "tags": [
+          "admin-season-cast-survey-roles-v2"
+        ]
+      },
+      "post": {
+        "operationId": "upsertAdminSeasonCastSurveyRoleV2",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "show_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "season_number",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "person_id": {
+                    "format": "uuid",
+                    "type": "string"
+                  },
+                  "role": {
+                    "enum": [
+                      "main",
+                      "friend_of"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "person_id",
+                  "role"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpsertSeasonCastSurveyRoleResponseV2"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeasonCastSurveyRoleProblemResponseV2"
+                }
+              }
+            },
+            "description": "The role request is invalid."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeasonCastSurveyRoleProblemResponseV2"
+                }
+              }
+            },
+            "description": "The role request failed."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeasonCastSurveyRoleProblemResponseV2"
+                }
+              }
+            },
+            "description": "The role store is unavailable."
+          }
+        },
+        "security": [
+          {
+            "InternalAdminBearer": []
+          }
+        ],
+        "summary": "Upsert Role",
+        "tags": [
+          "admin-season-cast-survey-roles-v2"
         ]
       }
     },
@@ -13213,6 +14298,289 @@
         "summary": "Get a public core episode",
         "tags": [
           "public-core-show-reads-v2"
+        ]
+      }
+    },
+    "/api/v2/identities/people/{slug}": {
+      "get": {
+        "description": "Resolves a canonical slug or direct alias. Optional show_id or show_slug context narrows collisions to people linked to that show's cast. The endpoint rejects requests that provide both contexts.",
+        "operationId": "resolvePublicPersonIdentityV2",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "example": "brandi-glanville",
+              "maxLength": 160,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional show UUID used to narrow person collisions.",
+            "in": "query",
+            "name": "show_id",
+            "required": false,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional show slug or direct alias used to narrow person collisions.",
+            "in": "query",
+            "name": "show_slug",
+            "required": false,
+            "schema": {
+              "maxLength": 160,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonIdentityResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentityProblemResponse"
+                }
+              }
+            },
+            "description": "Invalid slug or conflicting show context."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentityProblemResponse"
+                }
+              }
+            },
+            "description": "No public identity matched the request."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentityProblemResponse"
+                }
+              }
+            },
+            "description": "A direct alias matched multiple identities."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentityProblemResponse"
+                }
+              }
+            },
+            "description": "The resolver could not complete the request."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentityProblemResponse"
+                }
+              }
+            },
+            "description": "The identity store is temporarily unavailable."
+          }
+        },
+        "summary": "Resolve a public person identity",
+        "tags": [
+          "public-identities-v2"
+        ]
+      }
+    },
+    "/api/v2/identities/shows/{show_slug}/seasons/{season_number}": {
+      "get": {
+        "description": "Resolves the show alias first, then identifies a season by its non-negative season number. The canonical season path is derived from the canonical show alias and season number.",
+        "operationId": "resolvePublicSeasonIdentityV2",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "show_slug",
+            "required": true,
+            "schema": {
+              "example": "rhobh",
+              "maxLength": 160,
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "season_number",
+            "required": true,
+            "schema": {
+              "example": 14,
+              "maximum": 2147483647,
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeasonIdentityResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentityProblemResponse"
+                }
+              }
+            },
+            "description": "Invalid slug or conflicting show context."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentityProblemResponse"
+                }
+              }
+            },
+            "description": "No public identity matched the request."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentityProblemResponse"
+                }
+              }
+            },
+            "description": "A direct alias matched multiple identities."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentityProblemResponse"
+                }
+              }
+            },
+            "description": "The resolver could not complete the request."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentityProblemResponse"
+                }
+              }
+            },
+            "description": "The identity store is temporarily unavailable."
+          }
+        },
+        "summary": "Resolve a public season identity",
+        "tags": [
+          "public-identities-v2"
+        ]
+      }
+    },
+    "/api/v2/identities/shows/{slug}": {
+      "get": {
+        "description": "Resolves a canonical slug or direct alias. A canonical match wins over a colliding legacy alias; an unresolved alias collision returns HTTP 409. This endpoint is public and read-only.",
+        "operationId": "resolvePublicShowIdentityV2",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "example": "real-housewives-of-beverly-hills",
+              "maxLength": 160,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShowIdentityResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentityProblemResponse"
+                }
+              }
+            },
+            "description": "Invalid slug or conflicting show context."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentityProblemResponse"
+                }
+              }
+            },
+            "description": "No public identity matched the request."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentityProblemResponse"
+                }
+              }
+            },
+            "description": "A direct alias matched multiple identities."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentityProblemResponse"
+                }
+              }
+            },
+            "description": "The resolver could not complete the request."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentityProblemResponse"
+                }
+              }
+            },
+            "description": "The identity store is temporarily unavailable."
+          }
+        },
+        "summary": "Resolve a public show identity",
+        "tags": [
+          "public-identities-v2"
         ]
       }
     },

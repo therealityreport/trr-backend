@@ -1212,13 +1212,13 @@ def test_instagram_profile_page_call_sites_use_ready_payload_bindings_and_log_sc
         fetch_calls: list[str] = []
 
         def fake_sidecar_sql(*, row_kind: str, row_alias: str, mode: str) -> tuple[str, str]:
-            sidecar_calls.append((row_kind, row_alias, mode))  # noqa: B023 - called before next loop case
+            sidecar_calls.append((row_kind, row_alias, mode))
             if mode == "legacy":
                 return "", ""
             return "left join missing_payload_sidecar on true", ", null::jsonb as payload_probe"
 
         def fake_log_schema_unavailable(*, surface: str, entity_identity: object) -> None:
-            log_calls.append((surface, entity_identity))  # noqa: B023 - called before next loop case
+            log_calls.append((surface, entity_identity))
 
         def fake_rows_for_read(
             rows: list[dict[str, object]],
@@ -1227,14 +1227,14 @@ def test_instagram_profile_page_call_sites_use_ready_payload_bindings_and_log_sc
             mode: str,
             surface: str,
         ) -> list[dict[str, object]]:
-            row_calls.append((rows, row_kind, mode, surface))  # noqa: B023 - synchronous test double
+            row_calls.append((rows, row_kind, mode, surface))
             return rows
 
         def fake_fetch_all(sql: str, _params: list[object]) -> list[dict[str, object]]:
-            fetch_calls.append(sql)  # noqa: B023 - called before next loop case
-            if len(fetch_calls) == 1:  # noqa: B023 - called before next loop case
+            fetch_calls.append(sql)
+            if len(fetch_calls) == 1:
                 raise profile_common.psycopg_errors.UndefinedTable("payload sidecar missing")
-            return [{"id": f"{case_name}-row", "_total_count": 1}]  # noqa: B023 - synchronous case
+            return [{"id": f"{case_name}-row", "_total_count": 1}]
 
         monkeypatch.setattr(profile_common, "_instagram_payload_sidecar_sql", fake_sidecar_sql)
         monkeypatch.setattr(

@@ -277,7 +277,11 @@ def _default_catalog_stored_post_at(
     try:
         row = (
             _fetch_one(
-                f"select {aggregate}(posted_at) as stored_at from social.{table} where lower(source_account) = %s",
+                f"""
+                select {aggregate}(posted_at) as stored_at
+                from social.{table} p
+                where {_catalog_account_match_sql(normalized_platform)}
+                """,
                 [normalized_account],
                 conn=conn,
                 label=f"catalog-freshness-{aggregate}",

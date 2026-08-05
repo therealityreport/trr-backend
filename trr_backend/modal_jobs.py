@@ -837,14 +837,14 @@ def probe_browser_image_runtime() -> dict[str, object]:
     """Prove the browser image can import and launch Chromium without state."""
     # Keep this probe deliberately state-free: no Secret, database, Volume, Queue,
     # cookie, external URL, or browser storage is involved.
-    from patchright.sync_api import sync_playwright as patchright_sync_playwright
-    from playwright.sync_api import sync_playwright
-    from scrapling.fetchers import StealthyFetcher
-
     started = time.monotonic()
     try:
         # Importing the concrete fetcher catches Scrapling/Patchright integration
         # drift without constructing a session or making a network request.
+        from patchright.sync_api import sync_playwright as patchright_sync_playwright
+        from playwright.sync_api import sync_playwright
+        from scrapling.fetchers import StealthyFetcher
+
         _ = StealthyFetcher, patchright_sync_playwright
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)

@@ -375,7 +375,16 @@ def apply_named_secrets(repo_root: Path = REPO_ROOT) -> subprocess.CompletedProc
 def deploy_modal_app(repo_root: Path = REPO_ROOT) -> subprocess.CompletedProcess[str]:
     python_cmd = prepare_named_secrets._python_command()
     return subprocess.run(
-        [python_cmd, "-m", "modal", "deploy", "-m", "trr_backend.modal_jobs"],
+        [
+            python_cmd,
+            "-m",
+            "modal",
+            "deploy",
+            "-m",
+            deploy_backend.DEFAULT_APP_REF,
+            "--env",
+            deploy_backend.REQUIRED_MODAL_ENVIRONMENT,
+        ],
         cwd=repo_root,
         capture_output=True,
         text=True,

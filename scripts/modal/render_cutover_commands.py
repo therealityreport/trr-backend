@@ -5,9 +5,18 @@ from __future__ import annotations
 
 import argparse
 import shlex
+import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.modal.deploy_backend import (  # noqa: E402
+    DEFAULT_APP_NAME,
+    DEFAULT_APP_REF,
+    REQUIRED_MODAL_ENVIRONMENT,
+)
 
 TARGET_ENV = {
     "TRR_JOB_PLANE_MODE": "remote",
@@ -39,8 +48,9 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--modal-environment",
-        default="",
-        help="Optional Modal environment name passed through to readiness checks.",
+        choices=(REQUIRED_MODAL_ENVIRONMENT,),
+        default=REQUIRED_MODAL_ENVIRONMENT,
+        help=f"Pinned Modal environment passed to readiness checks (required: {REQUIRED_MODAL_ENVIRONMENT}).",
     )
     parser.add_argument(
         "--frontend-runtime-target",
@@ -52,13 +62,11 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = _parse_args()
-    verify_args = ""
-    if args.modal_environment:
-        verify_args = f" --env {shlex.quote(args.modal_environment)}"
+    verify_args = f" --env {shlex.quote(args.modal_environment)}"
 
     print("Full backend Modal cutover prep checklist")
     print(f"Repo root: {REPO_ROOT}")
-    print(f"Modal environment: {args.modal_environment or 'default'}")
+    print(f"Modal environment: {args.modal_environment}")
     print("\nTarget runtime env block:")
     for key, value in TARGET_ENV.items():
         print(f"  {key}={value}")
@@ -66,11 +74,13 @@ def main() -> int:
     deploy_command = shlex.join(
         [
             str(REPO_ROOT / ".venv" / "bin" / "python"),
-            "-m",
-            "modal",
-            "deploy",
-            "-m",
-            "trr_backend.modal_jobs",
+            str(REPO_ROOT / "scripts" / "modal" / "deploy_backend.py"),
+            "--app-ref",
+            DEFAULT_APP_REF,
+            "--app-name",
+            DEFAULT_APP_NAME,
+            "--env",
+            REQUIRED_MODAL_ENVIRONMENT,
         ]
     )
     print("\nSuggested Modal deploy commands:")

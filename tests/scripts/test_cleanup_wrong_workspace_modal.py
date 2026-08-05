@@ -84,33 +84,73 @@ def test_cleanup_stops_wrong_workspace_app_after_authoritative_readiness(monkeyp
     assert summary["wrong_app_present"] is True
     assert summary["wrong_app_history_count"] == 1
     assert summary["stopped"] is True
-    assert ["python", "-m", "modal", "app", "stop", "trr-backend-jobs"] in [
+    assert ["python", "-m", "modal", "app", "stop", "trr-backend-jobs", "--env", "main"] in [
         call["command"] for call in calls
     ]
     assert calls[0]["env"]["MODAL_PROFILE"] == "admin-56995"
     assert all(call["env"]["MODAL_PROFILE"] == "thb-bbl" for call in calls[1:])
+    assert all(call["env"]["MODAL_WORKSPACE"] == "tommy-hulihan-basketball" for call in calls[1:])
+    assert all(call["env"]["MODAL_ENVIRONMENT"] == "main" for call in calls[1:])
+    assert all(call["env"]["TRR_MODAL_APP_NAME"] == "trr-backend-jobs" for call in calls[1:])
+    assert all(call["env"]["TRR_MODAL_APP_REF"] == "trr_backend.modal_jobs" for call in calls[1:])
 
 
 def test_cleanup_refuses_when_wrong_profile_is_authoritative(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_run(command, **_kwargs):
-        joined = " ".join(command)
-        if "verify_modal_readiness.py" in joined:
-            return _completed(command, {"ok": True, "modal_workspace": {"workspace_ok": True}})
-        if "profile list" in joined:
-            return _completed(command, [{"name": "admin-56995", "workspace": "admin-56995", "active": True}])
-        raise AssertionError(f"unexpected command: {command}")
+    called = False
+
+    def fake_run(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("Modal subprocess must not run for an authoritative-profile stop")
 
     monkeypatch.setattr(cli, "python_command", lambda: "python")
     monkeypatch.setattr(cli.subprocess, "run", fake_run)
 
-    summary = cli.cleanup_wrong_workspace_deploy(
-        wrong_profile="admin-56995",
-        wrong_workspace="tommy-hulihan-basketball",
-        app_name="trr-backend-jobs",
-        stop=True,
-    )
+    with pytest.raises(ValueError, match="wrong_profile=admin-56995"):
+        cli.cleanup_wrong_workspace_deploy(
+            wrong_profile="admin-56995",
+            wrong_workspace="tommy-hulihan-basketball",
+            app_name="trr-backend-jobs",
+            stop=True,
+        )
 
-    assert summary["ok"] is False
-    assert summary["failure_reason"] == "wrong_profile_resolves_to_authoritative_workspace"
+    assert called is False
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_fragment"),
+    [
+        ({"wrong_profile": "another-profile"}, "wrong_profile=another-profile"),
+        ({"wrong_workspace": "another-workspace"}, "wrong_workspace=another-workspace"),
+        ({"app_name": "another-app"}, "app_name=another-app"),
+        ({"modal_environment": "staging"}, "environment=staging"),
+    ],
+)
+def test_cleanup_stop_rejects_target_override_before_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+    overrides: dict[str, str],
+    expected_fragment: str,
+) -> None:
+    called = False
+
+    def fail_if_called(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("Modal subprocess must not run for a target override")
+
+    monkeypatch.setattr(cli.subprocess, "run", fail_if_called)
+    kwargs = {
+        "wrong_profile": cli.DEFAULT_WRONG_PROFILE,
+        "wrong_workspace": cli.DEFAULT_WRONG_WORKSPACE,
+        "app_name": cli.DEFAULT_APP_NAME,
+        "modal_environment": "main",
+        "stop": True,
+    }
+    kwargs.update(overrides)
+
+    with pytest.raises(ValueError, match=expected_fragment):
+        cli.cleanup_wrong_workspace_deploy(**kwargs)
+
+    assert called is False
