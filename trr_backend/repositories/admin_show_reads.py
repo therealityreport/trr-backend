@@ -1477,7 +1477,8 @@ def _get_show_season_assets_impl(
                 metadata = _metadata_dict(row.get("metadata"))
                 metadata_people_count = _read_people_count(metadata.get("people_count"))
                 metadata_people_count_source = _read_people_count_source(metadata.get("people_count_source"))
-                people_count = _read_people_count(row.get("people_count")) or metadata_people_count
+                tagged_people_count = _read_people_count(row.get("people_count"))
+                people_count = tagged_people_count if tagged_people_count is not None else metadata_people_count
                 people_count_source = (
                     _read_people_count_source(row.get("people_count_source")) or metadata_people_count_source
                 )

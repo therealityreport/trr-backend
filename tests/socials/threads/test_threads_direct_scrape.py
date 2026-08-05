@@ -9,8 +9,9 @@ from typing import Any
 import pytest
 from fastapi import HTTPException
 
-from trr_backend.socials import threads as threads_module
+from trr_backend.socials import threads as threads_package
 from trr_backend.socials.threads import direct_scrape
+from trr_backend.socials.threads import scraper as threads_scraper
 
 
 class _FakeConfig:
@@ -65,6 +66,11 @@ def test_post_to_payload_preserves_threads_route_shape() -> None:
     }
 
 
+def test_threads_package_facade_preserves_canonical_scraper_identity() -> None:
+    assert threads_package.ThreadsScraper is threads_scraper.ThreadsScraper
+    assert threads_package.ThreadsScrapeConfig is threads_scraper.ThreadsScrapeConfig
+
+
 def test_scrape_threads_uses_injected_cookie_surface_and_shapes_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -101,8 +107,9 @@ def test_scrape_threads_uses_injected_cookie_surface_and_shapes_success(
     scraper = _FakeScraper(cookies={}, posts=posts)
     surfaces: list[str] = []
 
-    monkeypatch.setattr(threads_module, "ThreadsScraper", lambda *, cookies: _capture_scraper(scraper, cookies))
-    monkeypatch.setattr(threads_module, "ThreadsScrapeConfig", _FakeConfig)
+    _forbid_runtime_package_facade(monkeypatch)
+    monkeypatch.setattr(threads_scraper, "ThreadsScraper", lambda *, cookies: _capture_scraper(scraper, cookies))
+    monkeypatch.setattr(threads_scraper, "ThreadsScrapeConfig", _FakeConfig)
 
     request = SimpleNamespace(
         username="bravotv",
@@ -142,8 +149,9 @@ def test_scrape_threads_uses_injected_cookie_surface_and_shapes_success(
 def test_scrape_threads_preserves_failure_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     scraper = _FakeScraper(cookies={}, error=RuntimeError("scrape failed"))
 
-    monkeypatch.setattr(threads_module, "ThreadsScraper", lambda *, cookies: _capture_scraper(scraper, cookies))
-    monkeypatch.setattr(threads_module, "ThreadsScrapeConfig", _FakeConfig)
+    _forbid_runtime_package_facade(monkeypatch)
+    monkeypatch.setattr(threads_scraper, "ThreadsScraper", lambda *, cookies: _capture_scraper(scraper, cookies))
+    monkeypatch.setattr(threads_scraper, "ThreadsScrapeConfig", _FakeConfig)
 
     result = direct_scrape.scrape_threads(
         SimpleNamespace(username="bravotv", hashtags=[], keywords=[], date_start=None, date_end=None),
@@ -175,8 +183,9 @@ def test_preview_threads_profile_uses_direct_interface_and_latest_post(
     )
     surfaces: list[str] = []
 
-    monkeypatch.setattr(threads_module, "ThreadsScraper", lambda *, cookies: _capture_scraper(scraper, cookies))
-    monkeypatch.setattr(threads_module, "ThreadsScrapeConfig", _FakeConfig)
+    _forbid_runtime_package_facade(monkeypatch)
+    monkeypatch.setattr(threads_scraper, "ThreadsScraper", lambda *, cookies: _capture_scraper(scraper, cookies))
+    monkeypatch.setattr(threads_scraper, "ThreadsScrapeConfig", _FakeConfig)
 
     result = direct_scrape.preview_threads_profile(
         "bravotv",
@@ -229,3 +238,11 @@ def test_direct_scrape_module_does_not_import_repository_or_threads_lanes() -> N
 def _capture_scraper(scraper: _FakeScraper, cookies: Any) -> _FakeScraper:
     scraper.cookies = cookies
     return scraper
+
+
+def _forbid_runtime_package_facade(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("direct scrape runtime must import the canonical Threads scraper leaf")
+
+    monkeypatch.setattr(threads_package, "ThreadsScraper", fail)
+    monkeypatch.setattr(threads_package, "ThreadsScrapeConfig", fail)

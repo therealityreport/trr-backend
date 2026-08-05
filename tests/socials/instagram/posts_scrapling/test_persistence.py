@@ -1,10 +1,149 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import pytest
+
+import trr_backend.socials.instagram.posts_scrapling.persistence as persistence
+from trr_backend.socials.instagram.comments_scrapling import persistence as legacy_provider
+
+_REQUIRED_PROVIDER_NAMES = (
+    "get_season_context",
+    "_batch_upsert_instagram_comments",
+)
+
+
+@pytest.fixture(autouse=True)
+def _configured_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.repositories import social_season_analytics as repo
+
+    monkeypatch.setattr(legacy_provider, "_LEGACY_NAMESPACE", None)
+    legacy_provider._configure_legacy_provider(repo.__dict__)
+
+
+def test_persistence_import_does_not_load_legacy_social_modules() -> None:
+    backend_root = Path(__file__).resolve().parents[4]
+    code = "\n".join(
+        [
+            "import importlib",
+            "import sys",
+            "before = set(sys.modules)",
+            ("leaf = importlib.import_module('trr_backend.socials.instagram.posts_scrapling.persistence')"),
+            "assert callable(leaf.persist_instagram_posts)",
+            "loaded = set(sys.modules) - before",
+            "forbidden = {",
+            "    'trr_backend.socials.social_season_analytics_impl',",
+            "    'trr_backend.repositories.social_season_analytics',",
+            "}",
+            "assert not (loaded & forbidden), sorted(loaded & forbidden)",
+        ]
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=backend_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_late_monolith_import_configures_preloaded_persistence_leaf() -> None:
+    backend_root = Path(__file__).resolve().parents[4]
+    code = "\n".join(
+        [
+            "import importlib",
+            "import sys",
+            ("leaf = importlib.import_module('trr_backend.socials.instagram.posts_scrapling.persistence')"),
+            ("provider = importlib.import_module('trr_backend.socials.instagram.comments_scrapling.persistence')"),
+            "legacy_name = 'trr_backend.socials.social_season_analytics_impl'",
+            "assert legacy_name not in sys.modules",
+            "assert provider._LEGACY_NAMESPACE is None",
+            "legacy = importlib.import_module(legacy_name)",
+            "assert provider._LEGACY_NAMESPACE is legacy.__dict__",
+            "assert leaf._load_repo_helpers() is provider._load_repo_helpers()",
+            f"for name in {_REQUIRED_PROVIDER_NAMES!r}:",
+            "    assert getattr(leaf._load_repo_helpers(), name) is legacy.__dict__[name]",
+            "    assert getattr(leaf._load_repo_helpers(), name) is getattr(legacy, name)",
+        ]
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=backend_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_provider_proxy_is_shared_singleton_and_reads_exact_live_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = object()
+    second = object()
+    namespace = {"provider": first}
+    monkeypatch.setattr(legacy_provider, "_LEGACY_NAMESPACE", None)
+    legacy_provider._configure_legacy_provider(namespace)
+
+    proxy = persistence._load_repo_helpers()
+    assert proxy is persistence._load_repo_helpers()
+    assert proxy is legacy_provider._load_repo_helpers()
+    assert proxy is legacy_provider._LEGACY_PROVIDER
+    assert proxy.provider is first
+
+    namespace["provider"] = second
+    namespace["late_provider"] = first
+
+    assert proxy.provider is second
+    assert proxy.late_provider is first
+
+
+def test_provider_proxy_unconfigured_and_missing_names_fail_deterministically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proxy = persistence._load_repo_helpers()
+    monkeypatch.setattr(legacy_provider, "_LEGACY_NAMESPACE", None)
+
+    with pytest.raises(
+        RuntimeError,
+        match="Instagram comments-persistence provider is not configured: get_season_context",
+    ):
+        _ = proxy.get_season_context
+
+    legacy_provider._configure_legacy_provider({})
+    with pytest.raises(
+        AttributeError,
+        match="Instagram comments-persistence provider has no attribute: get_season_context",
+    ):
+        _ = proxy.get_season_context
+
+
+def test_provider_proxy_observes_all_live_repository_alias_patches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials import social_season_analytics_impl as social_repo
+
+    assert repo.__dict__ is social_repo.__dict__
+    monkeypatch.setattr(legacy_provider, "_LEGACY_NAMESPACE", None)
+    legacy_provider._configure_legacy_provider(repo.__dict__)
+    proxy = persistence._load_repo_helpers()
+
+    assert len(_REQUIRED_PROVIDER_NAMES) == 2
+    for name in _REQUIRED_PROVIDER_NAMES:
+        replacement = object()
+        monkeypatch.setattr(repo, name, replacement)
+        assert getattr(proxy, name) is replacement
 
 
 def test_adapt_graph_node_to_post_dto():

@@ -37,7 +37,7 @@ def video_to_payload(video: Any) -> dict[str, Any]:
 
 def scrape_youtube(request: Any, *, logger: logging.Logger | None = None) -> dict[str, Any]:
     """Scrape YouTube videos and return the existing route response shape."""
-    from trr_backend.socials import youtube as youtube_platform
+    from trr_backend.socials.youtube.scraper import YouTubeScrapeConfig, YouTubeScraper
 
     active_logger = logger or _DEFAULT_LOGGER
     config_kwargs = {
@@ -55,12 +55,12 @@ def scrape_youtube(request: Any, *, logger: logging.Logger | None = None) -> dic
         value = getattr(request, attr, None)
         if value:
             config_kwargs[attr] = value
-    config = youtube_platform.YouTubeScrapeConfig(
+    config = YouTubeScrapeConfig(
         **config_kwargs,
     )
 
     try:
-        scraper = youtube_platform.YouTubeScraper()
+        scraper = YouTubeScraper()
         videos = scraper.scrape(config)
 
         return {

@@ -14,38 +14,33 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
 
-import trr_backend.socials.social_season_analytics_impl as _core
 from trr_backend.socials.instagram.comments_scrapling.public_mode import (
     PUBLIC_COMMENTS_LOAD_STRATEGY,
     PUBLIC_COMMENTS_SCRAPE_MODE,
     comments_load_strategy_for_mode,
     comments_public_mode_from_config,
 )
+from trr_backend.socials.provider_registry import LateNamespaceProvider, LateProviderProxy, publish_module_slot
 
-_RESERVED_CORE_EXPORTS = {
-    "__builtins__",
-    "__cached__",
-    "__doc__",
-    "__file__",
-    "__loader__",
-    "__name__",
-    "__package__",
-    "__spec__",
-    "_core",
-    "_IMPORTED_CORE_NAMES",
-    "_LOCAL_ROOM_NAMES",
-    "_RESERVED_CORE_EXPORTS",
-    "_sync_core_overrides",
-}
 _IMPORTED_CORE_NAMES: set[str] = set()
-for _name, _value in _core.__dict__.items():
-    if _name in _RESERVED_CORE_EXPORTS:
-        continue
-    globals()[_name] = _value
-    _IMPORTED_CORE_NAMES.add(_name)
 _LOCAL_ROOM_NAMES: set[str] = set()
 _LOCAL_ROOM_FUNCTIONS: dict[str, Any] = {}
 _CORE_ROOM_WRAPPERS: dict[str, Any] = {}
+
+
+_PROVIDER = LateNamespaceProvider(
+    globals(),
+    prefix="INSTAGRAM_COMMENTS_PROVIDER",
+    room_names=_LOCAL_ROOM_NAMES,
+    imported_names=_IMPORTED_CORE_NAMES,
+    room_wrappers=_CORE_ROOM_WRAPPERS,
+    commit=publish_module_slot(globals(), "_core"),
+)
+_core: Any = LateProviderProxy(_PROVIDER)
+_require_provider_ready = _PROVIDER.require
+_configure_legacy_provider = _PROVIDER.configure
+_sync_core_overrides = _PROVIDER.sync
+_room_callable = _PROVIDER.room_callable
 
 INSTAGRAM_COMMENTS_AUDIT_CURSOR_RETRY_STOP_REASONS = (
     "pagination_deadline_exceeded",
@@ -126,19 +121,6 @@ _PUBLIC_COMMENTS_WORKER_CAP_REBALANCE_SLOW_POSTS_PER_MINUTE = 0.5
 _PUBLIC_COMMENTS_WORKER_CAP_REBALANCE_MIN_REMAINING_TARGETS = 10
 _PUBLIC_COMMENTS_WORKER_CAP_REBALANCE_MAX_RETRY_SHARD_SIZE = 10
 _INSTAGRAM_COMMENTS_NONTERMINAL_REMOTE_INVOCATION_STATUSES = frozenset({"pending", "running", "queued", "unknown"})
-
-
-def _sync_core_overrides() -> None:
-    for _name in _IMPORTED_CORE_NAMES - _LOCAL_ROOM_NAMES:
-        if hasattr(_core, _name):
-            globals()[_name] = getattr(_core, _name)
-
-
-def _room_callable(name: str, local_impl: Any) -> Any:
-    candidate = getattr(_core, name, None)
-    if callable(candidate) and candidate is not _CORE_ROOM_WRAPPERS.get(name):
-        return candidate
-    return local_impl
 
 
 def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = None) -> dict[str, Any]:
@@ -2878,7 +2860,10 @@ def _load_instagram_comments_audit_cursor_rows(
 def _select_instagram_comments_audit_cursor_retry_targets(
     rows: Sequence[Mapping[str, Any]],
 ) -> tuple[list[str], list[dict[str, Any]]]:
-    from trr_backend.socials.instagram.comments_scrapling import job_runner as comments_job_runner
+    from trr_backend.socials.instagram.comments_scrapling.audit_checkpoints import (
+        normalize_audit_reply_checkpoints,
+        normalize_audit_top_level_checkpoint,
+    )
 
     selected_shortcodes: list[str] = []
     selected_rows: list[dict[str, Any]] = []
@@ -2887,8 +2872,8 @@ def _select_instagram_comments_audit_cursor_retry_targets(
         shortcode = str(row.get("shortcode") or "").strip()
         if not shortcode or shortcode in seen_shortcodes:
             continue
-        top_level_checkpoint = comments_job_runner._normalize_audit_top_level_checkpoint(row)
-        reply_checkpoints = comments_job_runner._normalize_audit_reply_checkpoints(row)
+        top_level_checkpoint = normalize_audit_top_level_checkpoint(row)
+        reply_checkpoints = normalize_audit_reply_checkpoints(row)
         if not top_level_checkpoint and not reply_checkpoints:
             continue
         seen_shortcodes.add(shortcode)
@@ -8175,7 +8160,7 @@ def cancel_social_account_comments_job(
     }
 
 
-_LOCAL_ROOM_NAMES = {
+_LOCAL_ROOM_NAMES.update({
     "dispatch_due_social_jobs",
     "_dispatch_due_social_jobs_in_background",
     "_session_advisory_lock_connection",
@@ -8232,9 +8217,8 @@ _LOCAL_ROOM_NAMES = {
     "guarded_restart_social_account_comments_run",
     "cancel_social_account_comments_run",
     "cancel_social_account_comments_job",
-}
-_LOCAL_ROOM_FUNCTIONS = {_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES}
-_CORE_ROOM_WRAPPERS = {_name: getattr(_core, _name, None) for _name in _LOCAL_ROOM_NAMES}
+})
+_LOCAL_ROOM_FUNCTIONS.update({_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES})
 __all__ = [
     "_instagram_comments_stale_after_hours",
     "_instagram_comments_target_count_expr",

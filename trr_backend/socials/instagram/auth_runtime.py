@@ -1,42 +1,182 @@
-# ruff: noqa: F821, UP037
 """Instagram auth runtime, cookie health, and repair helpers."""
 
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
 import os
-from collections.abc import Iterator
+import time as time_module
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from datetime import UTC, date, datetime, time, timedelta
+from pathlib import Path
+from threading import Lock
 from typing import Any
 
-import trr_backend.socials.social_season_analytics_impl as _core
+from trr_backend.db import pg
+from trr_backend.socials.cookie_sources import _select_preferred_cookie_candidate
 
-_RESERVED_CORE_EXPORTS = {
-    "__builtins__",
-    "__cached__",
-    "__doc__",
-    "__file__",
-    "__loader__",
-    "__name__",
-    "__package__",
-    "__spec__",
-    "_core",
-    "_IMPORTED_CORE_NAMES",
-    "_LOCAL_ROOM_NAMES",
-    "_RESERVED_CORE_EXPORTS",
-    "_sync_core_overrides",
-}
-_IMPORTED_CORE_NAMES: set[str] = set()
-for _name, _value in _core.__dict__.items():
-    if _name in _RESERVED_CORE_EXPORTS:
-        continue
-    globals()[_name] = _value
-    _IMPORTED_CORE_NAMES.add(_name)
+logger = logging.getLogger(__name__)
+
 _LOCAL_ROOM_NAMES: set[str] = set()
 _LOCAL_ROOM_FUNCTIONS: dict[str, Any] = {}
 INSTAGRAM_AUTH_REPAIR_CONFIRMATION = "I UNDERSTAND INSTAGRAM AUTH RISK"
 INSTAGRAM_AUTH_REPAIR_CONFIRMATION_ENV = "SOCIAL_INSTAGRAM_AUTH_REPAIR_CONFIRMATION"
-_CORE_ROOM_WRAPPERS: dict[str, Any] = {}
 SOCIAL_INSTAGRAM_COOKIE_VALIDATION_USERNAME_DEFAULT = "instagram"
+SOCIAL_INSTAGRAM_COOKIE_VALIDATION_TTL_SECONDS_DEFAULT = 900
+SOCIAL_INSTAGRAM_COOKIE_REFRESH_TIMEOUT_SECONDS_DEFAULT = 120
+INSTAGRAM_LOCAL_EXECUTOR_BLOCKED_ERROR_CODE = "instagram_local_executor_blocked"
+
+_instagram_cookie_refresh_lock = Lock()
+_instagram_cookie_validation_cache: tuple[float, str, dict[str, Any]] | None = None
+_instagram_cookie_runtime_override: dict[str, str] | None = None
+
+_LEGACY_NAMESPACE: dict[str, Any] | None = None
+_LEGACY_ORIGINALS: dict[str, Any] = {}
+_STATE_NAMES = (
+    "_instagram_cookie_validation_cache",
+    "_instagram_cookie_runtime_override",
+)
+_STATE_LAST_SYNCED: dict[str, Any] = {}
+_MISSING = object()
+
+
+def _now_utc() -> datetime:
+    return datetime.now(tz=UTC)
+
+
+def _env_truthy(name: str, *, default: bool = False) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _resolve_positive_int_env(name: str, default: int, *, minimum: int = 1) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return max(minimum, default)
+    try:
+        return max(minimum, int(raw))
+    except ValueError:
+        return max(minimum, default)
+
+
+def _coerce_dt(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if isinstance(value, date):
+        return datetime.combine(value, time.min, tzinfo=UTC)
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+        except ValueError:
+            return None
+    return None
+
+
+def _iso(value: datetime | None) -> str | None:
+    if not value:
+        return None
+    return value.astimezone(UTC).isoformat()
+
+
+def _relation_exists(qualified_name: str, *, conn: Any | None = None) -> bool:
+    try:
+        if conn is None:
+            row = pg.fetch_one("select to_regclass(%s) is not null as exists", [qualified_name]) or {}
+        else:
+            with pg.db_cursor(conn=conn, label="relation_exists") as cur:
+                row = (
+                    pg.fetch_one_with_cursor(
+                        cur,
+                        "select to_regclass(%s) is not null as exists",
+                        [qualified_name],
+                    )
+                    or {}
+                )
+    except Exception:
+        return False
+    return bool(row.get("exists"))
+
+
+def _configure_legacy_overrides(
+    namespace: dict[str, Any],
+    originals: Mapping[str, Any],
+) -> None:
+    """Bind supported legacy patch seams without importing the legacy module."""
+
+    global _LEGACY_NAMESPACE, _LEGACY_ORIGINALS
+
+    _LEGACY_NAMESPACE = namespace
+    _LEGACY_ORIGINALS = dict(originals)
+    namespace["_instagram_cookie_refresh_lock"] = _instagram_cookie_refresh_lock
+    for name in _STATE_NAMES:
+        value = globals()[name]
+        if value is None:
+            value = namespace.get(name, value)
+        globals()[name] = value
+        namespace[name] = value
+        _STATE_LAST_SYNCED[name] = value
+
+
+def _legacy_callable(name: str, local_impl: Any) -> Any:
+    namespace = _LEGACY_NAMESPACE
+    if namespace is None:
+        return local_impl
+    candidate = namespace.get(name)
+    if callable(candidate) and candidate is not _LEGACY_ORIGINALS.get(name):
+        return candidate
+    return local_impl
+
+
+def _legacy_value(name: str, local_value: Any) -> Any:
+    namespace = _LEGACY_NAMESPACE
+    if namespace is None:
+        return local_value
+    return namespace.get(name, local_value)
+
+
+def _read_state(name: str) -> Any:
+    local_value = globals()[name]
+    namespace = _LEGACY_NAMESPACE
+    if namespace is None:
+        return local_value
+
+    legacy_value = namespace.get(name, local_value)
+    last_value = _STATE_LAST_SYNCED.get(name, _MISSING)
+    if last_value is _MISSING:
+        chosen = local_value
+    elif local_value is not last_value and legacy_value is last_value:
+        chosen = local_value
+    elif legacy_value is not last_value and local_value is last_value:
+        chosen = legacy_value
+    elif local_value is legacy_value:
+        chosen = local_value
+    else:
+        chosen = local_value
+    globals()[name] = chosen
+    namespace[name] = chosen
+    _STATE_LAST_SYNCED[name] = chosen
+    return chosen
+
+
+def _write_state(name: str, value: Any) -> None:
+    globals()[name] = value
+    if _LEGACY_NAMESPACE is not None:
+        _LEGACY_NAMESPACE[name] = value
+    _STATE_LAST_SYNCED[name] = value
+
+
+def _clear_instagram_cookie_validation_cache() -> None:
+    _write_state("_instagram_cookie_validation_cache", None)
 
 
 @contextmanager
@@ -66,35 +206,33 @@ def _instagram_cookie_validation_probe_mode() -> Iterator[None]:
                 os.environ[key] = value
 
 
-def _sync_core_overrides() -> None:
-    for _name in _IMPORTED_CORE_NAMES - _LOCAL_ROOM_NAMES:
-        if hasattr(_core, _name):
-            globals()[_name] = getattr(_core, _name)
-
-
-def _room_callable(name: str, local_impl: Any) -> Any:
-    candidate = getattr(_core, name, None)
-    if callable(candidate) and candidate is not _CORE_ROOM_WRAPPERS.get(name):
-        return candidate
-    return local_impl
-
-
 def _default_instagram_cookie_file_path() -> Path:
     return Path(__file__).resolve().parents[3] / "scripts" / "socials" / "instagram" / "instagram_cookies.json"
 
 
 def _instagram_cookie_file_candidates() -> list[Path]:
+    default_path = _legacy_callable(
+        "_default_instagram_cookie_file_path",
+        _default_instagram_cookie_file_path,
+    )()
     raw_candidates = [
         (os.getenv("SOCIAL_INSTAGRAM_COOKIES_FILE") or "").strip(),
         (os.getenv("INSTAGRAM_COOKIES_FILE") or "").strip(),
-        str(_default_instagram_cookie_file_path()),
+        str(default_path),
     ]
     return [Path(raw_path).expanduser() for raw_path in raw_candidates if str(raw_path or "").strip()]
 
 
 def _instagram_cookie_refresh_target_path() -> Path:
-    candidates = _instagram_cookie_file_candidates()
-    return candidates[0] if candidates else _default_instagram_cookie_file_path()
+    candidates = _legacy_callable(
+        "_instagram_cookie_file_candidates",
+        _instagram_cookie_file_candidates,
+    )()
+    default_path = _legacy_callable(
+        "_default_instagram_cookie_file_path",
+        _default_instagram_cookie_file_path,
+    )()
+    return candidates[0] if candidates else default_path
 
 
 def _instagram_auth_credentials() -> tuple[str | None, str | None]:
@@ -238,20 +376,21 @@ def _instagram_cookie_validation_detail(
 
 
 def _inspect_instagram_cookie_health(cookies: dict[str, str]) -> dict[str, Any]:
-    global _instagram_cookie_validation_cache
-
     schema_result = _instagram_cookie_schema_result(cookies)
     if not schema_result["valid"]:
         return schema_result
 
     fingerprint = _instagram_cookie_fingerprint(cookies)
-    ttl_seconds = _resolve_positive_int_env(
+    ttl_seconds = _legacy_callable(
+        "_resolve_positive_int_env",
+        _resolve_positive_int_env,
+    )(
         "SOCIAL_INSTAGRAM_COOKIE_VALIDATION_TTL_SECONDS",
         SOCIAL_INSTAGRAM_COOKIE_VALIDATION_TTL_SECONDS_DEFAULT,
         minimum=30,
     )
     now = time_module.monotonic()
-    cached = _instagram_cookie_validation_cache
+    cached = _read_state("_instagram_cookie_validation_cache")
     if cached and cached[1] == fingerprint and (now - cached[0]) < ttl_seconds:
         return dict(cached[2])
 
@@ -269,7 +408,10 @@ def _inspect_instagram_cookie_health(cookies: dict[str, str]) -> dict[str, Any]:
                 ),
             ),
         }
-        _instagram_cookie_validation_cache = (now, fingerprint, dict(result))
+        _write_state(
+            "_instagram_cookie_validation_cache",
+            (now, fingerprint, dict(result)),
+        )
         return dict(result)
 
     result: dict[str, Any]
@@ -365,21 +507,28 @@ def _inspect_instagram_cookie_health(cookies: dict[str, str]) -> dict[str, Any]:
         }
         logger.debug("Instagram cookie validation raised %s", result["reason"], exc_info=True)
 
-    _instagram_cookie_validation_cache = (now, fingerprint, dict(result))
+    _write_state(
+        "_instagram_cookie_validation_cache",
+        (now, fingerprint, dict(result)),
+    )
     return dict(result)
 
 
 def _validate_instagram_cookie_health(cookies: dict[str, str]) -> tuple[bool, str | None]:
-    _sync_core_overrides()
-    inspect_health = _room_callable("_inspect_instagram_cookie_health", _inspect_instagram_cookie_health)
+    inspect_health = _legacy_callable(
+        "_inspect_instagram_cookie_health",
+        _inspect_instagram_cookie_health,
+    )
     result = inspect_health(cookies)
     return bool(result.get("valid")), str(result.get("reason") or "").strip() or None
 
 
 def _refresh_instagram_cookies(stale_reason: str | None = None) -> dict[str, str]:
-    global _instagram_cookie_validation_cache, _instagram_cookie_runtime_override
-
-    username, password = _instagram_auth_credentials()
+    credentials = _legacy_callable(
+        "_instagram_auth_credentials",
+        _instagram_auth_credentials,
+    )
+    username, password = credentials()
     if not username or not password:
         return {}
 
@@ -389,16 +538,28 @@ def _refresh_instagram_cookies(stale_reason: str | None = None) -> dict[str, str
         refreshed = refresh_instagram_cookies(
             username=username,
             password=password,
-            cookie_file=_instagram_cookie_refresh_target_path(),
+            cookie_file=_legacy_callable(
+                "_instagram_cookie_refresh_target_path",
+                _instagram_cookie_refresh_target_path,
+            )(),
             headless=(os.getenv("SOCIAL_INSTAGRAM_COOKIE_REFRESH_HEADLESS") or "true").strip().lower()
             not in {"0", "false", "off", "no"},
-            timeout_seconds=_resolve_positive_int_env(
+            timeout_seconds=_legacy_callable(
+                "_resolve_positive_int_env",
+                _resolve_positive_int_env,
+            )(
                 "SOCIAL_INSTAGRAM_COOKIE_REFRESH_TIMEOUT_SECONDS",
                 SOCIAL_INSTAGRAM_COOKIE_REFRESH_TIMEOUT_SECONDS_DEFAULT,
                 minimum=30,
             ),
-            validation_username=_instagram_cookie_validation_username(),
-            validator=_validate_instagram_cookie_health,
+            validation_username=_legacy_callable(
+                "_instagram_cookie_validation_username",
+                _instagram_cookie_validation_username,
+            )(),
+            validator=_legacy_callable(
+                "_validate_instagram_cookie_health",
+                _validate_instagram_cookie_health,
+            ),
             validation_mode=(os.getenv("SOCIAL_INSTAGRAM_COMMENTS_AUTH_VALIDATION") or "graphql_profile"),
         )
     except Exception as exc:  # noqa: BLE001
@@ -410,8 +571,8 @@ def _refresh_instagram_cookies(stale_reason: str | None = None) -> dict[str, str
         return {}
 
     if refreshed:
-        _instagram_cookie_runtime_override = dict(refreshed)
-        _instagram_cookie_validation_cache = None
+        _write_state("_instagram_cookie_runtime_override", dict(refreshed))
+        _clear_instagram_cookie_validation_cache()
         try:
             from trr_backend.socials.instagram import set_instagram_runtime_override
 
@@ -422,27 +583,44 @@ def _refresh_instagram_cookies(stale_reason: str | None = None) -> dict[str, str
 
 
 def _ensure_instagram_cookies_fresh(cookies: dict[str, str]) -> dict[str, str]:
-    global _instagram_cookie_runtime_override
-
-    if _instagram_cookie_runtime_override:
-        return dict(_instagram_cookie_runtime_override)
-    if not _instagram_cookie_auto_refresh_enabled():
+    runtime_override = _read_state("_instagram_cookie_runtime_override")
+    if runtime_override:
+        return dict(runtime_override)
+    auto_refresh_enabled = _legacy_callable(
+        "_instagram_cookie_auto_refresh_enabled",
+        _instagram_cookie_auto_refresh_enabled,
+    )
+    if not auto_refresh_enabled():
         return cookies
 
-    is_valid, validation_reason = _validate_instagram_cookie_health(cookies)
+    validate_health = _legacy_callable(
+        "_validate_instagram_cookie_health",
+        _validate_instagram_cookie_health,
+    )
+    is_valid, validation_reason = validate_health(cookies)
     if is_valid:
         return cookies
 
-    with _instagram_cookie_refresh_lock:
-        latest = _instagram_cookie_runtime_override or _load_instagram_cookies_from_sources()
-        latest_valid, _ = _validate_instagram_cookie_health(dict(latest))
+    refresh_lock = _legacy_value(
+        "_instagram_cookie_refresh_lock",
+        _instagram_cookie_refresh_lock,
+    )
+    with refresh_lock:
+        latest = _read_state("_instagram_cookie_runtime_override") or _legacy_callable(
+            "_load_instagram_cookies_from_sources",
+            _load_instagram_cookies_from_sources,
+        )()
+        latest_valid, _ = validate_health(dict(latest))
         if latest_valid:
-            _instagram_cookie_runtime_override = dict(latest)
+            _write_state("_instagram_cookie_runtime_override", dict(latest))
             return dict(latest)
 
-        refreshed = _refresh_instagram_cookies(validation_reason)
+        refreshed = _legacy_callable(
+            "_refresh_instagram_cookies",
+            _refresh_instagram_cookies,
+        )(validation_reason)
         if refreshed:
-            refreshed_valid, refreshed_reason = _validate_instagram_cookie_health(refreshed)
+            refreshed_valid, refreshed_reason = validate_health(refreshed)
             if refreshed_valid:
                 return refreshed
             logger.warning(
@@ -453,8 +631,14 @@ def _ensure_instagram_cookies_fresh(cookies: dict[str, str]) -> dict[str, str]:
 
 
 def _load_instagram_cookies_legacy() -> dict[str, str]:
-    cookies = _load_instagram_cookies_from_sources()
-    return _ensure_instagram_cookies_fresh(cookies)
+    cookies = _legacy_callable(
+        "_load_instagram_cookies_from_sources",
+        _load_instagram_cookies_from_sources,
+    )()
+    return _legacy_callable(
+        "_ensure_instagram_cookies_fresh",
+        _ensure_instagram_cookies_fresh,
+    )(cookies)
 
 
 def _build_legacy_instagram_auth_session(
@@ -478,7 +662,10 @@ def _build_legacy_instagram_auth_session(
         str(
             getattr(shadow_session, "session_account_id", "")
             or browser_account_id
-            or _instagram_cookie_validation_username()
+            or _legacy_callable(
+                "_instagram_cookie_validation_username",
+                _instagram_cookie_validation_username,
+            )()
         ).strip()
         or None
     )
@@ -523,31 +710,44 @@ def _load_instagram_cookies() -> dict[str, str]:
         set_instagram_runtime_override,
     )
 
-    legacy_cookies = _load_instagram_cookies_legacy()
-    set_instagram_runtime_override(_instagram_cookie_runtime_override)
+    legacy_cookies = _legacy_callable(
+        "_load_instagram_cookies_legacy",
+        _load_instagram_cookies_legacy,
+    )()
+    set_instagram_runtime_override(
+        _read_state("_instagram_cookie_runtime_override"),
+    )
+    validation_username = _legacy_callable(
+        "_instagram_cookie_validation_username",
+        _instagram_cookie_validation_username,
+    )
+    env_truthy = _legacy_callable("_env_truthy", _env_truthy)
 
     shadow_session: Any | None = None
     try:
         shadow_session = resolve_instagram_auth_session(
-            browser_account_id=_instagram_cookie_validation_username(),
+            browser_account_id=validation_username(),
             caller_context="legacy_loader",
-            require_validation=_env_truthy("INSTAGRAM_AUTH_RESOLVER_V2"),
+            require_validation=env_truthy("INSTAGRAM_AUTH_RESOLVER_V2"),
         )
     except Exception:  # noqa: BLE001
-        if _env_truthy("INSTAGRAM_AUTH_RESOLVER_V2"):
+        if env_truthy("INSTAGRAM_AUTH_RESOLVER_V2"):
             raise
         logger.debug("Instagram auth resolver shadow evaluation failed", exc_info=True)
 
-    if _env_truthy("INSTAGRAM_AUTH_RESOLVER_V2"):
+    if env_truthy("INSTAGRAM_AUTH_RESOLVER_V2"):
         if shadow_session is not None:
             set_current_instagram_auth_session(shadow_session)
             return dict(shadow_session.cookies)
         clear_instagram_auth_runtime_state()
         return {}
 
-    legacy_session = _build_legacy_instagram_auth_session(
+    legacy_session = _legacy_callable(
+        "_build_legacy_instagram_auth_session",
+        _build_legacy_instagram_auth_session,
+    )(
         cookies=legacy_cookies,
-        browser_account_id=_instagram_cookie_validation_username(),
+        browser_account_id=validation_username(),
         shadow_session=shadow_session,
     )
     set_current_instagram_auth_session(legacy_session)
@@ -573,9 +773,14 @@ def _load_instagram_cookies() -> dict[str, str]:
 
 
 def get_instagram_auth_repair_signal(*, failure_lookback_hours: int = 24) -> dict[str, Any]:
-    _sync_core_overrides()
-    load_cookies = _room_callable("_load_instagram_cookies_from_sources", _load_instagram_cookies_from_sources)
-    inspect_health = _room_callable("_inspect_instagram_cookie_health", _inspect_instagram_cookie_health)
+    load_cookies = _legacy_callable(
+        "_load_instagram_cookies_from_sources",
+        _load_instagram_cookies_from_sources,
+    )
+    inspect_health = _legacy_callable(
+        "_inspect_instagram_cookie_health",
+        _inspect_instagram_cookie_health,
+    )
     cookies = load_cookies()
     cookie_validation = inspect_health(cookies)
     reason_codes: list[str] = []
@@ -588,8 +793,12 @@ def get_instagram_auth_repair_signal(*, failure_lookback_hours: int = 24) -> dic
         "instagram_graphql_checkpoint_required": "recent_instagram_graphql_checkpoint_required",
         INSTAGRAM_LOCAL_EXECUTOR_BLOCKED_ERROR_CODE: "recent_instagram_local_executor_blocked",
     }
-    if _relation_exists("social.scrape_jobs"):
-        cutoff = _now_utc() - timedelta(hours=max(1, int(failure_lookback_hours or 24)))
+    relation_exists = _legacy_callable("_relation_exists", _relation_exists)
+    now_utc = _legacy_callable("_now_utc", _now_utc)
+    coerce_dt = _legacy_callable("_coerce_dt", _coerce_dt)
+    iso = _legacy_callable("_iso", _iso)
+    if relation_exists("social.scrape_jobs"):
+        cutoff = now_utc() - timedelta(hours=max(1, int(failure_lookback_hours or 24)))
         try:
             failure_row = pg.fetch_one(
                 """
@@ -621,7 +830,7 @@ def get_instagram_auth_repair_signal(*, failure_lookback_hours: int = 24) -> dic
                 "run_id": str(failure_row.get("run_id") or "").strip() or None,
                 "worker_id": str(failure_row.get("worker_id") or "").strip() or None,
                 "last_error_code": normalized_error_code or None,
-                "updated_at": _iso(_coerce_dt(updated_at)) or str(updated_at or "").strip() or None,
+                "updated_at": iso(coerce_dt(updated_at)) or str(updated_at or "").strip() or None,
             }
 
     return {
@@ -654,7 +863,6 @@ _LOCAL_ROOM_NAMES = {
     "get_instagram_auth_repair_signal",
 }
 _LOCAL_ROOM_FUNCTIONS = {_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES}
-_CORE_ROOM_WRAPPERS = {_name: getattr(_core, _name, None) for _name in _LOCAL_ROOM_NAMES}
 __all__ = [
     "_default_instagram_cookie_file_path",
     "_instagram_cookie_file_candidates",

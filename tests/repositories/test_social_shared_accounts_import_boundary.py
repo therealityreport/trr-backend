@@ -33,7 +33,6 @@ COPIED_BINDINGS = (
     ("cancel_shared_run", "cancel_shared_run"),
     ("dismiss_social_account_catalog_run", "dismiss_social_account_catalog_run"),
     ("get_season_context", "get_season_context"),
-    ("get_shared_account_sources", "get_shared_account_sources"),
     ("get_social_account_catalog_freshness", "get_social_account_catalog_freshness"),
     (
         "get_social_account_catalog_gap_analysis_status",
@@ -54,7 +53,6 @@ COPIED_BINDINGS = (
     ),
     ("get_targets", "get_targets"),
     ("list_shared_review_queue", "list_shared_review_queue"),
-    ("put_shared_account_sources", "put_shared_account_sources"),
     ("put_social_account_profile_hashtags", "put_social_account_profile_hashtags"),
     ("put_targets", "put_targets"),
     ("resolve_shared_review_queue_item", "resolve_shared_review_queue_item"),
@@ -211,7 +209,7 @@ def test_dispatch_runtime_monolith_and_repository_share_exact_module_identity() 
     assert sys.modules[LEGACY_REPOSITORY_MODULE] is legacy_impl
 
 
-def test_all_twenty_one_legacy_bindings_are_import_time_identity_copies() -> None:
+def test_remaining_legacy_bindings_are_import_time_identity_copies() -> None:
     for local_name, legacy_name in COPIED_BINDINGS:
         assert getattr(shared_accounts, local_name) is getattr(legacy_impl, legacy_name)
 
@@ -248,6 +246,15 @@ def test_public_aliases_preserve_all_three_private_binding_identities() -> None:
         shared_accounts.shared_account_catalog_requires_modal_executor
         is shared_accounts._shared_account_catalog_requires_modal_executor
     )
+
+
+def test_shared_source_operations_use_canonical_leaf() -> None:
+    from trr_backend.socials.control_plane import shared_source_config
+
+    assert shared_accounts.get_shared_account_sources is shared_source_config.get_shared_account_sources
+    assert shared_accounts.put_shared_account_sources is shared_source_config.put_shared_account_sources
+    assert shared_accounts.get_shared_account_sources is not legacy_impl.get_shared_account_sources
+    assert shared_accounts.put_shared_account_sources is not legacy_impl.put_shared_account_sources
 
 
 def test_all_exports_remain_exact_and_ordered() -> None:

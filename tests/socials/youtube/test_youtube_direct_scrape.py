@@ -9,8 +9,8 @@ from typing import Any
 import pytest
 from fastapi import HTTPException
 
-import trr_backend.socials.youtube as youtube_package
 from trr_backend.socials.youtube import direct_scrape
+from trr_backend.socials.youtube import scraper as youtube_scraper
 
 
 def _request() -> SimpleNamespace:
@@ -72,7 +72,7 @@ def test_video_to_payload_preserves_route_fields_and_description_limit() -> None
     assert "comment_list" not in payload
 
 
-def test_scrape_youtube_uses_package_imports_for_existing_monkeypatch_path(
+def test_scrape_youtube_uses_canonical_scraper_imports(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     request = _request()
@@ -90,8 +90,8 @@ def test_scrape_youtube_uses_package_imports_for_existing_monkeypatch_path(
             self.__class__.last_config = config
             return [_video()]
 
-    monkeypatch.setattr(youtube_package, "YouTubeScrapeConfig", _FakeConfig)
-    monkeypatch.setattr(youtube_package, "YouTubeScraper", _FakeScraper)
+    monkeypatch.setattr(youtube_scraper, "YouTubeScrapeConfig", _FakeConfig)
+    monkeypatch.setattr(youtube_scraper, "YouTubeScraper", _FakeScraper)
 
     response = direct_scrape.scrape_youtube(request)
 
@@ -142,8 +142,8 @@ def test_scrape_youtube_passes_playlist_source_fields(
             self.__class__.last_config = config
             return []
 
-    monkeypatch.setattr(youtube_package, "YouTubeScrapeConfig", _FakeConfig)
-    monkeypatch.setattr(youtube_package, "YouTubeScraper", _FakeScraper)
+    monkeypatch.setattr(youtube_scraper, "YouTubeScrapeConfig", _FakeConfig)
+    monkeypatch.setattr(youtube_scraper, "YouTubeScraper", _FakeScraper)
 
     response = direct_scrape.scrape_youtube(request)
 
@@ -191,8 +191,8 @@ def test_scrape_youtube_returns_existing_error_shape(
         def error(self, *args: Any, **_kwargs: Any) -> None:
             self.calls.append(args)
 
-    monkeypatch.setattr(youtube_package, "YouTubeScrapeConfig", _FakeConfig)
-    monkeypatch.setattr(youtube_package, "YouTubeScraper", _FakeScraper)
+    monkeypatch.setattr(youtube_scraper, "YouTubeScrapeConfig", _FakeConfig)
+    monkeypatch.setattr(youtube_scraper, "YouTubeScraper", _FakeScraper)
     fake_logger = _FakeLogger()
 
     response = direct_scrape.scrape_youtube(_request(), logger=fake_logger)
@@ -219,8 +219,8 @@ def test_scrape_youtube_preserves_http_exception_passthrough(
         def scrape(self, _config: _FakeConfig) -> list[Any]:
             raise HTTPException(status_code=418, detail="teapot")
 
-    monkeypatch.setattr(youtube_package, "YouTubeScrapeConfig", _FakeConfig)
-    monkeypatch.setattr(youtube_package, "YouTubeScraper", _FakeScraper)
+    monkeypatch.setattr(youtube_scraper, "YouTubeScrapeConfig", _FakeConfig)
+    monkeypatch.setattr(youtube_scraper, "YouTubeScraper", _FakeScraper)
 
     with pytest.raises(HTTPException) as exc_info:
         direct_scrape.scrape_youtube(_request())
@@ -233,4 +233,5 @@ def test_direct_scrape_module_does_not_import_legacy_repository() -> None:
     source = Path(direct_scrape.__file__).read_text()
 
     assert "trr_backend.repositories.social_season_analytics" not in source
-    assert "trr_backend.socials.youtube.scraper import" not in source
+    assert "from trr_backend.socials import youtube as youtube_platform" not in source
+    assert "from trr_backend.socials.youtube.scraper import YouTubeScrapeConfig, YouTubeScraper" in source

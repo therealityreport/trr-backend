@@ -60,7 +60,7 @@ def search_twitter(
     """Run direct Twitter/X search and return the current route response shape."""
     operation_logger = logger or globals()["logger"]
 
-    from trr_backend.socials import twitter as twitter_module
+    import trr_backend.socials.twitter.scraper as twitter_module
 
     config = twitter_module.TwitterScrapeConfig(
         query=_read(request, "query"),
@@ -170,7 +170,7 @@ def fetch_tweet_replies(
     operation_logger = logger or globals()["logger"]
 
     try:
-        from trr_backend.socials import twitter as twitter_module
+        import trr_backend.socials.twitter.scraper as twitter_module
 
         twitter_cookies, twitter_bearer, twikit_creds = _load_auth_values(load_auth)
         scraper = twitter_module.TwitterScraper(
@@ -222,7 +222,7 @@ def fetch_tweet_quotes(
     operation_logger = logger or globals()["logger"]
 
     try:
-        from trr_backend.socials import twitter as twitter_module
+        import trr_backend.socials.twitter.scraper as twitter_module
 
         twitter_cookies, twitter_bearer, twikit_creds = _load_auth_values(load_auth)
         scraper = twitter_module.TwitterScraper(

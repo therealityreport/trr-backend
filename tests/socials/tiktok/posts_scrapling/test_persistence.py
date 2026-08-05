@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+import trr_backend.socials.tiktok.posts_scrapling.persistence as persistence
+
 
 class _FakeCursor:
     def __init__(self, conn: _FakeConnection) -> None:
@@ -32,6 +41,238 @@ class _ConnectionContext:
 
     def __exit__(self, *_args) -> None:
         return None
+
+
+@pytest.fixture(autouse=True)
+def _configured_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.repositories import social_season_analytics as repo
+
+    monkeypatch.setattr(persistence, "_LEGACY_NAMESPACE", None)
+    persistence._configure_legacy_provider(repo.__dict__)
+
+
+def test_persistence_import_does_not_load_legacy_social_modules() -> None:
+    backend_root = Path(__file__).resolve().parents[4]
+    code = "\n".join(
+        [
+            "import importlib",
+            "import sys",
+            "before = set(sys.modules)",
+            ("leaf = importlib.import_module('trr_backend.socials.tiktok.posts_scrapling.persistence')"),
+            "assert callable(leaf.persist_tiktok_posts)",
+            "loaded = set(sys.modules) - before",
+            "forbidden = {",
+            "    'trr_backend.socials.social_season_analytics_impl',",
+            "    'trr_backend.repositories.social_season_analytics',",
+            "}",
+            "assert not (loaded & forbidden), sorted(loaded & forbidden)",
+        ]
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=backend_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_late_monolith_import_configures_preloaded_persistence_leaf() -> None:
+    backend_root = Path(__file__).resolve().parents[4]
+    code = "\n".join(
+        [
+            "import importlib",
+            "import sys",
+            ("leaf = importlib.import_module('trr_backend.socials.tiktok.posts_scrapling.persistence')"),
+            "legacy_name = 'trr_backend.socials.social_season_analytics_impl'",
+            "assert legacy_name not in sys.modules",
+            "assert leaf._LEGACY_NAMESPACE is None",
+            "legacy = importlib.import_module(legacy_name)",
+            "assert leaf._LEGACY_NAMESPACE is legacy.__dict__",
+            "for name in (",
+            "    'get_season_context',",
+            "    '_upsert_tiktok_post',",
+            "    '_upsert_shared_catalog_post',",
+            "):",
+            "    assert leaf._legacy_callable(name) is legacy.__dict__[name]",
+            "    assert leaf._legacy_callable(name) is getattr(legacy, name)",
+        ]
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=backend_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_provider_configuration_is_late_live_and_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    namespace = {
+        "get_season_context": lambda _season_id: None,
+        "_upsert_tiktok_post": lambda *_args, **_kwargs: {"id": "post"},
+        "_upsert_shared_catalog_post": lambda **_kwargs: {"id": "catalog"},
+    }
+    monkeypatch.setattr(persistence, "_LEGACY_NAMESPACE", None)
+
+    persistence._configure_legacy_provider(namespace)
+    persistence._configure_legacy_provider(namespace)
+
+    assert persistence._LEGACY_NAMESPACE is namespace
+    replacement = lambda *_args, **_kwargs: {"id": "patched"}  # noqa: E731
+    namespace["_upsert_tiktok_post"] = replacement
+    assert persistence._legacy_callable("_upsert_tiktok_post") is replacement
+    with pytest.raises(
+        RuntimeError,
+        match="TikTok posts-persistence provider is already configured",
+    ):
+        persistence._configure_legacy_provider(dict(namespace))
+
+
+def test_unconfigured_provider_invocation_fails_deterministically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(persistence, "_LEGACY_NAMESPACE", None)
+
+    with pytest.raises(
+        RuntimeError,
+        match=("TikTok posts-persistence provider is not configured: _upsert_tiktok_post"),
+    ):
+        persistence.persist_tiktok_post_dtos(
+            account_handle="bravotv",
+            posts=[SimpleNamespace(video_id="tt-1")],
+            run_id=None,
+            job_id=None,
+        )
+
+
+@pytest.mark.parametrize(
+    ("provider_name", "season_id", "pipeline_ingest_mode"),
+    [
+        ("get_season_context", "season-1", None),
+        ("_upsert_tiktok_post", None, None),
+        ("_upsert_shared_catalog_post", None, "shared_account_catalog_backfill"),
+    ],
+)
+def test_missing_provider_fails_deterministically(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_name: str,
+    season_id: str | None,
+    pipeline_ingest_mode: str | None,
+) -> None:
+    namespace = {
+        "get_season_context": lambda _season_id: None,
+        "_upsert_tiktok_post": lambda *_args, **_kwargs: {"id": "post"},
+        "_upsert_shared_catalog_post": lambda **_kwargs: {"id": "catalog"},
+    }
+    namespace.pop(provider_name)
+    monkeypatch.setattr(persistence, "_LEGACY_NAMESPACE", namespace)
+
+    with pytest.raises(
+        RuntimeError,
+        match=f"TikTok posts-persistence provider is not configured: {provider_name}",
+    ):
+        persistence.persist_tiktok_post_dtos(
+            account_handle="bravotv",
+            posts=[SimpleNamespace(video_id="tt-1")],
+            run_id=None,
+            job_id=None,
+            season_id=season_id,
+            pipeline_ingest_mode=pipeline_ingest_mode,
+        )
+
+
+@pytest.mark.parametrize(
+    ("provider_name", "season_id", "pipeline_ingest_mode"),
+    [
+        ("get_season_context", "season-1", None),
+        ("_upsert_tiktok_post", None, None),
+        ("_upsert_shared_catalog_post", None, "shared_account_catalog_backfill"),
+    ],
+)
+def test_non_callable_provider_fails_deterministically(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_name: str,
+    season_id: str | None,
+    pipeline_ingest_mode: str | None,
+) -> None:
+    namespace = {
+        "get_season_context": lambda _season_id: None,
+        "_upsert_tiktok_post": lambda *_args, **_kwargs: {"id": "post"},
+        "_upsert_shared_catalog_post": lambda **_kwargs: {"id": "catalog"},
+    }
+    namespace[provider_name] = None
+    monkeypatch.setattr(persistence, "_LEGACY_NAMESPACE", namespace)
+
+    with pytest.raises(
+        TypeError,
+        match=f"TikTok posts-persistence provider is not callable: {provider_name}",
+    ):
+        persistence.persist_tiktok_post_dtos(
+            account_handle="bravotv",
+            posts=[SimpleNamespace(video_id="tt-1")],
+            run_id=None,
+            job_id=None,
+            season_id=season_id,
+            pipeline_ingest_mode=pipeline_ingest_mode,
+        )
+
+
+def test_persist_tiktok_posts_honors_live_repository_alias_patches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.db import pg
+    from trr_backend.repositories import social_season_analytics as repo
+
+    calls: list[tuple[str, str]] = []
+
+    def _install_providers(version: str) -> None:
+        monkeypatch.setattr(
+            repo,
+            "get_season_context",
+            lambda season_id: calls.append(("context", f"{version}:{season_id}")) or version,
+        )
+        monkeypatch.setattr(
+            repo,
+            "_upsert_tiktok_post",
+            lambda context, **_kwargs: calls.append(("post", f"{version}:{context}")) or {"id": version},
+        )
+        monkeypatch.setattr(
+            repo,
+            "_upsert_shared_catalog_post",
+            lambda **_kwargs: calls.append(("catalog", version)) or {"id": version},
+        )
+
+    monkeypatch.setattr(pg, "db_connection", lambda **_kwargs: _ConnectionContext())
+    for version in ("first", "second"):
+        _install_providers(version)
+        result = persistence.persist_tiktok_post_dtos(
+            account_handle="bravotv",
+            posts=[SimpleNamespace(video_id=f"tt-{version}")],
+            run_id=f"run-{version}",
+            job_id=f"job-{version}",
+            season_id=f"season-{version}",
+            pipeline_ingest_mode="shared_account_catalog_backfill",
+        )
+        assert result.posts_upserted == 1
+        assert result.catalog_posts_upserted == 1
+
+    assert calls == [
+        ("context", "first:season-first"),
+        ("post", "first:first"),
+        ("catalog", "first"),
+        ("context", "second:season-second"),
+        ("post", "second:second"),
+        ("catalog", "second"),
+    ]
 
 
 def test_adapt_tiktok_item_to_post_dto():

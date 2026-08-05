@@ -3,47 +3,44 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
-import trr_backend.socials.social_season_analytics_impl as _core
+from trr_backend.socials.provider_registry import LateNamespaceProvider
 
-_RESERVED_CORE_EXPORTS = {
-    "__builtins__",
-    "__cached__",
-    "__doc__",
-    "__file__",
-    "__loader__",
-    "__name__",
-    "__package__",
-    "__spec__",
-    "_core",
-    "_IMPORTED_CORE_NAMES",
-    "_LOCAL_ROOM_NAMES",
-    "_RESERVED_CORE_EXPORTS",
-    "_sync_core_overrides",
-}
 _IMPORTED_CORE_NAMES: set[str] = set()
-for _name, _value in _core.__dict__.items():
-    if _name in _RESERVED_CORE_EXPORTS:
-        continue
-    globals()[_name] = _value
-    _IMPORTED_CORE_NAMES.add(_name)
 _LOCAL_ROOM_NAMES: set[str] = set()
+_PROVIDER_BRIDGE_NAMES = {
+    "_build_drivers", "_build_ingest_shard_schedule", "_normalize_week_totals_payload",
+    "_resolve_depth_defaults", "_rows_for_platform", "_rule_based_sentiment_for_text",
+    "_text_contains_any_term", "_text_is_trailer_marker", "_threads_post_matches_show_terms",
+    "_video_matches_season", "_week_detail_instagram", "_week_detail_tiktok",
+    "_week_summary_fast_threads", "_week_summary_fast_tiktok", "_week_summary_fast_youtube",
+    "_youtube_post_matches_show_terms", "_youtube_title_is_cross_show_excluded",
+    "_youtube_video_matches_show_terms",
+    "sentiment_for_text",
+}
 _LOCAL_ROOM_FUNCTIONS: dict[str, Any] = {}
 _CORE_ROOM_WRAPPERS: dict[str, Any] = {}
 
+_PROVIDER = LateNamespaceProvider(
+    globals(),
+    prefix="ANALYTICS_READ_MODELS_PROVIDER",
+    room_names=_LOCAL_ROOM_NAMES,
+    imported_names=_IMPORTED_CORE_NAMES,
+    room_wrappers=_CORE_ROOM_WRAPPERS,
+    bridge_names=_PROVIDER_BRIDGE_NAMES,
+)
+_require_provider_ready = _PROVIDER.require
 
-def _sync_core_overrides() -> None:
-    for _name in _IMPORTED_CORE_NAMES - _LOCAL_ROOM_NAMES:
-        if hasattr(_core, _name):
-            globals()[_name] = getattr(_core, _name)
+for _provider_bridge_name in _PROVIDER_BRIDGE_NAMES:
+    globals()[_provider_bridge_name] = _PROVIDER.callable_bridge(_provider_bridge_name)
+del _provider_bridge_name
 
 
-def _room_callable(name: str, local_impl: Any) -> Any:
-    candidate = getattr(_core, name, None)
-    if callable(candidate) and candidate is not _CORE_ROOM_WRAPPERS.get(name):
-        return candidate
-    return local_impl
+_configure_legacy_provider = _PROVIDER.configure
+_sync_core_overrides = _PROVIDER.sync
+_room_callable = _PROVIDER.room_callable
 
 
 def get_week_live_health_snapshot(
@@ -3841,7 +3838,7 @@ def pdf_filename(show_id: str, season_number: int, generated_at: datetime | None
     return f"social_report_{show_id}_s{season_number}_{ts}.pdf"
 
 
-_LOCAL_ROOM_NAMES = {
+_LOCAL_ROOM_NAMES.update({
     "get_week_live_health_snapshot",
     "get_analytics",
     "get_comments_coverage",
@@ -3862,9 +3859,8 @@ _LOCAL_ROOM_NAMES = {
     "build_csv",
     "build_pdf",
     "pdf_filename",
-}
-_LOCAL_ROOM_FUNCTIONS = {_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES}
-_CORE_ROOM_WRAPPERS = {_name: getattr(_core, _name, None) for _name in _LOCAL_ROOM_NAMES}
+})
+_LOCAL_ROOM_FUNCTIONS.update({_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES})
 __all__ = [
     "get_week_live_health_snapshot",
     "get_analytics",

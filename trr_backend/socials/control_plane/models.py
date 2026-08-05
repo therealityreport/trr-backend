@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from trr_backend.socials.social_season_analytics_impl import (
+from trr_backend.socials.model_types import (
     COMMENT_MEDIA_MIRROR_STAGE,
+    DEFAULT_COMMENT_REFRESH_POLICY,
+    DEFAULT_YOUTUBE_SOURCE_MODE,
     IngestOptions,
     SeasonContext,
     SentimentAnalyzerContext,
@@ -12,6 +14,8 @@ from trr_backend.socials.social_season_analytics_impl import (
 
 __all__ = [
     "COMMENT_MEDIA_MIRROR_STAGE",
+    "DEFAULT_COMMENT_REFRESH_POLICY",
+    "DEFAULT_YOUTUBE_SOURCE_MODE",
     "IngestOptions",
     "SeasonContext",
     "SentimentAnalyzerContext",

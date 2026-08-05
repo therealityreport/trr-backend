@@ -4,9 +4,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from threading import RLock
 from typing import Any
 
+from trr_backend.socials.provider_registry import LateNamespaceProvider, publish_mapping_slot
 from trr_backend.socials.read_models.account_profile.comment_breakdown import (
     build_instagram_comment_breakdown,
     instagram_comment_completeness_from_breakdown,
@@ -14,52 +14,18 @@ from trr_backend.socials.read_models.account_profile.comment_breakdown import (
     instagram_facebook_crosspost_payload_from_row,
 )
 
-_RESERVED_CORE_EXPORTS = {
-    "__builtins__",
-    "__cached__",
-    "__doc__",
-    "__file__",
-    "__loader__",
-    "__name__",
-    "__package__",
-    "__spec__",
-    "_core",
-    "_IMPORTED_CORE_NAMES",
-    "_LOCAL_ROOM_NAMES",
-    "_RESERVED_CORE_EXPORTS",
-    "_PROVIDER_LOCK",
-    "_PROVIDER_NAMESPACE",
-    "_PROVIDER_STATE",
-    "_PROVIDER_STATE_CONFIGURING",
-    "_PROVIDER_STATE_READY",
-    "_PROVIDER_STATE_UNCONFIGURED",
-    "_configure_legacy_provider",
-    "_publish_provider_binding",
-    "_require_provider_ready",
-    "_sync_core_overrides",
-}
 _IMPORTED_CORE_NAMES: set[str] = set()
 _LOCAL_ROOM_NAMES: set[str] = set()
 _LOCAL_ROOM_FUNCTIONS: dict[str, Any] = {}
 _CORE_ROOM_WRAPPERS: dict[str, Any] = {}
-_PROVIDER_STATE_UNCONFIGURED = "UNCONFIGURED"
-_PROVIDER_STATE_CONFIGURING = "CONFIGURING"
-_PROVIDER_STATE_READY = "READY"
-_PROVIDER_STATE = _PROVIDER_STATE_UNCONFIGURED
-_PROVIDER_NAMESPACE: Mapping[str, Any] | None = None
-_PROVIDER_LOCK = RLock()
-_ABSENT_PROVIDER_BINDING = object()
 
 
 def _unconfigured_social_account_profile_post_item(*_args: Any, **_kwargs: Any) -> Any:
     raise RuntimeError(
         "ACCOUNT_PROFILE_PROVIDER_UNCONFIGURED: "
         "trr_backend.socials.social_season_analytics_impl has not finished loading"
-    )
-
-
+)
 _CORE_SOCIAL_ACCOUNT_PROFILE_POST_ITEM = _unconfigured_social_account_profile_post_item
-
 _SOCIAL_ACCOUNT_PROFILE_COMMENT_SORT_FIELDS = {"user", "comment", "likes", "replies", "created"}
 _SOCIAL_ACCOUNT_PROFILE_COMMENT_SORT_DIRECTIONS = {"asc", "desc"}
 _SOCIAL_ACCOUNT_PROFILE_DEFAULT_PAGE_SIZE = 25
@@ -68,127 +34,34 @@ _SOCIAL_ACCOUNT_PROFILE_DEFAULT_PAGE_SIZE = 25
 def _instagram_owner_account_match_sql(*, alias: str = "p") -> str:
     provider = _require_provider_ready()
     return provider["_instagram_owner_account_match_sql"](alias=alias)
-
-
 _LOCAL_ROOM_NAMES.add("_instagram_owner_account_match_sql")
-
-
-def _require_provider_ready() -> Mapping[str, Any]:
-    with _PROVIDER_LOCK:
-        if _PROVIDER_STATE != _PROVIDER_STATE_READY or _PROVIDER_NAMESPACE is None:
-            raise RuntimeError(
-                "ACCOUNT_PROFILE_PROVIDER_UNCONFIGURED: "
-                "trr_backend.socials.social_season_analytics_impl has not finished loading"
-            )
-        return _PROVIDER_NAMESPACE
 
 
 def _publish_provider_binding(name: str, value: Any) -> None:
     globals()[name] = value
-
-
-def _configure_legacy_provider(provider: Mapping[str, Any]) -> None:
-    """Publish one exact monolith namespace atomically, with READY committed last."""
-
-    global _CORE_SOCIAL_ACCOUNT_PROFILE_POST_ITEM
-    global _PROVIDER_NAMESPACE
-    global _PROVIDER_STATE
-
-    if not isinstance(provider, Mapping):
-        raise TypeError("ACCOUNT_PROFILE_PROVIDER_INVALID: provider must be a mapping")
-
-    with _PROVIDER_LOCK:
-        if _PROVIDER_STATE == _PROVIDER_STATE_READY:
-            if provider is _PROVIDER_NAMESPACE:
-                return
-            raise RuntimeError(
-                "ACCOUNT_PROFILE_PROVIDER_MISMATCH: "
-                "account-profile provider is already configured with a different mapping"
-            )
-        if _PROVIDER_STATE == _PROVIDER_STATE_CONFIGURING:
-            raise RuntimeError("ACCOUNT_PROFILE_PROVIDER_CONFIGURING: provider publication is already in progress")
-        if _PROVIDER_NAMESPACE is not None and provider is not _PROVIDER_NAMESPACE:
-            raise RuntimeError(
-                "ACCOUNT_PROFILE_PROVIDER_MISMATCH: "
-                "account-profile provider identity changed before publication"
-            )
-
-        staged_imported_names = {
-            name for name in provider if name not in _RESERVED_CORE_EXPORTS
-        }
-        staged_room_wrappers = {
-            name: provider.get(name) for name in _LOCAL_ROOM_NAMES
-        }
-        required_provider_wrappers = _LOCAL_ROOM_NAMES - {
-            "instagram_comment_rollup_health",
-            "rebuild_instagram_post_comment_rollups",
-        }
-        invalid_wrappers = sorted(
-            name
-            for name in required_provider_wrappers
-            if not callable(staged_room_wrappers.get(name))
-        )
-        if invalid_wrappers:
-            raise RuntimeError(
-                "ACCOUNT_PROFILE_PROVIDER_INVALID: missing callable room wrappers: "
-                + ", ".join(invalid_wrappers)
-            )
-        staged_post_item = staged_room_wrappers["_social_account_profile_post_item"]
-        staged_bindings = {
-            name: provider[name]
-            for name in staged_imported_names - _LOCAL_ROOM_NAMES
-        }
-        prior_globals = {
-            name: globals().get(name, _ABSENT_PROVIDER_BINDING)
-            for name in staged_bindings
-        }
-        prior_imported_names = set(_IMPORTED_CORE_NAMES)
-        prior_room_wrappers = dict(_CORE_ROOM_WRAPPERS)
-        prior_post_item = _CORE_SOCIAL_ACCOUNT_PROFILE_POST_ITEM
-        prior_namespace = _PROVIDER_NAMESPACE
-        prior_state = _PROVIDER_STATE
-
-        _PROVIDER_STATE = _PROVIDER_STATE_CONFIGURING
-        try:
-            for name in sorted(staged_bindings):
-                _publish_provider_binding(name, staged_bindings[name])
-            _IMPORTED_CORE_NAMES.clear()
-            _IMPORTED_CORE_NAMES.update(staged_imported_names)
-            _CORE_ROOM_WRAPPERS.clear()
-            _CORE_ROOM_WRAPPERS.update(staged_room_wrappers)
-            _CORE_SOCIAL_ACCOUNT_PROFILE_POST_ITEM = staged_post_item
-            _PROVIDER_NAMESPACE = provider
-            _PROVIDER_STATE = _PROVIDER_STATE_READY
-        except BaseException:
-            for name, prior_value in prior_globals.items():
-                if prior_value is _ABSENT_PROVIDER_BINDING:
-                    globals().pop(name, None)
-                else:
-                    globals()[name] = prior_value
-            _IMPORTED_CORE_NAMES.clear()
-            _IMPORTED_CORE_NAMES.update(prior_imported_names)
-            _CORE_ROOM_WRAPPERS.clear()
-            _CORE_ROOM_WRAPPERS.update(prior_room_wrappers)
-            _CORE_SOCIAL_ACCOUNT_PROFILE_POST_ITEM = prior_post_item
-            _PROVIDER_NAMESPACE = prior_namespace
-            _PROVIDER_STATE = prior_state
-            raise
-
-
-def _sync_core_overrides() -> None:
-    with _PROVIDER_LOCK:
-        provider = _require_provider_ready()
-        for _name in _IMPORTED_CORE_NAMES - _LOCAL_ROOM_NAMES:
-            if _name in provider:
-                globals()[_name] = provider[_name]
-
-
-def _room_callable(name: str, local_impl: Any) -> Any:
-    provider = _require_provider_ready()
-    candidate = provider.get(name)
-    if callable(candidate) and candidate is not _CORE_ROOM_WRAPPERS.get(name):
-        return candidate
-    return local_impl
+_OPTIONAL_PROVIDER_ROOM_WRAPPERS = {
+    "instagram_comment_rollup_health",
+    "rebuild_instagram_post_comment_rollups",
+}
+_PROVIDER = LateNamespaceProvider(
+    globals(),
+    prefix="ACCOUNT_PROFILE_PROVIDER",
+    room_names=_LOCAL_ROOM_NAMES,
+    imported_names=_IMPORTED_CORE_NAMES,
+    room_wrappers=_CORE_ROOM_WRAPPERS,
+    required_room_names=lambda: _LOCAL_ROOM_NAMES - _OPTIONAL_PROVIDER_ROOM_WRAPPERS,
+    publisher=lambda name, value: _publish_provider_binding(name, value),
+    commit=publish_mapping_slot(globals(), "_CORE_SOCIAL_ACCOUNT_PROFILE_POST_ITEM", "_social_account_profile_post_item"),  # noqa: E501
+    unconfigured_message="ACCOUNT_PROFILE_PROVIDER_UNCONFIGURED: trr_backend.socials.social_season_analytics_impl has not finished loading",  # noqa: E501
+    mismatch_message=(
+        "ACCOUNT_PROFILE_PROVIDER_MISMATCH: "
+        "account-profile provider is already configured with a different mapping"
+    ),
+)
+_require_provider_ready = _PROVIDER.require
+_configure_legacy_provider = _PROVIDER.configure
+_sync_core_overrides = _PROVIDER.sync
+_room_callable = _PROVIDER.room_callable
 
 
 def _normalize_social_account_profile_comment_sort_by(value: str | None) -> str:
@@ -242,7 +115,6 @@ def _instagram_profile_posts_page_search_where_sql(search: str | None, *, alias:
     normalized_search = str(search or "").strip().lower()
     if not normalized_search:
         return "", []
-
     normalized_handle_sql = (
         "nullif("
         "regexp_replace("
@@ -3355,7 +3227,7 @@ def get_social_account_profile_collaborators_tags(platform: str, account_handle:
     }
 
 
-_LOCAL_ROOM_NAMES = {
+_LOCAL_ROOM_NAMES.update({
     "_social_account_profile_post_item",
     "get_social_account_profile_summary",
     "get_social_account_profile_posts",
@@ -3365,8 +3237,8 @@ _LOCAL_ROOM_NAMES = {
     "instagram_comment_rollup_health",
     "rebuild_instagram_post_comment_rollups",
     "_fetch_materialized_comments_only_profile_rows_page",
-}
-_LOCAL_ROOM_FUNCTIONS = {_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES}
+})
+_LOCAL_ROOM_FUNCTIONS.update({_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES})
 __all__ = [
     "get_social_account_profile_summary",
     "get_social_account_profile_posts",

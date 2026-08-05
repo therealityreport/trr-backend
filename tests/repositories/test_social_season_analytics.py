@@ -1212,13 +1212,13 @@ def test_instagram_profile_page_call_sites_use_ready_payload_bindings_and_log_sc
         fetch_calls: list[str] = []
 
         def fake_sidecar_sql(*, row_kind: str, row_alias: str, mode: str) -> tuple[str, str]:
-            sidecar_calls.append((row_kind, row_alias, mode))
+            sidecar_calls.append((row_kind, row_alias, mode))  # noqa: B023 - called before next loop case
             if mode == "legacy":
                 return "", ""
             return "left join missing_payload_sidecar on true", ", null::jsonb as payload_probe"
 
         def fake_log_schema_unavailable(*, surface: str, entity_identity: object) -> None:
-            log_calls.append((surface, entity_identity))
+            log_calls.append((surface, entity_identity))  # noqa: B023 - called before next loop case
 
         def fake_rows_for_read(
             rows: list[dict[str, object]],
@@ -1227,14 +1227,14 @@ def test_instagram_profile_page_call_sites_use_ready_payload_bindings_and_log_sc
             mode: str,
             surface: str,
         ) -> list[dict[str, object]]:
-            row_calls.append((rows, row_kind, mode, surface))
+            row_calls.append((rows, row_kind, mode, surface))  # noqa: B023 - synchronous test double
             return rows
 
         def fake_fetch_all(sql: str, _params: list[object]) -> list[dict[str, object]]:
-            fetch_calls.append(sql)
-            if len(fetch_calls) == 1:
+            fetch_calls.append(sql)  # noqa: B023 - called before next loop case
+            if len(fetch_calls) == 1:  # noqa: B023 - called before next loop case
                 raise profile_common.psycopg_errors.UndefinedTable("payload sidecar missing")
-            return [{"id": f"{case_name}-row", "_total_count": 1}]
+            return [{"id": f"{case_name}-row", "_total_count": 1}]  # noqa: B023 - synchronous case
 
         monkeypatch.setattr(profile_common, "_instagram_payload_sidecar_sql", fake_sidecar_sql)
         monkeypatch.setattr(
@@ -1420,17 +1420,17 @@ def test_comments_coverage_instagram_uses_post_detail_reported_comments(monkeypa
 
     monkeypatch.setattr(social_repo, "_comment_lifecycle_supported", lambda *_args, **_kwargs: False)
 
-    def _fake_fetch_one(sql: str, params: list[Any]) -> dict[str, Any]:
+    def _fake_fetch_all(sql: str, params: list[Any]) -> list[dict[str, Any]]:
         captured["sql"] = " ".join(sql.split()).lower()
         captured["params"] = params
-        return {
-            "posts_scanned": 2,
-            "stale_posts_count": 1,
-            "saved_comments": 5,
-            "reported_comments": 149,
-        }
+        return [{"id": "post-1", "reported_comments": 149}]
 
-    monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+    monkeypatch.setattr(
+        social_repo,
+        "_instagram_saved_comment_counts_by_post",
+        lambda *_args, **_kwargs: {"post-1": 5},
+    )
 
     payload = social_repo._comments_coverage_for_platform(
         "season-1",

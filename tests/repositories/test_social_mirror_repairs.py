@@ -328,7 +328,11 @@ def test_run_platform_media_mirror_stage_threads_uses_persisted_raw_data_when_co
             media_asset_meta={},
         )
 
-    monkeypatch.setattr("trr_backend.socials.threads.resolve_threads_media", _fake_resolve_threads_media)
+    monkeypatch.setattr(
+        "trr_backend.socials.threads.media_resolver.resolve_threads_media",
+        _fake_resolve_threads_media,
+    )
+    monkeypatch.delattr("trr_backend.socials.threads.resolve_threads_media")
 
     def _fake_mirror_result(_context, *, platform: str, post, week_index: int | None, **_kwargs):  # noqa: ANN001
         mirrored_inputs.append(
@@ -398,7 +402,7 @@ def test_run_generic_comment_media_mirror_stage_threads_repairs_from_persisted_r
         lambda *_args, **_kwargs: SimpleNamespace(week_index=4),
     )
     monkeypatch.setattr(
-        "trr_backend.socials.threads.resolve_threads_media",
+        "trr_backend.socials.threads.media_resolver.resolve_threads_media",
         lambda raw_data, validate_urls=False: SimpleNamespace(  # noqa: ARG005, FBT002
             media_urls=["https://images.test/threads-comment.jpg"],
             thumbnail_url=None,
@@ -407,6 +411,7 @@ def test_run_generic_comment_media_mirror_stage_threads_repairs_from_persisted_r
             media_asset_meta={},
         ),
     )
+    monkeypatch.delattr("trr_backend.socials.threads.resolve_threads_media")
     monkeypatch.setattr(
         social_repo,
         "_mirror_platform_media_to_s3_result",

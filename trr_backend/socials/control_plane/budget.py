@@ -9,6 +9,13 @@ from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
 from trr_backend.socials.control_plane.backfill_health import get_backfill_health as _load_backfill_health
+from trr_backend.socials.control_plane.backfill_runbook import (
+    INSTAGRAM_BACKFILL_CANARY_WORKER_CAP,
+    INSTAGRAM_BACKFILL_LIVE_APPLY_WORKER_CAP,
+    INSTAGRAM_BACKFILL_MINIMUM_SAMPLE_FLOOR,
+    INSTAGRAM_BACKFILL_RUNBOOK_VERSION,
+    instagram_backfill_runbook_metadata,
+)
 from trr_backend.socials.control_plane.queue_status import get_queue_status as _load_queue_status
 from trr_backend.socials.instagram.auth_cooldown import get_active_cooldown as _load_active_cooldown
 
@@ -23,10 +30,6 @@ LANE_STATES: frozenset[str] = frozenset({STATE_NORMAL, STATE_REDUCED, STATE_PAUS
 DEFAULT_LANE = "instagram_backfill"
 DEFAULT_PLATFORM = "instagram"
 DEFAULT_TTL_SECONDS = 300
-INSTAGRAM_BACKFILL_RUNBOOK_VERSION = "v4"
-INSTAGRAM_BACKFILL_LIVE_APPLY_WORKER_CAP = 2
-INSTAGRAM_BACKFILL_CANARY_WORKER_CAP = 4
-INSTAGRAM_BACKFILL_MINIMUM_SAMPLE_FLOOR = 25
 INSTAGRAM_DB_SESSION_WORKER_BUDGET_ENV = "SOCIAL_INSTAGRAM_DB_SESSION_WORKER_BUDGET"
 LEGACY_INSTAGRAM_COMMENTS_DB_SESSION_BUDGET_ENV = "SOCIAL_INSTAGRAM_COMMENTS_DB_SESSION_BUDGET"
 DEFAULT_INSTAGRAM_DB_SESSION_WORKER_BUDGET = 10
@@ -327,33 +330,6 @@ def get_instagram_db_session_capacity(
         "block_reason": block_reason,
         "available": capacity_available,
         "read_error": capacity_read_error,
-    }
-
-
-def instagram_backfill_runbook_metadata(*, state: str = "active", cap4_canary_active: bool = False) -> dict[str, Any]:
-    """Return the v4 runbook metadata shared by budget, launch, and progress."""
-
-    return {
-        "phase": "live_apply",
-        "runbook_version": INSTAGRAM_BACKFILL_RUNBOOK_VERSION,
-        "state": str(state or "active").strip().lower() or "active",
-        "mandatory": True,
-        "current_comments_cap": INSTAGRAM_BACKFILL_LIVE_APPLY_WORKER_CAP,
-        "binding_cap": INSTAGRAM_BACKFILL_LIVE_APPLY_WORKER_CAP,
-        "live_apply": {
-            "mandatory": True,
-            "binding_cap": INSTAGRAM_BACKFILL_LIVE_APPLY_WORKER_CAP,
-        },
-        "speed_canary_optional": True,
-        "speed_canary_cap": INSTAGRAM_BACKFILL_CANARY_WORKER_CAP,
-        "cap4_canary": {
-            "optional": True,
-            "cap": INSTAGRAM_BACKFILL_CANARY_WORKER_CAP,
-            "active": bool(cap4_canary_active),
-            "mode": "active" if cap4_canary_active else "metadata_only",
-        },
-        "minimum_completed_comments_jobs": INSTAGRAM_BACKFILL_MINIMUM_SAMPLE_FLOOR,
-        "minimum_sample_floor": INSTAGRAM_BACKFILL_MINIMUM_SAMPLE_FLOOR,
     }
 
 

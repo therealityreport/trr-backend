@@ -38,7 +38,7 @@ def test_preview_tiktok_profile_uses_auth_preflight(monkeypatch) -> None:
         "_load_social_auth_or_503",
         lambda **_kwargs: {"sessionid": "cookie"},
     )
-    monkeypatch.setattr("trr_backend.socials.tiktok.TikTokScraper", _FakeScraper)
+    monkeypatch.setattr("trr_backend.socials.tiktok.scraper.TikTokScraper", _FakeScraper)
 
     payload = asyncio.run(socials_router.preview_tiktok_profile("creator", {"email": "admin@example.com"}))
 

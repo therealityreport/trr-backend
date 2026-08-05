@@ -62,7 +62,7 @@ ANALYTICS_CACHE_PATH = (
     Path(__file__).resolve().parents[2] / "api" / "routers" / "socials" / "_analytics_cache.py"
 )
 SOCIALS_ROUTER_PATH = (
-    Path(__file__).resolve().parents[2] / "api" / "routers" / "socials" / "__init__.py"
+    Path(__file__).resolve().parents[2] / "api" / "routers" / "socials" / "worker_health.py"
 )
 ACCOUNT_CATALOG_REVIEW_QUEUE_PATH = (
     SOCIALS_DIR / "pipelines" / "account_catalog" / "review_queue.py"
@@ -1053,83 +1053,18 @@ def test_control_plane_does_not_import_legacy_compatibility_path() -> None:
     assert files_with_legacy_imports == set()
 
 
-def test_recovery_dispatch_and_runtime_surfaces_reuse_existing_exact_module_proxies() -> None:
-    def assert_surface(filename: str, proxy_module: str, expected_names: tuple[str, ...]) -> None:
+def test_recovery_dispatch_and_runtime_use_the_shared_late_provider_registry() -> None:
+    for filename in ("recovery.py", "dispatch.py", "runtime.py"):
         source = (CONTROL_PLANE_DIR / filename).read_text()
-        tree = ast.parse(source)
-        proxy_imports = [
-            alias
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and node.module == proxy_module
-            for alias in node.names
-            if alias.name == "legacy" and alias.asname == "_legacy"
-        ]
-        proxy_bindings = {
-            target.id: node.value.attr
-            for node in tree.body
-            if isinstance(node, ast.Assign)
-            and len(node.targets) == 1
-            and isinstance((target := node.targets[0]), ast.Name)
-            and isinstance(node.value, ast.Attribute)
-            and isinstance(node.value.value, ast.Name)
-            and node.value.value.id == "_legacy"
-        }
-        deleted_names = {
-            target.id
-            for node in tree.body
-            if isinstance(node, ast.Delete)
-            for target in node.targets
-            if isinstance(target, ast.Name)
-        }
-
         assert "trr_backend.repositories.social_season_analytics" not in source
         assert "trr_backend.socials.social_season_analytics_impl" not in source
-        assert len(proxy_imports) == 1
-        assert proxy_bindings == {name: name for name in expected_names}
-        assert "_legacy" in deleted_names
-
-    assert_surface(
-        "recovery.py",
-        "trr_backend.socials.control_plane.run_lifecycle",
-        RECOVERY_LEGACY_EXPORT_NAMES,
-    )
-    assert_surface(
-        "dispatch.py",
-        "trr_backend.socials.control_plane.dispatch_runtime",
-        DISPATCH_LEGACY_EXPORT_NAMES,
-    )
-
-    runtime_source = (CONTROL_PLANE_DIR / "runtime.py").read_text()
-    runtime_tree = ast.parse(runtime_source)
-    runtime_proxy_imports = [
-        alias
-        for node in ast.walk(runtime_tree)
-        if isinstance(node, ast.ImportFrom)
-        and node.module == "trr_backend.socials.control_plane.dispatch_runtime"
-        for alias in node.names
-        if alias.name == "legacy" and alias.asname == "_core"
-    ]
-    runtime_deleted_names = {
-        target.id
-        for node in runtime_tree.body
-        if isinstance(node, ast.Delete)
-        for target in node.targets
-        if isinstance(target, ast.Name)
-    }
-    runtime_core_references = [
-        node
-        for node in ast.walk(runtime_tree)
-        if isinstance(node, ast.Name) and node.id == "_core" and isinstance(node.ctx, ast.Load)
-    ]
-
-    assert "trr_backend.repositories.social_season_analytics" not in runtime_source
-    assert "trr_backend.socials.social_season_analytics_impl" not in runtime_source
-    assert len(runtime_proxy_imports) == 1
-    assert runtime_core_references
-    assert "_core" not in runtime_deleted_names
+        assert "LateNamespaceProvider" in source
+        assert "_PROVIDER = LateNamespaceProvider" in source
+        assert "def _configure_legacy_provider(" in source
+        assert "_PROVIDER.configure(provider)" in source
 
 
-def test_dispatch_runtime_reuses_run_lifecycle_exact_loader_without_legacy_import() -> None:
+def test_dispatch_runtime_reuses_lifecycle_publication_without_legacy_import() -> None:
     source = (CONTROL_PLANE_DIR / "dispatch_runtime.py").read_text()
     tree = ast.parse(source)
     forbidden_modules = {
@@ -1145,26 +1080,6 @@ def test_dispatch_runtime_reuses_run_lifecycle_exact_loader_without_legacy_impor
             and any(alias.name in forbidden_modules for alias in node.names)
         )
     ]
-    provider_imports = [
-        node
-        for node in tree.body
-        if isinstance(node, ast.ImportFrom)
-        and node.module == "trr_backend.socials.control_plane.run_lifecycle"
-        and [(alias.name, alias.asname) for alias in node.names]
-        == [("_legacy_module", "_load_legacy_module")]
-    ]
-    provider_assignments = [
-        node
-        for node in tree.body
-        if isinstance(node, ast.Assign)
-        and [target.id for target in node.targets if isinstance(target, ast.Name)]
-        == ["legacy"]
-        and isinstance(node.value, ast.Call)
-        and isinstance(node.value.func, ast.Name)
-        and node.value.func.id == "_load_legacy_module"
-        and not node.value.args
-        and not node.value.keywords
-    ]
     deleted_names = {
         target.id
         for node in tree.body
@@ -1174,15 +1089,15 @@ def test_dispatch_runtime_reuses_run_lifecycle_exact_loader_without_legacy_impor
     }
 
     assert direct_legacy_imports == []
-    assert len(provider_imports) == 1
-    assert len(provider_assignments) == 1
-    assert "_load_legacy_module" in deleted_names
-    assert "_load_legacy_module" not in dispatch_runtime.__dict__
+    assert "LateModuleProvider" in source
+    assert "adopt_published" in source
+    assert "_published" in deleted_names
+    assert "_published" not in dispatch_runtime.__dict__
     assert dispatch_runtime.legacy is canonical_social_analytics
     assert run_lifecycle._legacy_module() is canonical_social_analytics
 
 
-def test_instagram_catalog_ingest_reuses_run_lifecycle_exact_loader_without_legacy_import() -> None:
+def test_instagram_catalog_ingest_reuses_lifecycle_publication_without_legacy_import() -> None:
     source = INSTAGRAM_CATALOG_INGEST_PATH.read_text()
     tree = ast.parse(source)
     forbidden_modules = {
@@ -1198,26 +1113,6 @@ def test_instagram_catalog_ingest_reuses_run_lifecycle_exact_loader_without_lega
             and any(alias.name in forbidden_modules for alias in node.names)
         )
     ]
-    provider_imports = [
-        node
-        for node in tree.body
-        if isinstance(node, ast.ImportFrom)
-        and node.module == "trr_backend.socials.control_plane.run_lifecycle"
-        and [(alias.name, alias.asname) for alias in node.names]
-        == [("_legacy_module", "_load_legacy_module")]
-    ]
-    provider_assignments = [
-        node
-        for node in tree.body
-        if isinstance(node, ast.Assign)
-        and [target.id for target in node.targets if isinstance(target, ast.Name)]
-        == ["_core"]
-        and isinstance(node.value, ast.Call)
-        and isinstance(node.value.func, ast.Name)
-        and node.value.func.id == "_load_legacy_module"
-        and not node.value.args
-        and not node.value.keywords
-    ]
     deleted_names = {
         target.id
         for node in tree.body
@@ -1227,38 +1122,36 @@ def test_instagram_catalog_ingest_reuses_run_lifecycle_exact_loader_without_lega
     }
 
     assert direct_legacy_imports == []
-    assert len(provider_imports) == 1
-    assert len(provider_assignments) == 1
-    assert "_load_legacy_module" in deleted_names
-    assert "_load_legacy_module" not in instagram_catalog_ingest.__dict__
+    assert "LateNamespaceProvider" in source
+    assert "adopt_published" in source
+    assert "_published_legacy_module" in deleted_names
+    assert "_published_legacy_module" not in instagram_catalog_ingest.__dict__
     assert instagram_catalog_ingest._core is canonical_social_analytics
     assert run_lifecycle._legacy_module() is canonical_social_analytics
 
 
-def test_analytics_cache_registration_reuses_live_dispatch_runtime_proxy() -> None:
+def test_analytics_cache_registration_uses_deferred_dispatch_publication_callback() -> None:
     source = ANALYTICS_CACHE_PATH.read_text()
     tree = ast.parse(source)
-    proxy_imports = [
+    callback_imports = [
         alias
         for node in ast.walk(tree)
         if isinstance(node, ast.ImportFrom)
         and node.module == "trr_backend.socials.control_plane.dispatch_runtime"
         for alias in node.names
-        if alias.name == "legacy" and alias.asname == "social_repo"
+        if alias.name == "register_provider_publication_callback"
     ]
     registration_calls = [
         node
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == "social_repo"
-        and node.func.attr == "register_week_detail_cache_invalidator"
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "register_provider_publication_callback"
     ]
 
     assert "trr_backend.repositories.social_season_analytics" not in source
     assert "trr_backend.socials.social_season_analytics_impl" not in source
-    assert len(proxy_imports) == 1
+    assert len(callback_imports) == 1
     assert len(registration_calls) == 1
 
 
@@ -1295,7 +1188,7 @@ def test_account_catalog_review_queue_reuses_dispatch_runtime_proxy_without_lega
     }
 
 
-def test_shared_accounts_reuses_import_time_dispatch_runtime_copies_without_legacy_import() -> None:
+def test_shared_accounts_uses_late_registry_bindings_without_a_legacy_import() -> None:
     source = SHARED_ACCOUNTS_PATH.read_text()
     tree = ast.parse(source)
     proxy_imports = [
@@ -1306,16 +1199,6 @@ def test_shared_accounts_reuses_import_time_dispatch_runtime_copies_without_lega
         for alias in node.names
         if alias.name == "legacy" and alias.asname == "_legacy"
     ]
-    copied_bindings = {
-        target.id: node.value.attr
-        for node in tree.body
-        if isinstance(node, ast.Assign)
-        and len(node.targets) == 1
-        and isinstance((target := node.targets[0]), ast.Name)
-        and isinstance(node.value, ast.Attribute)
-        and isinstance(node.value.value, ast.Name)
-        and node.value.value.id == "_legacy"
-    }
     deleted_names = {
         target.id
         for node in tree.body
@@ -1323,36 +1206,12 @@ def test_shared_accounts_reuses_import_time_dispatch_runtime_copies_without_lega
         for target in node.targets
         if isinstance(target, ast.Name)
     }
-    expected_names = {
-        "_default_targets",
-        "_normalize_catalog_backfill_window",
-        "_shared_account_catalog_requires_modal_executor",
-        "cancel_shared_run",
-        "dismiss_social_account_catalog_run",
-        "get_season_context",
-        "get_shared_account_sources",
-        "get_social_account_catalog_freshness",
-        "get_social_account_catalog_gap_analysis_status",
-        "get_social_account_catalog_posts",
-        "get_social_account_catalog_review_queue",
-        "get_social_account_catalog_verification",
-        "get_social_account_profile_hashtag_timeline",
-        "get_targets",
-        "list_shared_review_queue",
-        "put_shared_account_sources",
-        "put_social_account_profile_hashtags",
-        "put_targets",
-        "resolve_shared_review_queue_item",
-        "resolve_social_account_catalog_review_queue_item",
-    }
-
     assert "trr_backend.repositories.social_season_analytics" not in source
     assert "trr_backend.socials.social_season_analytics_impl" not in source
     assert len(proxy_imports) == 1
-    assert copied_bindings == {
-        **{name: name for name in expected_names},
-        "_legacy_cancel_social_account_catalog_run": "cancel_social_account_catalog_run",
-    }
+    assert "LateNamespaceProvider" in source
+    assert "_PROVIDER_BINDING_SOURCES" in source
+    assert "_PROVIDER = LateNamespaceProvider" in source
     assert "_legacy" in deleted_names
 
 
@@ -1416,7 +1275,7 @@ def test_profile_reads_reuses_function_scoped_dispatch_runtime_proxy_without_leg
 
     assert "trr_backend.repositories.social_season_analytics" not in source
     assert "trr_backend.socials.social_season_analytics_impl" not in source
-    assert len(proxy_imports) == 15
+    assert len(proxy_imports) == 16
     assert module_level_imports == []
 
 
@@ -2343,7 +2202,7 @@ def test_account_profile_nine_normal_import_leaders_reach_frozen_states() -> Non
         "trr_backend.socials.profile_dashboard": "UNCONFIGURED",
         "trr_backend.socials.social_season_analytics_impl": "READY",
         "trr_backend.repositories.social_season_analytics": "READY",
-        "trr_backend.socials.control_plane.shared_accounts": "READY",
+        "trr_backend.socials.control_plane.shared_accounts": "UNCONFIGURED",
     }
     for leader, expected_state in expected.items():
         _run_account_profile_contract_script(

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import ast
 import json
+import subprocess
+import sys
 from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,6 +17,40 @@ import trr_backend.socials.control_plane.queue_status as queue_status
 import trr_backend.socials.control_plane.worker_health as worker_health
 
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "socials" / "run_metadata"
+_REQUIRED_PROVIDER_NAMES = (
+    "SOCIAL_QUEUE_STATUS_CACHE_TTL_SECONDS_DEFAULT",
+    "SOCIAL_QUEUE_STATUS_STALE_FALLBACK_SECONDS_DEFAULT",
+    "SOCIAL_WORKER_HEARTBEAT_STALE_SECONDS_DEFAULT",
+    "_RECENT_FAILURE_TERMINAL_STATUSES",
+    "_RUN_PROGRESS_ACTIVE_JOB_STATUSES",
+    "_build_queue_status_alerts",
+    "_build_run_dispatch_health",
+    "_build_worker_health_alerts",
+    "_clear_social_hot_path_caches",
+    "_coerce_dt",
+    "_configured_execution_metadata",
+    "_empty_queue_status_counts",
+    "_iso",
+    "_list_dispatch_blocked_jobs",
+    "_list_stuck_jobs",
+    "_normalize_non_negative_int",
+    "_normalize_social_job_stage_for_stale",
+    "_queue_status_cache",
+    "_queue_status_cache_lock",
+    "_queue_status_last_good_cache",
+    "_recent_failure_not_dismissed_sql",
+    "_relation_exists",
+    "_resolve_positive_int_env",
+    "_run_failure_not_dismissed_sql",
+    "_scrape_jobs_features",
+    "execution_backend_canonical",
+    "get_worker_health",
+    "is_modal_remote_executor_enabled",
+    "is_queue_enabled",
+    "logger",
+    "pg",
+    "time_module",
+)
 RAW_SECRET_VALUE_KEYS = {
     "auth_token",
     "bearer_token",
@@ -33,6 +70,7 @@ RAW_SECRET_VALUE_KEYS = {
 
 @pytest.fixture(autouse=True)
 def _clear_queue_status_state() -> None:
+    queue_status._configure_legacy_provider(social_repo.__dict__)
     social_repo._queue_status_cache = None
     social_repo._queue_status_last_good_cache = None
     social_repo._clear_social_hot_path_caches()
@@ -40,6 +78,123 @@ def _clear_queue_status_state() -> None:
     social_repo._queue_status_cache = None
     social_repo._queue_status_last_good_cache = None
     social_repo._clear_social_hot_path_caches()
+
+
+def test_queue_status_source_has_no_direct_legacy_import_edge() -> None:
+    tree = ast.parse(Path(queue_status.__file__).read_text())
+    forbidden_modules = {
+        "trr_backend.repositories.social_season_analytics",
+        "trr_backend.socials.social_season_analytics_impl",
+    }
+    direct_legacy_imports = [
+        node
+        for node in ast.walk(tree)
+        if (isinstance(node, ast.ImportFrom) and node.module in forbidden_modules)
+        or (isinstance(node, ast.Import) and any(alias.name in forbidden_modules for alias in node.names))
+        or (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in {"import_module", "__import__"}
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and node.args[0].value in forbidden_modules
+        )
+    ]
+
+    assert direct_legacy_imports == []
+
+
+def test_public_dotted_import_loads_package_root_debt_and_exact_provider_namespace() -> None:
+    backend_root = Path(__file__).resolve().parents[2]
+    code = "\n".join(
+        [
+            "import importlib",
+            "import sys",
+            "leaf = importlib.import_module('trr_backend.socials.control_plane.queue_status')",
+            "legacy_name = 'trr_backend.socials.social_season_analytics_impl'",
+            "assert legacy_name in sys.modules",
+            "legacy = sys.modules[legacy_name]",
+            "assert leaf._LEGACY_NAMESPACE is legacy.__dict__",
+            "proxy = leaf._legacy_repo()",
+            f"for name in {_REQUIRED_PROVIDER_NAMES!r}:",
+            "    assert getattr(proxy, name) is legacy.__dict__[name]",
+        ]
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=backend_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_provider_unconfigured_reads_and_writes_fail_deterministically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proxy = queue_status._legacy_repo()
+    monkeypatch.setattr(queue_status, "_LEGACY_NAMESPACE", None)
+
+    with pytest.raises(
+        RuntimeError,
+        match="Queue-status provider is not configured for read: _queue_status_cache",
+    ):
+        _ = proxy._queue_status_cache
+    with pytest.raises(
+        RuntimeError,
+        match="Queue-status provider is not configured for write: _queue_status_cache",
+    ):
+        proxy._queue_status_cache = None
+
+
+def test_provider_configuration_is_idempotent_and_conflict_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    namespace: dict[str, object] = {}
+    monkeypatch.setattr(queue_status, "_LEGACY_NAMESPACE", None)
+
+    queue_status._configure_legacy_provider(namespace)
+    queue_status._configure_legacy_provider(namespace)
+
+    assert queue_status._LEGACY_NAMESPACE is namespace
+    with pytest.raises(RuntimeError, match="Queue-status provider is already configured"):
+        queue_status._configure_legacy_provider({})
+
+
+def test_provider_reads_live_repository_alias_monkeypatches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert social_repo.__dict__ is sys.modules["trr_backend.socials.social_season_analytics_impl"].__dict__
+    proxy = queue_status._legacy_repo()
+
+    assert len(_REQUIRED_PROVIDER_NAMES) == 32
+    for name in _REQUIRED_PROVIDER_NAMES:
+        replacement = object()
+        monkeypatch.setattr(social_repo, name, replacement)
+        assert getattr(proxy, name) is replacement
+
+
+def test_invalidate_queue_status_cache_writes_through_to_exact_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleared: list[bool] = []
+    namespace: dict[str, object] = {
+        "_clear_social_hot_path_caches": lambda: cleared.append(True),
+        "_queue_status_cache_lock": nullcontext(),
+        "_queue_status_cache": object(),
+        "_queue_status_last_good_cache": object(),
+    }
+    monkeypatch.setattr(queue_status, "_LEGACY_NAMESPACE", None)
+    queue_status._configure_legacy_provider(namespace)
+
+    queue_status.invalidate_queue_status_cache()
+
+    assert cleared == [True]
+    assert namespace["_queue_status_cache"] is None
+    assert namespace["_queue_status_last_good_cache"] is None
 
 
 def test_legacy_get_queue_status_delegates_to_control_plane_worker_health(monkeypatch: pytest.MonkeyPatch) -> None:

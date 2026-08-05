@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from trr_backend.socials.pipelines.job_handlers import FunctionPlatformJobHandler, PlatformJobHandler
+from trr_backend.socials.pipelines.job_handler_types import FunctionPlatformJobHandler, PlatformJobHandler
+from trr_backend.socials.pipelines.shared_job_executor import execute_shared_claimed_job
 
 INSTAGRAM_COMMENTS_SCRAPLING_STAGE = "comments_scrapling"
 INSTAGRAM_POSTS_SCRAPLING_STAGE = "posts_scrapling"
@@ -25,9 +26,7 @@ def _run_posts_scrapling(job: dict[str, Any], *, worker_id: str | None = None) -
 
 
 def _run_shared_instagram_stage(job: dict[str, Any], *, worker_id: str | None = None) -> dict[str, Any]:
-    from trr_backend.socials.social_season_analytics_impl import _execute_shared_claimed_job
-
-    return _execute_shared_claimed_job(job, worker_id=worker_id)
+    return execute_shared_claimed_job(job, worker_id=worker_id)
 
 
 def instagram_job_handlers() -> tuple[PlatformJobHandler, ...]:

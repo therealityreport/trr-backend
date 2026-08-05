@@ -1,3 +1,4 @@
+# ruff: noqa: F822
 """Runtime and auth helpers for the social control plane.
 
 This module is the canonical control-plane runtime import surface. Non-Instagram
@@ -9,12 +10,45 @@ from __future__ import annotations
 
 from typing import Any
 
-import trr_backend.socials.social_season_analytics_impl as _core
+from trr_backend.socials.control_plane.dispatch_runtime import legacy as _core
 from trr_backend.socials.instagram.auth_runtime import _load_instagram_cookies
+from trr_backend.socials.provider_registry import LateNamespaceProvider, publish_module_slot
 
-SocialIngestConflictError = _core.SocialIngestConflictError
-SocialIngestValidationError = _core.SocialIngestValidationError
-SocialWorkerUnavailableError = _core.SocialWorkerUnavailableError
+_PROVIDER_EXPORT_NAMES = (
+    "SocialIngestConflictError",
+    "SocialIngestValidationError",
+    "SocialWorkerUnavailableError",
+)
+def _publish_provider_binding(name: str, value: Any) -> None:
+    globals()[name] = value
+
+
+_PROVIDER = LateNamespaceProvider(
+    globals(),
+    prefix="SOCIAL_RUNTIME_PROVIDER",
+    bindings={name: name for name in _PROVIDER_EXPORT_NAMES},
+    publisher=lambda name, value: _publish_provider_binding(name, value),
+    commit=publish_module_slot(globals(), "_core"),
+    unconfigured_message="SOCIAL_RUNTIME_PROVIDER_UNCONFIGURED: provider publication has not completed",
+    missing_bindings_message="SOCIAL_RUNTIME_PROVIDER_INVALID: missing runtime bindings: ",
+)
+
+
+def _require_provider_ready() -> dict[str, Any]:
+    return _PROVIDER.require()  # type: ignore[return-value]
+
+
+def _configure_legacy_provider(provider: dict[str, Any]) -> None:
+    """Publish runtime exception identities after the provider finishes loading."""
+
+    _PROVIDER.configure(provider)
+
+
+def __getattr__(name: str) -> Any:
+    if name in _PROVIDER_EXPORT_NAMES:
+        _require_provider_ready()
+        return globals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _load_facebook_cookies() -> dict[str, str]:

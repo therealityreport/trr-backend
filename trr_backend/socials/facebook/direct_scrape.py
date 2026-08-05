@@ -1,9 +1,9 @@
 """Route-facing Facebook direct scrape orchestration.
 
 This module intentionally keeps posts catalog ownership out of the direct admin
-scrape path. Import scraper classes through ``trr_backend.socials.facebook`` in
-operation functions so existing monkeypatch paths remain valid during router
-migration.
+scrape path. Operation functions import scraper classes from the
+``trr_backend.socials.facebook.scraper`` leaf so the package root can retain its
+compatibility exports without creating an import cycle.
 """
 
 from __future__ import annotations
@@ -84,7 +84,11 @@ def post_to_payload(post: Any) -> dict[str, Any]:
         "views": int(_get_value(post, "views", 0) or 0),
         "url": str(_get_value(post, "url", "") or ""),
         "thumbnail_url": str(_get_value(post, "thumbnail_url", "") or "") or None,
-        "media_urls": [str(url).strip() for url in (_get_value(post, "media_urls", []) or []) if str(url or "").strip()],
+        "media_urls": [
+            str(url).strip()
+            for url in (_get_value(post, "media_urls", []) or [])
+            if str(url or "").strip()
+        ],
         "posted_at": _timestamp_to_iso(_get_value(post, "posted_at")),
         "reactions": dict(_get_value(post, "reactions", {}) or {}),
         "share_details": share_details,
@@ -112,7 +116,7 @@ def scrape_facebook(
     load_cookies: Callable[[str], Any],
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
-    from trr_backend.socials.facebook import FacebookScrapeConfig, FacebookScraper
+    from trr_backend.socials.facebook.scraper import FacebookScrapeConfig, FacebookScraper
 
     log = logger or _LOGGER
     page_handle = _get_value(request, "page_handle")
@@ -181,7 +185,7 @@ def search_facebook_posts(
     load_cookies: Callable[[str], Any],
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
-    from trr_backend.socials.facebook import FacebookScraper, FacebookSearchConfig
+    from trr_backend.socials.facebook.scraper import FacebookScraper, FacebookSearchConfig
 
     log = logger or _LOGGER
     query = _get_value(request, "query")
@@ -231,7 +235,7 @@ def preview_facebook_page(
     load_cookies: Callable[[str], Any],
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
-    from trr_backend.socials.facebook import FacebookScrapeConfig, FacebookScraper
+    from trr_backend.socials.facebook.scraper import FacebookScrapeConfig, FacebookScraper
 
     log = logger or _LOGGER
     log.info("Facebook preview requested for %s", page_handle)
@@ -261,7 +265,7 @@ def scrape_facebook_post(
     load_cookies: Callable[[str], Any],
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
-    from trr_backend.socials.facebook import FacebookScraper
+    from trr_backend.socials.facebook.scraper import FacebookScraper
 
     log = logger or _LOGGER
     post_url = _get_value(request, "post_url")

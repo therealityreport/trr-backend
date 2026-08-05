@@ -99,7 +99,7 @@ def test_search_facebook_posts_success(
             ]
 
     monkeypatch.setattr("api.routers.socials._load_social_auth_or_503", lambda **_: {"c_user": "1"})
-    monkeypatch.setattr("trr_backend.socials.facebook.FacebookScraper", FakeFacebookScraper)
+    monkeypatch.setattr("trr_backend.socials.facebook.scraper.FacebookScraper", FakeFacebookScraper)
 
     response = client.post(
         "/api/v1/admin/socials/facebook/search-posts",
@@ -175,7 +175,7 @@ def test_scrape_facebook_post_passes_additive_flags(
             )
 
     monkeypatch.setattr("api.routers.socials._load_social_auth_or_503", lambda **_: {"c_user": "1"})
-    monkeypatch.setattr("trr_backend.socials.facebook.FacebookScraper", FakeFacebookScraper)
+    monkeypatch.setattr("trr_backend.socials.facebook.scraper.FacebookScraper", FakeFacebookScraper)
 
     response = client.post(
         "/api/v1/admin/socials/facebook/scrape-post",
@@ -220,7 +220,7 @@ def test_scrape_facebook_route_remains_backward_compatible(
             return [_make_post(post_type="feed", media_provenance=FacebookMediaProvenance())]
 
     monkeypatch.setattr("api.routers.socials._load_social_auth_or_503", lambda **_: {"c_user": "1"})
-    monkeypatch.setattr("trr_backend.socials.facebook.FacebookScraper", FakeFacebookScraper)
+    monkeypatch.setattr("trr_backend.socials.facebook.scraper.FacebookScraper", FakeFacebookScraper)
 
     response = client.post(
         "/api/v1/admin/socials/facebook/scrape",

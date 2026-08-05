@@ -17,6 +17,15 @@ from typing import Any
 from psycopg2 import errors as psycopg_errors
 
 from trr_backend.db import pg
+from trr_backend.socials.instagram.comments_scrapling.audit_checkpoints import (
+    AUDIT_CURSOR_REPLY_CHECKPOINT_MAX_ITEMS as _AUDIT_CURSOR_REPLY_CHECKPOINT_MAX_ITEMS,
+)
+from trr_backend.socials.instagram.comments_scrapling.audit_checkpoints import (
+    normalize_audit_reply_checkpoints as _normalize_audit_reply_checkpoints,
+)
+from trr_backend.socials.instagram.comments_scrapling.audit_checkpoints import (
+    normalize_audit_top_level_checkpoint as _normalize_audit_top_level_checkpoint,
+)
 from trr_backend.socials.instagram.comments_scrapling.counts import (
     child_reply_count,
     parent_comment_count,
@@ -246,16 +255,6 @@ _BROWSER_SESSION_INVALIDATED_ERROR_CODE = "instagram_comments_browser_session_in
 _COMMENTS_PER_POST_CONCURRENCY_ENV = "SOCIAL_INSTAGRAM_COMMENTS_PER_POST_CONCURRENCY"
 _COMMENTS_PER_POST_CONCURRENCY_DEFAULT = 1
 _COMMENTS_PER_POST_CONCURRENCY_MAX = 8
-_AUDIT_CURSOR_REPLY_CHECKPOINT_MAX_ITEMS = 2000
-_AUDIT_CURSOR_RETRYABLE_STOP_REASONS = {
-    *_INCOMPLETE_RETRY_STALL_REASONS,
-    *_REPLY_ONLY_RETRY_REASONS,
-    "pagination_page_cap_reached",
-}
-_AUDIT_CURSOR_TERMINAL_STOP_REASONS = {
-    "pagination_repeated_cursor",
-    _TERMINAL_MISSING_CLASSIFIED_REASON,
-}
 _COMMENT_CAPTURE_HEALTH_COMPLETION_GAP_THRESHOLD = 1
 
 
@@ -2186,197 +2185,6 @@ def _normalized_uuid_text(value: Any) -> str | None:
         return None
 
 
-def _json_object(value: Any) -> dict[str, Any]:
-    if isinstance(value, dict):
-        return dict(value)
-    if isinstance(value, str) and value.strip():
-        try:
-            decoded = json.loads(value)
-        except json.JSONDecodeError:
-            return {}
-        return dict(decoded) if isinstance(decoded, dict) else {}
-    return {}
-
-
-def _audit_cursor_stop_reason_is_retryable(value: Any) -> bool:
-    stop_reason = str(value or "").strip()
-    if stop_reason in _AUDIT_CURSOR_TERMINAL_STOP_REASONS:
-        return False
-    return stop_reason in _AUDIT_CURSOR_RETRYABLE_STOP_REASONS
-
-
-def _cursor_param_value(value: Any) -> str | None:
-    cursor_param = str(value or "").strip()
-    return cursor_param if cursor_param in {"min_id", "max_id"} else None
-
-
-def _audit_row_stop_reason(row: Mapping[str, Any], payload: Mapping[str, Any], checkpoint: Mapping[str, Any]) -> str:
-    return str(
-        checkpoint.get("stop_reason")
-        or checkpoint.get("last_error_code")
-        or payload.get("stop_reason")
-        or row.get("cursor_stop_reason")
-        or ""
-    ).strip()
-
-
-def _normalize_audit_top_level_checkpoint(row: Mapping[str, Any]) -> dict[str, Any] | None:
-    payload = _json_object(row.get("cursor_payload"))
-    shortcode = str(row.get("shortcode") or "").strip()
-    checkpoint_candidates: list[Mapping[str, Any]] = []
-    top_level_checkpoint = payload.get("top_level_checkpoint")
-    if isinstance(top_level_checkpoint, Mapping):
-        checkpoint_candidates.append(top_level_checkpoint)
-    if any(
-        str(payload.get(key) or "").strip()
-        for key in (
-            "next_top_level_cursor",
-            "last_top_level_cursor",
-            "chosen_cursor",
-            "request_cursor",
-        )
-    ):
-        checkpoint_candidates.append(payload)
-    for checkpoint in checkpoint_candidates:
-        stop_reason = _audit_row_stop_reason(row, payload, checkpoint)
-        if not _audit_cursor_stop_reason_is_retryable(stop_reason):
-            continue
-        target_shortcode = str(
-            checkpoint.get("target_shortcode")
-            or checkpoint.get("source_id")
-            or checkpoint.get("shortcode")
-            or shortcode
-        ).strip()
-        next_cursor = str(
-            checkpoint.get("next_top_level_cursor") or checkpoint.get("chosen_cursor") or row.get("cursor_min_id") or ""
-        ).strip()
-        last_cursor = str(checkpoint.get("last_top_level_cursor") or checkpoint.get("request_cursor") or "").strip()
-        payload_next_cursor = str(payload.get("chosen_cursor") or payload.get("next_top_level_cursor") or "").strip()
-        cursor_repair: dict[str, Any] | None = None
-        if next_cursor and last_cursor and next_cursor == last_cursor and payload_next_cursor != next_cursor:
-            cursor_repair = {
-                "applied": True,
-                "reason": "degenerate_top_level_cursor_replayed",
-                "source": "cursor_payload.chosen_cursor",
-                "from_next_top_level_cursor": next_cursor,
-                "to_next_top_level_cursor": payload_next_cursor,
-            }
-            next_cursor = payload_next_cursor
-        cursor = next_cursor or last_cursor
-        if not target_shortcode or not cursor:
-            continue
-        next_cursor_param = _cursor_param_value(
-            checkpoint.get("next_top_level_cursor_param")
-            or checkpoint.get("chosen_cursor_param")
-            or row.get("cursor_param")
-        )
-        last_cursor_param = _cursor_param_value(
-            checkpoint.get("last_top_level_cursor_param") or checkpoint.get("request_cursor_param")
-        )
-        payload_next_cursor_param = _cursor_param_value(
-            payload.get("chosen_cursor_param") or payload.get("cursor_param")
-        )
-        if payload_next_cursor and next_cursor == payload_next_cursor and payload_next_cursor_param:
-            next_cursor_param = payload_next_cursor_param
-        normalized = {
-            "platform": "instagram",
-            "target_shortcode": target_shortcode,
-            "source_id": target_shortcode,
-            "stop_reason": stop_reason,
-            "retryable": True,
-        }
-        if next_cursor:
-            normalized["next_top_level_cursor"] = next_cursor
-        if next_cursor_param:
-            normalized["next_top_level_cursor_param"] = next_cursor_param
-        if last_cursor:
-            normalized["last_top_level_cursor"] = last_cursor
-        if last_cursor_param:
-            normalized["last_top_level_cursor_param"] = last_cursor_param
-        if cursor_repair:
-            normalized["cursor_repair_applied"] = True
-            normalized["cursor_repair_reason"] = cursor_repair["reason"]
-            normalized["cursor_repair_source"] = cursor_repair["source"]
-            normalized["cursor_repair"] = cursor_repair
-        for key in ("media_id", "pages_seen", "observed_comment_count", "expected_comment_count", "updated_at"):
-            if checkpoint.get(key) is not None:
-                normalized[key] = checkpoint.get(key)
-        return normalized
-    return None
-
-
-def _audit_reply_checkpoint_candidates(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    candidates: list[Mapping[str, Any]] = []
-    for key in ("reply_checkpoints",):
-        value = payload.get(key)
-        if isinstance(value, list):
-            candidates.extend(item for item in value if isinstance(item, Mapping))
-    for key in ("reply_checkpoint_summary", "reply_checkpoint_metadata"):
-        value = payload.get(key)
-        if not isinstance(value, Mapping):
-            continue
-        latest = value.get("latest")
-        if isinstance(latest, Mapping):
-            candidates.append(latest)
-        items = value.get("items")
-        if isinstance(items, list):
-            candidates.extend(item for item in items if isinstance(item, Mapping))
-    runtime = payload.get("fetcher_runtime")
-    if isinstance(runtime, Mapping):
-        checkpoint_metadata = runtime.get("reply_checkpoint_metadata")
-        if isinstance(checkpoint_metadata, Mapping) and isinstance(checkpoint_metadata.get("items"), list):
-            candidates.extend(item for item in checkpoint_metadata.get("items") or [] if isinstance(item, Mapping))
-    return candidates
-
-
-def _normalize_audit_reply_checkpoints(row: Mapping[str, Any]) -> list[dict[str, Any]]:
-    payload = _json_object(row.get("cursor_payload"))
-    shortcode = str(row.get("shortcode") or "").strip() or None
-    by_parent: dict[str, dict[str, Any]] = {}
-    for checkpoint in _audit_reply_checkpoint_candidates(payload):
-        stop_reason = _audit_row_stop_reason(row, payload, checkpoint)
-        if not _audit_cursor_stop_reason_is_retryable(stop_reason):
-            continue
-        parent_comment_id = str(checkpoint.get("parent_comment_id") or "").strip()
-        cursor = str(checkpoint.get("next_reply_cursor") or checkpoint.get("last_reply_cursor") or "").strip()
-        if not parent_comment_id or not cursor:
-            continue
-        next_cursor_param = _cursor_param_value(checkpoint.get("next_reply_cursor_param"))
-        last_cursor_param = _cursor_param_value(checkpoint.get("last_reply_cursor_param"))
-        normalized = {
-            "platform": "instagram",
-            "target_shortcode": str(
-                checkpoint.get("target_shortcode") or checkpoint.get("source_id") or shortcode or ""
-            )
-            or None,
-            "source_id": str(checkpoint.get("source_id") or checkpoint.get("target_shortcode") or shortcode or "")
-            or None,
-            "parent_comment_id": parent_comment_id,
-            "stop_reason": stop_reason,
-            "retryable": True,
-        }
-        if checkpoint.get("next_reply_cursor"):
-            normalized["next_reply_cursor"] = cursor
-        else:
-            normalized["last_reply_cursor"] = cursor
-        if next_cursor_param:
-            normalized["next_reply_cursor_param"] = next_cursor_param
-        if last_cursor_param:
-            normalized["last_reply_cursor_param"] = last_cursor_param
-        for key in (
-            "attempt_count",
-            "expected_reply_count",
-            "saved_reply_count_observed",
-            "pages_seen",
-            "updated_at",
-        ):
-            if checkpoint.get(key) is not None:
-                normalized[key] = checkpoint.get(key)
-        by_parent[parent_comment_id] = {key: value for key, value in normalized.items() if value is not None}
-    items = list(by_parent.values())
-    return items[-_AUDIT_CURSOR_REPLY_CHECKPOINT_MAX_ITEMS:]
-
-
 def _checkpoint_summary(items: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "items": list(items),
@@ -3410,13 +3218,31 @@ def _abort_queued_sibling_shards_after_run_fatal_error(
 
 
 def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str | None = None) -> dict[str, Any]:
-    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.control_plane.dispatch_runtime import legacy as repo
 
-    job_runner_started_at = lifecycle.now_utc()
     job_id = str(job.get("id") or "").strip()
     run_id = str(job.get("run_id") or "").strip()
     config = dict(job.get("config") or {})
     account_handle = str(config.get("account") or "").strip().lower().lstrip("@")
+    target_source_ids = [
+        str(item or "").strip()
+        for item in (config.get("target_source_ids") or ([config.get("source_id")] if config.get("source_id") else []))
+        if str(item or "").strip()
+    ]
+    if not account_handle:
+        raise CommentsScraplingRuntimeError(
+            "Instagram comments Scrapling job is missing an account handle.",
+            error_code="instagram_comments_account_missing",
+            retryable=False,
+        )
+    if not target_source_ids:
+        raise CommentsScraplingRuntimeError(
+            "Instagram comments Scrapling job has no target post shortcodes.",
+            error_code="instagram_comments_targets_missing",
+            retryable=False,
+        )
+
+    job_runner_started_at = lifecycle.now_utc()
     stage = str(config.get("stage") or repo.INSTAGRAM_COMMENTS_SCRAPLING_STAGE).strip().lower()
     mode = str(config.get("mode") or "profile").strip().lower()
     source_scope = str(config.get("source_scope") or "network").strip().lower() or "network"
@@ -3445,11 +3271,6 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
         config.get("comments_session_scope"),
         default=default_comments_session_scope,
     )
-    target_source_ids = [
-        str(item or "").strip()
-        for item in (config.get("target_source_ids") or ([config.get("source_id")] if config.get("source_id") else []))
-        if str(item or "").strip()
-    ]
     attempt_count, max_attempts = _job_attempt_state(job)
     comments_shard_index = max(1, int(config.get("comments_shard_index") or 1))
     comments_shard_count = max(1, int(config.get("comments_shard_count") or 1))
@@ -3503,18 +3324,6 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
         "proxy_state": "none" if public_comments_mode else "configured_by_environment",
         "fallback_policy": "requires_approval" if public_comments_mode else "automatic_enabled",
     }
-    if not account_handle:
-        raise CommentsScraplingRuntimeError(
-            "Instagram comments Scrapling job is missing an account handle.",
-            error_code="instagram_comments_account_missing",
-            retryable=False,
-        )
-    if not target_source_ids:
-        raise CommentsScraplingRuntimeError(
-            "Instagram comments Scrapling job has no target post shortcodes.",
-            error_code="instagram_comments_targets_missing",
-            retryable=False,
-        )
     # Only a transient DB-saturation error is allowed to zero the
     # expected-count map. Any OTHER exception (a real SQL/attr bug) must
     # propagate and crash the shard loudly instead of silently marking every

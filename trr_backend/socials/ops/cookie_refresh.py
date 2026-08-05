@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-import trr_backend.socials.social_season_analytics_impl as social_repo
+from trr_backend.socials.control_plane.dispatch_runtime import legacy as social_repo
 
 PlatformCookieLoader = Callable[[], dict[str, str]]
 PlatformCookieValidator = Callable[[dict[str, str]], tuple[bool, str | None]]

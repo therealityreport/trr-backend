@@ -87,7 +87,7 @@ def test_search_twitter_includes_hosted_media_field_without_mirroring(
     def _unexpected_mirror(*_args, **_kwargs):
         raise RuntimeError("should not mirror")
 
-    monkeypatch.setattr("trr_backend.socials.twitter.mirror_tweet_media", _unexpected_mirror)
+    monkeypatch.setattr("trr_backend.socials.twitter.scraper.mirror_tweet_media", _unexpected_mirror)
 
     response = client.post(
         "/api/v1/admin/socials/twitter/search",
@@ -136,7 +136,7 @@ def test_search_twitter_runs_mirror_when_requested(
         tweets[0].hosted_media_urls = ["https://cdn.example.com/media/video-2.mp4"]
         return {tweets[0].tweet_id: tweets[0].hosted_media_urls}
 
-    monkeypatch.setattr("trr_backend.socials.twitter.mirror_tweet_media", _fake_mirror)
+    monkeypatch.setattr("trr_backend.socials.twitter.scraper.mirror_tweet_media", _fake_mirror)
 
     response = client.post(
         "/api/v1/admin/socials/twitter/search",
@@ -178,7 +178,7 @@ def test_twitter_replies_returns_full_tweet_schema_and_mirroring(
         tweets[0].hosted_media_urls = ["https://cdn.example.com/media/reply-1.mp4"]
         return {tweets[0].tweet_id: tweets[0].hosted_media_urls}
 
-    monkeypatch.setattr("trr_backend.socials.twitter.mirror_tweet_media", _fake_mirror)
+    monkeypatch.setattr("trr_backend.socials.twitter.scraper.mirror_tweet_media", _fake_mirror)
 
     response = client.post(
         "/api/v1/admin/socials/twitter/replies",
@@ -223,7 +223,7 @@ def test_twitter_replies_skips_mirroring_when_flag_disabled(
     def _unexpected_mirror(*_args, **_kwargs):
         raise RuntimeError("should not mirror")
 
-    monkeypatch.setattr("trr_backend.socials.twitter.mirror_tweet_media", _unexpected_mirror)
+    monkeypatch.setattr("trr_backend.socials.twitter.scraper.mirror_tweet_media", _unexpected_mirror)
 
     response = client.post(
         "/api/v1/admin/socials/twitter/replies",
@@ -329,7 +329,7 @@ def test_twitter_quotes_returns_full_tweet_schema_and_diagnostics(
         tweets[0].hosted_media_urls = ["https://cdn.example.com/media/quote-1.mp4"]
         return {tweets[0].tweet_id: tweets[0].hosted_media_urls}
 
-    monkeypatch.setattr("trr_backend.socials.twitter.mirror_tweet_media", _fake_mirror)
+    monkeypatch.setattr("trr_backend.socials.twitter.scraper.mirror_tweet_media", _fake_mirror)
 
     response = client.post(
         "/api/v1/admin/socials/twitter/quotes",
@@ -375,7 +375,7 @@ def test_twitter_quotes_skips_mirroring_when_flag_disabled(
     def _unexpected_mirror(*_args, **_kwargs):
         raise RuntimeError("should not mirror")
 
-    monkeypatch.setattr("trr_backend.socials.twitter.mirror_tweet_media", _unexpected_mirror)
+    monkeypatch.setattr("trr_backend.socials.twitter.scraper.mirror_tweet_media", _unexpected_mirror)
 
     response = client.post(
         "/api/v1/admin/socials/twitter/quotes",

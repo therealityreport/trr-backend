@@ -29,7 +29,9 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+import trr_backend.socials.instagram.cookie_refresh_runtime as cookie_refresh_runtime
 from trr_backend.socials.account_browser_sessions import AccountBrowserSessionManager
+from trr_backend.socials.instagram.auth_session_context import get_current_instagram_auth_session
 from trr_backend.socials.instagram.constants import (
     COMMENT_REPLIES_URL as IG_COMMENT_REPLIES_URL,
 )
@@ -695,10 +697,6 @@ class InstagramScraper:
         self._annotate_auth_session_meta()
 
     def _attach_current_auth_session(self) -> None:
-        try:
-            from trr_backend.socials.instagram.auth_resolver import get_current_instagram_auth_session
-        except Exception:  # noqa: BLE001
-            return
         auth_session = get_current_instagram_auth_session()
         if auth_session is None:
             return
@@ -801,6 +799,57 @@ class InstagramScraper:
             result["reason"] = "missing_ds_user_id"
         return result
 
+    @staticmethod
+    def _validate_cookie_refresh_graphql(
+        cookies: dict[str, str],
+        *,
+        validation_username: str | None,
+        request_timeout: tuple[int, int],
+        allow_browser_fallback: bool,
+        allow_recovery: bool,
+        detailed_errors: bool,
+    ) -> tuple[bool, str | None]:
+        normalized_username = str(validation_username or "").strip().lstrip("@")
+        if not normalized_username:
+            return True, None
+        validator_scraper = InstagramScraper(
+            cookies=cookies,
+            browser_account_id=normalized_username,
+        )
+        payload = validator_scraper.fetch_posts_graphql(
+            normalized_username,
+            delay=0.0,
+            request_timeout=request_timeout,
+            allow_browser_fallback=allow_browser_fallback,
+            allow_recovery=allow_recovery,
+        )
+        payload_data = (payload or {}).get("data") if isinstance(payload, dict) else {}
+        connection = (
+            payload_data.get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
+            if isinstance(payload_data, dict)
+            else {}
+        )
+        if connection.get("edges"):
+            return True, None
+
+        retrieval_meta = dict(validator_scraper.last_retrieval_meta or {})
+        error_code = str(retrieval_meta.get("error_code") or "").strip().lower()
+        error_message = str(retrieval_meta.get("error_message") or "").strip().lower()
+        status_code = int(retrieval_meta.get("error_status_code") or 0)
+        if error_code == "instagram_graphql_checkpoint_required" or error_message == "checkpoint_required":
+            return False, "checkpoint_required"
+        if not detailed_errors:
+            return False, "graphql_validation_failed"
+        if error_code == "redirect_login":
+            return False, "redirect_login"
+        if error_code in {"instagram_graphql_cursor_unauthorized", "unauthorized"} or status_code == 401:
+            return False, "unauthorized"
+        if error_code in {"instagram_graphql_cursor_forbidden", "forbidden"} or status_code == 403:
+            return False, "forbidden"
+        if status_code == 429 and "wait" in error_message:
+            return True, "rate_limited_soft_pass"
+        return False, error_code or "graphql_validation_failed"
+
     def _try_auto_refresh_cookies(self) -> dict[str, Any]:
         """Refresh cookies via Playwright login using env-var credentials.
 
@@ -818,8 +867,6 @@ class InstagramScraper:
         if confirmation != INSTAGRAM_AUTH_REPAIR_CONFIRMATION:
             return {"refreshed": False, "reason": "instagram_auth_repair_confirmation_required"}
 
-        from .cookie_refresh import refresh_instagram_cookies
-
         ig_user = (os.getenv("INSTAGRAM_USERNAME") or "").strip()
         ig_pass = (os.getenv("INSTAGRAM_PASSWORD") or "").strip()
         if not ig_user or not ig_pass:
@@ -835,31 +882,17 @@ class InstagramScraper:
         validation_username = str(self.browser_account_id or ig_user).strip().lstrip("@")
 
         def _validate_refreshed_cookies(cookies: dict[str, str]) -> tuple[bool, str | None]:
-            validator_scraper = InstagramScraper(
-                cookies=cookies,
-                browser_account_id=validation_username or None,
-            )
-            payload = validator_scraper.fetch_posts_graphql(
-                validation_username or ig_user,
-                delay=0.0,
+            return self._validate_cookie_refresh_graphql(
+                cookies,
+                validation_username=validation_username or ig_user,
                 request_timeout=(10, 20),
+                allow_browser_fallback=True,
+                allow_recovery=True,
+                detailed_errors=False,
             )
-            payload_data = (payload or {}).get("data") if isinstance(payload, dict) else {}
-            connection = (
-                payload_data.get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
-                if isinstance(payload_data, dict)
-                else {}
-            )
-            if connection.get("edges"):
-                return True, None
-            error_code = str(validator_scraper.last_retrieval_meta.get("error_code") or "").strip().lower()
-            error_message = str(validator_scraper.last_retrieval_meta.get("error_message") or "").strip().lower()
-            if error_code == "instagram_graphql_checkpoint_required" or error_message == "checkpoint_required":
-                return False, "checkpoint_required"
-            return False, "graphql_validation_failed"
 
         try:
-            fresh_cookies = refresh_instagram_cookies(
+            fresh_cookies = cookie_refresh_runtime.refresh_instagram_cookies(
                 username=ig_user,
                 password=ig_pass,
                 cookie_file=str(cookie_path),
@@ -946,15 +979,24 @@ class InstagramScraper:
         headless = self._chrome_browser_headless()
 
         try:
-            from .cookie_refresh import interactive_chrome_login
+            def _validate_interactive_cookies(cookies: dict[str, str]) -> tuple[bool, str | None]:
+                return self._validate_cookie_refresh_graphql(
+                    cookies,
+                    validation_username=validation_username,
+                    request_timeout=(10, 45),
+                    allow_browser_fallback=False,
+                    allow_recovery=False,
+                    detailed_errors=True,
+                )
 
             def _run_interactive_login() -> dict[str, str]:
-                return interactive_chrome_login(
+                return cookie_refresh_runtime.interactive_chrome_login(
                     chrome_profile_name=chrome_profile,
                     cookie_file=cookie_file,
                     timeout_seconds=300,
                     validation_username=validation_username,
                     headless=headless,
+                    validator=_validate_interactive_cookies,
                 )
 
             try:

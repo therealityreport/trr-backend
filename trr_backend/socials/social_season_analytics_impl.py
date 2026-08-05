@@ -66113,6 +66113,7 @@ def _reserve_social_account_catalog_launch(
     initiated_by: str | None,
     placeholder_config: Mapping[str, Any],
     initial_status: str,
+    admission_callback: Callable[[Any], Mapping[str, Any] | None] | None = None,
 ) -> dict[str, Any]:
     normalized_platform = _normalize_social_account_profile_platform(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
@@ -66141,8 +66142,7 @@ def _reserve_social_account_catalog_launch(
                     "account_handle": normalized_account,
                 },
             )
-        lock_held_started_at = time_module.perf_counter()
-        deduped = False
+        lock_held_started_at, deduped = time_module.perf_counter(), False
         launch_group_id = str(_metadata_dict(placeholder_config).get("launch_group_id") or "").strip()
         try:
             if launch_group_id:
@@ -66192,13 +66192,13 @@ def _reserve_social_account_catalog_launch(
                         "account_handle": normalized_account,
                     },
                 )
+            config_updates = _metadata_dict(admission_callback(lock_conn)) if admission_callback else {}
             initial_summary = _build_run_summary_payload(
                 total_jobs=0,
                 completed_jobs=0,
                 failed_jobs=0,
                 active_jobs=0,
-                items_found_total=0,
-                stage_counts={},
+                items_found_total=0, stage_counts={},
             )
             with pg.db_cursor(conn=lock_conn, label=lock_label) as cur:
                 run_row = pg.fetch_one_with_cursor(
@@ -66232,7 +66232,7 @@ def _reserve_social_account_catalog_launch(
                         source_scope,
                         initial_status,
                         initiated_by,
-                        json.dumps(dict(_metadata_dict(placeholder_config))),
+                        json.dumps({**_metadata_dict(placeholder_config), **config_updates}),
                         json.dumps(initial_summary),
                         initial_status,
                     ],
@@ -66258,7 +66258,7 @@ def _reserve_social_account_catalog_launch(
         "run_id": run_id,
         "lock_wait_ms": lock_wait_ms,
         "lock_held_ms": lock_held_ms,
-        "deduped": deduped,
+        "deduped": deduped, "config_updates": config_updates,
     }
 
 
@@ -68283,38 +68283,34 @@ _extract_gap_analysis_operation_result = _canonical_extract_gap_analysis_operati
 _extract_gap_analysis_operation_error = _canonical_extract_gap_analysis_operation_error
 _catalog_freshness_degradable_error = _canonical_catalog_freshness_degradable_error
 _catalog_freshness_degraded_error_payload = _canonical_catalog_freshness_degraded_error_payload
-
 _configure_account_catalog_freshness_dependencies(
     _AccountCatalogFreshnessDependencies(
         normalize_platform=lambda value: _normalize_social_account_profile_platform(value),
         normalize_handle=lambda value: _normalize_social_account_profile_handle(value),
-        assert_profile_exists=lambda platform, account_handle: _assert_social_account_profile_exists(platform, account_handle),  # noqa: E501
-        catalog_recent_runs=lambda platform, account_handle, **kwargs: _catalog_recent_runs(platform, account_handle, **kwargs),  # noqa: E501
-        get_active_run=lambda platform, account_handle, **kwargs: get_active_social_account_catalog_run(platform, account_handle, **kwargs),  # noqa: E501
-        shared_catalog_total_posts=lambda platform, account_handle, **kwargs: _shared_catalog_total_posts(platform, account_handle, **kwargs),  # noqa: E501
-        catalog_newest_stored_post_at=lambda platform, account_handle, **kwargs: _catalog_newest_stored_post_at(platform, account_handle, **kwargs),  # noqa: E501
-        catalog_oldest_stored_post_at=lambda platform, account_handle, **kwargs: _catalog_oldest_stored_post_at(platform, account_handle, **kwargs),  # noqa: E501
+        assert_profile_exists=lambda platform, account_handle: _assert_social_account_profile_exists(platform, account_handle), catalog_recent_runs=lambda platform, account_handle, **kwargs: _catalog_recent_runs(platform, account_handle, **kwargs),  # noqa: E501
+        get_active_run=lambda platform, account_handle, **kwargs: get_active_social_account_catalog_run(platform, account_handle, **kwargs), shared_catalog_total_posts=lambda platform, account_handle, **kwargs: _shared_catalog_total_posts(platform, account_handle, **kwargs),  # noqa: E501
+        catalog_newest_stored_post_at=lambda platform, account_handle, **kwargs: _catalog_newest_stored_post_at(platform, account_handle, **kwargs), catalog_oldest_stored_post_at=lambda platform, account_handle, **kwargs: _catalog_oldest_stored_post_at(platform, account_handle, **kwargs),  # noqa: E501
         latest_account_frontier=lambda platform, account_handle, **kwargs: _latest_account_frontier(platform, account_handle, **kwargs),  # noqa: E501
         cached_live_profile_total_posts=lambda platform, account_handle: _cached_live_profile_total_posts(platform, account_handle),  # noqa: E501
         cached_live_profile_total_posts_cached_only=lambda platform, account_handle: _cached_live_profile_total_posts_cached_only(platform, account_handle),  # noqa: E501
-        now_utc=lambda: _now_utc(),
-        iso=lambda value: _iso(value),
+        now_utc=lambda: _now_utc(), iso=lambda value: _iso(value),
         gap_analysis_operation_type=lambda: SOCIAL_CATALOG_GAP_ANALYSIS_OPERATION_TYPE,
         gap_analysis_request_payload=lambda platform, account_handle: _social_catalog_gap_analysis_request_payload(platform, account_handle),  # noqa: E501
-        normalize_gap_analysis_operation_status=lambda value: _normalize_gap_analysis_operation_status(value),
-        extract_gap_analysis_operation_result=lambda row: _extract_gap_analysis_operation_result(row),
-        extract_gap_analysis_operation_error=lambda row: _extract_gap_analysis_operation_error(row),
-        freshness_degradable_error=lambda error: _catalog_freshness_degradable_error(error),
+        normalize_gap_analysis_operation_status=lambda value: _normalize_gap_analysis_operation_status(value), extract_gap_analysis_operation_result=lambda row: _extract_gap_analysis_operation_result(row),  # noqa: E501
+        extract_gap_analysis_operation_error=lambda row: _extract_gap_analysis_operation_error(row), freshness_degradable_error=lambda error: _catalog_freshness_degradable_error(error),  # noqa: E501
         freshness_degraded_error_payload=lambda error: _catalog_freshness_degraded_error_payload(error),
     )
 )
-
 get_social_account_catalog_freshness = _canonical_get_social_account_catalog_freshness
 get_social_account_catalog_gap_analysis_status = _canonical_get_social_account_catalog_gap_analysis_status
-from trr_backend.socials.control_plane import queue_status as _queue_status  # noqa: E402, I001
-_queue_status._configure_legacy_provider(globals())
-del _queue_status
-__import__(
-    "trr_backend.socials.read_models.account_profile.common",
-    fromlist=["_configure_legacy_provider"],
-)._configure_legacy_provider(globals())
+for _provider_path in (
+    "trr_backend.socials.control_plane.queue_status", "trr_backend.socials.read_models.account_profile.common",  # noqa: E501
+    "trr_backend.socials.analytics.read_models", "trr_backend.socials.pipelines.account_catalog.progress",
+    "trr_backend.socials.control_plane.run_lifecycle", "trr_backend.socials.control_plane.dispatch_runtime",  # noqa: E501
+    "trr_backend.socials.control_plane.dispatch", "trr_backend.socials.control_plane.recovery",
+    "trr_backend.socials.control_plane.runtime", "trr_backend.socials.control_plane.shared_accounts",  # noqa: E501
+    "trr_backend.socials.instagram.catalog_ingest", "trr_backend.socials.pipelines.account_catalog.launch",  # noqa: E501
+    "trr_backend.socials.pipelines.comments.instagram",
+):
+    __import__(_provider_path, fromlist=["_configure_legacy_provider"])._configure_legacy_provider(globals())
+del _provider_path

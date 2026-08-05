@@ -7,7 +7,9 @@ from datetime import datetime
 from typing import Any
 
 import trr_backend.socials.control_plane.run_lifecycle as run_lifecycle
-import trr_backend.socials.social_season_analytics_impl as legacy
+from trr_backend.socials.control_plane.queue_status import _legacy_repo
+
+legacy = _legacy_repo()
 
 
 def _fetch_all_control(sql: str, params: list[Any]) -> list[dict[str, Any]]:

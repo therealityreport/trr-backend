@@ -1,5 +1,4 @@
 """Worker-heartbeat and queue-health surfaces for the social control plane.
-
 This module owns the public worker-health/control-plane behavior. It still uses
 `social_season_analytics_impl` as the private dependency provider for shared DB,
 Modal, auth, normalization, and cache helpers while the monolith is shrinking.
@@ -13,8 +12,9 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
-import trr_backend.socials.social_season_analytics_impl as _core
-from trr_backend.socials.control_plane.queue_status import get_queue_status
+from trr_backend.socials.control_plane.queue_status import _legacy_repo, get_queue_status
+
+_core = _legacy_repo()
 
 
 def is_queue_enabled() -> bool:

@@ -5,6 +5,54 @@ import pytest
 import trr_backend.socials.socialblade.auth as auth_module
 
 
+def test_socialblade_cookie_health_retries_in_visible_browser(monkeypatch) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def fail_runtime_fetch(handle, _cookies, *, platform):
+        calls.append(("runtime", f"{platform}:{handle}"))
+        raise RuntimeError("runtime fetch blocked")
+
+    def retry_in_visible_browser(handle):
+        calls.append(("visible", handle))
+        return {"username": handle, "profile_stats": {"followers": 123}}
+
+    monkeypatch.setattr(auth_module, "run_socialblade_scrapling_fetch", fail_runtime_fetch)
+    monkeypatch.setattr(
+        auth_module,
+        "_validate_socialblade_cookie_health_via_visible_browser",
+        retry_in_visible_browser,
+    )
+
+    result = auth_module.validate_socialblade_cookie_health(
+        {"cf_clearance": "clearance", "session": "session-token"},
+        validation_handle="@BravoTV",
+        allow_visible_browser_retry=True,
+    )
+
+    assert result == (True, None)
+    assert calls == [("runtime", "instagram:bravotv"), ("visible", "bravotv")]
+
+
+def test_socialblade_cookie_health_reports_visible_browser_retry_failure(monkeypatch) -> None:
+    monkeypatch.setattr(
+        auth_module,
+        "run_socialblade_scrapling_fetch",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("runtime fetch blocked")),
+    )
+    monkeypatch.setattr(
+        auth_module,
+        "_validate_socialblade_cookie_health_via_visible_browser",
+        lambda _handle: (_ for _ in ()).throw(RuntimeError("visible retry failed")),
+    )
+
+    result = auth_module.validate_socialblade_cookie_health(
+        {"cf_clearance": "clearance", "session": "session-token"},
+        allow_visible_browser_retry=True,
+    )
+
+    assert result == (False, "validation_scrape_failed:visible retry failed")
+
+
 def test_shared_chrome_cdp_url_prefers_explicit_env(monkeypatch) -> None:
     monkeypatch.setenv("SOCIALBLADE_SHARED_CHROME_CDP_URL", "http://127.0.0.1:9555")
     monkeypatch.setattr(auth_module, "_chrome_cdp_endpoint_reachable", lambda _url: False)

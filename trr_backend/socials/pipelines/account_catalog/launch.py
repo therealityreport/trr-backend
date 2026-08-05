@@ -11,7 +11,6 @@ from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from typing import Any
 
-import trr_backend.socials.social_season_analytics_impl as _core
 from trr_backend.socials.instagram.media_completion import build_media_completion_payload
 from trr_backend.socials.instagram.snapshot_completion import (
     AD_FLAGS_PART,
@@ -35,44 +34,27 @@ from trr_backend.socials.pipelines.comments.instagram import (
 from trr_backend.socials.pipelines.comments.instagram import (
     start_social_account_comments_scrape as _start_comments_scrape,
 )
+from trr_backend.socials.provider_registry import LateNamespaceProvider, LateProviderProxy, publish_module_slot
 
-_RESERVED_CORE_EXPORTS = {
-    "__builtins__",
-    "__cached__",
-    "__doc__",
-    "__file__",
-    "__loader__",
-    "__name__",
-    "__package__",
-    "__spec__",
-    "_core",
-    "_IMPORTED_CORE_NAMES",
-    "_LOCAL_ROOM_NAMES",
-    "_RESERVED_CORE_EXPORTS",
-    "_sync_core_overrides",
-}
 _IMPORTED_CORE_NAMES: set[str] = set()
-for _name, _value in _core.__dict__.items():
-    if _name in _RESERVED_CORE_EXPORTS:
-        continue
-    globals()[_name] = _value
-    _IMPORTED_CORE_NAMES.add(_name)
 _LOCAL_ROOM_NAMES: set[str] = set()
 _LOCAL_ROOM_FUNCTIONS: dict[str, Any] = {}
 _CORE_ROOM_WRAPPERS: dict[str, Any] = {}
 
 
-def _sync_core_overrides() -> None:
-    for _name in _IMPORTED_CORE_NAMES - _LOCAL_ROOM_NAMES:
-        if hasattr(_core, _name):
-            globals()[_name] = getattr(_core, _name)
-
-
-def _room_callable(name: str, local_impl: Any) -> Any:
-    candidate = getattr(_core, name, None)
-    if callable(candidate) and candidate is not _CORE_ROOM_WRAPPERS.get(name):
-        return candidate
-    return local_impl
+_PROVIDER = LateNamespaceProvider(
+    globals(),
+    prefix="ACCOUNT_CATALOG_LAUNCH_PROVIDER",
+    room_names=_LOCAL_ROOM_NAMES,
+    imported_names=_IMPORTED_CORE_NAMES,
+    room_wrappers=_CORE_ROOM_WRAPPERS,
+    commit=publish_module_slot(globals(), "_core"),
+)
+_core: Any = LateProviderProxy(_PROVIDER)
+_require_provider_ready = _PROVIDER.require
+_configure_legacy_provider = _PROVIDER.configure
+_sync_core_overrides = _PROVIDER.sync
+_room_callable = _PROVIDER.room_callable
 
 
 def _normalize_catalog_source_scope(value: str | None, *, default: str = "network") -> str:
@@ -3118,15 +3100,14 @@ def launch_social_account_catalog_backfill(
     return payload
 
 
-_LOCAL_ROOM_NAMES = {
+_LOCAL_ROOM_NAMES.update({
     "start_social_account_catalog_backfill",
     "begin_social_account_catalog_backfill_launch",
     "finalize_social_account_catalog_backfill_launch",
     "launch_social_account_catalog_backfill",
     "get_instagram_catalog_launch_capacity",
-}
-_LOCAL_ROOM_FUNCTIONS = {_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES}
-_CORE_ROOM_WRAPPERS = {_name: getattr(_core, _name, None) for _name in _LOCAL_ROOM_NAMES}
+})
+_LOCAL_ROOM_FUNCTIONS.update({_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES})
 __all__ = [
     "start_social_account_catalog_backfill",
     "begin_social_account_catalog_backfill_launch",

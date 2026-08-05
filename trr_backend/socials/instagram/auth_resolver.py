@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import fcntl
 import hashlib
 import json
@@ -17,8 +16,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import RLock
-from typing import Any
+from typing import Any, cast
 
+import trr_backend.socials.instagram.auth_session_context as auth_session_context
 from trr_backend.socials.account_browser_sessions import AccountBrowserSessionManager
 from trr_backend.socials.browser_cookie_refresh import ensure_private_file_mode
 from trr_backend.socials.instagram.cookie_refresh import (
@@ -45,10 +45,6 @@ _SHORTCODE_RE = re.compile(r"^[A-Za-z0-9]{8,15}$")
 _SESSION_LOCKS: dict[str, RLock] = {}
 _SESSION_LOCKS_GUARD = RLock()
 _VALIDATION_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
-_CURRENT_AUTH_SESSION: contextvars.ContextVar[InstagramAuthSession | None] = contextvars.ContextVar(
-    "instagram_current_auth_session",
-    default=None,
-)
 _RUNTIME_OVERRIDE: dict[str, str] | None = None
 _DEFAULT_BROWSER_SESSION_MANAGER = AccountBrowserSessionManager(
     platform="instagram",
@@ -607,11 +603,14 @@ def _refresh_interactively(
 
 
 def set_current_instagram_auth_session(auth_session: InstagramAuthSession | None) -> None:
-    _CURRENT_AUTH_SESSION.set(auth_session)
+    auth_session_context.set_current_instagram_auth_session(auth_session)
 
 
 def get_current_instagram_auth_session() -> InstagramAuthSession | None:
-    return _CURRENT_AUTH_SESSION.get()
+    return cast(
+        InstagramAuthSession | None,
+        auth_session_context.get_current_instagram_auth_session(),
+    )
 
 
 def set_instagram_runtime_override(cookies: dict[str, str] | None) -> None:

@@ -1,3 +1,4 @@
+# ruff: noqa: F822
 """Dispatch and execution runtime entrypoints for the social control plane."""
 
 from __future__ import annotations
@@ -5,8 +6,22 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any
 
-import trr_backend.socials.social_season_analytics_impl as legacy
+from trr_backend.socials.control_plane.run_lifecycle import _legacy_module as _published
+from trr_backend.socials.control_plane.run_lifecycle import legacy as _legacy_proxy
+from trr_backend.socials.provider_registry import LateModuleProvider, adopt_published, publish_module_slot
 
+legacy: Any = _legacy_proxy
+del _legacy_proxy
+_PROVIDER = LateModuleProvider(
+    globals(),
+    prefix="DISPATCH_RUNTIME_PROVIDER",
+    commit=publish_module_slot(globals(), "legacy"),
+)
+_require_provider_ready = _PROVIDER.require
+_configure_legacy_provider = _PROVIDER.configure
+register_provider_publication_callback = _PROVIDER.register_module_publication_callback
+adopt_published(_PROVIDER, _published)
+del _published
 
 def _call_extracted_override(name: str, local_impl: Any, /, *args: Any, **kwargs: Any) -> Any:
     candidate = getattr(legacy, name, None)
@@ -15,18 +30,8 @@ def _call_extracted_override(name: str, local_impl: Any, /, *args: Any, **kwargs
     return local_impl(*args, **kwargs)
 
 
-def _instagram_public_comments_worker_cap(
-    run_id: str,
-    cache: dict[str, int | None],
-) -> int | None:
-    """Current active-worker cap for an Instagram public comments run (REVISED §4).
-
-    Returns the run config's ``comments_worker_cap_current`` (only public comments
-    runs carry it) or None when no cap applies. Results are cached per run_id so a
-    multi-shard run's config is loaded at most once per dispatch sweep. A missing
-    run or any load failure resolves to None so dispatch falls back to the normal
-    stage/platform caps.
-    """
+def _instagram_public_comments_worker_cap(run_id: str, cache: dict[str, int | None]) -> int | None:
+    """Read and cache an Instagram public-comments worker cap for one sweep."""
     normalized_run_id = str(run_id or "").strip()
     if not normalized_run_id:
         return None
@@ -88,7 +93,6 @@ def _reconcile_terminal_frontier_modal_call(
     worker_id = str(row.get("worker_id") or "").strip()
     if lease_owner and lease_owner not in {job_id, worker_id}:
         return None
-
     enqueue_result = legacy._coerce_shared_posts_enqueue_result(
         legacy._enqueue_shared_posts_job(
             run_id=run_id,
@@ -146,7 +150,6 @@ def _reconcile_terminal_frontier_modal_call(
         old_job_status = "cancelled"
         error_code = "terminal_modal_frontier_requeued"
         next_available_at = None
-
     legacy._release_shared_account_run_frontier(
         run_id=run_id,
         platform=platform,
@@ -376,7 +379,6 @@ def reconcile_terminal_modal_running_jobs(
     )
     if not rows:
         return []
-
     reconciled_rows: list[dict[str, Any]] = []
     now_utc = legacy._now_utc()
     for row in rows:
@@ -391,7 +393,6 @@ def reconcile_terminal_modal_running_jobs(
             continue
         if last_activity.tzinfo is None:
             last_activity = last_activity.replace(tzinfo=legacy.UTC)
-
         dispatch = legacy._job_dispatch_metadata(row)
         remote_invocation_id = str(dispatch.get("remote_invocation_id") or "").strip()
         if not remote_invocation_id:
@@ -412,7 +413,6 @@ def reconcile_terminal_modal_running_jobs(
                 if frontier_result is not None:
                     reconciled_rows.append(frontier_result)
             continue
-
         metadata_updates = dict(row.get("metadata") or {})
         metadata_updates["dispatch"] = {
             **dispatch,

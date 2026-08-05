@@ -12,12 +12,23 @@ import logging
 import os
 from typing import Annotated, Any
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, HTTPException, Request, Security
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from trr_backend.security.internal_admin import verify_internal_admin_token
 from trr_backend.security.jwt import InvalidTokenError, verify_jwt_token
 
 logger = logging.getLogger(__name__)
+
+INTERNAL_ADMIN_BEARER = HTTPBearer(
+    bearerFormat="JWT",
+    scheme_name="InternalAdminBearer",
+    description=(
+        "An allowlisted Supabase admin JWT or a TRR-signed internal-admin JWT. "
+        "The backend applies the same InternalAdminUser authorization policy to both."
+    ),
+    auto_error=False,
+)
 
 
 def _env_flag_strict(name: str, default: bool = False) -> bool:
@@ -192,7 +203,10 @@ def _allowlist_match(user: dict | None) -> dict | None:
     return None
 
 
-async def require_internal_admin(request: Request) -> dict:
+async def require_internal_admin(
+    request: Request,
+    _credentials: HTTPAuthorizationCredentials | None = Security(INTERNAL_ADMIN_BEARER),
+) -> dict:
     """
     Require an allowlisted/admin user, or a trusted internal service JWT caller.
 

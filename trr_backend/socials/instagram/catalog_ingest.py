@@ -4,37 +4,41 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
 from datetime import timedelta
 from typing import Any
 
-import trr_backend.socials.social_season_analytics_impl as _core
+from trr_backend.socials.control_plane.run_lifecycle import _legacy_module as _published_legacy_module
 from trr_backend.socials.instagram import payload_sidecars as _payload_sidecars
 from trr_backend.socials.instagram.post_normalizer import _REPOST_COUNT_ALIASES, _extract_repost_count
+from trr_backend.socials.provider_registry import (
+    LateNamespaceProvider,
+    LateProviderProxy,
+    adopt_published,
+    publish_module_slot,
+)
 
-_RESERVED_CORE_EXPORTS = {
-    "__builtins__",
-    "__cached__",
-    "__doc__",
-    "__file__",
-    "__loader__",
-    "__name__",
-    "__package__",
-    "__spec__",
-    "_core",
-    "_IMPORTED_CORE_NAMES",
-    "_LOCAL_ROOM_NAMES",
-    "_RESERVED_CORE_EXPORTS",
-    "_sync_core_overrides",
-}
 _IMPORTED_CORE_NAMES: set[str] = set()
-for _name, _value in _core.__dict__.items():
-    if _name in _RESERVED_CORE_EXPORTS:
-        continue
-    globals()[_name] = _value
-    _IMPORTED_CORE_NAMES.add(_name)
 _LOCAL_ROOM_NAMES: set[str] = set()
 _LOCAL_ROOM_FUNCTIONS: dict[str, Any] = {}
 _CORE_ROOM_WRAPPERS: dict[str, Any] = {}
+
+
+_PROVIDER = LateNamespaceProvider(
+    globals(),
+    prefix="INSTAGRAM_CATALOG_INGEST_PROVIDER",
+    room_names=_LOCAL_ROOM_NAMES,
+    imported_names=_IMPORTED_CORE_NAMES,
+    room_wrappers=_CORE_ROOM_WRAPPERS,
+    commit=publish_module_slot(globals(), "_core"),
+)
+_core: Any = LateProviderProxy(_PROVIDER)
+_require_provider_ready = _PROVIDER.require
+_configure_legacy_provider = _PROVIDER.configure
+_sync_core_overrides = _PROVIDER.sync
+_room_callable = _PROVIDER.room_callable
+adopt_published(_PROVIDER, _published_legacy_module)
+del _published_legacy_module
 
 
 _INSTAGRAM_COMMENTS_HEADER_KEYS = {
@@ -90,19 +94,6 @@ _INSTAGRAM_COMMENT_HIDDEN_KEYS = {
     "comment_count_hidden",
     "comments_count_hidden",
 }
-
-
-def _sync_core_overrides() -> None:
-    for _name in _IMPORTED_CORE_NAMES - _LOCAL_ROOM_NAMES:
-        if hasattr(_core, _name):
-            globals()[_name] = getattr(_core, _name)
-
-
-def _room_callable(name: str, local_impl: Any) -> Any:
-    candidate = getattr(_core, name, None)
-    if callable(candidate) and candidate is not _CORE_ROOM_WRAPPERS.get(name):
-        return candidate
-    return local_impl
 
 
 def _context_manager_from_callable(callable_obj: Any, /, *args: Any, **kwargs: Any) -> Any:
@@ -396,7 +387,6 @@ def _instagram_post_payload(
         duration_seconds = int(duration_seconds) if duration_seconds is not None else None
     except (TypeError, ValueError):
         duration_seconds = None
-
     raw_data_raw = post.to_dict() if hasattr(post, "to_dict") else {}
     raw_data = dict(raw_data_raw) if isinstance(raw_data_raw, dict) else {}
     incoming_raw_data_is_thin = _instagram_raw_data_is_thin_comments_header(raw_data)
@@ -445,7 +435,6 @@ def _instagram_post_payload(
     resolved_views = (
         existing_views if normalized_incoming_views is None else max(existing_views, normalized_incoming_views)
     )
-
     resolved_repost_count = _instagram_repost_count_from_post(post, raw_data)
     view_metrics_source = str(getattr(post, "video_views_source", "") or "").strip() or None
     view_metrics_observed_at = _coerce_dt(getattr(post, "metadata_scraped_at", None)) or _now_utc()
@@ -475,7 +464,6 @@ def _instagram_post_payload(
             view_metrics_payload["raw_candidates"] = compact_candidates
     if len(view_metrics_payload) > 1:
         raw_data["view_metrics"] = view_metrics_payload
-
     media_retrieval_meta = getattr(post, "media_retrieval_meta", None)
     if isinstance(media_retrieval_meta, dict):
         raw_data["media_retrieval_meta"] = {
@@ -2807,7 +2795,7 @@ def _scrape_shared_instagram_posts(
     return rows, retrieval_meta
 
 
-_LOCAL_ROOM_NAMES = {
+_LOCAL_ROOM_NAMES.update({
     "_shared_instagram_catalog_graphql_page_size",
     "_shared_instagram_catalog_delay_seconds",
     "_instagram_post_payload",
@@ -2838,9 +2826,8 @@ _LOCAL_ROOM_NAMES = {
     "_scrape_shared_instagram_posts_partitioned",
     "_scrape_shared_instagram_post_details_refresh",
     "_scrape_shared_instagram_posts",
-}
-_LOCAL_ROOM_FUNCTIONS = {_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES}
-_CORE_ROOM_WRAPPERS = {_name: getattr(_core, _name, None) for _name in _LOCAL_ROOM_NAMES}
+})
+_LOCAL_ROOM_FUNCTIONS.update({_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES})
 __all__ = [
     "_shared_instagram_catalog_graphql_page_size",
     "_shared_instagram_catalog_delay_seconds",

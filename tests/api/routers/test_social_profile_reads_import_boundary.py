@@ -52,7 +52,7 @@ def test_profile_reads_uses_only_function_scoped_dispatch_runtime_proxy_imports(
     visit(tree)
 
     assert not direct_legacy_imports
-    assert len(proxy_imports) == 15
+    assert len(proxy_imports) == 16
     assert IMPLEMENTATION_MODULE not in source
     assert REPOSITORY_ALIAS_MODULE not in source
 

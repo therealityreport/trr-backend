@@ -7,6 +7,34 @@ from typing import Any
 from trr_backend.db import pg
 from trr_backend.socials.instagram.scraper import InstagramComment
 
+_LEGACY_NAMESPACE: dict[str, Any] | None = None
+
+
+class _LegacyProviderProxy:
+    def __getattr__(self, name: str) -> Any:
+        namespace = _LEGACY_NAMESPACE
+        if namespace is None:
+            raise RuntimeError(f"Instagram comments-persistence provider is not configured: {name}")
+        try:
+            return namespace[name]
+        except KeyError:
+            raise AttributeError(f"Instagram comments-persistence provider has no attribute: {name}") from None
+
+
+_LEGACY_PROVIDER = _LegacyProviderProxy()
+
+
+def _configure_legacy_provider(namespace: dict[str, Any]) -> None:
+    """Bind the live monolith patch surface without importing or copying it."""
+
+    global _LEGACY_NAMESPACE
+
+    configured = _LEGACY_NAMESPACE
+    if configured is not None and configured is not namespace:
+        raise RuntimeError("Instagram comments-persistence provider is already configured")
+    _LEGACY_NAMESPACE = namespace
+
+
 # Author/url metadata columns the no-season comment upsert must not NULL-clobber
 # on a later metadata-poor pass (bug #3). Every name here is conditionally
 # written by the no-season payload builder below (gated on column existence), so
@@ -67,10 +95,8 @@ class _MaterializedInstagramPost(SimpleNamespace):
         return dict(getattr(self, "raw_data", {}) or {})
 
 
-def _load_repo_helpers():
-    from trr_backend.repositories import social_season_analytics as repo
-
-    return repo
+def _load_repo_helpers() -> _LegacyProviderProxy:
+    return _LEGACY_PROVIDER
 
 
 def _comment_effective_reply_depth(comment: InstagramComment, parent_external_id: str | None, *, fallback: int) -> int:
@@ -474,10 +500,7 @@ def _materialize_instagram_post_for_comments(
         .lstrip("@")
     )
     source_account = (
-        str(catalog_row.get("source_account") or owner_account or normalized_account or "")
-        .strip()
-        .lower()
-        .lstrip("@")
+        str(catalog_row.get("source_account") or owner_account or normalized_account or "").strip().lower().lstrip("@")
     )
     if not owner_account:
         owner_account = source_account or normalized_account

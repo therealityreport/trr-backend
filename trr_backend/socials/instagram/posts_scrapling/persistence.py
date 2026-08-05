@@ -36,6 +36,7 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from trr_backend.socials.instagram.comments_scrapling.persistence import _load_repo_helpers
 from trr_backend.socials.instagram.post_normalizer import _extract_repost_count, normalize_instagram_post
 
 logger = logging.getLogger("socials.instagram.posts_scrapling.persistence")
@@ -562,9 +563,9 @@ def persist_instagram_posts(
 ) -> PersistedInstagramPosts:
     """Adapt raw GraphQL nodes and persist through the canonical repo helper."""
     from trr_backend.db import pg
-    from trr_backend.repositories import social_season_analytics as repo
     from trr_backend.socials.instagram import catalog_ingest
 
+    repo = _load_repo_helpers()
     context = repo.get_season_context(season_id) if season_id else None
     posts_upserted = 0
     posts_skipped = 0
