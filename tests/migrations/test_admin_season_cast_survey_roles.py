@@ -23,7 +23,13 @@ def _normalized(path: Path) -> str:
 
 def test_backend_migration_faithfully_promotes_the_app_backlog_contract() -> None:
     sql = _normalized(MIGRATION)
-    app_sql = _normalized(APP_BACKLOG)
+    # GitHub checks out the backend as a standalone repository, while local
+    # workspace validation may also have the app checkout available beside it.
+    # The explicit fragments below are the promoted contract in both layouts;
+    # compare the app backlog too whenever that optional sibling is present.
+    contract_sqls = {"backend": sql}
+    if APP_BACKLOG.is_file():
+        contract_sqls["app_backlog"] = _normalized(APP_BACKLOG)
 
     for fragment in (
         "create table if not exists admin.season_cast_survey_roles",
@@ -41,8 +47,8 @@ def test_backend_migration_faithfully_promotes_the_app_backlog_contract() -> Non
         "idx_season_cast_survey_roles_person",
         "set_season_cast_survey_roles_updated_at",
     ):
-        assert fragment in sql
-        assert fragment in app_sql
+        for source, contract_sql in contract_sqls.items():
+            assert fragment in contract_sql, f"{fragment!r} missing from {source} contract"
 
     assert "references core.seasons" not in sql
     assert "references core.shows" not in sql
