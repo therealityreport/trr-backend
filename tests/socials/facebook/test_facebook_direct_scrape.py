@@ -24,13 +24,7 @@ from trr_backend.socials.facebook.scraper import (
     FacebookShare,
 )
 
-DIRECT_SCRAPE_PATH = (
-    Path(__file__).resolve().parents[3]
-    / "trr_backend"
-    / "socials"
-    / "facebook"
-    / "direct_scrape.py"
-)
+DIRECT_SCRAPE_PATH = Path(__file__).resolve().parents[3] / "trr_backend" / "socials" / "facebook" / "direct_scrape.py"
 
 
 def test_direct_scrape_imports_scraper_leaf_without_package_root_cycle() -> None:
@@ -38,11 +32,7 @@ def test_direct_scrape_imports_scraper_leaf_without_package_root_cycle() -> None
         DIRECT_SCRAPE_PATH.read_text(encoding="utf-8"),
         filename=str(DIRECT_SCRAPE_PATH),
     )
-    import_from_modules = {
-        node.module
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
-    }
+    import_from_modules = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
 
     assert "trr_backend.socials.facebook" not in import_from_modules
     assert "trr_backend.socials.facebook.scraper" in import_from_modules

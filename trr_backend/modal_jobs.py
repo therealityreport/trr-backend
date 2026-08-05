@@ -881,6 +881,8 @@ def probe_browser_image_runtime() -> dict[str, object]:
             "error_class": type(exc).__name__,
             "error": str(exc),
         }
+
+
 @app.function(
     name=_API_FUNCTION_NAME,
     secrets=_secrets,

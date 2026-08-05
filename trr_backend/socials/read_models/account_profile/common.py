@@ -24,7 +24,9 @@ def _unconfigured_social_account_profile_post_item(*_args: Any, **_kwargs: Any) 
     raise RuntimeError(
         "ACCOUNT_PROFILE_PROVIDER_UNCONFIGURED: "
         "trr_backend.socials.social_season_analytics_impl has not finished loading"
-)
+    )
+
+
 _CORE_SOCIAL_ACCOUNT_PROFILE_POST_ITEM = _unconfigured_social_account_profile_post_item
 _SOCIAL_ACCOUNT_PROFILE_COMMENT_SORT_FIELDS = {"user", "comment", "likes", "replies", "created"}
 _SOCIAL_ACCOUNT_PROFILE_COMMENT_SORT_DIRECTIONS = {"asc", "desc"}
@@ -34,11 +36,15 @@ _SOCIAL_ACCOUNT_PROFILE_DEFAULT_PAGE_SIZE = 25
 def _instagram_owner_account_match_sql(*, alias: str = "p") -> str:
     provider = _require_provider_ready()
     return provider["_instagram_owner_account_match_sql"](alias=alias)
+
+
 _LOCAL_ROOM_NAMES.add("_instagram_owner_account_match_sql")
 
 
 def _publish_provider_binding(name: str, value: Any) -> None:
     globals()[name] = value
+
+
 _OPTIONAL_PROVIDER_ROOM_WRAPPERS = {
     "instagram_comment_rollup_health",
     "rebuild_instagram_post_comment_rollups",
@@ -51,11 +57,12 @@ _PROVIDER = LateNamespaceProvider(
     room_wrappers=_CORE_ROOM_WRAPPERS,
     required_room_names=lambda: _LOCAL_ROOM_NAMES - _OPTIONAL_PROVIDER_ROOM_WRAPPERS,
     publisher=lambda name, value: _publish_provider_binding(name, value),
-    commit=publish_mapping_slot(globals(), "_CORE_SOCIAL_ACCOUNT_PROFILE_POST_ITEM", "_social_account_profile_post_item"),  # noqa: E501
+    commit=publish_mapping_slot(
+        globals(), "_CORE_SOCIAL_ACCOUNT_PROFILE_POST_ITEM", "_social_account_profile_post_item"
+    ),  # noqa: E501
     unconfigured_message="ACCOUNT_PROFILE_PROVIDER_UNCONFIGURED: trr_backend.socials.social_season_analytics_impl has not finished loading",  # noqa: E501
     mismatch_message=(
-        "ACCOUNT_PROFILE_PROVIDER_MISMATCH: "
-        "account-profile provider is already configured with a different mapping"
+        "ACCOUNT_PROFILE_PROVIDER_MISMATCH: account-profile provider is already configured with a different mapping"
     ),
 )
 _require_provider_ready = _PROVIDER.require
@@ -230,9 +237,7 @@ def _fetch_materialized_comments_only_profile_rows_page(
 ) -> tuple[list[dict[str, Any]], int]:
     normalized_platform = _normalize_social_account_profile_platform(platform)
     if normalized_platform not in {"tiktok", "youtube"}:
-        return _require_provider_ready()[
-            "_fetch_materialized_comments_only_profile_rows_page"
-        ](
+        return _require_provider_ready()["_fetch_materialized_comments_only_profile_rows_page"](
             platform,
             account_handle,
             page=page,
@@ -3227,17 +3232,19 @@ def get_social_account_profile_collaborators_tags(platform: str, account_handle:
     }
 
 
-_LOCAL_ROOM_NAMES.update({
-    "_social_account_profile_post_item",
-    "get_social_account_profile_summary",
-    "get_social_account_profile_posts",
-    "get_social_account_profile_comments",
-    "get_social_account_profile_hashtags",
-    "get_social_account_profile_collaborators_tags",
-    "instagram_comment_rollup_health",
-    "rebuild_instagram_post_comment_rollups",
-    "_fetch_materialized_comments_only_profile_rows_page",
-})
+_LOCAL_ROOM_NAMES.update(
+    {
+        "_social_account_profile_post_item",
+        "get_social_account_profile_summary",
+        "get_social_account_profile_posts",
+        "get_social_account_profile_comments",
+        "get_social_account_profile_hashtags",
+        "get_social_account_profile_collaborators_tags",
+        "instagram_comment_rollup_health",
+        "rebuild_instagram_post_comment_rollups",
+        "_fetch_materialized_comments_only_profile_rows_page",
+    }
+)
 _LOCAL_ROOM_FUNCTIONS.update({_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES})
 __all__ = [
     "get_social_account_profile_summary",

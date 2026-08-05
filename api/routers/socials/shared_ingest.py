@@ -1,5 +1,6 @@
 # ruff: noqa: F401, F403, F405, I001, UP037
 """Shared-account source, ingest, review, and status routes."""
+
 from __future__ import annotations
 
 from fastapi import APIRouter
@@ -8,6 +9,7 @@ from ._shared import *
 from .season_runs import *
 
 router = APIRouter()
+
 
 @router.get("/shared/sources")
 def get_shared_account_sources_route(
@@ -31,6 +33,7 @@ def get_shared_account_sources_route(
         logger.exception("Failed to read shared account sources: source_scope=%s", source_scope)
         raise _to_social_read_http_exception(exc) from exc
 
+
 @router.put("/shared/sources")
 def put_shared_account_sources_route(
     payload: SharedAccountSourcesPutRequest,
@@ -46,6 +49,7 @@ def put_shared_account_sources_route(
         )
     except ValueError as exc:
         raise _value_error_to_bad_request(exc) from exc
+
 
 @router.post("/shared/ingest")
 async def ingest_shared_social_accounts(
@@ -181,6 +185,7 @@ async def ingest_shared_social_accounts(
         response_payload["worker_health"] = worker_health
     return response_payload
 
+
 @router.get("/shared/ingest/runs")
 def get_shared_ingest_runs(
     limit: int = Query(default=_INGEST_JOBS_DEFAULT_LIMIT, ge=1, le=_INGEST_JOBS_MAX_LIMIT),
@@ -194,6 +199,7 @@ def get_shared_ingest_runs(
     canonical_source_scope = normalize_source_scope_param(source_scope) if source_scope is not None else None
     return list_shared_runs(limit=limit, status=status, source_scope=canonical_source_scope, run_id=run_id)
 
+
 @router.post("/shared/ingest/runs/{run_id}/cancel")
 def cancel_shared_ingest_run(
     run_id: str,
@@ -205,6 +211,7 @@ def cancel_shared_ingest_run(
         return cancel_shared_run(run_id, cancelled_by=(user or {}).get("email"))
     except ValueError as exc:
         raise _value_error_to_bad_request(exc) from exc
+
 
 @router.get("/shared/review-queue")
 def get_shared_review_queue(
@@ -227,6 +234,7 @@ def get_shared_review_queue(
         )
         raise _to_social_read_http_exception(exc) from exc
 
+
 @router.post("/shared/review-queue/{item_id}/resolve")
 def resolve_shared_review_queue(
     item_id: str,
@@ -244,6 +252,7 @@ def resolve_shared_review_queue(
         )
     except ValueError as exc:
         raise _value_error_to_bad_request(exc) from exc
+
 
 @router.get("/seasons/{season_id}/shared-status")
 def get_season_shared_status_route(
@@ -272,5 +281,6 @@ def get_season_shared_status_route(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to read season shared status: season=%s source_scope=%s", season_id, source_scope)
         raise _to_social_read_http_exception(exc) from exc
+
 
 __all__ = [name for name in globals() if not name.startswith("__")]

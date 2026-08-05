@@ -160,11 +160,7 @@ def _counter_value(value: Any) -> int:
 def _reason_counts(value: Any) -> dict[str, int]:
     if not isinstance(value, dict):
         return {}
-    return {
-        str(reason).strip(): _counter_value(count)
-        for reason, count in value.items()
-        if str(reason).strip()
-    }
+    return {str(reason).strip(): _counter_value(count) for reason, count in value.items() if str(reason).strip()}
 
 
 def _merge_persist_diagnostics(

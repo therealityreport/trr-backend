@@ -74,8 +74,7 @@ def test_dispatch_runtime_uses_late_module_provider_without_a_legacy_bootstrap_i
     lifecycle_imports = [
         alias
         for node in tree.body
-        if isinstance(node, ast.ImportFrom)
-        and node.module == "trr_backend.socials.control_plane.run_lifecycle"
+        if isinstance(node, ast.ImportFrom) and node.module == "trr_backend.socials.control_plane.run_lifecycle"
         for alias in node.names
         if (alias.name, alias.asname) == ("_legacy_module", "_published")
     ]

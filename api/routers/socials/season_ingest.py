@@ -1,5 +1,6 @@
 # ruff: noqa: F401, F403, F405, I001
 """Season ingest, sync-session, shared-account ingest, and target route aggregator."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -23,6 +24,7 @@ ROUTE_PREFIXES = (
     "/admin/socials/seasons/",
     "/admin/socials/shared/",
 )
+
 
 def surface_routes(router: Any) -> list[RouteRecord]:
     return [

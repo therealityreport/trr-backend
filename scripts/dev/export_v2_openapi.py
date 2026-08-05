@@ -61,9 +61,7 @@ def build_v2_openapi(source: dict[str, Any]) -> dict[str, Any]:
     paths = source.get("paths")
     if not isinstance(paths, dict):
         raise OpenAPIExportError("source OpenAPI document has no paths object")
-    selected_paths = {
-        path: value for path, value in paths.items() if path.startswith("/api/v2/")
-    }
+    selected_paths = {path: value for path, value in paths.items() if path.startswith("/api/v2/")}
     if not selected_paths:
         raise OpenAPIExportError("source OpenAPI document has no /api/v2 paths")
 
@@ -100,11 +98,7 @@ def build_v2_openapi(source: dict[str, Any]) -> dict[str, Any]:
         for tag in operation.get("tags", [])
         if isinstance(tag, str)
     }
-    selected_tags = [
-        tag
-        for tag in source.get("tags", [])
-        if isinstance(tag, dict) and tag.get("name") in used_tags
-    ]
+    selected_tags = [tag for tag in source.get("tags", []) if isinstance(tag, dict) and tag.get("name") in used_tags]
 
     document: dict[str, Any] = {
         "openapi": source.get("openapi", "3.1.0"),
@@ -121,12 +115,15 @@ def build_v2_openapi(source: dict[str, Any]) -> dict[str, Any]:
 
 
 def render_v2_openapi(source: dict[str, Any]) -> str:
-    return json.dumps(
-        build_v2_openapi(source),
-        ensure_ascii=False,
-        indent=2,
-        sort_keys=True,
-    ) + "\n"
+    return (
+        json.dumps(
+            build_v2_openapi(source),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
 
 
 def main() -> int:

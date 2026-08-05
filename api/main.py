@@ -632,9 +632,9 @@ from api.routers.v2 import admin_flashback as admin_flashback_v2  # noqa: E402
 from api.routers.v2 import admin_media as admin_media_v2  # noqa: E402
 from api.routers.v2 import admin_people_reads as admin_people_reads_v2  # noqa: E402
 from api.routers.v2 import admin_reddit_reads as admin_reddit_reads_v2  # noqa: E402
+from api.routers.v2 import admin_show_person_writes as admin_show_person_writes_v2  # noqa: E402
 from api.routers.v2 import admin_social_catalog_runs as admin_social_catalog_runs_v2  # noqa: E402
 from api.routers.v2 import admin_social_shared_sources as admin_social_shared_sources_v2  # noqa: E402
-from api.routers.v2 import admin_show_person_writes as admin_show_person_writes_v2  # noqa: E402
 from api.routers.v2 import admin_typography as admin_typography_v2  # noqa: E402
 from api.routers.v2 import core_cast_credit_reads as core_cast_credit_reads_v2  # noqa: E402
 from api.routers.v2 import core_show_reads as core_show_reads_v2  # noqa: E402

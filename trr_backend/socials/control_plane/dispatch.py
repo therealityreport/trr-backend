@@ -40,6 +40,8 @@ _LEGACY_EXPORT_NAMES = (
     "sync_newer_social_account_catalog",
     "sync_recent_social_account_catalog",
 )
+
+
 def _publish_provider_binding(name: str, value: Any) -> None:
     globals()[name] = value
 
@@ -68,6 +70,7 @@ def __getattr__(name: str) -> Any:
         _require_provider_ready()
         return globals()[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "SOCIAL_CATALOG_GAP_ANALYSIS_OPERATION_TYPE",

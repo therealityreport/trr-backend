@@ -1,5 +1,6 @@
 # ruff: noqa: F401, F403, F405, I001, UP037
 """Profile-scoped catalog read routes and shared catalog launch helpers."""
+
 from __future__ import annotations
 
 from fastapi import APIRouter
@@ -10,11 +11,13 @@ router = APIRouter()
 
 TWITTER_CATALOG_BACKFILL_LOOKBACK_DAYS = 365
 
+
 def _twitter_catalog_backfill_default_window(now: datetime | None = None) -> tuple[datetime, datetime]:
     end_at = now or datetime.now(tz=UTC)
     if end_at.tzinfo is None:
         end_at = end_at.replace(tzinfo=UTC)
     return end_at - timedelta(days=TWITTER_CATALOG_BACKFILL_LOOKBACK_DAYS), end_at
+
 
 def _finalize_catalog_backfill_launch_task(
     *,
@@ -153,6 +156,7 @@ def _finalize_catalog_backfill_launch_task(
     finally:
         _clear_account_profile_caches()
 
+
 def _resolve_local_catalog_inline_worker_count(*, result: Mapping[str, Any] | None, platform: str) -> int:
     selected_tasks = {
         str(item or "").strip().lower()
@@ -172,6 +176,7 @@ def _resolve_local_catalog_inline_worker_count(*, result: Mapping[str, Any] | No
         value = default_workers
     return _apply_local_inline_db_worker_budget(value)
 
+
 def _apply_local_inline_db_worker_budget(worker_count: int) -> int:
     try:
         requested_workers = int(worker_count or 1)
@@ -189,6 +194,7 @@ def _apply_local_inline_db_worker_budget(worker_count: int) -> int:
     available_worker_slots = max(1, pool_max - max(1, reserve_connections))
     return max(1, min(requested_workers, available_worker_slots))
 
+
 def _resolve_local_comments_inline_worker_count(*, result: Mapping[str, Any] | None) -> int:
     target_readiness = result.get("target_readiness") if isinstance(result, Mapping) else None
     comments_preview = target_readiness.get("comments_preview") if isinstance(target_readiness, Mapping) else None
@@ -202,6 +208,7 @@ def _resolve_local_comments_inline_worker_count(*, result: Mapping[str, Any] | N
     except (TypeError, ValueError):
         value = 1
     return _apply_local_inline_db_worker_budget(value)
+
 
 def _start_local_comments_inline_workers(
     *,
@@ -236,6 +243,7 @@ def _start_local_comments_inline_workers(
         worker_thread.start()
         worker_threads.append(worker_thread)
     return worker_threads
+
 
 def _start_deferred_comments_inline_followup(
     *,
@@ -316,6 +324,7 @@ def _start_deferred_comments_inline_followup(
     )
     return comments_run_id
 
+
 def _queue_catalog_backfill_finalize_task(
     *,
     background_tasks: BackgroundTasks,
@@ -363,6 +372,7 @@ def _queue_catalog_backfill_finalize_task(
         daemon=True,
     )
     thread.start()
+
 
 def _resolve_social_account_catalog_route_execution(
     *,
@@ -475,6 +485,7 @@ def _resolve_social_account_catalog_route_execution(
         "requires_modal_executor": requires_modal_executor,
     }
 
+
 def _build_catalog_worker_cap_transparency(result: Mapping[str, Any]) -> dict[str, Any]:
     """Surface the honest worker-cap truth from the adaptive worker plan.
 
@@ -528,6 +539,7 @@ def _build_catalog_worker_cap_transparency(result: Mapping[str, Any]) -> dict[st
 
     return transparency
 
+
 def _build_catalog_comments_skip_transparency(run_config: Mapping[str, Any]) -> dict[str, Any]:
     """Surface the precise, run-config-driven reason the comments stage was skipped.
 
@@ -546,6 +558,7 @@ def _build_catalog_comments_skip_transparency(run_config: Mapping[str, Any]) -> 
         "comments_skip_detail": skip.get("detail"),
         "comments_operator_action": skip.get("operator_action"),
     }
+
 
 def _finalize_social_account_catalog_route_response(
     *,
@@ -610,6 +623,7 @@ def _finalize_social_account_catalog_route_response(
         **_build_catalog_comments_skip_transparency(result),
     }
 
+
 class CatalogBackfillRequest(SourceScopedRequest):
     source_scope: Literal["bravo", "network", "creator", "community", "news"] = Field(default="network")
     date_start: datetime | None = None
@@ -640,8 +654,10 @@ class CatalogBackfillRequest(SourceScopedRequest):
         self.selected_tasks = deduped
         return self
 
+
 def _instagram_2025_backfill_apply_confirmation(run_id: str) -> str:
     return f"APPLY INSTAGRAM 2025 BACKFILL {run_id}"
+
 
 def _instagram_2025_backfill_apply_pending_metadata(run_id: str) -> dict[str, Any]:
     confirmation = _instagram_2025_backfill_apply_confirmation(run_id)
@@ -664,6 +680,7 @@ def _instagram_2025_backfill_apply_pending_metadata(run_id: str) -> dict[str, An
         },
     }
 
+
 def _instagram_backfill_requires_apply_confirmation(
     *,
     platform: str,
@@ -684,6 +701,7 @@ def _instagram_backfill_requires_apply_confirmation(
         return start_year <= 2025 <= end_year
     return start_year == 2025 or end_year == 2025
 
+
 def _attach_instagram_apply_metadata(result: Mapping[str, Any]) -> dict[str, Any]:
     run_id = str(result.get("run_id") or result.get("catalog_run_id") or "").strip()
     apply_metadata = _instagram_2025_backfill_apply_pending_metadata(run_id) if run_id else {}
@@ -695,18 +713,22 @@ def _attach_instagram_apply_metadata(result: Mapping[str, Any]) -> dict[str, Any
         "apply_run_id": run_id or None,
     }
 
+
 class CatalogSyncRecentRequest(SourceScopedRequest):
     source_scope: Literal["bravo", "network", "creator", "community", "news"] = Field(default="network")
     lookback_days: int = Field(default=1, ge=1, le=30)
     allow_inline_dev_fallback: bool = Field(default=False)
 
+
 class CatalogSyncNewerRequest(SourceScopedRequest):
     source_scope: Literal["bravo", "network", "creator", "community", "news"] = Field(default="network")
     allow_inline_dev_fallback: bool = Field(default=False)
 
+
 class CatalogResumeTailRequest(SourceScopedRequest):
     source_scope: Literal["bravo", "network", "creator", "community", "news"] = Field(default="network")
     allow_inline_dev_fallback: bool = Field(default=False)
+
 
 class CatalogRemediateDriftRequest(BaseModel):
     run_id: UUID | None = None
@@ -717,6 +739,7 @@ class CatalogRemediateDriftRequest(BaseModel):
     def normalize_source_scope(self) -> CatalogRemediateDriftRequest:
         self.source_scope = preserve_source_scope_param(self.source_scope, default="bravo")  # type: ignore[assignment]
         return self
+
 
 @router.get("/profiles/{platform}/{account_handle}/catalog/posts")
 def get_social_account_catalog_posts_route(
@@ -739,6 +762,7 @@ def get_social_account_catalog_posts_route(
         raise _value_error_to_bad_request(exc) from exc
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
+
 
 @router.get("/profiles/{platform}/{account_handle}/catalog/posts/{source_id}/detail")
 def get_social_account_catalog_post_detail_route(
@@ -765,6 +789,7 @@ def get_social_account_catalog_post_detail_route(
             source_id,
         )
         raise _to_social_read_http_exception(exc) from exc
+
 
 @router.get("/profiles/{platform}/{account_handle}/catalog/review-queue")
 def get_social_account_catalog_review_queue_route(
@@ -793,6 +818,7 @@ def get_social_account_catalog_review_queue_route(
             account_handle,
         )
         raise _to_social_read_http_exception(exc) from exc
+
 
 @router.get("/profiles/{platform}/{account_handle}/catalog/runs/{run_id}/progress")
 def get_social_account_catalog_run_progress_route(
@@ -836,6 +862,7 @@ def get_social_account_catalog_run_progress_route(
         )
         raise _to_social_read_http_exception(exc) from exc
 
+
 @router.get("/profiles/{platform}/{account_handle}/catalog/budget")
 def get_social_account_catalog_budget_decision_route(
     platform: str,
@@ -858,6 +885,7 @@ def get_social_account_catalog_budget_decision_route(
             account_handle,
         )
         raise _to_social_read_http_exception(exc) from exc
+
 
 @router.get("/profiles/{platform}/{account_handle}/catalog/runs/{run_id}/diagnostics")
 def get_social_account_catalog_run_diagnostics_route(
@@ -885,6 +913,7 @@ def get_social_account_catalog_run_diagnostics_route(
         )
         raise _to_social_read_http_exception(exc) from exc
 
+
 @router.get("/profiles/{platform}/{account_handle}/catalog/verification")
 def get_social_account_catalog_verification_route(
     platform: str,
@@ -910,6 +939,7 @@ def get_social_account_catalog_verification_route(
             run_id,
         )
         raise _internal_error_response(exc) from exc
+
 
 @router.get("/profiles/{platform}/{account_handle}/catalog/gap-analysis")
 def get_social_account_catalog_gap_analysis_route(
@@ -941,5 +971,6 @@ def get_social_account_catalog_gap_analysis_route(
             account_handle,
         )
         raise _to_social_read_http_exception(exc) from exc
+
 
 __all__ = [name for name in globals() if not name.startswith("__")]

@@ -756,11 +756,7 @@ def resolve_instagram_auth_session(
                     require_validation=require_validation,
                 )
 
-        if (
-            require_validation
-            and not validated
-            and validation_category not in {"validation_skipped"}
-        ):
+        if require_validation and not validated and validation_category not in {"validation_skipped"}:
             if browser_candidate is not None and selected.source != "browser_session":
                 validated_browser, reason_browser, category_browser, stale_ok_browser = _validate_cookies_via_graphql(
                     browser_candidate.cookies,

@@ -170,16 +170,8 @@ _EXPORT_GROUPS: dict[str, tuple[str, ...]] = {
         "update_worker_heartbeat",
     ),
 }
-_EXPORT_MODULES = {
-    name: module_name
-    for module_name, names in _EXPORT_GROUPS.items()
-    for name in names
-}
-__all__ = [
-    name
-    for names in _EXPORT_GROUPS.values()
-    for name in names
-]
+_EXPORT_MODULES = {name: module_name for module_name, names in _EXPORT_GROUPS.items() for name in names}
+__all__ = [name for names in _EXPORT_GROUPS.values() for name in names]
 
 
 def __getattr__(name: str) -> Any:

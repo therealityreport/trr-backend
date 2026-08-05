@@ -1,5 +1,6 @@
 # ruff: noqa: F401, F403, F405
 """Social landing-summary routes and shared legacy-scrape helpers."""
+
 from __future__ import annotations
 
 from fastapi import APIRouter
@@ -20,18 +21,22 @@ _SOCIAL_LANDING_PROGRESS_ROLLUP_CACHE: dict[Any, tuple[float, dict[str, Any]]] =
 
 _SOCIAL_LANDING_PROGRESS_ROLLUP_CACHE_LOCK = Lock()
 
+
 class SocialLandingSocialBladeRowsRequest(BaseModel):
     platforms: list[str] = Field(default_factory=list, max_length=8)
     person_ids: list[str] = Field(default_factory=list, max_length=1000)
     account_handles: list[str] = Field(default_factory=list, max_length=5000)
 
+
 class SocialLandingSocialBladeProgressCountsRequest(BaseModel):
     platforms: list[str] = Field(default_factory=list, max_length=5000)
     account_handles: list[str] = Field(default_factory=list, max_length=5000)
 
+
 class SocialLandingProgressRollupRequest(BaseModel):
     platforms: list[str] = Field(default_factory=list, max_length=5000)
     account_handles: list[str] = Field(default_factory=list, max_length=5000)
+
 
 def _normalize_landing_progress_targets(
     platforms: list[str],
@@ -55,11 +60,14 @@ def _normalize_landing_progress_targets(
         targets.append(key)
     return targets
 
+
 def _landing_progress_cache_key(targets: list[tuple[str, str]]) -> tuple[Any, ...]:
     return tuple(sorted(targets))
 
+
 def _sql_json_text_non_negative_int(expr: str) -> str:
     return f"coalesce(nullif(regexp_replace(coalesce({expr}, ''), '[^0-9]', '', 'g'), '')::bigint, 0)"
+
 
 def _instagram_reported_comments_sql(alias: str) -> str:
     safe_alias = alias.strip() or "p"
@@ -84,6 +92,7 @@ def _instagram_reported_comments_sql(alias: str) -> str:
         + ", ".join(_sql_json_text_non_negative_int(candidate) for candidate in raw_candidates)
         + ", 0)"
     )
+
 
 def _social_landing_reddit_dashboard_summary() -> tuple[dict[str, int], list[dict[str, Any]]]:
     from trr_backend.repositories.admin_reddit_reads import list_reddit_communities
@@ -126,6 +135,7 @@ def _social_landing_reddit_dashboard_summary() -> tuple[dict[str, int], list[dic
             },
             omitted_sections,
         )
+
 
 def _load_social_auth_or_503(
     *,
@@ -170,6 +180,7 @@ def _load_social_auth_or_503(
         )
     return credentials
 
+
 @router.get("/landing-summary")
 def get_social_landing_summary(_: InternalAdminUser = None) -> dict[str, Any]:
     from trr_backend.repositories.covered_shows import list_covered_shows
@@ -187,6 +198,7 @@ def get_social_landing_summary(_: InternalAdminUser = None) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to build social landing summary")
         raise _to_social_read_http_exception(exc) from exc
+
 
 @router.post("/landing-socialblade-rows")
 def post_social_landing_socialblade_rows(
@@ -253,6 +265,7 @@ def post_social_landing_socialblade_rows(
         logger.exception("Failed to read social landing SocialBlade rows")
         raise _to_social_read_http_exception(exc) from exc
 
+
 @router.post("/landing-socialblade-progress-counts")
 def post_social_landing_socialblade_progress_counts(
     payload: SocialLandingSocialBladeProgressCountsRequest,
@@ -303,6 +316,7 @@ def post_social_landing_socialblade_progress_counts(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to read social landing SocialBlade progress counts")
         raise _to_social_read_http_exception(exc) from exc
+
 
 @router.post("/landing-progress-rollup")
 def post_social_landing_progress_rollup(
@@ -642,5 +656,6 @@ def post_social_landing_progress_rollup(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to read social landing progress rollup")
         raise _to_social_read_http_exception(exc) from exc
+
 
 __all__ = [name for name in globals() if not name.startswith("__")]

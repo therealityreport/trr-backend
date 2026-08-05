@@ -173,10 +173,7 @@ async def _parse_show_batch_request(request: Request) -> ShowExternalIdsBatchReq
             request,
             code="INVALID_SHOW_EXTERNAL_IDS_BATCH_REQUEST",
             status=400,
-            message=(
-                f"show_ids must contain 1 to {MAX_EXTERNAL_ID_BATCH_SIZE} UUIDs "
-                "and no extra fields are allowed."
-            ),
+            message=(f"show_ids must contain 1 to {MAX_EXTERNAL_ID_BATCH_SIZE} UUIDs and no extra fields are allowed."),
         ) from error
 
 
@@ -206,9 +203,7 @@ def get_person_external_ids(request: Request, _: InternalAdminUser) -> PersonExt
             message="Person not found",
         )
     try:
-        return PersonExternalIdsResponseV2.model_validate(
-            {"person_id": person_id, "external_ids": external_ids}
-        )
+        return PersonExternalIdsResponseV2.model_validate({"person_id": person_id, "external_ids": external_ids})
     except Exception as error:
         raise _unexpected_problem(error, request, operation="person-detail-response") from error
 

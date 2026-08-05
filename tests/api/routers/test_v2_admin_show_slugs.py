@@ -151,9 +151,7 @@ def test_v2_exact_show_slug_database_and_unexpected_failures_are_safe_problems(
         )
 
     monkeypatch.setattr(show_slug_reads, "get_show_by_exact_slug", unavailable)
-    unavailable_response = TestClient(app).get(
-        "/api/v2/admin/shows/exact-slug/rhobh"
-    )
+    unavailable_response = TestClient(app).get("/api/v2/admin/shows/exact-slug/rhobh")
 
     assert unavailable_response.status_code == 503
     assert unavailable_response.json()["detail"]["code"] == "DATABASE_SERVICE_UNAVAILABLE"
@@ -163,9 +161,7 @@ def test_v2_exact_show_slug_database_and_unexpected_failures_are_safe_problems(
         raise RuntimeError("secret exact-slug query")
 
     monkeypatch.setattr(show_slug_reads, "get_show_by_exact_slug", failed)
-    failed_response = TestClient(app).get(
-        "/api/v2/admin/shows/exact-slug/rhobh"
-    )
+    failed_response = TestClient(app).get("/api/v2/admin/shows/exact-slug/rhobh")
 
     assert failed_response.status_code == 500
     assert failed_response.json()["detail"]["code"] == "SHOW_SLUG_REQUEST_FAILED"
@@ -212,9 +208,7 @@ def test_v2_exact_show_slug_openapi_is_strict_and_preserves_admin_auth() -> None
     assert operation["security"] == [{"InternalAdminBearer": []}]
     assert set(operation["responses"]) == {"200", "400", "404", "500", "503"}
     assert "422" not in operation["responses"]
-    assert [(parameter["name"], parameter["in"]) for parameter in operation["parameters"]] == [
-        ("slug", "path")
-    ]
+    assert [(parameter["name"], parameter["in"]) for parameter in operation["parameters"]] == [("slug", "path")]
     assert "post" not in schema["paths"][PATH]
 
     response_schema = schema["components"]["schemas"]["ExactShowSlugResponseV2"]

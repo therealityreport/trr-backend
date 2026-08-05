@@ -366,10 +366,7 @@ def test_refresh_owns_override_cache_and_lock_state(
         assert auth_runtime._read_state("_instagram_cookie_validation_cache") is None
         assert legacy_core._instagram_cookie_runtime_override == refreshed
         assert legacy_core._instagram_cookie_validation_cache is None
-        assert (
-            legacy_core._instagram_cookie_refresh_lock
-            is auth_runtime._instagram_cookie_refresh_lock
-        )
+        assert legacy_core._instagram_cookie_refresh_lock is auth_runtime._instagram_cookie_refresh_lock
         assert resolver_updates == [refreshed]
     finally:
         auth_runtime._write_state("_instagram_cookie_validation_cache", None)

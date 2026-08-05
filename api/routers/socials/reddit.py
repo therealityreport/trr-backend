@@ -10,6 +10,7 @@ from ._surfaces import RouteRecord, routes_matching
 
 router = APIRouter()
 
+
 def _reddit_refresh_worker_health_payload(
     *,
     healthy: bool,
@@ -27,6 +28,7 @@ def _reddit_refresh_worker_health_payload(
     if isinstance(extra, dict):
         payload.update(extra)
     return payload
+
 
 class RedditRefreshRunRequest(BaseModel):
     community_id: UUID
@@ -60,6 +62,7 @@ class RedditRefreshRunRequest(BaseModel):
     client_session_id: str | None = Field(default=None, max_length=200)
     client_workflow_id: str | None = Field(default=None, max_length=200)
 
+
 class RedditRefreshBackfillRequest(BaseModel):
     community_id: UUID
     season_id: UUID
@@ -67,11 +70,13 @@ class RedditRefreshBackfillRequest(BaseModel):
     mode: Literal["sync_posts", "sync_details", "sync_full"] = Field(default="sync_full")
     detail_refresh: bool = Field(default=False)
 
+
 class RedditCacheBulkRequest(BaseModel):
     community_id: UUID
     season_id: UUID
     period_keys: list[str] = Field(default_factory=list, max_length=25)
     container_keys: list[str] = Field(default_factory=list, max_length=25)
+
 
 def _start_reddit_refresh_run_from_serialized_payload(
     *,
@@ -189,8 +194,10 @@ def _start_reddit_refresh_run_from_serialized_payload(
         "execution_backend_canonical": execution_backend,
     }
 
+
 class AutoCategorizeFlairsRequest(BaseModel):
     show_id: UUID
+
 
 def serialize_reddit_refresh_payload(payload: Any) -> dict[str, Any]:
     data = payload.model_dump()
@@ -217,8 +224,10 @@ def serialize_reddit_refresh_payload(payload: Any) -> dict[str, Any]:
     data["season_id"] = str(payload.season_id)
     return data
 
+
 def normalize_reddit_backfill_container_keys(values: list[str]) -> list[str]:
     return [item.strip() for item in values if isinstance(item, str) and item.strip()]
+
 
 def serialize_reddit_backfill_payload(payload: Any) -> dict[str, Any]:
     return {
@@ -228,6 +237,7 @@ def serialize_reddit_backfill_payload(payload: Any) -> dict[str, Any]:
         "mode": payload.mode,
         "detail_refresh": bool(payload.detail_refresh),
     }
+
 
 @router.post("/reddit/runs")
 async def start_reddit_refresh_run(
@@ -253,6 +263,7 @@ async def start_reddit_refresh_run(
             payload.period_key,
         )
         raise _internal_error_response(exc) from exc
+
 
 @router.post("/reddit/runs/backfill")
 async def backfill_reddit_refresh_runs(
@@ -298,6 +309,7 @@ async def backfill_reddit_refresh_runs(
         )
         raise _internal_error_response(exc) from exc
 
+
 @router.get("/reddit/runs")
 async def list_reddit_refresh_runs(
     community_id: UUID | None = Query(default=None),
@@ -332,6 +344,7 @@ async def list_reddit_refresh_runs(
         )
         raise _internal_error_response(exc) from exc
 
+
 @router.get("/reddit/runs/{run_id}")
 async def get_reddit_refresh_run(run_id: UUID, _: InternalAdminUser = None) -> dict[str, Any]:
     from trr_backend.repositories.reddit_refresh import get_refresh_run
@@ -343,6 +356,7 @@ async def get_reddit_refresh_run(run_id: UUID, _: InternalAdminUser = None) -> d
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch reddit refresh run: run_id=%s", run_id)
         raise _internal_error_response(exc) from exc
+
 
 @router.get("/reddit/cache")
 async def get_reddit_cached_period_payload(
@@ -393,6 +407,7 @@ async def get_reddit_cached_period_payload(
             period_key,
         )
         raise _internal_error_response(exc) from exc
+
 
 @router.post("/reddit/cache/bulk")
 async def get_reddit_cached_period_payload_bulk(
@@ -519,6 +534,7 @@ async def get_reddit_cached_period_payload_bulk(
         )
         raise _internal_error_response(exc) from exc
 
+
 @router.get("/reddit/analytics/community/{community_id}/summary")
 async def get_reddit_community_analytics_summary(
     community_id: UUID,
@@ -549,6 +565,7 @@ async def get_reddit_community_analytics_summary(
             season_id,
         )
         raise _internal_error_response(exc) from exc
+
 
 @router.get("/reddit/analytics/community/{community_id}/shows")
 async def get_reddit_community_analytics_shows(
@@ -581,6 +598,7 @@ async def get_reddit_community_analytics_shows(
         )
         raise _internal_error_response(exc) from exc
 
+
 @router.get("/reddit/analytics/community/{community_id}/flairs")
 async def get_reddit_community_analytics_flairs(
     community_id: UUID,
@@ -611,6 +629,7 @@ async def get_reddit_community_analytics_flairs(
             season_id,
         )
         raise _internal_error_response(exc) from exc
+
 
 @router.get("/reddit/analytics/community/{community_id}/flairs/{flair_key}")
 async def get_reddit_community_analytics_flair_detail(
@@ -651,6 +670,7 @@ async def get_reddit_community_analytics_flair_detail(
             season_id,
         )
         raise _internal_error_response(exc) from exc
+
 
 @router.get("/reddit/analytics/community/{community_id}/posts")
 async def get_reddit_community_analytics_posts(
@@ -696,6 +716,7 @@ async def get_reddit_community_analytics_posts(
         )
         raise _internal_error_response(exc) from exc
 
+
 @router.post("/reddit/communities/{community_id}/auto-categorize-flairs")
 async def auto_categorize_community_flairs(
     community_id: UUID,
@@ -719,6 +740,7 @@ async def auto_categorize_community_flairs(
         logger.exception("Failed to auto-categorize flairs: community_id=%s show_id=%s", community_id, body.show_id)
         raise _internal_error_response(exc) from exc
 
+
 @router.post("/reddit/auto-categorize-flairs-batch")
 async def auto_categorize_flairs_batch(
     body: AutoCategorizeFlairsRequest,
@@ -737,10 +759,13 @@ async def auto_categorize_flairs_batch(
         logger.exception("Failed to batch auto-categorize flairs: show_id=%s", body.show_id)
         raise _internal_error_response(exc) from exc
 
+
 ROUTE_PREFIXES = ("/admin/socials/reddit/",)
+
 
 def surface_routes(router: Any) -> list[RouteRecord]:
     return routes_matching(router, ROUTE_PREFIXES)
+
 
 _serialize_reddit_refresh_payload = serialize_reddit_refresh_payload
 _serialize_reddit_backfill_payload = serialize_reddit_backfill_payload

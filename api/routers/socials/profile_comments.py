@@ -1,5 +1,6 @@
 # ruff: noqa: F401, F403, F405, I001
 """Profile-scoped comment read, audit, scrape, and run-control routes."""
+
 from __future__ import annotations
 
 from fastapi import APIRouter
@@ -8,6 +9,7 @@ from ._shared import *
 from .profile_reads import *
 
 router = APIRouter()
+
 
 @router.get("/profiles/{platform}/{account_handle}/comments")
 def get_social_account_profile_comments_route(
@@ -106,6 +108,7 @@ def get_social_account_profile_comments_route(
         )
         raise _to_social_read_http_exception(exc) from exc
 
+
 @router.get("/profiles/{platform}/{account_handle}/comments/audit-cursor-retries")
 def get_social_account_comments_audit_cursor_retries_route(
     platform: str,
@@ -146,6 +149,7 @@ def get_social_account_comments_audit_cursor_retries_route(
         raise _value_error_to_bad_request(exc) from exc
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
+
 
 @router.post("/profiles/{platform}/{account_handle}/comments/audit-cursor-retries")
 async def post_social_account_comments_audit_cursor_retries_route(
@@ -204,6 +208,7 @@ async def post_social_account_comments_audit_cursor_retries_route(
             status_code=400,
             detail={"code": exc.code, "message": str(exc), **jsonable_encoder(getattr(exc, "detail", {}) or {})},
         ) from exc
+
 
 @router.post("/profiles/{platform}/{account_handle}/comments/scrape")
 async def post_social_account_comments_scrape_route(
@@ -348,6 +353,7 @@ async def post_social_account_comments_scrape_route(
             },
         ) from exc
 
+
 @router.get("/profiles/{platform}/{account_handle}/comments/runs/{run_id}/progress")
 def get_social_account_comments_scrape_progress_route(
     platform: str,
@@ -377,6 +383,7 @@ def get_social_account_comments_scrape_progress_route(
         raise _value_error_to_bad_request(exc) from exc
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
+
 
 @router.post("/profiles/{platform}/{account_handle}/comments/runs/{run_id}/rebalance")
 def post_social_account_comments_run_rebalance_route(
@@ -408,6 +415,7 @@ def post_social_account_comments_run_rebalance_route(
         raise _value_error_to_bad_request(exc) from exc
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
+
 
 @router.post("/profiles/{platform}/{account_handle}/comments/runs/{run_id}/resume")
 def post_social_account_comments_run_resume_route(
@@ -456,6 +464,7 @@ def post_social_account_comments_run_resume_route(
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
 
+
 @router.post("/profiles/{platform}/{account_handle}/comments/runs/{run_id}/repair-auth")
 async def post_social_account_comments_run_repair_auth_route(
     platform: str,
@@ -495,6 +504,7 @@ async def post_social_account_comments_run_repair_auth_route(
         raise _value_error_to_bad_request(exc) from exc
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
+
 
 @router.post("/profiles/{platform}/{account_handle}/comments/runs/{run_id}/public-recovery")
 async def post_social_account_comments_run_public_recovery_route(
@@ -551,6 +561,7 @@ async def post_social_account_comments_run_public_recovery_route(
         raise _value_error_to_bad_request(exc) from exc
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
+
 
 @router.post("/profiles/{platform}/{account_handle}/comments/runs/{run_id}/authenticated-followup")
 async def post_social_account_comments_run_authenticated_followup_route(
@@ -611,6 +622,7 @@ async def post_social_account_comments_run_authenticated_followup_route(
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
 
+
 @router.post("/profiles/{platform}/{account_handle}/comments/runs/{run_id}/cancel")
 def post_social_account_comments_run_cancel_route(
     platform: str,
@@ -633,6 +645,7 @@ def post_social_account_comments_run_cancel_route(
         raise _value_error_to_bad_request(exc) from exc
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
+
 
 @router.post("/profiles/{platform}/{account_handle}/comments/runs/{run_id}/guarded-restart")
 def post_social_account_comments_run_guarded_restart_route(
@@ -685,6 +698,7 @@ def post_social_account_comments_run_guarded_restart_route(
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
 
+
 @router.post("/profiles/{platform}/{account_handle}/comments/runs/{run_id}/jobs/{job_id}/cancel")
 def post_social_account_comments_job_cancel_route(
     platform: str,
@@ -709,5 +723,6 @@ def post_social_account_comments_job_cancel_route(
         raise _value_error_to_bad_request(exc) from exc
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
+
 
 __all__ = [name for name in globals() if not name.startswith("__")]

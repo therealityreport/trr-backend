@@ -11,12 +11,23 @@ from trr_backend.socials.provider_registry import LateNamespaceProvider
 _IMPORTED_CORE_NAMES: set[str] = set()
 _LOCAL_ROOM_NAMES: set[str] = set()
 _PROVIDER_BRIDGE_NAMES = {
-    "_build_drivers", "_build_ingest_shard_schedule", "_normalize_week_totals_payload",
-    "_resolve_depth_defaults", "_rows_for_platform", "_rule_based_sentiment_for_text",
-    "_text_contains_any_term", "_text_is_trailer_marker", "_threads_post_matches_show_terms",
-    "_video_matches_season", "_week_detail_instagram", "_week_detail_tiktok",
-    "_week_summary_fast_threads", "_week_summary_fast_tiktok", "_week_summary_fast_youtube",
-    "_youtube_post_matches_show_terms", "_youtube_title_is_cross_show_excluded",
+    "_build_drivers",
+    "_build_ingest_shard_schedule",
+    "_normalize_week_totals_payload",
+    "_resolve_depth_defaults",
+    "_rows_for_platform",
+    "_rule_based_sentiment_for_text",
+    "_text_contains_any_term",
+    "_text_is_trailer_marker",
+    "_threads_post_matches_show_terms",
+    "_video_matches_season",
+    "_week_detail_instagram",
+    "_week_detail_tiktok",
+    "_week_summary_fast_threads",
+    "_week_summary_fast_tiktok",
+    "_week_summary_fast_youtube",
+    "_youtube_post_matches_show_terms",
+    "_youtube_title_is_cross_show_excluded",
     "_youtube_video_matches_show_terms",
     "sentiment_for_text",
 }
@@ -3838,28 +3849,30 @@ def pdf_filename(show_id: str, season_number: int, generated_at: datetime | None
     return f"social_report_{show_id}_s{season_number}_{ts}.pdf"
 
 
-_LOCAL_ROOM_NAMES.update({
-    "get_week_live_health_snapshot",
-    "get_analytics",
-    "get_comments_coverage",
-    "get_mirror_coverage",
-    "get_week_detail",
-    "get_week_detail_summary_fast",
-    "get_week_detail_summary",
-    "get_tiktok_overview",
-    "get_tiktok_cast_members",
-    "get_tiktok_hashtags",
-    "get_tiktok_sounds",
-    "get_tiktok_content_health",
-    "get_tiktok_sound_detail",
-    "get_tiktok_sound_posts",
-    "get_tiktok_post_detail",
-    "get_tiktok_sentiment_trends",
-    "get_post_comments",
-    "build_csv",
-    "build_pdf",
-    "pdf_filename",
-})
+_LOCAL_ROOM_NAMES.update(
+    {
+        "get_week_live_health_snapshot",
+        "get_analytics",
+        "get_comments_coverage",
+        "get_mirror_coverage",
+        "get_week_detail",
+        "get_week_detail_summary_fast",
+        "get_week_detail_summary",
+        "get_tiktok_overview",
+        "get_tiktok_cast_members",
+        "get_tiktok_hashtags",
+        "get_tiktok_sounds",
+        "get_tiktok_content_health",
+        "get_tiktok_sound_detail",
+        "get_tiktok_sound_posts",
+        "get_tiktok_post_detail",
+        "get_tiktok_sentiment_trends",
+        "get_post_comments",
+        "build_csv",
+        "build_pdf",
+        "pdf_filename",
+    }
+)
 _LOCAL_ROOM_FUNCTIONS.update({_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES})
 __all__ = [
     "get_week_live_health_snapshot",

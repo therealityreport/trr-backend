@@ -1648,9 +1648,11 @@ def get_social_account_catalog_run_progress(
     return payload
 
 
-_LOCAL_ROOM_NAMES.update({
-    "get_social_account_catalog_run_progress",
-})
+_LOCAL_ROOM_NAMES.update(
+    {
+        "get_social_account_catalog_run_progress",
+    }
+)
 _LOCAL_ROOM_FUNCTIONS.update({_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES})
 __all__ = [
     "get_social_account_catalog_run_progress",

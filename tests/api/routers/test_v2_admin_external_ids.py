@@ -179,9 +179,7 @@ def test_v2_external_id_database_and_unexpected_failures_are_safe_problems(
         raise DatabaseServiceUnavailableError("secret database topology", reason="pool_capacity")
 
     monkeypatch.setattr(external_id_reads, "get_person_external_ids", unavailable)
-    unavailable_response = TestClient(app).get(
-        f"/api/v2/admin/people/{PERSON_A}/external-ids"
-    )
+    unavailable_response = TestClient(app).get(f"/api/v2/admin/people/{PERSON_A}/external-ids")
     assert unavailable_response.status_code == 503
     assert unavailable_response.json()["detail"]["code"] == "DATABASE_SERVICE_UNAVAILABLE"
     assert "secret database topology" not in unavailable_response.text
@@ -241,20 +239,20 @@ def test_v2_external_id_openapi_is_explicit_bounded_and_has_no_extra_routes() ->
 
     detail_operation = schema["paths"]["/api/v2/admin/people/{person_id}/external-ids"]["get"]
     assert "404" in detail_operation["responses"]
-    assert {
-        (parameter["name"], parameter["in"])
-        for parameter in detail_operation["parameters"]
-    } == {("person_id", "path"), ("include_inactive", "query")}
+    assert {(parameter["name"], parameter["in"]) for parameter in detail_operation["parameters"]} == {
+        ("person_id", "path"),
+        ("include_inactive", "query"),
+    }
     assert "put" not in schema["paths"]["/api/v2/admin/people/{person_id}/external-ids"]
     assert "get" not in schema["paths"]["/api/v2/admin/people/external-ids/batch"]
     assert "get" not in schema["paths"]["/api/v2/admin/shows/external-ids/batch"]
 
-    person_batch_schema = schema["paths"]["/api/v2/admin/people/external-ids/batch"]["post"][
-        "requestBody"
-    ]["content"]["application/json"]["schema"]
-    show_batch_schema = schema["paths"]["/api/v2/admin/shows/external-ids/batch"]["post"][
-        "requestBody"
-    ]["content"]["application/json"]["schema"]
+    person_batch_schema = schema["paths"]["/api/v2/admin/people/external-ids/batch"]["post"]["requestBody"]["content"][
+        "application/json"
+    ]["schema"]
+    show_batch_schema = schema["paths"]["/api/v2/admin/shows/external-ids/batch"]["post"]["requestBody"]["content"][
+        "application/json"
+    ]["schema"]
     assert person_batch_schema["additionalProperties"] is False
     assert show_batch_schema["additionalProperties"] is False
     assert person_batch_schema["properties"]["person_ids"]["maxItems"] == MAX_EXTERNAL_ID_BATCH_SIZE

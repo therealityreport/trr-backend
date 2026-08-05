@@ -85,9 +85,7 @@ def post_to_payload(post: Any) -> dict[str, Any]:
         "url": str(_get_value(post, "url", "") or ""),
         "thumbnail_url": str(_get_value(post, "thumbnail_url", "") or "") or None,
         "media_urls": [
-            str(url).strip()
-            for url in (_get_value(post, "media_urls", []) or [])
-            if str(url or "").strip()
+            str(url).strip() for url in (_get_value(post, "media_urls", []) or []) if str(url or "").strip()
         ],
         "posted_at": _timestamp_to_iso(_get_value(post, "posted_at")),
         "reactions": dict(_get_value(post, "reactions", {}) or {}),

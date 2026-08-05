@@ -68,9 +68,7 @@ def test_week_window_leaf_is_import_neutral_and_unconfigured_in_fresh_interprete
 def test_production_composition_imports_register_resolver_in_fresh_interpreter(
     composition_import: str,
 ) -> None:
-    result = _run_fresh_interpreter(
-        "from trr_backend.socials import windowing\n" + textwrap.dedent(composition_import)
-    )
+    result = _run_fresh_interpreter("from trr_backend.socials import windowing\n" + textwrap.dedent(composition_import))
 
     assert result.returncode == 0, result.stderr or result.stdout
 

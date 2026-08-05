@@ -23,6 +23,7 @@ register_provider_publication_callback = _PROVIDER.register_module_publication_c
 adopt_published(_PROVIDER, _published)
 del _published
 
+
 def _call_extracted_override(name: str, local_impl: Any, /, *args: Any, **kwargs: Any) -> Any:
     candidate = getattr(legacy, name, None)
     if callable(candidate) and not getattr(candidate, "__trr_delegates_to_control_plane__", False):

@@ -746,7 +746,7 @@ def test_persist_instagram_posts_persists_inline_comment_samples(
                         "ownerUsername": "otherviewer",
                     }
                 ],
-            }
+            },
         ],
         run_id="run-1",
         job_id="job-1",

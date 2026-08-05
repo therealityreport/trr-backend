@@ -59,8 +59,7 @@ _PUBLIC_PROVIDER_ALIASES = {
     "shared_account_catalog_requires_modal_executor": "_shared_account_catalog_requires_modal_executor",
 }
 _PROVIDER_BINDING_SOURCES = _PROVIDER_BINDINGS | {
-    alias: _PROVIDER_BINDINGS[source]
-    for alias, source in _PUBLIC_PROVIDER_ALIASES.items()
+    alias: _PROVIDER_BINDINGS[source] for alias, source in _PUBLIC_PROVIDER_ALIASES.items()
 }
 
 

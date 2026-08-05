@@ -10,8 +10,10 @@ from ._surfaces import RouteRecord, routes_matching
 
 router = APIRouter()
 
+
 class CancelStuckJobsRequest(BaseModel):
     job_ids: list[UUID] | None = Field(default=None, max_length=500)
+
 
 class RecoverStaleMediaMirrorJobsRequest(BaseModel):
     run_id: UUID
@@ -21,6 +23,7 @@ class RecoverStaleMediaMirrorJobsRequest(BaseModel):
     dispatch_limit: int = Field(default=8, ge=1, le=250)
     skip_dispatch: bool = Field(default=False)
     confirm_recovery: str
+
 
 class DrainMediaMirrorAccountRequest(BaseModel):
     run_id: UUID
@@ -32,20 +35,25 @@ class DrainMediaMirrorAccountRequest(BaseModel):
     dry_run: bool = Field(default=False)
     confirm_drain: str
 
+
 class DismissRecentFailuresRequest(BaseModel):
     job_ids: list[UUID] = Field(default_factory=list, max_length=500)
     dismiss_all_visible: bool = False
 
+
 class ResetSocialIngestHealthRequest(BaseModel):
     pass
 
+
 class PurgeInactiveWorkersRequest(BaseModel):
     stale_after_seconds: int | None = Field(default=None, ge=5, le=86_400)
+
 
 class JobDebugRequest(BaseModel):
     apply_patch: bool = Field(default=False)
     confirm_apply: bool = Field(default=False)
     include_context: bool = Field(default=True)
+
 
 @router.get("/ingest/worker-health")
 def get_social_ingest_worker_health(_: InternalAdminUser = None) -> dict:
@@ -67,6 +75,7 @@ def get_social_ingest_worker_health(_: InternalAdminUser = None) -> dict:
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch social ingest worker health")
         raise _to_social_read_http_exception(exc) from exc
+
 
 @router.get("/ingest/backfill-health")
 def get_social_ingest_backfill_health(
@@ -107,6 +116,7 @@ def get_social_ingest_backfill_health(
         logger.exception("Failed to fetch social ingest backfill health")
         raise _to_social_read_http_exception(exc) from exc
 
+
 @router.get("/ingest/workers/{worker_id}/detail")
 def get_social_ingest_worker_detail(worker_id: str, _: InternalAdminUser = None) -> dict[str, Any]:
     from trr_backend.socials.control_plane.queue_status import _legacy_repo
@@ -123,6 +133,7 @@ def get_social_ingest_worker_detail(worker_id: str, _: InternalAdminUser = None)
         logger.exception("Failed to fetch social ingest worker detail: worker_id=%s", worker_id)
         raise _internal_error_response(exc) from exc
 
+
 @router.post("/ingest/workers/purge-inactive")
 def purge_social_ingest_inactive_workers(
     payload: PurgeInactiveWorkersRequest | None = None,
@@ -135,6 +146,7 @@ def purge_social_ingest_inactive_workers(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to purge inactive social ingest workers")
         raise _internal_error_response(exc) from exc
+
 
 @router.get("/ingest/queue-status")
 def get_social_ingest_queue_status(
@@ -170,6 +182,7 @@ def get_social_ingest_queue_status(
         logger.exception("Failed to fetch social ingest queue status")
         raise _to_social_read_http_exception(exc) from exc
 
+
 @router.post("/ingest/stuck-jobs/cancel")
 def cancel_social_ingest_stuck_jobs(
     payload: CancelStuckJobsRequest | None = None,
@@ -188,6 +201,7 @@ def cancel_social_ingest_stuck_jobs(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to cancel stuck social ingest jobs")
         raise _internal_error_response(exc) from exc
+
 
 @router.post("/ingest/media-mirror/recover-stale")
 def recover_stale_social_media_mirror_jobs(
@@ -245,6 +259,7 @@ def recover_stale_social_media_mirror_jobs(
         logger.exception("Failed to recover stale social media mirror jobs")
         raise _internal_error_response(exc) from exc
 
+
 @router.post("/ingest/media-mirror/drain-account")
 def drain_social_media_mirror_account_jobs(
     payload: DrainMediaMirrorAccountRequest,
@@ -280,6 +295,7 @@ def drain_social_media_mirror_account_jobs(
         logger.exception("Failed to drain social media mirror account jobs")
         raise _internal_error_response(exc) from exc
 
+
 @router.post("/ingest/dispatch-blocked-jobs/cancel")
 def cancel_social_ingest_dispatch_blocked_jobs(
     payload: CancelStuckJobsRequest | None = None,
@@ -299,6 +315,7 @@ def cancel_social_ingest_dispatch_blocked_jobs(
         logger.exception("Failed to cancel dispatch-blocked social ingest jobs")
         raise _internal_error_response(exc) from exc
 
+
 @router.post("/ingest/active-jobs/cancel")
 def cancel_social_ingest_active_jobs(
     user: InternalAdminUser = None,
@@ -312,6 +329,7 @@ def cancel_social_ingest_active_jobs(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to cancel active social ingest jobs")
         raise _internal_error_response(exc) from exc
+
 
 @router.post("/ingest/recent-failures/dismiss")
 def dismiss_social_ingest_recent_failures(
@@ -333,6 +351,7 @@ def dismiss_social_ingest_recent_failures(
         logger.exception("Failed to dismiss recent social ingest failures")
         raise _internal_error_response(exc) from exc
 
+
 @router.post("/ingest/reset-health")
 def reset_social_ingest_health_route(
     payload: ResetSocialIngestHealthRequest | None = None,
@@ -348,6 +367,7 @@ def reset_social_ingest_health_route(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to reset social ingest health")
         raise _internal_error_response(exc) from exc
+
 
 @router.post("/ingest/jobs/{job_id}/debug")
 def debug_social_ingest_job(
@@ -376,6 +396,7 @@ def debug_social_ingest_job(
         logger.exception("Failed to debug social ingest job: job_id=%s", job_id)
         raise _internal_error_response(exc) from exc
 
+
 @router.get("/ingest/health-dot")
 def get_social_ingest_health_dot(_: InternalAdminUser = None) -> dict[str, Any]:
     from trr_backend.socials.control_plane.queue_status import _legacy_repo
@@ -395,6 +416,7 @@ def get_social_ingest_health_dot(_: InternalAdminUser = None) -> dict[str, Any]:
         logger.exception("Failed to fetch social ingest health dot payload")
         raise _internal_error_response(exc) from exc
 
+
 @router.get("/live-status")
 def get_social_live_status(_: InternalAdminUser = None) -> dict[str, Any]:
     try:
@@ -402,6 +424,7 @@ def get_social_live_status(_: InternalAdminUser = None) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch social live status")
         raise _to_social_read_http_exception(exc) from exc
+
 
 @router.get("/live-status/stream")
 async def stream_social_live_status(request: Request, _: InternalAdminUser = None) -> StreamingResponse:
@@ -427,10 +450,12 @@ async def stream_social_live_status(request: Request, _: InternalAdminUser = Non
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
 
+
 ROUTE_PREFIXES = (
     "/admin/socials/ingest/",
     "/admin/socials/live-status",
 )
+
 
 def surface_routes(router: Any) -> list[RouteRecord]:
     return routes_matching(router, ROUTE_PREFIXES)

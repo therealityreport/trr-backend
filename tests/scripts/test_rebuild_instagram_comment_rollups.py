@@ -12,7 +12,6 @@ from typing import Any
 
 import pytest
 
-
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_MODULE = "scripts.socials.instagram.rebuild_comment_rollups"
 COMMON_MODULE = "trr_backend.socials.read_models.account_profile.common"
@@ -106,8 +105,7 @@ def test_rebuild_comment_rollups_main_forwards_arguments_and_prints_text(
         }
     ]
     assert capsys.readouterr().out == (
-        "Instagram comment rollup rebuild: scope=3 explicit post(s) "
-        "target_count=2 refreshed_count=2 dry_run=no\n"
+        "Instagram comment rollup rebuild: scope=3 explicit post(s) target_count=2 refreshed_count=2 dry_run=no\n"
     )
 
 

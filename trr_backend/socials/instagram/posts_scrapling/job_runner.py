@@ -279,7 +279,9 @@ def _public_scraper_runtime_metadata(scraper: Any | None = None) -> dict[str, An
             "session_mode": "none",
         },
         "proxy_session_key": None,
-        "transport": retrieval_meta.get("retrieval_transport") or retrieval_meta.get("transport") or "requests_enriched",  # noqa: E501
+        "transport": retrieval_meta.get("retrieval_transport")
+        or retrieval_meta.get("transport")
+        or "requests_enriched",  # noqa: E501
         "retrieval_transport": retrieval_meta.get("retrieval_transport") or retrieval_meta.get("transport"),
         "graphql_cursor": retrieval_meta.get("graphql_cursor"),
         "request_count": int(getattr(scraper, "_request_count", 0) or 0) if scraper is not None else 0,
@@ -753,7 +755,9 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                     raise PostsScraplingRuntimeError(
                         f"Public Instagram posts pagination failed for @{account_handle}: {error_code}.",
                         error_code=error_code or "public_graphql_no_connection",
-                        retryable=bool(retrieval_meta.get("retryable") or retrieval_meta.get("request_error_retryable")),  # noqa: E501
+                        retryable=bool(
+                            retrieval_meta.get("retryable") or retrieval_meta.get("request_error_retryable")
+                        ),  # noqa: E501
                         runtime_metadata={
                             **fetcher_metadata,
                             "fallback_requires_approval": True,
@@ -776,9 +780,7 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                     posts_skipped += persisted.posts_skipped
                     for reason, count in persisted.posts_skipped_by_reason.items():
                         posts_skipped_by_reason[reason] = posts_skipped_by_reason.get(reason, 0) + int(count or 0)
-                    unique_post_ids.update(
-                        identity for post in page_posts if (identity := _posts_node_identity(post))
-                    )
+                    unique_post_ids.update(identity for post in page_posts if (identity := _posts_node_identity(post)))
 
                 pages_fetched += 1
                 has_next = bool(page_info.get("has_next_page"))
@@ -1204,9 +1206,7 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                             else f"Instagram auth failed while fetching posts for @{account_handle}."
                         ),
                         error_code=(
-                            "instagram_posts_checkpoint_required"
-                            if is_checkpoint
-                            else "instagram_posts_auth_failed"
+                            "instagram_posts_checkpoint_required" if is_checkpoint else "instagram_posts_auth_failed"
                         ),
                         retryable=False,
                         runtime_metadata={

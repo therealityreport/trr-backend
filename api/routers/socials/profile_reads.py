@@ -1,5 +1,6 @@
 # ruff: noqa: F401, F403, F405, F722, I001, UP037
 """Profile reads, Instagram profile reads, and hashtag routes with shared profile helpers."""
+
 from __future__ import annotations
 
 from fastapi import APIRouter
@@ -8,8 +9,10 @@ from ._shared import *
 
 router = APIRouter()
 
+
 class SocialBladeProfileRefreshRequest(BaseModel):
     force: bool = False
+
 
 def _resolve_social_account_comments_route_execution(
     *,
@@ -96,17 +99,21 @@ def _resolve_social_account_comments_route_execution(
         "requires_modal_executor": requires_modal_executor,
     }
 
+
 class SocialAccountProfileHashtagAssignmentInput(BaseModel):
     show_id: UUID
     assignment_scope: Literal["global", "platform"] = Field(default="global")
     platform: Literal["instagram", "tiktok", "twitter", "youtube", "facebook", "threads"] | None = Field(default=None)
 
+
 class SocialAccountProfileHashtagInput(BaseModel):
     hashtag: str = Field(..., min_length=1, max_length=128)
     assignments: list[SocialAccountProfileHashtagAssignmentInput] = Field(default_factory=list)
 
+
 class SocialAccountProfileHashtagsPutRequest(BaseModel):
     hashtags: list[SocialAccountProfileHashtagInput] = Field(default_factory=list)
+
 
 class SocialAccountCommentsScrapeRequest(SourceScopedRequest):
     mode: Literal["profile", "single_post"] = Field(default="profile")
@@ -143,6 +150,7 @@ class SocialAccountCommentsScrapeRequest(SourceScopedRequest):
         self.date_end = normalized_end
         return self
 
+
 class SocialAccountCommentsAuditCursorRetryRequest(BaseModel):
     limit: int = Field(default=50, ge=1, le=500)
     shortcodes: list[str] | None = Field(default=None, max_length=500)
@@ -163,6 +171,7 @@ class SocialAccountCommentsAuditCursorRetryRequest(BaseModel):
     force_rerun_existing: bool = Field(default=False)
     dry_run: bool = Field(default=False)
 
+
 class SocialAccountCommentsAuthenticatedFollowupRequest(BaseModel):
     comments_worker_count: int | None = Field(default=1, ge=1, le=4)
     comments_target_batch_size: int = Field(default=1, ge=1, le=25)
@@ -171,12 +180,14 @@ class SocialAccountCommentsAuthenticatedFollowupRequest(BaseModel):
     dry_run: bool = Field(default=False)
     operator_confirmation: str | None = Field(default=None)
 
+
 class SocialAccountCommentsPublicRecoveryRequest(BaseModel):
     comments_worker_count: int | None = Field(default=4, ge=1, le=4)
     comments_target_batch_size: int = Field(default=10, ge=1, le=25)
     comments_enable_media_followups: bool | None = Field(default=None)
     dispatch_immediately: bool = Field(default=False)
     dry_run: bool = Field(default=False)
+
 
 def _enqueue_instagram_comments_audit_cursor_retries_background(**kwargs: Any) -> None:
     from trr_backend.socials.pipelines.comments.instagram import enqueue_instagram_comments_audit_cursor_retries
@@ -197,6 +208,7 @@ def _enqueue_instagram_comments_audit_cursor_retries_background(**kwargs: Any) -
             exc,
             exc_info=True,
         )
+
 
 def _refresh_social_account_profile_socialblade(
     *,
@@ -240,6 +252,7 @@ def _refresh_social_account_profile_socialblade(
         force=force,
     )
 
+
 class CookieRefreshRequest(BaseModel):
     headless: bool = Field(
         default=False,
@@ -249,11 +262,13 @@ class CookieRefreshRequest(BaseModel):
     operator_confirmation: str | None = Field(default=None)
     allow_cookie_refresh: bool = Field(default=True)
 
+
 def _env_truthy_default(name: str, *, default: bool) -> bool:
     raw = str(os.getenv(name) or "").strip().lower()
     if not raw:
         return default
     return raw in {"1", "true", "yes", "on", "enabled"}
+
 
 def _instagram_comments_auth_probe_allows_rendered_fallback(
     *,
@@ -262,6 +277,7 @@ def _instagram_comments_auth_probe_allows_rendered_fallback(
 ) -> bool:
     del status, reason
     return False
+
 
 def _cookie_health_auth_probe_metadata(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {
@@ -272,6 +288,7 @@ def _cookie_health_auth_probe_metadata(payload: Mapping[str, Any]) -> dict[str, 
         "repair_available": False,
     }
 
+
 def _instagram_comments_auth_probe_is_rate_limited(payload: Mapping[str, Any]) -> bool:
     reason = str(payload.get("reason") or payload.get("comments_auth_blocker") or "").strip().lower()
     status = str(payload.get("status") or payload.get("result") or "").strip().lower()
@@ -281,6 +298,7 @@ def _instagram_comments_auth_probe_is_rate_limited(payload: Mapping[str, Any]) -
         or "429" in reason
         or status == "rate_limited"
     )
+
 
 @router.get("/profiles/{platform}/{account_handle}/summary")
 def get_social_account_profile_summary_route(
@@ -321,6 +339,7 @@ def get_social_account_profile_summary_route(
             account_handle,
         )
         raise _to_social_read_http_exception(exc) from exc
+
 
 @router.get("/profiles/{platform}/{account_handle}/dashboard")
 def get_social_account_profile_dashboard_route(
@@ -371,6 +390,7 @@ def get_social_account_profile_dashboard_route(
         )
         raise _to_social_read_http_exception(exc) from exc
 
+
 @router.get("/profiles/{platform}/{account_handle}/live-profile-total")
 def get_social_account_live_profile_total_route(
     platform: str,
@@ -390,6 +410,7 @@ def get_social_account_live_profile_total_route(
             account_handle,
         )
         raise _to_social_read_http_exception(exc) from exc
+
 
 @router.get("/profiles/{platform}/{account_handle}/socialblade")
 def get_social_account_profile_socialblade_route(
@@ -419,6 +440,7 @@ def get_social_account_profile_socialblade_route(
             detail=f"No SocialBlade data found for {normalized_platform}/@{safe_handle}",
         )
     return data
+
 
 @router.post("/profiles/{platform}/{account_handle}/socialblade/refresh")
 async def refresh_social_account_profile_socialblade_route(
@@ -462,6 +484,7 @@ async def refresh_social_account_profile_socialblade_route(
             account_handle,
         )
         raise _to_social_read_http_exception(exc) from exc
+
 
 @router.get("/profiles/{platform}/{account_handle}/posts")
 def get_social_account_profile_posts_route(
@@ -546,6 +569,7 @@ def get_social_account_profile_posts_route(
         )
         raise _to_social_read_http_exception(exc) from exc
 
+
 @router.get("/profiles/instagram/{account_handle}/profile")
 def get_instagram_profile_detail_route(
     account_handle: str,
@@ -563,6 +587,7 @@ def get_instagram_profile_detail_route(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch Instagram profile detail: account=%s", account_handle)
         raise _to_social_read_http_exception(exc) from exc
+
 
 @router.get("/profiles/instagram/{account_handle}/relationships")
 def get_instagram_profile_relationships_route(
@@ -591,6 +616,7 @@ def get_instagram_profile_relationships_route(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch Instagram profile relationships: account=%s", account_handle)
         raise _to_social_read_http_exception(exc) from exc
+
 
 @router.get("/profiles/{platform}/{account_handle}/hashtags")
 def get_social_account_profile_hashtags_route(
@@ -642,6 +668,7 @@ def get_social_account_profile_hashtags_route(
         )
         raise _to_social_read_http_exception(exc) from exc
 
+
 @router.get("/profiles/{platform}/{account_handle}/hashtags/conflicts")
 def get_social_account_profile_hashtag_conflicts_route(
     platform: str,
@@ -685,6 +712,7 @@ def get_social_account_profile_hashtag_conflicts_route(
         )
         raise _to_social_read_http_exception(exc) from exc
 
+
 @router.get("/profiles/{platform}/{account_handle}/hashtags/timeline")
 def get_social_account_profile_hashtag_timeline_route(
     platform: str,
@@ -725,6 +753,7 @@ def get_social_account_profile_hashtag_timeline_route(
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
 
+
 @router.put("/profiles/{platform}/{account_handle}/hashtags")
 def put_social_account_profile_hashtags_route(
     platform: str,
@@ -747,6 +776,7 @@ def put_social_account_profile_hashtags_route(
         raise _value_error_to_bad_request(exc) from exc
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
+
 
 @router.get("/profiles/{platform}/{account_handle}/collaborators-tags")
 def get_social_account_profile_collaborators_tags_route(
@@ -784,5 +814,6 @@ def get_social_account_profile_collaborators_tags_route(
         raise _value_error_to_bad_request(exc) from exc
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
+
 
 __all__ = [name for name in globals() if not name.startswith("__")]

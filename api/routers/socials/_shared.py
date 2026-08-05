@@ -139,7 +139,6 @@ from .analytics_read import (
 )
 
 
-
 logger = logging.getLogger("api.routers.socials")
 
 
@@ -153,8 +152,6 @@ def _internal_error_response(_exc: Exception, *, status_code: int = 500) -> HTTP
     return HTTPException(status_code=status_code, detail={"code": "INTERNAL_ERROR", "message": message})
 
 
-
-
 SourceScopeParam = Literal["bravo", "network", "creator", "community", "news"]
 
 INSTAGRAM_AUTH_REFRESH_CONFIRMATION = "I UNDERSTAND INSTAGRAM AUTH RISK"
@@ -162,10 +159,6 @@ INSTAGRAM_AUTH_REFRESH_WARNING = (
     "Manual Instagram auth can surface CAPTCHA, verification code, checkpoint, or account-lock prompts. "
     "Complete those steps yourself before confirming a validated-cookie sync."
 )
-
-
-
-
 
 
 def normalize_source_scope_param(value: str | None, *, default: str = "network") -> str:
@@ -183,6 +176,7 @@ def preserve_source_scope_param(value: str | None, *, default: str = "network") 
         return normalized
     raise ValueError(f"Unsupported source scope: {value}")
 
+
 class SourceScopedRequest(BaseModel):
     source_scope: SourceScopeParam = Field(default="network")
 
@@ -190,6 +184,7 @@ class SourceScopedRequest(BaseModel):
     def normalize_source_scope(self) -> SourceScopedRequest:
         self.source_scope = normalize_source_scope_param(self.source_scope)  # type: ignore[assignment]
         return self
+
 
 def _raise_if_modal_social_dispatch_unresolvable(platform: str | None = None) -> None:
     resolution = resolve_modal_function(modal_social_job_function_name())
@@ -215,26 +210,19 @@ def _raise_if_modal_social_dispatch_unresolvable(platform: str | None = None) ->
         },
     )
 
+
 def _env_truthy(name: str) -> bool:
     raw = (os.getenv(name) or "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
 
 
-
-
-
-
-
-
 # Default timeout (seconds) for inline dev-fallback execution.
 # Configurable via SOCIAL_INLINE_EXECUTION_TIMEOUT_SECONDS env var.
+
 
 async def _run_admin_repo_call(func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
     """Keep async admin routes from blocking the event loop on sync repository work."""
     return await run_in_threadpool(func, *args, **kwargs)
-
-
-
 
 
 SocialExecutionMode = Literal["queued", "inline"]
@@ -258,11 +246,13 @@ def _resolve_social_execution_modes(
     )
     return execution_mode, execution_mode_canonical, execution_mode_legacy
 
+
 def _social_execution_mode_deprecation_payload() -> dict[str, Any]:
     return {
         "field": "execution_mode_legacy",
         "message": "execution_mode_legacy is deprecated; use execution_mode_canonical.",
     }
+
 
 def _start_runs_in_background(
     run_ids: list[str],
@@ -292,8 +282,10 @@ def _start_runs_in_background(
         return
     background_tasks.add_task(_runner)
 
+
 def _normalize_target_platforms(platforms: list[str] | None) -> list[str]:
     return _normalize_inline_target_platforms(platforms, supported_platforms=SOCIAL_SUPPORTED_PLATFORMS)
+
 
 def _parse_platform_query(platforms: str | None) -> list[str] | None:
     if not platforms or not platforms.strip():
@@ -323,6 +315,7 @@ def _parse_platform_query(platforms: str | None) -> list[str] | None:
         deduped.append(platform)
     return deduped
 
+
 def _value_error_to_bad_request(exc: ValueError) -> HTTPException:
     message = str(exc)
     if message.upper().startswith("INVALID_PLATFORM_FILTER"):
@@ -331,6 +324,7 @@ def _value_error_to_bad_request(exc: ValueError) -> HTTPException:
             detail={"code": "INVALID_PLATFORM_FILTER", "message": message.split(":", 1)[-1].strip() or message},
         )
     return HTTPException(status_code=400, detail=message)
+
 
 def _lookup_error_to_not_found(exc: LookupError) -> HTTPException:
     return HTTPException(status_code=404, detail=str(exc) or "Not found")
@@ -346,6 +340,7 @@ def _to_social_read_http_exception(error: Exception) -> HTTPException:
 
 def _worker_health_detail(worker_health: Any) -> Any:
     return jsonable_encoder(worker_health) if worker_health is not None else None
+
 
 def _remote_worker_unavailable_message(
     exc: Exception,
@@ -380,6 +375,7 @@ def _is_local_or_dev_runtime() -> bool:
 
     return False
 
+
 def _can_use_local_catalog_inline_fallback(
     *,
     allow_inline_dev_fallback: bool,
@@ -394,6 +390,7 @@ def _can_use_local_catalog_inline_fallback(
     if _env_truthy("TRR_ALLOW_LOCAL_ADMIN_OPERATION_OVERRIDE"):
         return True
     return bool(allow_inline_dev_fallback) and not remote_plane_enforced
+
 
 # Request/Response Models
 
@@ -419,10 +416,12 @@ def _can_use_local_catalog_inline_fallback(
 # Season social analytics (Bravo-first)
 # ---------------------------------------------------------------------------
 
+
 class CatalogRepairAuthRequest(BaseModel):
     allow_inline_dev_fallback: bool = Field(default=False)
     operator_confirmation: str | None = Field(default=None)
     allow_cookie_refresh: bool = Field(default=False)
+
 
 InstagramCommentsLoadStrategy = Literal[
     "instagram_comments_endpoint_cursor",
@@ -430,6 +429,7 @@ InstagramCommentsLoadStrategy = Literal[
     "single_session_load_all",
     "public_relay",
 ]
+
 
 def _require_instagram_auth_refresh_confirmation(platform: str, confirmation: str | None) -> None:
     normalized = str(platform or "").strip().lower()
@@ -446,14 +446,17 @@ def _require_instagram_auth_refresh_confirmation(platform: str, confirmation: st
         },
     )
 
+
 # ---------------------------------------------------------------------------
 # Reddit flair auto-categorization
 # ---------------------------------------------------------------------------
+
 
 class AutoCategorizeFlairsResponse(BaseModel):
     categories: dict[str, str]
     matched: int
     total: int
+
 
 # Intentionally exports private helpers for the decomposed route modules.
 __all__ = [name for name in globals() if not name.startswith("__")]

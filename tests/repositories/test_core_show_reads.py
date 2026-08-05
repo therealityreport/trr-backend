@@ -188,8 +188,7 @@ def test_search_episodes_matches_title_episode_label_and_sxe_with_expected_order
     assert "coalesce(e.title, '') ilike %s" in normalized_sql
     assert "concat('episode ', coalesce(e.episode_number::text, '')) ilike %s" in normalized_sql
     compact_episode_number = (
-        "concat('s', coalesce(e.season_number::text, ''), "
-        "'e', coalesce(e.episode_number::text, '')) ilike %s"
+        "concat('s', coalesce(e.season_number::text, ''), 'e', coalesce(e.episode_number::text, '')) ilike %s"
     )
     assert compact_episode_number in normalized_sql
     assert "e.air_date desc nulls last" in normalized_sql

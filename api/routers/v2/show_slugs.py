@@ -86,11 +86,7 @@ def _unexpected_problem(error: Exception, request: Request, *, operation: str) -
 
 def _parse_slug(request: Request) -> str:
     normalized_slug = str(request.path_params.get("slug") or "").strip().lower()
-    if (
-        not normalized_slug
-        or len(normalized_slug) > _MAX_SLUG_LENGTH
-        or _SLUG_RE.fullmatch(normalized_slug) is None
-    ):
+    if not normalized_slug or len(normalized_slug) > _MAX_SLUG_LENGTH or _SLUG_RE.fullmatch(normalized_slug) is None:
         raise _problem(
             request,
             code="INVALID_SHOW_SLUG",

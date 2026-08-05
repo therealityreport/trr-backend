@@ -109,9 +109,7 @@ def test_v2_recent_catalog_runs_normalizes_the_profile_and_clamps_limit(
             }
         ],
     }
-    assert fake_profile_reads.calls == [
-        {"platform": "instagram", "account_handle": "bravotv", "limit": 25}
-    ]
+    assert fake_profile_reads.calls == [{"platform": "instagram", "account_handle": "bravotv", "limit": 25}]
 
 
 @pytest.mark.parametrize(

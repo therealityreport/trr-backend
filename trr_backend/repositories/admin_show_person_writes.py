@@ -73,7 +73,7 @@ def update_show(show_id: str, patch: Mapping[str, Any]) -> tuple[dict[str, Any] 
         target_cte = f"""
         updated_show AS (
           UPDATE core.shows AS updated
-          SET {', '.join(updates)}
+          SET {", ".join(updates)}
           WHERE updated.id = %s::uuid
           RETURNING updated.id
         )

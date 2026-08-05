@@ -19,6 +19,8 @@ _PROVIDER_EXPORT_NAMES = (
     "SocialIngestValidationError",
     "SocialWorkerUnavailableError",
 )
+
+
 def _publish_provider_binding(name: str, value: Any) -> None:
     globals()[name] = value
 

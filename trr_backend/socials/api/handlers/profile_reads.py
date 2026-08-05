@@ -293,9 +293,7 @@ def _catalog_followups(value: object, *, run_status: str | None) -> dict[str, di
         followups["comments"] = {
             "run_id": comments_run_id,
             "status": (
-                run_status
-                if run_status in _CATALOG_TERMINAL_STATUSES and not comments_run_id
-                else comments_status
+                run_status if run_status in _CATALOG_TERMINAL_STATUSES and not comments_run_id else comments_status
             ),
             "state": comments_state,
             "source": (
@@ -337,9 +335,7 @@ def _catalog_followups(value: object, *, run_status: str | None) -> dict[str, di
             "status": run_status if run_status in _CATALOG_TERMINAL_STATUSES and not media_job_ids else media_status,
             "state": media_state,
             "source": (
-                "comments_media_followups"
-                if media_source == "comments_media_followups"
-                else "catalog_media_mirror"
+                "comments_media_followups" if media_source == "comments_media_followups" else "catalog_media_mirror"
             ),
             "enqueued_job_ids": media_job_ids,
             "enqueued_job_count": media_count,

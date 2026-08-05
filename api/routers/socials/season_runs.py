@@ -1,5 +1,6 @@
 # ruff: noqa: F401, F403, F405, UP037
 """Season ingest run routes and shared season-ingest helpers."""
+
 from __future__ import annotations
 
 from fastapi import APIRouter
@@ -16,6 +17,7 @@ _INGEST_JOBS_DEFAULT_OFFSET = 0
 
 _INGEST_JOBS_MAX_OFFSET = 5000
 
+
 def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
     raw = (os.getenv(name) or "").strip()
     if not raw:
@@ -26,11 +28,14 @@ def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
         return default
     return max(minimum, min(maximum, value))
 
+
 def _comments_run_workers_cap() -> int:
     legacy_default = _env_int("SOCIAL_INLINE_COMMENTS_WORKERS", 4, minimum=1, maximum=8)
     return _env_int("SOCIAL_COMMENTS_RUN_WORKERS", legacy_default, minimum=1, maximum=8)
 
+
 _INLINE_EXECUTION_TIMEOUT_SECONDS_DEFAULT = 600
+
 
 def _inline_execution_timeout_seconds() -> int:
     return _env_int(
@@ -39,6 +44,7 @@ def _inline_execution_timeout_seconds() -> int:
         minimum=30,
         maximum=7200,
     )
+
 
 def _execute_with_timeout(
     func: Any,
@@ -71,6 +77,7 @@ def _execute_with_timeout(
         raise exception[0]
     return result[0]
 
+
 def _normalize_run_summary_payload(summary: Any) -> dict[str, Any]:
     payload = dict(summary) if isinstance(summary, dict) else {}
     if not payload:
@@ -84,6 +91,7 @@ def _normalize_run_summary_payload(summary: Any) -> dict[str, Any]:
     payload["completed_jobs"] = completed_jobs
     return payload
 
+
 def _remote_only_social_platforms() -> set[str]:
     default_platforms = ",".join(SOCIAL_SUPPORTED_PLATFORMS)
     raw = str(os.getenv("SOCIAL_REMOTE_ONLY_PLATFORMS") or default_platforms).strip().lower()
@@ -93,9 +101,11 @@ def _remote_only_social_platforms() -> set[str]:
         token.strip() for token in raw.split(",") if token.strip() and token.strip() in set(SOCIAL_SUPPORTED_PLATFORMS)
     }
 
+
 def _blocked_remote_only_platforms(platforms: list[str] | None) -> list[str]:
     requested_platforms = set(_normalize_target_platforms(platforms))
     return sorted(requested_platforms & _remote_only_social_platforms())
+
 
 def _run_inline_season_ingest(
     run_id: str,
@@ -117,6 +127,7 @@ def _run_inline_season_ingest(
         thread_pool_executor_factory=ThreadPoolExecutor,
     )
 
+
 def _parse_utc_iso_datetime(value: str | None) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -124,6 +135,7 @@ def _parse_utc_iso_datetime(value: str | None) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
+
 
 def _resolve_ingest_window(
     *,
@@ -151,6 +163,7 @@ def _resolve_ingest_window(
         week_payload,
     )
 
+
 def _build_ingest_scope_payload(
     *,
     resolved_week: dict[str, Any] | None,
@@ -171,6 +184,7 @@ def _build_ingest_scope_payload(
         "date_end": date_end.isoformat().replace("+00:00", "Z") if isinstance(date_end, datetime) else None,
     }
 
+
 class SeasonSocialTargetInput(BaseModel):
     platform: Literal["instagram", "tiktok", "twitter", "youtube", "facebook", "threads", "reddit"]
     accounts: list[str] = Field(default_factory=list)
@@ -180,9 +194,11 @@ class SeasonSocialTargetInput(BaseModel):
     is_active: bool = Field(default=True)
     config: dict = Field(default_factory=dict)
 
+
 class SeasonSocialTargetsPutRequest(SourceScopedRequest):
     source_scope: Literal["bravo", "network", "creator", "community", "news"] = Field(default="network")
     targets: list[SeasonSocialTargetInput]
+
 
 class SeasonSocialIngestRequest(SourceScopedRequest):
     source_scope: Literal["bravo", "network", "creator", "community", "news"] = Field(default="network")
@@ -223,6 +239,7 @@ class SeasonSocialIngestRequest(SourceScopedRequest):
     client_session_id: str | None = Field(default=None, max_length=200)
     client_workflow_id: str | None = Field(default=None, max_length=200)
 
+
 class SeasonSocialOrchestrationRequest(SourceScopedRequest):
     source_scope: Literal["bravo", "network", "creator", "community", "news"] = Field(default="network")
     platforms: list[Literal["instagram", "tiktok", "twitter", "youtube", "facebook", "threads"]] | None = Field(
@@ -260,6 +277,7 @@ class SeasonSocialOrchestrationRequest(SourceScopedRequest):
     client_session_id: str | None = Field(default=None, max_length=200)
     client_workflow_id: str | None = Field(default=None, max_length=200)
 
+
 class SharedAccountSourceInput(BaseModel):
     platform: Literal["instagram", "tiktok", "twitter", "youtube", "facebook", "threads"]
     account_handle: str = Field(..., min_length=1, max_length=128)
@@ -267,9 +285,11 @@ class SharedAccountSourceInput(BaseModel):
     scrape_priority: int = Field(default=100, ge=1, le=10_000)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+
 class SharedAccountSourcesPutRequest(SourceScopedRequest):
     source_scope: Literal["bravo", "network", "creator", "community", "news"] = Field(default="network")
     sources: list[SharedAccountSourceInput]
+
 
 class SyncSessionRetryRequest(BaseModel):
     retry_kind: Literal[
@@ -278,6 +298,7 @@ class SyncSessionRetryRequest(BaseModel):
         "retry_missing_avatars",
         "retry_missing_comment_media",
     ]
+
 
 class SharedSocialIngestRequest(SourceScopedRequest):
     source_scope: Literal["bravo", "network", "creator", "community", "news"] = Field(default="network")
@@ -289,13 +310,16 @@ class SharedSocialIngestRequest(SourceScopedRequest):
     date_end: datetime | None = None
     allow_inline_dev_fallback: bool = Field(default=False)
 
+
 class SharedReviewResolveRequest(BaseModel):
     resolution_action: Literal["resolve", "ignore"] = Field(default="resolve")
     resolved_show_id: UUID | None = None
     resolved_season_id: UUID | None = None
 
+
 def _social_sync_sse_chunk(event_type: str, payload: dict[str, Any]) -> bytes:
     return f"event: {event_type}\ndata: {json.dumps(jsonable_encoder(payload))}\n\n".encode()
+
 
 def _build_sync_session_stream_payload_sync(sync_session_id: str) -> dict[str, Any]:
     from trr_backend.repositories.social_sync_orchestrator import evaluate_sync_session
@@ -315,8 +339,10 @@ def _build_sync_session_stream_payload_sync(sync_session_id: str) -> dict[str, A
         "emitted_at": datetime.now(UTC).isoformat(),
     }
 
+
 async def _build_sync_session_stream_payload(sync_session_id: str) -> dict[str, Any]:
     return await _run_admin_repo_call(_build_sync_session_stream_payload_sync, sync_session_id)
+
 
 @router.get("/seasons/{season_id}/ingest/jobs")
 async def get_season_ingest_jobs(
@@ -356,6 +382,7 @@ async def get_season_ingest_jobs(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to list social jobs: season=%s", season_id)
         raise _to_social_read_http_exception(exc) from exc
+
 
 @router.get("/seasons/{season_id}/ingest/runs")
 async def get_season_ingest_runs(
@@ -428,6 +455,7 @@ async def get_season_ingest_runs(
         )
         raise _to_social_read_http_exception(exc) from exc
 
+
 @router.get("/seasons/{season_id}/ingest/runs/summary")
 async def get_season_ingest_runs_summary(
     season_id: UUID,
@@ -490,6 +518,7 @@ async def get_season_ingest_runs_summary(
         )
         raise _to_social_read_http_exception(exc) from exc
 
+
 @router.get("/seasons/{season_id}/ingest/runs/{run_id}/progress")
 async def get_season_ingest_run_progress(
     season_id: UUID,
@@ -533,6 +562,7 @@ async def get_season_ingest_run_progress(
         )
         raise _internal_error_response(exc) from exc
 
+
 @router.post("/seasons/{season_id}/ingest/runs/{run_id}/cancel")
 async def cancel_season_ingest_run(
     season_id: UUID,
@@ -554,5 +584,6 @@ async def cancel_season_ingest_run(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to cancel social ingest run: season=%s run_id=%s", season_id, run_id)
         raise _internal_error_response(exc) from exc
+
 
 __all__ = [name for name in globals() if not name.startswith("__")]

@@ -108,10 +108,7 @@ def normalize_audit_top_level_checkpoint(row: Mapping[str, Any]) -> dict[str, An
             or shortcode
         ).strip()
         next_cursor = str(
-            checkpoint.get("next_top_level_cursor")
-            or checkpoint.get("chosen_cursor")
-            or row.get("cursor_min_id")
-            or ""
+            checkpoint.get("next_top_level_cursor") or checkpoint.get("chosen_cursor") or row.get("cursor_min_id") or ""
         ).strip()
         last_cursor = str(checkpoint.get("last_top_level_cursor") or checkpoint.get("request_cursor") or "").strip()
         payload_next_cursor = str(payload.get("chosen_cursor") or payload.get("next_top_level_cursor") or "").strip()

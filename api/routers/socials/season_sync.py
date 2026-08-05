@@ -1,5 +1,6 @@
 # ruff: noqa: F401, F403, F405, I001, UP037
 """Season targets, ingest, orchestration, and sync-session routes."""
+
 from __future__ import annotations
 
 from fastapi import APIRouter
@@ -8,6 +9,7 @@ from ._shared import *
 from .season_runs import *
 
 router = APIRouter()
+
 
 @router.get("/seasons/{season_id}/targets")
 async def get_season_targets(
@@ -40,6 +42,7 @@ async def get_season_targets(
         )
         raise _to_social_read_http_exception(exc) from exc
 
+
 @router.put("/seasons/{season_id}/targets")
 async def put_season_targets(
     season_id: UUID,
@@ -62,6 +65,7 @@ async def put_season_targets(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to write season social targets: season=%s", season_id)
         raise _internal_error_response(exc) from exc
+
 
 @router.post("/seasons/{season_id}/ingest")
 async def ingest_season_social(
@@ -351,6 +355,7 @@ async def ingest_season_social(
         logger.exception("Failed to enqueue social ingest: season=%s", sid)
         raise _internal_error_response(exc) from exc
 
+
 @router.post("/seasons/{season_id}/ingest/orchestrations")
 async def orchestrate_season_social_ingest(
     season_id: UUID,
@@ -454,6 +459,7 @@ async def orchestrate_season_social_ingest(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to orchestrate social ingest: season=%s", sid)
         raise _internal_error_response(exc) from exc
+
 
 @router.post("/seasons/{season_id}/sync-sessions")
 async def create_season_sync_session(
@@ -579,6 +585,7 @@ async def create_season_sync_session(
             raise HTTPException(status_code=503, detail=database_service_unavailable_detail(exc)) from exc
         raise _internal_error_response(exc) from exc
 
+
 @router.get("/seasons/{season_id}/sync-sessions/{sync_session_id}")
 async def get_season_sync_session(
     season_id: UUID,
@@ -602,6 +609,7 @@ async def get_season_sync_session(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch sync session: season=%s sync_session=%s", season_id, sync_session_id)
         raise _internal_error_response(exc) from exc
+
 
 @router.get("/seasons/{season_id}/sync-sessions/{sync_session_id}/stream")
 async def stream_season_sync_session(
@@ -664,6 +672,7 @@ async def stream_season_sync_session(
         },
     )
 
+
 @router.post("/seasons/{season_id}/sync-sessions/{sync_session_id}/cancel")
 async def cancel_season_sync_session(
     season_id: UUID,
@@ -687,6 +696,7 @@ async def cancel_season_sync_session(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to cancel sync session: season=%s sync_session=%s", season_id, sync_session_id)
         raise _internal_error_response(exc) from exc
+
 
 @router.post("/seasons/{season_id}/sync-sessions/{sync_session_id}/retry")
 async def retry_season_sync_session(
@@ -713,6 +723,7 @@ async def retry_season_sync_session(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to retry sync session: season=%s sync_session=%s", season_id, sync_session_id)
         raise _internal_error_response(exc) from exc
+
 
 @router.get("/seasons/{season_id}/ingest/schedule-preview")
 async def get_season_ingest_schedule_preview(
@@ -774,5 +785,6 @@ async def get_season_ingest_schedule_preview(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to build social ingest schedule preview: season=%s", season_id)
         raise _internal_error_response(exc) from exc
+
 
 __all__ = [name for name in globals() if not name.startswith("__")]

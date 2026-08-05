@@ -606,10 +606,13 @@ def _ensure_instagram_cookies_fresh(cookies: dict[str, str]) -> dict[str, str]:
         _instagram_cookie_refresh_lock,
     )
     with refresh_lock:
-        latest = _read_state("_instagram_cookie_runtime_override") or _legacy_callable(
-            "_load_instagram_cookies_from_sources",
-            _load_instagram_cookies_from_sources,
-        )()
+        latest = (
+            _read_state("_instagram_cookie_runtime_override")
+            or _legacy_callable(
+                "_load_instagram_cookies_from_sources",
+                _load_instagram_cookies_from_sources,
+            )()
+        )
         latest_valid, _ = validate_health(dict(latest))
         if latest_valid:
             _write_state("_instagram_cookie_runtime_override", dict(latest))

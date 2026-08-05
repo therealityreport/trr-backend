@@ -18,6 +18,8 @@ _LEGACY_EXPORT_NAMES = (
     "recover_stale_running_jobs",
     "reset_social_ingest_health",
 )
+
+
 def _publish_provider_binding(name: str, value: Any) -> None:
     globals()[name] = value
 
@@ -46,6 +48,7 @@ def __getattr__(name: str) -> Any:
         _require_provider_ready()
         return globals()[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "cancel_active_jobs",

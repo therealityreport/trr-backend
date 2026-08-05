@@ -105,9 +105,7 @@ def test_lock_key_honors_live_legacy_normalizer_overrides(
         lambda _value: "patched-account",
     )
     expected = int(
-        hashlib.md5(
-            b"posts-scrapling-start:patched-platform:patched-account"
-        ).hexdigest()[:15],
+        hashlib.md5(b"posts-scrapling-start:patched-platform:patched-account").hexdigest()[:15],
         16,
     ) % (2**31)
 

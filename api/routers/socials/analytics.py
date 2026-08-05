@@ -16,9 +16,11 @@ _WEEK_DETAIL_DEFAULT_POST_LIMIT = 20
 
 _WEEK_DETAIL_DEFAULT_POST_OFFSET = 0
 
+
 class PostCommentRefreshRequest(BaseModel):
     max_comments_per_post: int = Field(default=0, ge=0)
     fetch_replies: bool = Field(default=True)
+
 
 @router.get("/seasons/{season_id}/analytics/week/{week_index}/live-health")
 async def get_season_analytics_week_live_health(
@@ -88,6 +90,7 @@ async def get_season_analytics_week_live_health(
             duration_ms,
         )
         raise _to_social_read_http_exception(exc) from exc
+
 
 @router.get("/seasons/{season_id}/analytics")
 async def get_season_analytics(
@@ -195,6 +198,7 @@ async def get_season_analytics(
         )
         raise _to_social_read_http_exception(exc) from exc
 
+
 @router.get("/seasons/{season_id}/analytics/week/{week_index}/summary")
 async def get_season_analytics_week_summary(
     season_id: UUID,
@@ -287,6 +291,7 @@ async def get_season_analytics_week_summary(
             trace_id,
         )
         raise _to_social_read_http_exception(exc) from exc
+
 
 @router.get("/seasons/{season_id}/analytics/week/{week_index}")
 async def get_season_analytics_week_detail(
@@ -410,6 +415,7 @@ async def get_season_analytics_week_detail(
         )
         raise _to_social_read_http_exception(exc) from exc
 
+
 @router.get("/seasons/{season_id}/analytics/comments-coverage")
 async def get_season_comments_coverage(
     season_id: UUID,
@@ -463,6 +469,7 @@ async def get_season_comments_coverage(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to compute comments coverage: season=%s", season_id)
         raise _internal_error_response(exc) from exc
+
 
 @router.get("/seasons/{season_id}/analytics/mirror-coverage")
 async def get_season_mirror_coverage(
@@ -518,6 +525,7 @@ async def get_season_mirror_coverage(
         logger.exception("Failed to compute mirror coverage: season=%s", season_id)
         raise _internal_error_response(exc) from exc
 
+
 @router.get("/seasons/{season_id}/analytics/posts/{platform}/{source_id}")
 async def get_post_comments(
     season_id: UUID,
@@ -539,6 +547,7 @@ async def get_post_comments(
             source_id,
         )
         raise _internal_error_response(exc) from exc
+
 
 @router.get("/seasons/{season_id}/tiktok/overview")
 async def get_season_tiktok_overview(
@@ -570,6 +579,7 @@ async def get_season_tiktok_overview(
         logger.exception("Failed to fetch TikTok overview: season=%s", season_id)
         raise _internal_error_response(exc) from exc
 
+
 @router.get("/seasons/{season_id}/tiktok/cast-members")
 async def get_season_tiktok_cast_members(
     season_id: UUID,
@@ -589,6 +599,7 @@ async def get_season_tiktok_cast_members(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch TikTok cast members: season=%s", season_id)
         raise _internal_error_response(exc) from exc
+
 
 @router.get("/seasons/{season_id}/tiktok/hashtags")
 async def get_season_tiktok_hashtags(
@@ -613,6 +624,7 @@ async def get_season_tiktok_hashtags(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch TikTok hashtag/keyword trends: season=%s", season_id)
         raise _internal_error_response(exc) from exc
+
 
 @router.get("/seasons/{season_id}/tiktok/sounds")
 async def get_season_tiktok_sounds(
@@ -639,6 +651,7 @@ async def get_season_tiktok_sounds(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch TikTok sounds: season=%s", season_id)
         raise _internal_error_response(exc) from exc
+
 
 @router.get("/seasons/{season_id}/tiktok/content-health")
 async def get_season_tiktok_content_health(
@@ -672,6 +685,7 @@ async def get_season_tiktok_content_health(
         logger.exception("Failed to fetch TikTok content health: season=%s", season_id)
         raise _internal_error_response(exc) from exc
 
+
 @router.get("/seasons/{season_id}/tiktok/sounds/{sound_id}")
 async def get_season_tiktok_sound_detail(
     season_id: UUID,
@@ -687,6 +701,7 @@ async def get_season_tiktok_sound_detail(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch TikTok sound detail: season=%s sound_id=%s", season_id, sound_id)
         raise _internal_error_response(exc) from exc
+
 
 @router.get("/seasons/{season_id}/tiktok/sounds/{sound_id}/posts")
 async def get_season_tiktok_sound_posts(
@@ -705,6 +720,7 @@ async def get_season_tiktok_sound_posts(
         logger.exception("Failed to fetch TikTok sound posts: season=%s sound_id=%s", season_id, sound_id)
         raise _internal_error_response(exc) from exc
 
+
 @router.get("/seasons/{season_id}/tiktok/posts/{post_id}/detail")
 async def get_season_tiktok_post_detail(
     season_id: UUID,
@@ -720,6 +736,7 @@ async def get_season_tiktok_post_detail(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch TikTok post detail: season=%s post_id=%s", season_id, post_id)
         raise _internal_error_response(exc) from exc
+
 
 @router.get("/seasons/{season_id}/tiktok/sentiment-trends")
 async def get_season_tiktok_sentiment_trends(
@@ -740,6 +757,7 @@ async def get_season_tiktok_sentiment_trends(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch TikTok sentiment trends: season=%s", season_id)
         raise _internal_error_response(exc) from exc
+
 
 @router.post("/seasons/{season_id}/analytics/posts/{platform}/{source_id}/refresh")
 async def refresh_post_comments_for_post(
@@ -783,6 +801,7 @@ async def refresh_post_comments_for_post(
         )
         raise _internal_error_response(exc) from exc
 
+
 @router.post("/seasons/{season_id}/instagram/mirror/requeue")
 async def requeue_instagram_mirror_jobs(
     season_id: UUID,
@@ -814,6 +833,7 @@ async def requeue_instagram_mirror_jobs(
             source_scope,
         )
         raise _internal_error_response(exc) from exc
+
 
 @router.post("/seasons/{season_id}/{platform}/mirror/requeue")
 async def requeue_platform_mirror_jobs(
@@ -850,6 +870,7 @@ async def requeue_platform_mirror_jobs(
             source_scope,
         )
         raise _internal_error_response(exc) from exc
+
 
 @router.get("/seasons/{season_id}/analytics/export.csv")
 async def export_season_analytics_csv(
@@ -890,6 +911,7 @@ async def export_season_analytics_csv(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to export social CSV: season=%s", season_id)
         raise _internal_error_response(exc) from exc
+
 
 @router.get("/seasons/{season_id}/analytics/export.pdf")
 async def export_season_analytics_pdf(
@@ -935,6 +957,7 @@ async def export_season_analytics_pdf(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to export social PDF: season=%s", season_id)
         raise _internal_error_response(exc) from exc
+
 
 ROUTE_PREFIXES = ("/admin/socials/seasons/",)
 

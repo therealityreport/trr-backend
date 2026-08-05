@@ -5,6 +5,8 @@ aliases this module for backwards compatibility while ownership moves under
 `trr_backend.socials`.
 """
 
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import asyncio
@@ -8822,10 +8824,7 @@ def _configure_instagram_auth_runtime_legacy_overrides() -> None:
 
     _configure_legacy_overrides(
         globals(),
-        {
-            name: globals()[name]
-            for name in _INSTAGRAM_AUTH_RUNTIME_LEGACY_OVERRIDE_NAMES
-        },
+        {name: globals()[name] for name in _INSTAGRAM_AUTH_RUNTIME_LEGACY_OVERRIDE_NAMES},
     )
     _instagram_cookie_refresh_lock = auth_runtime_refresh_lock
 
@@ -22647,6 +22646,7 @@ def _batch_upsert_instagram_posts(*args: Any, **kwargs: Any) -> Any:
 
 def _instagram_post_source_urls(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.media_mirror import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["_instagram_post_source_urls"](*args, **kwargs)
 
 
@@ -23185,6 +23185,7 @@ def _platform_post_needs_media_mirror(
 
 def _instagram_post_needs_media_mirror(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.media_mirror import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["_instagram_post_needs_media_mirror"](*args, **kwargs)
 
 
@@ -23312,6 +23313,7 @@ def _update_platform_post_media_mirror_fields(
 
 def _update_instagram_post_media_mirror_fields(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.media_mirror import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["_update_instagram_post_media_mirror_fields"](*args, **kwargs)
 
 
@@ -23365,6 +23367,7 @@ def _update_platform_post_media_asset_meta(
 
 def _update_instagram_post_source_media_fields(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.media_mirror import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["_update_instagram_post_source_media_fields"](*args, **kwargs)
 
 
@@ -23742,6 +23745,7 @@ def _bulk_enqueue_platform_media_mirror_jobs(
 
 def _enqueue_instagram_media_mirror_job(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.media_mirror import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["_enqueue_instagram_media_mirror_job"](*args, **kwargs)
 
 
@@ -32689,6 +32693,7 @@ def _run_generic_comment_media_mirror_stage(
 
 def _run_instagram_media_mirror_stage(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.media_mirror import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["_run_instagram_media_mirror_stage"](*args, **kwargs)
 
 
@@ -43427,26 +43432,31 @@ def _run_shared_account_posts_stage(
 
 def _instagram_profile_scraper(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["_instagram_profile_scraper"](*args, **kwargs)
 
 
 def _run_instagram_profile_snapshot_stage(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["_run_instagram_profile_snapshot_stage"](*args, **kwargs)
 
 
 def _instagram_following_rows_from_payload(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["_instagram_following_rows_from_payload"](*args, **kwargs)
 
 
 def _fetch_instagram_following_rows(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["_fetch_instagram_following_rows"](*args, **kwargs)
 
 
 def _run_instagram_profile_following_stage(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["_run_instagram_profile_following_stage"](*args, **kwargs)
 
 
@@ -48921,11 +48931,13 @@ def requeue_media_mirror_jobs(
 
 def requeue_instagram_media_mirror_jobs(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.media_mirror import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["requeue_instagram_media_mirror_jobs"](*args, **kwargs)
 
 
 def _configure_instagram_media_mirror_legacy_provider() -> None:
     from trr_backend.socials.instagram.media_mirror import _LOCAL_ROOM_NAMES, _configure_legacy_provider
+
     _configure_legacy_provider(globals(), {name: globals()[name] for name in _LOCAL_ROOM_NAMES})
 
 
@@ -64144,10 +64156,7 @@ def _configure_instagram_posts_control_legacy_provider() -> None:
 
     _configure_legacy_provider(
         globals(),
-        {
-            name: globals()[name]
-            for name in _INSTAGRAM_POSTS_CONTROL_LEGACY_PROVIDER_NAMES
-        },
+        {name: globals()[name] for name in _INSTAGRAM_POSTS_CONTROL_LEGACY_PROVIDER_NAMES},
     )
 
 
@@ -64357,96 +64366,115 @@ def get_social_account_profile_comments(*args: Any, **kwargs: Any) -> Any:
 
 def _instagram_profile_tables_ready(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["_instagram_profile_tables_ready"](*args, **kwargs)
 
 
 def _normalize_instagram_profile_source_scope(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["_normalize_instagram_profile_source_scope"](*args, **kwargs)
 
 
 def _instagram_profile_fetch_one(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["_instagram_profile_fetch_one"](*args, **kwargs)
 
 
 def _instagram_profile_fetch_all(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["_instagram_profile_fetch_all"](*args, **kwargs)
 
 
 def _instagram_profile_execute_one(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["_instagram_profile_execute_one"](*args, **kwargs)
 
 
 def _instagram_profile_execute(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["_instagram_profile_execute"](*args, **kwargs)
 
 
 def _instagram_profile_parse_about_timestamp(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["_instagram_profile_parse_about_timestamp"](*args, **kwargs)
 
 
 def _instagram_profile_domain(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["_instagram_profile_domain"](*args, **kwargs)
 
 
 def _instagram_profile_normalized_url(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["_instagram_profile_normalized_url"](*args, **kwargs)
 
 
 def _instagram_profile_merge_rows(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["_instagram_profile_merge_rows"](*args, **kwargs)
 
 
 def _instagram_profile_existing_row(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["_instagram_profile_existing_row"](*args, **kwargs)
 
 
 def _sync_instagram_profile_external_links(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["_sync_instagram_profile_external_links"](*args, **kwargs)
 
 
 def persist_instagram_profile_snapshot(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["persist_instagram_profile_snapshot"](*args, **kwargs)
 
 
 def _instagram_profile_row_for_username(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["_instagram_profile_row_for_username"](*args, **kwargs)
 
 
 def persist_instagram_profile_relationships(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["persist_instagram_profile_relationships"](*args, **kwargs)
 
 
 def _instagram_profile_response(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["_instagram_profile_response"](*args, **kwargs)
 
 
 def get_instagram_profile_detail(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["get_instagram_profile_detail"](*args, **kwargs)
 
 
 def get_instagram_profile_relationships(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_FUNCTIONS
+
     return _LOCAL_ROOM_FUNCTIONS["get_instagram_profile_relationships"](*args, **kwargs)
 
 
 def _configure_instagram_profile_stages_legacy_provider() -> None:
     from trr_backend.socials.instagram.profile_stages import _LOCAL_ROOM_NAMES, _configure_legacy_provider
+
     _configure_legacy_provider(globals(), {name: globals()[name] for name in _LOCAL_ROOM_NAMES})
 
 
@@ -66198,7 +66226,8 @@ def _reserve_social_account_catalog_launch(
                 completed_jobs=0,
                 failed_jobs=0,
                 active_jobs=0,
-                items_found_total=0, stage_counts={},
+                items_found_total=0,
+                stage_counts={},
             )
             with pg.db_cursor(conn=lock_conn, label=lock_label) as cur:
                 run_row = pg.fetch_one_with_cursor(
@@ -66258,7 +66287,8 @@ def _reserve_social_account_catalog_launch(
         "run_id": run_id,
         "lock_wait_ms": lock_wait_ms,
         "lock_held_ms": lock_held_ms,
-        "deduped": deduped, "config_updates": config_updates,
+        "deduped": deduped,
+        "config_updates": config_updates,
     }
 
 
@@ -68264,17 +68294,39 @@ def _instagram_catalog_gallery_total_posts(
     return _normalize_non_negative_int(row.get("total"))
 
 
-from trr_backend.socials.pipelines.account_catalog.freshness import SOCIAL_CATALOG_GAP_ANALYSIS_OPERATION_TYPE as _CANONICAL_SOCIAL_CATALOG_GAP_ANALYSIS_OPERATION_TYPE  # noqa: E402, E501, I001
-from trr_backend.socials.pipelines.account_catalog.freshness import AccountCatalogFreshnessDependencies as _AccountCatalogFreshnessDependencies  # noqa: E402, E501
-from trr_backend.socials.pipelines.account_catalog.freshness import _catalog_freshness_degradable_error as _canonical_catalog_freshness_degradable_error  # noqa: E402, E501
-from trr_backend.socials.pipelines.account_catalog.freshness import _catalog_freshness_degraded_error_payload as _canonical_catalog_freshness_degraded_error_payload  # noqa: E402, E501
-from trr_backend.socials.pipelines.account_catalog.freshness import _extract_gap_analysis_operation_error as _canonical_extract_gap_analysis_operation_error  # noqa: E402, E501
-from trr_backend.socials.pipelines.account_catalog.freshness import _extract_gap_analysis_operation_result as _canonical_extract_gap_analysis_operation_result  # noqa: E402, E501
-from trr_backend.socials.pipelines.account_catalog.freshness import _normalize_gap_analysis_operation_status as _canonical_normalize_gap_analysis_operation_status  # noqa: E402, E501
-from trr_backend.socials.pipelines.account_catalog.freshness import _social_catalog_gap_analysis_request_payload as _canonical_social_catalog_gap_analysis_request_payload  # noqa: E402, E501
-from trr_backend.socials.pipelines.account_catalog.freshness import configure_account_catalog_freshness_dependencies as _configure_account_catalog_freshness_dependencies  # noqa: E402, E501
-from trr_backend.socials.pipelines.account_catalog.freshness import get_social_account_catalog_freshness as _canonical_get_social_account_catalog_freshness  # noqa: E402, E501
-from trr_backend.socials.pipelines.account_catalog.freshness import get_social_account_catalog_gap_analysis_status as _canonical_get_social_account_catalog_gap_analysis_status  # noqa: E402, E501
+from trr_backend.socials.pipelines.account_catalog.freshness import (  # noqa: E402
+    SOCIAL_CATALOG_GAP_ANALYSIS_OPERATION_TYPE as _CANONICAL_SOCIAL_CATALOG_GAP_ANALYSIS_OPERATION_TYPE,
+)
+from trr_backend.socials.pipelines.account_catalog.freshness import (
+    AccountCatalogFreshnessDependencies as _AccountCatalogFreshnessDependencies,
+)
+from trr_backend.socials.pipelines.account_catalog.freshness import (
+    _catalog_freshness_degradable_error as _canonical_catalog_freshness_degradable_error,
+)
+from trr_backend.socials.pipelines.account_catalog.freshness import (
+    _catalog_freshness_degraded_error_payload as _canonical_catalog_freshness_degraded_error_payload,
+)
+from trr_backend.socials.pipelines.account_catalog.freshness import (
+    _extract_gap_analysis_operation_error as _canonical_extract_gap_analysis_operation_error,
+)
+from trr_backend.socials.pipelines.account_catalog.freshness import (
+    _extract_gap_analysis_operation_result as _canonical_extract_gap_analysis_operation_result,
+)
+from trr_backend.socials.pipelines.account_catalog.freshness import (
+    _normalize_gap_analysis_operation_status as _canonical_normalize_gap_analysis_operation_status,
+)
+from trr_backend.socials.pipelines.account_catalog.freshness import (
+    _social_catalog_gap_analysis_request_payload as _canonical_social_catalog_gap_analysis_request_payload,
+)
+from trr_backend.socials.pipelines.account_catalog.freshness import (
+    configure_account_catalog_freshness_dependencies as _configure_account_catalog_freshness_dependencies,
+)
+from trr_backend.socials.pipelines.account_catalog.freshness import (
+    get_social_account_catalog_freshness as _canonical_get_social_account_catalog_freshness,
+)
+from trr_backend.socials.pipelines.account_catalog.freshness import (
+    get_social_account_catalog_gap_analysis_status as _canonical_get_social_account_catalog_gap_analysis_status,
+)
 
 SOCIAL_CATALOG_GAP_ANALYSIS_OPERATION_TYPE = _CANONICAL_SOCIAL_CATALOG_GAP_ANALYSIS_OPERATION_TYPE
 _social_catalog_gap_analysis_request_payload = _canonical_social_catalog_gap_analysis_request_payload
@@ -68287,29 +68339,60 @@ _configure_account_catalog_freshness_dependencies(
     _AccountCatalogFreshnessDependencies(
         normalize_platform=lambda value: _normalize_social_account_profile_platform(value),
         normalize_handle=lambda value: _normalize_social_account_profile_handle(value),
-        assert_profile_exists=lambda platform, account_handle: _assert_social_account_profile_exists(platform, account_handle), catalog_recent_runs=lambda platform, account_handle, **kwargs: _catalog_recent_runs(platform, account_handle, **kwargs),  # noqa: E501
-        get_active_run=lambda platform, account_handle, **kwargs: get_active_social_account_catalog_run(platform, account_handle, **kwargs), shared_catalog_total_posts=lambda platform, account_handle, **kwargs: _shared_catalog_total_posts(platform, account_handle, **kwargs),  # noqa: E501
-        catalog_newest_stored_post_at=lambda platform, account_handle, **kwargs: _catalog_newest_stored_post_at(platform, account_handle, **kwargs), catalog_oldest_stored_post_at=lambda platform, account_handle, **kwargs: _catalog_oldest_stored_post_at(platform, account_handle, **kwargs),  # noqa: E501
-        latest_account_frontier=lambda platform, account_handle, **kwargs: _latest_account_frontier(platform, account_handle, **kwargs),  # noqa: E501
-        cached_live_profile_total_posts=lambda platform, account_handle: _cached_live_profile_total_posts(platform, account_handle),  # noqa: E501
-        cached_live_profile_total_posts_cached_only=lambda platform, account_handle: _cached_live_profile_total_posts_cached_only(platform, account_handle),  # noqa: E501
-        now_utc=lambda: _now_utc(), iso=lambda value: _iso(value),
+        assert_profile_exists=lambda platform, account_handle: _assert_social_account_profile_exists(
+            platform, account_handle
+        ),
+        catalog_recent_runs=lambda platform, account_handle, **kwargs: _catalog_recent_runs(
+            platform, account_handle, **kwargs
+        ),  # noqa: E501
+        get_active_run=lambda platform, account_handle, **kwargs: get_active_social_account_catalog_run(
+            platform, account_handle, **kwargs
+        ),
+        shared_catalog_total_posts=lambda platform, account_handle, **kwargs: _shared_catalog_total_posts(
+            platform, account_handle, **kwargs
+        ),  # noqa: E501
+        catalog_newest_stored_post_at=lambda platform, account_handle, **kwargs: _catalog_newest_stored_post_at(
+            platform, account_handle, **kwargs
+        ),
+        catalog_oldest_stored_post_at=lambda platform, account_handle, **kwargs: _catalog_oldest_stored_post_at(
+            platform, account_handle, **kwargs
+        ),  # noqa: E501
+        latest_account_frontier=lambda platform, account_handle, **kwargs: _latest_account_frontier(
+            platform, account_handle, **kwargs
+        ),  # noqa: E501
+        cached_live_profile_total_posts=lambda platform, account_handle: _cached_live_profile_total_posts(
+            platform, account_handle
+        ),  # noqa: E501
+        cached_live_profile_total_posts_cached_only=lambda platform,
+        account_handle: _cached_live_profile_total_posts_cached_only(platform, account_handle),  # noqa: E501
+        now_utc=lambda: _now_utc(),
+        iso=lambda value: _iso(value),
         gap_analysis_operation_type=lambda: SOCIAL_CATALOG_GAP_ANALYSIS_OPERATION_TYPE,
-        gap_analysis_request_payload=lambda platform, account_handle: _social_catalog_gap_analysis_request_payload(platform, account_handle),  # noqa: E501
-        normalize_gap_analysis_operation_status=lambda value: _normalize_gap_analysis_operation_status(value), extract_gap_analysis_operation_result=lambda row: _extract_gap_analysis_operation_result(row),  # noqa: E501
-        extract_gap_analysis_operation_error=lambda row: _extract_gap_analysis_operation_error(row), freshness_degradable_error=lambda error: _catalog_freshness_degradable_error(error),  # noqa: E501
+        gap_analysis_request_payload=lambda platform, account_handle: _social_catalog_gap_analysis_request_payload(
+            platform, account_handle
+        ),  # noqa: E501
+        normalize_gap_analysis_operation_status=lambda value: _normalize_gap_analysis_operation_status(value),
+        extract_gap_analysis_operation_result=lambda row: _extract_gap_analysis_operation_result(row),  # noqa: E501
+        extract_gap_analysis_operation_error=lambda row: _extract_gap_analysis_operation_error(row),
+        freshness_degradable_error=lambda error: _catalog_freshness_degradable_error(error),  # noqa: E501
         freshness_degraded_error_payload=lambda error: _catalog_freshness_degraded_error_payload(error),
     )
 )
 get_social_account_catalog_freshness = _canonical_get_social_account_catalog_freshness
 get_social_account_catalog_gap_analysis_status = _canonical_get_social_account_catalog_gap_analysis_status
 for _provider_path in (
-    "trr_backend.socials.control_plane.queue_status", "trr_backend.socials.read_models.account_profile.common",  # noqa: E501
-    "trr_backend.socials.analytics.read_models", "trr_backend.socials.pipelines.account_catalog.progress",
-    "trr_backend.socials.control_plane.run_lifecycle", "trr_backend.socials.control_plane.dispatch_runtime",  # noqa: E501
-    "trr_backend.socials.control_plane.dispatch", "trr_backend.socials.control_plane.recovery",
-    "trr_backend.socials.control_plane.runtime", "trr_backend.socials.control_plane.shared_accounts",  # noqa: E501
-    "trr_backend.socials.instagram.catalog_ingest", "trr_backend.socials.pipelines.account_catalog.launch",  # noqa: E501
+    "trr_backend.socials.control_plane.queue_status",
+    "trr_backend.socials.read_models.account_profile.common",  # noqa: E501
+    "trr_backend.socials.analytics.read_models",
+    "trr_backend.socials.pipelines.account_catalog.progress",
+    "trr_backend.socials.control_plane.run_lifecycle",
+    "trr_backend.socials.control_plane.dispatch_runtime",  # noqa: E501
+    "trr_backend.socials.control_plane.dispatch",
+    "trr_backend.socials.control_plane.recovery",
+    "trr_backend.socials.control_plane.runtime",
+    "trr_backend.socials.control_plane.shared_accounts",  # noqa: E501
+    "trr_backend.socials.instagram.catalog_ingest",
+    "trr_backend.socials.pipelines.account_catalog.launch",  # noqa: E501
     "trr_backend.socials.pipelines.comments.instagram",
 ):
     __import__(_provider_path, fromlist=["_configure_legacy_provider"])._configure_legacy_provider(globals())

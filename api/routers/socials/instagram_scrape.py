@@ -1,5 +1,6 @@
 # ruff: noqa: F401, F403, F405, I001, UP037
 """Direct Instagram scrape and preview routes."""
+
 from __future__ import annotations
 
 from fastapi import APIRouter
@@ -8,6 +9,7 @@ from ._shared import *
 from .social_landing import *
 
 router = APIRouter()
+
 
 class InstagramScrapeRequest(BaseModel):
     """Request to scrape Instagram posts."""
@@ -25,6 +27,7 @@ class InstagramScrapeRequest(BaseModel):
     person_id: UUID | None = Field(default=None, description="Associated person ID")
     allow_inline_dev_fallback: bool = Field(default=False)
 
+
 class InstagramPostResponse(BaseModel):
     """Single Instagram post in response."""
 
@@ -40,6 +43,7 @@ class InstagramPostResponse(BaseModel):
     url: str
     username: str
 
+
 class InstagramScrapeResponse(BaseModel):
     """Response from Instagram scrape operation."""
 
@@ -49,6 +53,7 @@ class InstagramScrapeResponse(BaseModel):
     posts: list[InstagramPostResponse]
     filters_applied: dict
     error: str | None = None
+
 
 class SocialAccountConfig(BaseModel):
     """Configuration for a social account to track."""
@@ -60,6 +65,7 @@ class SocialAccountConfig(BaseModel):
     show_id: UUID | None = None
     season_number: int | None = None
     person_id: UUID | None = None
+
 
 @router.post("/instagram/scrape", response_model=InstagramScrapeResponse)
 async def scrape_instagram(
@@ -135,6 +141,7 @@ async def scrape_instagram(
             filters_applied={},
             error=str(e),
         )
+
 
 @router.post("/instagram/scrape/async")
 async def scrape_instagram_async(
@@ -295,6 +302,7 @@ async def scrape_instagram_async(
         response_payload["worker_health"] = worker_health
     return response_payload
 
+
 @router.get("/instagram/preview/{username}")
 async def preview_instagram_profile(
     username: str,
@@ -345,5 +353,6 @@ async def preview_instagram_profile(
             detail="Instagram preview failed",
             headers={"x-error-code": "SOCIAL_PREVIEW_FAILED"},
         ) from e
+
 
 __all__ = [name for name in globals() if not name.startswith("__")]

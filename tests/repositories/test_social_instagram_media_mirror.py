@@ -270,16 +270,19 @@ def test_enqueue_keeps_instagram_platform_conn_and_arguments(monkeypatch: pytest
 
     monkeypatch.setattr(legacy_core, "_enqueue_platform_media_mirror_job", enqueue)
 
-    assert media_mirror._enqueue_instagram_media_mirror_job(
-        context,
-        run_id="run-1",
-        source_scope="network",
-        account="bravotv",
-        post_row=post_row,
-        week_index=3,
-        parent_job_id="parent-1",
-        conn=conn,
-    ) == "job-1"
+    assert (
+        media_mirror._enqueue_instagram_media_mirror_job(
+            context,
+            run_id="run-1",
+            source_scope="network",
+            account="bravotv",
+            post_row=post_row,
+            week_index=3,
+            parent_job_id="parent-1",
+            conn=conn,
+        )
+        == "job-1"
+    )
     assert calls == [
         (
             (context,),
@@ -309,11 +312,14 @@ def test_stage_keeps_instagram_platform_and_arguments(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(legacy_core, "_run_platform_media_mirror_stage", run_stage)
 
-    assert media_mirror._run_instagram_media_mirror_stage(
-        context=context,
-        job_id="job-1",
-        config=config,
-    ) == result
+    assert (
+        media_mirror._run_instagram_media_mirror_stage(
+            context=context,
+            job_id="job-1",
+            config=config,
+        )
+        == result
+    )
     assert calls == [
         {
             "context": context,
@@ -336,14 +342,17 @@ def test_requeue_keeps_instagram_platform_pagination_and_window(monkeypatch: pyt
 
     monkeypatch.setattr(legacy_core, "requeue_media_mirror_jobs", requeue)
 
-    assert media_mirror.requeue_instagram_media_mirror_jobs(
-        "season-1",
-        source_scope="cast",
-        limit=321,
-        failed_only=True,
-        date_start=date_start,
-        date_end=date_end,
-    ) is result
+    assert (
+        media_mirror.requeue_instagram_media_mirror_jobs(
+            "season-1",
+            source_scope="cast",
+            limit=321,
+            failed_only=True,
+            date_start=date_start,
+            date_end=date_end,
+        )
+        is result
+    )
     assert calls == [
         (
             ("season-1",),

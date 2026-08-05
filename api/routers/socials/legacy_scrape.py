@@ -1,5 +1,6 @@
 # ruff: noqa: F401, F403, F405, I001
 """Legacy direct platform scrape and preview route aggregator."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -28,6 +29,7 @@ ROUTE_PREFIXES = (
     "/admin/socials/threads/",
     "/admin/socials/landing-",
 )
+
 
 def surface_routes(router: Any) -> list[RouteRecord]:
     return routes_matching(router, ROUTE_PREFIXES)

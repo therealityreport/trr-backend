@@ -1,5 +1,6 @@
 # ruff: noqa: F401, F403, F405, I001
 """Profile-scoped account catalog route aggregator."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -22,6 +23,7 @@ router.routes.extend(_catalog_backfill.router.routes)
 ROUTE_PREFIXES = ("/admin/socials/profiles/",)
 
 REQUIRED_PATH_FRAGMENT = "/catalog/"
+
 
 def surface_routes(router: Any) -> list[RouteRecord]:
     return [record for record in routes_matching(router, ROUTE_PREFIXES) if REQUIRED_PATH_FRAGMENT in record[1]]

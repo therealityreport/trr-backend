@@ -14,8 +14,7 @@ TypographyState = dict[str, list[dict[str, Any]]]
 
 _SET_FIELDS = "id::text AS id, slug, name, area, seed_source, roles, created_at, updated_at"
 _ASSIGNMENT_FIELDS = (
-    "id::text AS id, area, page_key, instance_key, set_id::text AS set_id, "
-    "source_path, notes, created_at, updated_at"
+    "id::text AS id, area, page_key, instance_key, set_id::text AS set_id, source_path, notes, created_at, updated_at"
 )
 
 # This is the canonical seeded state from TRR-APP's typography-seed module at

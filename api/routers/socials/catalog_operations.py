@@ -1,5 +1,6 @@
 # ruff: noqa: F401, F403, F405, I001, UP037
 """Profile-scoped catalog operation routes."""
+
 from __future__ import annotations
 
 from fastapi import APIRouter
@@ -8,6 +9,7 @@ from ._shared import *
 from .catalog_reads import *
 
 router = APIRouter()
+
 
 def _cancel_catalog_run_in_background(
     *,
@@ -58,6 +60,7 @@ def _cancel_catalog_run_in_background(
         daemon=True,
     ).start()
 
+
 class CatalogReviewResolveRequest(BaseModel):
     resolution_action: Literal["assign_show", "mark_non_show"]
     show_id: UUID | None = None
@@ -68,6 +71,7 @@ class CatalogReviewResolveRequest(BaseModel):
             raise ValueError("show_id is required when assigning a show hashtag")
         return self
 
+
 class SocialAccountCompletionRetryTargetsRequest(BaseModel):
     run_id: UUID | None = None
     retry_targets: dict[str, list[dict[str, Any]]] | list[dict[str, Any]] = Field(default_factory=dict)
@@ -77,11 +81,13 @@ class SocialAccountCompletionRetryTargetsRequest(BaseModel):
     dispatch_immediately: bool = Field(default=True)
     dry_run: bool = Field(default=False)
 
+
 def _to_optional_request_header_value(value: str | None) -> str | None:
     if not value:
         return None
     normalized = str(value).strip()
     return normalized or None
+
 
 def _start_social_catalog_gap_analysis_operation(
     *,
@@ -123,6 +129,7 @@ def _start_social_catalog_gap_analysis_operation(
     refreshed = admin_operations_repo.get_operation(operation_id) or operation
     refreshed["attached"] = attached
     return refreshed
+
 
 @router.post("/profiles/{platform}/{account_handle}/catalog/retry-targets")
 async def post_social_account_catalog_retry_targets_route(
@@ -169,6 +176,7 @@ async def post_social_account_catalog_retry_targets_route(
             detail={"code": exc.code, "message": str(exc), **jsonable_encoder(getattr(exc, "detail", {}) or {})},
         ) from exc
 
+
 @router.post("/profiles/{platform}/{account_handle}/catalog/gap-analysis/run")
 def post_social_account_catalog_gap_analysis_run_route(
     platform: str,
@@ -201,6 +209,7 @@ def post_social_account_catalog_gap_analysis_run_route(
         )
         raise _to_social_read_http_exception(exc) from exc
 
+
 @router.post("/profiles/{platform}/{account_handle}/catalog/runs/{run_id}/cancel")
 def post_social_account_catalog_run_cancel_route(
     platform: str,
@@ -231,6 +240,7 @@ def post_social_account_catalog_run_cancel_route(
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
 
+
 @router.post("/profiles/{platform}/{account_handle}/catalog/runs/{run_id}/dismiss")
 def post_social_account_catalog_run_dismiss_route(
     platform: str,
@@ -253,6 +263,7 @@ def post_social_account_catalog_run_dismiss_route(
         raise _value_error_to_bad_request(exc) from exc
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
+
 
 @router.post("/profiles/{platform}/{account_handle}/catalog/review-queue/{item_id}/resolve")
 def post_social_account_catalog_review_queue_resolve_route(
@@ -278,6 +289,7 @@ def post_social_account_catalog_review_queue_resolve_route(
         raise _value_error_to_bad_request(exc) from exc
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
+
 
 @router.post("/profiles/{platform}/{account_handle}/catalog/freshness")
 def post_social_account_catalog_freshness_route(
@@ -306,6 +318,7 @@ def post_social_account_catalog_freshness_route(
             account_handle,
         )
         raise _to_social_read_http_exception(exc) from exc
+
 
 @router.post("/profiles/{platform}/{account_handle}/catalog/runs/{run_id}/manual-auth")
 @router.post("/profiles/{platform}/{account_handle}/catalog/runs/{run_id}/repair-auth")
@@ -347,5 +360,6 @@ async def post_social_account_catalog_run_repair_auth_route(
         raise _value_error_to_bad_request(exc) from exc
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
+
 
 __all__ = [name for name in globals() if not name.startswith("__")]

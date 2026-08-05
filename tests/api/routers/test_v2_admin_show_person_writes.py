@@ -149,9 +149,7 @@ def test_invalid_write_inputs_use_stable_400_problems_not_fastapi_422(
     assert response.json()["detail"]["request_id"] == "invalid-write"
     assert "422" not in response.text
     if code == "source_order_must_include_all_sources":
-        assert fake_repository.calls == [
-            ("update_person_canonical_profile_source_order", (PERSON_ID, ["imdb"]))
-        ]
+        assert fake_repository.calls == [("update_person_canonical_profile_source_order", (PERSON_ID, ["imdb"]))]
     else:
         assert fake_repository.calls == []
 
@@ -164,6 +162,4 @@ def test_missing_show_uses_a_typed_404(client: TestClient, fake_repository: Fake
 
     assert response.status_code == 404
     assert response.json()["detail"]["code"] == "SHOW_NOT_FOUND"
-    assert fake_repository.calls == [
-        ("update_show", ("33333333-3333-3333-3333-333333333333", {"name": "Missing"}))
-    ]
+    assert fake_repository.calls == [("update_show", ("33333333-3333-3333-3333-333333333333", {"name": "Missing"}))]

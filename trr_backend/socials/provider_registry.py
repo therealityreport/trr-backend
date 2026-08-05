@@ -173,8 +173,7 @@ class LateNamespaceProvider:
         )
         self._invalid_message = invalid_message or f"{prefix}_INVALID: provider must be a mapping"
         self._missing_bindings_message = (
-            missing_bindings_message
-            or f"{prefix}_INVALID: missing compatibility bindings: "
+            missing_bindings_message or f"{prefix}_INVALID: missing compatibility bindings: "
         )
         self._lock = RLock()
         self._state = UNCONFIGURED
@@ -269,37 +268,27 @@ class LateNamespaceProvider:
             staged_names = {name for name in namespace if name not in self._reserved_names}
             staged_wrappers = {name: namespace.get(name) for name in self._room_names}
             required_room_names = self._resolved_required_room_names()
-            invalid_wrappers = sorted(
-                name for name in required_room_names if not callable(staged_wrappers.get(name))
-            )
+            invalid_wrappers = sorted(name for name in required_room_names if not callable(staged_wrappers.get(name)))
             if invalid_wrappers:
                 raise RuntimeError(
-                    f"{self._prefix}_INVALID: missing callable room wrappers: "
-                    + ", ".join(invalid_wrappers)
+                    f"{self._prefix}_INVALID: missing callable room wrappers: " + ", ".join(invalid_wrappers)
                 )
             if self._bindings is not None:
                 missing_names = sorted(
-                    provider_name
-                    for provider_name in set(self._bindings.values())
-                    if provider_name not in namespace
+                    provider_name for provider_name in set(self._bindings.values()) if provider_name not in namespace
                 )
                 if missing_names:
                     raise RuntimeError(self._missing_bindings_message + ", ".join(missing_names))
                 staged_bindings = {
-                    local_name: namespace[provider_name]
-                    for local_name, provider_name in self._bindings.items()
+                    local_name: namespace[provider_name] for local_name, provider_name in self._bindings.items()
                 }
             elif self._copy_bindings:
                 staged_bindings = {
-                    name: namespace[name]
-                    for name in staged_names - self._room_names - self._bridge_names
+                    name: namespace[name] for name in staged_names - self._room_names - self._bridge_names
                 }
             else:
                 staged_bindings = {}
-            prior_bindings = {
-                name: self._owner.get(name, _MISSING)
-                for name in staged_bindings
-            }
+            prior_bindings = {name: self._owner.get(name, _MISSING) for name in staged_bindings}
             prior_imported_names = set(self.imported_names)
             prior_room_wrappers = dict(self.room_wrappers)
             prior_namespace = self._namespace
@@ -439,6 +428,7 @@ class LateModuleProvider(LateNamespaceProvider):
                     adapter = existing_adapter
                     break
             else:
+
                 def adapter(_namespace: Namespace, module: ModuleType | None) -> None:
                     if module is None:
                         raise RuntimeError(f"{self._prefix}_INVALID: published module identity is unavailable")

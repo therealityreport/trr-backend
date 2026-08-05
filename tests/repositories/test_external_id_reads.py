@@ -142,9 +142,7 @@ def test_show_batch_is_one_query_and_omits_missing_rows_without_reordering(
 
     monkeypatch.setattr(external_id_reads.pg, "fetch_all", fake_fetch_all)
 
-    shows, query_count = external_id_reads.list_show_external_ids_by_show_ids(
-        [SHOW_B, SHOW_A, SHOW_B]
-    )
+    shows, query_count = external_id_reads.list_show_external_ids_by_show_ids([SHOW_B, SHOW_A, SHOW_B])
 
     assert query_count == 1
     assert len(calls) == 1

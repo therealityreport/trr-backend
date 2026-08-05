@@ -979,6 +979,7 @@ class InstagramScraper:
         headless = self._chrome_browser_headless()
 
         try:
+
             def _validate_interactive_cookies(cookies: dict[str, str]) -> tuple[bool, str | None]:
                 return self._validate_cookie_refresh_graphql(
                     cookies,

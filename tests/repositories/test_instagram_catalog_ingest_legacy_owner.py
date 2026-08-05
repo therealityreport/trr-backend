@@ -74,8 +74,7 @@ def test_catalog_ingest_uses_late_provider_publication_without_a_legacy_bootstra
     lifecycle_imports = [
         alias
         for node in tree.body
-        if isinstance(node, ast.ImportFrom)
-        and node.module == "trr_backend.socials.control_plane.run_lifecycle"
+        if isinstance(node, ast.ImportFrom) and node.module == "trr_backend.socials.control_plane.run_lifecycle"
         for alias in node.names
         if (alias.name, alias.asname) == ("_legacy_module", "_published_legacy_module")
     ]

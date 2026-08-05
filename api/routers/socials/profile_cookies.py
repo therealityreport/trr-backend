@@ -1,5 +1,6 @@
 # ruff: noqa: F401, F403, F405
 """Profile-scoped cookie-health and refresh routes."""
+
 from __future__ import annotations
 
 from fastapi import APIRouter
@@ -8,6 +9,7 @@ from ._shared import *
 from .profile_reads import *
 
 router = APIRouter()
+
 
 @router.get("/profiles/{platform}/{account_handle}/cookies/health")
 def get_cookie_health_route(
@@ -161,6 +163,7 @@ def get_cookie_health_route(
         }
     return health
 
+
 @router.post("/profiles/{platform}/{account_handle}/cookies/refresh")
 def post_cookie_refresh_route(
     platform: str,
@@ -211,5 +214,6 @@ def post_cookie_refresh_route(
             },
         )
     return result
+
 
 __all__ = [name for name in globals() if not name.startswith("__")]

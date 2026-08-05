@@ -1,5 +1,6 @@
 # ruff: noqa: F401, F403, F405, I001
 """Profile-scoped catalog backfill and sync routes."""
+
 from __future__ import annotations
 
 from fastapi import APIRouter
@@ -9,6 +10,7 @@ from .catalog_reads import *
 from .catalog_operations import *
 
 router = APIRouter()
+
 
 @router.post("/profiles/{platform}/{account_handle}/catalog/backfill")
 async def post_social_account_catalog_backfill_route(
@@ -232,6 +234,7 @@ async def post_social_account_catalog_backfill_route(
         background_tasks=background_tasks,
     )
 
+
 @router.post("/profiles/{platform}/{account_handle}/catalog/remediate-drift")
 async def post_social_account_catalog_remediate_drift_route(
     platform: str,
@@ -259,6 +262,7 @@ async def post_social_account_catalog_remediate_drift_route(
         raise _value_error_to_bad_request(exc) from exc
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
+
 
 @router.post("/profiles/{platform}/{account_handle}/catalog/sync-recent")
 async def post_social_account_catalog_sync_recent_route(
@@ -328,6 +332,7 @@ async def post_social_account_catalog_sync_recent_route(
         background_tasks=background_tasks,
     )
 
+
 @router.post("/profiles/{platform}/{account_handle}/catalog/sync-newer")
 async def post_social_account_catalog_sync_newer_route(
     platform: str,
@@ -394,6 +399,7 @@ async def post_social_account_catalog_sync_newer_route(
         requires_modal_executor=requires_modal_executor,
         background_tasks=background_tasks,
     )
+
 
 @router.post("/profiles/{platform}/{account_handle}/catalog/resume-tail")
 async def post_social_account_catalog_resume_tail_route(
@@ -469,5 +475,6 @@ async def post_social_account_catalog_resume_tail_route(
         ),
         "deprecated_route": True,
     }
+
 
 __all__ = [name for name in globals() if not name.startswith("__")]

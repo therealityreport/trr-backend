@@ -11,13 +11,7 @@ def source_schema() -> dict:
             "/api/v1/ignored": {
                 "get": {
                     "responses": {
-                        "200": {
-                            "content": {
-                                "application/json": {
-                                    "schema": {"$ref": "#/components/schemas/Ignored"}
-                                }
-                            }
-                        }
+                        "200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Ignored"}}}}
                     }
                 }
             },
@@ -26,13 +20,7 @@ def source_schema() -> dict:
                     "tags": ["v2"],
                     "security": [{"InternalAdmin": []}],
                     "responses": {
-                        "200": {
-                            "content": {
-                                "application/json": {
-                                    "schema": {"$ref": "#/components/schemas/Envelope"}
-                                }
-                            }
-                        }
+                        "200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Envelope"}}}}
                     },
                 }
             },
@@ -41,9 +29,7 @@ def source_schema() -> dict:
             "schemas": {
                 "Envelope": {
                     "type": "object",
-                    "properties": {
-                        "item": {"$ref": "#/components/schemas/Item"}
-                    },
+                    "properties": {"item": {"$ref": "#/components/schemas/Item"}},
                 },
                 "Item": {"type": "object", "properties": {"id": {"type": "string"}}},
                 "Ignored": {"type": "object"},

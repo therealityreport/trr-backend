@@ -1,5 +1,6 @@
 # ruff: noqa: F401
 """Registration-only admin-socials router package."""
+
 from __future__ import annotations
 
 import sys
@@ -101,11 +102,7 @@ _COMPATIBILITY_MODULES = tuple(
     )
 )
 _COMPATIBILITY_OWNERS = {
-    name: tuple(
-        (module, module.__dict__[name])
-        for module in _COMPATIBILITY_MODULES
-        if name in module.__dict__
-    )
+    name: tuple((module, module.__dict__[name]) for module in _COMPATIBILITY_MODULES if name in module.__dict__)
     for name in {name for module in _COMPATIBILITY_MODULES for name in module.__dict__}
 }
 
