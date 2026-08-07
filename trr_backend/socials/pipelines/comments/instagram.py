@@ -9,7 +9,7 @@ import os
 import re
 import time as time_module
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
@@ -46,6 +46,86 @@ _require_provider_ready = _PROVIDER.require
 _configure_legacy_provider = _PROVIDER.configure
 _sync_core_overrides = _PROVIDER.sync
 _room_callable = _PROVIDER.room_callable
+
+# ---------------------------------------------------------------------------
+# Names injected at runtime by the legacy provider-patch loop (configured via
+# ``register_legacy_patchable_namespace`` when the analytics implementation
+# module loads). These annotation-only declarations bind nothing at runtime;
+# they only declare types so static analysis knows the names exist.
+# ---------------------------------------------------------------------------
+# Injected modules / module-like handles.
+pg: Any
+json: Any
+copy: Any
+psycopg_errors: Any
+logger: Any
+uuid4: Callable[..., Any]
+# Injected exception types.
+SocialIngestValidationError: Any
+SocialIngestConflictError: Any
+SocialWorkerUnavailableError: Any
+# Injected constants.
+INSTAGRAM_COMMENTS_SCRAPLING_STAGE: Any
+INSTAGRAM_COMMENTS_SCRAPLING_WORKER_LANE: Any
+COMMENT_MEDIA_MIRROR_STAGE: Any
+SOCIAL_INSTAGRAM_COMMENTS_TARGET_PREVIEW_CACHE_TTL_SECONDS_DEFAULT: Any
+SOCIAL_INSTAGRAM_COMMENTS_MAX_ATTEMPTS_DEFAULT: Any
+_INSTAGRAM_COMMENTS_TARGET_PREVIEW_CACHE: Any
+_INSTAGRAM_COMMENTS_TARGET_PREVIEW_CACHE_LOCK: Any
+_INSTAGRAM_COMMENTS_TERMINAL_UNAVAILABLE_ERROR_CODES: Any
+# Injected helper callables.
+_as_text_list: Callable[..., Any]
+_assert_social_account_profile_exists: Callable[..., Any]
+_call_profile_summary_loader_with_conn: Callable[..., Any]
+_clear_worker_heartbeat_for_job: Callable[..., Any]
+_coerce_dt: Callable[..., Any]
+_column_exists: Callable[..., Any]
+_comment_lifecycle_supported: Callable[..., Any]
+_comments_only_profile_filter_where_sql: Callable[..., Any]
+_create_job: Callable[..., Any]
+_create_run: Callable[..., str]
+_enqueue_instagram_media_mirror_job: Callable[..., Any]
+_enqueue_platform_comment_media_mirror_job: Callable[..., Any]
+_increment_run_counters_on_job_create_batch: Callable[..., Any]
+_instagram_account_jsonb_array_match_sql: Callable[..., Any]
+_instagram_account_match_sql: Callable[..., Any]
+_instagram_catalog_collaborator_membership_available: Callable[..., Any]
+_instagram_cookie_fingerprint: Callable[..., Any]
+_instagram_external_facebook_comments_sql: Callable[..., Any]
+_instagram_fetchable_comments_sql: Callable[..., Any]
+_instagram_reported_comments_sql: Callable[..., Any]
+_invalidate_queue_status_cache: Callable[..., Any]
+_iso: Callable[..., Any]
+_job_config_allows_priority_comment_recovery_override: Callable[..., Any]
+_job_required_execution_backend: Callable[..., Any]
+_job_runtime_metadata: Callable[..., Any]
+_json_dumps: Callable[..., Any]
+_load_social_account_comments_run_row: Callable[..., Any]
+_merge_catalog_run_config: Callable[..., Any]
+_metadata_dict: Callable[..., Any]
+_normalize_non_negative_int: Callable[..., Any]
+_normalize_social_account_profile_handle: Callable[..., Any]
+_normalize_social_account_profile_platform: Callable[..., Any]
+_normalize_unique_terms: Callable[..., Any]
+_now_utc: Callable[..., Any]
+_persist_run_counters_and_summary: Callable[..., Any]
+_resolve_effective_runtime_version: Callable[..., Any]
+_resolve_int_env_with_bounds: Callable[..., Any]
+_resolve_media_mirror_stage_context: Callable[..., Any]
+_resolve_positive_int_env: Callable[..., Any]
+_resolve_runtime_version_stamp: Callable[..., Any]
+_run_counter_columns_ready: Callable[..., Any]
+_scrape_jobs_features: Callable[..., Any]
+_shared_catalog_base_query_parts: Callable[..., Any]
+_social_account_comments_recent_runs: Callable[..., Any]
+_social_account_comments_start_lock_key: Callable[..., Any]
+_social_account_profile_owner_match_sql: Callable[..., Any]
+_status_is_active: Callable[..., Any]
+_update_run_summary: Callable[..., Any]
+assert_worker_available_when_queue_enabled: Callable[..., Any]
+is_modal_remote_executor_enabled: Callable[..., Any]
+is_queue_enabled: Callable[..., Any]
+refresh_platform_cookies_interactive: Callable[..., Any]
 
 INSTAGRAM_COMMENTS_AUDIT_CURSOR_RETRY_STOP_REASONS = (
     "pagination_deadline_exceeded",
@@ -2321,7 +2401,6 @@ def start_social_account_comments_scrape(
                         detail=active_run,
                     )
                 active_run_to_cancel = dict(active_run)
-            target_source_ids: list[str]
             target_enumeration_started_at = time_module.perf_counter()
             if normalized_mode == "single_post":
                 normalized_source_id = str(source_id or "").strip()
@@ -8281,10 +8360,10 @@ __all__ = [
     "cancel_social_account_comments_job",
 ]
 
-# The API schedules this helper from the extracted comments leaf, while
-# compatibility callers still patch the legacy repository name. Bridge the
-# local launch/progress exports so those patches remain observable.
+# The API schedules the launch/progress exports from this extracted leaf while
+# compatibility callers still patch their legacy repository names. Dispatch is
+# control-plane-owned, so it deliberately remains outside that legacy bridge.
 register_legacy_patchable_namespace(
     globals(),
-    (*__all__, "dispatch_due_social_jobs", "_dispatch_due_social_jobs_in_background"),
+    __all__,
 )

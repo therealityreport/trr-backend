@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import types
+from typing import Any
 
 import pytest
 
@@ -878,6 +879,7 @@ def test_modal_deploy_schedules_are_disabled_by_default(monkeypatch: pytest.Monk
     try:
         assert "schedule" not in reloaded.sweep_social_dispatch_queue._modal_function_options
         assert "schedule" not in reloaded.heartbeat_remote_executors._modal_function_options
+        assert "schedule" not in reloaded.poll_due_show_season_media_watches._modal_function_options
         assert "schedule" not in reloaded.sync_nbcumv_official_images._modal_function_options
         assert "schedule" not in reloaded.purge_stale_social_worker_heartbeats._modal_function_options
         assert reloaded.serve_backend_api._modal_function_options["min_containers"] == 0
@@ -900,6 +902,7 @@ def test_modal_deploy_schedules_can_be_enabled_explicitly(monkeypatch: pytest.Mo
         social_recovery_schedule = reloaded.sweep_social_dispatch_queue._modal_function_options["schedule"]
         nbcumv_schedule = reloaded.sync_nbcumv_official_images._modal_function_options["schedule"]
         cleanup_schedule = reloaded.purge_stale_social_worker_heartbeats._modal_function_options["schedule"]
+        assert "schedule" not in reloaded.poll_due_show_season_media_watches._modal_function_options
         assert heartbeat_schedule.expression == "* * * * *"
         assert social_recovery_schedule.expression == "*/2 * * * *"
         assert nbcumv_schedule.expression == "15 14 * * *"
@@ -1117,7 +1120,7 @@ def test_run_socialblade_scrape_persists_payload_with_following_sidecar(
     import trr_backend.socials.socialblade.scraper as scraper_module
     import trr_backend.socials.socialblade.service as service_module
 
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     monkeypatch.setattr(auth_module, "load_socialblade_cookies_from_sources", lambda: {"cf_clearance": "token"})
 
@@ -1199,7 +1202,7 @@ def test_run_socialblade_scrape_persists_account_scoped_payload_without_person(
     import trr_backend.socials.socialblade.scraper as scraper_module
     import trr_backend.socials.socialblade.service as service_module
 
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     monkeypatch.setattr(auth_module, "load_socialblade_cookies_from_sources", lambda: {})
     monkeypatch.setattr(scraper_module, "scrape_socialblade", lambda handle, _cookies, **_kwargs: {"username": handle})
@@ -1231,7 +1234,8 @@ def test_heartbeat_remote_executors_reports_social_auth_capabilities(
     from trr_backend.db import pg
 
     close_calls: list[str] = []
-    recorded: list[dict[str, object]] = []
+    recorded: list[dict[str, Any]] = []
+    media_poll_calls: list[bool] = []
 
     def _fake_record_dispatcher_heartbeat(**kwargs):
         recorded.append(kwargs)
@@ -1250,8 +1254,15 @@ def test_heartbeat_remote_executors_reports_social_auth_capabilities(
         ),
     )
     monkeypatch.setattr(pg, "close_pool", lambda: close_calls.append("closed"))
+    monkeypatch.setattr(
+        modal_jobs,
+        "_poll_due_show_season_media_watches_impl",
+        lambda: media_poll_calls.append(True) or {"status": "completed", "claimed": 0},
+    )
+    monkeypatch.setattr(modal_jobs, "_validate_modal_maintenance_owner_config", lambda: "modal_singleton_cron")
 
     payload = modal_jobs.heartbeat_remote_executors.local()
+    assert media_poll_calls == [True]
 
     assert payload == {
         "ok": True,
@@ -1284,7 +1295,7 @@ def test_heartbeat_remote_executors_reports_social_auth_capabilities(
 
 
 def test_modal_completion_evidence_contract_is_explicit() -> None:
-    contract = modal_jobs.modal_completion_evidence_contract()
+    contract: dict[str, Any] = modal_jobs.modal_completion_evidence_contract()
 
     assert contract["modal_update_status_required"] is True
     assert contract["blocker_required_when_not_updated"] is True
@@ -1336,11 +1347,11 @@ def test_browser_image_runtime_probe_closes_browser_before_playwright_context(
             self.active = False
 
     context = _PlaywrightContext()
-    playwright_sync_api = types.ModuleType("playwright.sync_api")
+    playwright_sync_api: Any = types.ModuleType("playwright.sync_api")
     playwright_sync_api.sync_playwright = lambda: context
-    patchright_sync_api = types.ModuleType("patchright.sync_api")
+    patchright_sync_api: Any = types.ModuleType("patchright.sync_api")
     patchright_sync_api.sync_playwright = lambda: None
-    scrapling_fetchers = types.ModuleType("scrapling.fetchers")
+    scrapling_fetchers: Any = types.ModuleType("scrapling.fetchers")
     scrapling_fetchers.StealthyFetcher = object
     monkeypatch.setitem(sys.modules, "playwright.sync_api", playwright_sync_api)
     monkeypatch.setitem(sys.modules, "patchright.sync_api", patchright_sync_api)
@@ -1479,7 +1490,7 @@ def test_purge_stale_social_worker_heartbeats_uses_seven_day_policy(
     from trr_backend.db import pg
 
     close_calls: list[str] = []
-    captured: dict[str, object] = {"params": []}
+    captured: dict[str, Any] = {"params": []}
 
     def _fake_fetch_one(_sql, params=None):
         captured["fetch_sql"] = _sql

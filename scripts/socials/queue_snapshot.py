@@ -4,9 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
-import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -71,14 +71,15 @@ def build_snapshot(args: argparse.Namespace) -> dict[str, Any]:
 
 def _print_compact(payload: dict[str, Any]) -> None:
     snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), dict) else {}
-    status_counts = snapshot.get("status_counts") if isinstance(snapshot, dict) else []
+    status_counts: Any = snapshot.get("status_counts") if isinstance(snapshot, dict) else []
     counts = {
-        str(row.get("status") or "unknown"): int(row.get("jobs") or 0)
-        for row in status_counts
-        if isinstance(row, dict)
+        str(row.get("status") or "unknown"): int(row.get("jobs") or 0) for row in status_counts if isinstance(row, dict)
     }
     print(
-        "run_id={run_id} platform={platform} stage={stage} stale_running={stale} queued={queued} running={running} retrying={retrying}".format(
+        (
+            "run_id={run_id} platform={platform} stage={stage} stale_running={stale} "
+            "queued={queued} running={running} retrying={retrying}"
+        ).format(
             run_id=payload.get("run_id"),
             platform=payload.get("platform"),
             stage=payload.get("stage"),

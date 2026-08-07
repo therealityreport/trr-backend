@@ -8,10 +8,11 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from threading import BoundedSemaphore
-from typing import Any
+from typing import Any, NoReturn
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
+import requests.cookies
 
 from trr_backend.integrations import getty as getty_integration
 from trr_backend.integrations import getty_transport
@@ -227,9 +228,7 @@ def _browser_page_result(search_page: Any, response: Any | None) -> dict[str, An
 
 def _resolve_getty_browser_mode() -> str:
     raw_value = str(os.getenv("TRR_GETTY_BROWSER_MODE") or "").strip().lower()
-    if raw_value in {"live", "cookies"}:
-        return raw_value
-    return _DEFAULT_GETTY_BROWSER_MODE
+    return raw_value if raw_value in {"live", "cookies"} else _DEFAULT_GETTY_BROWSER_MODE
 
 
 def _resolve_getty_max_concurrent_jobs() -> int:
@@ -344,7 +343,9 @@ def _build_browser_bridge(profile_dir: Path) -> LocalGettyBridge | None:
                 authenticated = True
                 auth_mode = "chrome_profile_browser_login_bootstrap"
             else:
-                auth_warning = "openai-agent Getty Chrome profile is not authenticated; Getty scraping may be truncated."
+                auth_warning = (
+                    "openai-agent Getty Chrome profile is not authenticated; Getty scraping may be truncated."
+                )
 
         session, cookie_count = _context_cookies_to_session(browser_context)
 
@@ -555,9 +556,9 @@ def _build_isolated_bridge_from_bridge(bridge: LocalGettyBridge) -> LocalGettyBr
 
 def _query_indicates_session_truncation(summary: dict[str, Any]) -> bool:
     termination_reason = str(summary.get("termination_reason") or "").strip().lower()
-    if termination_reason in {"pagination_rewrite", "session_truncated"}:
-        return True
-    return bool(summary.get("pagination_rewrite_detected"))
+    return termination_reason in {"pagination_rewrite", "session_truncated"} or bool(
+        summary.get("pagination_rewrite_detected")
+    )
 
 
 def _getty_remote_transport_enabled() -> bool:
@@ -565,7 +566,7 @@ def _getty_remote_transport_enabled() -> bool:
     return raw_value in {"1", "true", "yes", "on"}
 
 
-def _raise_getty_session_error(message: str, *, code: str) -> None:
+def _raise_getty_session_error(message: str, *, code: str) -> NoReturn:
     raise GettyPrefetchSessionError(message, code=code)
 
 

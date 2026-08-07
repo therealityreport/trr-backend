@@ -9,7 +9,7 @@ import hashlib
 import os
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from trr_backend.socials.instagram.media_completion import build_media_completion_payload
 from trr_backend.socials.instagram.snapshot_completion import (
@@ -41,10 +41,90 @@ from trr_backend.socials.provider_registry import (
     register_legacy_patchable_namespace,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from datetime import datetime
+    from typing import Literal
+    from uuid import uuid4
+
+    def _type_only_callable(*_args: Any, **_kwargs: Any) -> Any:
+        return None
+
+    CATALOG_SUPPORTED_PLATFORMS: Any
+    INSTAGRAM_COMMENTS_SCRAPLING_STAGE: Any
+    INSTAGRAM_COMMENTS_SCRAPLING_WORKER_LANE: Any
+    SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE: Any
+    SocialIngestConflictError: Any
+    _as_text_list: Callable[..., Any] = _type_only_callable
+    _assert_social_account_profile_exists: Callable[..., Any] = _type_only_callable
+    _bounded_window_skip_ahead_candidate: Callable[..., Any] = _type_only_callable
+    _bounded_window_skip_ahead_enabled: Callable[..., Any] = _type_only_callable
+    _build_attached_comments_followup: Callable[..., Any] = _type_only_callable
+    _build_attached_media_followup: Callable[..., Any] = _type_only_callable
+    _build_social_account_catalog_launch_placeholder_config: Callable[..., Any] = _type_only_callable
+    _catalog_launch_initial_status: Callable[..., Any] = _type_only_callable
+    _catalog_media_attachment_id: Callable[..., Any] = _type_only_callable
+    _coerce_dt: Callable[..., Any] = _type_only_callable
+    _complete_catalog_launch_no_work: Callable[..., Any] = _type_only_callable
+    _effective_social_account_catalog_backfill_selected_tasks: Callable[..., Any] = _type_only_callable
+    _instagram_comments_profile_shard_count: Callable[..., Any] = _type_only_callable
+    _instagram_comments_recommended_shard_count: Callable[..., Any] = _type_only_callable
+    _instagram_cookie_fingerprint: Callable[..., Any] = _type_only_callable
+    _instagram_materialization_state: Callable[..., Any] = _type_only_callable
+    _instagram_social_account_comments_target_counts: Callable[..., Any] = _type_only_callable
+    _iso: Callable[..., Any] = _type_only_callable
+    _json_dumps: Callable[..., Any] = _type_only_callable
+    _latest_account_frontier: Callable[..., Any] = _type_only_callable
+    _load_catalog_run_row_by_id: Callable[..., Any] = _type_only_callable
+    _materialized_social_account_total_posts: Callable[..., Any] = _type_only_callable
+    _merge_catalog_run_config: Callable[..., Any] = _type_only_callable
+    _metadata_dict: Callable[..., Any] = _type_only_callable
+    _normalize_comment_anchor_source_ids: Callable[..., Any] = _type_only_callable
+    _normalize_non_negative_int: Callable[..., Any] = _type_only_callable
+    _normalize_optional_social_account_catalog_backfill_selected_tasks: Callable[..., Any] = _type_only_callable
+    _normalize_social_account_catalog_backfill_selected_tasks: Callable[..., Any] = _type_only_callable
+    _normalize_social_account_profile_handle: Callable[..., Any] = _type_only_callable
+    _normalize_social_account_profile_platform: Callable[..., Any] = _type_only_callable
+    _now_utc: Callable[..., Any] = _type_only_callable
+    _record_social_account_catalog_launch_failure: Callable[..., Any] = _type_only_callable
+    _reserve_social_account_catalog_launch: Callable[..., Any] = _type_only_callable
+    _resolve_effective_runtime_version: Callable[..., Any] = _type_only_callable
+    _resolve_runtime_version_stamp: Callable[..., Any] = _type_only_callable
+    _set_run_status: Callable[..., Any] = _type_only_callable
+    _shared_account_catalog_requires_modal_executor: Callable[..., Any] = _type_only_callable
+    _tiktok_catalog_comment_override_enabled: Callable[..., Any] = _type_only_callable
+    assert_worker_available_when_queue_enabled: Callable[..., Any] = _type_only_callable
+    ingest_shared_accounts: Callable[..., Any] = _type_only_callable
+    is_queue_enabled: Callable[..., Any] = _type_only_callable
+    logger: Any
+    pg: Any
+    prefer_local_inline: Callable[..., Any] = _type_only_callable
+    refresh_platform_cookies_interactive: Callable[..., Any] = _type_only_callable
+    resolve_social_account_catalog_action_seed: Callable[..., Any] = _type_only_callable
+    time_module: Any
+
 _IMPORTED_CORE_NAMES: set[str] = set()
 _LOCAL_ROOM_NAMES: set[str] = set()
 _LOCAL_ROOM_FUNCTIONS: dict[str, Any] = {}
 _CORE_ROOM_WRAPPERS: dict[str, Any] = {}
+_PROVIDER_BRIDGE_NAMES = {
+    "_merge_catalog_run_config",
+    "probe_modal_instagram_comments_auth_health",
+    "probe_modal_instagram_posts_auth_health",
+    "remediate_social_account_catalog_runtime_supersession",
+    "request_cancel_social_account_catalog_run",
+    "drain_media_mirror_account_jobs",
+}
+
+
+def _capture_provider_bridge_fallbacks(namespace: Mapping[str, Any], _module: Any) -> None:
+    """Capture patchable provider fallbacks before legacy wrappers publish."""
+
+    for name in _PROVIDER_BRIDGE_NAMES:
+        fallback = namespace.get(name)
+        if callable(fallback):
+            globals()[name] = fallback
+    register_legacy_patchable_namespace(globals(), _PROVIDER_BRIDGE_NAMES)
 
 
 _PROVIDER = LateNamespaceProvider(
@@ -53,8 +133,10 @@ _PROVIDER = LateNamespaceProvider(
     room_names=_LOCAL_ROOM_NAMES,
     imported_names=_IMPORTED_CORE_NAMES,
     room_wrappers=_CORE_ROOM_WRAPPERS,
+    bridge_names=_PROVIDER_BRIDGE_NAMES,
     commit=publish_module_slot(globals(), "_core"),
 )
+_PROVIDER.register_publication_callback(_capture_provider_bridge_fallbacks)
 _core: Any = LateProviderProxy(_PROVIDER)
 _require_provider_ready = _PROVIDER.require
 _configure_legacy_provider = _PROVIDER.configure
@@ -1289,10 +1371,10 @@ def start_social_account_catalog_backfill(
     if run_id and not reserved_here and launch_group_id and _catalog_launch_parent_cancelled(run_id):
         return _catalog_launch_parent_result(_catalog_launch_parent_snapshot(run_id))
     if reserved_here:
-        admission_callback = None
+        admission_callback: Callable[[Any], dict[str, Any]] | None = None
         if normalized_platform == "instagram":
 
-            def admission_callback(lock_conn: Any) -> dict[str, Any]:
+            def _instagram_admission_callback(lock_conn: Any) -> dict[str, Any]:
                 return _instagram_db_session_admission_config(
                     selected_tasks=effective_selected_tasks or selected_tasks,
                     details_worker_count=effective_details_worker_count,
@@ -1302,6 +1384,8 @@ def start_social_account_catalog_backfill(
                     budget_decision=budget_decision,
                     conn=lock_conn,
                 )
+
+            admission_callback = _instagram_admission_callback
 
         initial_completion_metadata = (
             _initial_instagram_completion_metadata(
@@ -1563,10 +1647,10 @@ def begin_social_account_catalog_backfill_launch(
         else _apply_budget_worker_limit(comments_worker_count, budget_decision)
     )
     db_session_capacity: dict[str, Any] | None = None
-    admission_callback = None
+    admission_callback: Callable[[Any], dict[str, Any]] | None = None
     if normalized_platform == "instagram":
 
-        def admission_callback(lock_conn: Any) -> dict[str, Any]:
+        def _instagram_admission_callback(lock_conn: Any) -> dict[str, Any]:
             return _instagram_db_session_admission_config(
                 selected_tasks=normalized_selected_tasks,
                 details_worker_count=effective_details_worker_count,
@@ -1576,6 +1660,8 @@ def begin_social_account_catalog_backfill_launch(
                 budget_decision=budget_decision,
                 conn=lock_conn,
             )
+
+        admission_callback = _instagram_admission_callback
 
     initial_completion_metadata = (
         _initial_instagram_completion_metadata(
@@ -2368,6 +2454,7 @@ def launch_social_account_catalog_backfill(
     target_readiness: dict[str, Any] | None = None
     comments_blocker_reasons: list[str] = []
     comments_started_before_detail_complete = False
+    stored_post_count = 0
     if normalized_platform == "instagram":
         coverage_started_at = time_module.perf_counter()
         use_fast_existing_posts_launch_state = bool(

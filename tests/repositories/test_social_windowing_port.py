@@ -5,11 +5,11 @@ import sys
 import textwrap
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
-from trr_backend.repositories import social_season_analytics as repo
+from trr_backend.socials import social_season_analytics_impl as repo
 from trr_backend.socials import windowing
 from trr_backend.socials.control_plane import windowing as control_plane_windowing
 from trr_backend.socials.model_types import SeasonContext, WeekWindow
@@ -52,20 +52,23 @@ def test_week_window_leaf_is_import_neutral_and_unconfigured_in_fresh_interprete
     "composition_import",
     [
         """
-        from trr_backend.repositories import social_season_analytics as repo
+        from trr_backend.socials import social_season_analytics_impl as repo
 
         assert windowing._week_window_resolver is repo.resolve_week_window
         """,
         """
+        import sys
+
         from trr_backend.socials.control_plane import resolve_week_window
 
-        assert windowing._week_window_resolver is not None
         assert resolve_week_window is windowing.resolve_week_window
+        assert windowing._week_window_resolver is None
+        assert "trr_backend.socials.social_season_analytics_impl" not in sys.modules
         """,
     ],
     ids=["legacy-repository", "public-control-plane"],
 )
-def test_production_composition_imports_register_resolver_in_fresh_interpreter(
+def test_import_composition_preserves_the_expected_windowing_contract_in_fresh_interpreter(
     composition_import: str,
 ) -> None:
     result = _run_fresh_interpreter("from trr_backend.socials import windowing\n" + textwrap.dedent(composition_import))
@@ -160,7 +163,7 @@ def test_week_window_port_uses_canonical_monolith_resolution(monkeypatch: pytest
 
 def test_control_plane_windowing_reexports_import_neutral_resolver() -> None:
     assert control_plane_windowing is windowing
-    assert control_plane_windowing.resolve_week_window is windowing.resolve_week_window
+    assert cast(Any, control_plane_windowing).resolve_week_window is windowing.resolve_week_window
 
 
 def test_control_plane_windowing_monkeypatches_legacy_leaf(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -170,4 +173,4 @@ def test_control_plane_windowing_monkeypatches_legacy_leaf(monkeypatch: pytest.M
     monkeypatch.setattr(control_plane_windowing, "resolve_week_window", fake_resolver)
 
     assert windowing.resolve_week_window is fake_resolver
-    assert control_plane_windowing.resolve_week_window("season-4", week_index=4) == {"patched": True}
+    assert cast(Any, control_plane_windowing).resolve_week_window("season-4", week_index=4) == {"patched": True}

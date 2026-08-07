@@ -7,6 +7,7 @@ import time
 from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 from uuid import UUID, uuid4
 
@@ -51,9 +52,27 @@ def _make_admin_token(secret: str, subject: str = "admin-1") -> str:
 
 @pytest.fixture(autouse=True)
 def _mock_fandom_page_directory():
-    with patch(
-        "api.routers.admin_show_links._get_cached_fandom_page_directory_entry",
-        return_value=None,
+    with (
+        patch(
+            "api.routers.admin_show_links._get_cached_fandom_page_directory_entry",
+            return_value=None,
+        ),
+        patch(
+            "api.routers.admin_show_links.search_real_housewives_wiki",
+            return_value=None,
+        ),
+        patch(
+            "api.routers.admin_show_links.search_fandom_community_wiki_candidates",
+            return_value=[],
+        ),
+        patch(
+            "api.routers.admin_show_links.search_fandom_person_related_pages",
+            return_value=[],
+        ),
+        patch(
+            "api.routers.admin_show_links.discover_fandom_candidate_pages",
+            return_value=[],
+        ),
     ):
         yield
 
@@ -91,7 +110,25 @@ def test_discover_show_links_uses_default_bravo_snapshot_variant() -> None:
                 },
             ]
 
-            links = _discover_show_links(show_id)
+            with (
+                patch(
+                    "api.routers.admin_show_links.search_real_housewives_wiki",
+                    return_value=None,
+                ),
+                patch(
+                    "api.routers.admin_show_links._curated_show_fandom_base_urls",
+                    return_value=(),
+                ),
+                patch(
+                    "api.routers.admin_show_links.search_fandom_community_wiki_candidates",
+                    return_value=[],
+                ),
+                patch(
+                    "api.routers.admin_show_links.discover_fandom_candidate_pages",
+                    return_value=[],
+                ),
+            ):
+                links = _discover_show_links(show_id)
 
     snapshot_call = fetch_one.call_args_list[2]
     assert snapshot_call.args[1] == [show_id, "default"]
@@ -2426,7 +2463,7 @@ def test_patch_show_link_cascades_when_show_wikipedia_is_updated() -> None:
                         show_id=show_id,
                         link_id=link_id,
                         payload=admin_show_links.LinkPatchRequest(
-                            url="https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)"
+                            url=cast("Any", "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)")
                         ),
                         db=db,
                         admin={"email": "admin@example.com"},
@@ -2470,7 +2507,7 @@ def test_patch_show_link_rejects_missing_show_wikipedia_article() -> None:
                     show_id=show_id,
                     link_id=link_id,
                     payload=admin_show_links.LinkPatchRequest(
-                        url="https://en.wikipedia.org/wiki/The_Traitors_(US_fake_page)"
+                        url=cast("Any", "https://en.wikipedia.org/wiki/The_Traitors_(US_fake_page)")
                     ),
                     db=db,
                     admin={"email": "admin@example.com"},

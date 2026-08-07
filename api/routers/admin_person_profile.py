@@ -9,7 +9,7 @@ import threading
 from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, datetime
 from queue import Empty, SimpleQueue
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import requests
@@ -20,13 +20,20 @@ from pydantic import BaseModel
 
 from api.auth import InternalAdminUser
 from api.deps import PostgrestAdminClient
-from api.routers import admin_person_images, admin_show_bravo, admin_show_links
 from scripts.sync import sync_episode_appearances, sync_show_cast
 from trr_backend.db import pg
 from trr_backend.ingestion.fandom_person_scraper import fetch_fandom_person_html, parse_fandom_person_html
 from trr_backend.ingestion.show_cast_matrix_scraper import is_missing_wikipedia_page
 from trr_backend.integrations.tmdb_person import fetch_tmdb_person_full
-from trr_backend.pipeline.admin_operations import operation_stream_response, start_operation_for_stream
+from trr_backend.pipeline.admin_operation_registry import (
+    get_person_images_capabilities,
+    get_show_bravo_capabilities,
+    get_show_links_capabilities,
+)
+from trr_backend.pipeline.admin_operations import (
+    operation_stream_response,
+    start_operation_for_stream,
+)
 from trr_backend.repositories.cast_fandom import upsert_cast_fandom
 from trr_backend.repositories.cast_tmdb import upsert_cast_tmdb
 from trr_backend.scraping.bravo_parser import parse_person_page
@@ -239,6 +246,7 @@ def _discover_and_persist_person_links(
     person_id: str,
     actor: str,
 ) -> int:
+    admin_show_links = get_show_links_capabilities()
     discovered = admin_show_links._discover_people_links(show_id, person_ids={person_id})
     upserted = 0
     for row in discovered:
@@ -298,6 +306,7 @@ def _refresh_tmdb_profile(
     *,
     person: dict[str, Any],
 ) -> tuple[int, int]:
+    admin_person_images = get_person_images_capabilities()
     tmdb_person_id = admin_person_images._get_tmdb_id(db, str(person["id"]), _coerce_record(person.get("external_ids")))
     if not tmdb_person_id:
         raise ProfileSourceSkippedError("No TMDb person id available.")
@@ -560,6 +569,7 @@ def _refresh_bravo_profile(
     related_shows: list[dict[str, Any]],
     actor: str,
 ) -> tuple[int, int]:
+    admin_show_bravo = get_show_bravo_capabilities()
     before_refresh = {
         "biography": person.get("biography"),
         "profile_image_url": person.get("profile_image_url"),
@@ -571,7 +581,8 @@ def _refresh_bravo_profile(
     parsed = parse_person_page(bravo_url)
     bio = parsed.get("bio") if isinstance(parsed.get("bio"), str) else None
     hero_image_url = parsed.get("hero_image_url") if isinstance(parsed.get("hero_image_url"), str) else None
-    social_links = parsed.get("social_links") if isinstance(parsed.get("social_links"), dict) else {}
+    social_links_value = parsed.get("social_links")
+    social_links = social_links_value if isinstance(social_links_value, dict) else {}
     admin_show_bravo._persist_person_profile(
         db,
         person_id=str(person["id"]),
@@ -686,13 +697,17 @@ def _run_person_profile_refresh(
     source_failures: list[str] = []
     source_skips: list[str] = []
 
-    for stage, label, runner in (
-        ("profile_tmdb", "Refreshing TMDb profile...", _refresh_tmdb_profile),
-        ("profile_imdb", "Refreshing IMDb profile...", _refresh_imdb_profile),
-        ("profile_fandom", "Refreshing Fandom profile...", _refresh_fandom_profile),
-        ("profile_wikipedia", "Refreshing Wikipedia profile...", _refresh_wikipedia_profile),
-        ("profile_bravo", "Refreshing Bravo profile...", _refresh_bravo_profile),
-    ):
+    profile_stages = cast(
+        "tuple[tuple[str, str, Callable[..., tuple[int, int]]], ...]",
+        (
+            ("profile_tmdb", "Refreshing TMDb profile...", _refresh_tmdb_profile),
+            ("profile_imdb", "Refreshing IMDb profile...", _refresh_imdb_profile),
+            ("profile_fandom", "Refreshing Fandom profile...", _refresh_fandom_profile),
+            ("profile_wikipedia", "Refreshing Wikipedia profile...", _refresh_wikipedia_profile),
+            ("profile_bravo", "Refreshing Bravo profile...", _refresh_bravo_profile),
+        ),
+    )
+    for stage, label, runner in profile_stages:
         emit(stage, label)
         try:
             if runner is _refresh_tmdb_profile:
@@ -820,7 +835,8 @@ def _build_refresh_profile_event_stream(
         )
         return
 
-    result = result_box.get("result") if isinstance(result_box.get("result"), dict) else {}
+    result_value = result_box.get("result")
+    result = result_value if isinstance(result_value, dict) else {}
     yield _sse_event(
         "complete",
         {
@@ -837,9 +853,9 @@ def _build_refresh_profile_event_stream(
 def refresh_person_profile_stream(
     person_id: UUID,
     payload: RefreshProfileRequest = Body(default_factory=RefreshProfileRequest),
-    db: PostgrestAdminClient = None,
-    admin: InternalAdminUser = None,
-    request: Request = None,
+    db: PostgrestAdminClient = cast(PostgrestAdminClient, None),
+    admin: InternalAdminUser = cast(InternalAdminUser, None),
+    request: Request = cast(Request, None),
 ) -> StreamingResponse:
     person_id_str = str(person_id)
     actor = str((admin or {}).get("email") or (admin or {}).get("id") or "admin")

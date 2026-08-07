@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 from uuid import UUID, uuid5
 
-from trr_backend.media.s3_mirror import build_hosted_url
+from trr_backend.object_storage import load_object_storage_config as load_storage_config
 
 if TYPE_CHECKING:
     from trr_backend.db.session import DbSession
@@ -16,6 +16,12 @@ else:
 
 _ASSET_ID_NAMESPACE = UUID("52f296b6-0f8d-4bfb-8f39-6e7e5ea8a3a6")
 _LINK_ID_NAMESPACE = UUID("3e73e1b4-6b0f-4cbf-a0f4-9029a4f9f2b7")
+
+
+def build_hosted_url(hosted_key: str) -> str:
+    if not (key := str(hosted_key or "").strip()):
+        raise RuntimeError("hosted_key is required to build hosted_url")
+    return f"{load_storage_config(require_bucket=True, require_public_base_url=True).public_base_url}/{key.lstrip('/')}"
 
 
 def _as_str(value: Any) -> str | None:
@@ -28,10 +34,8 @@ def _as_str(value: Any) -> str | None:
 def _as_int(value: Any) -> int | None:
     if isinstance(value, int):
         return value
-    if isinstance(value, str):
-        raw = value.strip()
-        if raw.isdigit():
-            return int(raw)
+    if isinstance(value, str) and (raw := value.strip()).isdigit():
+        return int(raw)
     return None
 
 
@@ -54,19 +58,15 @@ def _as_bool(value: Any) -> bool | None:
         return value
     if isinstance(value, str):
         raw = value.strip().lower()
-        if raw in ("true", "1", "yes", "y"):
-            return True
-        if raw in ("false", "0", "no", "n"):
-            return False
+        if raw in ("true", "1", "yes", "y", "false", "0", "no", "n"):
+            return raw in ("true", "1", "yes", "y")
     return None
 
 
 def _compact_dict(payload: Mapping[str, Any]) -> dict[str, Any]:
     cleaned: dict[str, Any] = {}
     for key, value in payload.items():
-        if value is None:
-            continue
-        if isinstance(value, str) and not value.strip():
+        if value is None or (isinstance(value, str) and not value.strip()):
             continue
         cleaned[key] = value
     return cleaned
@@ -251,6 +251,7 @@ def transform_season_images_to_media(
 
         asset_id_str = str(asset_id)
         if asset_id_str not in assets_by_id:
+            legacy_metadata = row.get("metadata")
             asset = {
                 "id": asset_id_str,
                 "media_type": "image",
@@ -269,7 +270,7 @@ def transform_season_images_to_media(
                 "hosted_etag": _as_str(row.get("hosted_etag")),
                 "hosted_at": row.get("hosted_at"),
                 "fetched_at": row.get("fetched_at"),
-                "metadata": dict(row.get("metadata")) if isinstance(row.get("metadata"), dict) else {},
+                "metadata": dict(legacy_metadata) if isinstance(legacy_metadata, dict) else {},
             }
             assets_by_id[asset_id_str] = _compact_dict(asset)
 
@@ -333,6 +334,7 @@ def transform_episode_images_to_media(
 
         asset_id_str = str(asset_id)
         if asset_id_str not in assets_by_id:
+            legacy_metadata = row.get("metadata")
             asset = {
                 "id": asset_id_str,
                 "media_type": "image",
@@ -351,7 +353,7 @@ def transform_episode_images_to_media(
                 "hosted_etag": _as_str(row.get("hosted_etag")),
                 "hosted_at": row.get("hosted_at"),
                 "fetched_at": row.get("fetched_at"),
-                "metadata": dict(row.get("metadata")) if isinstance(row.get("metadata"), dict) else {},
+                "metadata": dict(legacy_metadata) if isinstance(legacy_metadata, dict) else {},
             }
             assets_by_id[asset_id_str] = _compact_dict(asset)
 
@@ -470,7 +472,8 @@ def transform_cast_photos_to_media(
     for row in rows:
         person_id = _as_str(row.get("person_id"))
         source = _as_str(row.get("source"))
-        metadata = dict(row.get("metadata")) if isinstance(row.get("metadata"), dict) else {}
+        raw_metadata = row.get("metadata")
+        metadata: dict[str, Any] = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
         if source == "getty":
             source_url = _first_str(
                 row.get("image_url_canonical"),
@@ -652,7 +655,8 @@ def reconcile_media_asset_id_conflicts(
                 continue
             position = _as_int(link.get("position"))
             is_primary = bool(_as_bool(link.get("is_primary")) or False)
-            context = dict(link.get("context")) if isinstance(link.get("context"), dict) else {}
+            raw_context = link.get("context")
+            context: dict[str, Any] = dict(raw_context) if isinstance(raw_context, dict) else {}
             link["id"] = str(
                 _link_id_for(
                     entity_type=entity_type,

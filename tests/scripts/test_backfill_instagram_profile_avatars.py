@@ -323,7 +323,10 @@ def test_oversized_avatar_download_is_marked_non_retryable(monkeypatch: pytest.M
             del fileobj, bucket, key, ExtraArgs
             raise AssertionError("oversized avatar should not upload")
 
-    monkeypatch.setattr(mod.social_repo.requests, "get", lambda *args, **kwargs: _FakeStreamResponse())
+    monkeypatch.setattr(
+        "trr_backend.socials.media_url_safety.safe_requests_get",
+        lambda *args, **kwargs: _FakeStreamResponse(),
+    )
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_client", lambda: _FakeS3Client())
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_bucket", lambda: "bucket")
     monkeypatch.setattr("trr_backend.media.s3_mirror.build_hosted_url", lambda key: f"https://cdn.test/{key}")
@@ -442,7 +445,10 @@ def test_tagged_avatar_writer_preserves_sha256_metadata(monkeypatch: pytest.Monk
             del fileobj, bucket, key, ExtraArgs
             return None
 
-    monkeypatch.setattr(mod.social_repo.requests, "get", lambda *args, **kwargs: _FakeStreamResponse())
+    monkeypatch.setattr(
+        "trr_backend.socials.media_url_safety.safe_requests_get",
+        lambda *args, **kwargs: _FakeStreamResponse(),
+    )
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_client", lambda: _FakeS3Client())
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_bucket", lambda: "bucket")
     monkeypatch.setattr("trr_backend.media.s3_mirror.build_hosted_url", lambda key: f"https://cdn.test/{key}")

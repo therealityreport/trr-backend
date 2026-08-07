@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import ast
+from collections.abc import Iterator
+from pathlib import Path
+
 import pytest
 
 from trr_backend.db import connection
 
 
 @pytest.fixture(autouse=True)
-def _clear_resolution_cache() -> None:
+def _clear_resolution_cache() -> Iterator[None]:
     connection.resolve_database_url.cache_clear()
     connection.resolve_database_url_candidates.cache_clear()
     connection.resolve_database_url_candidate_details.cache_clear()
@@ -213,6 +217,89 @@ def test_resolve_database_url_raises_without_candidates(
 ) -> None:
     with pytest.raises(connection.DatabaseConnectionError):
         connection.resolve_database_url()
+
+
+class _FakeCursor:
+    def __init__(self, result: object | None = None) -> None:
+        self.executed: list[str] = []
+        self.result = result
+
+    def __enter__(self) -> _FakeCursor:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def execute(self, statement: str) -> None:
+        self.executed.append(statement)
+
+    def fetchone(self) -> object | None:
+        return self.result
+
+
+class _FakeConnection:
+    def __init__(self, result: object | None = None) -> None:
+        self.cursor_instance = _FakeCursor(result)
+        self.autocommit = False
+        self.closed = False
+
+    def cursor(self) -> _FakeCursor:
+        return self.cursor_instance
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_ensure_ready_for_ingestion_keeps_core_check_and_cache_reload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schema_connection = _FakeConnection(result=(1,))
+    reload_connection = _FakeConnection()
+    connections = [schema_connection, reload_connection]
+
+    monkeypatch.setattr(connection.psycopg2, "connect", lambda _url: connections.pop(0))
+
+    connection.ensure_ready_for_ingestion("postgresql://database.example/postgres")
+
+    assert schema_connection.cursor_instance.executed == ["SELECT 1 FROM pg_namespace WHERE nspname = 'core';"]
+    assert schema_connection.closed is True
+    assert reload_connection.cursor_instance.executed == ["SELECT pg_notify('pgrst', 'reload schema');"]
+    assert reload_connection.autocommit is True
+    assert reload_connection.closed is True
+
+
+def test_ensure_ready_for_ingestion_preserves_schema_and_reload_failure_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    missing_schema_connection = _FakeConnection()
+    monkeypatch.setattr(connection.psycopg2, "connect", lambda _url: missing_schema_connection)
+
+    with pytest.raises(connection.DatabaseConnectionError, match="core` schema not found"):
+        connection.ensure_ready_for_ingestion("postgresql://database.example/postgres")
+
+    schema_connection = _FakeConnection(result=(1,))
+    connect_calls = 0
+
+    def _connect(_url: str) -> _FakeConnection:
+        nonlocal connect_calls
+        connect_calls += 1
+        if connect_calls == 1:
+            return schema_connection
+        raise connection.psycopg2.OperationalError("reload unavailable")
+
+    monkeypatch.setattr(connection.psycopg2, "connect", _connect)
+
+    connection.ensure_ready_for_ingestion("postgresql://database.example/postgres")
+    assert schema_connection.closed is True
+
+
+def test_connection_module_does_not_import_postgrest_cache() -> None:
+    source = Path(connection.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    assert not any(
+        isinstance(node, ast.ImportFrom) and node.module == "trr_backend.db.postgrest_cache" for node in ast.walk(tree)
+    )
 
 
 class TestLegacyEnvsRejected:

@@ -12,7 +12,7 @@ import time
 import uuid
 from datetime import UTC, datetime
 from importlib.metadata import version as package_version
-from typing import Final
+from typing import Any, Final, cast
 
 from trr_backend.observability import configure_runtime_observability
 from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
@@ -102,7 +102,7 @@ def _load_modal_module():
     return imported_modal
 
 
-modal = _load_modal_module()
+modal: Any = _load_modal_module()
 logger = logging.getLogger(__name__)
 
 _BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -460,7 +460,7 @@ _OPERATOR_TUNABLE_RUNTIME_DEFAULT_KEYS: Final[frozenset[str]] = frozenset(
 def _build_lean_image_base(
     *,
     apt_packages: tuple[str, ...] = (),
-    image_factory: object | None = None,
+    image_factory: Any | None = None,
 ):
     factory = image_factory or modal.Image
     image = factory.debian_slim(python_version="3.11")
@@ -475,13 +475,13 @@ def _build_lean_image_base(
     return image
 
 
-def _build_media_image_base(*, image_factory: object | None = None):
+def _build_media_image_base(*, image_factory: Any | None = None):
     """Build the lean backend runtime with FFmpeg/FFprobe for media extraction."""
 
     return _build_lean_image_base(apt_packages=("ffmpeg",), image_factory=image_factory)
 
 
-def _build_social_image_base(*, include_browser_runtime: bool = False, image_factory: object | None = None):
+def _build_social_image_base(*, include_browser_runtime: bool = False, image_factory: Any | None = None):
     factory = image_factory or modal.Image
     image = factory.debian_slim(python_version="3.11")
     if include_browser_runtime:
@@ -688,7 +688,7 @@ def _api_custom_domains() -> list[str] | None:
     return domains or None
 
 
-def _resolve_modal_secrets() -> list[modal.Secret]:
+def _resolve_modal_secrets() -> list[Any]:
     explicit_runtime_secret_name = _runtime_secret_name()
     explicit_social_secret_name = _social_secret_name()
 
@@ -899,11 +899,13 @@ def serve_backend_api():
 
 
 def _execute_admin_operation(operation_id: str, operation_type: str) -> dict[str, object]:
+    from trr_backend.pipeline.admin_operation_bootstrap import register_admin_operation_providers
     from trr_backend.pipeline.admin_operations import (
         claim_and_execute_operation,
         wait_for_sub_operation_dependencies,
     )
 
+    register_admin_operation_providers()
     worker_id = _worker_id("admin-operation")
     started_at = _worker_started(
         "admin_operations",
@@ -913,9 +915,7 @@ def _execute_admin_operation(operation_id: str, operation_type: str) -> dict[str
         worker_id=worker_id,
     )
     try:
-        # If this is a sub-operation, wait for dependency targets to complete
-        deps_satisfied = wait_for_sub_operation_dependencies(operation_id)
-        if not deps_satisfied:
+        if not wait_for_sub_operation_dependencies(operation_id):
             result = {
                 "operation_id": operation_id,
                 "operation_type": operation_type,
@@ -1088,6 +1088,171 @@ def run_admin_operation_v2(operation_id: str, operation_type: str) -> dict[str, 
     return _execute_admin_operation(operation_id, operation_type)
 
 
+def _show_season_media_watch_lease_seconds() -> int:
+    return max(30, min(int(os.getenv("TRR_MEDIA_WATCH_LEASE_SECONDS", "180")), 3600))
+
+
+def _show_season_media_watch_dispatch_limit() -> int:
+    return max(1, min(int(os.getenv("TRR_MEDIA_WATCH_DISPATCH_LIMIT", "4")), 16))
+
+
+def _show_season_media_watch_retry_seconds(watch: dict[str, object]) -> int:
+    """Use bounded, deterministic jitter after persisted failures.
+
+    The service owns the final fenced write.  Supplying its cadence before the
+    run begins keeps that final write atomic with the run journal, while a
+    successful run naturally resets to the configured cadence.
+    """
+    cadence = max(1, int(cast("int | str", watch.get("poll_interval_seconds") or 60)))
+    failures = max(0, int(cast("int | str", watch.get("consecutive_failures") or 0)))
+    if not failures:
+        return cadence
+    maximum = max(cadence, min(int(os.getenv("TRR_MEDIA_WATCH_MAX_RETRY_SECONDS", "3600")), 86_400))
+    exponential = min(maximum, cadence * (2 ** min(failures, 10)))
+    seed = sum(ord(char) for char in f"{watch.get('id', '')}:{watch.get('lease_fence', '')}") % 21
+    return max(1, min(maximum, int(exponential * (0.90 + (seed / 100)))))
+
+
+@app.function(
+    name="run_show_season_media_watch_worker",
+    image=_image,
+    secrets=_secrets,
+    retries=0,
+    timeout=60 * 60,
+    max_containers=16,
+)
+def run_show_season_media_watch_worker(
+    watch: dict[str, object],
+    lease_owner: str,
+    lease_fence: int,
+    backfill: bool | None = None,
+) -> dict[str, object]:
+    """Run one already-claimed watch; never attempt an inline lease fallback."""
+    from trr_backend.media.watchers.service import run_show_season_media_watch
+    from trr_backend.repositories import media_watchers
+
+    watch_id = str(watch.get("id") or "").strip()
+    started_at = _worker_started(
+        "show_season_media_watch",
+        function_name="run_show_season_media_watch_worker",
+        watch_id=watch_id,
+        lease_fence=lease_fence,
+    )
+    try:
+        if not watch_id or not str(lease_owner or "").strip():
+            raise ValueError("watch_id and lease_owner are required")
+        if not media_watchers.heartbeat_lease(
+            watch_id=watch_id,
+            lease_owner=lease_owner,
+            lease_fence=int(lease_fence),
+            lease_seconds=_show_season_media_watch_lease_seconds(),
+        ):
+            result = {"watch_id": watch_id, "lease_fence": int(lease_fence), "status": "fenced"}
+            _worker_finished("show_season_media_watch", started_at, result_status="fenced", **result)
+            return result
+        effective_watch = dict(watch)
+        effective_watch["poll_interval_seconds"] = _show_season_media_watch_retry_seconds(effective_watch)
+        result = run_show_season_media_watch(
+            effective_watch,
+            lease_owner=lease_owner,
+            lease_fence=int(lease_fence),
+            backfill=backfill,
+        )
+        payload = {
+            "watch_id": watch_id,
+            "lease_fence": int(lease_fence),
+            "status": result.status,
+            "run_id": result.run_id,
+            "summary": result.summary,
+            "continuation": result.continuation,
+            "error": result.error,
+        }
+        _worker_finished("show_season_media_watch", started_at, result_status=result.status, **payload)
+        return payload
+    except Exception as exc:
+        _worker_failed(
+            "show_season_media_watch",
+            started_at,
+            failure_class=type(exc).__name__,
+            watch_id=watch_id,
+            lease_fence=lease_fence,
+        )
+        raise
+    finally:
+        _close_db_pools_after_worker("show_season_media_watch", watch_id=watch_id, lease_fence=lease_fence)
+
+
+def _poll_due_show_season_media_watches_impl() -> dict[str, object]:
+    """Singleton minute poller that claims a bounded number of due watches."""
+    owner_config = _validate_modal_maintenance_owner_config()
+    if owner_config not in {"modal_singleton_cron", "api_runtime_scheduler"}:
+        return {
+            "status": "disabled",
+            "reason": "maintenance_scheduler_not_owner",
+            "maintenance_owner": owner_config,
+            "claimed": 0,
+            "dispatched": 0,
+        }
+
+    from trr_backend.repositories import media_watchers
+
+    owner = _worker_id("show-season-media-poller")
+    claimed: list[dict[str, object]] = []
+    dispatch_errors: list[str] = []
+    started_at = _worker_started(
+        "show_season_media_poller",
+        function_name="poll_due_show_season_media_watches",
+        dispatch_limit=_show_season_media_watch_dispatch_limit(),
+    )
+    try:
+        for _ in range(_show_season_media_watch_dispatch_limit()):
+            watch = media_watchers.claim_due_watch(
+                lease_owner=owner,
+                lease_seconds=_show_season_media_watch_lease_seconds(),
+            )
+            if watch is None:
+                break
+            claimed.append(dict(watch))
+        for watch in claimed:
+            try:
+                run_show_season_media_watch_worker.spawn(
+                    watch=watch,
+                    lease_owner=owner,
+                    lease_fence=int(cast("int | str", watch["lease_fence"])),
+                    backfill=None,
+                )
+            except Exception as exc:  # Lease expiry is the safe recovery path; never run inline.
+                logger.exception("[show-season-media-poller] worker dispatch failed watch_id=%s", watch.get("id"))
+                dispatch_errors.append(f"{watch.get('id')}: {type(exc).__name__}")
+        payload = {
+            "status": "completed" if not dispatch_errors else "partial",
+            "claimed": len(claimed),
+            "dispatched": len(claimed) - len(dispatch_errors),
+            "dispatch_errors": dispatch_errors,
+            "lease_owner": owner,
+        }
+        _worker_finished("show_season_media_poller", started_at, result_status=str(payload["status"]), **payload)
+        return payload
+    except Exception as exc:
+        _worker_failed("show_season_media_poller", started_at, failure_class=type(exc).__name__)
+        raise
+    finally:
+        _close_db_pools_after_worker("show_season_media_poller")
+
+
+@app.function(
+    name="poll_due_show_season_media_watches",
+    image=_image,
+    secrets=_secrets,
+    retries=0,
+    timeout=5 * 60,
+    max_containers=1,
+)
+def poll_due_show_season_media_watches() -> dict[str, object]:
+    """On-demand entrypoint; the minute heartbeat owns the durable clock."""
+    return _poll_due_show_season_media_watches_impl()
+
+
 @app.function(
     image=_FUNCTION_IMAGE_BINDINGS["run_google_news_sync"],
     secrets=_secrets,
@@ -1141,7 +1306,7 @@ def run_reddit_refresh(run_id: str) -> dict[str, object]:
     )
     try:
         result = execute_refresh_run(run_id, worker_id=worker_id)
-        payload = {
+        payload: dict[str, object] = {
             "run_id": run_id,
             "status": str(result.get("status") or ""),
             "worker_id": worker_id,
@@ -1731,6 +1896,12 @@ def sync_nbcumv_official_images() -> dict[str, object]:
 )
 def heartbeat_remote_executors(heartbeat_source: str = "backend_runtime_scheduler") -> dict[str, object]:
     _validate_modal_maintenance_owner_config()
+    try:
+        _poll_due_show_season_media_watches_impl()
+    except Exception:
+        # Keep the pre-existing executor heartbeat independent while making the
+        # media poll visible in its own structured worker-failure logs.
+        logger.exception("[executor-heartbeat] show-season media poll failed")
     from trr_backend.modal_dispatch import _record_dispatcher_heartbeat
     from trr_backend.socials.control_plane import get_worker_auth_capabilities, is_queue_enabled
 

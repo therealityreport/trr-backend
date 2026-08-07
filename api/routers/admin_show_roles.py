@@ -4,7 +4,7 @@ import logging
 import os
 import re
 import time
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query
@@ -28,24 +28,17 @@ from trr_backend.ingestion.show_cast_matrix_scraper import (
     parse_wikipedia_cast_matrix_html,
     try_fetch_html,
 )
+from trr_backend.pipeline.admin_operation_registry import (
+    get_show_bravo_capabilities,
+    get_show_links_capabilities,
+)
 from trr_backend.scraping.bravo_parser import parse_person_page
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin/shows", tags=["admin-show-roles"])
 
-_CANONICAL_ROLE_ORDER = [
-    "Housewife",
-    "Friend",
-    "Guest",
-    "Husband",
-    "Ex-Husband",
-    "Boyfriend",
-    "Ex-Boyfriend",
-    "Fiance",
-    "Ex-Fiance",
-    "Kid",
-]
+_CANONICAL_ROLE_ORDER = "Housewife Friend Guest Husband Ex-Husband Boyfriend Ex-Boyfriend Fiance Ex-Fiance Kid".split()
 _SYNC_SOURCE_CAST = "cast_matrix_sync"
 _SYNC_SOURCE_RELATIONSHIP = "cast_matrix_relationship_sync"
 _SYNC_SOURCE_KID = "cast_matrix_kid_sync"
@@ -170,7 +163,8 @@ def _show_metadata(show_id: str) -> dict[str, Any]:
 
 
 def _is_bravo_show(show: dict[str, Any]) -> bool:
-    networks = show.get("networks") if isinstance(show.get("networks"), list) else []
+    networks_value = show.get("networks")
+    networks = networks_value if isinstance(networks_value, list) else []
     return any(str(network).strip().lower() == "bravo" for network in networks)
 
 
@@ -328,8 +322,7 @@ def _upsert_bravo_profile_links(
     person_names_by_id: dict[str, str],
     dry_run: bool,
 ) -> tuple[int, dict[str, str]]:
-    from api.routers import admin_show_links
-
+    admin_show_links = get_show_links_capabilities()
     existing = _load_existing_bravo_profile_links(show_id)
     upserted = 0
 
@@ -396,7 +389,7 @@ def _import_missing_bravo_profile_images(
     profile_links_by_person: dict[str, str],
     dry_run: bool,
 ) -> tuple[int, int]:
-    from api.routers import admin_show_bravo
+    admin_show_bravo = get_show_bravo_capabilities()
 
     imported = 0
     skipped = 0
@@ -497,7 +490,7 @@ def _resolve_season_ids(show_id: str) -> dict[int, str]:
         [show_id],
     )
     return {
-        int(row.get("season_number")): str(row.get("id") or "").strip()
+        int(cast("int", row.get("season_number"))): str(row.get("id") or "").strip()
         for row in rows
         if isinstance(row.get("season_number"), int) and row.get("id")
     }
@@ -602,7 +595,7 @@ def _build_relationship_assignments(
     by_norm_name: dict[str, str],
     season_filter: set[int],
 ) -> tuple[list[dict[str, Any]], list[str], list[str]]:
-    from api.routers import admin_show_links
+    admin_show_links = get_show_links_capabilities()
 
     assignments: list[dict[str, Any]] = []
     unmatched_names: list[str] = []

@@ -30,11 +30,12 @@ def _apply_cli_db_pool_defaults() -> None:
     if not preset_maxconn:
         os.environ["TRR_DB_POOL_MAXCONN"] = "1"
 
+
 ACTIVE_JOB_STATUSES = ("queued", "pending", "retrying", "running")
 
 
 def _social_repo():
-    from trr_backend.repositories import social_season_analytics as social_repo
+    from trr_backend.socials import social_season_analytics_impl as social_repo
 
     return social_repo
 

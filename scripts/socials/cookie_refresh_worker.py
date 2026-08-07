@@ -14,10 +14,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.modal import repair_instagram_auth
-from trr_backend.repositories import social_season_analytics as social_repo
-from trr_backend.socials.instagram import cookie_refresh as instagram_cookie_refresh
-from trr_backend.utils.env import load_env
+from scripts.modal import repair_instagram_auth  # noqa: E402
+from trr_backend.socials import social_season_analytics_impl as social_repo  # noqa: E402
+from trr_backend.socials.instagram import cookie_refresh as instagram_cookie_refresh  # noqa: E402
+from trr_backend.utils.env import load_env  # noqa: E402
 
 MANUAL_CHECKPOINT_REASONS = {
     "checkpoint_required",

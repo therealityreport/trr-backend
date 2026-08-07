@@ -4,12 +4,13 @@ import asyncio
 import json
 import threading
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import requests
 
-from trr_backend.socials.instagram.request_client import InstagramRequestFailure
+from trr_backend.socials.instagram.identity_pool import InstagramIdentityPool, InstagramScraperIdentity
+from trr_backend.socials.instagram.request_client import InstagramRequestClient, InstagramRequestFailure
 from trr_backend.socials.instagram.scraper import InstagramScraper, ScrapeConfig
 
 
@@ -232,7 +233,7 @@ def test_fetch_posts_graphql_records_cursor_unauthorized_failure_metadata(monkey
     assert scraper.last_retrieval_meta["error_code"] == "instagram_graphql_cursor_unauthorized"
     assert scraper.last_retrieval_meta["error_class"] == "HTTPError"
     assert scraper.last_retrieval_meta["error_status_code"] == 401
-    assert scraper.last_retrieval_meta["retryable"] is True
+    assert scraper.last_retrieval_meta["retryable"] is False
     assert scraper.last_retrieval_meta["graphql_cursor"] == "cursor-1"
     assert scraper.last_retrieval_meta["transport"] == "requests_enriched"
 
@@ -270,7 +271,7 @@ def test_fetch_posts_graphql_clears_cursor_context_after_request_client_auth_fai
         def post_form_json(self, *args, **kwargs):
             raise InstagramRequestFailure("unauthorized", status_code=401, retryable=False)
 
-    scraper._request_client = _Client()
+    scraper._request_client = cast(InstagramRequestClient, _Client())
 
     payload = scraper.fetch_posts_graphql(
         "bravotv",
@@ -581,6 +582,7 @@ def test_fetch_posts_graphql_uses_explicit_page_size_override(monkeypatch: pytes
     monkeypatch.setattr(scraper, "_profile_posts_doc_ids", lambda: ["doc"])
 
     def _fake_post(_url: str, *, data: dict[str, Any] | None = None, **_kwargs: Any) -> _FakeResponse:
+        assert data is not None
         captured["variables"] = _json.loads(data["variables"])
         return _FakeResponse(
             json_payload={
@@ -626,6 +628,7 @@ def test_fetch_posts_graphql_uses_default_page_size_without_override(monkeypatch
     monkeypatch.setattr(scraper, "_profile_posts_doc_ids", lambda: ["doc"])
 
     def _fake_post(_url: str, *, data: dict[str, Any] | None = None, **_kwargs: Any) -> _FakeResponse:
+        assert data is not None
         captured["variables"] = _json.loads(data["variables"])
         return _FakeResponse(
             json_payload={
@@ -649,7 +652,9 @@ def test_fetch_posts_graphql_uses_default_page_size_without_override(monkeypatch
 def test_request_cookies_updates_active_identity_cookie_jar(monkeypatch: pytest.MonkeyPatch) -> None:
     scraper = InstagramScraper(cookies={"sessionid": "seed"})
     scraper._identity_pool_enabled = True
-    scraper._active_identity = type("Identity", (), {"cookies": {"sessionid": "seed"}})()
+    scraper._active_identity = cast(
+        InstagramScraperIdentity, type("Identity", (), {"cookies": {"sessionid": "seed"}})()
+    )
     scraper.session.cookies.set("csrftoken", "csrf-token")
 
     merged = scraper._request_cookies()
@@ -674,7 +679,10 @@ def test_identity_pool_does_not_record_success_for_unsuccessful_response(
 ) -> None:
     scraper = InstagramScraper(cookies={"sessionid": "seed"})
     scraper._identity_pool_enabled = True
-    scraper._active_identity = type("Identity", (), {"session_id": "identity-a", "cookies": {"sessionid": "seed"}})()
+    scraper._active_identity = cast(
+        InstagramScraperIdentity,
+        type("Identity", (), {"session_id": "identity-a", "cookies": {"sessionid": "seed"}})(),
+    )
     success_calls: list[str] = []
     request_calls: list[str] = []
 
@@ -690,7 +698,7 @@ def test_identity_pool_does_not_record_success_for_unsuccessful_response(
     response.headers.update(headers)
     response._content = body
 
-    scraper._identity_pool = _Pool()
+    scraper._identity_pool = cast(InstagramIdentityPool, _Pool())
     monkeypatch.setattr(scraper.session, "post", lambda *_args, **_kwargs: response)
 
     assert scraper._post("https://www.instagram.com/graphql/query/") is response
@@ -701,7 +709,10 @@ def test_identity_pool_does_not_record_success_for_unsuccessful_response(
 def test_identity_pool_records_success_for_successful_json_response(monkeypatch: pytest.MonkeyPatch) -> None:
     scraper = InstagramScraper(cookies={"sessionid": "seed"})
     scraper._identity_pool_enabled = True
-    scraper._active_identity = type("Identity", (), {"session_id": "identity-a", "cookies": {"sessionid": "seed"}})()
+    scraper._active_identity = cast(
+        InstagramScraperIdentity,
+        type("Identity", (), {"session_id": "identity-a", "cookies": {"sessionid": "seed"}})(),
+    )
     success_calls: list[str] = []
 
     class _Pool:
@@ -716,7 +727,7 @@ def test_identity_pool_records_success_for_successful_json_response(monkeypatch:
     response.headers["Content-Type"] = "application/json"
     response._content = b'{"ok": true}'
 
-    scraper._identity_pool = _Pool()
+    scraper._identity_pool = cast(InstagramIdentityPool, _Pool())
     monkeypatch.setattr(scraper.session, "post", lambda *_args, **_kwargs: response)
 
     assert scraper._post("https://www.instagram.com/graphql/query/") is response
@@ -726,7 +737,10 @@ def test_identity_pool_records_success_for_successful_json_response(monkeypatch:
 def test_reset_request_session_preserves_active_identity_cookies(monkeypatch: pytest.MonkeyPatch) -> None:
     scraper = InstagramScraper(cookies={})
     scraper._identity_pool_enabled = True
-    scraper._active_identity = type("Identity", (), {"cookies": {"sessionid": "seed", "csrftoken": "csrf"}})()
+    scraper._active_identity = cast(
+        InstagramScraperIdentity,
+        type("Identity", (), {"cookies": {"sessionid": "seed", "csrftoken": "csrf"}})(),
+    )
     scraper.session.cookies.set("mid", "mid-token")
 
     scraper._reset_request_session()
@@ -739,7 +753,10 @@ def test_reset_request_session_preserves_active_identity_cookies(monkeypatch: py
 def test_fetch_posts_graphql_checkpoint_required_uses_same_identity_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
     scraper = InstagramScraper(cookies={"sessionid": "seed", "csrftoken": "csrf", "ds_user_id": "1"})
     scraper._identity_pool_enabled = True
-    scraper._active_identity = type("Identity", (), {"session_id": "identity-a", "cookies": dict(scraper.cookies)})()
+    scraper._active_identity = cast(
+        InstagramScraperIdentity,
+        type("Identity", (), {"session_id": "identity-a", "cookies": dict(scraper.cookies)})(),
+    )
     refresh_attempts: list[str] = []
 
     monkeypatch.setattr(
@@ -763,7 +780,8 @@ def test_fetch_posts_graphql_checkpoint_required_uses_same_identity_refresh(monk
     monkeypatch.setattr(
         scraper,
         "_try_auto_refresh_cookies",
-        lambda: refresh_attempts.append(scraper._active_identity.session_id) or {"refreshed": False, "reason": "noop"},
+        lambda: refresh_attempts.append(cast(InstagramScraperIdentity, scraper._active_identity).session_id)
+        or {"refreshed": False, "reason": "noop"},
     )
 
     payload = scraper.fetch_posts_graphql("bravotv", None, 0.0)
@@ -784,6 +802,7 @@ def test_fetch_posts_graphql_retires_identity_after_repeated_hard_403(monkeypatc
 
         def merge_cookies(self, session_id: str, cookies: dict[str, str]) -> None:
             del session_id
+            assert scraper._active_identity is not None
             scraper._active_identity.cookies = dict(cookies)
 
         def retire(self, session_id: str, *, reason: str, block_reason: str | None = None) -> None:
@@ -794,7 +813,7 @@ def test_fetch_posts_graphql_retires_identity_after_repeated_hard_403(monkeypatc
             acquire_calls += 1
             return type("Identity", (), {"session_id": f"identity-{acquire_calls}", "cookies": dict(scraper.cookies)})()
 
-    scraper._identity_pool = _Pool()
+    scraper._identity_pool = cast(InstagramIdentityPool, _Pool())
     scraper._active_identity = scraper._identity_pool.acquire()
 
     monkeypatch.setattr(
@@ -831,26 +850,29 @@ def test_scrape_graphql_marks_initial_failure_without_shortcode_fallback(monkeyp
     monkeypatch.setattr(scraper, "_extract_profile_total_posts", lambda *_args, **_kwargs: None)
 
     posts = scraper._scrape_graphql(
-        type(
-            "Cfg",
-            (),
-            {
-                "username": "bravotv",
-                "delay_seconds": 0.0,
-                "max_pages": 1,
-                "no_match_page_limit": None,
-                "max_scrape_seconds": 60.0,
-                "date_start": None,
-                "date_end": None,
-                "hashtags": [],
-                "fast_mode": False,
-                "matches_hashtags": lambda self, text: True,
-                "is_in_date_range": lambda self, ts: True,
-                "show_id": None,
-                "season_number": None,
-                "person_id": None,
-            },
-        )()
+        cast(
+            ScrapeConfig,
+            type(
+                "Cfg",
+                (),
+                {
+                    "username": "bravotv",
+                    "delay_seconds": 0.0,
+                    "max_pages": 1,
+                    "no_match_page_limit": None,
+                    "max_scrape_seconds": 60.0,
+                    "date_start": None,
+                    "date_end": None,
+                    "hashtags": [],
+                    "fast_mode": False,
+                    "matches_hashtags": lambda self, text: True,
+                    "is_in_date_range": lambda self, ts: True,
+                    "show_id": None,
+                    "season_number": None,
+                    "person_id": None,
+                },
+            )(),
+        )
     )
 
     assert posts == []
@@ -1092,7 +1114,7 @@ def test_redirect_login_failure_marks_auth_block_and_attempts_interactive_repair
                 redirect_target="https://www.instagram.com/accounts/login/",
             )
 
-    scraper._request_client = _Client()
+    scraper._request_client = cast(InstagramRequestClient, _Client())
 
     payload = scraper.fetch_posts_graphql("bravotv", "cursor-1", 0.0)
 
@@ -1139,7 +1161,7 @@ def test_fetch_posts_graphql_can_disable_auth_recovery_side_effects(
                 redirect_target="https://www.instagram.com/accounts/login/",
             )
 
-    scraper._request_client = _Client()
+    scraper._request_client = cast(InstagramRequestClient, _Client())
 
     payload = scraper.fetch_posts_graphql(
         "bravotv",
@@ -1256,8 +1278,11 @@ def test_checkpoint_failure_does_not_retire_identity(monkeypatch: pytest.MonkeyP
         def merge_cookies(self, session_id: str, cookies: dict[str, str]) -> None:
             del session_id, cookies
 
-    scraper._identity_pool = _Pool()
-    scraper._active_identity = type("Identity", (), {"session_id": "ig-1", "cookies": dict(scraper.cookies)})()
+    scraper._identity_pool = cast(InstagramIdentityPool, _Pool())
+    scraper._active_identity = cast(
+        InstagramScraperIdentity,
+        type("Identity", (), {"session_id": "ig-1", "cookies": dict(scraper.cookies)})(),
+    )
     monkeypatch.setattr(
         scraper,
         "_try_auto_refresh_cookies",
@@ -1278,7 +1303,7 @@ def test_checkpoint_failure_does_not_retire_identity(monkeypatch: pytest.MonkeyP
         def post_form_json(self, *args, **kwargs):
             raise InstagramRequestFailure("checkpoint_required", status_code=400, retryable=False)
 
-    scraper._request_client = _Client()
+    scraper._request_client = cast(InstagramRequestClient, _Client())
 
     payload = scraper.fetch_posts_graphql("bravotv", "cursor-1", 0.0)
 

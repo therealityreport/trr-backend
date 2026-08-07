@@ -10,11 +10,10 @@ from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from trr_backend.socials.instagram.permalink_metadata import fetch_permalink_metadata
 from trr_backend.socials.instagram.scraper import InstagramScraper
-
 
 PUBLIC_PROBE_VERSION = "2026-06-15.public-instagram-proof-v1"
 
@@ -204,7 +203,7 @@ def run_public_probe(
     config = PublicProbeConfig(
         account=account,
         until_date=config.until_date,
-        target_years=_normalize_target_years(config.target_years),
+        target_years=parse_target_years(config.target_years),
         max_pages=_normalize_max_pages(config.max_pages),
         continue_after_boundary=bool(config.continue_after_boundary),
         sample_details_per_page=max(0, int(config.sample_details_per_page or 0)),
@@ -545,10 +544,13 @@ def _default_comments_fetcher(post: PublicPostSummary) -> PublicCommentsStatus:
             load_strategy="public_relay",
         )
         diagnostic = getattr(result, "diagnostic_metadata", {}) or {}
-        public_comments = diagnostic.get("public_comments") if isinstance(diagnostic, dict) else {}
-        relay_comments = diagnostic.get("relay_comments") if isinstance(diagnostic, dict) else {}
+        is_diag_dict = isinstance(diagnostic, dict)
+        public_comments = cast("dict[str, Any]", diagnostic.get("public_comments")) if is_diag_dict else {}
+        relay_comments = cast("dict[str, Any]", diagnostic.get("relay_comments")) if is_diag_dict else {}
         classification = str(public_comments.get("classification") or "public_blocked")
-        recovered = _safe_int(public_comments.get("recovered_count"), default=_comment_tree_count(getattr(result, "comments", [])))
+        recovered = _safe_int(
+            public_comments.get("recovered_count"), default=_comment_tree_count(getattr(result, "comments", []))
+        )
         return PublicCommentsStatus(
             shortcode=post.shortcode,
             attempted=True,
@@ -556,7 +558,9 @@ def _default_comments_fetcher(post: PublicPostSummary) -> PublicCommentsStatus:
             advertised_count=_optional_int(public_comments.get("advertised_count")),
             recovered_count=recovered,
             coverage_ratio=_optional_float(public_comments.get("coverage_ratio")),
-            terminal_reason=str(public_comments.get("terminal_reason") or getattr(result, "fetch_reason", "") or "").strip()
+            terminal_reason=str(
+                public_comments.get("terminal_reason") or getattr(result, "fetch_reason", "") or ""
+            ).strip()
             or None,
             fallback_source=str(relay_comments.get("fallback_source") or "").strip() or None,
             stop_reason=str(getattr(result, "fetch_reason", "") or "").strip() or None,
@@ -605,10 +609,6 @@ def parse_target_years(value: Any) -> tuple[int, ...]:
     if not years:
         return (2025, 2026)
     return tuple(year for year in years if 2000 <= year <= 2100) or (2025, 2026)
-
-
-def _normalize_target_years(value: Any) -> tuple[int, ...]:
-    return parse_target_years(value)
 
 
 def _initial_state(config: PublicProbeConfig, *, state: dict[str, Any]) -> dict[str, Any]:
@@ -927,7 +927,7 @@ def _post_year(post: PublicPostSummary) -> int | None:
 
 
 def _oldest_post_at(posts: Any) -> str | None:
-    epochs = [getattr(post, "taken_at_epoch", None) for post in posts if getattr(post, "taken_at_epoch", None)]
+    epochs = [epoch for post in posts if (epoch := getattr(post, "taken_at_epoch", None))]
     if not epochs:
         return None
     return _iso_from_epoch(min(epochs))

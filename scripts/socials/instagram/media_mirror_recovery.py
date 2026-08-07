@@ -13,14 +13,14 @@ from typing import Any
 
 try:
     from trr_backend.db import pg
-    from trr_backend.repositories import social_season_analytics as social_repo
+    from trr_backend.socials import social_season_analytics_impl as social_repo
     from trr_backend.utils.env import load_env
 except ModuleNotFoundError:  # pragma: no cover - script execution convenience
     repo_root = Path(__file__).resolve().parents[3]
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
     from trr_backend.db import pg
-    from trr_backend.repositories import social_season_analytics as social_repo
+    from trr_backend.socials import social_season_analytics_impl as social_repo
     from trr_backend.utils.env import load_env
 
 
@@ -150,7 +150,12 @@ def fetch_stale_running_jobs(
           claimed_at,
           heartbeat_at,
           coalesce(config->>'stage', metadata->>'stage', job_type) as stage,
-          coalesce(config->>'account', metadata->>'account', config->>'account_handle', metadata->>'account_handle') as account
+          coalesce(
+            config->>'account',
+            metadata->>'account',
+            config->>'account_handle',
+            metadata->>'account_handle'
+          ) as account
         from social.scrape_jobs
         where platform = 'instagram'
           and run_id = %s::uuid
@@ -218,7 +223,9 @@ def recover_and_dispatch(args: argparse.Namespace, account: str | None) -> dict[
         "recover_limit": max(1, int(args.recover_limit or 1)),
         "dispatch_limit": max(1, int(args.dispatch_limit or 1)),
         "before": before,
-        "recovered_job_ids": [str(row.get("id") or "").strip() for row in recovered if str(row.get("id") or "").strip()],
+        "recovered_job_ids": [
+            str(row.get("id") or "").strip() for row in recovered if str(row.get("id") or "").strip()
+        ],
         "dispatch": dispatch,
         "after": after,
     }
@@ -227,7 +234,10 @@ def recover_and_dispatch(args: argparse.Namespace, account: str | None) -> dict[
 def _print_compact(payload: dict[str, Any]) -> None:
     before = payload.get("before") or {}
     print(
-        "run_id={run_id} stage={stage} dry_run={dry_run} stale_running={stale} recovered={recovered} dispatched={dispatched}".format(
+        (
+            "run_id={run_id} stage={stage} dry_run={dry_run} stale_running={stale} "
+            "recovered={recovered} dispatched={dispatched}"
+        ).format(
             run_id=payload.get("run_id"),
             stage=payload.get("stage"),
             dry_run=payload.get("dry_run"),

@@ -1876,7 +1876,7 @@ def test_post_social_account_catalog_backfill_requires_modal_executor(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
+    from trr_backend.socials.social_season_analytics_impl import SocialWorkerUnavailableError
 
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -1911,7 +1911,7 @@ def test_post_social_account_catalog_backfill_surfaces_auth_preflight_failure_wh
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
+    from trr_backend.socials.social_season_analytics_impl import SocialWorkerUnavailableError
 
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -2086,7 +2086,7 @@ def test_post_social_account_catalog_backfill_blocks_inline_fallback_when_modal_
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
+    from trr_backend.socials.social_season_analytics_impl import SocialWorkerUnavailableError
 
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     monkeypatch.setenv("APP_ENV", "development")
@@ -2148,7 +2148,7 @@ def test_post_social_account_catalog_backfill_blocks_local_admin_override_when_m
     monkeypatch.setenv("TRR_ALLOW_LOCAL_ADMIN_OPERATION_OVERRIDE", "1")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
-    from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
+    from trr_backend.socials.social_season_analytics_impl import SocialWorkerUnavailableError
 
     with (
         patch("trr_backend.socials.control_plane.worker_health.is_queue_enabled", return_value=True),
@@ -2247,7 +2247,7 @@ def test_post_social_account_catalog_backfill_returns_conflict_for_active_profil
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from trr_backend.repositories.social_season_analytics import SocialIngestConflictError
+    from trr_backend.socials.social_season_analytics_impl import SocialIngestConflictError
 
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -2284,7 +2284,7 @@ def test_post_social_account_catalog_backfill_conflict_serializes_datetime_detai
 ) -> None:
     from datetime import UTC, datetime
 
-    from trr_backend.repositories.social_season_analytics import SocialIngestConflictError
+    from trr_backend.socials.social_season_analytics_impl import SocialIngestConflictError
 
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -2402,7 +2402,7 @@ def test_post_social_account_catalog_sync_newer_returns_validation_error(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from trr_backend.repositories.social_season_analytics import SocialIngestValidationError
+    from trr_backend.socials.social_season_analytics_impl import SocialIngestValidationError
 
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -2478,7 +2478,7 @@ def test_post_social_account_catalog_resume_tail_returns_validation_error(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from trr_backend.repositories.social_season_analytics import SocialIngestValidationError
+    from trr_backend.socials.social_season_analytics_impl import SocialIngestValidationError
 
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -3194,7 +3194,7 @@ def test_post_social_account_catalog_sync_recent_serializes_worker_health_on_mod
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
+    from trr_backend.socials.social_season_analytics_impl import SocialWorkerUnavailableError
 
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -3374,7 +3374,7 @@ def test_post_social_account_comments_run_guarded_restart(client: TestClient, mo
 def test_post_social_account_comments_run_guarded_restart_conflict_returns_409(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from trr_backend.repositories.social_season_analytics import SocialIngestConflictError
+    from trr_backend.socials.social_season_analytics_impl import SocialIngestConflictError
 
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -3694,7 +3694,7 @@ def test_post_social_account_catalog_freshness_returns_degraded_recent_runs_payl
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import trr_backend.repositories.social_season_analytics as social_repo
+    import trr_backend.socials.social_season_analytics_impl as social_repo
     from api.routers import socials as socials_router
 
     socials_router._clear_account_profile_caches()
@@ -4329,7 +4329,7 @@ def test_ingest_maps_structured_validation_errors_to_400(
     code: str,
     message: str,
 ) -> None:
-    from trr_backend.repositories.social_season_analytics import SocialIngestValidationError
+    from trr_backend.socials.social_season_analytics_impl import SocialIngestValidationError
 
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     monkeypatch.setenv("SOCIAL_REMOTE_ONLY_PLATFORMS", "none")
@@ -6078,7 +6078,7 @@ def test_ingest_returns_503_when_queue_enabled_and_worker_missing(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
+    from trr_backend.socials.social_season_analytics_impl import SocialWorkerUnavailableError
 
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     monkeypatch.setenv("SOCIAL_REMOTE_ONLY_PLATFORMS", "none")
@@ -6307,7 +6307,7 @@ def test_post_social_account_comments_scrape_returns_503_when_auth_repair_fails(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from trr_backend.repositories.social_season_analytics import SocialIngestValidationError
+    from trr_backend.socials.social_season_analytics_impl import SocialIngestValidationError
 
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -6668,7 +6668,7 @@ def test_post_social_account_comments_scrape_queue_dispatches_in_background(
             return_value={"run_id": "comments-run-queued-1", "status": "queued"},
         ) as scrape_mock,
         patch(
-            "trr_backend.repositories.social_season_analytics._dispatch_due_social_jobs_in_background"
+            "trr_backend.socials.pipelines.comments.instagram._dispatch_due_social_jobs_in_background"
         ) as dispatch_mock,
     ):
         response = client.post(
@@ -6691,15 +6691,6 @@ def test_post_social_account_comments_scrape_background_dispatch_exception_keeps
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
-    class SynchronousThread:
-        def __init__(self, *, target: Any, name: str | None = None, daemon: bool | None = None) -> None:
-            self._target = target
-            self.name = name
-            self.daemon = daemon
-
-        def start(self) -> None:
-            self._target()
-
     with (
         patch(
             "api.routers.socials._resolve_social_account_comments_route_execution",
@@ -6714,10 +6705,9 @@ def test_post_social_account_comments_scrape_background_dispatch_exception_keeps
             return_value={"run_id": "comments-run-queued-2", "status": "queued"},
         ) as scrape_mock,
         patch(
-            "trr_backend.repositories.social_season_analytics.dispatch_due_social_jobs",
+            "trr_backend.socials.pipelines.comments.instagram.dispatch_due_social_jobs",
             side_effect=RuntimeError("dispatch failed"),
         ) as dispatch_mock,
-        patch("trr_backend.repositories.social_season_analytics.Thread", SynchronousThread),
     ):
         response = client.post(
             "/api/v1/admin/socials/profiles/instagram/bravotv/comments/scrape",
@@ -6850,7 +6840,7 @@ def test_ingest_returns_503_when_remote_job_plane_enforced_and_worker_missing_ev
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
+    from trr_backend.socials.social_season_analytics_impl import SocialWorkerUnavailableError
 
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     monkeypatch.setenv("APP_ENV", "development")
@@ -6894,7 +6884,7 @@ def test_ingest_falls_back_inline_in_dev_when_worker_missing_and_flag_enabled(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
+    from trr_backend.socials.social_season_analytics_impl import SocialWorkerUnavailableError
 
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     monkeypatch.setenv("APP_ENV", "development")
@@ -6963,7 +6953,7 @@ def test_ingest_requires_remote_worker_for_instagram_even_with_inline_fallback_e
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
+    from trr_backend.socials.social_season_analytics_impl import SocialWorkerUnavailableError
 
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     monkeypatch.setenv("APP_ENV", "development")
@@ -7210,7 +7200,7 @@ def test_ingest_keeps_503_when_worker_missing_outside_dev_even_with_fallback_fla
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
+    from trr_backend.socials.social_season_analytics_impl import SocialWorkerUnavailableError
 
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     monkeypatch.setenv("APP_ENV", "production")
@@ -7905,7 +7895,7 @@ def test_create_sync_session_endpoint_blocks_when_workers_unhealthy(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
+    from trr_backend.socials.social_season_analytics_impl import SocialWorkerUnavailableError
 
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     monkeypatch.setenv("SOCIAL_REMOTE_ONLY_PLATFORMS", "instagram,tiktok")
@@ -7947,7 +7937,7 @@ def test_create_sync_session_endpoint_requires_remote_worker_for_configured_plat
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
+    from trr_backend.socials.social_season_analytics_impl import SocialWorkerUnavailableError
 
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     monkeypatch.setenv("SOCIAL_REMOTE_ONLY_PLATFORMS", "twitter,facebook")

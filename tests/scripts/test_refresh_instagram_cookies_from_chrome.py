@@ -3,6 +3,7 @@ from __future__ import annotations
 import builtins
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -116,7 +117,7 @@ def test_missing_cookie_extraction_dependency_returns_actionable_redacted_json(
     monkeypatch.setattr(cli, "_find_chrome_profile", lambda _profile: Path("/tmp/Profile 13"))
     real_import = builtins.__import__
 
-    def _missing_pycookiecheat(name: str, *args: object, **kwargs: object) -> object:
+    def _missing_pycookiecheat(name: str, *args: Any, **kwargs: Any) -> object:
         if name == "pycookiecheat":
             raise ImportError("No module named pycookiecheat")
         return real_import(name, *args, **kwargs)
@@ -154,9 +155,11 @@ def test_missing_cookie_extraction_dependency_returns_actionable_redacted_json(
 
 
 def test_live_validation_uses_profile_posts_graphql(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
-    def _fake_validate(cookies: dict[str, str], *, validation_username: str, timeout_seconds: int) -> tuple[bool, str | None]:
+    def _fake_validate(
+        cookies: dict[str, str], *, validation_username: str, timeout_seconds: int
+    ) -> tuple[bool, str | None]:
         captured["cookies"] = dict(cookies)
         captured["validation_username"] = validation_username
         captured["timeout_seconds"] = timeout_seconds
@@ -248,7 +251,7 @@ def test_modal_source_env_embeds_validated_cookies_and_removes_file_pointer(tmp_
             [
                 "TRR_DB_URL=postgresql://example",
                 "SOCIAL_INSTAGRAM_COOKIES_FILE=data/instagram_cookies.json",
-                "SOCIAL_INSTAGRAM_COOKIES_JSON={\"sessionid\":\"stale\"}",
+                'SOCIAL_INSTAGRAM_COOKIES_JSON={"sessionid":"stale"}',
                 "SOCIAL_AUTH_INSTAGRAM_USERNAME=codexhuli",
             ]
         )
@@ -275,7 +278,7 @@ def test_modal_source_env_embeds_validated_cookies_and_removes_file_pointer(tmp_
 def test_push_to_modal_uses_generated_cookie_source_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     source_env = tmp_path / ".env"
     source_env.write_text("TRR_DB_URL=postgresql://example\n", encoding="utf-8")
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     def _fake_run(command, **_kwargs):
         generated_source = Path(command[command.index("--source-env") + 1])

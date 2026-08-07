@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from fastapi import HTTPException
 
@@ -33,7 +33,9 @@ def get_run_or_404(run_id: str) -> dict[str, Any]:
 
 
 def run_artifact_object(row: dict[str, Any], artifact_name: str) -> dict[str, Any]:
-    artifact_paths = row.get("artifact_paths") if isinstance(row.get("artifact_paths"), dict) else {}
+    artifact_paths = (
+        cast("dict[str, Any]", row.get("artifact_paths")) if isinstance(row.get("artifact_paths"), dict) else {}
+    )
     artifact = artifact_paths.get(artifact_name)
     if not isinstance(artifact, dict):
         raise HTTPException(status_code=404, detail=f"Artifact not found: {artifact_name}")
@@ -117,7 +119,9 @@ def row_matches_review_filters(
     if display_eligible is not None:
         if not candidates and display_eligible is True:
             return False
-        if candidates and not any(bool(candidate.get("display_eligible")) is display_eligible for candidate in candidates):
+        if candidates and not any(
+            bool(candidate.get("display_eligible")) is display_eligible for candidate in candidates
+        ):
             return False
     if source_role:
         normalized_role = source_role.strip().lower()
@@ -157,7 +161,10 @@ def append_action_to_artifact_payload(payload: dict[str, Any], action: dict[str,
         duplicate_groups = []
         for row in safe_list(updated.get("duplicate_groups")):
             duplicate = safe_dict(row)
-            if str(duplicate.get("key") or "") == action_key and str(duplicate.get("key_type") or "") == action_key_type:
+            if (
+                str(duplicate.get("key") or "") == action_key
+                and str(duplicate.get("key_type") or "") == action_key_type
+            ):
                 duplicate["operator_status"] = action.get("resolution")
                 duplicate["operator_action"] = action
             duplicate_groups.append(duplicate)
@@ -171,7 +178,9 @@ def append_review_action(run_id: str, action: dict[str, Any]) -> dict[str, Any]:
     actions = safe_list(review_summary.get("operator_actions"))
     actions.append(action)
     review_summary["operator_actions"] = actions[-100:]
-    artifact_paths = row.get("artifact_paths") if isinstance(row.get("artifact_paths"), dict) else {}
+    artifact_paths = (
+        cast("dict[str, Any]", row.get("artifact_paths")) if isinstance(row.get("artifact_paths"), dict) else {}
+    )
     if isinstance(artifact_paths.get("run_review"), dict):
         run_review = safe_dict(load_run_artifact_payload(row, "run_review"))
         updated_run_review = append_action_to_artifact_payload(run_review, action)
@@ -355,7 +364,9 @@ def resolve_duplicate_group(*, run_id: str, payload: Any) -> dict[str, Any]:
     updated_asset_ids: list[str] = []
     primary_asset_id = None
     if payload.primary_group_id:
-        primary_asset_id = str(records_by_group.get(payload.primary_group_id, {}).get("media_asset_id") or "").strip() or None
+        primary_asset_id = (
+            str(records_by_group.get(payload.primary_group_id, {}).get("media_asset_id") or "").strip() or None
+        )
 
     if payload.action == "mark_duplicate":
         if not primary_asset_id:

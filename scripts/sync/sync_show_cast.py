@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from typing import TYPE_CHECKING, cast
 
 import requests
 
@@ -31,6 +32,9 @@ from trr_backend.repositories.sync_state import (
     mark_sync_state_in_progress,
     mark_sync_state_success,
 )
+
+if TYPE_CHECKING:
+    from trr_backend.db.session import DbSession
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -117,7 +121,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.skip_db:
         print("ERROR: --skip-db is not supported for this script (database access required).", file=sys.stderr)
         return 2
-    db = load_env_and_db(skip_db=args.skip_db)
+    # args.skip_db exits above, so load_env_and_db always returns a live session here.
+    db = cast("DbSession", load_env_and_db(skip_db=args.skip_db))
     assert_core_people_table_exists(db)
     assert_core_credits_table_exists(db)
     if not args.dry_run and not args.skip_db:
@@ -175,7 +180,9 @@ def main(argv: list[str] | None = None) -> int:
                 html = client.fetch_fullcredits_page(imdb_id, verbose=bool(args.verbose))
                 parsed = parse_fullcredits_html(html, series_id=imdb_id)
                 cast_rows = parsed.cast_rows
-                crew_rows = [row for row in parsed.crew_rows if row.credit_category in _IMDB_ALLOWLISTED_CREW_CATEGORIES]
+                crew_rows = [
+                    row for row in parsed.crew_rows if row.credit_category in _IMDB_ALLOWLISTED_CREW_CATEGORIES
+                ]
             except ImdbFullCreditsError as exc:
                 if not exc.is_blocked:
                     raise

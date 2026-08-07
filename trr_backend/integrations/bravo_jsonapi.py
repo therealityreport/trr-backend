@@ -5,6 +5,7 @@ import json
 import re
 import time
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
@@ -34,6 +35,21 @@ _GALLERY_ORIGINAL_IMAGE_RE = re.compile(
     r'((?:field_media_items|legacy/(?:photos|images/photo)|\d{4}/\d{2})/[^\s"\'?]+\.(?:jpg|jpeg|png))',
     re.IGNORECASE,
 )
+
+
+class BravoJSONAPIMalformedPageError(RuntimeError):
+    """A JSON:API response cannot be used safely by an incremental collector."""
+
+
+@dataclass(frozen=True)
+class BravoJSONAPIPage:
+    """One validated collection response and its normalized next-page link."""
+
+    resource: str
+    request_url: str
+    records: tuple[dict[str, Any], ...]
+    included: tuple[dict[str, Any], ...]
+    next_url: str | None
 
 
 def _client(client: httpx.Client | None = None) -> httpx.Client:
@@ -198,7 +214,7 @@ def _extract_original_gallery_image_urls(page_html: str) -> list[str]:
 
 def _extract_gallery_item_id_from_selector(selector: Any) -> str | None:
     attributes = getattr(selector, "attrib", None)
-    if isinstance(attributes, Mapping) or hasattr(attributes, "get"):
+    if attributes is not None and (isinstance(attributes, Mapping) or hasattr(attributes, "get")):
         for key in (
             "data-gallery-item-id",
             "data-gallery-id",
@@ -482,11 +498,13 @@ def find_person_uuid(name: str, *, client: httpx.Client | None = None) -> str | 
         return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
 
     def _entry_title(entry: dict[str, Any]) -> str:
-        attributes = entry.get("attributes") if isinstance(entry.get("attributes"), dict) else {}
+        raw_attributes = entry.get("attributes")
+        attributes = raw_attributes if isinstance(raw_attributes, dict) else {}
         return str(attributes.get("title") or "").strip()
 
     def _entry_path(entry: dict[str, Any]) -> str:
-        attributes = entry.get("attributes") if isinstance(entry.get("attributes"), dict) else {}
+        raw_attributes = entry.get("attributes")
+        attributes = raw_attributes if isinstance(raw_attributes, dict) else {}
         path = attributes.get("path")
         return str(path.get("alias") or "").strip() if isinstance(path, dict) else ""
 
@@ -610,9 +628,12 @@ def fetch_person_image_assets(
             )
         },
     )
-    data = detail.get("data") if isinstance(detail.get("data"), dict) else {}
-    attributes = data.get("attributes") if isinstance(data.get("attributes"), dict) else {}
-    relationships = data.get("relationships") if isinstance(data.get("relationships"), dict) else {}
+    raw_data = detail.get("data")
+    data = raw_data if isinstance(raw_data, dict) else {}
+    raw_attributes = data.get("attributes")
+    attributes = raw_attributes if isinstance(raw_attributes, dict) else {}
+    raw_relationships = data.get("relationships")
+    relationships = raw_relationships if isinstance(raw_relationships, dict) else {}
     included = detail.get("included") or []
     included_items = included if isinstance(included, list) else []
 
@@ -649,7 +670,8 @@ def fetch_person_image_assets(
     rows: list[dict[str, Any]] = []
     seen_keys: set[str] = set()
     for field_name in ("field_person_cover_photo", "field_person_full_photo"):
-        field_rel = relationships.get(field_name) if isinstance(relationships.get(field_name), dict) else {}
+        raw_field_rel = relationships.get(field_name)
+        field_rel = raw_field_rel if isinstance(raw_field_rel, dict) else {}
         media_ref = field_rel.get("data") if isinstance(field_rel, dict) else None
         media_refs = media_ref if isinstance(media_ref, list) else [media_ref]
         for media_ref_item in media_refs:
@@ -657,19 +679,17 @@ def fetch_person_image_assets(
                 continue
             media_id = str(media_ref_item.get("id") or "").strip()
             media_entry = media_by_id.get(media_id) or {}
-            media_attributes = media_entry.get("attributes") if isinstance(media_entry.get("attributes"), dict) else {}
-            media_relationships = (
-                media_entry.get("relationships") if isinstance(media_entry.get("relationships"), dict) else {}
-            )
-            media_image_rel = (
-                media_relationships.get("field_media_image")
-                if isinstance(media_relationships.get("field_media_image"), dict)
-                else {}
-            )
+            raw_media_attributes = media_entry.get("attributes")
+            media_attributes = raw_media_attributes if isinstance(raw_media_attributes, dict) else {}
+            raw_media_relationships = media_entry.get("relationships")
+            media_relationships = raw_media_relationships if isinstance(raw_media_relationships, dict) else {}
+            raw_media_image_rel = media_relationships.get("field_media_image")
+            media_image_rel = raw_media_image_rel if isinstance(raw_media_image_rel, dict) else {}
             file_ref = media_image_rel.get("data") if isinstance(media_image_rel, dict) else {}
             file_id = str(file_ref.get("id") or "").strip() if isinstance(file_ref, dict) else ""
             file_entry = file_by_id.get(file_id) or {}
-            file_attributes = file_entry.get("attributes") if isinstance(file_entry.get("attributes"), dict) else {}
+            raw_file_attributes = file_entry.get("attributes")
+            file_attributes = raw_file_attributes if isinstance(raw_file_attributes, dict) else {}
             file_url = _extract_file_url(file_attributes)
             file_name = (
                 str(file_attributes.get("filename") or "").strip()
@@ -785,7 +805,8 @@ def _iter_media_refs(detail_payload: dict[str, Any]) -> Iterable[dict[str, Any]]
     data = detail_payload.get("data")
     if not isinstance(data, dict):
         return []
-    relationships = data.get("relationships") if isinstance(data.get("relationships"), dict) else {}
+    raw_relationships = data.get("relationships")
+    relationships = raw_relationships if isinstance(raw_relationships, dict) else {}
     field_media_items_raw = relationships.get("field_media_items")
     field_media_items = field_media_items_raw if isinstance(field_media_items_raw, dict) else {}
     refs = field_media_items.get("data")
@@ -845,19 +866,17 @@ def fetch_gallery_assets(
             continue
         media_id = str(ref.get("id") or "").strip()
         media_entry = media_by_id.get(media_id) or {}
-        media_attributes = media_entry.get("attributes") if isinstance(media_entry.get("attributes"), dict) else {}
-        media_relationships = (
-            media_entry.get("relationships") if isinstance(media_entry.get("relationships"), dict) else {}
-        )
-        media_image_rel = (
-            media_relationships.get("field_media_image")
-            if isinstance(media_relationships.get("field_media_image"), dict)
-            else {}
-        )
+        raw_media_attributes = media_entry.get("attributes")
+        media_attributes = raw_media_attributes if isinstance(raw_media_attributes, dict) else {}
+        raw_media_relationships = media_entry.get("relationships")
+        media_relationships = raw_media_relationships if isinstance(raw_media_relationships, dict) else {}
+        raw_media_image_rel = media_relationships.get("field_media_image")
+        media_image_rel = raw_media_image_rel if isinstance(raw_media_image_rel, dict) else {}
         file_ref = media_image_rel.get("data") if isinstance(media_image_rel, dict) else {}
         file_id = str(file_ref.get("id") or "").strip() if isinstance(file_ref, dict) else ""
         file_entry = file_by_id.get(file_id) or {}
-        file_attributes = file_entry.get("attributes") if isinstance(file_entry.get("attributes"), dict) else {}
+        raw_file_attributes = file_entry.get("attributes")
+        file_attributes = raw_file_attributes if isinstance(raw_file_attributes, dict) else {}
         file_url = _extract_file_url(file_attributes)
         file_name = (
             str(file_attributes.get("filename") or "").strip()
@@ -913,3 +932,104 @@ def fetch_gallery_assets(
             html_row["bravotv_html_enriched"] = True
             rows.append(html_row)
     return rows
+
+
+def _jsonapi_collection_url(resource: str) -> str:
+    cleaned = str(resource or "").strip().strip("/")
+    if not cleaned or ".." in cleaned.split("/") or "?" in cleaned or "#" in cleaned:
+        raise ValueError("Bravo JSON:API resource must be a relative resource path")
+    return f"{JSONAPI_BASE_URL}/{cleaned}"
+
+
+def _normalize_jsonapi_next_url(value: Any) -> str | None:
+    """Validate a ``links.next`` value before a collector follows it."""
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        value = value.get("href")
+    if not isinstance(value, str) or not value.strip():
+        raise BravoJSONAPIMalformedPageError("Bravo JSON:API links.next was not a URL")
+    candidate = _absolute_url(value)
+    parsed = urlparse(str(candidate or ""))
+    hostname = (parsed.hostname or "").casefold()
+    if (
+        parsed.scheme != "https"
+        or hostname not in {"bravotv.com", "www.bravotv.com"}
+        or (parsed.port not in (None, 443))
+        or not parsed.path.startswith("/jsonapi/")
+    ):
+        raise BravoJSONAPIMalformedPageError("Bravo JSON:API links.next was outside the official JSON:API origin")
+    return candidate
+
+
+def _validated_jsonapi_records(value: Any, *, field: str, request_url: str) -> tuple[dict[str, Any], ...]:
+    if not isinstance(value, list):
+        raise BravoJSONAPIMalformedPageError(f"Bravo JSON:API {field} was not a list for {request_url}")
+    records: list[dict[str, Any]] = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            raise BravoJSONAPIMalformedPageError(f"Bravo JSON:API {field} contained a non-object for {request_url}")
+        entry_id = str(entry.get("id") or "").strip()
+        entry_type = str(entry.get("type") or "").strip()
+        if not entry_id or not entry_type:
+            raise BravoJSONAPIMalformedPageError(
+                f"Bravo JSON:API {field} contained a record without type/id for {request_url}"
+            )
+        records.append(dict(entry))
+    return tuple(records)
+
+
+def fetch_jsonapi_collection_page(
+    resource: str,
+    *,
+    client: httpx.Client | None = None,
+    params: Mapping[str, Any] | None = None,
+    page_url: str | None = None,
+) -> BravoJSONAPIPage:
+    """Fetch one validated list response without hiding malformed pagination.
+
+    Collectors own their termination and cap logic; this helper only guarantees
+    that every followed ``links.next`` link is an official HTTPS JSON:API URL and
+    that page records have durable JSON:API identities.
+    """
+    request_url = _normalize_jsonapi_next_url(page_url) if page_url else _jsonapi_collection_url(resource)
+    if request_url is None:
+        raise ValueError("Bravo JSON:API page URL is required")
+    payload = _get_json(_client(client), request_url, params=dict(params) if page_url is None and params else None)
+    if "data" not in payload:
+        raise BravoJSONAPIMalformedPageError(f"Bravo JSON:API page was missing data for {request_url}")
+    records = _validated_jsonapi_records(payload.get("data"), field="data", request_url=request_url)
+    included_raw = payload.get("included", [])
+    included = _validated_jsonapi_records(included_raw, field="included", request_url=request_url)
+    links = payload.get("links", {})
+    if not isinstance(links, Mapping):
+        raise BravoJSONAPIMalformedPageError(f"Bravo JSON:API links was not an object for {request_url}")
+    next_url = _normalize_jsonapi_next_url(links.get("next")) if "next" in links else None
+    return BravoJSONAPIPage(
+        resource=str(resource).strip().strip("/"),
+        request_url=request_url,
+        records=records,
+        included=included,
+        next_url=next_url,
+    )
+
+
+def fetch_jsonapi_resource_detail(
+    resource: str,
+    resource_id: str,
+    *,
+    client: httpx.Client | None = None,
+    params: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
+    """Fetch a JSON:API detail record with the same strict identity checks."""
+    clean_id = str(resource_id or "").strip()
+    if not clean_id or "/" in clean_id or "?" in clean_id or "#" in clean_id:
+        raise ValueError("Bravo JSON:API resource ID must be a single non-empty identifier")
+    request_url = f"{_jsonapi_collection_url(resource)}/{clean_id}"
+    payload = _get_json(_client(client), request_url, params=dict(params) if params else None)
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise BravoJSONAPIMalformedPageError(f"Bravo JSON:API detail was missing data object for {request_url}")
+    records = _validated_jsonapi_records([data], field="data", request_url=request_url)
+    included = _validated_jsonapi_records(payload.get("included", []), field="included", request_url=request_url)
+    return records[0], included

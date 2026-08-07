@@ -10,7 +10,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from trr_backend.db import pg
-from trr_backend.repositories import social_season_analytics as social_repo
+from trr_backend.socials import social_season_analytics_impl as social_repo
 from trr_backend.utils.env import load_env
 
 
@@ -381,11 +381,11 @@ def main() -> int:
                         context_cache[season_id] = context
                         try:
                             season_windows, _ = social_repo._resolve_week_windows(  # noqa: SLF001
-                            context,
-                            timezone="America/New_York",
-                            source_scope=source_scope,
-                            now_utc=now_utc,
-                        )
+                                context,
+                                timezone="America/New_York",
+                                source_scope=source_scope,
+                                now_utc=now_utc,
+                            )
                         except Exception:
                             season_windows = []
                         windows_cache[season_id] = season_windows

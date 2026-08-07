@@ -10,7 +10,7 @@ import re
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from time import perf_counter
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from urllib.parse import quote, unquote, urlparse
 from uuid import UUID
 
@@ -18,12 +18,17 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, HttpUrl
 
+import trr_backend.pipeline.admin_operations as admin_operations
 from api.auth import InternalAdminUser
 from api.deps import SupabaseAdminClient, get_list_result
 from trr_backend.ingestion.fandom_person_scraper import fetch_fandom_person_html, parse_fandom_person_html
 from trr_backend.ingestion.show_cast_matrix_scraper import is_missing_fandom_page
 from trr_backend.integrations.fandom import is_allowlisted_fandom_domain, load_fandom_community_allowlist
-from trr_backend.pipeline.admin_operations import operation_stream_response, start_operation_for_stream
+from trr_backend.pipeline.admin_operation_registry import (
+    get_scrape_capabilities,
+    get_show_links_capabilities,
+    get_show_roles_capabilities,
+)
 from trr_backend.repositories.cast_fandom import upsert_cast_fandom
 from trr_backend.scraping.bravo_parser import (
     parse_bravo_show_bundle,
@@ -930,7 +935,8 @@ def _validate_cast_only_preview_reuse_or_raise(
     expected_preview_signature: str | None = None,
     request_preview_signature: str | None = None,
 ) -> None:
-    preview_show = preview_result.get("show") if isinstance(preview_result.get("show"), dict) else {}
+    raw_preview_show = preview_result.get("show")
+    preview_show: dict[str, Any] = raw_preview_show if isinstance(raw_preview_show, dict) else {}
     preview_show_url = (
         str(preview_result.get("show_url") or "").strip() or str(preview_show.get("canonical_url") or "").strip()
     )
@@ -1107,8 +1113,7 @@ def _persist_missing_bravo_profile_markers(
     cast_person_name_by_id: dict[str, str],
     link_state_by_person_id: dict[str, dict[str, Any]],
 ) -> int:
-    from api.routers import admin_show_links
-
+    admin_show_links = get_show_links_capabilities()
     marked = 0
     seen_urls: set[str] = set()
     for raw_url in missing_candidate_urls:
@@ -1220,7 +1225,7 @@ def _persist_valid_fandom_profile_links(
     cast_person_name_by_id: dict[str, str],
     link_state_by_person_id: dict[str, dict[str, Any]],
 ) -> int:
-    from api.routers import admin_show_links
+    admin_show_links = get_show_links_capabilities()
 
     upserted = 0
     seen_rows: set[tuple[str, str]] = set()
@@ -1278,7 +1283,7 @@ def _persist_missing_fandom_profile_markers(
     cast_person_name_by_id: dict[str, str],
     link_state_by_person_id: dict[str, dict[str, Any]],
 ) -> int:
-    from api.routers import admin_show_links
+    admin_show_links = get_show_links_capabilities()
 
     marked = 0
     seen_rows: set[tuple[str, str]] = set()
@@ -1300,7 +1305,8 @@ def _persist_missing_fandom_profile_markers(
             continue
         seen_rows.add(dedupe_key)
         state = link_state_by_person_id.get(person_id) or {}
-        existing_urls = state.get("url_keys") if isinstance(state.get("url_keys"), set) else set()
+        raw_url_keys = state.get("url_keys")
+        existing_urls: set[Any] = raw_url_keys if isinstance(raw_url_keys, set) else set()
         if marker_url in existing_urls:
             continue
         person_name = cast_person_name_by_id.get(person_id, "").strip()
@@ -1724,10 +1730,10 @@ def _has_existing_external_id(out: dict[str, Any], key: str) -> bool:
 
     if key.endswith("_url") and key[:-4] in _SOCIAL_PLATFORMS:
         existing = out.get(key)
-        return isinstance(existing, str) and existing.strip()
+        return cast(bool, isinstance(existing, str) and existing.strip())
 
     existing = out.get(key)
-    return isinstance(existing, str) and existing.strip()
+    return cast(bool, isinstance(existing, str) and existing.strip())
 
 
 def _merge_external_ids_fill_missing(existing: Any, incoming: dict[str, str]) -> dict[str, Any]:
@@ -1795,7 +1801,7 @@ def _persist_bravo_profile_social_sources(
     actor: str,
     season_number: int = 0,
 ) -> dict[str, int]:
-    from api.routers import admin_show_links
+    admin_show_links = get_show_links_capabilities()
 
     stats = {
         "canonical_inserted": 0,
@@ -1987,18 +1993,18 @@ def _import_person_profile_image(
     source_label: str,
     context_section: str,
 ) -> dict[str, Any]:
-    from api.routers.admin_scrape import ImportImageItem, ImportRequest, import_images
+    admin_scrape = get_scrape_capabilities()
 
     asset_label = f"{source_label} profile picture"
     if season_number is not None:
-        import_request = ImportRequest(
+        import_request = admin_scrape.ImportRequest(
             entity_type="season",
             show_id=UUID(show_id),
             season_id=UUID(season_id) if season_id else None,
             season_number=season_number,
             source_url=person_url,
             images=[
-                ImportImageItem(
+                admin_scrape.ImportImageItem(
                     candidate_id=f"{source_label.lower()}-person-hero-{person_id}",
                     url=image_url,
                     caption=f"{asset_label}{f' ({person_name})' if person_name else ''}",
@@ -2011,12 +2017,12 @@ def _import_person_profile_image(
             ],
         )
     else:
-        import_request = ImportRequest(
+        import_request = admin_scrape.ImportRequest(
             entity_type="person",
             person_id=UUID(person_id),
             source_url=person_url,
             images=[
-                ImportImageItem(
+                admin_scrape.ImportImageItem(
                     candidate_id=f"{source_label.lower()}-person-hero-{person_id}",
                     url=image_url,
                     caption=f"{asset_label}{f' ({person_name})' if person_name else ''}",
@@ -2027,7 +2033,7 @@ def _import_person_profile_image(
                 )
             ],
         )
-    import_result = import_images(import_request, db, admin_user)
+    import_result = admin_scrape.import_images(import_request, db, admin_user)
     asset_ids: list[str] = []
     hosted_urls: list[str] = []
     for raw_asset in list(getattr(import_result, "assets", []) or []):
@@ -2383,7 +2389,7 @@ def _sync_bravo_video_thumbnails(
     force: bool = False,
     refresh_from_clip_metadata: bool = True,
 ) -> dict[str, Any]:
-    from api.routers.admin_scrape import ImportImageItem, ImportRequest, import_images
+    admin_scrape = get_scrape_capabilities()
 
     attempted = 0
     imported = 0
@@ -2396,7 +2402,8 @@ def _sync_bravo_video_thumbnails(
     candidate_counter = 0
 
     for list_key in ("videos_show", "videos_person"):
-        video_items = normalized.get(list_key) if isinstance(normalized.get(list_key), list) else []
+        raw_video_items = normalized.get(list_key)
+        video_items: list[Any] = raw_video_items if isinstance(raw_video_items, list) else []
         for item in video_items:
             if not isinstance(item, dict):
                 continue
@@ -2440,12 +2447,12 @@ def _sync_bravo_video_thumbnails(
             candidate_counter += 1
 
             try:
-                import_request = ImportRequest(
+                import_request = admin_scrape.ImportRequest(
                     entity_type="show",
                     show_id=UUID(show_id),
                     source_url=clip_url,
                     images=[
-                        ImportImageItem(
+                        admin_scrape.ImportImageItem(
                             candidate_id=f"bravo-video-thumbnail-{candidate_counter}",
                             url=source_image_url,
                             caption=str(item.get("title") or "").strip()[:160] or _BRAVO_VIDEO_THUMBNAIL_ASSET_NAME,
@@ -2456,7 +2463,7 @@ def _sync_bravo_video_thumbnails(
                         )
                     ],
                 )
-                import_result = import_images(import_request, db, admin_user)
+                import_result = admin_scrape.import_images(import_request, db, admin_user)
             except Exception as exc:  # noqa: BLE001
                 failed += 1
                 error_message = f"{clip_url}: {exc}"
@@ -2521,14 +2528,14 @@ def _extract_videos_from_snapshot(
     if not isinstance(normalized, dict):
         normalized = {}
 
-    videos_show = normalized.get("videos_show") if isinstance(normalized.get("videos_show"), list) else []
-    videos_person = normalized.get("videos_person") if isinstance(normalized.get("videos_person"), list) else []
+    raw_videos_show = normalized.get("videos_show")
+    videos_show: list[Any] = raw_videos_show if isinstance(raw_videos_show, list) else []
+    raw_videos_person = normalized.get("videos_person")
+    videos_person: list[Any] = raw_videos_person if isinstance(raw_videos_person, list) else []
 
-    # Most recent Bravo show snapshots already embed person video/news payloads.
-    # Avoid reloading person_source_latest on every read unless we need a fallback
-    # for older snapshots that do not include embedded person items.
     if merge_person_sources and len(videos_person) == 0:
-        people = normalized.get("people") if isinstance(normalized.get("people"), list) else []
+        raw_people = normalized.get("people")
+        people: list[Any] = raw_people if isinstance(raw_people, list) else []
         person_ids = [
             str(item.get("person_id"))
             for item in people
@@ -2565,11 +2572,14 @@ def _extract_news_from_snapshot(
     if not isinstance(normalized, dict):
         normalized = {}
 
-    news_show = normalized.get("news_show") if isinstance(normalized.get("news_show"), list) else []
-    news_person = normalized.get("news_person") if isinstance(normalized.get("news_person"), list) else []
+    raw_news_show = normalized.get("news_show")
+    news_show: list[Any] = raw_news_show if isinstance(raw_news_show, list) else []
+    raw_news_person = normalized.get("news_person")
+    news_person: list[Any] = raw_news_person if isinstance(raw_news_person, list) else []
 
     if len(news_person) == 0:
-        people = normalized.get("people") if isinstance(normalized.get("people"), list) else []
+        raw_people = normalized.get("people")
+        people: list[Any] = raw_people if isinstance(raw_people, list) else []
         person_ids = [
             str(item.get("person_id"))
             for item in people
@@ -2722,28 +2732,31 @@ def _filter_bundle_by_season(bundle: dict[str, Any], season_number: int | None) 
         return bundle
 
     filtered_bundle = dict(bundle)
-    videos = bundle.get("videos") if isinstance(bundle.get("videos"), list) else []
+    raw_bundle_videos = bundle.get("videos")
+    videos: list[Any] = raw_bundle_videos if isinstance(raw_bundle_videos, list) else []
     filtered_bundle["videos"] = [
         item
         for item in videos
         if isinstance(item, dict)
         and isinstance(item.get("season_number"), int)
-        and int(item.get("season_number")) == season_number
+        and int(cast(int, item.get("season_number"))) == season_number
     ]
 
-    people = bundle.get("people") if isinstance(bundle.get("people"), list) else []
+    raw_bundle_people = bundle.get("people")
+    people: list[Any] = raw_bundle_people if isinstance(raw_bundle_people, list) else []
     filtered_people: list[dict[str, Any]] = []
     for person in people:
         if not isinstance(person, dict):
             continue
         person_copy = dict(person)
-        person_videos = person.get("videos") if isinstance(person.get("videos"), list) else []
+        raw_person_videos = person.get("videos")
+        person_videos: list[Any] = raw_person_videos if isinstance(raw_person_videos, list) else []
         person_copy["videos"] = [
             item
             for item in person_videos
             if isinstance(item, dict)
             and isinstance(item.get("season_number"), int)
-            and int(item.get("season_number")) == season_number
+            and int(cast(int, item.get("season_number"))) == season_number
         ]
         filtered_people.append(person_copy)
     filtered_bundle["people"] = filtered_people
@@ -2829,7 +2842,7 @@ def _persist_discovered_links_from_bravo_sync(
     show_id: str,
     actor: str,
 ) -> dict[str, int]:
-    from api.routers import admin_show_links
+    admin_show_links = get_show_links_capabilities()
 
     discovered = admin_show_links._discover_show_links(show_id)
     discovered.extend(admin_show_links._discover_season_links(show_id))
@@ -2919,7 +2932,7 @@ def _persist_cast_role_suggestions_from_bravo_sync(
             continue
 
         season_number = (
-            int(item.get("season_number"))
+            int(cast(int, item.get("season_number")))
             if isinstance(item.get("season_number"), int)
             else int(fallback_season_number or 0)
         )
@@ -2930,7 +2943,8 @@ def _persist_cast_role_suggestions_from_bravo_sync(
         season_id = season_id_cache[season_number]
         article_url = str(item.get("article_url") or "").strip() or None
 
-        person_tags = item.get("person_tags") if isinstance(item.get("person_tags"), list) else []
+        raw_person_tags = item.get("person_tags")
+        person_tags: list[Any] = raw_person_tags if isinstance(raw_person_tags, list) else []
         for raw_tag in person_tags:
             if not isinstance(raw_tag, dict):
                 continue
@@ -2984,8 +2998,8 @@ def _persist_cast_role_suggestions_from_bravo_sync(
 def preview_bravo_import(
     show_id: UUID,
     payload: BravoPreviewRequest,
-    db: SupabaseAdminClient = None,
-    _: InternalAdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ):
     show_id_str = str(show_id)
     if not _show_exists(db, show_id_str):
@@ -3036,8 +3050,9 @@ def preview_bravo_import(
         hydrate_person_related_dates=not payload.cast_only,
     )
     bundle = _filter_bundle_by_season(bundle, payload.season_number)
-    person_candidate_results = (
-        bundle.get("person_candidate_results") if isinstance(bundle.get("person_candidate_results"), list) else []
+    raw_person_candidate_results = bundle.get("person_candidate_results")
+    person_candidate_results: list[Any] = (
+        raw_person_candidate_results if isinstance(raw_person_candidate_results, list) else []
     )
     summary = _summarize_candidate_results(person_candidate_results)
     fandom_candidate_results = (
@@ -3103,8 +3118,8 @@ def preview_bravo_import_stream(
     show_id: UUID,
     payload: BravoPreviewRequest,
     request: Request,
-    db: SupabaseAdminClient = None,
-    admin: InternalAdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    admin: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> StreamingResponse:
     show_id_str = str(show_id)
     if not _show_exists(db, show_id_str):
@@ -3323,7 +3338,8 @@ def preview_bravo_import_stream(
                                 if not candidate_url:
                                     continue
 
-                                person = probe.get("person") if isinstance(probe.get("person"), dict) else None
+                                raw_probe_person = probe.get("person")
+                                person = raw_probe_person if isinstance(raw_probe_person, dict) else None
                                 if status == "ok" and person:
                                     people.append(person)
 
@@ -3643,14 +3659,14 @@ def preview_bravo_import_stream(
                 },
             )
 
-    operation = start_operation_for_stream(
+    operation = admin_operations.start_operation_for_stream(
         operation_type="admin_show_bravo_preview",
         producer=event_stream,
         request_payload=request_payload,
         initiated_by=actor,
         request=request,
     )
-    return operation_stream_response(str(operation.get("id")), request=request)
+    return admin_operations.operation_stream_response(str(operation.get("id")), request=request)
 
 
 def build_bravo_preview_operation_producer(
@@ -3712,8 +3728,8 @@ def build_bravo_preview_operation_producer(
 def commit_bravo_import(
     show_id: UUID,
     payload: BravoCommitRequest,
-    db: SupabaseAdminClient = None,
-    admin_user: InternalAdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    admin_user: InternalAdminUser = cast(InternalAdminUser, None),
 ):
     show_id_str = str(show_id)
     if not _show_exists(db, show_id_str):
@@ -3795,15 +3811,17 @@ def commit_bravo_import(
             hydrate_person_related_dates=not payload.cast_only,
         )
     bundle = _filter_bundle_by_season(bundle, payload.season_number)
-    person_candidate_results = (
-        bundle.get("person_candidate_results") if isinstance(bundle.get("person_candidate_results"), list) else []
+    raw_person_candidate_results = bundle.get("person_candidate_results")
+    person_candidate_results: list[Any] = (
+        raw_person_candidate_results if isinstance(raw_person_candidate_results, list) else []
     )
     summary = _summarize_candidate_results(person_candidate_results)
     bravo_candidates_tested = summary["tested"]
     bravo_candidates_valid = summary["valid"]
     bravo_candidates_missing = summary["missing"]
-    fandom_candidate_results = (
-        bundle.get("fandom_candidate_results") if isinstance(bundle.get("fandom_candidate_results"), list) else []
+    raw_fandom_candidate_results = bundle.get("fandom_candidate_results")
+    fandom_candidate_results: list[Any] = (
+        raw_fandom_candidate_results if isinstance(raw_fandom_candidate_results, list) else []
     )
     if not fandom_candidate_results:
         fandom_candidate_results = _probe_fandom_person_url_candidates(
@@ -3918,8 +3936,6 @@ def commit_bravo_import(
     show_snapshot = _upsert_show_snapshot(db, show_id=show_id_str, payload=show_payload)
     if not payload.cast_only:
         if season_id:
-            # Bravo copy is typically season-current marketing text; for season-targeted sync
-            # persist it to the selected season overview instead of overwriting global show copy.
             _persist_season_overview(
                 db,
                 show_id=show_id_str,
@@ -3988,11 +4004,11 @@ def commit_bravo_import(
     cast_matrix_sync_error: str | None = None
     if payload.sync_cast_matrix and not payload.cast_only:
         try:
-            from api.routers.admin_show_roles import CastMatrixSyncRequest, sync_cast_matrix_for_show
+            admin_show_roles = get_show_roles_capabilities()
 
-            cast_matrix_sync = sync_cast_matrix_for_show(
+            cast_matrix_sync = admin_show_roles.sync_cast_matrix_for_show(
                 show_id=show_id_str,
-                payload=CastMatrixSyncRequest(
+                payload=admin_show_roles.CastMatrixSyncRequest(
                     season_numbers=[int(payload.season_number)] if payload.season_number else [],
                     include_relationship_roles=True,
                     include_bravo_links=True,
@@ -4053,7 +4069,8 @@ def commit_bravo_import(
         snapshot_meta = _upsert_person_snapshot(db, person_id=person_id, payload=person_payload)
         person_snapshots.append(snapshot_meta)
 
-        social_links = person.get("social_links") if isinstance(person.get("social_links"), dict) else {}
+        raw_social_links = person.get("social_links")
+        social_links: dict[str, Any] = raw_social_links if isinstance(raw_social_links, dict) else {}
         _persist_person_profile(
             db,
             person_id=person_id,
@@ -4165,7 +4182,8 @@ def commit_bravo_import(
 
         if profile_image_promoted_by_person_id.get(person_id) or person_id in fandom_image_stage_done:
             continue
-        photos = result.get("photos") if isinstance(result.get("photos"), list) else []
+        raw_result_photos = result.get("photos")
+        photos: list[Any] = raw_result_photos if isinstance(raw_result_photos, list) else []
         fallback_image_url = _select_fandom_profile_image_url(photos)
         if not fallback_image_url:
             continue
@@ -4259,15 +4277,14 @@ def commit_bravo_import(
 
     if selected_show_images:
         try:
-            # Reuse the existing scrape import pipeline for show-linked images.
-            from api.routers.admin_scrape import ImportImageItem, ImportRequest, import_images
+            admin_scrape = get_scrape_capabilities()
 
-            import_request = ImportRequest(
+            import_request = admin_scrape.ImportRequest(
                 entity_type="show",
                 show_id=UUID(show_id_str),
                 source_url=str(payload.show_url),
                 images=[
-                    ImportImageItem(
+                    admin_scrape.ImportImageItem(
                         candidate_id=_stable_show_image_candidate_id(image["url"]),
                         url=image["url"],
                         caption=f"Bravo import ({image['kind']})",
@@ -4277,7 +4294,7 @@ def commit_bravo_import(
                     for image in selected_show_images
                 ],
             )
-            import_result = import_images(import_request, db, admin_user)
+            import_result = admin_scrape.import_images(import_request, db, admin_user)
             imported_show_images = import_result.imported
             imported_show_images_skipped = import_result.skipped_duplicates
             image_import_errors = import_result.errors
@@ -4383,8 +4400,8 @@ def commit_bravo_import(
 def sync_bravo_video_thumbnails(
     show_id: UUID,
     payload: BravoVideoThumbnailSyncRequest,
-    db: SupabaseAdminClient = None,
-    admin_user: InternalAdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    admin_user: InternalAdminUser = cast(InternalAdminUser, None),
 ):
     show_id_str = str(show_id)
     if not _show_exists(db, show_id_str):
@@ -4435,15 +4452,16 @@ def get_bravo_videos(
     season_number: int | None = Query(default=None),
     person_id: UUID | None = Query(default=None),
     merge_person_sources: bool = Query(default=True),
-    db: SupabaseAdminClient = None,
-    _: InternalAdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ):
     show_id_str = str(show_id)
     if not _show_exists(db, show_id_str):
         raise HTTPException(status_code=404, detail=f"Show {show_id_str} not found")
 
     snapshot = _fetch_show_snapshot(db, show_id_str)
-    payload = snapshot.get("payload") if isinstance(snapshot.get("payload"), dict) else {}
+    raw_snapshot_payload = snapshot.get("payload")
+    payload: dict[str, Any] = raw_snapshot_payload if isinstance(raw_snapshot_payload, dict) else {}
 
     videos = _extract_videos_from_snapshot(payload, merge_person_sources=merge_person_sources, db=db)
 
@@ -4452,7 +4470,7 @@ def get_bravo_videos(
         filtered = [
             item
             for item in filtered
-            if isinstance(item.get("season_number"), int) and int(item.get("season_number")) == season_number
+            if isinstance(item.get("season_number"), int) and int(cast(int, item.get("season_number"))) == season_number
         ]
 
     if person_id is not None:
@@ -4483,15 +4501,16 @@ def get_bravo_videos(
 def get_bravo_news(
     show_id: UUID,
     person_id: UUID | None = Query(default=None),
-    db: SupabaseAdminClient = None,
-    _: InternalAdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ):
     show_id_str = str(show_id)
     if not _show_exists(db, show_id_str):
         raise HTTPException(status_code=404, detail=f"Show {show_id_str} not found")
 
     snapshot = _fetch_show_snapshot(db, show_id_str)
-    payload = snapshot.get("payload") if isinstance(snapshot.get("payload"), dict) else {}
+    raw_snapshot_payload = snapshot.get("payload")
+    payload: dict[str, Any] = raw_snapshot_payload if isinstance(raw_snapshot_payload, dict) else {}
 
     news = _extract_news_from_snapshot(payload, db=db)
 

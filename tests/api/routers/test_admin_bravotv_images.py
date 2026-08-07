@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import ANY, patch
 from uuid import uuid4
 
@@ -11,8 +12,8 @@ import pytest
 from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
 
-from api.routers import admin_bravotv_images
 from api.main import app
+from api.routers import admin_bravotv_images
 from trr_backend.media.getty_replacement import ResolvedPublicReplacement
 
 
@@ -44,7 +45,7 @@ def _fake_get_object(*, bucket: str, key: str) -> dict[str, io.BytesIO]:
     }
 
 
-def _fake_json_object(payload_by_key: dict[str, object]):
+def _fake_json_object(payload_by_key: dict[str, Any]):
     def _get_object(**kwargs):  # noqa: ANN001
         key = kwargs["Key"]
         if key not in payload_by_key:
@@ -55,7 +56,7 @@ def _fake_json_object(payload_by_key: dict[str, object]):
 
 
 class _FakeObjectStorage:
-    def __init__(self, payload_by_key: dict[str, object]) -> None:
+    def __init__(self, payload_by_key: dict[str, Any]) -> None:
         self.payload_by_key = dict(payload_by_key)
         self.puts: list[dict[str, object]] = []
 
@@ -321,7 +322,11 @@ def test_get_run_review_items_filters_and_paginates_review_reasons(
                 return_value=type(
                     "FakeClient",
                     (),
-                    {"get_object": staticmethod(_fake_json_object({"bravotv-image-runs/test/run_review.json": run_review}))},
+                    {
+                        "get_object": staticmethod(
+                            _fake_json_object({"bravotv-image-runs/test/run_review.json": run_review})
+                        )
+                    },
                 )(),
             ):
                 response = client.get(
@@ -374,7 +379,9 @@ def test_approve_replacement_candidate_uses_run_candidate_and_records_action(
                 "trr_backend.media.bravotv.admin_review_service.get_object_storage_client",
                 return_value=storage,
             ):
-                with patch("trr_backend.media.bravotv.admin_review_service.create_supabase_admin_client", return_value=object()):
+                with patch(
+                    "trr_backend.media.bravotv.admin_review_service.create_supabase_admin_client", return_value=object()
+                ):
                     with patch(
                         "trr_backend.media.bravotv.admin_review_service.fetch_media_asset",
                         return_value={"id": asset_id, "source": "getty", "width": 1600, "height": 900, "metadata": {}},
@@ -418,8 +425,14 @@ def test_approve_replacement_candidate_uses_run_candidate_and_records_action(
     resolve_mock.assert_called_once()
     apply_mock.assert_called_once()
     assert update_mock.call_args.kwargs["review_summary"]["operator_actions"][0]["type"] == "replacement_approved"
-    assert storage.payload_by_key["bravotv-image-runs/test/replacement_candidates.json"][0]["operator_status"] == "approved"
-    assert storage.payload_by_key["bravotv-image-runs/test/run_review.json"]["operator_actions"][0]["type"] == "replacement_approved"
+    assert (
+        storage.payload_by_key["bravotv-image-runs/test/replacement_candidates.json"][0]["operator_status"]
+        == "approved"
+    )
+    assert (
+        storage.payload_by_key["bravotv-image-runs/test/run_review.json"]["operator_actions"][0]["type"]
+        == "replacement_approved"
+    )
 
 
 def test_bulk_approve_replacement_candidates_records_partial_results(
@@ -452,8 +465,12 @@ def test_bulk_approve_replacement_candidates_records_partial_results(
 
     with patch("trr_backend.media.bravotv.admin_review_service.get_bravotv_run", return_value=run_row):
         with patch("trr_backend.media.bravotv.admin_review_service.get_object_storage_bucket", return_value="bucket-1"):
-            with patch("trr_backend.media.bravotv.admin_review_service.get_object_storage_client", return_value=storage):
-                with patch("trr_backend.media.bravotv.admin_review_service.create_supabase_admin_client", return_value=object()):
+            with patch(
+                "trr_backend.media.bravotv.admin_review_service.get_object_storage_client", return_value=storage
+            ):
+                with patch(
+                    "trr_backend.media.bravotv.admin_review_service.create_supabase_admin_client", return_value=object()
+                ):
                     with patch(
                         "trr_backend.media.bravotv.admin_review_service.fetch_media_asset",
                         return_value={"id": asset_id, "source": "getty", "width": 1600, "height": 900, "metadata": {}},
@@ -545,8 +562,12 @@ def test_resolve_duplicate_group_marks_non_primary_assets(
                 "trr_backend.media.bravotv.admin_review_service.get_object_storage_client",
                 return_value=storage,
             ):
-                with patch("trr_backend.media.bravotv.admin_review_service.create_supabase_admin_client", return_value=object()):
-                    with patch("trr_backend.media.bravotv.admin_review_service.update_media_asset_metadata") as update_asset_mock:
+                with patch(
+                    "trr_backend.media.bravotv.admin_review_service.create_supabase_admin_client", return_value=object()
+                ):
+                    with patch(
+                        "trr_backend.media.bravotv.admin_review_service.update_media_asset_metadata"
+                    ) as update_asset_mock:
                         with patch(
                             "trr_backend.media.bravotv.admin_review_service.update_bravotv_run_progress",
                             return_value=run_row,
@@ -569,6 +590,9 @@ def test_resolve_duplicate_group_marks_non_primary_assets(
     action = update_run_mock.call_args.kwargs["review_summary"]["operator_actions"][0]
     assert action["type"] == "duplicate_resolved"
     assert action["primary_media_asset_id"] == primary_asset_id
-    assert storage.payload_by_key["bravotv-image-runs/test/imported_records.json"][1]["operator_status"] == "duplicate_marked"
+    assert (
+        storage.payload_by_key["bravotv-image-runs/test/imported_records.json"][1]["operator_status"]
+        == "duplicate_marked"
+    )
     duplicate_group = storage.payload_by_key["bravotv-image-runs/test/run_review.json"]["duplicate_groups"][0]
     assert duplicate_group["operator_status"] == "mark_duplicate"

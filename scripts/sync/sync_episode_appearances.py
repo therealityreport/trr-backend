@@ -17,7 +17,7 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import requests
 
@@ -60,6 +60,9 @@ from trr_backend.repositories.sync_state import (
     mark_sync_state_in_progress,
     mark_sync_state_success,
 )
+
+if TYPE_CHECKING:
+    from trr_backend.db.session import DbSession
 
 
 @dataclass(frozen=True)
@@ -305,7 +308,9 @@ def _missing_self_credit_rows(
     existing_credit_rows: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, object]]:
     existing_person_ids = {
-        str(row.get("person_id") or "").strip() for row in existing_credit_rows if str(row.get("person_id") or "").strip()
+        str(row.get("person_id") or "").strip()
+        for row in existing_credit_rows
+        if str(row.get("person_id") or "").strip()
     }
     return [row for row in credit_rows if str(row.get("person_id") or "").strip() not in existing_person_ids]
 
@@ -336,7 +341,8 @@ def main(argv: list[str] | None = None) -> int:
         print("ERROR: --skip-db is not supported for this script (database access required).", file=sys.stderr)
         return 2
 
-    db = load_env_and_db(skip_db=args.skip_db)
+    # args.skip_db exits above, so load_env_and_db always returns a live session here.
+    db = cast("DbSession", load_env_and_db(skip_db=args.skip_db))
     assert_core_shows_table_exists(db)
     assert_core_people_table_exists(db)
     assert_core_credits_table_exists(db)
@@ -428,7 +434,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Parsed IMDb Self credits: {len(self_rows)} cast rows.", flush=True)
             if not self_rows:
                 raise RuntimeError(
-                    "IMDb occurrence refresh returned zero usable Self rows; refusing to mark credit_occurrences successful."
+                    "IMDb occurrence refresh returned zero usable Self rows; "
+                    "refusing to mark credit_occurrences successful."
                 )
 
             # Ensure people exist.
@@ -546,7 +553,10 @@ def main(argv: list[str] | None = None) -> int:
 
             missing_credit_rows = _missing_self_credit_rows(credit_rows, existing_credit_rows)
             if missing_credit_rows and not args.dry_run:
-                print(f"Writing missing cast membership credits for {show_id}: {len(missing_credit_rows)} rows.", flush=True)
+                print(
+                    f"Writing missing cast membership credits for {show_id}: {len(missing_credit_rows)} rows.",
+                    flush=True,
+                )
                 inserted_credits = insert_credits_ignore_conflicts(db, missing_credit_rows)
                 credits_inserted += len(inserted_credits)
             elif missing_credit_rows:

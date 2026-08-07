@@ -91,19 +91,10 @@ def _build_operator_summary(*, account: str, run_id: str, job_id: str, result: d
             or 0
         ),
         "posts_fetched": int(
-            stage_counters.get("posts")
-            or listing_progress.get("posts_seen")
-            or result.get("items_found")
-            or 0
+            stage_counters.get("posts") or listing_progress.get("posts_seen") or result.get("items_found") or 0
         ),
-        "posts_upserted": int(
-            persist_counters.get("posts_upserted")
-            or listing_progress.get("posts_upserted")
-            or 0
-        ),
-        "stop_reason": (
-            str(listing_progress.get("stop_reason") or metadata.get("stop_reason") or "").strip() or None
-        ),
+        "posts_upserted": int(persist_counters.get("posts_upserted") or listing_progress.get("posts_upserted") or 0),
+        "stop_reason": (str(listing_progress.get("stop_reason") or metadata.get("stop_reason") or "").strip() or None),
         "proxy_pacing": proxy_pacing,
         "decodo_mode": (
             str(proxy_identity.get("provider") or fetcher_runtime.get("selected_proxy_fingerprint") or "").strip()
@@ -135,7 +126,7 @@ def main() -> int:
     args = parser.parse_args()
 
     from trr_backend.db import pg
-    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials import social_season_analytics_impl as repo
     from trr_backend.socials.instagram.posts_scrapling.job_runner import (
         run_instagram_posts_scrapling_job,
     )

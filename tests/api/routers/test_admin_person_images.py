@@ -7,6 +7,7 @@ import re
 import time
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -18,6 +19,9 @@ from fastapi.testclient import TestClient
 from api.main import app
 from api.routers import admin_nbcumv, admin_person_images
 from trr_backend.media.getty_replacement import ResolvedPublicReplacement
+
+if TYPE_CHECKING:
+    from api.deps import SupabaseAdminClient
 
 _REAL_IMPORT_NBCUMV_PERSON_MEDIA = admin_person_images._import_nbcumv_person_media
 _REAL_IMPORT_BRAVOTV_PERSON_MEDIA = admin_person_images._import_bravotv_person_media
@@ -688,9 +692,9 @@ def test_import_nbcumv_person_media_persists_getty_unmatched_urls_and_imports_on
     from trr_backend.integrations import nbcumv as nbcumv_integration
 
     person_id = str(uuid4())
-    captured_snapshot: dict[str, object] = {}
-    imported_items: list[object] = []
-    imported_getty_rows: list[dict[str, object]] = []
+    captured_snapshot: dict[str, Any] = {}
+    imported_items: list[Any] = []
+    imported_getty_rows: list[dict[str, Any]] = []
     captured_searches: list[dict[str, object]] = []
     mock_db = MagicMock()
     (
@@ -856,7 +860,7 @@ def test_import_nbcumv_person_media_uses_show_index_crosswalk_when_filename_sear
     from trr_backend.integrations import nbcumv as nbcumv_integration
 
     person_id = str(uuid4())
-    imported_items: list[object] = []
+    imported_items: list[Any] = []
 
     monkeypatch.setattr(admin_nbcumv, "_ensure_sources", lambda db: None)
 
@@ -957,7 +961,7 @@ def test_import_nbcumv_person_media_repairs_existing_shared_getty_rows(monkeypat
         "?p=1&s=594x594&w=gi&k=20&c=qm3GOG53fvQgAxq82lriZGbdZ_rzQZWtiq59vsjszbs="
     )
     cast_updates: list[dict[str, object]] = []
-    asset_updates: list[dict[str, object]] = []
+    asset_updates: list[dict[str, Any]] = []
 
     class _Response:
         def __init__(self, data):
@@ -1089,7 +1093,7 @@ def test_import_nbcumv_person_media_repairs_existing_shared_getty_rows(monkeypat
     )
 
     result = _REAL_IMPORT_NBCUMV_PERSON_MEDIA(
-        _Db(),
+        cast("SupabaseAdminClient", _Db()),
         person_id=person_id,
         person_name="Brandi Glanville",
         show_id=None,
@@ -1262,7 +1266,7 @@ def test_import_nbcumv_person_media_resets_stale_hosted_getty_asset_when_mirrore
     )
 
     result = _REAL_IMPORT_NBCUMV_PERSON_MEDIA(
-        _Db(),
+        cast("SupabaseAdminClient", _Db()),
         person_id=person_id,
         person_name="Brandi Glanville",
         show_id=None,
@@ -1372,7 +1376,7 @@ def test_sync_cast_gallery_rows_to_media_assets_resets_stale_getty_hosted_state(
     monkeypatch.setattr("trr_backend.repositories.media_assets.upsert_media_links", lambda db, links: list(links))
 
     admin_person_images._sync_cast_gallery_rows_to_media_assets(
-        _Db(),
+        cast("SupabaseAdminClient", _Db()),
         [
             {
                 "id": "cast-row-1",
@@ -1520,7 +1524,7 @@ def test_import_nbcumv_person_media_falls_back_to_direct_nbcumv_caption_search(
     from trr_backend.integrations import getty as getty_integration
     from trr_backend.integrations import nbcumv as nbcumv_integration
 
-    imported_items: list[object] = []
+    imported_items: list[Any] = []
 
     monkeypatch.setattr(admin_nbcumv, "_ensure_sources", lambda db: None)
     monkeypatch.setattr(getty_integration, "search_editorial_assets", lambda *args, **kwargs: [])
@@ -1745,7 +1749,7 @@ def test_import_nbcumv_person_media_uses_credited_shows_for_direct_nbcumv_search
     from trr_backend.integrations import getty as getty_integration
     from trr_backend.integrations import nbcumv as nbcumv_integration
 
-    imported_items: list[object] = []
+    imported_items: list[Any] = []
     searched_show_ids: list[str | None] = []
 
     monkeypatch.setattr(admin_nbcumv, "_ensure_sources", lambda db: None)
@@ -1840,7 +1844,7 @@ def test_import_nbcumv_person_media_supplements_getty_matches_with_all_nbcumv_ca
     from trr_backend.integrations import getty as getty_integration
     from trr_backend.integrations import nbcumv as nbcumv_integration
 
-    imported_items: list[object] = []
+    imported_items: list[Any] = []
     searched_show_ids: list[str | None] = []
 
     monkeypatch.setattr(admin_nbcumv, "_ensure_sources", lambda db: None)
@@ -1960,7 +1964,7 @@ def test_import_nbcumv_person_media_imports_getty_fallback_when_nbcumv_is_unauth
     from trr_backend.integrations import getty as getty_integration
     from trr_backend.integrations import nbcumv as nbcumv_integration
 
-    imported_getty_rows: list[dict[str, object]] = []
+    imported_getty_rows: list[dict[str, Any]] = []
     mock_db = MagicMock()
     (
         mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.eq.return_value.in_.return_value.execute.return_value.data
@@ -2075,7 +2079,7 @@ def test_import_nbcumv_person_media_auto_replaces_bravocon_getty_asset(
     from trr_backend.integrations import getty as getty_integration
     from trr_backend.integrations import nbcumv as nbcumv_integration
 
-    imported_getty_rows: list[dict[str, object]] = []
+    imported_getty_rows: list[dict[str, Any]] = []
     mock_db = MagicMock()
     (
         mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.eq.return_value.in_.return_value.execute.return_value.data
@@ -2173,7 +2177,7 @@ def test_import_nbcumv_person_media_auto_replaces_bravocon_getty_asset(
 def test_import_nbcumv_person_media_skips_public_replacement_for_prefetched_getty_assets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    imported_getty_rows: list[dict[str, object]] = []
+    imported_getty_rows: list[dict[str, Any]] = []
 
     class _Response:
         def __init__(self, data):
@@ -2223,6 +2227,10 @@ def test_import_nbcumv_person_media_skips_public_replacement_for_prefetched_gett
         lambda **kwargs: (_ for _ in ()).throw(AssertionError("identity lookup should be skipped")),
     )
     monkeypatch.setattr(
+        "trr_backend.integrations.nbcumv.resolve_show_by_title",
+        lambda _title: None,
+    )
+    monkeypatch.setattr(
         admin_person_images,
         "resolve_best_public_replacement",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("public replacement should be skipped")),
@@ -2257,7 +2265,7 @@ def test_import_nbcumv_person_media_skips_public_replacement_for_prefetched_gett
     )
 
     result = _REAL_IMPORT_NBCUMV_PERSON_MEDIA(
-        _Db(),
+        cast("SupabaseAdminClient", _Db()),
         person_id=str(uuid4()),
         person_name="Brandi Glanville",
         show_id=None,
@@ -2292,7 +2300,7 @@ def test_import_nbcumv_person_media_skips_public_replacement_for_prefetched_gett
 def test_import_nbcumv_person_media_discovery_mode_defers_weak_prefetched_getty_urls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    imported_getty_rows: list[dict[str, object]] = []
+    imported_getty_rows: list[dict[str, Any]] = []
 
     class _Response:
         def __init__(self, data):
@@ -2338,6 +2346,10 @@ def test_import_nbcumv_person_media_discovery_mode_defers_weak_prefetched_getty_
     monkeypatch.setattr(admin_nbcumv, "_ensure_sources", lambda db: None)
     monkeypatch.setattr(admin_person_images, "_build_show_lookup_maps", lambda db: ({}, {}, {}))
     monkeypatch.setattr(
+        "trr_backend.integrations.nbcumv.resolve_show_by_title",
+        lambda _title: None,
+    )
+    monkeypatch.setattr(
         "trr_backend.repositories.cast_photos.upsert_cast_photos",
         lambda db, rows, dedupe_on="source_image_id": (
             imported_getty_rows.extend(list(rows))
@@ -2367,7 +2379,7 @@ def test_import_nbcumv_person_media_discovery_mode_defers_weak_prefetched_getty_
     )
 
     result = _REAL_IMPORT_NBCUMV_PERSON_MEDIA(
-        _Db(),
+        cast("SupabaseAdminClient", _Db()),
         person_id=str(uuid4()),
         person_name="Brandi Glanville",
         show_id=None,
@@ -2414,7 +2426,7 @@ def test_import_nbcumv_person_media_discovery_mode_defers_weak_prefetched_getty_
 def test_import_nbcumv_person_media_getty_only_prefetch_ignores_requested_show_filter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    imported_getty_rows: list[dict[str, object]] = []
+    imported_getty_rows: list[dict[str, Any]] = []
 
     class _Response:
         def __init__(self, data):
@@ -2465,6 +2477,10 @@ def test_import_nbcumv_person_media_getty_only_prefetch_ignores_requested_show_f
     monkeypatch.setattr(admin_nbcumv, "_ensure_sources", lambda db: None)
     monkeypatch.setattr(admin_person_images, "_build_show_lookup_maps", lambda db: ({}, {}, {}))
     monkeypatch.setattr(
+        "trr_backend.integrations.nbcumv.resolve_show_by_title",
+        lambda _title: None,
+    )
+    monkeypatch.setattr(
         "trr_backend.repositories.cast_photos.upsert_cast_photos",
         lambda db, rows, dedupe_on="source_image_id": (
             imported_getty_rows.extend(list(rows))
@@ -2494,7 +2510,7 @@ def test_import_nbcumv_person_media_getty_only_prefetch_ignores_requested_show_f
     )
 
     result = _REAL_IMPORT_NBCUMV_PERSON_MEDIA(
-        _Db(),
+        cast("SupabaseAdminClient", _Db()),
         person_id=str(uuid4()),
         person_name="Brandi Glanville",
         show_id=uuid4(),
@@ -2527,7 +2543,7 @@ def test_import_nbcumv_person_media_getty_only_prefetch_ignores_requested_show_f
 def test_import_nbcumv_person_media_getty_only_defers_weak_discovery_urls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    imported_getty_rows: list[dict[str, object]] = []
+    imported_getty_rows: list[dict[str, Any]] = []
 
     class _Response:
         def __init__(self, data):
@@ -2578,6 +2594,10 @@ def test_import_nbcumv_person_media_getty_only_defers_weak_discovery_urls(
     monkeypatch.setattr(admin_nbcumv, "_ensure_sources", lambda db: None)
     monkeypatch.setattr(admin_person_images, "_build_show_lookup_maps", lambda db: ({}, {}, {}))
     monkeypatch.setattr(
+        "trr_backend.integrations.nbcumv.resolve_show_by_title",
+        lambda _title: None,
+    )
+    monkeypatch.setattr(
         "trr_backend.repositories.cast_photos.upsert_cast_photos",
         lambda db, rows, dedupe_on="source_image_id": (
             imported_getty_rows.extend(list(rows))
@@ -2607,7 +2627,7 @@ def test_import_nbcumv_person_media_getty_only_defers_weak_discovery_urls(
     )
 
     result = _REAL_IMPORT_NBCUMV_PERSON_MEDIA(
-        _Db(),
+        cast("SupabaseAdminClient", _Db()),
         person_id=str(uuid4()),
         person_name="Brandi Glanville",
         show_id=uuid4(),
@@ -2646,7 +2666,7 @@ def test_import_nbcumv_person_media_getty_only_defers_weak_discovery_urls(
 def test_import_nbcumv_person_media_getty_only_skips_existing_shared_counterparts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    imported_getty_rows: list[dict[str, object]] = []
+    imported_getty_rows: list[dict[str, Any]] = []
 
     class _Response:
         def __init__(self, data):
@@ -2731,7 +2751,7 @@ def test_import_nbcumv_person_media_getty_only_skips_existing_shared_counterpart
     )
 
     result = _REAL_IMPORT_NBCUMV_PERSON_MEDIA(
-        _Db(),
+        cast("SupabaseAdminClient", _Db()),
         person_id=str(uuid4()),
         person_name="Brandi Glanville",
         show_id=None,
@@ -2858,7 +2878,7 @@ def test_import_nbcumv_person_media_getty_only_batches_large_upserts(
     ]
 
     result = _REAL_IMPORT_NBCUMV_PERSON_MEDIA(
-        _Db(),
+        cast("SupabaseAdminClient", _Db()),
         person_id=str(uuid4()),
         person_name="Brandi Glanville",
         show_id=None,
@@ -2879,7 +2899,7 @@ def test_import_nbcumv_person_media_getty_only_batches_large_upserts(
 def test_import_nbcumv_person_media_getty_only_keeps_distinct_editorial_ids_with_shared_object_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    imported_getty_rows: list[dict[str, object]] = []
+    imported_getty_rows: list[dict[str, Any]] = []
 
     class _Response:
         def __init__(self, data):
@@ -2958,7 +2978,7 @@ def test_import_nbcumv_person_media_getty_only_keeps_distinct_editorial_ids_with
 
     shared_object_name = "BRANDI_REPEAT.JPG"
     result = _REAL_IMPORT_NBCUMV_PERSON_MEDIA(
-        _Db(),
+        cast("SupabaseAdminClient", _Db()),
         person_id=str(uuid4()),
         person_name="Brandi Glanville",
         show_id=None,
@@ -3090,7 +3110,7 @@ def test_import_nbcumv_person_media_filters_getty_fallback_rows_to_requested_sho
     from trr_backend.integrations import getty as getty_integration
     from trr_backend.integrations import nbcumv as nbcumv_integration
 
-    imported_getty_rows: list[dict[str, object]] = []
+    imported_getty_rows: list[dict[str, Any]] = []
     mock_db = MagicMock()
     (
         mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.eq.return_value.in_.return_value.execute.return_value.data
@@ -3187,7 +3207,7 @@ def test_import_nbcumv_person_media_buckets_wwhl_and_bravocon(monkeypatch: pytes
     from trr_backend.integrations import getty as getty_integration
     from trr_backend.integrations import nbcumv as nbcumv_integration
 
-    imported_getty_rows: list[dict[str, object]] = []
+    imported_getty_rows: list[dict[str, Any]] = []
     mock_db = MagicMock()
     (
         mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.eq.return_value.in_.return_value.execute.return_value.data
@@ -3250,7 +3270,7 @@ def test_import_nbcumv_person_media_imports_broad_grouped_events_as_event_bucket
     from trr_backend.integrations import getty as getty_integration
     from trr_backend.integrations import nbcumv as nbcumv_integration
 
-    imported_getty_rows: list[dict[str, object]] = []
+    imported_getty_rows: list[dict[str, Any]] = []
     hosted_updates: list[tuple[str, dict[str, object]]] = []
     mock_db = MagicMock()
     (
@@ -4273,7 +4293,7 @@ def test_repair_existing_imdb_cast_photos_backfills_image_type_from_mediaviewer_
         lambda db, rows, show_id, show_name: (0, 0),
     )
 
-    upserted_rows: list[dict[str, object]] = []
+    upserted_rows: list[dict[str, Any]] = []
 
     def _fake_upsert(db, rows, *, dedupe_on):  # type: ignore[no-untyped-def]
         upserted_rows.extend(rows)
@@ -4484,7 +4504,7 @@ def test_repair_existing_imdb_cast_photos_rejects_stale_request_context_show(mon
         ),
     )
 
-    upserted_rows: list[dict[str, object]] = []
+    upserted_rows: list[dict[str, Any]] = []
 
     def _fake_upsert(db, rows, *, dedupe_on):  # type: ignore[no-untyped-def]
         upserted_rows.extend(rows)

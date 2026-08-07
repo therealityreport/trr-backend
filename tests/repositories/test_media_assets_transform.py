@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from typing import cast
+
+from trr_backend.db.session import DbSession
+from trr_backend.media import s3_mirror
 from trr_backend.repositories.media_assets import (
+    build_hosted_url,
     reconcile_media_asset_id_conflicts,
     transform_cast_photos_to_media,
     transform_episode_images_to_media,
@@ -51,6 +56,16 @@ class _FakeDb:
         if name != "media_assets":
             raise AssertionError(f"Unexpected table lookup: {name}")
         return _FakeMediaAssetsQuery(self._media_assets_rows)
+
+
+def test_build_hosted_url_matches_storage_mirror_adapter(monkeypatch) -> None:
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com/")
+
+    hosted_key = "/images/shows/tt123/poster.png"
+
+    assert build_hosted_url(hosted_key) == s3_mirror.build_hosted_url(hosted_key)
 
 
 def test_transform_show_images_preserves_urls_and_hosted() -> None:
@@ -306,7 +321,7 @@ def test_reconcile_media_asset_id_conflicts_reuses_existing_source_asset_row() -
         }
     ]
 
-    reconciled_assets, reconciled_links = reconcile_media_asset_id_conflicts(db, assets, links)
+    reconciled_assets, reconciled_links = reconcile_media_asset_id_conflicts(cast(DbSession, db), assets, links)
 
     assert reconciled_assets[0]["id"] == "existing-asset-id"
     assert reconciled_links[0]["media_asset_id"] == "existing-asset-id"

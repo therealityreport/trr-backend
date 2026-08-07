@@ -8,7 +8,7 @@ access is required.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -26,23 +26,25 @@ def test_both_absent_returns_none_none() -> None:
 
 def test_parses_iso_to_utc_aware_datetimes() -> None:
     start, end = _normalize_comment_date_window("2024-01-01", "2024-02-01")
-    assert start == datetime(2024, 1, 1, tzinfo=timezone.utc)
-    assert end == datetime(2024, 2, 1, tzinfo=timezone.utc)
-    assert start.tzinfo is timezone.utc
-    assert end.tzinfo is timezone.utc
+    assert start is not None
+    assert end is not None
+    assert start == datetime(2024, 1, 1, tzinfo=UTC)
+    assert end == datetime(2024, 2, 1, tzinfo=UTC)
+    assert start.tzinfo is UTC
+    assert end.tzinfo is UTC
 
 
 def test_z_suffix_and_offset_normalize_to_utc() -> None:
     start, _ = _normalize_comment_date_window("2024-03-10T12:00:00Z", None)
-    assert start == datetime(2024, 3, 10, 12, 0, tzinfo=timezone.utc)
+    assert start == datetime(2024, 3, 10, 12, 0, tzinfo=UTC)
     # A +02:00 offset is converted back to UTC.
     start2, _ = _normalize_comment_date_window("2024-03-10T12:00:00+02:00", None)
-    assert start2 == datetime(2024, 3, 10, 10, 0, tzinfo=timezone.utc)
+    assert start2 == datetime(2024, 3, 10, 10, 0, tzinfo=UTC)
 
 
 def test_naive_input_assumed_utc() -> None:
     start, _ = _normalize_comment_date_window("2024-05-01T08:30:00", None)
-    assert start == datetime(2024, 5, 1, 8, 30, tzinfo=timezone.utc)
+    assert start == datetime(2024, 5, 1, 8, 30, tzinfo=UTC)
 
 
 def test_start_inclusive_end_exclusive_predicate() -> None:

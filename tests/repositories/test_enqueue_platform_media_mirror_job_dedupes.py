@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from datetime import date
 from typing import Any
 
-from trr_backend.repositories import social_season_analytics as social_repo
+from trr_backend.socials import social_season_analytics_impl as social_repo
 
 
 @contextmanager
@@ -17,7 +17,7 @@ def _fake_db_cursor(conn=None):  # noqa: ANN001
 def test_enqueue_platform_media_mirror_job_is_global_across_runs_for_same_post(monkeypatch) -> None:
     created_ids: list[str | None] = []
     db_calls: list[tuple[str, tuple[object, ...], str]] = []
-    state = {"job_id": None}
+    state: dict[str, str | None] = {"job_id": None}
     lock = threading.Lock()
 
     def _fake_fetch_one_with_cursor(_cur, sql, params):  # noqa: ANN001
@@ -105,8 +105,7 @@ def test_bulk_enqueue_platform_media_mirror_jobs_batches_insert_and_counter(monk
         configs = [json.loads(row[3]) for row in rows]
         execute_calls.append({"rows": rows, "configs": configs, "conn": conn})
         return [
-            {"job_id": f"job-{index}", "post_id": config["post_id"]}
-            for index, config in enumerate(configs, start=1)
+            {"job_id": f"job-{index}", "post_id": config["post_id"]} for index, config in enumerate(configs, start=1)
         ]
 
     monkeypatch.setattr(social_repo.pg, "execute_values_returning", _execute_values_returning)

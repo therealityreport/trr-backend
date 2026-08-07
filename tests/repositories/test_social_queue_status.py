@@ -6,15 +6,17 @@ import ast
 import json
 import subprocess
 import sys
+from collections.abc import Iterator
 from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-import trr_backend.repositories.social_season_analytics as social_repo
 import trr_backend.socials.control_plane.queue_status as queue_status
 import trr_backend.socials.control_plane.worker_health as worker_health
+import trr_backend.socials.social_season_analytics_impl as social_repo
 
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "socials" / "run_metadata"
 _REQUIRED_PROVIDER_NAMES = (
@@ -69,7 +71,7 @@ RAW_SECRET_VALUE_KEYS = {
 
 
 @pytest.fixture(autouse=True)
-def _clear_queue_status_state() -> None:
+def _clear_queue_status_state() -> Iterator[None]:
     queue_status._configure_legacy_provider(social_repo.__dict__)
     social_repo._queue_status_cache = None
     social_repo._queue_status_last_good_cache = None
@@ -104,7 +106,7 @@ def test_queue_status_source_has_no_direct_legacy_import_edge() -> None:
     assert direct_legacy_imports == []
 
 
-def test_public_dotted_import_loads_package_root_debt_and_exact_provider_namespace() -> None:
+def test_public_dotted_import_defers_provider_until_late_publication() -> None:
     backend_root = Path(__file__).resolve().parents[2]
     code = "\n".join(
         [
@@ -112,10 +114,18 @@ def test_public_dotted_import_loads_package_root_debt_and_exact_provider_namespa
             "import sys",
             "leaf = importlib.import_module('trr_backend.socials.control_plane.queue_status')",
             "legacy_name = 'trr_backend.socials.social_season_analytics_impl'",
-            "assert legacy_name in sys.modules",
+            "assert legacy_name not in sys.modules",
+            "assert leaf._LEGACY_NAMESPACE is None",
+            "proxy = leaf._legacy_repo()",
+            "try:",
+            "    proxy.pg",
+            "except RuntimeError as exc:",
+            "    assert 'Queue-status provider is not configured' in str(exc)",
+            "else:",
+            "    raise AssertionError('unpublished provider must fail closed')",
+            "import trr_backend.socials.social_season_analytics_impl as legacy",
             "legacy = sys.modules[legacy_name]",
             "assert leaf._LEGACY_NAMESPACE is legacy.__dict__",
-            "proxy = leaf._legacy_repo()",
             f"for name in {_REQUIRED_PROVIDER_NAMES!r}:",
             "    assert getattr(proxy, name) is legacy.__dict__[name]",
         ]
@@ -171,10 +181,11 @@ def test_provider_reads_live_repository_alias_monkeypatches(
     proxy = queue_status._legacy_repo()
 
     assert len(_REQUIRED_PROVIDER_NAMES) == 32
-    for name in _REQUIRED_PROVIDER_NAMES:
-        replacement = object()
-        monkeypatch.setattr(social_repo, name, replacement)
-        assert getattr(proxy, name) is replacement
+    with monkeypatch.context() as scoped:
+        for name in _REQUIRED_PROVIDER_NAMES:
+            replacement = object()
+            scoped.setattr(social_repo, name, replacement)
+            assert getattr(proxy, name) is replacement
 
 
 def test_invalidate_queue_status_cache_writes_through_to_exact_namespace(
@@ -220,7 +231,7 @@ def test_get_queue_status_uses_cache_ttl_and_skips_recent_failures_when_disabled
 
     query_calls: list[str] = []
 
-    def _fake_fetch_all_with_cursor(_cur: object, sql: str, params: list[object] | None = None):
+    def _fake_fetch_all_with_cursor(_cur: object, sql: str, params: list[Any] | None = None):
         del params
         normalized = " ".join(sql.split()).lower()
         query_calls.append(normalized)
@@ -274,7 +285,7 @@ def test_get_queue_status_fresh_true_bypasses_cache(monkeypatch: pytest.MonkeyPa
 
     query_counter = {"count": 0}
 
-    def _fake_fetch_all_with_cursor(_cur: object, sql: str, params: list[object] | None = None):
+    def _fake_fetch_all_with_cursor(_cur: object, sql: str, params: list[Any] | None = None):
         del params
         query_counter["count"] += 1
         normalized = " ".join(sql.split()).lower()
@@ -373,7 +384,7 @@ def test_get_queue_status_summary_only_skips_expensive_side_effects(
 
     query_calls: list[str] = []
 
-    def _fake_fetch_all_with_cursor(_cur: object, sql: str, params: list[object] | None = None):
+    def _fake_fetch_all_with_cursor(_cur: object, sql: str, params: list[Any] | None = None):
         del params
         normalized_sql = " ".join(sql.split()).lower()
         query_calls.append(normalized_sql)
@@ -483,7 +494,7 @@ def test_get_queue_status_read_does_not_run_recovery_side_effects(
         def execute(self, _sql: str, _params: list[object] | None = None) -> None:
             return None
 
-    def _fake_fetch_all_with_cursor(_cur: object, sql: str, params: list[object] | None = None):
+    def _fake_fetch_all_with_cursor(_cur: object, sql: str, params: list[Any] | None = None):
         del params
         normalized_sql = " ".join(sql.split()).lower()
         if "post_persist_truthfulness" in normalized_sql:
@@ -531,7 +542,7 @@ def test_get_queue_status_summary_includes_media_stale_claims(monkeypatch: pytes
         def execute(self, _sql: str, _params: list[object] | None = None) -> None:
             return None
 
-    def _fake_fetch_all_with_cursor(_cur: object, sql: str, params: list[object] | None = None):
+    def _fake_fetch_all_with_cursor(_cur: object, sql: str, params: list[Any] | None = None):
         normalized_sql = " ".join(sql.split()).lower()
         if "with media_jobs as" in normalized_sql:
             return []
@@ -576,7 +587,7 @@ def test_get_queue_status_summary_includes_recent_media_runs(monkeypatch: pytest
         def execute(self, _sql: str, _params: list[object] | None = None) -> None:
             return None
 
-    def _fake_fetch_all_with_cursor(_cur: object, sql: str, params: list[object] | None = None):
+    def _fake_fetch_all_with_cursor(_cur: object, sql: str, params: list[Any] | None = None):
         normalized_sql = " ".join(sql.split()).lower()
         if "with media_jobs as" in normalized_sql:
             assert params is not None
@@ -721,7 +732,7 @@ def test_get_queue_status_includes_stuck_jobs_payload(monkeypatch: pytest.Monkey
         def execute(self, _sql: str, _params: list[object] | None = None) -> None:
             return None
 
-    def _fake_fetch_all_with_cursor(_cur: object, sql: str, params: list[object] | None = None):
+    def _fake_fetch_all_with_cursor(_cur: object, sql: str, params: list[Any] | None = None):
         del params
         if "post_persist_truthfulness" in " ".join(sql.split()).lower():
             return []

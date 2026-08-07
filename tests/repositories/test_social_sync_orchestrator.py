@@ -4,11 +4,16 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+import pytest
+
+from trr_backend.repositories import social_season_analytics as social_repo
 from trr_backend.repositories import social_sync_orchestrator as orchestrator
 
 
 class _FakeSocialRepo:
     PLATFORM_POST_TABLES = {"instagram": "instagram_posts"}
+    # Annotation-only declaration (no runtime binding); some tests assign it per-instance.
+    PLATFORM_COMMENT_TABLES: dict[str, str]
     PLATFORM_POSTED_AT_COLUMN = {"instagram": "posted_at"}
     PLATFORM_SOURCE_ID_COLUMN = {"instagram": "shortcode"}
 
@@ -99,6 +104,22 @@ class _FakeSocialRepo:
     def _modal_dispatch_platform_cap(_stage: str | None, platform: str | None) -> int | None:
         defaults = {"tiktok": 2, "twitter": 2, "facebook": 1, "threads": 1}
         return defaults.get(str(platform or "").strip().lower())
+
+
+@pytest.fixture(autouse=True)
+def _stub_sync_diagnostics_worker_health(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep pure sync-session serialization independent of ambient modal health."""
+    monkeypatch.setattr(
+        social_repo,
+        "get_worker_health",
+        lambda: {
+            "queue_enabled": False,
+            "healthy": True,
+            "healthy_workers": 0,
+            "oldest_queued_age_seconds": 0,
+            "workers": [],
+        },
+    )
 
 
 def test_follow_up_dimensions_from_snapshot_returns_expected_dimensions() -> None:

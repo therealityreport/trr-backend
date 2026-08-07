@@ -12,7 +12,7 @@ from typing import Any
 try:
     from scripts.socials.instagram.backfill_progress import build_progress, print_compact
     from trr_backend.db import pg
-    from trr_backend.repositories import social_season_analytics as social_repo
+    from trr_backend.socials import social_season_analytics_impl as social_repo
     from trr_backend.utils.env import load_env
 except ModuleNotFoundError:  # pragma: no cover - script execution convenience
     repo_root = Path(__file__).resolve().parents[3]
@@ -20,7 +20,7 @@ except ModuleNotFoundError:  # pragma: no cover - script execution convenience
         sys.path.insert(0, str(repo_root))
     from scripts.socials.instagram.backfill_progress import build_progress, print_compact
     from trr_backend.db import pg
-    from trr_backend.repositories import social_season_analytics as social_repo
+    from trr_backend.socials import social_season_analytics_impl as social_repo
     from trr_backend.utils.env import load_env
 
 
@@ -38,7 +38,10 @@ def _json_safe(value: Any) -> Any:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Recover a stalled Instagram backfill frontier, repair canonical metrics, normalize hosted media, and dispatch due jobs."
+        description=(
+            "Recover a stalled Instagram backfill frontier, repair canonical metrics, normalize hosted media, "
+            "and dispatch due jobs."
+        )
     )
     parser.add_argument("--run-id", required=True, help="social.scrape_runs id")
     parser.add_argument("--stale-after-seconds", type=int, default=900)
@@ -116,7 +119,9 @@ def main() -> int:
             _emit_step("step=orphaned_frontier_lease_recover status=running", json_mode=args.json)
             frontier_recovery = social_repo.recover_orphaned_instagram_frontier_leases_for_run(args.run_id)
             _emit_step(
-                "step=orphaned_frontier_lease_recover status=done released_frontiers={frontiers} due_jobs={jobs}".format(
+                (
+                    "step=orphaned_frontier_lease_recover status=done released_frontiers={frontiers} due_jobs={jobs}"
+                ).format(
                     frontiers=int(frontier_recovery.get("released_frontier_leases") or 0),
                     jobs=int(frontier_recovery.get("due_jobs") or 0),
                 ),
@@ -152,7 +157,11 @@ def main() -> int:
             return 0
 
         print(
-            "recovered_jobs={recovered} canonical_metric_rows_repaired={repaired} hosted_media_status_rows_normalized={normalized} released_frontiers={released_frontiers} dispatched_jobs={dispatched}".format(
+            (
+                "recovered_jobs={recovered} canonical_metric_rows_repaired={repaired} "
+                "hosted_media_status_rows_normalized={normalized} "
+                "released_frontiers={released_frontiers} dispatched_jobs={dispatched}"
+            ).format(
                 recovered=len(recovered),
                 repaired=int(canonical_repair.get("canonical_metric_rows_repaired") or 0),
                 normalized=int(media_normalization.get("hosted_media_status_rows_normalized") or 0),

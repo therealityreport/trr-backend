@@ -26,6 +26,9 @@ from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 from api.auth import InternalAdminUser
 from api.deps import SupabaseAdminClient
+from trr_backend.pipeline.admin_operation_registry import (
+    get_show_sync_capabilities,
+)
 from trr_backend.pipeline.admin_operations import operation_stream_response, start_operation_for_stream
 from trr_backend.scraping.url_image_scraper import (
     download_and_hash_image,
@@ -478,7 +481,6 @@ def _import_non_show_logo_target(
 
     Returns: (status, hosted_logo_url, created_asset_id)
     """
-    from api.routers import admin_show_sync
     from trr_backend.media.s3_mirror import (
         build_logo_s3_key,
         get_s3_bucket,
@@ -488,10 +490,9 @@ def _import_non_show_logo_target(
         upload_bytes_to_s3,
     )
 
+    admin_show_sync = get_show_sync_capabilities()
     if target_type in {"network", "streaming", "production"}:
-        explicit_id: int | None = None
-        if target_key.isdigit():
-            explicit_id = int(target_key)
+        explicit_id: int | None = int(target_key) if target_key.isdigit() else None
         target_row, config = admin_show_sync._resolve_dimension_target(  # noqa: SLF001
             db,
             target_type=target_type,
@@ -854,10 +855,15 @@ def import_images(
     source_domain = _extract_source_domain(str(request.source_url))
     source = f"web_scrape:{source_domain}"
 
-    # Entity-specific setup
+    # Entity-specific setup. The entity_type Literal makes the chain below
+    # exhaustive; defaults exist only so the type checker sees bindings.
+    entity_id = ""
+    resolved_show_id = ""
+    resolved_season_number: int | None = None
+    path_identifier = ""
+    link_context: dict[str, Any] = {}
     if request.entity_type == "season":
         if request.season_id:
-            # Trust season_id from caller to avoid hard dependency on season lookup.
             entity_id = str(request.season_id)
             resolved_show_id = str(request.show_id) if request.show_id else ""
             resolved_season_number = request.season_number
@@ -924,7 +930,6 @@ def import_images(
             "source_url": str(request.source_url),
         }
 
-    # Fetch cast members for matching if enabled
     cast_members: list[dict] = []
     if request.match_cast and request.entity_type == "season":
         if resolved_season_number is None:
@@ -962,7 +967,7 @@ def import_images(
     skipped_count = 0
     errors: list[str] = []
     assets: list[MediaAssetSummary] = []
-    auto_count_assets: dict[str, str] = {}
+    auto_count_assets: dict[str, Any] = {}
     text_overlay_asset_ids: set[str] = set()
 
     for idx, img in enumerate(request.images):
@@ -992,7 +997,7 @@ def import_images(
             )
 
             if img.kind == "logo" and _brand_logo_routing_v2_enabled() and logo_target and logo_target[0] != "show":
-                _, routed_url, routed_asset_id = _import_non_show_logo_target(
+                _routed_asset, routed_url, routed_asset_id = _import_non_show_logo_target(
                     db=db,
                     target_type=logo_target[0],
                     target_key=logo_target[1],
@@ -1031,8 +1036,11 @@ def import_images(
                 )
                 continue
 
-            # Build S3 key based on entity type (used for mirror updates too)
+            # Build S3 key based on entity type (used for mirror updates too).
+            # The entity_type Literal makes the chain exhaustive; the default
+            # exists only so the type checker sees a binding.
             ext = guess_ext_from_content_type(content_type)
+            s3_key = ""
             if request.entity_type == "season":
                 season_number_for_key = resolved_season_number or request.season_number
                 if season_number_for_key is None:
@@ -1558,7 +1566,13 @@ async def import_images_stream(
         source_domain = _extract_source_domain(str(request.source_url))
         source = f"web_scrape:{source_domain}"
 
-        # Entity-specific setup
+        # Entity-specific setup. The entity_type Literal makes the chain below
+        # exhaustive; defaults exist only so the type checker sees bindings.
+        entity_id = ""
+        resolved_show_id = ""
+        resolved_season_number: int | None = None
+        path_identifier = ""
+        link_context: dict[str, Any] = {}
         if request.entity_type == "season":
             if request.season_id:
                 entity_id = str(request.season_id)
@@ -1661,7 +1675,7 @@ async def import_images_stream(
         skipped_count = 0
         errors: list[str] = []
         assets: list[dict] = []
-        auto_count_assets: dict[str, str] = {}
+        auto_count_assets: dict[str, Any] = {}
         text_overlay_asset_ids: set[str] = set()
         total = len(request.images)
 
@@ -1751,8 +1765,11 @@ async def import_images_stream(
                     yield f"event: imported\ndata: {json.dumps(imported_data)}\n\n"
                     continue
 
-                # Build S3 key based on entity type (used for mirror updates too)
+                # Build S3 key based on entity type (used for mirror updates too).
+                # The entity_type Literal makes the chain exhaustive; the default
+                # exists only so the type checker sees a binding.
                 ext = guess_ext_from_content_type(content_type)
+                s3_key = ""
                 if request.entity_type == "season":
                     season_number_for_key = resolved_season_number or request.season_number
                     if season_number_for_key is None:

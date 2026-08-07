@@ -8,13 +8,14 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 import requests
 
 import trr_backend.socials.tiktok.scraper as tiktok_scraper_module
-from trr_backend.repositories import social_season_analytics as social_repo
+from trr_backend.socials import social_season_analytics_impl as social_repo
 from trr_backend.socials.facebook.scraper import FacebookScrapeConfig, FacebookScraper
 from trr_backend.socials.instagram.scraper import InstagramScraper
 from trr_backend.socials.instagram.scraper import ScrapeConfig as InstagramScrapeConfig
@@ -638,6 +639,7 @@ def test_youtube_process_video_data_filters_non_matching_owner() -> None:
         target_handle="bravo",
         ownership_filtered_counter=ownership_filtered,
     )
+    assert isinstance(videos, list)
     assert [video.video_id for video in videos] == ["vid-keep"]
     assert ownership_filtered[0] == 1
 
@@ -973,8 +975,10 @@ def test_youtube_process_video_data_skips_undated_shorts_for_bounded_windows(
     monkeypatch.setattr(scraper, "_iter_video_renderers", lambda _data: iter([renderer]))
     monkeypatch.setattr(scraper, "_fetch_precise_publish_timestamp", lambda _video_id, delay=2.0, **_kw: 0)
 
-    videos, stats = scraper._process_video_data({}, config, surface="shorts", return_stats=True)  # noqa: SLF001
+    result = scraper._process_video_data({}, config, surface="shorts", return_stats=True)  # noqa: SLF001
 
+    assert isinstance(result, tuple)
+    videos, stats = result
     assert videos == []
     assert stats["timestamp_unknown"] == 1
     assert stats["shorts_undated_skipped"] == 1
@@ -3046,7 +3050,7 @@ def test_instagram_scrape_graphql_backfills_owner_avatar_from_profile_payload(
     posts = scraper._scrape_graphql(config)  # noqa: SLF001
 
     assert len(posts) == 1
-    assert posts[0].owner_profile_pic_url == "https://images.test/instagram-profile-hd.jpg"
+    assert cast(Any, posts[0]).owner_profile_pic_url == "https://images.test/instagram-profile-hd.jpg"
     assert scraper.last_retrieval_meta["profile_avatar_backfilled_posts"] == 1
 
 
@@ -3655,7 +3659,7 @@ def test_instagram_scrape_emits_progress_callback(monkeypatch: pytest.MonkeyPatc
 
 
 def test_instagram_graphql_progress_cancellation_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
-    class _CancelledProgress(RuntimeError):
+    class _CancelledProgressError(RuntimeError):
         error_code = "shared_account_posts_cancelled"
         error_class = "SharedAccountStageCancelled"
         runtime_metadata = {"cancelled": True}
@@ -3694,9 +3698,9 @@ def test_instagram_graphql_progress_cancellation_propagates(monkeypatch: pytest.
     monkeypatch.setattr(scraper, "fetch_posts_graphql", _fake_fetch_posts_graphql)
 
     def _raise_cancelled(_payload: dict[str, object]) -> None:
-        raise _CancelledProgress()
+        raise _CancelledProgressError()
 
-    with pytest.raises(_CancelledProgress):
+    with pytest.raises(_CancelledProgressError):
         scraper._scrape_graphql(config, progress_cb=_raise_cancelled)  # noqa: SLF001
 
     assert call_cursors == [None]
@@ -3769,6 +3773,7 @@ def test_instagram_graphql_stops_after_consecutive_no_match_pages(monkeypatch: p
         call_cursors.append(cursor)
         return page_payloads[len(call_cursors) - 1]
 
+    monkeypatch.setattr(scraper, "fetch_profile_info", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(scraper, "fetch_posts_graphql", _fake_fetch_posts_graphql)
 
     posts = scraper._scrape_graphql(config)  # noqa: SLF001
@@ -4314,6 +4319,7 @@ def test_twitter_scrape_emits_progress_callback(monkeypatch: pytest.MonkeyPatch)
             tweet_id="1",
             username="bravo",
             date_time="2026-01-01",
+            created_at=int(datetime(2026, 1, 1, 12, tzinfo=UTC).timestamp()),
             likes=1,
             retweets=0,
         ),
@@ -4570,6 +4576,11 @@ def test_youtube_scrape_emits_progress_callback(monkeypatch: pytest.MonkeyPatch)
     )
     monkeypatch.setattr(scraper, "_process_video_data", lambda data, cfg, **kwargs: [])
     monkeypatch.setattr(scraper, "_extract_channel_continuation_token", lambda data: None)
+    monkeypatch.setattr(
+        scraper,
+        "_scrape_channel_via_ytdlp",
+        lambda *args, **kwargs: ([], {"used": False, "available": False, "posts_checked": 0, "matched_posts": 0}),
+    )
     monkeypatch.setattr(scraper, "_search_via_ytdlp", lambda cfg, **kwargs: [])
 
     scraper.scrape(

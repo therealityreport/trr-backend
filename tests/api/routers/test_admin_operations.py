@@ -4,6 +4,7 @@ import asyncio
 import json
 import time
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -34,8 +35,8 @@ def client() -> TestClient:
     return TestClient(app)
 
 
-def _parse_sse(raw_text: str) -> list[tuple[str, dict[str, object]]]:
-    events: list[tuple[str, dict[str, object]]] = []
+def _parse_sse(raw_text: str) -> list[tuple[str, dict[str, Any]]]:
+    events: list[tuple[str, dict[str, Any]]] = []
     normalized = raw_text.replace("\r\n", "\n")
     for block in normalized.split("\n\n"):
         if not block.strip():
@@ -50,6 +51,34 @@ def _parse_sse(raw_text: str) -> list[tuple[str, dict[str, object]]]:
         payload = json.loads("\n".join(data_lines)) if data_lines else {}
         events.append((event_type, payload))
     return events
+
+
+def test_remote_operation_producer_uses_the_registered_factory() -> None:
+    producer = object()
+    with patch.object(
+        pipeline_admin_operations,
+        "build_registered_admin_operation_producer",
+        return_value=producer,
+    ) as resolver:
+        resolved = pipeline_admin_operations._resolve_remote_operation_producer(
+            operation_id="operation-1",
+            operation_type="admin_show_refresh",
+            request_payload={"show_id": "show-1"},
+        )
+
+    assert resolved is producer
+    resolver.assert_called_once_with("admin_show_refresh", {"show_id": "show-1"}, "operation-1")
+
+
+def test_remote_operation_producer_returns_none_for_unregistered_type() -> None:
+    assert (
+        pipeline_admin_operations._resolve_remote_operation_producer(
+            operation_id="operation-1",
+            operation_type="unknown_operation",
+            request_payload={},
+        )
+        is None
+    )
 
 
 def test_get_operation_returns_operation_and_latest_event_seq(
@@ -100,7 +129,7 @@ def test_stream_operation_replays_after_seq_in_order(client: TestClient, monkeyp
     operation_id = str(uuid4())
     seen_after: list[int] = []
 
-    operation_rows = [
+    operation_rows: list[dict[str, object]] = [
         {"id": operation_id, "status": "running", "operation_type": "show_sync"},
         {"id": operation_id, "status": "completed", "operation_type": "show_sync"},
     ]
@@ -174,7 +203,7 @@ def test_operation_stream_generator_uses_async_state_helpers() -> None:
         helper_calls.append(("state", -1))
         return {"id": operation_id, "status": "completed", "operation_type": "show_sync"}
 
-    async def _read_stream_once() -> list[tuple[str, dict[str, object]]]:
+    async def _read_stream_once() -> list[tuple[str, dict[str, Any]]]:
         raw_chunks: list[str] = []
         async for chunk in pipeline_admin_operations.operation_stream_generator(
             operation_id,
@@ -340,7 +369,7 @@ def test_force_cancel_stale_admin_operations_returns_cleanup_payload(
 
 def test_start_operation_emits_operation_envelope_as_first_replayed_event() -> None:
     operation_id = str(uuid4())
-    stored_events: list[dict[str, object]] = []
+    stored_events: list[dict[str, Any]] = []
 
     def _append_event(
         _operation_id: str,
@@ -362,7 +391,7 @@ def test_start_operation_emits_operation_envelope_as_first_replayed_event() -> N
     def _stream_events(_operation_id: str, *, after_seq: int = 0, limit: int = 500):
         return [row for row in stored_events if int(row["event_seq"]) > after_seq][:limit]
 
-    async def _read_stream_once() -> list[tuple[str, dict[str, object]]]:
+    async def _read_stream_once() -> list[tuple[str, dict[str, Any]]]:
         raw_chunks: list[str] = []
         async for chunk in pipeline_admin_operations.operation_stream_generator(
             operation_id,
@@ -868,7 +897,7 @@ def test_replay_stream_returns_all_events_after_modal_execution(monkeypatch: pyt
     )
 
     # Phase 3: Replay from seq 0 — should get all events then terminate
-    async def _replay() -> list[tuple[str, dict[str, object]]]:
+    async def _replay() -> list[tuple[str, dict[str, Any]]]:
         raw_chunks: list[str] = []
         async for chunk in pipeline_admin_operations.operation_stream_generator(
             operation_id,
@@ -900,7 +929,7 @@ def test_replay_stream_returns_all_events_after_modal_execution(monkeypatch: pyt
         assert str(payload.get("operation_id", "")) == operation_id
 
     # Phase 4: Replay with after_seq > 0 skips already-seen events
-    async def _replay_partial() -> list[tuple[str, dict[str, object]]]:
+    async def _replay_partial() -> list[tuple[str, dict[str, Any]]]:
         raw_chunks: list[str] = []
         async for chunk in pipeline_admin_operations.operation_stream_generator(
             operation_id,

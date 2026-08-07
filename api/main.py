@@ -16,21 +16,24 @@ import logging
 import os
 import time
 import uuid
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import cast
 
 try:
     from dotenv import load_dotenv
 except Exception:  # pragma: no cover - python-dotenv is expected locally, optional in slim runtimes.
     load_dotenv = None  # type: ignore[assignment]
 
-if load_dotenv is not None:
+if load_dotenv is not None and os.getenv("TRR_TEST_DISABLE_DOTENV") != "1":
     load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+import trr_backend.observability as _observability_module
 import trr_backend.socials.social_season_analytics_impl as _social_analytics_provider
 from api.auth import InternalAdminUser
 from api.realtime.broker import broker_runtime_status, init_broker, shutdown_broker
@@ -47,7 +50,6 @@ from trr_backend.db.connection import (
 from trr_backend.db.pg import DatabaseServiceUnavailableError, database_service_unavailable_detail
 from trr_backend.middleware.request_timeout import RequestTimeoutMiddleware
 from trr_backend.observability import (
-    CONTENT_TYPE_LATEST,
     bind_trace_id,
     configure_runtime_observability,
     metrics_available,
@@ -62,6 +64,8 @@ from trr_backend.security.jwt import (
     expected_supabase_project_ref,
 )
 from trr_backend.socials.read_models.account_profile.common import instagram_comment_rollup_health
+
+CONTENT_TYPE_LATEST: str = _observability_module.CONTENT_TYPE_LATEST
 
 del _social_analytics_provider
 
@@ -102,7 +106,7 @@ def _is_local_or_dev_runtime() -> bool:
     return raw_local in {"1", "true", "yes", "on"}
 
 
-def _database_url_lane_label(candidate: dict[str, object] | None) -> str:
+def _database_url_lane_label(candidate: Mapping[str, object] | None) -> str:
     if not candidate:
         return "missing_database_url"
     source = str(candidate.get("source") or "")
@@ -224,6 +228,10 @@ def _modal_stale_worker_cleanup_interval_seconds() -> int:
     return _positive_int_env("TRR_MODAL_RUNTIME_STALE_WORKER_CLEANUP_INTERVAL_SECONDS", 24 * 60 * 60, minimum=60)
 
 
+def _modal_media_watch_interval_seconds() -> int:
+    return _positive_int_env("TRR_MEDIA_WATCH_POLL_INTERVAL_SECONDS", 60, minimum=60)
+
+
 def _run_modal_executor_heartbeat_once() -> dict[str, object]:
     from trr_backend.modal_dispatch import modal_heartbeat_function_name, spawn_modal_maintenance_function
 
@@ -256,6 +264,16 @@ def _run_modal_stale_worker_cleanup_once() -> dict[str, object]:
         log_label="modal stale worker cleanup",
         dispatcher_name="social",
         supported_platforms=list(SOCIAL_SUPPORTED_PLATFORMS),
+    )
+
+
+def _run_modal_media_watch_poller_once() -> dict[str, object]:
+    from trr_backend.modal_dispatch import spawn_modal_maintenance_function
+
+    return spawn_modal_maintenance_function(
+        function_name="poll_due_show_season_media_watches",
+        log_label="show-season media watch poller",
+        dispatcher_name="admin",
     )
 
 
@@ -470,6 +488,7 @@ async def lifespan(app: FastAPI):
     if _modal_runtime_scheduler_enabled():
         modal_scheduler_stop = asyncio.Event()
         modal_scheduler_specs = [
+            ("media_watch_poller", _modal_media_watch_interval_seconds(), _run_modal_media_watch_poller_once),
             ("executor_heartbeat", _modal_heartbeat_interval_seconds(), _run_modal_executor_heartbeat_once),
             ("social_recovery", _modal_social_recovery_interval_seconds(), _run_modal_social_recovery_once),
             (
@@ -491,10 +510,12 @@ async def lifespan(app: FastAPI):
             )
         logger.info(
             "[startup-config] modal runtime scheduler enabled heartbeat_interval_seconds=%s "
-            "social_recovery_interval_seconds=%s stale_worker_cleanup_interval_seconds=%s",
+            "social_recovery_interval_seconds=%s stale_worker_cleanup_interval_seconds=%s "
+            "media_watch_interval_seconds=%s",
             _modal_heartbeat_interval_seconds(),
             _modal_social_recovery_interval_seconds(),
             _modal_stale_worker_cleanup_interval_seconds(),
+            _modal_media_watch_interval_seconds(),
         )
     yield
     # Shutdown
@@ -589,6 +610,10 @@ async def observability_middleware(request: Request, call_next):
 
 
 # Include routers
+from trr_backend.pipeline.admin_operation_bootstrap import register_admin_operation_providers  # noqa: E402
+
+register_admin_operation_providers()
+
 from api.routers import (  # noqa: E402
     admin_asset_batch_jobs,
     admin_asset_flags,
@@ -603,6 +628,7 @@ from api.routers import (  # noqa: E402
     admin_image_counts,
     admin_media_assets,
     admin_media_links,
+    admin_media_watchers,
     admin_nbcumv,
     admin_networks_streaming_reads,
     admin_operations,
@@ -668,6 +694,7 @@ app.include_router(admin_face_references.router, prefix="/api/v1")
 app.include_router(admin_image_counts.router, prefix="/api/v1")
 app.include_router(admin_media_assets.router, prefix="/api/v1")
 app.include_router(admin_media_links.router, prefix="/api/v1")
+app.include_router(admin_media_watchers.router, prefix="/api/v1")
 app.include_router(admin_networks_streaming_reads.router, prefix="/api/v1")
 app.include_router(admin_operations.router, prefix="/api/v1")
 app.include_router(admin_people_reads.router, prefix="/api/v1")
@@ -823,7 +850,7 @@ def _db_activity_holder_snapshot() -> dict[str, object]:
 
 
 @app.get("/admin/health/db-pressure")
-def admin_health_db_pressure(_: InternalAdminUser = None) -> dict[str, object]:
+def admin_health_db_pressure(_: InternalAdminUser = cast(InternalAdminUser, None)) -> dict[str, object]:
     """Internal DB pressure details for admin/operator diagnostics."""
     snapshot = pg.local_pool_pressure_snapshot()
     snapshot["db_activity"] = _db_activity_holder_snapshot()
@@ -847,7 +874,9 @@ def admin_health_db_pressure(_: InternalAdminUser = None) -> dict[str, object]:
 
 @app.get("/admin/health/instagram-comment-rollups")
 @app.get("/api/v1/admin/health/instagram-comment-rollups")
-def admin_health_instagram_comment_rollups(sample_limit: int = 25, _: InternalAdminUser = None) -> dict[str, object]:
+def admin_health_instagram_comment_rollups(
+    sample_limit: int = 25, _: InternalAdminUser = cast(InternalAdminUser, None)
+) -> dict[str, object]:
     """Internal exact-count health check for persisted Instagram comment rollups."""
     return instagram_comment_rollup_health(sample_limit=sample_limit)
 

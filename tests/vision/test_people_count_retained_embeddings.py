@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+from typing import Any
+
+import pytest
+
 from trr_backend.vision import people_count_engine as engine
+
+pytestmark = pytest.mark.vision
 
 
 def test_load_person_facebank_centroids_uses_ml_reference_embeddings(monkeypatch) -> None:
@@ -45,7 +51,7 @@ def test_load_person_facebank_centroids_uses_ml_reference_embeddings(monkeypatch
     entries = engine._load_person_facebank_centroids()
 
     assert len(entries) == 2
-    by_person = {entry["person_id"]: entry for entry in entries}
+    by_person: dict[Any, Any] = {entry["person_id"]: entry for entry in entries}
     assert by_person["person-1"]["person_name"] == "Person One"
     assert by_person["person-2"]["person_name"] == "Person Two"
     assert len(by_person["person-1"]["embedding"]) == 3

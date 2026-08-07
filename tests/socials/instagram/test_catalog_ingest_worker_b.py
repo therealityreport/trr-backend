@@ -2,17 +2,27 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from trr_backend.socials.instagram import catalog_ingest as catalog
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _configure_catalog_ingest_provider() -> None:
+    """Publish the legacy provider so these unit fakes replace its DB helpers."""
+    from trr_backend.socials import social_season_analytics_impl as legacy
+
+    catalog._configure_legacy_provider(vars(legacy))
+
+
 def _patch_catalog_and_core(monkeypatch: pytest.MonkeyPatch, name: str, value: Any) -> None:
     monkeypatch.setattr(catalog, name, value)
-    if hasattr(catalog._core, name):
-        monkeypatch.setattr(catalog._core, name, value)
+    # These room callables resolve through the published legacy namespace after
+    # _sync_core_overrides(), so an absent legacy binding is a broken fake, not
+    # a condition this helper may silently ignore.
+    monkeypatch.setattr(catalog._core, name, value)
 
 
 def _post(**overrides: Any) -> SimpleNamespace:
@@ -189,11 +199,11 @@ def test_partitioned_scrape_accepts_opaque_cursor_boundary(monkeypatch: pytest.M
     scraper = _FakeGraphQLScraper()
 
     monkeypatch.setattr(catalog.time_module, "sleep", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(catalog, "_shared_instagram_account_execution", _fake_account_execution)
-    monkeypatch.setattr(catalog, "_build_shared_instagram_scraper", lambda **_kwargs: scraper)
-    monkeypatch.setattr(catalog, "_shared_instagram_frontier_auth_validation", lambda _config: (False, None))
-    monkeypatch.setattr(
-        catalog,
+    _patch_catalog_and_core(monkeypatch, "_shared_instagram_account_execution", _fake_account_execution)
+    _patch_catalog_and_core(monkeypatch, "_build_shared_instagram_scraper", lambda **_kwargs: scraper)
+    _patch_catalog_and_core(monkeypatch, "_shared_instagram_frontier_auth_validation", lambda _config: (False, None))
+    _patch_catalog_and_core(
+        monkeypatch,
         "_fetch_shared_instagram_graphql_page",
         lambda **_kwargs: (
             {
@@ -243,10 +253,10 @@ def test_partitioned_scrape_mid_cursor_empty_marks_retryable_partial(monkeypatch
         return None, {}, "public"
 
     monkeypatch.setattr(catalog.time_module, "sleep", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(catalog, "_shared_instagram_account_execution", _fake_account_execution)
-    monkeypatch.setattr(catalog, "_build_shared_instagram_scraper", lambda **_kwargs: scraper)
-    monkeypatch.setattr(catalog, "_shared_instagram_frontier_auth_validation", lambda _config: (False, None))
-    monkeypatch.setattr(catalog, "_fetch_shared_instagram_graphql_page", _fake_fetch)
+    _patch_catalog_and_core(monkeypatch, "_shared_instagram_account_execution", _fake_account_execution)
+    _patch_catalog_and_core(monkeypatch, "_build_shared_instagram_scraper", lambda **_kwargs: scraper)
+    _patch_catalog_and_core(monkeypatch, "_shared_instagram_frontier_auth_validation", lambda _config: (False, None))
+    _patch_catalog_and_core(monkeypatch, "_fetch_shared_instagram_graphql_page", _fake_fetch)
     _patch_catalog_and_core(
         monkeypatch,
         "_persist_shared_catalog_posts_batch",
@@ -297,9 +307,9 @@ def test_discovery_mid_scan_error_marks_incomplete_coverage(monkeypatch: pytest.
         )
 
     monkeypatch.setattr(catalog.time_module, "sleep", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(catalog, "_shared_instagram_account_execution", _fake_account_execution)
-    monkeypatch.setattr(catalog, "_build_shared_instagram_scraper", lambda **_kwargs: scraper)
-    monkeypatch.setattr(catalog, "_fetch_shared_instagram_graphql_page", _fake_fetch)
+    _patch_catalog_and_core(monkeypatch, "_shared_instagram_account_execution", _fake_account_execution)
+    _patch_catalog_and_core(monkeypatch, "_build_shared_instagram_scraper", lambda **_kwargs: scraper)
+    _patch_catalog_and_core(monkeypatch, "_fetch_shared_instagram_graphql_page", _fake_fetch)
     monkeypatch.setattr(catalog, "_catalog_full_history_posts_per_shard", lambda _platform: 10)
 
     partitions, meta = catalog._discover_instagram_cursor_partitions(
@@ -309,9 +319,10 @@ def test_discovery_mid_scan_error_marks_incomplete_coverage(monkeypatch: pytest.
     )
 
     assert len(partitions) == 1
-    assert partitions[0].cursor_start is None
-    assert partitions[0].cursor_end is None
-    assert partitions[0].metadata["incomplete_coverage"] is True
+    partition = cast(Any, partitions[0])
+    assert partition.cursor_start is None
+    assert partition.cursor_end is None
+    assert partition.metadata["incomplete_coverage"] is True
     assert meta["partial_discovery"] is True
     assert meta["incomplete_coverage"] is True
     assert meta["complete_coverage"] is False
@@ -337,9 +348,9 @@ def test_discovery_mid_scan_empty_page_marks_incomplete_coverage(monkeypatch: py
         return None, {}, "public"
 
     monkeypatch.setattr(catalog.time_module, "sleep", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(catalog, "_shared_instagram_account_execution", _fake_account_execution)
-    monkeypatch.setattr(catalog, "_build_shared_instagram_scraper", lambda **_kwargs: scraper)
-    monkeypatch.setattr(catalog, "_fetch_shared_instagram_graphql_page", _fake_fetch)
+    _patch_catalog_and_core(monkeypatch, "_shared_instagram_account_execution", _fake_account_execution)
+    _patch_catalog_and_core(monkeypatch, "_build_shared_instagram_scraper", lambda **_kwargs: scraper)
+    _patch_catalog_and_core(monkeypatch, "_fetch_shared_instagram_graphql_page", _fake_fetch)
     monkeypatch.setattr(catalog, "_catalog_full_history_posts_per_shard", lambda _platform: 10)
 
     partitions, meta = catalog._discover_instagram_cursor_partitions(
@@ -349,7 +360,8 @@ def test_discovery_mid_scan_empty_page_marks_incomplete_coverage(monkeypatch: py
     )
 
     assert len(partitions) == 1
-    assert partitions[0].metadata["incomplete_coverage"] is True
+    partition = cast(Any, partitions[0])
+    assert partition.metadata["incomplete_coverage"] is True
     assert meta["partial_discovery"] is True
     assert meta["complete_coverage"] is False
     assert meta["error_code"] == "instagram_graphql_discovery_cursor_empty_page"

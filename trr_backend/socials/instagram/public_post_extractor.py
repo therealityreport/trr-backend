@@ -11,9 +11,10 @@ import inspect
 import json
 import math
 import re
+from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from html import unescape
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 from trr_backend.socials._scrapling_http_utils import response_text, status_code
@@ -211,7 +212,7 @@ def _fetch_with_static_fetcher(fetcher: Any, url: str, **kwargs: Any) -> Any:
             continue
         result = method(url, **kwargs)
         if inspect.isawaitable(result):
-            return asyncio.run(result)
+            return asyncio.run(cast(Coroutine[Any, Any, Any], result))
         return result
     raise RuntimeError("Scrapling Fetcher has no supported fetch method")
 
@@ -311,7 +312,7 @@ def _children(media: dict[str, Any]) -> list[dict[str, Any]]:
     sidecar = media.get("edge_sidecar_to_children")
     edges = sidecar.get("edges") if isinstance(sidecar, dict) else None
     if isinstance(edges, list):
-        return [edge.get("node") for edge in edges if isinstance(edge, dict) and isinstance(edge.get("node"), dict)]
+        return [node for edge in edges if isinstance(edge, dict) and isinstance(node := edge.get("node"), dict)]
     child_posts = media.get("childPosts")
     if isinstance(child_posts, list):
         return [item for item in child_posts if isinstance(item, dict)]
@@ -477,13 +478,13 @@ def _image_candidates(node: dict[str, Any], *, slide_index: int | None = None) -
     if isinstance(image_versions, dict):
         direct = _string_or_none(image_versions.get("url"))
         if direct:
-            candidates.append(
-                PublicPostMediaCandidate(direct, "image", "image_versions2.url", slide_index=slide_index)
-            )
-        for row in image_versions.get("candidates") if isinstance(image_versions.get("candidates"), list) else []:
+            candidates.append(PublicPostMediaCandidate(direct, "image", "image_versions2.url", slide_index=slide_index))
+        image_candidates_raw = image_versions.get("candidates")
+        for row in image_candidates_raw if isinstance(image_candidates_raw, list) else []:
             if isinstance(row, dict):
                 _append_candidate(candidates, row, "image", "image_versions2.candidates", slide_index)
-    for row in node.get("display_resources") if isinstance(node.get("display_resources"), list) else []:
+    display_resources_raw = node.get("display_resources")
+    for row in display_resources_raw if isinstance(display_resources_raw, list) else []:
         if isinstance(row, dict):
             _append_candidate(candidates, row, "image", "display_resources", slide_index)
     for key in ("display_url", "thumbnail_src", "thumbnail_url"):
@@ -495,7 +496,8 @@ def _image_candidates(node: dict[str, Any], *, slide_index: int | None = None) -
 
 def _video_candidates(node: dict[str, Any], *, slide_index: int | None = None) -> list[PublicPostMediaCandidate]:
     candidates: list[PublicPostMediaCandidate] = []
-    for row in node.get("video_versions") if isinstance(node.get("video_versions"), list) else []:
+    video_versions_raw = node.get("video_versions")
+    for row in video_versions_raw if isinstance(video_versions_raw, list) else []:
         if isinstance(row, dict):
             _append_candidate(candidates, row, "video", "video_versions", slide_index)
     for key in ("video_url", "videoUrl"):

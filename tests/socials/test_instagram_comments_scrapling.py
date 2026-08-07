@@ -7,6 +7,7 @@ import inspect
 from contextlib import nullcontext
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 from trr_backend.socials.instagram.comments_scrapling.fetcher import (
@@ -37,7 +38,7 @@ def test_select_comments_proxy_prefers_explicit_proxy_urls(monkeypatch) -> None:
     assert config.proxy_rotator is not None
 
 
-def test_comments_gap_defaults_allow_only_single_missing_comment(monkeypatch) -> None:
+def test_comments_gap_defaults_require_exact_coverage(monkeypatch) -> None:
     from trr_backend.socials.instagram.comments_scrapling.fetcher import _hidden_unavailable_gap_is_tolerable
     from trr_backend.socials.instagram.comments_scrapling.job_runner import _reported_count_gap_is_tolerable
 
@@ -49,10 +50,10 @@ def test_comments_gap_defaults_allow_only_single_missing_comment(monkeypatch) ->
     ):
         monkeypatch.delenv(name, raising=False)
 
-    assert _hidden_unavailable_gap_is_tolerable(unresolved_gap=1, target_count=100)
-    assert not _hidden_unavailable_gap_is_tolerable(unresolved_gap=2, target_count=100)
-    assert _reported_count_gap_is_tolerable(unresolved_gap=1, target_count=100)
-    assert not _reported_count_gap_is_tolerable(unresolved_gap=2, target_count=100)
+    assert _hidden_unavailable_gap_is_tolerable(unresolved_gap=0, target_count=100)
+    assert not _hidden_unavailable_gap_is_tolerable(unresolved_gap=1, target_count=100)
+    assert _reported_count_gap_is_tolerable(unresolved_gap=0, target_count=100)
+    assert not _reported_count_gap_is_tolerable(unresolved_gap=1, target_count=100)
 
 
 def test_select_comments_proxy_decodo_browser_proxy_is_dict_with_raw_password(monkeypatch) -> None:
@@ -85,6 +86,7 @@ def test_select_comments_proxy_api_url_has_encoded_credentials(monkeypatch) -> N
 
     config = select_comments_proxy()
     assert config is not None
+    assert config.api_proxy_url is not None
     assert "%3D" in config.api_proxy_url  # = is encoded
     assert "z1Snjx5L3xT2ektx=B" not in config.api_proxy_url  # raw = is NOT in URL
 
@@ -101,6 +103,7 @@ def test_select_comments_proxy_same_upstream_for_both(monkeypatch) -> None:
     config = select_comments_proxy()
     assert config is not None
     assert isinstance(config.browser_proxy, dict)
+    assert config.api_proxy_url is not None
     assert "gate.decodo.com:7000" in config.browser_proxy["server"]
     assert "gate.decodo.com:7000" in config.api_proxy_url
 
@@ -128,12 +131,14 @@ def test_select_comments_proxy_adds_decodo_sticky_session_and_duration(monkeypat
 
     expected_token = hashlib.sha256(b"bravotv").hexdigest()[:16]
     expected_suffix = f"-session-{expected_token}-sessionduration-10"
+    expected_egress_token = hashlib.sha256(b"bravotv").hexdigest()[:12]
 
     assert config is not None
     assert isinstance(config.browser_proxy, dict)
+    assert config.api_proxy_url is not None
     assert config.browser_proxy["username"] == f"user-username{expected_suffix}"
     assert expected_suffix in config.api_proxy_url
-    assert config.fingerprint == "gate.decodo.com:7000:decodo"
+    assert config.fingerprint == f"gate.decodo.com:7000:decodo:{expected_egress_token}"
 
 
 def test_select_comments_proxy_defaults_to_base_decodo_credentials(monkeypatch) -> None:
@@ -150,6 +155,7 @@ def test_select_comments_proxy_defaults_to_base_decodo_credentials(monkeypatch) 
     assert config is not None
     assert isinstance(config.browser_proxy, dict)
     assert config.browser_proxy["username"] == "user-username"
+    assert config.api_proxy_url is not None
     assert "session-" not in config.api_proxy_url
     assert config.session_mode == "rotating"
 
@@ -183,6 +189,7 @@ def test_select_comments_proxy_clamps_invalid_or_large_ttl_to_supported_minutes(
 
     assert config is not None
     assert isinstance(config.browser_proxy, dict)
+    assert config.api_proxy_url is not None
     assert "-sessionduration-1440" in config.browser_proxy["username"]
     assert "-sessionduration-1440" in config.api_proxy_url
 
@@ -200,7 +207,7 @@ def test_select_comments_proxy_fingerprint_stays_log_safe_under_sticky_mode(monk
     config = select_comments_proxy(session_key="bravotv")
 
     assert config is not None
-    assert config.fingerprint == "gate.decodo.com:7000:decodo"
+    assert config.fingerprint.startswith("gate.decodo.com:7000:decodo:")
     assert "session-" not in config.fingerprint
     assert "user-username" not in config.fingerprint
     assert "secret" not in config.fingerprint
@@ -395,7 +402,7 @@ def test_job_runner_uses_resolved_browser_account_id_as_proxy_session_key(monkey
 def test_instagram_public_first_comments_job_skips_auth_resolver_and_proxy_selector(monkeypatch) -> None:
     from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
 
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
     monkeypatch.setenv("DECODO_PROXY_URL", "http://user:pass@gate.decodo.com:7000")
     monkeypatch.setenv("DECODO_USERNAME", "user")
     monkeypatch.setenv("DECODO_PASSWORD", "pass")
@@ -458,7 +465,7 @@ def test_instagram_public_first_comments_job_skips_auth_resolver_and_proxy_selec
     def fail_proxy_selector(**_kwargs):
         raise AssertionError("public comments mode must not select Decodo/proxy")
 
-    finish_payloads: list[dict[str, object]] = []
+    finish_payloads: list[dict[str, Any]] = []
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", fail_auth_resolver)
     monkeypatch.setattr(jr, "select_comments_proxy", fail_proxy_selector)
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", FakeFetcher)

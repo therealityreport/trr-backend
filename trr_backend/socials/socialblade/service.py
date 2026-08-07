@@ -111,7 +111,8 @@ def socialblade_instagram_following_config() -> dict[str, int]:
 
 
 def _safe_instagram_following_retrieval_meta(metadata: dict[str, Any]) -> dict[str, Any]:
-    retrieval_meta = metadata.get("retrieval_meta") if isinstance(metadata.get("retrieval_meta"), dict) else {}
+    retrieval_meta_raw = metadata.get("retrieval_meta")
+    retrieval_meta = retrieval_meta_raw if isinstance(retrieval_meta_raw, dict) else {}
     allowed = {
         "profile_id",
         "pages_fetched",
@@ -347,9 +348,7 @@ def is_growth_data_fresh(
         return False
     if history_source in {"page_trpc_capture", "page_trpc_capture_short"} and max(
         _chart_point_count(data), _metrics_row_count(data)
-    ) < (
-        _DEFAULT_MIN_REUSABLE_PAGE_CAPTURE_POINTS
-    ):
+    ) < (_DEFAULT_MIN_REUSABLE_PAGE_CAPTURE_POINTS):
         return False
     if _chart_lags_metrics(data):
         return False

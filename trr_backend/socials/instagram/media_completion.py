@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 CAPTURED = "captured"
 RETRYABLE = "retryable"
@@ -450,9 +450,7 @@ def build_media_completion_payload(
     comment_media_gate = classify_comment_media_gate(comment_media, stale_media_claims=normalized_stale_claims)
     gates = (hosted_media_gate, avatar_gate, comment_media_gate)
     gaps = [gap for gate in gates for gap in gate.gaps]
-    media_mirror_retry_targets = [
-        target for gate in (hosted_media_gate, avatar_gate) for target in gate.retry_targets
-    ]
+    media_mirror_retry_targets = [target for gate in (hosted_media_gate, avatar_gate) for target in gate.retry_targets]
     comment_media_mirror_retry_targets = list(comment_media_gate.retry_targets)
     normalized_comment_text_reply_targets = _normalize_comment_text_reply_retry_targets(
         comment_text_reply_retry_targets
@@ -861,7 +859,7 @@ def _coerce_avatar_evidence_list(
     if isinstance(evidence, AuthorAvatarEvidence):
         return [evidence]
     if isinstance(evidence, Mapping):
-        return [AuthorAvatarEvidence.from_row(evidence)]
+        return [AuthorAvatarEvidence.from_row(cast("Mapping[str, Any]", evidence))]
     avatars: list[AuthorAvatarEvidence] = []
     for item in evidence:
         if isinstance(item, AuthorAvatarEvidence):
@@ -897,9 +895,7 @@ def _normalize_comment_text_reply_retry_targets(
     for item in targets or []:
         if isinstance(item, Mapping):
             candidate = {
-                str(key): value
-                for key, value in item.items()
-                if value is not None and str(key).strip() and value != ""
+                str(key): value for key, value in item.items() if value is not None and str(key).strip() and value != ""
             }
         else:
             candidate = {"source_id": str(item or "").strip()}
@@ -918,8 +914,10 @@ def _normalize_stale_media_claims(
 ) -> dict[str, Any]:
     if not claims:
         return {"total": 0, "by_stage": {}, "by_platform": {}}
-    if isinstance(claims, Mapping) and isinstance(claims.get("stale_media_claims"), Mapping):
-        claims = claims["stale_media_claims"]
+    if isinstance(claims, Mapping):
+        nested_claims = claims.get("stale_media_claims")
+        if isinstance(nested_claims, Mapping):
+            claims = nested_claims
     by_stage: dict[str, int] = {}
     by_platform: dict[str, int] = {}
     total = 0

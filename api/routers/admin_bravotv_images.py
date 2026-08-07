@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request
@@ -10,14 +10,13 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from api.auth import InternalAdminUser
+from trr_backend.db.admin import create_supabase_admin_client
 from trr_backend.media.bravotv import admin_review_service as review_service
 from trr_backend.media.bravotv.run_service import (
     attach_operation,
     execute_bravotv_image_run_from_request_payload,
-    get_bravotv_run,
     get_latest_bravotv_run,
 )
-from trr_backend.db.admin import create_supabase_admin_client
 from trr_backend.pipeline.admin_operations import operation_stream_response, start_operation_for_stream
 
 router = APIRouter(prefix="/admin/bravotv/images", tags=["admin-bravotv-images"])
@@ -143,19 +142,22 @@ def _hydrate_bravotv_getty_prefetch(payload: BravotvImageRunRequest) -> BravotvI
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Getty prefetch failed: {exc}") from exc
 
+    merged_value = prefetch_payload.get("merged")
+    merged_events_value = prefetch_payload.get("merged_events")
+    query_summaries_value = prefetch_payload.get("query_summaries")
     return payload.model_copy(
         update={
             "getty_prefetched_assets": (
-                list(prefetch_payload.get("merged")) if isinstance(prefetch_payload.get("merged"), list) else []
+                list(merged_value) if isinstance(merged_value, list) else []
             ),
             "getty_prefetched_events": (
-                list(prefetch_payload.get("merged_events"))
-                if isinstance(prefetch_payload.get("merged_events"), list)
+                list(merged_events_value)
+                if isinstance(merged_events_value, list)
                 else []
             ),
             "getty_prefetched_queries": (
-                list(prefetch_payload.get("query_summaries"))
-                if isinstance(prefetch_payload.get("query_summaries"), list)
+                list(query_summaries_value)
+                if isinstance(query_summaries_value, list)
                 else []
             ),
             "getty_prefetch_mode": str(prefetch_payload.get("prefetch_mode") or prefetch_mode).strip() or prefetch_mode,
@@ -285,7 +287,7 @@ def build_bravotv_image_operation_producer(*, request_payload: dict[str, Any]):
 def start_bravotv_image_run(
     request: Request,
     payload: BravotvImageRunRequest = Body(...),
-    admin_user: InternalAdminUser = None,
+    admin_user: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> StreamingResponse:
     payload = _hydrate_bravotv_getty_prefetch(payload)
     actor = str((admin_user or {}).get("email") or (admin_user or {}).get("id") or "admin")
@@ -325,7 +327,7 @@ def start_bravotv_show_run(
     show_id: UUID,
     request: Request,
     payload: BravotvImageRunRequest | None = None,
-    admin_user: InternalAdminUser = None,
+    admin_user: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> StreamingResponse:
     body = payload or BravotvImageRunRequest(mode="show", show_id=show_id, sources=["getty"])
     body.show_id = show_id
@@ -338,7 +340,7 @@ def start_bravotv_person_run(
     person_id: UUID,
     request: Request,
     payload: BravotvImageRunRequest | None = None,
-    admin_user: InternalAdminUser = None,
+    admin_user: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> StreamingResponse:
     body = payload or BravotvImageRunRequest(mode="person", person_id=person_id, sources=["all"])
     body.person_id = person_id
@@ -347,12 +349,12 @@ def start_bravotv_person_run(
 
 
 @router.get("/runs/{run_id}")
-def get_run_detail(run_id: UUID, _: InternalAdminUser = None) -> dict[str, Any]:
+def get_run_detail(run_id: UUID, _: InternalAdminUser = cast(InternalAdminUser, None)) -> dict[str, Any]:
     return _get_run_or_404(run_id)
 
 
 @router.get("/shows/{show_id}/latest")
-def get_latest_show_run(show_id: UUID, _: InternalAdminUser = None) -> dict[str, Any]:
+def get_latest_show_run(show_id: UUID, _: InternalAdminUser = cast(InternalAdminUser, None)) -> dict[str, Any]:
     row = get_latest_bravotv_run(mode="show", show_id=str(show_id))
     if not row:
         return {"run": None}
@@ -360,7 +362,7 @@ def get_latest_show_run(show_id: UUID, _: InternalAdminUser = None) -> dict[str,
 
 
 @router.get("/people/{person_id}/latest")
-def get_latest_person_run(person_id: UUID, _: InternalAdminUser = None) -> dict[str, Any]:
+def get_latest_person_run(person_id: UUID, _: InternalAdminUser = cast(InternalAdminUser, None)) -> dict[str, Any]:
     row = get_latest_bravotv_run(mode="person", person_id=str(person_id))
     if not row:
         return {"run": None}
@@ -373,7 +375,7 @@ def get_run_artifact_preview(
     artifact_name: str,
     offset: int = 0,
     limit: int = 25,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     row = _get_run_or_404(run_id)
     parsed = _load_run_artifact_payload(row, artifact_name)
@@ -398,7 +400,7 @@ def get_run_review_items(
     source_role: str | None = None,
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=25, ge=1, le=100),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     row = _get_run_or_404(run_id)
     artifact_name = "merged_catalog" if section == "merged_catalog" else "run_review"
@@ -432,7 +434,7 @@ def get_run_review_items(
 def backfill_existing_run(
     run_id: UUID,
     payload: BackfillRunRequest | None = None,
-    admin_user: InternalAdminUser = None,
+    admin_user: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     row = _get_run_or_404(run_id)
     request_payload = _safe_dict(row.get("request_payload"))
@@ -453,7 +455,7 @@ def backfill_existing_run(
         nbcumv_limit=int(original_payload.get("nbcumv_limit") or 300),
         bravo_limit=int(original_payload.get("bravo_limit") or 300),
         supplemental_limit=int(original_payload.get("supplemental_limit") or 100),
-        force_all=bool((payload.force_all if payload else True)),
+        force_all=bool(payload.force_all if payload else True),
         getty_prefetch_mode=str(original_payload.get("getty_prefetch_mode") or "full").strip() or "full",
     )
     body = _hydrate_bravotv_getty_prefetch(body)
@@ -487,7 +489,7 @@ def approve_replacement_candidate(
     run_id: UUID,
     group_id: str,
     payload: ApproveReplacementRequest,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     row = _get_run_or_404(run_id)
     return _approve_replacement_for_run(run_id=str(run_id), row=row, group_id=group_id, payload=payload)
@@ -497,7 +499,7 @@ def approve_replacement_candidate(
 def approve_replacement_candidates_bulk(
     run_id: UUID,
     payload: BulkApproveReplacementRequest,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     row = _get_run_or_404(run_id)
     db = create_supabase_admin_client()
@@ -533,6 +535,6 @@ def approve_replacement_candidates_bulk(
 def resolve_duplicate_group(
     run_id: UUID,
     payload: ResolveDuplicateRequest,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     return review_service.resolve_duplicate_group(run_id=str(run_id), payload=payload)

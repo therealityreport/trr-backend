@@ -64,6 +64,7 @@ def test_extract_bravo_image_people_names_does_not_fall_back_to_gallery_cast() -
 
 def test_collect_bravo_person_filters_show_before_limit(monkeypatch) -> None:
     monkeypatch.setattr(get_images_pipeline, "find_person_uuid", lambda *_args, **_kwargs: "person-1")
+    monkeypatch.setattr(get_images_pipeline, "find_show_node", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         get_images_pipeline,
         "fetch_person_galleries",
@@ -231,7 +232,7 @@ def test_collect_nbcumv_person_rejects_photographer_name_false_positive(monkeypa
 
 
 def test_collect_getty_person_runs_bravo_then_name_without_overlap(monkeypatch) -> None:
-    calls: list[tuple[str, int, dict[str, str] | None]] = []
+    calls: list[tuple[str, int | None, dict[str, str] | None]] = []
 
     def fake_search(phrase, *, limit=None, query_params=None, **_kwargs):
         calls.append((phrase, limit, query_params))

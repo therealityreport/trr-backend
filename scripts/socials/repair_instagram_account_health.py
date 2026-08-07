@@ -109,7 +109,7 @@ def _worker_drain_command(*, run_id: str, stage: str, max_run_seconds: int) -> l
 
 
 def _gap_analysis(account: str) -> dict[str, Any]:
-    from trr_backend.repositories import social_season_analytics as social_repo
+    from trr_backend.socials import social_season_analytics_impl as social_repo
 
     return social_repo.get_social_account_catalog_gap_analysis("instagram", _normalize_account(account))
 
@@ -134,7 +134,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     before = _gap_analysis(args.account)
     recommended_action = str(before.get("recommended_action") or "").strip().lower()
     steps: list[dict[str, Any]] = [
-        {"name": "gap_before", "status": "ok", "recommended_action": recommended_action, "gap_type": before.get("gap_type")}
+        {
+            "name": "gap_before",
+            "status": "ok",
+            "recommended_action": recommended_action,
+            "gap_type": before.get("gap_type"),
+        }
     ]
     run_id = str(args.run_id or "").strip() or None
 

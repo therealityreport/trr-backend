@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any, cast
+
+import pytest
 
 from trr_backend.vision.people_count_service import auto_thumbnail_crop
+
+pytestmark = pytest.mark.vision
 
 
 def test_auto_thumbnail_crop_prefers_matched_face_over_higher_confidence() -> None:
@@ -41,10 +46,10 @@ def test_auto_thumbnail_crop_prefers_matched_face_over_higher_confidence() -> No
             ),
         ],
     )
-    crop = auto_thumbnail_crop(result)
+    crop = auto_thumbnail_crop(cast(Any, result))
     assert crop is not None
     # Should center on the matched face (x ~ 0.7 -> 70%), not the unmatched face (x ~ 0.2 -> 20%)
-    assert crop["x"] > 50, f"Expected crop centered on matched face (right side), got x={crop['x']}"
+    assert cast(float, crop["x"]) > 50, f"Expected crop centered on matched face (right side), got x={crop['x']}"
 
 
 def test_auto_thumbnail_crop_falls_back_to_confidence_when_no_match_info() -> None:
@@ -69,7 +74,7 @@ def test_auto_thumbnail_crop_falls_back_to_confidence_when_no_match_info() -> No
             ),
         ],
     )
-    crop = auto_thumbnail_crop(result)
+    crop = auto_thumbnail_crop(cast(Any, result))
     assert crop is not None
     # Should center on the higher-confidence face (left side)
-    assert crop["x"] < 50, f"Expected crop centered on higher-confidence face, got x={crop['x']}"
+    assert cast(float, crop["x"]) < 50, f"Expected crop centered on higher-confidence face, got x={crop['x']}"

@@ -4,9 +4,14 @@ import asyncio
 import fcntl
 import multiprocessing as mp
 import time
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from multiprocessing.synchronize import Event as MpSyncEvent
 
 import pytest
 
@@ -20,7 +25,7 @@ from trr_backend.socials.instagram.auth_resolver import (
 )
 
 
-def _hold_instagram_auth_lock(lock_path: str, hold_seconds: float, acquired_event: mp.synchronize.Event) -> None:
+def _hold_instagram_auth_lock(lock_path: str, hold_seconds: float, acquired_event: MpSyncEvent) -> None:
     with open(lock_path, "a+", encoding="utf-8") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
@@ -31,7 +36,7 @@ def _hold_instagram_auth_lock(lock_path: str, hold_seconds: float, acquired_even
 
 
 @pytest.fixture(autouse=True)
-def _clear_auth_resolver_state(monkeypatch: pytest.MonkeyPatch) -> None:
+def _clear_auth_resolver_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     for key in (
         "SOCIAL_INSTAGRAM_COOKIES_JSON",
         "SOCIAL_INSTAGRAM_COOKIES_FILE",
@@ -208,7 +213,7 @@ def test_instagram_auth_resolver_validation_disables_recovery(
 ) -> None:
     from trr_backend.socials.instagram import auth_resolver
 
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     class _FakeScraper:
         last_retrieval_meta: dict[str, object] = {}
@@ -429,6 +434,8 @@ def test_refresh_interactively_defaults_to_headless_codex_profile(
     monkeypatch.setenv("SOCIAL_INSTAGRAM_AUTH_REPAIR_CONFIRMATION", "I UNDERSTAND INSTAGRAM AUTH RISK")
     monkeypatch.delenv("SOCIAL_INSTAGRAM_BROWSER_MODE", raising=False)
     monkeypatch.delenv("SOCIAL_INSTAGRAM_CHROME_PROFILE", raising=False)
+    monkeypatch.delenv("MODAL_TASK_ID", raising=False)
+    monkeypatch.delenv("MODAL_ENVIRONMENT", raising=False)
 
     def _fake_interactive_login(**kwargs: object) -> dict[str, str]:
         captured.update(kwargs)
@@ -458,6 +465,8 @@ def test_resolve_instagram_auth_session_repairs_checkpoint_with_interactive_logi
     monkeypatch.setenv("SOCIAL_BROWSER_SESSION_DIR", str(tmp_path / "browser-sessions"))
     monkeypatch.setenv("SOCIAL_INSTAGRAM_INTERACTIVE_LOGIN", "1")
     monkeypatch.setenv("SOCIAL_INSTAGRAM_AUTH_REPAIR_CONFIRMATION", "I UNDERSTAND INSTAGRAM AUTH RISK")
+    monkeypatch.delenv("MODAL_TASK_ID", raising=False)
+    monkeypatch.delenv("MODAL_ENVIRONMENT", raising=False)
 
     validation_calls: list[dict[str, str]] = []
 

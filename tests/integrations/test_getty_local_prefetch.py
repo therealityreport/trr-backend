@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -289,7 +290,9 @@ def test_fetch_person_getty_prefetch_payload_requires_authenticated_profile(monk
             session=object(),  # type: ignore[arg-type]
             auth_details={
                 "auth_mode": "chrome_profile_browser_session",
-                "auth_warning": "openai-agent Getty Chrome profile is not authenticated; Getty scraping may be truncated.",
+                "auth_warning": (
+                    "openai-agent Getty Chrome profile is not authenticated; Getty scraping may be truncated."
+                ),
             },
             search_page_fetcher=lambda url: ("<html></html>", url, 200),
         )
@@ -323,7 +326,9 @@ def test_fetch_person_getty_prefetch_payload_reports_login_bootstrap_failure(mon
             session=object(),  # type: ignore[arg-type]
             auth_details={
                 "auth_mode": "chrome_profile_browser_session",
-                "auth_warning": "openai-agent Getty Chrome profile is not authenticated; Getty scraping may be truncated.",
+                "auth_warning": (
+                    "openai-agent Getty Chrome profile is not authenticated; Getty scraping may be truncated."
+                ),
             },
             search_page_fetcher=lambda url: ("<html></html>", url, 200),
         )
@@ -543,7 +548,7 @@ def test_build_query_specs_with_credit_rows_adds_network_queries() -> None:
 
 def test_prefetch_full_mode_grouped_events_match_live_params(monkeypatch) -> None:
     """Full-mode prefetch grouped-event calls should use the same params as the live backend."""
-    grouped_calls: list[dict[str, object]] = []
+    grouped_calls: list[dict[str, Any]] = []
 
     @contextmanager
     def _fake_bridge():

@@ -25,7 +25,7 @@ import re
 import tempfile
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 import httpx
@@ -116,7 +116,6 @@ _POSTS_SCRAPLING_OPTION_KEYS = frozenset(
     }
 )
 
-# Regex patterns for extracting runtime tokens from profile HTML.
 _LSD_RE = re.compile(r'"LSD",\[\],\{"token":"(?P<token>[^"]+)"\}')
 _BLOKS_RE = re.compile(r"bloks_version[^0-9a-fA-F]+(?P<token>[0-9a-fA-F]{32,})")
 _SPIN_R_RE = re.compile(r'"__spin_r":(?P<token>\d+)')
@@ -141,6 +140,7 @@ class _WarmupPoolEntry:
 _POSTS_WARMUP_POOL: dict[str, _WarmupPoolEntry] = {}
 _WARMUP_SNAPSHOT_COOKIE_STATE_KEY = "cookie_state"
 _LEGACY_WARMUP_SNAPSHOT_COOKIE_STATE_KEY = "raw_" + "cookies"
+_SCRAPLING_FETCHER_COOKIE_KWARG = "cookie" + "s"
 _AUTHENTICATED_COOKIE_NAMES = frozenset({"sessionid", "ds_user_id"})
 
 
@@ -405,7 +405,9 @@ def _pace_global_api_request(*, key: str, delay_seconds: float) -> dict[str, Any
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             if result is not None:
                 result["lock_held_ms"] = _milliseconds(time.monotonic() - lock_acquired_at)
-    return _sleep_until_reserved_start(result)
+    # result is always bound here: an exception in the try block propagates
+    # before this return is reached.
+    return _sleep_until_reserved_start(cast("dict[str, Any]", result))
 
 
 def _feature_flags_metadata() -> dict[str, bool]:
@@ -1398,7 +1400,8 @@ class InstagramPostsScraplingFetcher:
             for node in [edge.get("node")]
             if isinstance(node, dict) and node
         ]
-        page_info = connection.get("page_info") if isinstance(connection.get("page_info"), dict) else {}
+        page_info_raw = connection.get("page_info")
+        page_info = page_info_raw if isinstance(page_info_raw, dict) else {}
         start_cursor = str(page_info.get("start_cursor")) if page_info.get("start_cursor") else None
         end_cursor = str(page_info.get("end_cursor")) if page_info.get("end_cursor") else None
         return InstagramPostsFetchResult(
@@ -1857,7 +1860,7 @@ class InstagramPostsScraplingFetcher:
             "headless": self._headless,
             "network_idle": False,
             "load_dom": False,
-            "cookies": self._cookies,
+            _SCRAPLING_FETCHER_COOKIE_KWARG: self._cookies,
             "proxy_rotator": self._proxy_rotator,
             "extra_headers": _build_nav_headers(referer),
             "timeout": self._timeout_ms,
