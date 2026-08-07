@@ -2198,6 +2198,109 @@ class TestRefreshShowPhotosStream:
         assert event_seq_matches == sorted(event_seq_matches)
         assert len(event_seq_matches) == len(set(event_seq_matches))
 
+    def test_refresh_photos_stream_fetches_tmdb_and_fandom_for_every_cast_target(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+        show_id = str(uuid4())
+
+        class FakeQuery:
+            def __init__(self, rows):
+                self.rows = rows
+
+            def select(self, *_args, **_kwargs):
+                return self
+
+            def eq(self, *_args, **_kwargs):
+                return self
+
+            def in_(self, *_args, **_kwargs):
+                return self
+
+            def limit(self, *_args, **_kwargs):
+                return self
+
+            def execute(self):
+                response = MagicMock()
+                response.data = self.rows
+                response.error = None
+                return response
+
+        class FakeDb:
+            rows_by_table = {
+                "shows": [
+                    {
+                        "id": show_id,
+                        "name": "The Real Housewives of Test",
+                        "imdb_id": None,
+                        "tmdb_id": None,
+                        "external_ids": {},
+                    }
+                ],
+                "episode_appearances": [{"person_id": "person-a"}, {"person_id": "person-b"}],
+                "people": [
+                    {"id": "person-a", "full_name": "Alpha Housewife", "external_ids": {"tmdb": 101}},
+                    {"id": "person-b", "full_name": "Beta Housewife", "external_ids": {"tmdb": 202}},
+                ],
+            }
+
+            def schema(self, *_args, **_kwargs):
+                return self
+
+            def table(self, name):
+                return FakeQuery(self.rows_by_table.get(name, []))
+
+        tmdb_calls: list[tuple[int, str]] = []
+        fandom_person_calls: list[tuple[str, str]] = []
+        fandom_gallery_calls: list[tuple[str, str]] = []
+
+        def fake_tmdb(tmdb_id: int, person_id: str, **_kwargs):
+            tmdb_calls.append((tmdb_id, person_id))
+            return []
+
+        def fake_fandom_person(person_name: str, person_id: str, **_kwargs):
+            fandom_person_calls.append((person_name, person_id))
+            return []
+
+        def fake_fandom_gallery(person_name: str, person_id: str, **_kwargs):
+            fandom_gallery_calls.append((person_name, person_id))
+            return []
+
+        with (
+            patch("trr_backend.db.admin.create_supabase_admin_client", return_value=FakeDb()),
+            patch("trr_backend.repositories.cast_tmdb.get_cast_tmdb_by_person_id", return_value=None),
+            patch("api.routers.admin_show_sync._get_known_person_source_total", return_value=None),
+            patch("trr_backend.ingestion.cast_photo_sources.fetch_tmdb_cast_photos", side_effect=fake_tmdb),
+            patch(
+                "trr_backend.ingestion.cast_photo_sources.fetch_fandom_person_cast_photos",
+                side_effect=fake_fandom_person,
+            ),
+            patch(
+                "trr_backend.ingestion.cast_photo_sources.fetch_fandom_gallery_cast_photos",
+                side_effect=fake_fandom_gallery,
+            ),
+        ):
+            response = client.post(
+                f"/api/v1/admin/shows/{show_id}/refresh-photos/stream",
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "skip_s3": True,
+                    "skip_prune": True,
+                    "skip_auto_count": True,
+                    "skip_word_detection": True,
+                },
+            )
+
+        assert response.status_code == 200
+        assert sorted(tmdb_calls) == [(101, "person-a"), (202, "person-b")]
+        assert sorted(fandom_person_calls) == [
+            ("Alpha Housewife", "person-a"),
+            ("Beta Housewife", "person-b"),
+        ]
+        assert sorted(fandom_gallery_calls) == [
+            ("Alpha Housewife", "person-a"),
+            ("Beta Housewife", "person-b"),
+        ]
+
     def test_skip_cast_photos_runs_gallery_only_stream(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "test-bucket")

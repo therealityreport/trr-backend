@@ -2936,10 +2936,17 @@ def test_get_social_account_comments_run_progress_route_is_read_only(
         "shard_progress": [],
     }
 
-    with patch(
-        "trr_backend.socials.pipelines.comments.instagram.get_social_account_comments_scrape_run_progress",
-        return_value=expected,
-    ) as progress_mock:
+    with (
+        patch(
+            "trr_backend.socials.pipelines.comments.instagram.get_social_account_comments_scrape_run_progress",
+            return_value=expected,
+        ) as progress_mock,
+        patch.object(
+            socials_router,
+            "_resolve_account_profile_singleflight",
+            side_effect=lambda _key, loader: loader(),
+        ) as singleflight_mock,
+    ):
         response = client.get(
             f"/api/v1/admin/socials/profiles/instagram/bravotv/comments/runs/{run_id}/progress",
             headers={"Authorization": f"Bearer {token}"},
@@ -2953,6 +2960,7 @@ def test_get_social_account_comments_run_progress_route_is_read_only(
         run_id=str(run_id),
         auto_rebalance_slow_shards=False,
     )
+    assert singleflight_mock.call_args.args[0][-1:] == (str(run_id),)
 
 
 def test_post_social_account_comments_run_rebalance_route_is_explicit_mutation(

@@ -393,10 +393,7 @@ def get_social_account_comments_scrape_progress_route(
         surface="comments-run-progress",
         platform=platform,
         account_handle=account_handle,
-        # NOTE: passes a str where the helper annotates tuple[Any, ...]; the
-        # helper unpacks it char-by-char, which still yields a unique key per
-        # run_id. Cast keeps runtime behavior byte-identical.
-        extra=cast("tuple[Any, ...]", str(run_id)),
+        extra=(str(run_id),),
     )
     try:
         return _resolve_account_profile_singleflight(

@@ -545,8 +545,10 @@ def _default_comments_fetcher(post: PublicPostSummary) -> PublicCommentsStatus:
         )
         diagnostic = getattr(result, "diagnostic_metadata", {}) or {}
         is_diag_dict = isinstance(diagnostic, dict)
-        public_comments = cast("dict[str, Any]", diagnostic.get("public_comments")) if is_diag_dict else {}
-        relay_comments = cast("dict[str, Any]", diagnostic.get("relay_comments")) if is_diag_dict else {}
+        public_comments_raw = diagnostic.get("public_comments") if is_diag_dict else {}
+        relay_comments_raw = diagnostic.get("relay_comments") if is_diag_dict else {}
+        public_comments = public_comments_raw if isinstance(public_comments_raw, dict) else {}
+        relay_comments = relay_comments_raw if isinstance(relay_comments_raw, dict) else {}
         classification = str(public_comments.get("classification") or "public_blocked")
         recovered = _safe_int(
             public_comments.get("recovered_count"), default=_comment_tree_count(getattr(result, "comments", []))

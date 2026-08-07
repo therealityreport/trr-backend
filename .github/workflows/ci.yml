@@ -160,9 +160,8 @@ jobs:
 
 
   typecheck:
-    name: Pyright (non-blocking)
+    name: Pyright
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -218,7 +217,7 @@ jobs:
           recompile_and_diff() {
             local infile="$1" lockfile="$2"; shift 2
             cp "$lockfile" "/tmp/$(basename "$lockfile").before"
-            uv pip compile "$infile" "$@" -o "$lockfile"
+            uv pip compile "$infile" --python-version 3.11 "$@" -o "$lockfile"
             diff -u "/tmp/$(basename "$lockfile").before" "$lockfile"
           }
           recompile_and_diff requirements.modal.lean.in requirements.modal.lean.lock.txt \

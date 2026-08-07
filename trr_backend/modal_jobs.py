@@ -66,6 +66,7 @@ def _build_modal_stub_module():
         def function(self, *args, **kwargs):
             def _decorator(func):
                 func.local = func
+                func.get_raw_f = lambda: func
                 func._modal_function_args = args
                 func._modal_function_options = dict(kwargs)
                 return func

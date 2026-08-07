@@ -33,6 +33,9 @@ def _register_surface(surface: Any) -> None:
     for route in surface.router.routes:
         if not isinstance(route, APIRoute):
             continue
+        route_kwargs = {}
+        if hasattr(route, "strict_content_type"):
+            route_kwargs["strict_content_type"] = route.strict_content_type
         router.add_api_route(
             route.path,
             route.endpoint,
@@ -59,7 +62,7 @@ def _register_surface(surface: Any) -> None:
             callbacks=route.callbacks,
             openapi_extra=route.openapi_extra,
             generate_unique_id_function=route.generate_unique_id_function,
-            strict_content_type=route.strict_content_type,
+            **route_kwargs,
         )
 
 

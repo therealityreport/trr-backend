@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -16,7 +17,6 @@ from trr_backend.socials.instagram.public_probe import (
     run_public_probe,
     validate_public_environment,
 )
-
 
 BLOCKED_ENV = (
     "SOCIAL_INSTAGRAM_COOKIES_JSON",
@@ -57,6 +57,38 @@ def test_env_guard_blocks_cookies_decodo_proxy_and_auth(monkeypatch: pytest.Monk
     assert "SOCIAL_INSTAGRAM_POSTS_PROXY_URLS" in violations
     assert "SOCIAL_INSTAGRAM_SESSION_ACCOUNT_ID" in violations
     assert any(item.startswith("SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER=decodo") for item in violations)
+
+
+def test_default_comments_fetcher_treats_non_dict_public_comments_as_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCommentsFetcher:
+        def __init__(self, **_kwargs: Any) -> None:
+            self._parser: object | None = None
+
+        async def fetch_comments_for_shortcode(self, *_args: Any, **_kwargs: Any) -> SimpleNamespace:
+            return SimpleNamespace(
+                diagnostic_metadata={"public_comments": None, "relay_comments": None},
+                comments=[],
+                fetch_reason="relay unavailable",
+            )
+
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.comments_scrapling.fetcher.InstagramCommentsScraplingFetcher",
+        FakeCommentsFetcher,
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.public_probe.InstagramScraper",
+        lambda **_kwargs: object(),
+    )
+
+    from trr_backend.socials.instagram.public_probe import _default_comments_fetcher
+
+    result = _default_comments_fetcher(PublicPostSummary(shortcode="ABC123", comment_count=3))
+
+    assert result.classification == "public_blocked"
+    assert result.recovered_count == 0
+    assert result.stop_reason == "relay unavailable"
 
 
 def test_probe_raises_before_scraping_when_public_env_is_dirty(
@@ -390,7 +422,7 @@ def _detail_success(shortcode: str) -> PublicDetailStatus:
         media_type="image",
         media_url_count=1,
         thumbnail_present=True,
-        taken_at=datetime.now(timezone.utc).isoformat(),
+        taken_at=datetime.now(UTC).isoformat(),
         caption_present=True,
         source="test",
     )

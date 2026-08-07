@@ -5742,6 +5742,9 @@ def refresh_show_photos_stream(
             return list(person_ids)
 
         person_ids: list[str] = []
+        targets: list[dict[str, Any]] = []
+        fetch_units = 0
+        stage_done = 0
         if payload.skip_cast_photos:
             yield progress(
                 stage="sync_cast_photos",
@@ -5792,7 +5795,6 @@ def refresh_show_photos_stream(
                         people_rows.extend(resp.data)
 
                 # Build inputs per person.
-                targets: list[dict[str, Any]] = []
                 for person in people_rows:
                     pid = str(person.get("id") or "").strip()
                     if not pid:
@@ -5836,7 +5838,6 @@ def refresh_show_photos_stream(
                     )
 
                 # Compute fetch work (only count source fetches that have required ids).
-                fetch_units = 0
                 for t in targets:
                     if t.get("imdb_person_id"):
                         fetch_units += 1  # IMDb
@@ -5861,7 +5862,6 @@ def refresh_show_photos_stream(
                         message="Skipping Fandom cast photos for non-Real Housewives shows.",
                     )
 
-                stage_done = 0
                 for t in targets:
                     pid = str(t.get("person_id"))
                     pname = t.get("person_name")
@@ -5996,6 +5996,23 @@ def refresh_show_photos_stream(
                                 )
                         except Exception as exc:  # noqa: BLE001
                             errors.append(f"IMDb cast photos {pid}: {exc}")
+
+            # Keep every non-IMDb source scoped to one cast target. IMDb
+            # uses the preceding loop; TMDb and Fandom share this per-person
+            # loop so a final target cannot overwrite the earlier ones.
+            for t in targets:
+                pid = str(t.get("person_id"))
+                pname = t.get("person_name")
+                imdb_pid = t.get("imdb_person_id")
+                tmdb_pid = t.get("tmdb_person_id")
+
+                def _tag_show_context(rows: list[dict]) -> None:
+                    for row in rows:
+                        meta = dict(row.get("metadata") or {})
+                        meta.setdefault("show_id", show_id_str)
+                        if show_name:
+                            meta.setdefault("show_name", show_name)
+                        row["metadata"] = meta
 
                 # TMDb
                 if tmdb_pid:

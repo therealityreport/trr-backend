@@ -21,7 +21,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any
 from urllib.parse import urlparse
 
 import requests
@@ -536,14 +536,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.verbose:
             print(f"\nBatch {batch_num}/{total_batches} ({len(batch)} assets):")
 
-        # Non-dry runs always bind storage above; typing-only cast for pyright.
-        storage_cfg = cast("ObjectStorageConfig", storage)
         summary = process_batch(
             db,
             batch,
             s3_client=s3_client,
-            bucket=storage_cfg.bucket,
-            cdn_base_url=cast("str", storage_cfg.public_base_url),
+            # Dry runs do not construct storage configuration or an S3 client.
+            # process_batch passes these only to mirror_single_asset, which
+            # returns before using either value in dry-run mode.
+            bucket=storage.bucket if storage is not None else "",
+            cdn_base_url=str(storage.public_base_url or "") if storage is not None else "",
             max_retries=args.max_retries,
             backoff_hours=args.retry_backoff_hours,
             concurrency=args.concurrency,
