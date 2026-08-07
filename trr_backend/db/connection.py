@@ -14,6 +14,8 @@ import sys
 from functools import lru_cache
 from urllib.parse import urlsplit, urlunsplit
 
+import psycopg2
+
 logger = logging.getLogger(__name__)
 
 CANONICAL_DB_ENV = "TRR_DB_URL"
@@ -396,23 +398,31 @@ def ensure_ready_for_ingestion(
     Raises:
         DatabaseConnectionError: If verification fails.
     """
-    from trr_backend.db.postgrest_cache import (
-        PostgrestCacheError,
-        reload_postgrest_schema,
-        verify_core_schema_exists,
-    )
-
     url = database_url or resolve_database_url()
 
     try:
-        verify_core_schema_exists(url)
-    except PostgrestCacheError as e:
-        raise DatabaseConnectionError(str(e)) from e
+        conn = psycopg2.connect(url)
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM pg_namespace WHERE nspname = 'core';")
+            core_schema = cur.fetchone()
+        conn.close()
+    except psycopg2.Error as error:
+        raise DatabaseConnectionError(f"Failed to verify core schema: {error}") from error
+
+    if not core_schema:
+        raise DatabaseConnectionError(
+            "Wrong database URL: `core` schema not found.\n\n"
+            "Ensure TRR_DB_URL points to your runtime Supabase database."
+        )
 
     if reload_schema_cache:
         try:
-            reload_postgrest_schema(url)
-        except PostgrestCacheError:
+            conn = psycopg2.connect(url)
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_notify('pgrst', 'reload schema');")
+            conn.close()
+        except psycopg2.Error:
             pass  # Best effort - continue anyway
 
 
