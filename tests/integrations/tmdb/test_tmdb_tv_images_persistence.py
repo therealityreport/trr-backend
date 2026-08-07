@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -46,7 +47,7 @@ def test_stage1_tmdb_fetch_images_upserts_show_images_and_sets_primary_paths(mon
         annotate_imdb_episodic=False,
         tmdb_fetch_details=False,
         tmdb_fetch_images=True,
-        supabase_client=object(),
+        supabase_client=cast(Any, object()),
     )
     assert result.created == 1
 
@@ -177,7 +178,7 @@ def test_show_images_read_path_filters_by_show_id() -> None:
             assert name == "core"
             return _Schema(self)
 
-    rows = list_tmdb_show_images(_Db(), show_id=expected_show_id)
+    rows = list_tmdb_show_images(cast(Any, _Db()), show_id=expected_show_id)
     assert [r["file_path"] for r in rows] == ["/right.jpg"]
     assert rows[0]["url"] == "https://image.tmdb.org/t/p/original/right.jpg"
     assert "vote_average" not in rows[0]

@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from trr_backend.services import core_cast_credit_reads
+from trr_backend.services.core_cast_credit_reads import SeasonCastView
 
 SHOW_ID = "11111111-1111-1111-1111-111111111111"
 SEASON_ID = "11111111-1111-1111-1111-111111111112"
@@ -357,7 +358,7 @@ def test_season_membership_preserves_person_show_seasons_shape(
 @pytest.mark.parametrize("view", ["membership", "episode_counts"])
 def test_season_views_apply_opt_in_bravo_after_local_photo_sources(
     monkeypatch: pytest.MonkeyPatch,
-    view: str,
+    view: SeasonCastView,
 ) -> None:
     monkeypatch.setattr(
         core_cast_credit_reads.repository,

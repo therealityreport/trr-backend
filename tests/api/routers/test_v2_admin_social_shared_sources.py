@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -62,7 +63,7 @@ def test_routes_require_internal_admin() -> None:
 
 
 def test_get_forwards_normalized_query(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     def get_sources(**kwargs):
         captured.update(kwargs)
@@ -97,7 +98,7 @@ def test_put_is_strict_and_forwards_verified_actor(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     def put_sources(**kwargs):
         captured.update(kwargs)

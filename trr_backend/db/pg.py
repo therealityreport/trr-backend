@@ -8,7 +8,7 @@ import time
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from threading import Lock
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 from urllib.parse import urlparse
 
 import psycopg2
@@ -1344,7 +1344,7 @@ def fetch_all_with_cursor(
     query: str,
     params: Iterable[Any] | None = None,
 ) -> list[dict[str, Any]]:
-    cur.execute(query, params or [])
+    cur.execute(query, cast("Any", params or []))
     rows = cur.fetchall()
     return [dict(row) for row in rows]
 
@@ -1354,7 +1354,7 @@ def fetch_one_with_cursor(
     query: str,
     params: Iterable[Any] | None = None,
 ) -> dict[str, Any] | None:
-    cur.execute(query, params or [])
+    cur.execute(query, cast("Any", params or []))
     row = cur.fetchone()
     return dict(row) if row else None
 

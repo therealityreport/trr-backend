@@ -7,9 +7,9 @@ from typing import Any
 
 import pytest
 
-import trr_backend.repositories.social_season_analytics as social_repo
 import trr_backend.socials.control_plane.run_lifecycle as run_lifecycle
 import trr_backend.socials.control_plane.shared_accounts as shared_reads
+import trr_backend.socials.social_season_analytics_impl as social_repo
 from trr_backend.socials.control_plane import SeasonContext
 
 

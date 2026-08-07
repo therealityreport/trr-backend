@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException
@@ -96,7 +96,9 @@ def _image_source_for_reference(reference_image_id: str) -> tuple[dict[str, Any]
 
 
 @router.get("/face-references/people/{person_id}", response_model=FaceReferenceListResponse)
-def list_face_references(person_id: UUID, _: InternalAdminUser = None) -> FaceReferenceListResponse:
+def list_face_references(
+    person_id: UUID, _: InternalAdminUser = cast(InternalAdminUser, None)
+) -> FaceReferenceListResponse:
     rows = face_references.list_face_reference_images(person_id=str(person_id), include_inactive=True)
     return FaceReferenceListResponse(person_id=str(person_id), items=[_row_to_item(row) for row in rows])
 
@@ -104,7 +106,7 @@ def list_face_references(person_id: UUID, _: InternalAdminUser = None) -> FaceRe
 @router.get("/face-references/review-queue", response_model=FaceReferenceReviewQueueResponse)
 def list_face_reference_review_queue(
     limit: int = 50,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> FaceReferenceReviewQueueResponse:
     rows = face_references.list_face_reference_builder_review_queue(limit=limit)
     return FaceReferenceReviewQueueResponse(items=[_row_to_item(row) for row in rows])
@@ -114,7 +116,7 @@ def list_face_reference_review_queue(
 def review_face_reference(
     reference_image_id: UUID,
     payload: ReviewReferenceRequest,
-    admin_user: InternalAdminUser = None,
+    admin_user: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> FaceReferenceImageItem:
     updated = face_references.set_face_reference_review_status(
         reference_image_id=str(reference_image_id),
@@ -131,7 +133,9 @@ def review_face_reference(
 
 
 @router.post("/face-references/search")
-def search_face_references(payload: SearchReferencesRequest, _: InternalAdminUser = None) -> dict[str, Any]:
+def search_face_references(
+    payload: SearchReferencesRequest, _: InternalAdminUser = cast(InternalAdminUser, None)
+) -> dict[str, Any]:
     image_source = payload.image_source
     if payload.reference_image_id:
         reference_row, derived_image_source = _image_source_for_reference(str(payload.reference_image_id))
@@ -159,7 +163,9 @@ def search_face_references(payload: SearchReferencesRequest, _: InternalAdminUse
 
 
 @router.post("/face-references/verify")
-def verify_face_reference_pair(payload: VerifyReferencesRequest, _: InternalAdminUser = None) -> dict[str, Any]:
+def verify_face_reference_pair(
+    payload: VerifyReferencesRequest, _: InternalAdminUser = cast(InternalAdminUser, None)
+) -> dict[str, Any]:
     left_image = payload.left_image_source
     right_image = payload.right_image_source
     if payload.left_reference_image_id:
@@ -175,7 +181,7 @@ def verify_face_reference_pair(payload: VerifyReferencesRequest, _: InternalAdmi
 def reembed_face_reference(
     reference_image_id: UUID,
     payload: ReembedReferenceRequest,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     reference_row, derived_image_source = _image_source_for_reference(str(reference_image_id))
     image_source = payload.image_source or derived_image_source

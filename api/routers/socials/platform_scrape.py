@@ -3,10 +3,15 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from fastapi import APIRouter
 
 from ._shared import *
 from .social_landing import *
+
+if TYPE_CHECKING:
+    from .social_landing import _load_social_auth_or_503
 
 router = APIRouter()
 
@@ -324,7 +329,7 @@ class FacebookPostResponse(BaseModel):
 
 
 def _facebook_post_response(post: Any) -> FacebookPostResponse:
-    raw_media_provenance = getattr(post, "media_provenance", None)
+    raw_media_provenance: Any = getattr(post, "media_provenance", None)
     if hasattr(raw_media_provenance, "to_dict"):
         media_provenance = dict(raw_media_provenance.to_dict() or {})
     elif isinstance(raw_media_provenance, dict):

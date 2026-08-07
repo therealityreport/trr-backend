@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any, cast
 
 import pytest
 
@@ -66,7 +67,7 @@ def test_repair_platform_dry_run_reports_rewrites_without_updates(monkeypatch: p
     )
 
     stats = mod._repair_platform(
-        cur,
+        cast(Any, cur),
         platform="facebook",
         table="facebook_posts",
         cdn_base_url="https://pub.example.r2.dev",
@@ -113,7 +114,7 @@ def test_repair_platform_apply_updates_rows(monkeypatch: pytest.MonkeyPatch) -> 
     )
 
     stats = mod._repair_platform(
-        cur,
+        cast(Any, cur),
         platform="instagram",
         table="instagram_posts",
         cdn_base_url="https://pub.example.r2.dev",

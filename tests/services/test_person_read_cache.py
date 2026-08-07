@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 
@@ -16,7 +17,7 @@ CACHE_KEY = f"person:{PERSON_ID}:cover-photo"
 
 
 @pytest.fixture(autouse=True)
-def clear_person_read_cache() -> None:
+def clear_person_read_cache() -> Iterator[None]:
     invalidate_person_read_cache()
     yield
     invalidate_person_read_cache()

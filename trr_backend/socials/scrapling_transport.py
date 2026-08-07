@@ -16,7 +16,7 @@ import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 from trr_backend.socials._scrapling_http_utils import extract_response_cookies
@@ -430,7 +430,7 @@ def build_proxy_rotator(
     if isinstance(proxies, str):
         normalized: list[str | dict[str, str]] = [proxies.strip()] if proxies.strip() else []
     elif isinstance(proxies, dict):
-        normalized = [proxies] if proxies else []
+        normalized = [cast("dict[str, str]", proxies)] if proxies else []
     else:
         normalized = []
         for proxy in proxies:

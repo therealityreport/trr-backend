@@ -7,10 +7,10 @@ from typing import Any
 
 import pytest
 
-import trr_backend.repositories.social_season_analytics as legacy_repo
 import trr_backend.socials.control_plane as control_plane
 import trr_backend.socials.control_plane.runtime as runtime_surface
 import trr_backend.socials.social_season_analytics_impl as canonical_social_analytics
+import trr_backend.socials.social_season_analytics_impl as legacy_repo
 
 
 def _build_stamp(

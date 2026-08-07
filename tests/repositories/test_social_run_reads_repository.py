@@ -6,8 +6,8 @@ from datetime import UTC, datetime
 
 import pytest
 
-import trr_backend.repositories.social_season_analytics as social_repo
 import trr_backend.socials.control_plane.run_reads as run_reads
+import trr_backend.socials.social_season_analytics_impl as social_repo
 
 
 def test_legacy_list_runs_delegates_to_control_plane_run_reads(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -248,7 +248,7 @@ def test_get_run_progress_snapshot_includes_dynamic_stages_and_per_handle(monkey
             "worker_id": "social-worker:c",
         },
     ]
-    seen_fetch_one_pools: list[str] = []
+    seen_fetch_one_pools: list[str | None] = []
 
     monkeypatch.setattr(social_repo, "_relation_exists", lambda _name: True)
     monkeypatch.setattr(social_repo, "_scrape_jobs_features", lambda: {"has_run_id": True, "has_queue_fields": True})

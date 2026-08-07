@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -104,7 +105,7 @@ def test_retire_matches_updates_only_selected_ids(monkeypatch) -> None:
             {"id": "job-3", "error_message": "asset_wrong_content_type"},
         ],
     )
-    calls: list[dict[str, object]] = []
+    calls: list[dict[str, Any]] = []
     monkeypatch.setattr(
         mod.pg,
         "execute_returning",

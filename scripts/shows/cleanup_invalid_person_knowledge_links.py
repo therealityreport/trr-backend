@@ -48,8 +48,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     scan = admin_show_links._scan_invalid_person_knowledge_links(show_id)
-    scanned_rows = scan.get("scanned_rows") if isinstance(scan.get("scanned_rows"), list) else []
-    invalid_rows = scan.get("invalid_rows") if isinstance(scan.get("invalid_rows"), list) else []
+    raw_scanned_rows = scan.get("scanned_rows")
+    raw_invalid_rows = scan.get("invalid_rows")
+    scanned_rows: list[dict[str, Any]] = raw_scanned_rows if isinstance(raw_scanned_rows, list) else []
+    invalid_rows: list[dict[str, Any]] = raw_invalid_rows if isinstance(raw_invalid_rows, list) else []
     validation_failures = int(scan.get("validation_failures") or 0)
 
     invalid_ids = [str(row.get("id") or "").strip() for row in invalid_rows if row.get("id")]

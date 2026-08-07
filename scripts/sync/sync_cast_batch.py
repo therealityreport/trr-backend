@@ -7,7 +7,7 @@ import argparse
 import subprocess
 import sys
 import time
-from typing import Any
+from typing import Any, cast
 
 from scripts._sync_common import add_show_filter_args, fetch_show_rows, load_env_and_db
 
@@ -62,7 +62,7 @@ def run_command(cmd: list[str], step_name: str, verbose: bool) -> tuple[bool, st
             capture_output=True,
             text=True,
             timeout=300,
-            env={**subprocess.os.environ, "PYTHONPATH": "."},
+            env={**cast(Any, subprocess).os.environ, "PYTHONPATH": "."},
             check=False,
         )
 

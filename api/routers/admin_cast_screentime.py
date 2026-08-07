@@ -8,7 +8,7 @@ import logging
 import os
 import subprocess
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
 
@@ -520,7 +520,10 @@ def _aggregate_rollup(
             }
             for item in totals.values()
         ),
-        key=lambda item: (float(item["screen_time_seconds"]), int(item["frame_count"])),
+        key=lambda item: (
+            float(cast("float", item["screen_time_seconds"])),
+            int(cast("int", item["frame_count"])),
+        ),
         reverse=True,
     )
     return {
@@ -1609,10 +1612,11 @@ def import_video_asset(
                     "status": "uploaded",
                     "content_type": mirror_meta.get("content_type"),
                     "verification_json": {
-                        **(
+                        **cast(
+                            "dict[str, Any]",
                             session.get("verification_json")
                             if isinstance(session.get("verification_json"), dict)
-                            else {}
+                            else {},
                         ),
                         "mirror": mirror_meta,
                         "source_provenance": source_provenance,
@@ -1628,7 +1632,8 @@ def import_video_asset(
             if not row:
                 raise HTTPException(status_code=404, detail="Social YouTube video row not found")
             expected_owners = _resolve_official_youtube_owners(owner_context)
-            raw_data = row.get("raw_data") if isinstance(row.get("raw_data"), dict) else {}
+            raw_data_value = row.get("raw_data")
+            raw_data = raw_data_value if isinstance(raw_data_value, dict) else {}
             matched_owner = _assert_youtube_official_match(
                 actual_channel_id=str(row.get("channel_id") or "").strip() or None,
                 actual_candidates=[
@@ -1643,7 +1648,8 @@ def import_video_asset(
                 ],
                 expected_owners=expected_owners,
             )
-            hosted_media_urls = row.get("hosted_media_urls") if isinstance(row.get("hosted_media_urls"), list) else []
+            hosted_media_urls_value = row.get("hosted_media_urls")
+            hosted_media_urls = hosted_media_urls_value if isinstance(hosted_media_urls_value, list) else []
             preferred_hosted_url = _preferred_video_url(
                 [str(url).strip() for url in hosted_media_urls if str(url).strip()]
             )
@@ -1675,10 +1681,11 @@ def import_video_asset(
                     "status": "uploaded",
                     "content_type": mirror_meta.get("content_type"),
                     "verification_json": {
-                        **(
+                        **cast(
+                            "dict[str, Any]",
                             session.get("verification_json")
                             if isinstance(session.get("verification_json"), dict)
-                            else {}
+                            else {},
                         ),
                         "mirror": mirror_meta,
                         "source_provenance": source_provenance,
@@ -1704,10 +1711,11 @@ def import_video_asset(
                     "status": "uploaded",
                     "content_type": mirror_meta.get("content_type"),
                     "verification_json": {
-                        **(
+                        **cast(
+                            "dict[str, Any]",
                             session.get("verification_json")
                             if isinstance(session.get("verification_json"), dict)
-                            else {}
+                            else {},
                         ),
                         "mirror": mirror_meta,
                         "source_provenance": source_provenance,

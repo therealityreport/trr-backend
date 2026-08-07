@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from scripts.verify_credits_parity import parse_args
+from typing import Any, cast
+
+import scripts.verify_credits_parity as _verify_credits_parity
+
+parse_args: Any = cast(Any, _verify_credits_parity).parse_args
 
 
 class TestParseArgs:

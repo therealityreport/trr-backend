@@ -303,7 +303,8 @@ def _diagnose_missing_person_sources(*, show_ids: list[str], names: list[str] | 
             if has_approved_imdb and has_approved_tmdb:
                 continue
 
-            external_ids = row.get("external_ids") if isinstance(row.get("external_ids"), dict) else {}
+            raw_external_ids = row.get("external_ids")
+            external_ids: dict[str, Any] = raw_external_ids if isinstance(raw_external_ids, dict) else {}
             imdb_id, imdb_id_source = admin_show_links._resolve_person_external_identifier(
                 external_ids,
                 keys=("imdb", "imdb_id"),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 
@@ -405,7 +406,7 @@ def test_row_to_response_exposes_previous_run_snapshot() -> None:
 
 
 def test_insert_growth_snapshot_writes_immutable_row(monkeypatch) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     def fake_execute_returning(sql: str, params: list[object]):
         captured["sql"] = sql

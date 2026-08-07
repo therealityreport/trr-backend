@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 from contextlib import contextmanager
+from typing import Any
 
 import pytest
 
@@ -143,7 +144,7 @@ def test_verify_required_workspace_blocks_wrong_workspace(monkeypatch: pytest.Mo
 
 
 def test_modal_profile_rows_uses_pinned_profile(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[dict[str, object]] = []
+    calls: list[dict[str, Any]] = []
 
     def fake_run(command, **kwargs):
         calls.append({"command": command, **kwargs})

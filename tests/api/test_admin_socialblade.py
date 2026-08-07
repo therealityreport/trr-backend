@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -24,7 +25,7 @@ def test_single_refresh_passes_force(monkeypatch: pytest.MonkeyPatch) -> None:
     import api.routers.admin_socialblade as router_module
     import trr_backend.socials.socialblade.service as service_module
 
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     def fake_refresh_and_persist_socialblade(**kwargs):
         captured.update(kwargs)
@@ -61,7 +62,7 @@ def test_single_refresh_runs_sync_pipeline_in_threadpool(monkeypatch: pytest.Mon
     import api.routers.admin_socialblade as router_module
     import trr_backend.socials.socialblade.service as service_module
 
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     def fake_refresh_and_persist_socialblade(**kwargs):
         captured["kwargs"] = kwargs
@@ -117,7 +118,8 @@ def test_single_refresh_runs_sync_pipeline_in_threadpool(monkeypatch: pytest.Mon
         "source": "person_page",
         "force": True,
     }
-    assert scraper("heathergay")["instagram_following_scrape"] == {"status": "completed"}
+    scraper_result: Any = scraper("heathergay")
+    assert scraper_result["instagram_following_scrape"] == {"status": "completed"}
     assert captured["sidecar"] == {
         "payload": {"username": "heathergay", "stats_refreshed": True},
         "handle": "heathergay",
@@ -166,7 +168,7 @@ def test_person_page_scrape_uses_visible_browser_retry_without_headless_login(
     import trr_backend.socials.socialblade.auth as auth_module
     import trr_backend.socials.socialblade.scraper as scraper_module
 
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     monkeypatch.setattr(job_plane_module, "is_modal_remote_executor_enabled", lambda: False)
     monkeypatch.setattr(
@@ -297,7 +299,7 @@ def test_batch_refresh_cast_comparison_dispatches_modal_and_returns_call_id(
     import trr_backend.socials.socialblade.auth as auth_module
     import trr_backend.socials.socialblade.service as service_module
 
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     monkeypatch.setattr(
         auth_module,
@@ -495,7 +497,7 @@ def test_socialblade_history_returns_snapshot_rows(monkeypatch: pytest.MonkeyPat
     import trr_backend.repositories.socialblade_growth as growth_module
     from trr_backend.db import pg as pg_module
 
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     monkeypatch.setattr(growth_module, "socialblade_growth_snapshots_table_exists", lambda: True)
 
@@ -666,7 +668,7 @@ def test_batch_socialblade_refresh_rejects_malformed_person_id(monkeypatch: pyte
 def test_account_socialblade_read_route_uses_platform_handle_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
     import trr_backend.repositories.socialblade_growth as repository_module
 
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     def fake_get_growth_data(person_id, handle: str, *, platform: str = "instagram"):
         captured.update({"person_id": person_id, "handle": handle, "platform": platform})
@@ -697,7 +699,7 @@ def test_account_socialblade_refresh_route_uses_platform_specific_scraper(monkey
     import trr_backend.socials.socialblade.scraper as scraper_module
     import trr_backend.socials.socialblade.service as service_module
 
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     def fake_refresh_cookies(*args, **kwargs):
         captured["cookie_refresh_threadpool_started"] = "threadpool_func" in captured
@@ -816,7 +818,7 @@ def test_account_socialblade_refresh_route_uses_visible_retry_without_login_fall
     import trr_backend.socials.socialblade.scraper as scraper_module
     import trr_backend.socials.socialblade.service as service_module
 
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     monkeypatch.setattr(auth_module, "refresh_socialblade_cookies", lambda *args, **kwargs: {"cf_clearance": "token"})
     monkeypatch.setattr(auth_module, "load_socialblade_cookies_from_sources", lambda: {"cf_clearance": "token"})
@@ -895,7 +897,7 @@ def test_account_socialblade_refresh_route_allows_tiktok_visible_retry(
     import trr_backend.socials.socialblade.scraper as scraper_module
     import trr_backend.socials.socialblade.service as service_module
 
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     monkeypatch.setattr(auth_module, "refresh_socialblade_cookies", lambda *args, **kwargs: {"cf_clearance": "token"})
     monkeypatch.setattr(auth_module, "load_socialblade_cookies_from_sources", lambda: {"cf_clearance": "token"})
@@ -980,7 +982,7 @@ def test_batch_refresh_season_run_dispatches_following_sidecar(monkeypatch: pyte
     import trr_backend.socials.socialblade.auth as auth_module
     import trr_backend.socials.socialblade.service as service_module
 
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     monkeypatch.setattr(
         auth_module,

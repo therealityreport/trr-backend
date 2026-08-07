@@ -27,7 +27,7 @@ from trr_backend.modal_dispatch import (  # noqa: E402
     modal_environment_name,
     modal_social_comments_job_function_name,
 )
-from trr_backend.repositories import social_season_analytics as social_repo  # noqa: E402
+from trr_backend.socials import social_season_analytics_impl as social_repo  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import argparse
 import json
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 from scripts.socials import queue_snapshot as cli
 
 
-def _args(**overrides: Any) -> SimpleNamespace:
+def _args(**overrides: Any) -> argparse.Namespace:
     values = {
         "run_id": "11111111-1111-1111-1111-111111111111",
         "platform": "instagram",
@@ -17,7 +18,7 @@ def _args(**overrides: Any) -> SimpleNamespace:
         "json": True,
     }
     values.update(overrides)
-    return SimpleNamespace(**values)
+    return cast(argparse.Namespace, SimpleNamespace(**values))
 
 
 def test_build_snapshot_normalizes_account_and_delegates(monkeypatch) -> None:

@@ -15,8 +15,10 @@ Programmatic usage:
 
 from __future__ import annotations
 
+import importlib
 import logging
 import os
+from typing import Any, cast
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -24,9 +26,13 @@ from pydantic import BaseModel, Field
 from api.auth import InternalAdminUser
 
 try:
-    from claude_computer_use import ComputerUseClient
-    from claude_computer_use.loop import async_sampling_loop
-except ImportError:  # pragma: no cover - exercised via configuration failure path
+    # Optional dependency resolved dynamically: `claude_computer_use` is not a
+    # statically resolvable package in this workspace.
+    ComputerUseClient = importlib.import_module("claude_computer_use").ComputerUseClient
+    async_sampling_loop = importlib.import_module("claude_computer_use.loop").async_sampling_loop
+except (ImportError, AttributeError):  # pragma: no cover - exercised via configuration failure path
+    # AttributeError mirrors the ImportError a `from x import y` raises when
+    # the module exists but the symbol is missing.
     ComputerUseClient = None
     async_sampling_loop = None
 
@@ -65,7 +71,7 @@ class ComputerUseConfigurationError(RuntimeError):
 
 
 @router.post("/run", response_model=ComputerUseResponse)
-async def run_task(req: ComputerUseRequest, _: InternalAdminUser = None):
+async def run_task(req: ComputerUseRequest, _: InternalAdminUser = cast("Any", None)):
     """Execute a computer use task via Claude."""
     try:
         result = await run_computer_task(

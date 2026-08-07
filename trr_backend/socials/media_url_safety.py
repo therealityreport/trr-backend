@@ -96,7 +96,7 @@ def _is_reserved_test_host(hostname: str) -> bool:
     return normalized in _RESERVED_TEST_HOSTS or normalized.endswith(_RESERVED_TEST_SUFFIXES)
 
 
-def _is_blocked_ip(ip: ipaddress._BaseAddress) -> bool:
+def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     mapped = getattr(ip, "ipv4_mapped", None)
     if mapped is not None:
         ip = mapped

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from trr_backend.repositories import tagging_references as refs
 
@@ -42,7 +42,8 @@ def test_build_owner_tagging_reference_profile_pins_existing_selected(monkeypatc
     profile = refs.build_owner_tagging_reference_profile(db=None, person_id="person-1")
     assert profile["cache_hit"] is True
     assert profile["accepted"] == 1
-    assert profile["used"][0]["link_id"] == "link-1"
+    used = cast("list[dict[str, Any]]", profile["used"])
+    assert used[0]["link_id"] == "link-1"
 
 
 def test_sync_owner_tagging_reference_usage_preserves_existing_selected_by_default(monkeypatch) -> None:
@@ -146,10 +147,11 @@ def test_selected_references_prefer_source_url_over_hosted_url(monkeypatch) -> N
     profile = refs.build_owner_tagging_reference_profile(db=None, person_id="person-1")
     assert profile["cache_hit"] is True
     assert profile["accepted"] == 1
-    assert profile["used"][0]["url"] == "https://origin.example.com/ref-1.jpg"
-    assert profile["used"][0]["source_url"] == "https://origin.example.com/ref-1.jpg"
-    assert profile["used"][0]["hosted_url"] == "https://cdn.example.com/ref-1.jpg"
-    assert profile["used"][0]["url_candidates"] == [
+    used = cast("list[dict[str, Any]]", profile["used"])
+    assert used[0]["url"] == "https://origin.example.com/ref-1.jpg"
+    assert used[0]["source_url"] == "https://origin.example.com/ref-1.jpg"
+    assert used[0]["hosted_url"] == "https://cdn.example.com/ref-1.jpg"
+    assert used[0]["url_candidates"] == [
         "https://origin.example.com/ref-1.jpg",
         "https://cdn.example.com/ref-1.jpg",
     ]
@@ -190,7 +192,8 @@ def test_rank_candidates_wwhl_allows_seeded_cross_title_references() -> None:
     )
 
     assert len(selected) >= 1
-    assert selected[0]["link_id"] == "link-cross-title-seeded"
+    first = cast("dict[str, Any]", selected[0])
+    assert first["link_id"] == "link-cross-title-seeded"
     assert "cross_title_wwhl" in list(selected[0].get("reasons") or [])
 
 
@@ -274,7 +277,7 @@ def test_build_owner_facebank_initial_reference_profile_prefers_show_and_primary
         max_refs=5,
     )
 
-    selected = profile["used"]
+    selected = cast("list[dict[str, Any]]", profile["used"])
     assert [entry["link_id"] for entry in selected[:2]] == ["link-show-solo", "link-primary"]
     assert [entry["link_id"] for entry in selected].count("link-seeded-event") == 1
     assert [entry["link_id"] for entry in selected].count("link-second-event") == 0
@@ -327,7 +330,8 @@ def test_build_owner_facebank_initial_reference_profile_uses_non_solo_only_as_la
 
     profile = refs.build_owner_facebank_initial_reference_profile(db=None, person_id="person-1", max_refs=3)
 
-    assert [entry["link_id"] for entry in profile["used"]] == [
+    used = cast("list[dict[str, Any]]", profile["used"])
+    assert [entry["link_id"] for entry in used] == [
         "link-solo-2",
         "link-solo-1",
         "link-group-fallback",

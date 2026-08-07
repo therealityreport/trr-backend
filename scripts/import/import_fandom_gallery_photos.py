@@ -24,7 +24,7 @@ import re
 import sys
 import time
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from trr_backend.db.admin import create_supabase_admin_client
 from trr_backend.ingestion.cast_photo_sources import (
@@ -324,7 +324,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.dry_run:
             print(f"  DRY RUN: Would import {len(rows)} photos")
             for row in rows[:5]:
-                print(f"    - {row.get('image_url')[:80]}...")
+                print(f"    - {cast('str', row.get('image_url'))[:80]}...")
             if len(rows) > 5:
                 print(f"    ... and {len(rows) - 5} more")
             total_imported += len(rows)

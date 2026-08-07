@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
@@ -28,6 +28,9 @@ from api.schemas.v2.admin_media import (
 from trr_backend.db.pg import database_service_unavailable_detail, is_database_service_unavailable_error
 from trr_backend.problem import problem_http_exception
 from trr_backend.repositories.admin_media import ImageType
+
+if TYPE_CHECKING:
+    from api.schemas.v2.admin_media import AdminMediaLinkV2
 from trr_backend.services import admin_media as admin_media_service
 
 logger = logging.getLogger(__name__)
@@ -618,7 +621,7 @@ def list_media_links(request: Request, _: InternalAdminUser) -> AdminMediaLinksR
     )
     try:
         links, _query_count = admin_media_service.get_media_links(media_asset_id)
-        return AdminMediaLinksResponseV2(links=links)
+        return AdminMediaLinksResponseV2(links=cast("list[AdminMediaLinkV2]", links))
     except Exception as error:
         raise _unexpected_problem(error, request, operation="list-media-links") from error
 

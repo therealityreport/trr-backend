@@ -10,14 +10,23 @@ from typing import Any, Protocol
 class PlatformJobHandler(Protocol):
     """Executable handler for one platform/stage pair."""
 
-    platform: str
-    stage: str
+    @property
+    def platform(self) -> str:
+        """Platform key owned by this handler."""
+        ...
+
+    @property
+    def stage(self) -> str:
+        """Stage key owned by this handler."""
+        ...
 
     def supports(self, platform: str, stage: str) -> bool:
         """Return true when this handler owns the claimed job."""
+        ...
 
     def execute(self, job: dict[str, Any], *, worker_id: str | None = None) -> dict[str, Any]:
         """Execute the claimed job and return the persisted job row."""
+        ...
 
 
 @dataclass(frozen=True)

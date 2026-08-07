@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
@@ -20,6 +20,9 @@ from api.schemas.v2.covered_shows import (
 from trr_backend.db.pg import database_service_unavailable_detail, is_database_service_unavailable_error
 from trr_backend.problem import problem_http_exception
 from trr_backend.services import covered_shows as covered_shows_service
+
+if TYPE_CHECKING:
+    from api.schemas.v2.covered_shows import CoveredShowV2
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +164,7 @@ async def create_covered_show(request: Request, admin: InternalAdminUser) -> Cov
             show_name=body.show_name,
             actor_uid=_actor_uid(admin, request),
         )
-        return CoveredShowResponseV2(show=show)
+        return CoveredShowResponseV2(show=cast("CoveredShowV2", show))
     except HTTPException:
         raise
     except Exception as error:
@@ -188,7 +191,7 @@ def get_covered_show(request: Request, _: InternalAdminUser) -> CoveredShowRespo
             message="Show not found in covered shows list.",
         )
     try:
-        return CoveredShowResponseV2(show=show)
+        return CoveredShowResponseV2(show=cast("CoveredShowV2", show))
     except Exception as error:
         raise _unexpected_problem(error, request, operation="detail-response") from error
 

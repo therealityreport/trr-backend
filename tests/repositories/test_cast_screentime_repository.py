@@ -54,6 +54,7 @@ def test_get_subtitle_summary_returns_aggregate_counts_and_filters_skipped(monke
     monkeypatch.setattr(cast_screentime.pg, "fetch_all", _fetch_all)
 
     result = cast_screentime.get_subtitle_summary("asset-1")
+    assert result is not None
 
     assert result["status"] == "complete"
     assert result["discovered_track_count"] == 2
@@ -113,6 +114,7 @@ def test_queue_subtitle_extraction_force_requeues_complete_asset(monkeypatch):
     )
 
     result = cast_screentime.queue_subtitle_extraction("asset-1", force=True)
+    assert result is not None
 
     assert result["status"] == "queued"
     assert result["should_dispatch"] is True
@@ -144,6 +146,7 @@ def test_queue_subtitle_extraction_force_does_not_overlap_running_asset(monkeypa
     )
 
     result = cast_screentime.queue_subtitle_extraction("asset-1", force=True)
+    assert result is not None
 
     assert result["status"] == "running"
     assert result["already_active"] is True
@@ -178,6 +181,7 @@ def test_queue_subtitle_extraction_force_recovers_only_stale_running_asset(monke
     monkeypatch.setattr(cast_screentime.pg, "execute_returning", _execute_returning)
 
     result = cast_screentime.queue_subtitle_extraction("asset-1", force=True)
+    assert result is not None
 
     assert result["status"] == "queued"
     assert result["already_active"] is False

@@ -7,10 +7,10 @@ import logging
 import os
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from trr_backend.socials.account_browser_sessions import AccountBrowserSessionManager
 from trr_backend.socials.browser_cookie_refresh import (
@@ -67,7 +67,7 @@ def _remaining_timeout_ms(deadline: float, *, floor_ms: int = 1_000) -> int:
     return max(floor_ms, remaining)
 
 
-def _cookie_payload(cookies: list[dict[str, Any]]) -> dict[str, str]:
+def _cookie_payload(cookies: Sequence[Mapping[str, Any]]) -> dict[str, str]:
     payload: dict[str, str] = {}
     for cookie in cookies:
         domain = str(cookie.get("domain") or "")
@@ -258,7 +258,7 @@ def refresh_instagram_cookies(
                             )
                             cookies = {}
                 if cookies.get("sessionid"):
-                    storage_state = context.storage_state()
+                    storage_state = cast("dict[str, Any]", context.storage_state())
                     session.close()
                     browser = None
                     browser_sessions.import_bootstrapped_session(

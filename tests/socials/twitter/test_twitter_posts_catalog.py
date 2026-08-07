@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -466,7 +466,7 @@ def test_shared_catalog_reply_state_counts_inserts_duplicates_and_skips() -> Non
             return None
         return {"tweet_id": tweet_id}
 
-    persistence.upsert_tweet = _upsert_tweet
+    persistence.upsert_tweet = cast(Any, _upsert_tweet)
 
     scrape_shared_twitter_posts(
         run_id="run-1",

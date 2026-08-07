@@ -6,7 +6,7 @@ import logging
 import os
 import time
 from threading import Event, Lock
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Query
@@ -200,7 +200,7 @@ def _log_read(route: str, *, query_count: int, payload: dict[str, Any], cache_st
 def search_admin_show_reads(
     q: str = Query(..., min_length=3),
     limit: int = Query(8, ge=1, le=20),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
     cache_key = f"search:{q.strip().lower()}:{limit}"
@@ -218,7 +218,7 @@ def list_admin_shows(
     q: str = Query(..., min_length=1),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
     cache_key = f"shows:{q.strip().lower()}:{limit}:{offset}"
@@ -247,7 +247,9 @@ def list_admin_shows(
 
 
 @router.get("/shows/resolve-slug")
-def resolve_admin_show_slug(slug: str = Query(..., min_length=1), _: InternalAdminUser = None) -> dict[str, Any]:
+def resolve_admin_show_slug(
+    slug: str = Query(..., min_length=1), _: InternalAdminUser = cast(InternalAdminUser, None)
+) -> dict[str, Any]:
     started_at = time.perf_counter()
     cache_key = f"resolve-slug:{slug.strip().lower()}"
 
@@ -276,7 +278,7 @@ def resolve_admin_show_slug(slug: str = Query(..., min_length=1), _: InternalAdm
 def get_people_home(
     limit: int = Query(12, ge=1, le=24),
     x_trr_admin_user_uid: str | None = Header(default=None, alias="X-TRR-Admin-User-Uid"),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
     normalized_uid = (x_trr_admin_user_uid or "").strip() or None
@@ -297,7 +299,7 @@ def get_people_home(
 
 
 @router.get("/shows/{show_id}")
-def get_admin_show(show_id: str, _: InternalAdminUser = None) -> dict[str, Any]:
+def get_admin_show(show_id: str, _: InternalAdminUser = cast(InternalAdminUser, None)) -> dict[str, Any]:
     show_id = _require_uuid_param(show_id, "show_id")
     started_at = time.perf_counter()
     cache_key = f"show:{show_id}"
@@ -325,7 +327,7 @@ def get_admin_show_assets(
     cursor: str | None = Query(default=None),
     full: bool = Query(False),
     sources: str | None = Query(None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     show_id = _require_uuid_param(show_id, "show_id")
     started_at = time.perf_counter()
@@ -383,7 +385,7 @@ def list_admin_show_seasons(
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     include_episode_signal: bool = Query(False),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     show_id = _require_uuid_param(show_id, "show_id")
     started_at = time.perf_counter()
@@ -426,7 +428,7 @@ def get_admin_show_season_assets(
     cursor: str | None = Query(default=None),
     full: bool = Query(False),
     sources: str | None = Query(None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     show_id = _require_uuid_param(show_id, "show_id")
     started_at = time.perf_counter()
@@ -487,7 +489,7 @@ def list_admin_season_episodes(
     season_id: str,
     limit: int = Query(20, ge=1, le=500),
     offset: int = Query(0, ge=0),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
     cache_key = f"season-episodes:{season_id}:{limit}:{offset}"
@@ -518,7 +520,7 @@ def list_admin_season_episodes(
 @router.get("/seasons/{season_id}/backdrops/unassigned")
 def get_admin_unassigned_season_backdrops(
     season_id: str,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
     cache_key = f"season-unassigned-backdrops:{season_id}"
@@ -548,7 +550,7 @@ def get_admin_unassigned_season_backdrops(
 def assign_admin_season_backdrops(
     season_id: str,
     body: dict[str, Any],
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     requested_ids = body.get("media_asset_ids")
     media_asset_ids = (
@@ -581,7 +583,7 @@ def get_admin_show_cast(
     photo_fallback: str = Query("none"),
     include_photos: bool = Query(True),
     eligibility_mode: str = Query("default"),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     show_id = _require_uuid_param(show_id, "show_id")
     started_at = time.perf_counter()
@@ -616,7 +618,7 @@ def get_admin_show_cast(
 @router.get("/shows/{show_id}/credits")
 def get_admin_show_credits(
     show_id: str,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     show_id = _require_uuid_param(show_id, "show_id")
     started_at = time.perf_counter()
@@ -644,7 +646,7 @@ def get_admin_season_cast(
     offset: int = Query(0, ge=0),
     include_archive_only: bool = Query(False),
     photo_fallback: str = Query("none"),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     show_id = _require_uuid_param(show_id, "show_id")
     started_at = time.perf_counter()
@@ -675,7 +677,9 @@ def get_admin_season_cast(
 
 
 @router.post("/shows/{show_id}/cache/invalidate")
-def invalidate_admin_show_read_cache(show_id: str, _: InternalAdminUser = None) -> dict[str, bool]:
+def invalidate_admin_show_read_cache(
+    show_id: str, _: InternalAdminUser = cast(InternalAdminUser, None)
+) -> dict[str, bool]:
     show_id = _require_uuid_param(show_id, "show_id")
     invalidate_show_read_cache(show_id=show_id)
     logger.info("[admin-show-read] route=invalidate-cache show_id=%s", show_id)

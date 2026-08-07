@@ -34,6 +34,7 @@ def test_build_auto_thumbnail_crop_payload_falls_back_to_face_centroid(monkeypat
 
     payload = detection.build_auto_thumbnail_crop_payload(_result())
 
+    assert payload is not None
     assert payload == {
         "x": 44.5,
         "y": 21.0,

@@ -45,7 +45,9 @@ class Crawl4aiRuntime:
 
     def healthcheck(self) -> RuntimeHealth:
         try:
-            import crawl4ai  # noqa: F401
+            # Optional dependency: resolved via builtins.__import__ so tests can
+            # intercept it; the module is not statically resolvable here.
+            __import__("crawl4ai")
         except ImportError as exc:
             return RuntimeHealth(
                 healthy=False,

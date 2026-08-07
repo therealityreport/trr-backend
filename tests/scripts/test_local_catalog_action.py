@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -366,7 +367,7 @@ def test_main_bounded_instagram_dry_run_preserves_offline_plan_when_preview_is_u
 
 def test_main_bounded_instagram_dry_run_emits_read_only_target_preview(monkeypatch, capsys) -> None:
     calls: list[str] = []
-    preview_args: dict[str, object] = {}
+    preview_args: dict[str, Any] = {}
 
     monkeypatch.setattr(cli, "load_dotenv", lambda *args, **kwargs: calls.append("dotenv"))
     monkeypatch.setattr(

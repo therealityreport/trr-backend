@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from concurrent.futures import Future
+from typing import Any, cast
 
 import pytest
 
@@ -11,7 +13,7 @@ from trr_backend.db.pg import DatabaseServiceUnavailableError
 
 
 @pytest.fixture(autouse=True)
-def _reset_account_profile_caches() -> None:
+def _reset_account_profile_caches() -> Generator[None, None, None]:
     profile_cache._clear_account_profile_caches()
     yield
     profile_cache._clear_account_profile_caches()
@@ -26,7 +28,7 @@ def test_account_profile_cache_key_normalizes_identity_and_preserves_extras() ->
         page_size=25,
         search=" CAST ",
         window=" 30D ",
-        comments_only=1,
+        comments_only=cast("Any", 1),
         comment_filter=" Missing ",
         sort_by=" Posted_At ",
         sort_dir=" DESC ",

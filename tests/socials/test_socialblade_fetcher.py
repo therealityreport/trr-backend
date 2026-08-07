@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import date, timedelta
+from typing import Any
 
 import pytest
 
@@ -137,7 +138,7 @@ def test_scrapling_fetcher_uses_direct_instagram_user_url_without_raw_init_scrip
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fetcher = _build_fetcher(platform="instagram")
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     async def fake_async_fetch(url: str, **kwargs: object):
         captured["url"] = url
@@ -165,7 +166,7 @@ def test_scrapling_fetcher_passes_proxy_to_browser_and_http_client(monkeypatch: 
         platform="instagram",
         proxy_config=_DummyProxyConfig(browser_proxy=browser_proxy, api_proxy_url="http://proxy.example:8080"),
     )
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     async def fake_async_fetch(url: str, **kwargs: object):
         captured["url"] = url
@@ -191,7 +192,7 @@ def test_scrapling_fetcher_passes_proxy_to_browser_and_http_client(monkeypatch: 
 
 def test_scrapling_fetcher_uses_tiktok_user_url_with_trpc_capture(monkeypatch: pytest.MonkeyPatch) -> None:
     fetcher = _build_fetcher(platform="tiktok")
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     async def fake_async_fetch(url: str, **kwargs: object):
         captured["url"] = url
@@ -369,7 +370,7 @@ def test_scrapling_fetcher_prefers_captured_xhr_history_when_html_capture_is_mis
         "grade": "B+",
         "ranks": {"sb": 39828, "followers": 318818, "engagement_rate": 46796},
     }
-    xhr_responses = [
+    xhr_responses: list[object] = [
         _DummyResponse(
             text=_trpc_batch_payload(user_payload, history_rows),
             url="https://socialblade.com/api/trpc/instagram.user,instagram.history?batch=1&input=%7B%7D",

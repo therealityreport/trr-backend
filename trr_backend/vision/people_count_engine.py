@@ -12,8 +12,9 @@ import logging
 import os
 import time
 from datetime import UTC, datetime
+from importlib import import_module
 from threading import Lock
-from typing import Any
+from typing import Any, cast
 
 import requests
 
@@ -25,12 +26,12 @@ logger = logging.getLogger(__name__)
 
 DetectorMode = str
 
-_yolo_detector: object | None = None
+_yolo_detector: Any | None = None
 _yolo_last_error: str | None = None
 _FACE_MATCH_CACHE_LOCK = Lock()
-_FACE_MATCH_CACHE: dict[str, object] = {"expires_at": 0.0, "entries": []}
+_FACE_MATCH_CACHE: dict[str, Any] = {"expires_at": 0.0, "entries": []}
 _OWNER_REFERENCE_CACHE_LOCK = Lock()
-_OWNER_REFERENCE_CACHE: dict[str, dict[str, object]] = {}
+_OWNER_REFERENCE_CACHE: dict[str, dict[str, Any]] = {}
 
 
 class VisionEngineError(RuntimeError):
@@ -91,7 +92,7 @@ def _lazy_cv2():
     return cv2
 
 
-def _get_yolo_detector() -> object | None:
+def _get_yolo_detector() -> Any | None:
     global _yolo_detector, _yolo_last_error
 
     if _yolo_detector is not None:
@@ -102,14 +103,15 @@ def _get_yolo_detector() -> object | None:
         return None
 
     try:
-        from ultralytics import YOLO
+        ultralytics: Any = import_module("ultralytics")
+        yolo_class = ultralytics.YOLO
     except Exception as exc:  # noqa: BLE001
         _yolo_last_error = str(exc)
         return None
 
     try:
         model_name = os.getenv("YOLO_MODEL", "yolov8n")
-        _yolo_detector = YOLO(f"{model_name}.pt")
+        _yolo_detector = yolo_class(f"{model_name}.pt")
         _yolo_last_error = None
         return _yolo_detector
     except Exception as exc:  # noqa: BLE001
@@ -324,7 +326,9 @@ def _normalize_owner_reference_images(value: list[dict[str, object]] | None) -> 
         normalized_entry = _normalize_reference_entry(entry)
         if normalized_entry is None:
             continue
-        signature = "|".join(str(url).strip().lower() for url in list(normalized_entry.get("url_candidates") or []))
+        signature = "|".join(
+            str(url).strip().lower() for url in list(cast("list[object]", normalized_entry.get("url_candidates") or []))
+        )
         if signature and signature not in seen:
             seen.add(signature)
             normalized.append(normalized_entry)
@@ -539,7 +543,11 @@ def _simulated_count(image: Any) -> tuple[int, int]:
 def _reference_cache_key(person_id: str, references: list[dict[str, object]]) -> str:
     material = [person_id]
     for entry in references:
-        urls = [str(url).strip() for url in list(entry.get("url_candidates") or []) if isinstance(url, str)]
+        urls = [
+            str(url).strip()
+            for url in list(cast("list[object]", entry.get("url_candidates") or []))
+            if isinstance(url, str)
+        ]
         material.extend(urls)
     return hashlib.sha256("|".join(material).encode("utf-8")).hexdigest()
 
@@ -576,7 +584,11 @@ def _build_reference_centroid(
     skipped: list[dict[str, str]] = []
 
     for ref in references:
-        urls = [str(url).strip() for url in list(ref.get("url_candidates") or []) if isinstance(url, str)]
+        urls = [
+            str(url).strip()
+            for url in list(cast("list[object]", ref.get("url_candidates") or []))
+            if isinstance(url, str)
+        ]
         if not urls:
             continue
         resolved_url: str | None = None
@@ -618,8 +630,9 @@ def _build_reference_centroid(
             value = ref.get(field)
             if value:
                 used_entry[field] = value
-        if isinstance(ref.get("url_candidates"), list):
-            used_entry["url_candidates"] = [u for u in ref.get("url_candidates") if isinstance(u, str)]
+        ref_url_candidates = ref.get("url_candidates")
+        if isinstance(ref_url_candidates, list):
+            used_entry["url_candidates"] = [u for u in ref_url_candidates if isinstance(u, str)]
 
         if face_count > 1:
             reasons_list = used_entry.get("reasons")
@@ -661,9 +674,9 @@ def _build_owner_reference_centroid_profile(
             expires_at = float(cached.get("expires_at") or 0.0)
             if expires_at > now_ts:
                 centroid = cached.get("centroid")
-                profile = cached.get("profile")
-                if isinstance(profile, dict):
-                    profile_out = dict(profile)
+                cached_profile = cached.get("profile")
+                if isinstance(cached_profile, dict):
+                    profile_out = dict(cached_profile)
                     profile_out["cache_hit"] = True
                     return centroid, profile_out
 
@@ -828,7 +841,7 @@ def _match_faces_to_people(
             centroid = entry.get("embedding")
             if centroid is None:
                 continue
-            similarity = float(np.dot(face_embedding, centroid))
+            similarity = float(np.dot(face_embedding, cast("Any", centroid)))
             scored.append((similarity, entry))
         scored.sort(key=lambda item: item[0], reverse=True)
 
@@ -934,10 +947,11 @@ def _normalize_face_detections(
                 payload[field] = value
         if isinstance(filter_info.get("filter_decision"), str):
             payload["filter_decision"] = filter_info["filter_decision"]
-        if isinstance(filter_info.get("filter_metrics"), dict) and filter_info.get("filter_metrics"):
+        raw_filter_metrics = filter_info.get("filter_metrics")
+        if isinstance(raw_filter_metrics, dict) and raw_filter_metrics:
             payload["filter_metrics"] = {
                 key: float(value)
-                for key, value in filter_info["filter_metrics"].items()
+                for key, value in raw_filter_metrics.items()
                 if key in {"face_w", "face_h", "face_area_ratio"} and isinstance(value, (int, float))
             }
         detections.append(payload)
@@ -986,17 +1000,19 @@ def _compute_people_count_dict(payload: dict[str, object]) -> dict[str, object]:
     prefer_fast_pass = (
         bool(payload.get("prefer_fast_pass")) if isinstance(payload.get("prefer_fast_pass"), bool) else False
     )
+    raw_candidate_person_ids = payload.get("candidate_person_ids")
     candidate_person_ids = _normalize_candidate_person_ids(
-        payload.get("candidate_person_ids") if isinstance(payload.get("candidate_person_ids"), list) else None
+        raw_candidate_person_ids if isinstance(raw_candidate_person_ids, list) else None
     )
-    owner_person_id = _normalize_owner_person_id(
-        payload.get("owner_person_id") if isinstance(payload.get("owner_person_id"), str) else None
-    )
+    raw_owner_person_id = payload.get("owner_person_id")
+    owner_person_id = _normalize_owner_person_id(raw_owner_person_id if isinstance(raw_owner_person_id, str) else None)
+    raw_owner_reference_images = payload.get("owner_reference_images")
     owner_reference_images = _normalize_owner_reference_images(
-        payload.get("owner_reference_images") if isinstance(payload.get("owner_reference_images"), list) else None
+        raw_owner_reference_images if isinstance(raw_owner_reference_images, list) else None
     )
+    raw_person_reference_images = payload.get("person_reference_images")
     person_reference_images = _normalize_person_reference_images(
-        payload.get("person_reference_images") if isinstance(payload.get("person_reference_images"), list) else None
+        raw_person_reference_images if isinstance(raw_person_reference_images, list) else None
     )
     owner_reference_centroid = None
     reference_profile = None

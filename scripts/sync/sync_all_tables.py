@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from typing import Any, cast
 
 from scripts._sync_common import add_show_filter_args
 
@@ -63,13 +64,14 @@ def main(argv: list[str] | None = None) -> int:
         sync_shows,
     )
 
+    # The scripts.* shims re-export main dynamically via globals(); pyright cannot see it.
     runners = {
-        "shows": sync_shows.main,
-        "seasons": sync_seasons.main,
-        "episodes": sync_episodes.main,
-        "people": sync_people.main,
-        "show_cast": sync_show_cast.main,
-        "episode_appearances": sync_episode_appearances.main,
+        "shows": cast(Any, sync_shows).main,
+        "seasons": cast(Any, sync_seasons).main,
+        "episodes": cast(Any, sync_episodes).main,
+        "people": cast(Any, sync_people).main,
+        "show_cast": cast(Any, sync_show_cast).main,
+        "episode_appearances": cast(Any, sync_episode_appearances).main,
     }
 
     if args.tables:

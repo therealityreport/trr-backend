@@ -7,6 +7,7 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 from textwrap import dedent
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 from fastapi import FastAPI
@@ -362,8 +363,10 @@ def test_admin_health_instagram_comment_rollups_calls_ready_common_export_offlin
     import trr_backend.socials.read_models.account_profile.common as common
     import trr_backend.socials.social_season_analytics_impl as provider
 
-    assert common._PROVIDER_STATE == "READY"
-    assert common._PROVIDER_NAMESPACE is provider.__dict__
+    # _PROVIDER_STATE/_PROVIDER_NAMESPACE are injected at runtime by the provider loop.
+    common_any: Any = common
+    assert common_any._PROVIDER_STATE == "READY"
+    assert common_any._PROVIDER_NAMESPACE is provider.__dict__
     assert api_main.instagram_comment_rollup_health is common.instagram_comment_rollup_health
     connection = object()
     db_calls: list[dict[str, object]] = []
@@ -382,7 +385,7 @@ def test_admin_health_instagram_comment_rollups_calls_ready_common_export_offlin
         patch.object(provider.pg, "db_read_connection", fake_read_connection),
         patch.object(provider, "_instagram_post_comment_rollups_available", fake_available),
     ):
-        result = api_main.admin_health_instagram_comment_rollups(sample_limit=7, _=None)
+        result = api_main.admin_health_instagram_comment_rollups(sample_limit=7, _=cast("Any", None))
 
     assert result == {
         "status": "unavailable",

@@ -27,12 +27,15 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Iterable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-try:
+if TYPE_CHECKING:
     import requests
-except Exception:  # noqa: BLE001
-    requests = None
+else:
+    try:
+        import requests
+    except Exception:  # noqa: BLE001
+        requests = None
 
 from trr_backend.db.admin import create_supabase_admin_client
 from trr_backend.db.postgrest_cache import is_pgrst204_error

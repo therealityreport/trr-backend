@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -73,7 +74,7 @@ def test_fresh_import_orders_publish_exact_provider(order: tuple[str, str]) -> N
 
 def test_provider_is_idempotent_mismatch_rejecting_and_refreshes_monolith_patches() -> None:
     room = importlib.import_module(PROGRESS_MODULE)
-    legacy = importlib.import_module(LEGACY_IMPL_MODULE)
+    legacy = cast(Any, importlib.import_module(LEGACY_IMPL_MODULE))
 
     assert room._PROVIDER_STATE == "READY"
     assert room._PROVIDER_NAMESPACE is legacy.__dict__

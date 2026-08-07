@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 try:
@@ -270,7 +270,8 @@ def _fetch_rows(
 
     cur.execute(sql, params)
     rows = cur.fetchall()
-    return rows if isinstance(rows, list) else []
+    # RealDictRow is a dict subclass; typing-only cast for pyright.
+    return cast("list[dict[str, Any]]", rows) if isinstance(rows, list) else []
 
 
 def _update_rows(
@@ -323,7 +324,8 @@ def main(argv: list[str] | None = None) -> int:
 
     conn = psycopg2.connect(_resolve_db_url(), cursor_factory=RealDictCursor)
     try:
-        cur = conn.cursor()
+        # cursor_factory=RealDictCursor makes this a RealDictCursor; typing-only cast.
+        cur = cast("RealDictCursor", conn.cursor())
         for table in tables:
             rows = _fetch_rows(
                 cur,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any, cast
 
 from trr_backend.integrations import getty
 
@@ -126,7 +127,7 @@ def test_search_asset_candidates_records_query_summary_and_detects_page_rewrite(
     assert summary["expected_page"] == 4
     assert summary["current_page"] == 1
     assert summary["response_url"] == "https://www.gettyimages.com/search/2/image?family=editorial&page=1"
-    assert summary["first_editorial_ids"][:3] == ["11", "12", "13"]
+    assert cast(Any, summary["first_editorial_ids"])[:3] == ["11", "12", "13"]
 
 
 def test_search_asset_candidates_records_request_exception_details(monkeypatch) -> None:
@@ -137,7 +138,7 @@ def test_search_asset_candidates_records_request_exception_details(monkeypatch) 
     class _Session:
         def get(self, url: str, **kwargs):
             exc = getty.RequestException("blocked by upstream")
-            exc.response = _Response()
+            exc.response = cast(Any, _Response())
             raise exc
 
     summary: dict[str, object] = {}
@@ -825,6 +826,7 @@ def test_scan_event_page_for_person_respects_limit(monkeypatch) -> None:
         scan_limit=50,
     )
 
+    assert results is not None
     assert results["total_scanned"] == 50
 
 

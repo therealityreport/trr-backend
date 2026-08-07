@@ -100,6 +100,7 @@ def test_select_tiktok_proxy_decodo_sticky_opt_in(monkeypatch):
     assert result is not None
     assert isinstance(result.browser_proxy, dict)
     assert result.session_mode == "sticky"
+    assert result.api_proxy_url is not None
     assert result.browser_proxy["username"].startswith("user1-session-")
     assert "-sessionduration-10" in result.browser_proxy["username"]
     assert "sessionduration-10" in result.api_proxy_url

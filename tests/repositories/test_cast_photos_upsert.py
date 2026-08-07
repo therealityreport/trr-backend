@@ -3,11 +3,13 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 from uuid import UUID
 
 import pytest
 
+from trr_backend.db.session import DbSession
 from trr_backend.models.cast_photos import CastPhotoUpsert
 from trr_backend.repositories.cast_photos import (
     CastPhotoRepositoryError,
@@ -33,7 +35,7 @@ class _FakeClient:
         self._fail_count = fail_count
         self._attempts = 0
         self._response = response or _FakeResponse(data=[{"id": "test-id"}])
-        self._rpc_calls: list[tuple[str, dict[str, object]]] = []
+        self._rpc_calls: list[tuple[str, dict[str, Any]]] = []
         self._update_calls: list[tuple[str, dict[str, object]]] = []
         self._mode = "rpc"
         self._pending_table = ""
@@ -100,7 +102,7 @@ def test_upsert_cast_photos_retries_on_pgrst204(
 ) -> None:
     client = _FakeClient(fail_count=1)
 
-    upsert_cast_photos(client, [_sample_row()])
+    upsert_cast_photos(cast(DbSession, client), [_sample_row()])
 
     assert client._attempts == 2
     mock_reload.assert_called_once()
@@ -110,7 +112,7 @@ def test_upsert_cast_photos_retries_on_pgrst204(
 def test_upsert_cast_photos_uses_rpc_function() -> None:
     client = _FakeClient()
 
-    upsert_cast_photos(client, [_sample_row()])
+    upsert_cast_photos(cast(DbSession, client), [_sample_row()])
 
     assert client._rpc_calls
     assert client._rpc_calls[0][0] == "upsert_cast_photos_by_identity"
@@ -130,7 +132,7 @@ def test_upsert_cast_photos_uses_canonical_rpc() -> None:
         source="fandom",
     )
 
-    upsert_cast_photos(client, [row], dedupe_on="image_url_canonical")
+    upsert_cast_photos(cast(DbSession, client), [row], dedupe_on="image_url_canonical")
 
     assert client._rpc_calls
     assert client._rpc_calls[0][0] == "upsert_cast_photos_by_canonical"
@@ -149,7 +151,7 @@ def test_upsert_cast_photos_requires_source_image_id() -> None:
     )
 
     with pytest.raises(CastPhotoRepositoryError):
-        upsert_cast_photos(client, [bad_row])
+        upsert_cast_photos(cast(DbSession, client), [bad_row])
 
 
 def test_upsert_cast_photos_requires_canonical_url() -> None:
@@ -164,7 +166,7 @@ def test_upsert_cast_photos_requires_canonical_url() -> None:
     )
 
     with pytest.raises(CastPhotoRepositoryError):
-        upsert_cast_photos(client, [bad_row], dedupe_on="image_url_canonical")
+        upsert_cast_photos(cast(DbSession, client), [bad_row], dedupe_on="image_url_canonical")
 
 
 def test_upsert_cast_photos_normalizes_canonical_payload_from_image_url() -> None:
@@ -180,7 +182,7 @@ def test_upsert_cast_photos_normalizes_canonical_payload_from_image_url() -> Non
         image_url_canonical="https://static.wikia.nocookie.net/Real-Housewives/images/AbC.jpg?cb=123",
     )
 
-    upsert_cast_photos(client, [row], dedupe_on="image_url_canonical")
+    upsert_cast_photos(cast(DbSession, client), [row], dedupe_on="image_url_canonical")
 
     payload = client._rpc_calls[0][1]["rows"][0]
     assert payload["image_url_canonical"] == "https://static.wikia.nocookie.net/real-housewives/images/abc.jpg"
@@ -199,17 +201,20 @@ def test_upsert_cast_photos_serializes_nested_metadata() -> None:
         url="https://m.media-amazon.com/images/M/MV5BTEST@._V1_.jpg",
         url_path="/images/M/MV5BTEST@._V1_.jpg",
         width=640,
-        metadata={
-            nested_key: {
-                "date_only": date(2024, 1, 2),
-                "date_time": datetime(2024, 1, 2, 3, 4, 5),
-                "values": [Decimal("12.34"), {"enum": _TestEnum.SAMPLE}],
+        metadata=cast(
+            "dict[str, Any]",
+            {
+                nested_key: {
+                    "date_only": date(2024, 1, 2),
+                    "date_time": datetime(2024, 1, 2, 3, 4, 5),
+                    "values": [Decimal("12.34"), {"enum": _TestEnum.SAMPLE}],
+                },
+                "list": [date(2024, 1, 3), datetime(2024, 1, 3, 4, 5, 6)],
             },
-            "list": [date(2024, 1, 3), datetime(2024, 1, 3, 4, 5, 6)],
-        },
+        ),
     )
 
-    upsert_cast_photos(client, [row])
+    upsert_cast_photos(cast(DbSession, client), [row])
 
     payload = client._rpc_calls[0][1]["rows"][0]
     metadata = payload["metadata"]
@@ -248,7 +253,7 @@ def test_upsert_cast_photos_merges_metadata_for_existing_identity_rows() -> None
         metadata={"source_variant": "imdb_person_gallery"},
     )
 
-    upserted = upsert_cast_photos(client, [row], dedupe_on="source_image_id")
+    upserted = upsert_cast_photos(cast(DbSession, client), [row], dedupe_on="source_image_id")
 
     assert client._update_calls
     row_id, payload = client._update_calls[0]

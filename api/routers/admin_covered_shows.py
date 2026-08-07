@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, Header, HTTPException
 from fastapi.encoders import jsonable_encoder
@@ -51,7 +51,7 @@ def _actor_uid(admin: dict[str, Any], explicit_uid: str | None) -> str:
 
 
 @router.get("")
-def list_covered_shows(_: InternalAdminUser = None) -> dict[str, Any]:
+def list_covered_shows(_: InternalAdminUser = cast(InternalAdminUser, None)) -> dict[str, Any]:
     started_at = time.perf_counter()
     payload, query_count, cache_status = covered_shows_service.list_covered_shows()
     _log_read("list", query_count=query_count, payload=payload, cache_status=cache_status, started_at=started_at)
@@ -59,7 +59,7 @@ def list_covered_shows(_: InternalAdminUser = None) -> dict[str, Any]:
 
 
 @router.get("/{show_id}")
-def get_covered_show(show_id: str, _: InternalAdminUser = None) -> dict[str, Any]:
+def get_covered_show(show_id: str, _: InternalAdminUser = cast(InternalAdminUser, None)) -> dict[str, Any]:
     started_at = time.perf_counter()
     show, query_count, cache_status = covered_shows_service.get_covered_show(show_id)
     if show is None:
@@ -73,7 +73,7 @@ def get_covered_show(show_id: str, _: InternalAdminUser = None) -> dict[str, Any
 def create_covered_show(
     body: CreateCoveredShowRequest,
     x_trr_admin_user_uid: str | None = Header(default=None, alias="X-TRR-Admin-User-Uid"),
-    admin: InternalAdminUser = None,
+    admin: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     show_id = str(body.trr_show_id or "").strip()
     show_name = str(body.show_name or "").strip()
@@ -91,7 +91,7 @@ def create_covered_show(
 
 
 @router.delete("/{show_id}")
-def delete_covered_show(show_id: str, _: InternalAdminUser = None) -> dict[str, bool]:
+def delete_covered_show(show_id: str, _: InternalAdminUser = cast(InternalAdminUser, None)) -> dict[str, bool]:
     deleted, _query_count = covered_shows_service.remove_covered_show(show_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Show not found in covered shows list")
@@ -99,7 +99,7 @@ def delete_covered_show(show_id: str, _: InternalAdminUser = None) -> dict[str, 
 
 
 @router.post("/cache/invalidate")
-def invalidate_cache(_: InternalAdminUser = None) -> dict[str, bool]:
+def invalidate_cache(_: InternalAdminUser = cast(InternalAdminUser, None)) -> dict[str, bool]:
     invalidate_covered_shows_cache()
     logger.info("[admin-covered-shows-read] route=invalidate-cache")
     return {"success": True}

@@ -401,6 +401,7 @@ def test_normalize_nasa_style_profile_payload() -> None:
     assert profile.url == "https://www.instagram.com/nasa"
     assert profile.username == "nasa"
     assert profile.full_name == "NASA"
+    assert profile.biography is not None
     assert profile.biography.startswith("Exploring the universe")
     assert profile.followers_count == 96000000
     assert profile.follows_count == 77

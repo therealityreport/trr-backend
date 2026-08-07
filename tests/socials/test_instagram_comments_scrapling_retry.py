@@ -9,7 +9,7 @@ import time
 from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -1018,7 +1018,7 @@ def test_reply_only_auth_blocked_gap_reconciliation_requires_reply_only_strategy
 def test_rebuild_http_client_closes_previous_client(monkeypatch) -> None:
     fetcher = _build_fetcher()
     old = _TrackingClient()
-    fetcher._http_client = old
+    fetcher._http_client = cast(Any, old)
     monkeypatch.setattr(
         "trr_backend.socials.instagram.comments_scrapling.fetcher.httpx.AsyncClient",
         lambda **_kwargs: _TrackingClient(),
@@ -1724,8 +1724,8 @@ def test_fetch_comments_resumes_from_top_level_cursor(monkeypatch: pytest.Monkey
 
     assert result.fetch_failed is False
     assert [comment.comment_id for comment in result.comments] == ["c2"]
-    assert fetcher._fetch_json_response.await_args.kwargs["params"]["min_id"] == "cursor-2"
-    assert fetcher._fetch_json_response.await_args.kwargs["params"]["sort_order"] == "recent"
+    assert cast(Any, fetcher._fetch_json_response.await_args).kwargs["params"]["min_id"] == "cursor-2"
+    assert cast(Any, fetcher._fetch_json_response.await_args).kwargs["params"]["sort_order"] == "recent"
 
 
 def test_fetch_comments_can_disable_explicit_sort_order(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1755,7 +1755,7 @@ def test_fetch_comments_can_disable_explicit_sort_order(monkeypatch: pytest.Monk
     )
 
     assert result.fetch_failed is False
-    assert "sort_order" not in fetcher._fetch_json_response.await_args.kwargs["params"]
+    assert "sort_order" not in cast(Any, fetcher._fetch_json_response.await_args).kwargs["params"]
 
 
 def test_comment_sort_order_resolver_defaults_to_recent_for_coverage(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1843,7 +1843,7 @@ def test_fetch_comment_replies_resumes_with_checkpoint_cursor_param() -> None:
     )
 
     assert result.fetch_failed is False
-    assert fetcher._fetch_json_response.await_args.kwargs["params"] == {"max_id": "tail-cursor"}
+    assert cast(Any, fetcher._fetch_json_response.await_args).kwargs["params"] == {"max_id": "tail-cursor"}
 
 
 def test_fetch_comment_replies_uses_rendered_parent_permalink_after_auth_challenge() -> None:
@@ -1878,11 +1878,11 @@ def test_fetch_comment_replies_uses_rendered_parent_permalink_after_auth_challen
     assert result.fetch_reason == "rendered_reply_fallback_recovered"
     assert [reply.comment_id for reply in result.comments] == ["reply-1"]
     fetcher._fetch_rendered_coauthor_comments_for_status_only.assert_awaited_once()
-    assert fetcher._fetch_rendered_coauthor_comments_for_status_only.await_args.args[1] == (
+    assert cast(Any, fetcher._fetch_rendered_coauthor_comments_for_status_only.await_args).args[1] == (
         "https://www.instagram.com/p/ABC123/c/parent-1/"
     )
     assert (
-        fetcher._fetch_rendered_coauthor_comments_for_status_only.await_args.kwargs["source_snapshot_type"]
+        cast(Any, fetcher._fetch_rendered_coauthor_comments_for_status_only.await_args).kwargs["source_snapshot_type"]
         == "rendered_reply_fallback_comments"
     )
 
@@ -1982,8 +1982,8 @@ def test_fetch_comments_resumes_top_level_cursor_with_recorded_param() -> None:
     )
 
     assert result.fetch_failed is False
-    assert fetcher._fetch_json_response.await_args.kwargs["params"]["max_id"] == "cursor-2"
-    assert "min_id" not in fetcher._fetch_json_response.await_args.kwargs["params"]
+    assert cast(Any, fetcher._fetch_json_response.await_args).kwargs["params"]["max_id"] == "cursor-2"
+    assert "min_id" not in cast(Any, fetcher._fetch_json_response.await_args).kwargs["params"]
 
 
 def test_fetch_comment_replies_ignores_page_cap_env_and_records_repeated_cursor(monkeypatch) -> None:
@@ -2108,7 +2108,7 @@ def test_fetch_comment_replies_resumes_from_checkpoint_cursor() -> None:
 
     assert [comment.comment_id for comment in result.comments] == ["r2"]
     assert result.fetch_failed is False
-    assert fetcher._fetch_json_response.await_args.kwargs["params"] == {"min_id": "reply-cursor-2"}
+    assert cast(Any, fetcher._fetch_json_response.await_args).kwargs["params"] == {"min_id": "reply-cursor-2"}
 
 
 def test_fetch_comment_replies_follows_head_more_with_min_cursor() -> None:
@@ -2435,7 +2435,7 @@ def test_fetch_api_with_browser_returns_browser_response() -> None:
 
     assert result is response
     fetcher._fetcher.async_fetch.assert_awaited_once()
-    request_url = fetcher._fetcher.async_fetch.await_args.args[0]
+    request_url = cast(Any, fetcher._fetcher.async_fetch.await_args).args[0]
     assert request_url == (
         "https://www.instagram.com/api/v1/media/1/comments/?can_support_threading=true&permalink_enabled=false"
     )
@@ -2901,7 +2901,7 @@ def test_auth_failure_uses_rendered_post_fallback_for_non_collaborator() -> None
     assert result.comments == [rendered_comment]
     fetcher._fetch_rendered_coauthor_comments_for_status_only.assert_awaited_once()
     assert (
-        fetcher._fetch_rendered_coauthor_comments_for_status_only.await_args.kwargs["source_snapshot_type"]
+        cast(Any, fetcher._fetch_rendered_coauthor_comments_for_status_only.await_args).kwargs["source_snapshot_type"]
         == "rendered_auth_fallback_comments"
     )
     rendered_lane = fetcher.runtime_metadata["lane_diagnostics"]["rendered"]
@@ -4027,9 +4027,9 @@ def test_select_comments_proxy_decodo_sticky_session(monkeypatch) -> None:
     result = select_comments_proxy()
     assert result is not None
     assert result.session_mode == "sticky"
-    assert "-session-" in result.browser_proxy["username"]
-    assert "-sessionduration-10" in result.browser_proxy["username"]
-    assert "sessionduration-10" in result.api_proxy_url
+    assert "-session-" in cast(dict[str, str], result.browser_proxy)["username"]
+    assert "-sessionduration-10" in cast(dict[str, str], result.browser_proxy)["username"]
+    assert "sessionduration-10" in cast(str, result.api_proxy_url)
 
 
 def test_job_runner_uses_shard_proxy_session_only_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4048,7 +4048,11 @@ def test_job_runner_uses_shard_proxy_session_only_when_enabled(monkeypatch: pyte
             return None
 
         async def fetch_comments_for_shortcode(self, *_args: Any, **_kwargs: Any) -> InstagramCommentsFetchResult:
-            return InstagramCommentsFetchResult(comments=[object()], fetch_failed=False, auth_failed=False)
+            return InstagramCommentsFetchResult(
+                comments=[cast(InstagramComment, object())],
+                fetch_failed=False,
+                auth_failed=False,
+            )
 
         async def aclose(self) -> None:
             return None
@@ -4464,8 +4468,8 @@ def test_completion_residual_gap_health_check_saturation_retries_targets(
     exc = exc_info.value
     assert exc.error_code == "instagram_comments_health_gap_check_unavailable"
     assert exc.retryable is True
-    assert exc.runtime_metadata["retry_target_source_ids"] == canaries
-    assert exc.runtime_metadata["completion_status"] == "comment_capture_health_check_unavailable"
+    assert cast(dict[str, Any], exc.runtime_metadata)["retry_target_source_ids"] == canaries
+    assert cast(dict[str, Any], exc.runtime_metadata)["completion_status"] == "comment_capture_health_check_unavailable"
 
 
 def test_job_runner_completion_health_gap_requeues_canary_shortcodes(
@@ -4500,7 +4504,11 @@ def test_job_runner_completion_health_gap_requeues_canary_shortcodes(
 
         async def fetch_comments_for_shortcode(self, shortcode: str, **_kwargs: Any) -> InstagramCommentsFetchResult:
             fetch_calls.append(shortcode)
-            return InstagramCommentsFetchResult(comments=[object()], fetch_failed=False, auth_failed=False)
+            return InstagramCommentsFetchResult(
+                comments=[cast(InstagramComment, object())],
+                fetch_failed=False,
+                auth_failed=False,
+            )
 
         async def aclose(self) -> None:
             return None
@@ -4938,7 +4946,7 @@ def test_job_runner_tracks_isolated_post_auth_failure_for_retry(monkeypatch: pyt
             auth_failed=True,
             fetch_reason="html_challenge_or_auth_required",
         ),
-        InstagramCommentsFetchResult(comments=[object()], fetch_failed=False),
+        InstagramCommentsFetchResult(comments=[cast(InstagramComment, object())], fetch_failed=False),
     ]
     fetch_call_idx = {"i": 0}
 
@@ -5515,7 +5523,7 @@ def test_comments_job_runner_skips_duplicate_public_replay_after_auth_block(
 def test_public_replay_guard_accepts_legacy_and_recovery_pending_reasons(monkeypatch: pytest.MonkeyPatch) -> None:
     from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
 
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     def fake_fetch_all(sql: str, params: list[object]) -> list[dict[str, object]]:
         captured["sql"] = " ".join(sql.split())
@@ -5872,7 +5880,11 @@ def test_comments_job_runner_config_schema_only_skips_endpoint_probe(
 
         async def fetch_comments_for_shortcode(self, shortcode: str, **_kwargs: Any) -> InstagramCommentsFetchResult:
             fetch_calls.append(shortcode)
-            return InstagramCommentsFetchResult(comments=[object()], fetch_failed=False, auth_failed=False)
+            return InstagramCommentsFetchResult(
+                comments=[cast(InstagramComment, object())],
+                fetch_failed=False,
+                auth_failed=False,
+            )
 
         async def aclose(self) -> None:
             return None
@@ -6249,8 +6261,8 @@ def test_job_runner_partial_progress_persists_before_error(monkeypatch: pytest.M
         )
 
     fetch_results = [
-        InstagramCommentsFetchResult(comments=[object()], fetch_failed=False),
-        InstagramCommentsFetchResult(comments=[object()], fetch_failed=False),
+        InstagramCommentsFetchResult(comments=[cast(InstagramComment, object())], fetch_failed=False),
+        InstagramCommentsFetchResult(comments=[cast(InstagramComment, object())], fetch_failed=False),
         InstagramCommentsFetchResult(
             comments=[],
             fetch_failed=True,
@@ -6371,8 +6383,8 @@ def test_job_runner_continues_after_first_retryable_post_fetch_failure(monkeypat
             retryable=True,
             reported_comment_count=39,
         ),
-        InstagramCommentsFetchResult(comments=[object()], fetch_failed=False),
-        InstagramCommentsFetchResult(comments=[object()], fetch_failed=False),
+        InstagramCommentsFetchResult(comments=[cast(InstagramComment, object())], fetch_failed=False),
+        InstagramCommentsFetchResult(comments=[cast(InstagramComment, object())], fetch_failed=False),
     ]
     fetch_call_idx = {"i": 0}
 
@@ -6497,7 +6509,7 @@ def test_job_runner_surfaces_coauthor_status_only_failures(monkeypatch: pytest.M
                 retryable=True,
                 reported_comment_count=149,
             )
-        return InstagramCommentsFetchResult(comments=[object()], fetch_failed=False)
+        return InstagramCommentsFetchResult(comments=[cast(InstagramComment, object())], fetch_failed=False)
 
     fake_fetcher = MagicMock()
     fake_fetcher.warmup = AsyncMock()
@@ -6585,7 +6597,7 @@ def test_job_runner_retries_single_incomplete_target_in_large_shard(monkeypatch:
                 retryable=True,
                 reported_comment_count=39,
             )
-        return InstagramCommentsFetchResult(comments=[object()], fetch_failed=False)
+        return InstagramCommentsFetchResult(comments=[cast(InstagramComment, object())], fetch_failed=False)
 
     fake_fetcher = MagicMock()
     fake_fetcher.warmup = AsyncMock()
@@ -6659,7 +6671,11 @@ def test_job_runner_passes_top_level_resume_cursor_from_prior_metadata(
 
         async def fetch_comments_for_shortcode(self, _shortcode: str, **kwargs: Any) -> InstagramCommentsFetchResult:
             fetch_kwargs.append(dict(kwargs))
-            return InstagramCommentsFetchResult(comments=[object()], fetch_failed=False, auth_failed=False)
+            return InstagramCommentsFetchResult(
+                comments=[cast(InstagramComment, object())],
+                fetch_failed=False,
+                auth_failed=False,
+            )
 
         async def aclose(self) -> None:
             return None
@@ -6764,7 +6780,11 @@ def test_job_runner_passes_coauthor_target_metadata_to_fetcher(monkeypatch: pyte
 
         async def fetch_comments_for_shortcode(self, _shortcode: str, **kwargs: Any) -> InstagramCommentsFetchResult:
             fetch_kwargs.append(dict(kwargs))
-            return InstagramCommentsFetchResult(comments=[object()], fetch_failed=False, auth_failed=False)
+            return InstagramCommentsFetchResult(
+                comments=[cast(InstagramComment, object())],
+                fetch_failed=False,
+                auth_failed=False,
+            )
 
         async def aclose(self) -> None:
             return None
@@ -6973,7 +6993,11 @@ def test_job_runner_passes_reply_resume_cursors_from_prior_metadata(
 
         async def fetch_comments_for_shortcode(self, _shortcode: str, **kwargs: Any) -> InstagramCommentsFetchResult:
             fetch_kwargs.append(dict(kwargs))
-            return InstagramCommentsFetchResult(comments=[object()], fetch_failed=False, auth_failed=False)
+            return InstagramCommentsFetchResult(
+                comments=[cast(InstagramComment, object())],
+                fetch_failed=False,
+                auth_failed=False,
+            )
 
         async def aclose(self) -> None:
             return None
@@ -7071,7 +7095,11 @@ def test_job_runner_passes_top_level_resume_cursor_from_audit_payload(
 
         async def fetch_comments_for_shortcode(self, _shortcode: str, **kwargs: Any) -> InstagramCommentsFetchResult:
             fetch_kwargs.append(dict(kwargs))
-            return InstagramCommentsFetchResult(comments=[object()], fetch_failed=False, auth_failed=False)
+            return InstagramCommentsFetchResult(
+                comments=[cast(InstagramComment, object())],
+                fetch_failed=False,
+                auth_failed=False,
+            )
 
         async def aclose(self) -> None:
             return None
@@ -7186,7 +7214,11 @@ def test_job_runner_passes_reply_resume_cursor_from_audit_payload(
 
         async def fetch_comments_for_shortcode(self, _shortcode: str, **kwargs: Any) -> InstagramCommentsFetchResult:
             fetch_kwargs.append(dict(kwargs))
-            return InstagramCommentsFetchResult(comments=[object()], fetch_failed=False, auth_failed=False)
+            return InstagramCommentsFetchResult(
+                comments=[cast(InstagramComment, object())],
+                fetch_failed=False,
+                auth_failed=False,
+            )
 
         async def aclose(self) -> None:
             return None
@@ -7530,7 +7562,11 @@ def test_job_runner_reports_actual_comments_posts_checked(monkeypatch: pytest.Mo
             return None
 
         async def fetch_comments_for_shortcode(self, *_args: Any, **_kwargs: Any) -> InstagramCommentsFetchResult:
-            return InstagramCommentsFetchResult(comments=[object()], fetch_failed=False, auth_failed=False)
+            return InstagramCommentsFetchResult(
+                comments=[cast(InstagramComment, object())],
+                fetch_failed=False,
+                auth_failed=False,
+            )
 
         async def aclose(self) -> None:
             return None
@@ -7647,7 +7683,11 @@ def test_job_runner_retry_skips_already_complete_targets(monkeypatch: pytest.Mon
 
         async def fetch_comments_for_shortcode(self, shortcode: str, **_kwargs: Any) -> InstagramCommentsFetchResult:
             fetch_calls.append(shortcode)
-            return InstagramCommentsFetchResult(comments=[object()], fetch_failed=False, auth_failed=False)
+            return InstagramCommentsFetchResult(
+                comments=[cast(InstagramComment, object())],
+                fetch_failed=False,
+                auth_failed=False,
+            )
 
         async def aclose(self) -> None:
             return None
@@ -7699,7 +7739,7 @@ def test_job_runner_retry_skips_already_complete_targets(monkeypatch: pytest.Mon
 
     assert fetch_calls == ["SHORT2"]
     assert persist_calls == ["SHORT2"]
-    assert progress_activities[-1]["posts_checked"] == 2
+    assert cast(dict[str, Any], progress_activities[-1])["posts_checked"] == 2
     assert finish_calls[-1]["status"] == "completed"
     assert finish_calls[-1]["metadata"]["skipped_complete_target_source_ids"] == ["SHORT1"]
     assert finish_calls[-1]["metadata"]["post_latency"]["samples"][0]["completion_reason"] == "already_complete"
@@ -7735,7 +7775,11 @@ def test_job_runner_incomplete_fill_skips_targets_completed_by_prior_attempt(
 
         async def fetch_comments_for_shortcode(self, shortcode: str, **_kwargs: Any) -> InstagramCommentsFetchResult:
             fetch_calls.append(shortcode)
-            return InstagramCommentsFetchResult(comments=[object()], fetch_failed=False, auth_failed=False)
+            return InstagramCommentsFetchResult(
+                comments=[cast(InstagramComment, object())],
+                fetch_failed=False,
+                auth_failed=False,
+            )
 
         async def aclose(self) -> None:
             return None
@@ -7816,7 +7860,11 @@ def test_job_runner_retrying_job_prefilters_complete_targets_without_retry_flag(
 
         async def fetch_comments_for_shortcode(self, shortcode: str, **_kwargs: Any) -> InstagramCommentsFetchResult:
             fetch_calls.append(shortcode)
-            return InstagramCommentsFetchResult(comments=[object()], fetch_failed=False, auth_failed=False)
+            return InstagramCommentsFetchResult(
+                comments=[cast(InstagramComment, object())],
+                fetch_failed=False,
+                auth_failed=False,
+            )
 
         async def aclose(self) -> None:
             return None
@@ -7895,7 +7943,11 @@ def test_job_runner_marks_uncapped_success_complete(monkeypatch: pytest.MonkeyPa
             return None
 
         async def fetch_comments_for_shortcode(self, *_args: Any, **_kwargs: Any) -> InstagramCommentsFetchResult:
-            return InstagramCommentsFetchResult(comments=[object()], fetch_failed=False, auth_failed=False)
+            return InstagramCommentsFetchResult(
+                comments=[cast(InstagramComment, object())],
+                fetch_failed=False,
+                auth_failed=False,
+            )
 
         async def aclose(self) -> None:
             return None
@@ -7969,7 +8021,7 @@ def test_job_runner_keeps_capped_success_incomplete_when_local_cap_is_hit(monkey
 
         async def fetch_comments_for_shortcode(self, *_args: Any, **_kwargs: Any) -> InstagramCommentsFetchResult:
             return InstagramCommentsFetchResult(
-                comments=[object(), object()],
+                comments=[cast(InstagramComment, object()), cast(InstagramComment, object())],
                 fetch_failed=False,
                 auth_failed=False,
             )
@@ -8074,7 +8126,7 @@ def test_job_runner_retries_only_retryable_incomplete_posts(monkeypatch: pytest.
         async def fetch_comments_for_shortcode(self, shortcode: str, **_kwargs: Any) -> InstagramCommentsFetchResult:
             if shortcode == "SHORT1":
                 return InstagramCommentsFetchResult(
-                    comments=[object()],
+                    comments=[cast(InstagramComment, object())],
                     fetch_failed=True,
                     auth_failed=False,
                     fetch_reason="http_429",
@@ -8082,7 +8134,7 @@ def test_job_runner_retries_only_retryable_incomplete_posts(monkeypatch: pytest.
                     retryable=True,
                 )
             return InstagramCommentsFetchResult(
-                comments=[object()],
+                comments=[cast(InstagramComment, object())],
                 fetch_failed=False,
                 auth_failed=False,
                 request_count=4,
@@ -8997,7 +9049,7 @@ def test_job_runner_stops_after_first_genuine_http_429(
             fetch_calls.append(shortcode)
             if shortcode == "SHORT2":
                 return InstagramCommentsFetchResult(
-                    comments=[object()],
+                    comments=[cast(InstagramComment, object())],
                     fetch_failed=True,
                     auth_failed=False,
                     fetch_reason="http_429",
@@ -9006,7 +9058,7 @@ def test_job_runner_stops_after_first_genuine_http_429(
                     public_block_signal="http_429",
                 )
             return InstagramCommentsFetchResult(
-                comments=[object()],
+                comments=[cast(InstagramComment, object())],
                 fetch_failed=False,
                 auth_failed=False,
                 request_count=2,
@@ -9112,7 +9164,7 @@ def test_job_runner_completes_one_pass_incomplete_fill_with_unresolved_targets(
 
         async def fetch_comments_for_shortcode(self, *_args: Any, **_kwargs: Any) -> InstagramCommentsFetchResult:
             return InstagramCommentsFetchResult(
-                comments=[object()],
+                comments=[cast(InstagramComment, object())],
                 fetch_failed=True,
                 auth_failed=False,
                 fetch_reason="reply_tail_incomplete",
@@ -9212,7 +9264,11 @@ def test_job_runner_completed_metadata_reports_final_request_count(monkeypatch: 
 
         async def fetch_comments_for_shortcode(self, *_args: Any, **_kwargs: Any) -> InstagramCommentsFetchResult:
             self._request_count = 4
-            return InstagramCommentsFetchResult(comments=[object()], fetch_failed=False, auth_failed=False)
+            return InstagramCommentsFetchResult(
+                comments=[cast(InstagramComment, object())],
+                fetch_failed=False,
+                auth_failed=False,
+            )
 
         async def aclose(self) -> None:
             return None
@@ -9412,7 +9468,7 @@ def test_job_runner_persists_partial_success_when_auth_failed_but_comments_prese
 
         async def fetch_comments_for_shortcode(self, *_args: Any, **_kwargs: Any) -> InstagramCommentsFetchResult:
             return InstagramCommentsFetchResult(
-                comments=[object() for _ in range(22)],
+                comments=[cast(InstagramComment, object()) for _ in range(22)],
                 fetch_failed=False,
                 auth_failed=True,
                 fetch_reason=None,
@@ -9499,7 +9555,11 @@ def test_job_runner_reuses_one_db_connection_for_all_post_persists(monkeypatch: 
             return None
 
         async def fetch_comments_for_shortcode(self, *_args: Any, **_kwargs: Any) -> InstagramCommentsFetchResult:
-            return InstagramCommentsFetchResult(comments=[object()], fetch_failed=False, auth_failed=False)
+            return InstagramCommentsFetchResult(
+                comments=[cast(InstagramComment, object())],
+                fetch_failed=False,
+                auth_failed=False,
+            )
 
         async def aclose(self) -> None:
             return None
@@ -9561,7 +9621,11 @@ def test_job_runner_commits_each_post_persist(monkeypatch: pytest.MonkeyPatch) -
             return None
 
         async def fetch_comments_for_shortcode(self, *_args: Any, **_kwargs: Any) -> InstagramCommentsFetchResult:
-            return InstagramCommentsFetchResult(comments=[object()], fetch_failed=False, auth_failed=False)
+            return InstagramCommentsFetchResult(
+                comments=[cast(InstagramComment, object())],
+                fetch_failed=False,
+                auth_failed=False,
+            )
 
         async def aclose(self) -> None:
             return None
@@ -9634,7 +9698,11 @@ def test_job_runner_returns_degraded_summary_when_final_job_read_hits_db_saturat
             return None
 
         async def fetch_comments_for_shortcode(self, *_args: Any, **_kwargs: Any) -> InstagramCommentsFetchResult:
-            return InstagramCommentsFetchResult(comments=[object()], fetch_failed=False, auth_failed=False)
+            return InstagramCommentsFetchResult(
+                comments=[cast(InstagramComment, object())],
+                fetch_failed=False,
+                auth_failed=False,
+            )
 
         async def aclose(self) -> None:
             return None

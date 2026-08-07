@@ -3,9 +3,31 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, cast
+
 from fastapi import APIRouter
 
 from ._shared import *
+
+if TYPE_CHECKING:
+    from ._shared import (
+        _account_profile_cache_key,
+        _can_use_local_catalog_inline_fallback,
+        _clear_account_profile_caches,
+        _internal_error_response,
+        _is_local_or_dev_runtime,
+        _lookup_error_to_not_found,
+        _raise_if_modal_social_dispatch_unresolvable,
+        _remote_worker_unavailable_message,
+        _resolve_account_profile_catalog_run_progress,
+        _resolve_account_profile_singleflight,
+        _resolve_social_execution_modes,
+        _social_execution_mode_deprecation_payload,
+        _start_runs_in_background,
+        _to_social_read_http_exception,
+        _value_error_to_bad_request,
+        _worker_health_detail,
+    )
 
 router = APIRouter()
 
@@ -748,7 +770,7 @@ def get_social_account_catalog_posts_route(
     page: int = Query(default=1, ge=1, le=10_000),
     page_size: int = Query(default=25, ge=1, le=100),
     assignment_status: Literal["assigned", "unassigned", "ambiguous", "needs_review"] | None = Query(default=None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     try:
         return social_profile_reads.get_catalog_posts(
@@ -769,7 +791,7 @@ def get_social_account_catalog_post_detail_route(
     platform: str,
     account_handle: str,
     source_id: str,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     try:
         return social_profile_reads.get_catalog_post_detail(
@@ -795,7 +817,7 @@ def get_social_account_catalog_post_detail_route(
 def get_social_account_catalog_review_queue_route(
     platform: str,
     account_handle: str,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     cache_key = _account_profile_cache_key(
         surface="catalog-review-queue",
@@ -827,7 +849,7 @@ def get_social_account_catalog_run_progress_route(
     run_id: UUID,
     recent_log_limit: int = Query(default=20, ge=1, le=100),
     fast: bool = Query(default=False),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     try:
         progress_payload = _resolve_account_profile_catalog_run_progress(
@@ -867,7 +889,7 @@ def get_social_account_catalog_run_progress_route(
 def get_social_account_catalog_budget_decision_route(
     platform: str,
     account_handle: str,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     try:
         return social_profile_reads.get_catalog_budget_decision(
@@ -892,7 +914,7 @@ def get_social_account_catalog_run_diagnostics_route(
     platform: str,
     account_handle: str,
     run_id: UUID,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     try:
         return social_profile_reads.get_catalog_run_diagnostics(
@@ -919,7 +941,7 @@ def get_social_account_catalog_verification_route(
     platform: str,
     account_handle: str,
     run_id: UUID | None = None,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     try:
         return social_profile_reads.get_catalog_verification(
@@ -945,7 +967,7 @@ def get_social_account_catalog_verification_route(
 def get_social_account_catalog_gap_analysis_route(
     platform: str,
     account_handle: str,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     cache_key = _account_profile_cache_key(
         surface="catalog-gap-analysis",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -98,7 +99,7 @@ def test_tmdb_season_enrichment_preserves_imdb_title_and_upserts_posters(monkeyp
         tmdb_fetch_details=False,
         imdb_fetch_episodes=False,
         tmdb_fetch_seasons=True,
-        supabase_client=object(),
+        supabase_client=cast(Any, object()),
     )
     assert result.created == 1
 

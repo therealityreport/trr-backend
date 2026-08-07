@@ -762,7 +762,7 @@ def main(argv: list[str] | None = None) -> int:
         print("Error: Show not found")
         return 1
 
-    show_id = show.get("id")
+    show_id: Any = show.get("id")
     show_name = show.get("name")
     print(f"Found show: {show_name} (ID: {show_id})")
 
@@ -785,7 +785,7 @@ def main(argv: list[str] | None = None) -> int:
     total_s3_failed = 0
 
     for idx, person in enumerate(cast):
-        person_id = person.get("id")
+        person_id: Any = person.get("id")
         full_name = person.get("full_name") or "Unknown"
 
         if idx > 0 and args.delay_ms > 0:

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 import requests
+import requests.cookies
 
 from trr_backend.socials.instagram.request_client import InstagramRequestClient, InstagramRequestFailure
 
@@ -44,7 +47,7 @@ def test_request_client_classifies_redirect_to_login() -> None:
             headers={},
             cookies={},
             params={"doc_id": "1"},
-            sender=_fake_get,
+            sender=cast(Any, _fake_get),
         )
 
     assert exc.value.error_code == "redirect_login"
@@ -65,7 +68,7 @@ def test_request_client_classifies_checkpoint_and_feedback() -> None:
             headers={},
             cookies={},
             data={"doc_id": "1"},
-            sender=_fake_post,
+            sender=cast(Any, _fake_post),
         )
 
     assert exc.value.error_code == "checkpoint_required"
@@ -90,7 +93,7 @@ def test_request_client_classifies_200_html_login_before_json_parse() -> None:
             headers={},
             cookies={},
             params={"doc_id": "1"},
-            sender=_fake_get,
+            sender=cast(Any, _fake_get),
         )
 
     assert exc.value.error_code == "redirect_login"
@@ -116,7 +119,7 @@ def test_request_client_classifies_200_html_checkpoint_before_json_parse() -> No
             headers={},
             cookies={},
             data={"doc_id": "1"},
-            sender=_fake_post,
+            sender=cast(Any, _fake_post),
         )
 
     assert exc.value.error_code == "checkpoint_required"

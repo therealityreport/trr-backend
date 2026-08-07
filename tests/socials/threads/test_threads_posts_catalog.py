@@ -67,7 +67,7 @@ class _FakeThreadsScraper:
     def __init__(self, posts: list[Any], retrieval_meta: dict[str, Any], *, cookies: dict[str, str]) -> None:
         self.posts = posts
         self.cookies = cookies
-        self.config: Any | None = None
+        self.config: Any = None
         self.last_retrieval_meta = dict(retrieval_meta)
 
     def scrape(self, config: Any, *, progress_cb=None) -> list[Any]:

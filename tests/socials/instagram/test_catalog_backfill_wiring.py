@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import api.routers.socials as socials_router
 from trr_backend.socials.pipelines.account_catalog import launch, progress
 from trr_backend.socials.pipelines.comments import instagram as comments
@@ -187,7 +189,7 @@ def test_progress_payload_maps_paused_budget_to_blocked_budget_metadata() -> Non
 
 
 def test_completion_retry_targets_bucket_into_queue_primitives(monkeypatch) -> None:
-    calls: dict[str, list[object]] = {
+    calls: dict[str, list[Any]] = {
         "media": [],
         "comment_media": [],
         "comment_text": [],

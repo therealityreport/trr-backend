@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 from trr_backend.repositories.socialblade_growth import normalize_socialblade_account_handle
 from trr_backend.socials.socialblade import service as service_module
@@ -200,7 +201,7 @@ def test_socialblade_handle_normalization_preserves_youtube_channel_ids_and_face
 
 
 def test_attach_instagram_following_scrape_completes(monkeypatch) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     def fake_run_stage(*, handle: str, source_scope: str, config: dict[str, object]):
         captured["handle"] = handle
@@ -301,7 +302,7 @@ def test_attach_instagram_following_scrape_skips_non_instagram_platform() -> Non
 
 
 def test_persist_scraped_payload_inserts_fresh_snapshot_and_upserts_merged_current_row(monkeypatch) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
     existing = {
         "row_id": "growth-row-1",
         "scraped_at": "2026-05-12T08:00:00Z",

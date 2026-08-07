@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -541,7 +542,7 @@ def test_force_cancel_stale_operations_allows_force_selected_requested_ids() -> 
 
 def test_claim_next_operation_supports_excluded_operation_types() -> None:
     operation_id = str(uuid4())
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     def _fake_fetch_one(query: str, params: list[object]):
         captured["query"] = query

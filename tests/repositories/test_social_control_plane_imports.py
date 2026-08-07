@@ -7,10 +7,11 @@ import subprocess
 import sys
 from pathlib import Path
 from textwrap import dedent
+from typing import Any
 
 import pytest
 
-import trr_backend.repositories.social_season_analytics as legacy_repo
+import trr_backend.repositories.social_season_analytics as _legacy_repo_module
 import trr_backend.socials.account_catalog.catalog_launch as catalog_launch
 import trr_backend.socials.account_catalog.catalog_progress as catalog_progress
 import trr_backend.socials.account_catalog.profile_reads as profile_reads
@@ -55,6 +56,11 @@ import trr_backend.socials.read_models.account_profile.instagram as account_prof
 import trr_backend.socials.read_models.coverage as read_models_coverage
 import trr_backend.socials.read_models.season_analytics as read_models_season_analytics
 import trr_backend.socials.social_season_analytics_impl as canonical_social_analytics
+
+# The legacy import above must stay first in the import block: importing it loads
+# the analytics impl, whose provider publication the later module-level imports
+# depend on. The Any alias gives Pyright a typed handle without changing order.
+legacy_repo: Any = _legacy_repo_module
 
 CONTROL_PLANE_DIR = Path(__file__).resolve().parents[2] / "trr_backend" / "socials" / "control_plane"
 SOCIALS_DIR = Path(__file__).resolve().parents[2] / "trr_backend" / "socials"
@@ -545,6 +551,7 @@ def test_threads_runtime_callers_lazily_import_only_canonical_leaf_owners() -> N
                 )
             )
             if imports_package_root:
+                assert isinstance(node, (ast.Import, ast.ImportFrom))
                 package_root_imports.append((path, node.lineno))
 
         for function_node in (node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))):

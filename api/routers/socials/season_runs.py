@@ -3,9 +3,23 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any, cast
+
 from fastapi import APIRouter
 
 from ._shared import *
+
+if TYPE_CHECKING:
+    # These underscore-prefixed helpers are re-exported at runtime by the star
+    # import above via ``_shared``'s dynamic ``__all__``; the imports below
+    # only make them visible to static type checkers.
+    from ._shared import (
+        _internal_error_response,
+        _normalize_target_platforms,
+        _run_admin_repo_call,
+        _to_social_read_http_exception,
+        _value_error_to_bad_request,
+    )
 
 router = APIRouter()
 
@@ -352,7 +366,7 @@ async def get_season_ingest_jobs(
     run_id: UUID | None = Query(default=None),
     status: str | None = Query(default=None),
     platform: Literal["instagram", "tiktok", "twitter", "youtube", "facebook", "threads"] | None = Query(default=None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> dict:
     from trr_backend.socials.control_plane import list_jobs
 
@@ -399,7 +413,7 @@ async def get_season_ingest_runs(
     week_index: int | None = Query(default=None, ge=0),
     date_start: datetime | None = Query(default=None),
     date_end: datetime | None = Query(default=None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> dict:
     from trr_backend.socials.control_plane import list_runs
 
@@ -467,7 +481,7 @@ async def get_season_ingest_runs_summary(
     week_index: int | None = Query(default=None, ge=0),
     date_start: datetime | None = Query(default=None),
     date_end: datetime | None = Query(default=None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> dict:
     from trr_backend.socials.control_plane import list_run_summaries
 
@@ -524,7 +538,7 @@ async def get_season_ingest_run_progress(
     season_id: UUID,
     run_id: UUID,
     recent_log_limit: int = Query(default=20, ge=1, le=100),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     from trr_backend.socials.control_plane import run_reads as run_read_control_plane
 
@@ -567,7 +581,7 @@ async def get_season_ingest_run_progress(
 async def cancel_season_ingest_run(
     season_id: UUID,
     run_id: UUID,
-    user: InternalAdminUser = None,
+    user: InternalAdminUser = cast(Any, None),
 ) -> dict:
     from trr_backend.socials.control_plane import cancel_run
 

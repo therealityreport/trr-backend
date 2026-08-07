@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -60,7 +61,7 @@ class _FakeQuery:
             rows = [row for row in rows if str(row.get(column)) in allowed]
         if self._order is not None:
             column, desc = self._order
-            rows.sort(key=lambda row: row.get(column), reverse=desc)
+            rows.sort(key=cast("Any", lambda row: row.get(column)), reverse=desc)
         if self._range is not None:
             start, end = self._range
             rows = rows[start : end + 1]

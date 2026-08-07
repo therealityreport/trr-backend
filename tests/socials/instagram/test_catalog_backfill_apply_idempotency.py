@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-import trr_backend.repositories.social_season_analytics as social_repo
+import trr_backend.socials.social_season_analytics_impl as social_repo
 
 
 def _install_fake_pg(

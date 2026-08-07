@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Any, cast
 
 import pytest
 from psycopg2 import InterfaceError
@@ -178,7 +180,7 @@ def _detail(url: str) -> dict[str, object]:
 
 
 @pytest.fixture(autouse=True)
-def _reset_pool_state(monkeypatch: pytest.MonkeyPatch) -> None:
+def _reset_pool_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     for name in (
         "APP_ENV",
         "ENV",
@@ -476,7 +478,7 @@ def test_db_connection_discards_closed_connection_on_return(monkeypatch: pytest.
     monkeypatch.setattr(pg, "ThreadedConnectionPool", lambda *args, **kwargs: fake_pool)
 
     with pg.db_connection() as conn:
-        conn.closed = True
+        cast(Any, conn).closed = True
 
     assert fake_pool.getconn_calls == 1
     assert fake_pool.putconn_calls == 1
@@ -510,7 +512,7 @@ def test_pool_init_falls_back_after_transient_dns_failure(monkeypatch: pytest.Mo
 
     def _pool_factory(*_args, **kwargs):
         dsn = kwargs.get("dsn")
-        calls.append(dsn)
+        calls.append(cast(str, dsn))
         if dsn == primary:
             raise RuntimeError("getaddrinfo ENOTFOUND aws-1-us-east-1.pooler.supabase.com")
         return fake_pool
@@ -1056,7 +1058,7 @@ def test_reset_pool_expected_pool_ignores_stale_pool_reference() -> None:
     pg._pool = active_pool
     pg._active_pool_dsn = "postgresql://db.example.com/postgres"
 
-    pg.reset_pool(expected_pool=stale_pool)
+    pg.reset_pool(expected_pool=cast(Any, stale_pool))
 
     assert pg._pool is active_pool
     assert active_pool.closeall_calls == 0
@@ -1161,7 +1163,7 @@ def test_fetch_all_uses_social_control_pool(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_build_pool_for_session_mode_supavisor_uses_conservative_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     def _pool_factory(*, minconn, maxconn, **kwargs):
         captured["minconn"] = minconn
@@ -1191,7 +1193,7 @@ def test_build_pool_for_session_mode_supavisor_uses_conservative_defaults(monkey
 
 
 def test_build_pool_for_named_pool_sets_pool_application_name(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     def _pool_factory(*, minconn, maxconn, **kwargs):
         captured["minconn"] = minconn
@@ -1292,7 +1294,7 @@ def test_local_pool_pressure_snapshot_reports_named_application_names(monkeypatc
 
 
 def test_build_pool_for_non_session_urls_keeps_default_pool_size(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     def _pool_factory(*, minconn, maxconn, **kwargs):
         captured["minconn"] = minconn

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 
@@ -13,7 +14,7 @@ import trr_backend.socials.control_plane.run_lifecycle as run_lifecycle
 def test_set_run_status_conditions_transition_on_observed_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     def fake_fetch_one(sql: str, params=None, *, conn=None, **_kwargs):
         captured["sql"] = " ".join(sql.lower().split())
@@ -38,7 +39,7 @@ def test_finalize_does_not_overwrite_cancellation_after_status_read(
             {"status": "cancelled", "config": {}},
         ]
     )
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     def fake_fetch_one(sql: str, params=None, *, conn=None, **_kwargs):
         normalized = " ".join(sql.split()).lower()
@@ -88,7 +89,7 @@ def test_only_one_deferred_followup_claim_is_accepted(
         "platform": "instagram",
         "account_handle": "bravotv",
     }
-    claims: list[dict[str, object]] = []
+    claims: list[dict[str, Any]] = []
 
     def fake_fetch_one(sql: str, params=None, *, conn=None, **_kwargs):
         normalized = " ".join(sql.split()).lower()
@@ -141,7 +142,7 @@ def test_stale_deferred_followup_claim_is_reclaimed_with_a_new_lease(
         "launch_lease_expires_at": "2026-07-10T11:55:00+00:00",
         "launch_group_id": "group-1",
     }
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     monkeypatch.setattr(run_lifecycle.legacy, "_now_utc", lambda: now)
 
@@ -271,7 +272,7 @@ def test_recovered_deferred_followup_reuses_child_before_launch(
             "launch_recovered_at": "2026-07-10T12:00:00+00:00",
         }
     }
-    writes: list[dict[str, object]] = []
+    writes: list[dict[str, Any]] = []
     launches: list[object] = []
 
     def fake_fetch_one(sql: str, params=None, **_kwargs):
@@ -331,7 +332,7 @@ def test_claimed_deferred_followup_rechecks_parent_cancellation(
             "account_handle": "bravotv",
         }
     }
-    updates: list[dict[str, object]] = []
+    updates: list[dict[str, Any]] = []
 
     monkeypatch.setattr(
         run_lifecycle.legacy.pg,
@@ -385,8 +386,8 @@ def test_deferred_followup_cancels_child_when_parent_wins_attach_race(
             None,
         ]
     )
-    cancelled_children: list[dict[str, object]] = []
-    durable_updates: list[dict[str, object]] = []
+    cancelled_children: list[dict[str, Any]] = []
+    durable_updates: list[dict[str, Any]] = []
     events: list[str] = []
 
     def fake_fetch_one(sql: str, params=None, **_kwargs):
@@ -463,8 +464,8 @@ def test_parent_cancellation_drains_already_attached_deferred_child(
             "comments": {"run_id": "comments-child-2", "status": "queued"},
         },
     }
-    updates: list[dict[str, object]] = []
-    cancelled_children: list[dict[str, object]] = []
+    updates: list[dict[str, Any]] = []
+    cancelled_children: list[dict[str, Any]] = []
 
     monkeypatch.setattr(
         run_lifecycle.legacy.pg,
@@ -513,7 +514,7 @@ def test_attached_child_cancel_failure_stays_retryable_and_nonterminal(
         },
         "attached_followups": {"comments": {"run_id": "comments-child-fail", "status": "running"}},
     }
-    updates: list[dict[str, object]] = []
+    updates: list[dict[str, Any]] = []
     monkeypatch.setattr(
         run_lifecycle.legacy.pg,
         "fetch_one",
@@ -564,7 +565,7 @@ def test_deferred_child_cancellation_recovery_persists_terminal_outcome(
             "cancelled_by": "admin@example.com",
         },
     }
-    persisted_outcomes: list[dict[str, object]] = []
+    persisted_outcomes: list[dict[str, Any]] = []
 
     monkeypatch.setattr(
         run_lifecycle.legacy.pg,
@@ -726,7 +727,7 @@ def test_claimed_deferred_followup_records_deterministic_launch_outcome(
             "account_handle": "bravotv",
         }
     }
-    updates: list[dict[str, object]] = []
+    updates: list[dict[str, Any]] = []
 
     monkeypatch.setattr(
         run_lifecycle.legacy.pg,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import scripts.socials.repair_twitter_video_thumbnails as mod
 
 
@@ -40,7 +42,7 @@ def test_repair_rows_dry_run_prefers_hosted_media_non_video_url() -> None:
         ]
     )
 
-    stats = mod._repair_rows(cur, season_id="", limit=100, dry_run=True)
+    stats = mod._repair_rows(cast(Any, cur), season_id="", limit=100, dry_run=True)
 
     assert stats.scanned == 1
     assert stats.eligible == 1
@@ -68,7 +70,7 @@ def test_repair_rows_apply_falls_back_to_source_media_non_video_url() -> None:
         ]
     )
 
-    stats = mod._repair_rows(cur, season_id="", limit=100, dry_run=False)
+    stats = mod._repair_rows(cast(Any, cur), season_id="", limit=100, dry_run=False)
 
     assert stats.scanned == 1
     assert stats.eligible == 1
@@ -102,7 +104,7 @@ def test_repair_rows_tracks_unresolved_when_no_non_video_candidate_exists() -> N
         ]
     )
 
-    stats = mod._repair_rows(cur, season_id="", limit=100, dry_run=False)
+    stats = mod._repair_rows(cast(Any, cur), season_id="", limit=100, dry_run=False)
 
     assert stats.scanned == 1
     assert stats.eligible == 0

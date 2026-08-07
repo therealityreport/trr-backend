@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote, unquote, urlencode, urljoin, urlparse
 
 try:
@@ -352,7 +352,7 @@ def _extract_infobox_entries(soup: BeautifulSoup) -> dict[str, str]:
 
     entries: dict[str, str] = {}
     for item in infobox.select(".pi-item.pi-data"):
-        key = (item.get("data-source") or "").strip()
+        key = cast(str, item.get("data-source") or "").strip()
         if not key:
             label = item.select_one(".pi-data-label")
             key = (label.get_text(" ", strip=True) if label else "").strip()
@@ -683,10 +683,13 @@ def search_fandom_person_related_pages(
             add_candidate(candidate_url)
             if len(candidates) >= limit:
                 break
-        next_page_url = _extract_fandom_search_next_page_url(
-            body,
-            community_domain=domain,
-            current_url=next_page_url,
+        next_page_url = cast(
+            str,
+            _extract_fandom_search_next_page_url(
+                body,
+                community_domain=domain,
+                current_url=next_page_url,
+            ),
         )
 
     return candidates[:limit]
@@ -1156,7 +1159,7 @@ def parse_fandom_gallery_html(html: str, *, url: str, person_name: str) -> Fando
                 continue
 
             # Get the image URL (prefer data-src for lazy-loaded images)
-            thumb = img.get("data-src") or img.get("src") or ""
+            thumb = cast(str, img.get("data-src") or img.get("src") or "")
             if not thumb or "data:image" in thumb:
                 continue
 
@@ -1172,8 +1175,8 @@ def parse_fandom_gallery_html(html: str, *, url: str, person_name: str) -> Fando
                 caption = caption_el.get_text(" ", strip=True) or None
 
             section_label = _find_section_label(item)
-            width = _parse_int(img.get("data-image-width") or img.get("width"))
-            height = _parse_int(img.get("data-image-height") or img.get("height"))
+            width = _parse_int(cast("str | None", img.get("data-image-width") or img.get("width")))
+            height = _parse_int(cast("str | None", img.get("data-image-height") or img.get("height")))
             file_page_url = _extract_file_page_url(item) or _extract_file_page_url(img)
             images.append(
                 FandomGalleryImage(
@@ -1191,7 +1194,7 @@ def parse_fandom_gallery_html(html: str, *, url: str, person_name: str) -> Fando
     # Method 2: Look for images inside gallery tags
     for gallery in soup.select(".gallery, .wikia-gallery"):
         for img in gallery.select("img"):
-            thumb = img.get("data-src") or img.get("src") or ""
+            thumb = cast(str, img.get("data-src") or img.get("src") or "")
             if not thumb or "data:image" in thumb:
                 continue
 
@@ -1201,13 +1204,13 @@ def parse_fandom_gallery_html(html: str, *, url: str, person_name: str) -> Fando
             seen_urls.add(full_url)
 
             # Get alt text as caption fallback
-            caption = img.get("alt") or img.get("title")
+            caption = cast("str | None", img.get("alt") or img.get("title"))
             if caption and caption.lower() in ("image", "photo", "gallery"):
                 caption = None
 
             section_label = _find_section_label(img)
-            width = _parse_int(img.get("data-image-width") or img.get("width"))
-            height = _parse_int(img.get("data-image-height") or img.get("height"))
+            width = _parse_int(cast("str | None", img.get("data-image-width") or img.get("width")))
+            height = _parse_int(cast("str | None", img.get("data-image-height") or img.get("height")))
             file_page_url = _extract_file_page_url(img)
             images.append(
                 FandomGalleryImage(
@@ -1226,11 +1229,11 @@ def parse_fandom_gallery_html(html: str, *, url: str, person_name: str) -> Fando
     article = soup.select_one(".mw-parser-output") or soup.select_one("#mw-content-text")
     if article:
         for img in article.select("img"):
-            thumb = img.get("data-src") or img.get("src") or ""
+            thumb = cast(str, img.get("data-src") or img.get("src") or "")
             if not thumb or "data:image" in thumb:
                 continue
             # Skip tiny images (icons, etc.)
-            width = img.get("width") or img.get("data-image-width")
+            width = cast("str | None", img.get("width") or img.get("data-image-width"))
             if width:
                 try:
                     if int(width) < 100:
@@ -1243,13 +1246,13 @@ def parse_fandom_gallery_html(html: str, *, url: str, person_name: str) -> Fando
                 continue
             seen_urls.add(full_url)
 
-            caption = img.get("alt") or img.get("title")
+            caption = cast("str | None", img.get("alt") or img.get("title"))
             if caption and caption.lower() in ("image", "photo", "gallery"):
                 caption = None
 
             section_label = _find_section_label(img)
-            width = _parse_int(img.get("data-image-width") or img.get("width"))
-            height = _parse_int(img.get("data-image-height") or img.get("height"))
+            width = _parse_int(cast("str | None", img.get("data-image-width") or img.get("width")))
+            height = _parse_int(cast("str | None", img.get("data-image-height") or img.get("height")))
             file_page_url = _extract_file_page_url(img)
             images.append(
                 FandomGalleryImage(
@@ -1306,17 +1309,17 @@ def parse_fandom_file_html(html: str, *, url: str) -> FandomFileResult:
 
     link = soup.select_one("div.fullMedia a") or soup.select_one("a#file")
     if link and link.get("href"):
-        file_url = _normalize_fandom_url(link.get("href"))
+        file_url = _normalize_fandom_url(cast("str | None", link.get("href")))
 
     if not file_url:
         meta_image = soup.select_one("meta[property='og:image']")
         if meta_image and meta_image.get("content"):
-            file_url = _normalize_fandom_url(meta_image.get("content"))
+            file_url = _normalize_fandom_url(cast("str | None", meta_image.get("content")))
 
     meta_width = soup.select_one("meta[property='og:image:width']")
     meta_height = soup.select_one("meta[property='og:image:height']")
-    width = _parse_int(meta_width.get("content") if meta_width else None)
-    height = _parse_int(meta_height.get("content") if meta_height else None)
+    width = _parse_int(cast("str | None", meta_width.get("content")) if meta_width else None)
+    height = _parse_int(cast("str | None", meta_height.get("content")) if meta_height else None)
 
     full_media = soup.select_one("div.fullMedia") or soup.select_one("div.fullmedia")
     if full_media:

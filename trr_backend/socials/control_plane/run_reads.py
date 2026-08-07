@@ -95,7 +95,8 @@ def list_runs(
     rows = _fetch_all_control(sql, params)
     filtered_rows: list[dict[str, Any]] = []
     for row in rows:
-        config = row.get("config") if isinstance(row.get("config"), dict) else {}
+        config_value = row.get("config")
+        config: dict[str, Any] = config_value if isinstance(config_value, dict) else {}
         if not legacy._run_matches_scope_filters(
             config,
             platforms=normalized_platforms,
@@ -104,7 +105,8 @@ def list_runs(
             date_end=normalized_date_end,
         ):
             continue
-        summary = row.get("summary") if isinstance(row.get("summary"), dict) else {}
+        summary_value = row.get("summary")
+        summary: dict[str, Any] = summary_value if isinstance(summary_value, dict) else {}
         total_jobs = int(summary.get("total_jobs") or 0)
         completed_jobs = int(summary.get("completed_jobs") or 0)
         failed_jobs = int(summary.get("failed_jobs") or 0)
@@ -252,7 +254,8 @@ def list_run_summaries(
         run_id = str(run.get("id") or "")
         if not run_id:
             continue
-        summary = run.get("summary") if isinstance(run.get("summary"), dict) else {}
+        summary_value = run.get("summary")
+        summary: dict[str, Any] = summary_value if isinstance(summary_value, dict) else {}
         aggregate = by_run.get(run_id) or {}
         started_at = run.get("started_at")
         completed_at = run.get("completed_at")

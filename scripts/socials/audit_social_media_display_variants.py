@@ -10,7 +10,7 @@ from typing import Any
 import requests
 
 from trr_backend.db import pg
-from trr_backend.repositories import social_season_analytics as social_repo
+from trr_backend.socials import social_season_analytics_impl as social_repo
 from trr_backend.utils.env import load_env
 
 

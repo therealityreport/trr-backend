@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
@@ -133,7 +133,8 @@ def _snapshot_history_status(row: dict[str, Any], raw_response: dict[str, Any]) 
 
 
 def _snapshot_history_item(row: dict[str, Any]) -> dict[str, Any]:
-    raw_response = row.get("raw_response") if isinstance(row.get("raw_response"), dict) else {}
+    raw_response_value = row.get("raw_response")
+    raw_response = raw_response_value if isinstance(raw_response_value, dict) else {}
     error = str(raw_response.get("last_attempt_error") or raw_response.get("error") or "").strip() or None
     reason = str(raw_response.get("reason") or raw_response.get("last_attempt_history_source") or "").strip() or None
     return {
@@ -156,7 +157,7 @@ def _snapshot_history_item(row: dict[str, Any]) -> dict[str, Any]:
 @router.get("/socialblade/calls/{call_id}")
 async def get_socialblade_modal_call_status(
     call_id: str,
-    _admin: InternalAdminUser = None,
+    _admin: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     """Inspect the live Modal function-call status for a SocialBlade scrape."""
     safe_call_id = str(call_id or "").strip()
@@ -175,7 +176,7 @@ async def get_socialblade_history(
     handles: list[str] | None = Query(default=None, alias="handle"),
     platform: str = Query(default="instagram", min_length=1),
     limit: int = Query(default=25, ge=1, le=100),
-    _admin: InternalAdminUser = None,
+    _admin: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     """Return compact SocialBlade snapshot history for a cast/member set."""
     from trr_backend.db import pg
@@ -260,7 +261,7 @@ async def get_socialblade_history(
 async def get_socialblade_cookie_health(
     validate: bool = Query(default=True),
     handle: str | None = Query(default=None),
-    _admin: InternalAdminUser = None,
+    _admin: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     """Return redacted SocialBlade cookie health for admin preflight panels."""
     from trr_backend.socials.socialblade.auth import socialblade_cookie_health_report

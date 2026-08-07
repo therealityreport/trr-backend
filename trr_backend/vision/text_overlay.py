@@ -7,7 +7,7 @@ import os
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import requests
 
@@ -473,7 +473,7 @@ def _build_gemini_content_generator(*, api_key: str, model_name: str):
             return client.models.generate_content(
                 model=model_name,
                 contents=contents,
-                config=generation_config,
+                config=cast("Any", generation_config),
             )
 
         return _generate

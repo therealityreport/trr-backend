@@ -79,7 +79,7 @@ def probe_subtitle_streams(video_path: str | Path) -> list[dict[str, Any]]:
         if not isinstance(raw_stream, dict) or raw_stream.get("codec_type") != "subtitle":
             continue
         raw_index = raw_stream.get("index")
-        if isinstance(raw_index, bool):
+        if raw_index is None or isinstance(raw_index, bool):
             continue
         try:
             stream_index = int(raw_index)
@@ -87,8 +87,10 @@ def probe_subtitle_streams(video_path: str | Path) -> list[dict[str, Any]]:
             continue
         if stream_index < 0 or isinstance(raw_index, float) and not raw_index.is_integer():
             continue
-        tags = raw_stream.get("tags") if isinstance(raw_stream.get("tags"), dict) else {}
-        disposition = raw_stream.get("disposition") if isinstance(raw_stream.get("disposition"), dict) else {}
+        raw_tags = raw_stream.get("tags")
+        tags: dict[str, Any] = raw_tags if isinstance(raw_tags, dict) else {}
+        raw_disposition = raw_stream.get("disposition")
+        disposition: dict[str, Any] = raw_disposition if isinstance(raw_disposition, dict) else {}
         codec_name = str(raw_stream.get("codec_name") or "unknown").strip().lower()
         language_raw = str(tags.get("language") or "").strip() or None
         selection_status, extraction_status = _subtitle_selection(codec_name=codec_name, language_raw=language_raw)
@@ -385,7 +387,8 @@ def extract_video_asset_subtitles(
         summary = cast_screentime.get_subtitle_summary(video_asset_id, include_skipped=True)
         return summary or {"video_asset_id": video_asset_id, "status": "not_found"}
 
-    source_json = asset.get("source_json") if isinstance(asset.get("source_json"), dict) else {}
+    raw_source_json = asset.get("source_json")
+    source_json: dict[str, Any] = raw_source_json if isinstance(raw_source_json, dict) else {}
     source_key = str(source_json.get("object_key") or "").strip()
     try:
         client, storage_bucket = _resolve_storage(storage_client, bucket)
@@ -561,8 +564,10 @@ def load_subtitle_cues(
 
 
 def _safe_download_stem(asset: dict[str, Any]) -> str:
-    source_json = asset.get("source_json") if isinstance(asset.get("source_json"), dict) else {}
-    metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
+    raw_source_json = asset.get("source_json")
+    source_json: dict[str, Any] = raw_source_json if isinstance(raw_source_json, dict) else {}
+    raw_metadata = asset.get("metadata")
+    metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
     raw = str(
         source_json.get("original_filename")
         or metadata.get("original_filename")

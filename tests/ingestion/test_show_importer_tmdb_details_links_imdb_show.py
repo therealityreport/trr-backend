@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 
@@ -82,7 +83,7 @@ def test_tmdb_details_can_link_tmdb_candidate_to_existing_imdb_show(monkeypatch)
         imdb_fetch_episodes=False,
         tmdb_fetch_seasons=False,
         enrich_show_metadata=False,
-        supabase_client=object(),
+        supabase_client=cast(Any, object()),
     )
 
     # First candidate inserts the show; second candidate links via IMDb id and updates the same row.

@@ -6,7 +6,7 @@ import hashlib
 import logging
 import re
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException
@@ -648,13 +648,13 @@ def _upsert_nbcumv_asset(
         raise HTTPException(status_code=400, detail="NBCUMV image was missing lbx_id and location")
     existing = _existing_asset_by_nbcumv_id(db, str(image.get("lbx_id") or ""))
 
-    dimensions = (
+    dimensions: Any = (
         (metadata.get("embedded_file") or {}).get("dimensions")
         if isinstance(metadata.get("embedded_file"), dict)
         else {}
     )
-    width = dimensions.get("width") or image.get("lbx_width")
-    height = dimensions.get("height") or image.get("lbx_height")
+    width: Any = dimensions.get("width") or image.get("lbx_width")
+    height: Any = dimensions.get("height") or image.get("lbx_height")
     existing_sha256 = existing.get("sha256") if existing else None
     existing_content_type = existing.get("content_type") if existing else None
     existing_bytes = existing.get("bytes") if existing else None
@@ -876,7 +876,7 @@ def _import_single_item(
 def preview_nbcumv_import(
     request: NbcumvPreviewRequest,
     db: SupabaseAdminClient,
-    _: AdminUser = None,
+    _: AdminUser = cast(AdminUser, None),
 ) -> dict[str, Any]:
     _ensure_sources(db)
     filters = nbcumv.SearchFilters(
@@ -954,7 +954,7 @@ def preview_nbcumv_import(
 def import_nbcumv_assets(
     request: NbcumvImportRequest,
     db: SupabaseAdminClient,
-    _: AdminUser = None,
+    _: AdminUser = cast(AdminUser, None),
 ) -> dict[str, Any]:
     _ensure_sources(db)
     people_index = _load_eligible_people_index(db)

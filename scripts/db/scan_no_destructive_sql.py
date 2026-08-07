@@ -57,8 +57,9 @@ def _sql_context_matches(text: str) -> list[tuple[int, str]]:
         if in_fence and not sql_fence:
             continue
         candidate = stripped if in_fence else stripped.rstrip(";")
-        if DESTRUCTIVE_SQL_RE.search(candidate) and (in_fence or DESTRUCTIVE_SQL_RE.match(candidate)):
-            matches.append((line_no, DESTRUCTIVE_SQL_RE.search(candidate).group(0)))
+        destructive_match = DESTRUCTIVE_SQL_RE.search(candidate)
+        if destructive_match and (in_fence or DESTRUCTIVE_SQL_RE.match(candidate)):
+            matches.append((line_no, destructive_match.group(0)))
     return matches
 
 

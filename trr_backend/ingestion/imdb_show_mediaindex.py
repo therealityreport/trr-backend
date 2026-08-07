@@ -37,8 +37,10 @@ def _normalize_kind_from_imdb_type(imdb_type: str | None, fallback_kind: str = "
 
 def _flatten_tags_into_metadata(metadata: dict[str, Any], tags: dict[str, Any]) -> dict[str, Any]:
     merged = dict(metadata)
-    people = tags.get("people") if isinstance(tags.get("people"), list) else []
-    titles = tags.get("titles") if isinstance(tags.get("titles"), list) else []
+    people_raw = tags.get("people")
+    people: list[Any] = people_raw if isinstance(people_raw, list) else []
+    titles_raw = tags.get("titles")
+    titles: list[Any] = titles_raw if isinstance(titles_raw, list) else []
 
     people_names: list[str] = []
     people_imdb_ids: list[str] = []

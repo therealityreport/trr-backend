@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 
 from trr_backend.db import pg
 
@@ -54,7 +54,7 @@ def get_show_core_auto_refresh_settings() -> dict[str, Any]:
     payload = value if isinstance(value, dict) else {}
     return {
         "paused": _normalize_bool(payload.get("paused")),
-        "updated_at": row.get("updated_at").isoformat() if row and row.get("updated_at") else None,
+        "updated_at": cast(Any, row.get("updated_at")).isoformat() if row and row.get("updated_at") else None,
         "updated_by": row.get("updated_by") if row else None,
     }
 
@@ -132,6 +132,6 @@ def set_show_core_auto_refresh_paused(*, paused: bool, updated_by: str | None = 
     payload = value if isinstance(value, dict) else {}
     return {
         "paused": _normalize_bool(payload.get("paused")),
-        "updated_at": row.get("updated_at").isoformat() if row and row.get("updated_at") else None,
+        "updated_at": cast(Any, row.get("updated_at")).isoformat() if row and row.get("updated_at") else None,
         "updated_by": row.get("updated_by") if row else None,
     }

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -63,7 +63,7 @@ def default_threads_posts_scrapling_rollout_enabled(monkeypatch: pytest.MonkeyPa
     monkeypatch.delenv(_ROLLOUT_ENV, raising=False)
 
 
-def _thread_post(post_id: str = "th-1") -> SimpleNamespace:
+def _thread_post(post_id: str = "th-1") -> Any:
     return SimpleNamespace(
         post_id=post_id,
         username="bravotv",
@@ -329,20 +329,23 @@ def test_threads_job_runner_uses_final_fetcher_metadata_not_warmup_snapshot(
             self._request_count = 4
             return jr.ThreadsPostsFetchResult(
                 posts=[
-                    SimpleNamespace(
-                        post_id="th-1",
-                        username="bravotv",
-                        text="hello",
-                        media_urls=[],
-                        thumbnail_url=None,
-                        likes=1,
-                        replies=0,
-                        reposts=0,
-                        quotes=0,
-                        views=10,
-                        posted_at=None,
-                        url="https://www.threads.com/@bravotv/post/abc",
-                        to_dict=lambda: {"post_id": "th-1"},
+                    cast(
+                        Any,
+                        SimpleNamespace(
+                            post_id="th-1",
+                            username="bravotv",
+                            text="hello",
+                            media_urls=[],
+                            thumbnail_url=None,
+                            likes=1,
+                            replies=0,
+                            reposts=0,
+                            quotes=0,
+                            views=10,
+                            posted_at=None,
+                            url="https://www.threads.com/@bravotv/post/abc",
+                            to_dict=lambda: {"post_id": "th-1"},
+                        ),
                     )
                 ],
                 fetch_failed=False,

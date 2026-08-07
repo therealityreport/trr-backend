@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from typing import Any
+
 from psycopg2.extras import Json
 
 from trr_backend.repositories import face_references
 
 
 def test_sync_face_reference_image_upserts_enabled_row(monkeypatch) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     monkeypatch.setattr(
         face_references,
@@ -47,7 +49,7 @@ def test_sync_face_reference_image_upserts_enabled_row(monkeypatch) -> None:
 
 
 def test_sync_face_reference_image_disables_existing_row(monkeypatch) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     monkeypatch.setattr(
         face_references,
@@ -91,7 +93,7 @@ def test_list_active_face_reference_person_ids_filters_blank_rows(monkeypatch) -
 
 
 def test_list_face_reference_images_orders_by_review_state(monkeypatch) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     def _fake_fetch_all(sql: str, params: list[object]) -> list[dict[str, object]]:
         captured["sql"] = sql
@@ -109,7 +111,7 @@ def test_list_face_reference_images_orders_by_review_state(monkeypatch) -> None:
 
 
 def test_resolve_face_reference_image_supports_legacy_bridge(monkeypatch) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     def _fake_fetch_one(sql: str, params: list[object]) -> dict[str, object]:
         captured["sql"] = sql
@@ -126,7 +128,7 @@ def test_resolve_face_reference_image_supports_legacy_bridge(monkeypatch) -> Non
 
 
 def test_set_face_reference_review_status_marks_duplicates_inactive(monkeypatch) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     def _fake_execute_returning(sql: str, params: list[object]) -> list[dict[str, object]]:
         captured["sql"] = sql
@@ -152,7 +154,7 @@ def test_set_face_reference_review_status_marks_duplicates_inactive(monkeypatch)
 
 
 def test_upsert_face_reference_embedding_serializes_vector(monkeypatch) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     def _fake_execute_returning(sql: str, params: list[object]) -> list[dict[str, object]]:
         captured["sql"] = sql

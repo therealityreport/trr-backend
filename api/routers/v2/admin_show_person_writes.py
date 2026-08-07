@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
@@ -22,6 +22,9 @@ from api.schemas.v2.admin_show_person_writes import (
 from trr_backend.db.pg import database_service_unavailable_detail, is_database_service_unavailable_error
 from trr_backend.problem import problem_http_exception
 from trr_backend.repositories import admin_show_person_writes as repository
+
+if TYPE_CHECKING:
+    from api.schemas.v2.admin_show_person_writes import AdminEffectivePersonSocialHandlesV2
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin-show-person-writes-v2"])
@@ -182,6 +185,8 @@ async def list_effective_person_social_handles(
         handles, _query_count = repository.list_effective_person_social_handles(
             [str(person_id) for person_id in body.person_ids]
         )
-        return AdminEffectivePersonSocialHandlesResponseV2(handles=handles)
+        return AdminEffectivePersonSocialHandlesResponseV2(
+            handles=cast("list[AdminEffectivePersonSocialHandlesV2]", handles)
+        )
     except Exception as error:
         raise _unexpected_problem(error, request, operation="list-effective-person-social-handles") from error

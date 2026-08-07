@@ -5,7 +5,7 @@ import io
 import json
 import logging
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 import requests
 from PIL import Image, ImageOps
@@ -28,7 +28,12 @@ def _normalize_square_bbox_from_face_box(
     y = box.get("y")
     width = box.get("width")
     height = box.get("height")
-    if not all(isinstance(v, (int, float)) for v in (x, y, width, height)):
+    if not (
+        isinstance(x, (int, float))
+        and isinstance(y, (int, float))
+        and isinstance(width, (int, float))
+        and isinstance(height, (int, float))
+    ):
         return None
 
     x = float(x)
@@ -144,7 +149,8 @@ def generate_and_upload_face_crops(
         return []
 
     out: list[dict[str, Any]] = []
-    resample = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
+    # Older Pillow exposes LANCZOS only at module level; cast keeps the fallback attribute access as-is.
+    resample = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else cast(Any, Image).LANCZOS
 
     for box in sorted(face_boxes, key=lambda item: int(item.get("index") or 0)):
         square_bbox = _extract_square_bbox(box)

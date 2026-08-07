@@ -6,6 +6,41 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from ._shared import *
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    # Type-only declarations for underscore-prefixed helpers that are injected
+    # at runtime via the dynamic ``__all__`` star export from ``._shared``.
+    from ._shared import (
+        _ACCOUNT_PROFILE_CACHE_MAX_ENTRIES,
+        _ACCOUNT_PROFILE_CACHE_TTL_SECONDS,
+        _ACCOUNT_PROFILE_COLLABORATORS_CACHE,
+        _ACCOUNT_PROFILE_COLLABORATORS_CACHE_LOCK,
+        _ACCOUNT_PROFILE_DASHBOARD_CACHE,
+        _ACCOUNT_PROFILE_DASHBOARD_CACHE_LOCK,
+        _ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE,
+        _ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE_LOCK,
+        _ACCOUNT_PROFILE_HASHTAGS_CACHE,
+        _ACCOUNT_PROFILE_HASHTAGS_CACHE_LOCK,
+        _ACCOUNT_PROFILE_POSTS_CACHE,
+        _ACCOUNT_PROFILE_POSTS_CACHE_LOCK,
+        _ACCOUNT_PROFILE_PROGRESS_CACHE_TTL_SECONDS,
+        _ACCOUNT_PROFILE_SUMMARY_CACHE,
+        _ACCOUNT_PROFILE_SUMMARY_CACHE_LOCK,
+        _account_profile_cache_key,
+        _can_use_local_catalog_inline_fallback,
+        _clear_account_profile_caches,
+        _get_ttl_cached_payload,
+        _internal_error_response,
+        _lookup_error_to_not_found,
+        _raise_if_modal_social_dispatch_unresolvable,
+        _remote_worker_unavailable_message,
+        _resolve_account_profile_singleflight,
+        _set_ttl_cached_payload,
+        _to_social_read_http_exception,
+        _value_error_to_bad_request,
+        _worker_health_detail,
+    )
 
 router = APIRouter()
 
@@ -305,7 +340,7 @@ def get_social_account_profile_summary_route(
     request: Request,
     platform: str,
     account_handle: str,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     detail = social_profile_reads.normalize_profile_summary_detail(request.query_params.get("detail"))
 
@@ -348,7 +383,7 @@ def get_social_account_profile_dashboard_route(
     account_handle: str,
     run_id: str | None = Query(default=None),
     recent_log_limit: int = Query(default=25, ge=0, le=100),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     from trr_backend.socials.profile_dashboard import build_social_account_profile_dashboard
 
@@ -395,7 +430,7 @@ def get_social_account_profile_dashboard_route(
 def get_social_account_live_profile_total_route(
     platform: str,
     account_handle: str,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     try:
         return social_profile_reads.get_live_profile_total(platform=platform, account_handle=account_handle)
@@ -416,7 +451,7 @@ def get_social_account_live_profile_total_route(
 def get_social_account_profile_socialblade_route(
     platform: str,
     account_handle: str,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     from trr_backend.repositories.socialblade_growth import get_growth_data
     from trr_backend.socials.socialblade.service import (
@@ -447,7 +482,7 @@ async def refresh_social_account_profile_socialblade_route(
     platform: str,
     account_handle: str,
     body: SocialBladeProfileRefreshRequest,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     from trr_backend.socials.socialblade.service import (
         SocialBladeRefreshError,
@@ -499,7 +534,7 @@ def get_social_account_profile_posts_route(
     comment_filter: str | None = Query(default=None),
     sort_by: str | None = Query(default=None),
     sort_dir: str | None = Query(default=None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     started_at = perf_counter()
     effective_page_size = page_size if "page_size" in request.query_params else (limit or page_size)
@@ -574,7 +609,7 @@ def get_social_account_profile_posts_route(
 def get_instagram_profile_detail_route(
     account_handle: str,
     source_scope: str = Query(default="network"),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     from trr_backend.socials.instagram.profile_stages import get_instagram_profile_detail
 
@@ -596,7 +631,7 @@ def get_instagram_profile_relationships_route(
     source_scope: str = Query(default="bravo"),
     page: int = Query(default=1, ge=1, le=10_000),
     page_size: int = Query(default=25, ge=1, le=100),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     from trr_backend.socials.instagram.profile_stages import get_instagram_profile_relationships
 
@@ -624,7 +659,7 @@ def get_social_account_profile_hashtags_route(
     account_handle: str,
     window: Literal["all", "30d", "365d"] | None = Query(default=None),
     assignment_status: Literal["all", "assigned", "unassigned"] | None = Query(default="all"),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     cache_key = _account_profile_cache_key(
         surface="hashtags",
@@ -674,7 +709,7 @@ def get_social_account_profile_hashtag_conflicts_route(
     platform: str,
     account_handle: str,
     limit: int = Query(default=25, ge=1, le=100),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     from trr_backend.socials.read_models.account_profile import get_social_hashtag_assignment_conflict_history
 
@@ -718,7 +753,7 @@ def get_social_account_profile_hashtag_timeline_route(
     platform: str,
     account_handle: str,
     window: Literal["all", "30d", "365d"] | None = Query(default=None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     cache_key = _account_profile_cache_key(
         surface="hashtags_timeline",
@@ -782,7 +817,7 @@ def put_social_account_profile_hashtags_route(
 def get_social_account_profile_collaborators_tags_route(
     platform: str,
     account_handle: str,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     cache_key = _account_profile_cache_key(
         surface="collaborators-tags",

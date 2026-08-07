@@ -6,7 +6,7 @@ import hashlib
 import io
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import requests
 from PIL import Image, ImageOps
@@ -60,9 +60,10 @@ def _normalize_crop(crop: dict[str, Any] | None) -> CropSpec | None:
     if not isinstance(crop, dict):
         return None
     try:
-        x = float(crop.get("x"))
-        y = float(crop.get("y"))
-        zoom = float(crop.get("zoom"))
+        # float(None) raising TypeError is the intended missing-key path; cast keeps that behavior.
+        x = float(cast(Any, crop.get("x")))
+        y = float(cast(Any, crop.get("y")))
+        zoom = float(cast(Any, crop.get("zoom")))
     except (TypeError, ValueError):
         return None
 

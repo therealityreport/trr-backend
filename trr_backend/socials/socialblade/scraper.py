@@ -10,7 +10,7 @@ import re
 import sys
 from collections import OrderedDict
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 logger = logging.getLogger(__name__)
@@ -807,9 +807,8 @@ def _mark_payload_as_degraded_attempt(payload: dict[str, Any], error: Exception)
     """Keep partial scrape evidence when the authenticated retry cannot complete."""
     degraded = dict(payload)
     if _socialblade_payload_has_complete_page_capture(degraded):
-        runtime_metadata = (
-            degraded.get("runtime_metadata") if isinstance(degraded.get("runtime_metadata"), dict) else {}
-        )
+        runtime_metadata_raw = degraded.get("runtime_metadata")
+        runtime_metadata = runtime_metadata_raw if isinstance(runtime_metadata_raw, dict) else {}
         degraded["runtime_metadata"] = {
             **runtime_metadata,
             "login_retry_failed": True,
@@ -1211,7 +1210,7 @@ def scrape_socialblade(
                 return _mark_payload_as_degraded_attempt(payload, login_exc)
         return payload
     except Exception as exc:  # noqa: BLE001
-        candidate_error = exc.__cause__ if getattr(exc, "__cause__", None) is not None else exc
+        candidate_error = cast("Exception", exc.__cause__) if getattr(exc, "__cause__", None) is not None else exc
         if allow_visible_browser_retry and _should_retry_in_visible_shared_browser(candidate_error):
             _log("Retrying SocialBlade scrape through visible shared Chrome session...")
             return scrape_socialblade_with_shared_browser_session(
@@ -1232,7 +1231,9 @@ def scrape_socialblade(
                 return _run_scrapling_socialblade_fetch(handle, refreshed_cookies, platform=platform)
             except Exception as login_exc:  # noqa: BLE001
                 candidate_login_error = (
-                    login_exc.__cause__ if getattr(login_exc, "__cause__", None) is not None else login_exc
+                    cast("Exception", login_exc.__cause__)
+                    if getattr(login_exc, "__cause__", None) is not None
+                    else login_exc
                 )
                 if allow_visible_browser_retry and _should_retry_in_visible_shared_browser(candidate_login_error):
                     _log("Login fallback still challenged; retrying in visible shared Chrome session...")

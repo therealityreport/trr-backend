@@ -114,6 +114,7 @@ def upsert_cast_fandom(db: DbSession, row: Mapping[str, Any]) -> dict[str, Any]:
         cleaned = [_escape(item) for item in romances if item is not None]
         payload["romances"] = "{" + ",".join(cleaned) + "}" if cleaned else None
 
+    response: Any = None
     for attempt in range(_PGRST204_MAX_RETRIES + 1):
         try:
             response = db.schema("core").table("cast_fandom").upsert(payload, on_conflict="person_id,source").execute()

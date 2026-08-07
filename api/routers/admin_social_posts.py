@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel
@@ -68,7 +68,7 @@ def _validate_season_belongs_to_show(trr_season_id: str, show_id: str, detail: s
 def list_social_posts_for_show(
     show_id: str,
     trr_season_id: str | None = Query(default=None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     _validate_uuid(show_id, "showId")
     if trr_season_id is not None:
@@ -83,7 +83,7 @@ def create_social_post_for_show(
     show_id: str,
     body: CreateSocialPostRequest,
     x_trr_admin_user_uid: str | None = Header(default=None, alias="X-TRR-Admin-User-Uid"),
-    admin: InternalAdminUser = None,
+    admin: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     _validate_uuid(show_id, "showId")
     url = _validate_url(body.url, required=True)
@@ -103,7 +103,7 @@ def create_social_post_for_show(
 
 
 @router.get("/social-posts/{post_id}")
-def get_social_post(post_id: str, _: InternalAdminUser = None) -> dict[str, Any]:
+def get_social_post(post_id: str, _: InternalAdminUser = cast(InternalAdminUser, None)) -> dict[str, Any]:
     _validate_uuid(post_id, "postId")
     post, _query_count = social_posts_repo.get_post(post_id)
     if post is None:
@@ -115,7 +115,7 @@ def get_social_post(post_id: str, _: InternalAdminUser = None) -> dict[str, Any]
 def update_social_post(
     post_id: str,
     body: UpdateSocialPostRequest,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     _validate_uuid(post_id, "postId")
     existing_post, _query_count = social_posts_repo.get_post(post_id)
@@ -157,7 +157,7 @@ def update_social_post(
 
 
 @router.delete("/social-posts/{post_id}")
-def delete_social_post(post_id: str, _: InternalAdminUser = None) -> dict[str, bool]:
+def delete_social_post(post_id: str, _: InternalAdminUser = cast(InternalAdminUser, None)) -> dict[str, bool]:
     _validate_uuid(post_id, "postId")
     deleted, _query_count = social_posts_repo.delete_post(post_id)
     if not deleted:

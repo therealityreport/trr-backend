@@ -1254,7 +1254,7 @@ def test_mirror_media_asset_updates_canonical_ingest_columns(monkeypatch: pytest
 
 
 def test_get_show_assets_preserves_logo_fields_and_dedupes_show_images(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_fetch_all(query: str, params=None, cur=None):
+    def fake_fetch_all(query: str, params: Any = None, cur: Any = None):
         sql = str(query)
         if "from core.media_links as ml" in sql and "ml.entity_type = 'show'" in sql:
             return [
@@ -1329,7 +1329,7 @@ def test_get_show_assets_preserves_logo_fields_and_dedupes_show_images(monkeypat
 def test_get_show_assets_paginates_after_fetch_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     captured_limits: list[int] = []
 
-    def fake_fetch_all(query: str, params=None, cur=None):
+    def fake_fetch_all(query: str, params: Any = None, cur: Any = None):
         sql = str(query)
         if "from core.media_links as ml" in sql and "ml.entity_type = 'show'" in sql:
             captured_limits.append(int(params[-2]))
@@ -1371,7 +1371,7 @@ def test_get_show_assets_paginates_after_fetch_limit(monkeypatch: pytest.MonkeyP
 def test_get_show_assets_full_path_uses_full_fetch_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     captured_limits: list[int] = []
 
-    def fake_fetch_all(query: str, params=None, cur=None):
+    def fake_fetch_all(query: str, params: Any = None, cur: Any = None):
         sql = str(query)
         if "from core.media_links as ml" in sql and "ml.entity_type = 'show'" in sql:
             captured_limits.append(int(params[-2]))
@@ -1437,7 +1437,7 @@ def test_get_show_season_assets_default_path_paginates_after_fetch_limit(monkeyp
             }
         raise AssertionError(f"unexpected query: {sql}")
 
-    def fake_fetch_all(query: str, params=None, cur=None):
+    def fake_fetch_all(query: str, params: Any = None, cur: Any = None):
         sql = str(query)
         if "from core.media_links as ml" in sql and "ml.entity_type = 'season'" in sql:
             captured_limits.append(int(params[1]))
@@ -1521,7 +1521,7 @@ def test_get_show_season_assets_bounds_large_cast_photo_fanout(monkeypatch: pyte
             }
         raise AssertionError(f"unexpected query: {sql}")
 
-    def fake_fetch_all(query: str, params=None, cur=None):
+    def fake_fetch_all(query: str, params: Any = None, cur: Any = None):
         nonlocal captured_cast_params, captured_cast_query
         sql = str(query)
         if "from core.media_links as ml" in sql and "ml.entity_type = 'season'" in sql:
@@ -1667,7 +1667,7 @@ def test_get_show_assets_merges_default_rows_with_dedupe_and_logo_fields(
 ) -> None:
     captured_limits: list[int] = []
 
-    def fake_fetch_all(query: str, params=None, cur=None):
+    def fake_fetch_all(query: str, params: Any = None, cur: Any = None):
         if "from core.media_links as ml" in query:
             captured_limits.append(int(params[-2]))
             assert int(params[-1]) == 0

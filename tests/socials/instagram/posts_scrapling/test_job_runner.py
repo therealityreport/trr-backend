@@ -239,7 +239,7 @@ def test_job_runner_emits_post_skip_truthfulness_metadata(monkeypatch: pytest.Mo
     from trr_backend.socials.instagram.posts_scrapling.job_runner import run_instagram_posts_scrapling_job
     from trr_backend.socials.instagram.posts_scrapling.persistence import PersistedInstagramPosts
 
-    captured_finish: dict[str, object] = {}
+    captured_finish: dict[str, Any] = {}
 
     class _FakeFetcher:
         runtime_metadata = {"request_count": 1}

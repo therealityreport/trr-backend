@@ -3,10 +3,24 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any, cast
+
 from fastapi import APIRouter
 
 from ._shared import *
 from ._surfaces import RouteRecord, routes_matching
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator, Callable
+
+    # These underscore-prefixed helpers are re-exported at runtime by
+    # ``from ._shared import *`` via _shared's dynamic ``__all__``; the
+    # declarations below only make them visible to static type checkers.
+    from ._shared import (
+        _internal_error_response,
+        _run_admin_repo_call,
+        _to_social_read_http_exception,
+    )
 
 router = APIRouter()
 
@@ -56,7 +70,7 @@ class JobDebugRequest(BaseModel):
 
 
 @router.get("/ingest/worker-health")
-def get_social_ingest_worker_health(_: InternalAdminUser = None) -> dict:
+def get_social_ingest_worker_health(_: InternalAdminUser = cast(Any, None)) -> dict:
     from trr_backend.socials.control_plane.worker_health import (
         get_worker_health,
         is_queue_enabled,
@@ -95,7 +109,7 @@ def get_social_ingest_backfill_health(
         default=True,
         description="Include terminal (completed/failed) runs alongside active ones.",
     ),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     from trr_backend.socials.control_plane.backfill_health import get_backfill_health
 
@@ -118,7 +132,7 @@ def get_social_ingest_backfill_health(
 
 
 @router.get("/ingest/workers/{worker_id}/detail")
-def get_social_ingest_worker_detail(worker_id: str, _: InternalAdminUser = None) -> dict[str, Any]:
+def get_social_ingest_worker_detail(worker_id: str, _: InternalAdminUser = cast(Any, None)) -> dict[str, Any]:
     from trr_backend.socials.control_plane.queue_status import _legacy_repo
 
     try:
@@ -137,7 +151,7 @@ def get_social_ingest_worker_detail(worker_id: str, _: InternalAdminUser = None)
 @router.post("/ingest/workers/purge-inactive")
 def purge_social_ingest_inactive_workers(
     payload: PurgeInactiveWorkersRequest | None = None,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     from trr_backend.socials.control_plane.queue_status import _legacy_repo as _repo
 
@@ -160,7 +174,7 @@ def get_social_ingest_queue_status(
     include_runs_summary: bool = Query(default=False, description="Include scrape run status aggregates"),
     summary_only: bool = Query(default=True, description="Use the bounded status summary path"),
     statement_timeout_ms: int = Query(default=2000, ge=1000, le=30000),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     from trr_backend.socials.control_plane.queue_status import _legacy_repo
 
@@ -186,7 +200,7 @@ def get_social_ingest_queue_status(
 @router.post("/ingest/stuck-jobs/cancel")
 def cancel_social_ingest_stuck_jobs(
     payload: CancelStuckJobsRequest | None = None,
-    user: InternalAdminUser = None,
+    user: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     from trr_backend.socials.control_plane import recovery as recovery_control_plane
 
@@ -206,7 +220,7 @@ def cancel_social_ingest_stuck_jobs(
 @router.post("/ingest/media-mirror/recover-stale")
 def recover_stale_social_media_mirror_jobs(
     payload: RecoverStaleMediaMirrorJobsRequest,
-    user: InternalAdminUser = None,
+    user: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     from trr_backend.socials.control_plane.dispatch_runtime import dispatch_due_social_jobs
     from trr_backend.socials.control_plane import recovery as recovery_control_plane
@@ -263,9 +277,16 @@ def recover_stale_social_media_mirror_jobs(
 @router.post("/ingest/media-mirror/drain-account")
 def drain_social_media_mirror_account_jobs(
     payload: DrainMediaMirrorAccountRequest,
-    user: InternalAdminUser = None,
+    user: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
-    from trr_backend.socials.pipelines.account_catalog.launch import drain_media_mirror_account_jobs
+    # ``drain_media_mirror_account_jobs`` is published into the launch module's
+    # globals at runtime by its provider bridge, so static checkers cannot see
+    # it as an import symbol; resolve it via the module object with an explicit type.
+    from trr_backend.socials.pipelines.account_catalog import launch as _account_catalog_launch
+
+    drain_media_mirror_account_jobs: Callable[..., dict[str, Any]] = cast(
+        Any, _account_catalog_launch
+    ).drain_media_mirror_account_jobs
 
     confirm_required = "DRAIN BRAVO MEDIA"
     if payload.confirm_drain != confirm_required:
@@ -299,7 +320,7 @@ def drain_social_media_mirror_account_jobs(
 @router.post("/ingest/dispatch-blocked-jobs/cancel")
 def cancel_social_ingest_dispatch_blocked_jobs(
     payload: CancelStuckJobsRequest | None = None,
-    user: InternalAdminUser = None,
+    user: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     from trr_backend.socials.control_plane import recovery as recovery_control_plane
 
@@ -318,7 +339,7 @@ def cancel_social_ingest_dispatch_blocked_jobs(
 
 @router.post("/ingest/active-jobs/cancel")
 def cancel_social_ingest_active_jobs(
-    user: InternalAdminUser = None,
+    user: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     from trr_backend.socials.control_plane import recovery as recovery_control_plane
 
@@ -334,7 +355,7 @@ def cancel_social_ingest_active_jobs(
 @router.post("/ingest/recent-failures/dismiss")
 def dismiss_social_ingest_recent_failures(
     payload: DismissRecentFailuresRequest | None = None,
-    user: InternalAdminUser = None,
+    user: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     from trr_backend.socials.control_plane import recovery as recovery_control_plane
 
@@ -355,7 +376,7 @@ def dismiss_social_ingest_recent_failures(
 @router.post("/ingest/reset-health")
 def reset_social_ingest_health_route(
     payload: ResetSocialIngestHealthRequest | None = None,
-    user: InternalAdminUser = None,
+    user: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     del payload
     from trr_backend.socials.control_plane import recovery as recovery_control_plane
@@ -373,7 +394,7 @@ def reset_social_ingest_health_route(
 def debug_social_ingest_job(
     job_id: UUID,
     payload: JobDebugRequest | None = None,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     from trr_backend.socials.control_plane import recovery as recovery_control_plane
 
@@ -398,7 +419,7 @@ def debug_social_ingest_job(
 
 
 @router.get("/ingest/health-dot")
-def get_social_ingest_health_dot(_: InternalAdminUser = None) -> dict[str, Any]:
+def get_social_ingest_health_dot(_: InternalAdminUser = cast(Any, None)) -> dict[str, Any]:
     from trr_backend.socials.control_plane.queue_status import _legacy_repo
 
     try:
@@ -418,7 +439,7 @@ def get_social_ingest_health_dot(_: InternalAdminUser = None) -> dict[str, Any]:
 
 
 @router.get("/live-status")
-def get_social_live_status(_: InternalAdminUser = None) -> dict[str, Any]:
+def get_social_live_status(_: InternalAdminUser = cast(Any, None)) -> dict[str, Any]:
     try:
         return social_live_status.build_live_status_payload()
     except Exception as exc:  # noqa: BLE001
@@ -427,8 +448,8 @@ def get_social_live_status(_: InternalAdminUser = None) -> dict[str, Any]:
 
 
 @router.get("/live-status/stream")
-async def stream_social_live_status(request: Request, _: InternalAdminUser = None) -> StreamingResponse:
-    async def event_stream() -> Any:
+async def stream_social_live_status(request: Request, _: InternalAdminUser = cast(Any, None)) -> StreamingResponse:
+    async def event_stream() -> AsyncGenerator[str, None]:
         while True:
             if await request.is_disconnected():
                 return

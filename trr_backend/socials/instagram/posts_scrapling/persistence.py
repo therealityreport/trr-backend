@@ -34,7 +34,7 @@ import json
 import logging
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from trr_backend.socials.instagram.comments_scrapling.persistence import _load_repo_helpers
 from trr_backend.socials.instagram.post_normalizer import _extract_repost_count, normalize_instagram_post
@@ -444,7 +444,7 @@ def _normalizer_object_to_dict(value: Any) -> dict[str, Any]:
         result = value.to_dict()
         return dict(result) if isinstance(result, dict) else {}
     if is_dataclass(value):
-        result = asdict(value)
+        result = asdict(cast("Any", value))
         return dict(result) if isinstance(result, dict) else {}
     if isinstance(value, dict):
         return dict(value)

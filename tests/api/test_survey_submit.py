@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
 from uuid import uuid4
 
 from api.routers import surveys
@@ -41,7 +42,7 @@ def test_compute_survey_results_uses_sql_aggregation(monkeypatch):
         ],
     )
 
-    payload = surveys._compute_survey_results(object(), survey_id)
+    payload = surveys._compute_survey_results(cast("Any", object()), survey_id)
 
     assert payload == {
         "survey_id": str(survey_id),
@@ -69,7 +70,7 @@ def test_update_aggregates_batches_rows(monkeypatch):
     monkeypatch.setattr(surveys.pg, "execute_values_no_return", fake_execute)
 
     surveys._update_aggregates(
-        object(),
+        cast("Any", object()),
         survey_id,
         {
             "questions": [

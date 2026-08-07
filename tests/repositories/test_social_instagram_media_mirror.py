@@ -4,7 +4,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -259,7 +259,7 @@ def test_source_field_update_treats_omission_and_provider_sentinel_as_unset(
 
 
 def test_enqueue_keeps_instagram_platform_conn_and_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
-    context = object()
+    context = cast(Any, object())
     conn = object()
     post_row = {"id": "post-1"}
     calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
@@ -301,7 +301,7 @@ def test_enqueue_keeps_instagram_platform_conn_and_arguments(monkeypatch: pytest
 
 
 def test_stage_keeps_instagram_platform_and_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
-    context = object()
+    context = cast(Any, object())
     config = {"post_id": "post-1"}
     calls: list[dict[str, Any]] = []
     result = (1, 2, {"status": "complete"})

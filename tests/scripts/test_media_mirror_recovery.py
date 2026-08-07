@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import argparse
 import json
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 from scripts.socials.instagram import media_mirror_recovery as cli
 
 
-def _args(**overrides: Any) -> SimpleNamespace:
+def _args(**overrides: Any) -> argparse.Namespace:
     values = {
         "run_id": "11111111-1111-1111-1111-111111111111",
         "stage": "media_mirror",
@@ -22,7 +23,7 @@ def _args(**overrides: Any) -> SimpleNamespace:
         "json": True,
     }
     values.update(overrides)
-    return SimpleNamespace(**values)
+    return cast(argparse.Namespace, SimpleNamespace(**values))
 
 
 def test_fetch_status_snapshot_reports_counts_and_stale_jobs(monkeypatch) -> None:

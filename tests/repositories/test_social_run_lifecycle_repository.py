@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from psycopg2 import OperationalError
 
-import trr_backend.repositories.social_season_analytics as social_repo
 import trr_backend.socials.control_plane.run_lifecycle as run_lifecycle
+import trr_backend.socials.social_season_analytics_impl as social_repo
 from trr_backend.socials.control_plane import dispatch_runtime
 
 
@@ -349,9 +350,9 @@ def test_preserve_protected_run_summary_fields_skips_missing_and_null() -> None:
 
 def test_update_run_summary_incremental_preserves_audit_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(run_lifecycle.legacy, "_run_counter_columns_ready", lambda: True)
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
-    def _fake_fetch_one(sql: str, params: list[object]):  # noqa: ARG001
+    def _fake_fetch_one(sql: str, params: list[Any]):  # noqa: ARG001
         normalized = " ".join(sql.lower().split())
         if "from social.scrape_runs where id = %s" in normalized and "select total_jobs" in normalized:
             # The recompute read must include the existing summary.
@@ -408,7 +409,7 @@ def test_update_run_summary_force_recompute_preserves_audit_fields(monkeypatch: 
         "public_blocked_pause": {"checked": 25, "blocked": 20},
         "dispatch_control": {"pause_after_current": True, "pause_reason": "public_blocked_repeated"},
     }
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     # Recompute aggregation read (plain fetch_one).
     def _fake_fetch_one(sql: str, params: list[object]):  # noqa: ARG001
@@ -434,7 +435,7 @@ def test_update_run_summary_force_recompute_preserves_audit_fields(monkeypatch: 
     # via cursor. Match the read by intent (a select from social.scrape_runs), not an
     # exact column list, so adding columns like ``config`` to the query does not stop
     # the mock from returning the row — which is what production Postgres would do.
-    def _fake_fetch_one_with_cursor(cur: object, sql: str, params: list[object]):  # noqa: ARG001
+    def _fake_fetch_one_with_cursor(cur: object, sql: str, params: list[Any]):  # noqa: ARG001
         normalized = " ".join(sql.lower().split())
         if normalized.startswith("select") and "summary" in normalized and "from social.scrape_runs" in normalized:
             return {"summary": existing_summary, "config": None}
@@ -575,7 +576,7 @@ def test_recover_failed_deferred_comments_followups_repends_and_relaunches(
 
     monkeypatch.setattr(run_lifecycle.legacy.pg, "advisory_session_lock", fake_advisory_lock)
 
-    def fake_fetch_one(sql: str, params=None, *, conn=None, **_kwargs):
+    def fake_fetch_one(sql: str, params: Any = None, *, conn=None, **_kwargs):
         normalized = " ".join(sql.split()).lower()
         if normalized.startswith("select"):
             assert conn is lock_conn
@@ -626,7 +627,7 @@ def test_recover_failed_deferred_comments_followups_restores_failed_when_launch_
         "retry_attempts": 0,
     }
     candidate_config = {"deferred_comments_followup": stored_followup}
-    writes: list[dict[str, object]] = []
+    writes: list[dict[str, Any]] = []
 
     monkeypatch.setattr(
         run_lifecycle.legacy.pg,
@@ -639,7 +640,7 @@ def test_recover_failed_deferred_comments_followups_restores_failed_when_launch_
         del lock_key, label, pool_name
         yield lock_conn
 
-    def fake_fetch_one(sql: str, params=None, *, conn=None, **_kwargs):
+    def fake_fetch_one(sql: str, params: Any = None, *, conn=None, **_kwargs):
         normalized = " ".join(sql.split()).lower()
         if normalized.startswith("select"):
             return {"run_id": "run-skip", "status": "completed", "config": candidate_config, "summary": {}}

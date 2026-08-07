@@ -5,7 +5,7 @@ import sys
 import types
 import urllib.parse
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import requests
 
@@ -312,7 +312,7 @@ def test_search_timeline_404_latches_unavailable_after_rediscovery(monkeypatch) 
 
         def raise_for_status(self) -> None:
             error = requests.exceptions.HTTPError("404 Client Error")
-            error.response = self
+            error.response = cast(Any, self)
             raise error
 
         def json(self) -> dict[str, Any]:

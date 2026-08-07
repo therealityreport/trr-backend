@@ -11,7 +11,7 @@ import re
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 import requests
@@ -1054,7 +1054,7 @@ class ThreadsScraper:
                     context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
                     cookie_records = self._playwright_cookie_records(cookies_override)
                     if cookie_records:
-                        context.add_cookies(cookie_records)
+                        context.add_cookies(cast("list[Any]", cookie_records))
                     page = context.new_page()
                     page.on("request", _remember_graphql_request)
                     page.on(
@@ -2211,7 +2211,8 @@ class ThreadsScraper:
 
     @staticmethod
     def _classify_interaction_type(*, item: dict[str, Any], post: dict[str, Any]) -> str:
-        tpai = post.get("text_post_app_info") if isinstance(post.get("text_post_app_info"), dict) else {}
+        tpai_raw = post.get("text_post_app_info")
+        tpai = tpai_raw if isinstance(tpai_raw, dict) else {}
         candidates = [
             item.get("interaction_type"),
             item.get("type"),

@@ -3,9 +3,18 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, cast
+
 from fastapi import APIRouter
 
 from ._shared import *
+
+if TYPE_CHECKING:
+    from ._shared import (
+        _get_ttl_cached_payload,
+        _set_ttl_cached_payload,
+        _to_social_read_http_exception,
+    )
 
 router = APIRouter()
 
@@ -182,7 +191,7 @@ def _load_social_auth_or_503(
 
 
 @router.get("/landing-summary")
-def get_social_landing_summary(_: InternalAdminUser = None) -> dict[str, Any]:
+def get_social_landing_summary(_: InternalAdminUser = cast(InternalAdminUser, None)) -> dict[str, Any]:
     from trr_backend.repositories.covered_shows import list_covered_shows
 
     try:
@@ -203,7 +212,7 @@ def get_social_landing_summary(_: InternalAdminUser = None) -> dict[str, Any]:
 @router.post("/landing-socialblade-rows")
 def post_social_landing_socialblade_rows(
     payload: SocialLandingSocialBladeRowsRequest,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     from trr_backend.db import pg
 
@@ -269,7 +278,7 @@ def post_social_landing_socialblade_rows(
 @router.post("/landing-socialblade-progress-counts")
 def post_social_landing_socialblade_progress_counts(
     payload: SocialLandingSocialBladeProgressCountsRequest,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     from trr_backend.db import pg
 
@@ -321,7 +330,7 @@ def post_social_landing_socialblade_progress_counts(
 @router.post("/landing-progress-rollup")
 def post_social_landing_progress_rollup(
     payload: SocialLandingProgressRollupRequest,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     from trr_backend.db import pg
 

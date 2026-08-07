@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import argparse
 import json
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 from scripts.socials.instagram import bravo_straggler_recovery as cli
 
 
-def _args(**overrides: Any) -> SimpleNamespace:
+def _args(**overrides: Any) -> argparse.Namespace:
     values = {
         "account": "@BravoTV",
         "limit": 50,
@@ -30,7 +31,7 @@ def _args(**overrides: Any) -> SimpleNamespace:
         "json": True,
     }
     values.update(overrides)
-    return SimpleNamespace(**values)
+    return cast(argparse.Namespace, SimpleNamespace(**values))
 
 
 def test_delegate_argv_safe_12_preserves_batch_size_and_normalizes_account() -> None:

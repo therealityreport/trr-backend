@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from trr_backend.db import pg
-from trr_backend.repositories import social_season_analytics as social_repo
+from trr_backend.socials import social_season_analytics_impl as social_repo
 from trr_backend.socials.instagram import InstagramScraper
 from trr_backend.utils.env import load_env
 
@@ -132,7 +132,8 @@ class _BackfillPost:
         self.media_mirror_error = row.get("media_mirror_error")
         self.tagged_users_detail = row.get("tagged_users_detail") or []
         self.collaborators_detail = row.get("collaborators_detail") or []
-        self._raw_data = row.get("raw_data") if isinstance(row.get("raw_data"), dict) else {}
+        raw_data = row.get("raw_data")
+        self._raw_data: dict[str, Any] = raw_data if isinstance(raw_data, dict) else {}
 
     def to_dict(self) -> dict[str, Any]:
         return dict(self._raw_data)

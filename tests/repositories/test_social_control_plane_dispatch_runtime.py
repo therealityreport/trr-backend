@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 
@@ -238,7 +239,7 @@ def test_dispatch_runtime_clears_expired_pause_for_global_dispatch_candidate(
     legacy = dispatch_runtime.legacy
     now = datetime(2026, 6, 30, 18, 0, tzinfo=UTC)
     dispatched_job_ids: list[str] = []
-    updated_pause_rows: list[dict[str, object]] = []
+    updated_pause_rows: list[dict[str, Any]] = []
     candidates = [
         {
             "id": "job-expired-pause",
@@ -455,7 +456,7 @@ def test_reconcile_terminal_modal_running_jobs_completes_successful_stale_call(
 ) -> None:
     legacy = dispatch_runtime.legacy
     now = datetime(2026, 6, 12, 4, 20, tzinfo=UTC)
-    finished: list[dict[str, object]] = []
+    finished: list[dict[str, Any]] = []
     refreshed: list[dict[str, object]] = []
     row = {
         "id": "job-terminal-success",
@@ -542,7 +543,7 @@ def test_reconcile_terminal_modal_running_jobs_requeues_unfinished_frontier_afte
     legacy = dispatch_runtime.legacy
     now = datetime(2026, 6, 12, 4, 20, tzinfo=UTC)
     released: list[dict[str, object]] = []
-    finished: list[dict[str, object]] = []
+    finished: list[dict[str, Any]] = []
     enqueued: list[dict[str, object]] = []
     row = {
         "id": "job-frontier",
@@ -751,7 +752,7 @@ def test_dispatch_runtime_uses_capacity_stage_and_job_config_cap(
     dispatched_job_ids: list[str] = []
     dispatched_priority_recovery: list[bool] = []
     dispatched_priority_recovery: list[bool] = []
-    cap_calls: list[dict[str, object]] = []
+    cap_calls: list[dict[str, Any]] = []
     candidates = [
         {
             "id": "job-dedicated",

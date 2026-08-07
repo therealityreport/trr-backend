@@ -82,7 +82,7 @@ def _catalog_shared_dependencies(*, fixture: dict[str, Any], ytdlp_available: bo
 def test_youtube_empty_channel_page_sets_error_code():
     """When YouTube scraper returns 0 posts with no error_code,
     the orchestration layer should set youtube_empty_channel_page."""
-    from trr_backend.repositories.social_season_analytics import (
+    from trr_backend.socials.social_season_analytics_impl import (
         _scrape_shared_youtube_posts,
     )
 
@@ -149,6 +149,7 @@ def test_youtube_posts_catalog_uses_golden_fixture_without_network():
     )
 
     assert rows == [{"id": "row-abc123", "video_id": "abc123", "source_account": "bravo"}]
+    assert scraper.config is not None
     assert scraper.config.channel_handle == "bravo"
     assert scraper.config.max_results == 5
     assert scraper.config.enforce_keyword_filter is False

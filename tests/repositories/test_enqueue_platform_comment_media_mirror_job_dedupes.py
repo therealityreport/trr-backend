@@ -4,7 +4,7 @@ import threading
 from contextlib import contextmanager
 from datetime import date
 
-from trr_backend.repositories import social_season_analytics as social_repo
+from trr_backend.socials import social_season_analytics_impl as social_repo
 
 
 @contextmanager
@@ -14,7 +14,7 @@ def _fake_db_cursor(conn=None):  # noqa: ANN001
 
 def test_enqueue_platform_comment_media_mirror_job_is_global_across_runs_for_same_comment(monkeypatch) -> None:
     created_ids: list[str | None] = []
-    state = {"job_id": None}
+    state: dict[str, str | None] = {"job_id": None}
     lock = threading.Lock()
     seen_insert_sql: list[str] = []
 

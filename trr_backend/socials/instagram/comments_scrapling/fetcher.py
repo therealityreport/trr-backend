@@ -24,7 +24,7 @@ from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlencode, urlparse
 
 import httpx
@@ -1943,7 +1943,8 @@ def _fb_crosspost_comment_to_instagram_comment(
         return None
     author = row.get("from")
     if not isinstance(author, Mapping):
-        author = row.get("user") if isinstance(row.get("user"), Mapping) else {}
+        author_user_raw = row.get("user")
+        author = author_user_raw if isinstance(author_user_raw, Mapping) else {}
     text = str(row.get("text") or row.get("message") or "").strip()
     if not text:
         return None
@@ -4769,7 +4770,8 @@ class InstagramCommentsScraplingFetcher:
                 fetch_reason = "single_session_rendered_hydration_empty"
 
         target_count = _expected_target_count(expected_comments, max_comments)
-        if target_count is not None and (max_comments <= 0 or expected_comments <= max_comments):
+        # target_count is non-None only when expected_comments is non-None.
+        if target_count is not None and (max_comments <= 0 or cast("int", expected_comments) <= max_comments):
             current_flattened_count = flattened_comment_count(comments)
             current_missing_reply_count = missing_reply_count(comments)
             if (
@@ -6123,7 +6125,8 @@ class InstagramCommentsScraplingFetcher:
                     jazoest = str(self._parser._jazoest_for_token(lsd) or "").strip()  # noqa: SLF001
                 except Exception:  # noqa: BLE001
                     jazoest = ""
-            spin = context.get("spin") if isinstance(context.get("spin"), Mapping) else {}
+            spin_raw = context.get("spin")
+            spin = spin_raw if isinstance(spin_raw, Mapping) else {}
             if relay_is_logged_in:
                 graphql_headers = self._safe_httpx_headers(self._parser.get_headers(post_url))
                 graphql_headers.update(

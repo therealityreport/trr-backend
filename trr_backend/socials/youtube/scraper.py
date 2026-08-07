@@ -20,7 +20,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from html import unescape
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
 import requests
@@ -1361,7 +1361,8 @@ class YouTubeScraper:
             schema_url = str(item.get("url") or post_url or "").strip()
             published_raw = str(item.get("datePublished") or item.get("uploadDate") or "").strip()
             published_at = self._parse_timestamp(published_raw) if published_raw else 0
-            author = item.get("author") if isinstance(item.get("author"), dict) else {}
+            author_raw = item.get("author")
+            author = author_raw if isinstance(author_raw, dict) else {}
             return {
                 "schema_type": item.get("@type"),
                 "url": schema_url or None,
@@ -2015,7 +2016,9 @@ class YouTubeScraper:
                 browse_url,
                 headers=headers,
                 data=json.dumps(payload),
-                timeout=self._continuation_request_timeout(),
+                # requests accepts urllib3 Timeout objects at runtime; the stubs
+                # only admit float/tuple, so widen for the type checker.
+                timeout=cast("Any", self._continuation_request_timeout()),
             )
             self._track_response_status(response.status_code)
             response.raise_for_status()

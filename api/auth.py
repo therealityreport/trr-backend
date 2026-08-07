@@ -10,7 +10,7 @@ from __future__ import annotations
 import hmac
 import logging
 import os
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from fastapi import Depends, HTTPException, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -217,7 +217,10 @@ async def require_internal_admin(
         current_user = await get_current_user(request)
         matched_user = _allowlist_match(current_user)
     except HTTPException as exc:
-        if exc.status_code == 500 and exc.headers.get("x-error-code") == "AUTH_SERVICE_UNAVAILABLE":
+        if (
+            exc.status_code == 500
+            and cast("dict[str, str]", exc.headers).get("x-error-code") == "AUTH_SERVICE_UNAVAILABLE"
+        ):
             current_user = None
             matched_user = None
         else:
@@ -227,7 +230,8 @@ async def require_internal_admin(
 
     role = (current_user or {}).get("role") if isinstance(current_user, dict) else None
     if role == "service_role" and _service_role_allowed("TRR_INTERNAL_ADMIN_ALLOW_SERVICE_ROLE"):
-        return current_user
+        # role is only non-None when current_user is a dict (see above).
+        return cast("dict", current_user)
 
     if _raw_internal_admin_fallback_matches(request):
         logger.info("internal admin auth fallback accepted via raw shared secret header")
@@ -281,7 +285,10 @@ async def require_cast_screentime_admin(request: Request) -> dict:
     try:
         current_user = await get_current_user(request)
     except HTTPException as exc:
-        if exc.status_code == 500 and exc.headers.get("x-error-code") == "AUTH_SERVICE_UNAVAILABLE":
+        if (
+            exc.status_code == 500
+            and cast("dict[str, str]", exc.headers).get("x-error-code") == "AUTH_SERVICE_UNAVAILABLE"
+        ):
             current_user = None
         else:
             raise
@@ -293,7 +300,8 @@ async def require_cast_screentime_admin(request: Request) -> dict:
     role = (current_user or {}).get("role") if isinstance(current_user, dict) else None
     if role == "service_role":
         if _internal_admin_secret_matches(request):
-            return current_user
+            # role is only non-None when current_user is a dict (see above).
+            return cast("dict", current_user)
         raise HTTPException(status_code=403, detail="Allowlist admin access required")
 
     return await require_internal_admin(request)
@@ -318,7 +326,10 @@ async def require_facebank_seed_admin(request: Request) -> dict:
     try:
         current_user = await get_current_user(request)
     except HTTPException as exc:
-        if exc.status_code == 500 and exc.headers.get("x-error-code") == "AUTH_SERVICE_UNAVAILABLE":
+        if (
+            exc.status_code == 500
+            and cast("dict[str, str]", exc.headers).get("x-error-code") == "AUTH_SERVICE_UNAVAILABLE"
+        ):
             current_user = None
         else:
             raise
@@ -330,7 +341,8 @@ async def require_facebank_seed_admin(request: Request) -> dict:
     role = (current_user or {}).get("role") if isinstance(current_user, dict) else None
     if role == "service_role":
         if _internal_admin_secret_matches(request):
-            return current_user
+            # role is only non-None when current_user is a dict (see above).
+            return cast("dict", current_user)
         raise HTTPException(status_code=403, detail="Allowlist admin access required")
 
     return await require_internal_admin(request)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import MagicMock
 from uuid import uuid4
 
@@ -57,8 +58,8 @@ def test_show_get_images_request_defaults_getty_limit_to_none() -> None:
 @pytest.mark.anyio
 async def test_get_show_images_stream_runs_import_in_threadpool(monkeypatch: pytest.MonkeyPatch) -> None:
     show_id = uuid4()
-    db = object()
-    captured: dict[str, object] = {}
+    db: Any = object()
+    captured: dict[str, Any] = {}
 
     monkeypatch.setattr(
         admin_show_images,
@@ -82,10 +83,10 @@ async def test_get_show_images_stream_runs_import_in_threadpool(monkeypatch: pyt
 
     response = await admin_show_images.get_show_images_stream(
         show_id,
-        connection=object(),
+        connection=cast("Any", object()),
         request=admin_show_images.ShowGetImagesRequest(limit=5, getty_limit=7),
         db=db,
-        _=object(),
+        _=cast("Any", object()),
     )
 
     chunks: list[str] = []
@@ -112,7 +113,7 @@ def test_import_show_images_reuses_nbcumv_single_item_worker(monkeypatch: pytest
     from trr_backend.integrations import nbcumv as nbcumv_integration
 
     show_id = uuid4()
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     monkeypatch.setattr(admin_nbcumv, "_ensure_sources", lambda db: None)
     monkeypatch.setattr(admin_nbcumv, "_load_eligible_people_index", lambda db: {"lisa barlow": []})
@@ -145,7 +146,7 @@ def test_import_show_images_reuses_nbcumv_single_item_worker(monkeypatch: pytest
 
     monkeypatch.setattr(admin_nbcumv, "_import_single_item", _fake_import_single_item)
 
-    db = object()
+    db: Any = object()
     result = admin_show_images._import_show_images(
         db,
         show_id=str(show_id),
@@ -180,7 +181,7 @@ def test_import_show_images_uses_public_replacement_only_for_bravo_family(
     from trr_backend.integrations import getty as getty_integration
     from trr_backend.integrations import nbcumv as nbcumv_integration
 
-    inserted_rows: list[dict[str, object]] = []
+    inserted_rows: list[dict[str, Any]] = []
     db = _build_media_assets_db(inserted_rows)
     resolved_person_id = str(uuid4())
 

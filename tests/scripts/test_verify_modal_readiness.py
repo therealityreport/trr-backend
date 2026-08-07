@@ -5,6 +5,7 @@ import subprocess
 import sys
 import time
 import types
+from typing import Any
 
 import pytest
 
@@ -130,7 +131,7 @@ def test_expected_function_names_skips_social_functions_when_queue_disabled(monk
 def test_run_modal_json_reports_lookup_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TRR_MODAL_LOOKUP_TIMEOUT_SECONDS", "1")
 
-    def fake_run(*_args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+    def fake_run(*_args: object, **kwargs: Any) -> subprocess.CompletedProcess[str]:
         raise subprocess.TimeoutExpired(cmd="modal secret list", timeout=kwargs["timeout"])
 
     monkeypatch.setattr(cli.subprocess, "run", fake_run)
@@ -799,13 +800,13 @@ def test_verify_modal_readiness_requires_missing_social_comments_function_even_i
 def test_diagnose_instagram_comments_remote_uses_persisted_run_id_and_cleans_up_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake_modal = types.ModuleType("modal")
+    fake_modal: Any = types.ModuleType("modal")
     fake_modal.Function = types.SimpleNamespace(from_name=lambda *_args, **_kwargs: None)
     monkeypatch.setitem(sys.modules, "modal", fake_modal)
 
     from scripts.modal import diagnose_instagram_comments_remote as diagnose
 
-    created_runs: list[dict[str, object]] = []
+    created_runs: list[dict[str, Any]] = []
     created_jobs: list[dict[str, object]] = []
     cleanup_calls: list[tuple[str, tuple[object, ...]]] = []
 

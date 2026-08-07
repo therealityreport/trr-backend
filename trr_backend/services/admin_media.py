@@ -247,7 +247,8 @@ def update_media_link_context(
     link, query_count = admin_media_repo.update_media_link_context(link_id, patch)
     if link is None:
         return None, query_count
-    context = link.get("context") if isinstance(link.get("context"), dict) else {}
+    raw_context = link.get("context")
+    context: dict[str, Any] = raw_context if isinstance(raw_context, dict) else {}
     return (
         {
             "link_id": str(link.get("id") or ""),

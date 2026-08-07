@@ -1,6 +1,7 @@
 """Tests for standalone Twitter scrape persistence helpers."""
 
 from contextlib import nullcontext
+from typing import Any, cast
 from unittest.mock import patch
 
 from trr_backend.socials.twitter.scraper import Tweet
@@ -108,7 +109,7 @@ def test_tweet_to_payload_preserves_none_display_name():
     from trr_backend.repositories.twitter_standalone import _tweet_to_payload
 
     tweet = _make_tweet("700")
-    tweet.display_name = None
+    cast(Any, tweet).display_name = None
     payload = _tweet_to_payload(tweet, scrape_query="#TEST", scraped_at="2026-01-01T00:00:00+00:00")
     assert payload["display_name"] is None
 

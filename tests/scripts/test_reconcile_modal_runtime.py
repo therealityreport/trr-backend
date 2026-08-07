@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from typing import Any
 
 import pytest
 
@@ -9,7 +10,7 @@ from scripts.modal import reconcile_modal_runtime as cli
 
 
 def test_deploy_modal_app_uses_immutable_target(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[dict[str, object]] = []
+    calls: list[dict[str, Any]] = []
 
     def fake_run(command, **kwargs):
         calls.append({"command": command, **kwargs})

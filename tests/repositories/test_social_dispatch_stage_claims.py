@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any, cast
 
-from trr_backend.repositories import social_season_analytics as repo
+from trr_backend.socials import social_season_analytics_impl as repo
 from trr_backend.socials.instagram.comments_scrapling import job_runner as comments_job_runner
 from trr_backend.socials.pipelines.job_handler_types import (
     FunctionPlatformJobHandler as LeafFunctionPlatformJobHandler,
@@ -92,7 +93,7 @@ def test_comments_scrapling_completion_uses_flattened_reply_count() -> None:
         reported_comment_count=4,
     )
 
-    assert comments_job_runner._comments_scrape_is_complete(result=result, max_comments_per_post=0) is True  # noqa: SLF001
+    assert comments_job_runner._comments_scrape_is_complete(result=cast(Any, result), max_comments_per_post=0) is True  # noqa: SLF001
 
 
 def test_inline_fallback_followup_worker_id_keeps_modal_followups_queue_owned() -> None:

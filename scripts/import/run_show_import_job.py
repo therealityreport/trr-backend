@@ -307,6 +307,7 @@ def main(argv: list[str]) -> int:
             time.sleep(sleep_s)
             continue
         return rc
+    return rc
 
 
 if __name__ == "__main__":

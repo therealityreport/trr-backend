@@ -172,7 +172,7 @@ def _upsert_sync_state(
     status: str,
     last_success_at: str | None = None,
     last_seen_most_recent_episode: str | None = None,
-    last_error: str | None = None,
+    last_error: object | None = None,
 ) -> None:
     table_name = _normalize_table_name(table_name)
     show_id = _coerce_show_id(show_id)

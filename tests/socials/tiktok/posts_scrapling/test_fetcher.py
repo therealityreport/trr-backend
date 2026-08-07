@@ -258,7 +258,9 @@ def test_tiktok_warmup_optional_xhr_capture_metadata(_mock_scrapling, monkeypatc
 
     asyncio.run(fetcher.warmup("someone"))
 
-    call_kwargs = fetcher._fetcher.async_fetch.await_args.kwargs
+    warmup_await_args = fetcher._fetcher.async_fetch.await_args
+    assert warmup_await_args is not None
+    call_kwargs = warmup_await_args.kwargs
     assert call_kwargs["capture_xhr"] == r"/api/(?:user/detail|post/item_list)/"
     assert call_kwargs["locale"] == "en-US"
     meta = fetcher.runtime_metadata

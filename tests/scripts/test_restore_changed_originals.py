@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import hashlib
-import importlib
 
 import pytest
 
-mod = importlib.import_module("scripts.media.restore_changed_originals")
+import scripts.media.restore_changed_originals as mod
 
 
 def _sha(text: str) -> str:

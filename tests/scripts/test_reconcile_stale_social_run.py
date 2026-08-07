@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from typing import Any
 
 from scripts.socials import reconcile_stale_social_run as subject
 
@@ -10,7 +11,7 @@ from scripts.socials import reconcile_stale_social_run as subject
 @dataclass
 class FakePg:
     rows: dict[str, list[dict[str, object]]] = field(default_factory=dict)
-    writes: list[tuple[str, list[object]]] = field(default_factory=list)
+    writes: list[tuple[str, list[Any]]] = field(default_factory=list)
     remaining_count_reads: int = 0
     summary_reads: int = 0
     lock_entries: int = 0
@@ -23,7 +24,7 @@ class FakePg:
         self.lock_entries += 1
         yield self.lock_conn
 
-    def fetch_one(self, query: str, params: list[object], **kwargs):
+    def fetch_one(self, query: str, params: list[Any], **kwargs):
         if kwargs:
             assert kwargs.get("conn") is self.lock_conn
         normalized = " ".join(query.lower().split())

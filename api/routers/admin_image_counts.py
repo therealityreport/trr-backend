@@ -5,8 +5,11 @@ from __future__ import annotations
 import logging
 import os
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
@@ -348,12 +351,15 @@ def _resolve_runtime_person_reference_pools(
                 )
                 used_raw = profile.get("used")
                 if isinstance(used_raw, list):
-                    references = [entry for entry in used_raw if isinstance(entry, dict)]
+                    references = cast("list[dict[str, Any]]", [entry for entry in used_raw if isinstance(entry, dict)])
                 if references:
-                    references = sync_owner_tagging_reference_usage(
-                        db,
-                        person_id,
-                        used_references=references,
+                    references = cast(
+                        "list[dict[str, Any]]",
+                        sync_owner_tagging_reference_usage(
+                            db,
+                            person_id,
+                            used_references=references,
+                        ),
                     )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
@@ -1064,7 +1070,7 @@ def _build_detection_boxes(
     person_boxes = sorted(
         person_boxes,
         key=lambda box: (
-            -(box.get("confidence") if isinstance(box.get("confidence"), (int, float)) else 0.0),
+            -(cast("float", box.get("confidence")) if isinstance(box.get("confidence"), (int, float)) else 0.0),
             float(box.get("x") or 0.0),
             float(box.get("y") or 0.0),
         ),
@@ -1192,9 +1198,9 @@ def _normalize_thumbnail_crop_payload(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
     try:
-        x = float(value.get("x"))
-        y = float(value.get("y"))
-        zoom = float(value.get("zoom"))
+        x = float(cast("Any", value.get("x")))
+        y = float(cast("Any", value.get("y")))
+        zoom = float(cast("Any", value.get("zoom")))
     except (TypeError, ValueError):
         return None
     x_value = x * 100.0 if 0.0 <= x <= 1.0 else x
@@ -1267,6 +1273,10 @@ def _owner_face_crop_payload(
             float(item.get("width") or 0.0) * float(item.get("height") or 0.0),
         ),
     )
+    # Defaults for static analysis; every runtime path below overwrites them.
+    cx: float = 0.0
+    cy: float = 0.0
+    target_span: float = 1.0
     # Prefer square_crop_bbox from vision API (includes proper padding)
     scb = best.get("square_crop_bbox")
     if isinstance(scb, list) and len(scb) >= 4:
@@ -1361,8 +1371,8 @@ class AutoCountShowImagesResponse(BaseModel):
 def auto_count_cast_photo(
     photo_id: UUID,
     force: bool = Query(default=False),
-    db: SupabaseAdminClient = None,
-    _: InternalAdminUser = None,
+    db: SupabaseAdminClient = cast("SupabaseAdminClient", None),
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> AutoCountResponse:
     response = (
         db.schema("core")
@@ -1459,20 +1469,26 @@ def auto_count_cast_photo(
     owner_reference_images: list[dict[str, Any]] = []
     if owner_person_id:
         try:
-            owner_reference_profile = build_owner_tagging_reference_profile(
-                db,
-                owner_person_id,
-                show_id=metadata.get("show_id"),
-                show_name=str(metadata.get("show_name") or "").strip() or None,
+            owner_reference_profile = cast(
+                "dict[str, Any]",
+                build_owner_tagging_reference_profile(
+                    db,
+                    owner_person_id,
+                    show_id=metadata.get("show_id"),
+                    show_name=str(metadata.get("show_name") or "").strip() or None,
+                ),
             )
             raw_used = owner_reference_profile.get("used")
             if isinstance(raw_used, list):
                 owner_reference_images = [entry for entry in raw_used if isinstance(entry, dict)]
             if owner_reference_images:
-                owner_reference_images = sync_owner_tagging_reference_usage(
-                    db,
-                    owner_person_id,
-                    used_references=owner_reference_images,
+                owner_reference_images = cast(
+                    "list[dict[str, Any]]",
+                    sync_owner_tagging_reference_usage(
+                        db,
+                        owner_person_id,
+                        used_references=owner_reference_images,
+                    ),
                 )
         except Exception as exc:  # noqa: BLE001
             owner_reference_profile = None
@@ -1547,10 +1563,13 @@ def auto_count_cast_photo(
         references_used = [entry for entry in reference_profile_used if isinstance(entry, dict)]
     if owner_person_id:
         try:
-            references_used = sync_owner_tagging_reference_usage(
-                db,
-                owner_person_id,
-                used_references=references_used,
+            references_used = cast(
+                "list[dict[str, Any]]",
+                sync_owner_tagging_reference_usage(
+                    db,
+                    owner_person_id,
+                    used_references=references_used,
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to sync owner tagging references for cast photo %s: %s", photo_id, exc)
@@ -1580,7 +1599,7 @@ def auto_count_cast_photo(
             entity_kind="cast_photo",
             entity_id=str(photo_id),
             image_url=selected_image_url,
-            face_boxes=face_boxes,
+            face_boxes=cast("list[Mapping[str, Any]]", face_boxes),
             size=256,
         )
     if metadata.get("face_crops") != face_crops:
@@ -1624,8 +1643,8 @@ def auto_count_cast_photo(
         face_count=result.face_count,
         detector=result.detector,
         model=result.model,
-        face_boxes=face_boxes,
-        face_crops=face_crops,
+        face_boxes=cast("list[FaceBox]", face_boxes),
+        face_crops=cast("list[FaceCrop]", face_crops),
         thumbnail_crop=resolved_crop_payload,
         references_used=references_used or None,
     )
@@ -1635,8 +1654,8 @@ def auto_count_cast_photo(
 def auto_count_media_asset(
     asset_id: UUID,
     force: bool = Query(default=False),
-    db: SupabaseAdminClient = None,
-    _: InternalAdminUser = None,
+    db: SupabaseAdminClient = cast("SupabaseAdminClient", None),
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> AutoCountResponse:
     response = (
         db.schema("core")
@@ -1789,20 +1808,26 @@ def auto_count_media_asset(
                 None,
             )
             context_obj = primary_context if isinstance(primary_context, dict) else {}
-            owner_reference_profile = build_owner_tagging_reference_profile(
-                db,
-                owner_person_id,
-                show_id=context_obj.get("show_id"),
-                show_name=str(context_obj.get("show_name") or "").strip() or None,
+            owner_reference_profile = cast(
+                "dict[str, Any]",
+                build_owner_tagging_reference_profile(
+                    db,
+                    owner_person_id,
+                    show_id=context_obj.get("show_id"),
+                    show_name=str(context_obj.get("show_name") or "").strip() or None,
+                ),
             )
             raw_used = owner_reference_profile.get("used")
             if isinstance(raw_used, list):
                 owner_reference_images = [entry for entry in raw_used if isinstance(entry, dict)]
             if owner_reference_images:
-                owner_reference_images = sync_owner_tagging_reference_usage(
-                    db,
-                    owner_person_id,
-                    used_references=owner_reference_images,
+                owner_reference_images = cast(
+                    "list[dict[str, Any]]",
+                    sync_owner_tagging_reference_usage(
+                        db,
+                        owner_person_id,
+                        used_references=owner_reference_images,
+                    ),
                 )
         except Exception as exc:  # noqa: BLE001
             owner_reference_profile = None
@@ -1877,10 +1902,13 @@ def auto_count_media_asset(
         references_used = [entry for entry in reference_profile_used if isinstance(entry, dict)]
     if owner_person_id:
         try:
-            references_used = sync_owner_tagging_reference_usage(
-                db,
-                owner_person_id,
-                used_references=references_used,
+            references_used = cast(
+                "list[dict[str, Any]]",
+                sync_owner_tagging_reference_usage(
+                    db,
+                    owner_person_id,
+                    used_references=references_used,
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to sync owner tagging references for media asset %s: %s", asset_id, exc)
@@ -1890,7 +1918,7 @@ def auto_count_media_asset(
             entity_kind="media_asset",
             entity_id=str(asset_id),
             image_url=selected_image_url,
-            face_boxes=face_boxes,
+            face_boxes=cast("list[Mapping[str, Any]]", face_boxes),
             size=256,
         )
     context_auto_update = {
@@ -1958,7 +1986,7 @@ def auto_count_media_asset(
     resolved_crop_payload = _normalize_thumbnail_crop_payload(latest_crop_payload)
     if resolved_crop_payload is None:
         for link in links:
-            context = link.get("context") if isinstance(link.get("context"), dict) else {}
+            context = cast("dict[str, Any]", link.get("context")) if isinstance(link.get("context"), dict) else {}
             resolved_crop_payload = _normalize_thumbnail_crop_payload(context.get("thumbnail_crop"))
             if resolved_crop_payload is not None:
                 break
@@ -1971,8 +1999,8 @@ def auto_count_media_asset(
         face_count=result.face_count,
         detector=result.detector,
         model=result.model,
-        face_boxes=face_boxes,
-        face_crops=face_crops,
+        face_boxes=cast("list[FaceBox]", face_boxes),
+        face_crops=cast("list[FaceCrop]", face_crops),
         thumbnail_crop=resolved_crop_payload,
         references_used=references_used or None,
     )
@@ -1982,8 +2010,8 @@ def auto_count_media_asset(
 def auto_count_show_images(
     show_id: UUID,
     payload: AutoCountShowImagesRequest,
-    db: SupabaseAdminClient = None,
-    _: InternalAdminUser = None,
+    db: SupabaseAdminClient = cast("SupabaseAdminClient", None),
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> AutoCountShowImagesResponse:
     show_id_str = str(show_id)
 
@@ -2200,7 +2228,7 @@ def auto_count_show_images(
                 entity_kind="media_asset",
                 entity_id=str(asset_id),
                 image_url=selected_image_url,
-                face_boxes=face_boxes,
+                face_boxes=cast("list[Mapping[str, Any]]", face_boxes),
                 size=256,
             )
         context_auto_update = {

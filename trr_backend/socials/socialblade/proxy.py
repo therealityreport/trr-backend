@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote, urlparse
 
 from trr_backend.socials._scrapling_http_utils import env_truthy, resolve_positive_int_env
@@ -30,7 +31,7 @@ def _split_proxy_values(raw: str) -> list[str]:
     return values
 
 
-def _build_proxy_rotator(browser_proxy: str | dict[str, str] | list[str | dict[str, str]] | None) -> Any | None:
+def _build_proxy_rotator(browser_proxy: str | dict[str, str] | Sequence[str | dict[str, str]] | None) -> Any | None:
     if browser_proxy is None:
         return None
     try:
@@ -38,9 +39,9 @@ def _build_proxy_rotator(browser_proxy: str | dict[str, str] | list[str | dict[s
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError("Scrapling proxy rotation is unavailable. Install scrapling[fetchers].") from exc
     if isinstance(browser_proxy, list):
-        normalized = [value for value in browser_proxy if value]
+        normalized = [value for value in cast("Sequence[Any]", browser_proxy) if value]
         return ProxyRotator(normalized) if normalized else None
-    return ProxyRotator([browser_proxy])
+    return ProxyRotator(cast("list[Any]", [browser_proxy]))
 
 
 def _fingerprint_from_gateway(gateway: str, provider: str) -> str:

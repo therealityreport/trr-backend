@@ -5,6 +5,7 @@ import os
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -145,7 +146,7 @@ def test_threads_cookie_refresh_falls_back_to_direct_login(monkeypatch, tmp_path
     cookies = threads_cookie_refresh.refresh_threads_cookies(
         username="codex@thereality.report",
         password="secret",
-        cookie_file=tmp_path / "threads-cookies.json",
+        cookie_file=cast(str, tmp_path / "threads-cookies.json"),
         headless=True,
         timeout_seconds=45,
     )
@@ -286,7 +287,7 @@ def test_cookie_refresh_context_defaults_to_codex_chrome_profile(
         json.dumps({"profile": {"name": "codex"}, "account_info": [{"email": "codex@thereality.report"}]}),
         encoding="utf-8",
     )
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     class _FakeContext:
         def close(self) -> None:
@@ -409,7 +410,7 @@ def test_cookie_refresh_context_allows_profileless_browser_with_override(
     tmp_path: Path,
 ) -> None:
     chrome_root = tmp_path / "Chrome"
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     class _FakeContext:
         def close(self) -> None:
@@ -609,10 +610,10 @@ def test_instagram_cookie_refresh_rejects_unvalidated_graphql_session(monkeypatc
         def __exit__(self, *_args: object) -> bool:
             return False
 
-    sync_api_module = ModuleType("playwright.sync_api")
+    sync_api_module: Any = ModuleType("playwright.sync_api")
     sync_api_module.TimeoutError = _FakePlaywrightTimeoutError
     sync_api_module.sync_playwright = lambda: _PlaywrightContext()
-    playwright_module = ModuleType("playwright")
+    playwright_module: Any = ModuleType("playwright")
     playwright_module.sync_api = sync_api_module
     monkeypatch.setitem(sys.modules, "playwright", playwright_module)
     monkeypatch.setitem(sys.modules, "playwright.sync_api", sync_api_module)
@@ -705,10 +706,10 @@ def test_instagram_cookie_refresh_preserves_challenge_error_when_browser_close_f
         def __exit__(self, *_args: object) -> bool:
             return False
 
-    sync_api_module = ModuleType("playwright.sync_api")
+    sync_api_module: Any = ModuleType("playwright.sync_api")
     sync_api_module.TimeoutError = _FakePlaywrightTimeoutError
     sync_api_module.sync_playwright = lambda: _PlaywrightContext()
-    playwright_module = ModuleType("playwright")
+    playwright_module: Any = ModuleType("playwright")
     playwright_module.sync_api = sync_api_module
     monkeypatch.setitem(sys.modules, "playwright", playwright_module)
     monkeypatch.setitem(sys.modules, "playwright.sync_api", sync_api_module)
@@ -798,10 +799,10 @@ def test_instagram_cookie_refresh_schema_only_skips_graphql_validator(monkeypatc
         def __exit__(self, *_args: object) -> bool:
             return False
 
-    sync_api_module = ModuleType("playwright.sync_api")
+    sync_api_module: Any = ModuleType("playwright.sync_api")
     sync_api_module.TimeoutError = _FakePlaywrightTimeoutError
     sync_api_module.sync_playwright = lambda: _PlaywrightContext()
-    playwright_module = ModuleType("playwright")
+    playwright_module: Any = ModuleType("playwright")
     playwright_module.sync_api = sync_api_module
     monkeypatch.setitem(sys.modules, "playwright", playwright_module)
     monkeypatch.setitem(sys.modules, "playwright.sync_api", sync_api_module)
@@ -986,10 +987,10 @@ def test_interactive_instagram_login_rejects_saved_session_when_graphql_fails(
         def __exit__(self, *_args: object) -> bool:
             return False
 
-    sync_api_module = ModuleType("playwright.sync_api")
+    sync_api_module: Any = ModuleType("playwright.sync_api")
     sync_api_module.TimeoutError = TimeoutError
     sync_api_module.sync_playwright = lambda: _PlaywrightContext()
-    playwright_module = ModuleType("playwright")
+    playwright_module: Any = ModuleType("playwright")
     playwright_module.sync_api = sync_api_module
     monkeypatch.setitem(sys.modules, "playwright", playwright_module)
     monkeypatch.setitem(sys.modules, "playwright.sync_api", sync_api_module)
@@ -1009,7 +1010,7 @@ def test_interactive_instagram_login_rejects_saved_session_when_graphql_fails(
 def test_instagram_saved_cookie_validation_uses_profile_posts_graphql(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     class _FakeScraper:
         last_retrieval_meta: dict[str, object] = {}
@@ -1058,7 +1059,7 @@ def test_interactive_instagram_login_launches_real_profile_directory(
     )
     monkeypatch.setenv("SOCIAL_BROWSER_SESSION_DIR", str(tmp_path / "sessions"))
     monkeypatch.setattr(browser_cookie_refresh, "_chrome_profile_base_dir", lambda: chrome_root)
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
     writes: list[tuple[Path, dict[str, str]]] = []
 
     class _FakePlaywrightTimeoutError(Exception):
@@ -1109,10 +1110,10 @@ def test_interactive_instagram_login_launches_real_profile_directory(
         def __exit__(self, *_args: object) -> bool:
             return False
 
-    sync_api_module = ModuleType("playwright.sync_api")
+    sync_api_module: Any = ModuleType("playwright.sync_api")
     sync_api_module.TimeoutError = _FakePlaywrightTimeoutError
     sync_api_module.sync_playwright = lambda: _PlaywrightContext()
-    playwright_module = ModuleType("playwright")
+    playwright_module: Any = ModuleType("playwright")
     playwright_module.sync_api = sync_api_module
     monkeypatch.setitem(sys.modules, "playwright", playwright_module)
     monkeypatch.setitem(sys.modules, "playwright.sync_api", sync_api_module)
@@ -1213,6 +1214,7 @@ def test_threads_validate_session_tokens_requires_graphql_tokens(monkeypatch) ->
     monkeypatch.setattr(scraper, "_fetch_html", _boom)
     valid, reason = scraper.validate_session_tokens()
     assert valid is False
+    assert reason is not None
     assert reason.startswith("probe_fetch_failed:")
 
 
@@ -1235,6 +1237,7 @@ def test_facebook_in_protocol_validator(monkeypatch) -> None:
     )
     valid, reason = validate({"c_user": "1", "xs": "2"})
     assert valid is False
+    assert reason is not None
     assert reason.startswith("login_redirect:")
 
     monkeypatch.setattr(
@@ -1248,7 +1251,7 @@ def test_facebook_in_protocol_validator(monkeypatch) -> None:
 def test_threads_refresh_passes_in_protocol_validator(monkeypatch, tmp_path) -> None:
     from trr_backend.socials.threads import cookie_refresh as threads_cookie_refresh_mod
 
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     def _fake_refresh(*, spec: object, validator: object = None, **_: object) -> dict[str, str]:
         captured["validator"] = validator

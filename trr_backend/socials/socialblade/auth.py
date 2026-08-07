@@ -9,7 +9,7 @@ import socket
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
@@ -465,7 +465,9 @@ def extract_socialblade_cookies_from_chrome_profile(
 
     validation_url = _socialblade_validation_url(validation_handle)
     extracted = chrome_cookies(validation_url, cookie_file=str(cookie_file))
-    cookies = {str(name): str(value) for name, value in dict(extracted or {}).items() if name and value}
+    cookies = {
+        str(name): str(value) for name, value in dict(cast("dict[str, Any]", extracted or {})).items() if name and value
+    }
     require_socialblade_authenticated_cookies(cookies, source=f"Chrome profile {selection.display_name}")
     healthy, reason = validate_socialblade_cookie_health(
         cookies,

@@ -3,10 +3,47 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, cast
+
 from fastapi import APIRouter
 
 from ._shared import *
 from ._surfaces import RouteRecord, routes_matching
+
+if TYPE_CHECKING:
+    from ._shared import (
+        _ANALYTICS_CACHE,
+        _ANALYTICS_CACHE_LOCK,
+        _ANALYTICS_CACHE_MAX_ENTRIES,
+        _ANALYTICS_CACHE_TTL_SECONDS,
+        _COMMENTS_COVERAGE_CACHE,
+        _COMMENTS_COVERAGE_CACHE_LOCK,
+        _COVERAGE_CACHE_MAX_ENTRIES,
+        _COVERAGE_CACHE_TTL_SECONDS,
+        _MIRROR_COVERAGE_CACHE,
+        _MIRROR_COVERAGE_CACHE_LOCK,
+        _WEEK_LIVE_HEALTH_CACHE,
+        _WEEK_LIVE_HEALTH_CACHE_LOCK,
+        _WEEK_LIVE_HEALTH_CACHE_MAX_ENTRIES,
+        _WEEK_LIVE_HEALTH_CACHE_TTL_SECONDS,
+        _analytics_cache_key,
+        _coverage_cache_window_key,
+        _get_ttl_cached_payload,
+        _get_week_detail_cached_payload,
+        _get_week_summary_cached_payload,
+        _internal_error_response,
+        _normalize_target_platforms,
+        _parse_platform_query,
+        _run_admin_repo_call,
+        _set_ttl_cached_payload,
+        _set_week_detail_cached_payload,
+        _set_week_summary_cached_payload,
+        _to_social_read_http_exception,
+        _value_error_to_bad_request,
+        _week_detail_cache_key,
+        _week_live_health_cache_key,
+        _week_summary_cache_key,
+    )
 
 router = APIRouter()
 
@@ -29,7 +66,7 @@ async def get_season_analytics_week_live_health(
     source_scope: Literal["bravo", "network", "creator", "community", "news"] = Query(default="network"),
     timezone: str = Query(default="America/New_York"),
     platforms: str | None = Query(default=None, description="Comma-separated platform list"),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     from trr_backend.socials.analytics import get_week_live_health_snapshot
 
@@ -103,7 +140,7 @@ async def get_season_analytics(
         default=None,
         description="Comma-separated include list: rows,flags,schedule,benchmark",
     ),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict:
     from trr_backend.socials.analytics import get_analytics
 
@@ -210,7 +247,7 @@ async def get_season_analytics_week_summary(
     max_comments_per_post: int = Query(default=_WEEK_DETAIL_DEFAULT_MAX_COMMENTS_PER_POST, ge=0, le=500),
     sort_field: WeekDetailSortField = Query(default="posted_at"),
     sort_dir: WeekDetailSortDir = Query(default="desc"),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict:
     from trr_backend.socials.analytics import get_week_detail_summary, get_week_detail_summary_fast
 
@@ -306,7 +343,7 @@ async def get_season_analytics_week_detail(
     sort_field: WeekDetailSortField = Query(default="posted_at"),
     sort_dir: WeekDetailSortDir = Query(default="desc"),
     include_status: bool = Query(default=True),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict:
     from trr_backend.socials.analytics import get_week_detail
 
@@ -347,7 +384,7 @@ async def get_season_analytics_week_detail(
                 sort_dir=sort_dir,
                 include_status=include_status,
             )
-            _set_week_detail_cached_payload(cache_key, base_payload)
+            _set_week_detail_cached_payload(cache_key, cast("dict[str, Any]", base_payload))
         else:
             cached_posts, cached_total = week_detail_cached_post_counts(base_payload)
 
@@ -366,10 +403,10 @@ async def get_season_analytics_week_detail(
                     sort_dir=sort_dir,
                     include_status=include_status,
                 )
-            _set_week_detail_cached_payload(cache_key, base_payload)
+            _set_week_detail_cached_payload(cache_key, cast("dict[str, Any]", base_payload))
 
         paged_payload = page_week_detail_payload(
-            base_payload,
+            cast("dict[str, Any]", base_payload),
             post_limit=post_limit,
             post_offset=post_offset,
             sort_field=sort_field,
@@ -424,7 +461,7 @@ async def get_season_comments_coverage(
     platforms: str | None = Query(default=None, description="Comma-separated platform list"),
     date_start: datetime | None = Query(default=None),
     date_end: datetime | None = Query(default=None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict:
     from trr_backend.socials.analytics import get_comments_coverage
 
@@ -479,7 +516,7 @@ async def get_season_mirror_coverage(
     platforms: str | None = Query(default=None, description="Comma-separated platform list"),
     date_start: datetime | None = Query(default=None),
     date_end: datetime | None = Query(default=None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict:
     from trr_backend.socials.analytics import get_mirror_coverage
 
@@ -531,7 +568,7 @@ async def get_post_comments(
     season_id: UUID,
     platform: str,
     source_id: str,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict:
     from trr_backend.socials.analytics import get_post_comments as _get
 
@@ -558,7 +595,7 @@ async def get_season_tiktok_overview(
     hashtag: str | None = Query(default=None),
     keyword: str | None = Query(default=None),
     sound_id: str | None = Query(default=None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     from trr_backend.socials.analytics import get_tiktok_overview
 
@@ -585,7 +622,7 @@ async def get_season_tiktok_cast_members(
     season_id: UUID,
     date_start: datetime | None = Query(default=None),
     date_end: datetime | None = Query(default=None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     from trr_backend.socials.analytics import get_tiktok_cast_members
 
@@ -607,7 +644,7 @@ async def get_season_tiktok_hashtags(
     token_type: str = Query(default="hashtag"),
     date_start: datetime | None = Query(default=None),
     date_end: datetime | None = Query(default=None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     from trr_backend.socials.analytics import get_tiktok_hashtags
 
@@ -633,7 +670,7 @@ async def get_season_tiktok_sounds(
     date_end: datetime | None = Query(default=None),
     search: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=250),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     from trr_backend.socials.analytics import get_tiktok_sounds
 
@@ -663,7 +700,7 @@ async def get_season_tiktok_content_health(
     keyword: str | None = Query(default=None),
     sound_id: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=250),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     from trr_backend.socials.analytics import get_tiktok_content_health
 
@@ -690,7 +727,7 @@ async def get_season_tiktok_content_health(
 async def get_season_tiktok_sound_detail(
     season_id: UUID,
     sound_id: str,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     from trr_backend.socials.analytics import get_tiktok_sound_detail
 
@@ -708,7 +745,7 @@ async def get_season_tiktok_sound_posts(
     season_id: UUID,
     sound_id: str,
     limit: int = Query(default=100, ge=1, le=500),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     from trr_backend.socials.analytics import get_tiktok_sound_posts
 
@@ -725,7 +762,7 @@ async def get_season_tiktok_sound_posts(
 async def get_season_tiktok_post_detail(
     season_id: UUID,
     post_id: str,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     from trr_backend.socials.analytics import get_tiktok_post_detail
 
@@ -743,7 +780,7 @@ async def get_season_tiktok_sentiment_trends(
     season_id: UUID,
     date_start: datetime | None = Query(default=None),
     date_end: datetime | None = Query(default=None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     from trr_backend.socials.analytics import get_tiktok_sentiment_trends
 
@@ -765,7 +802,7 @@ async def refresh_post_comments_for_post(
     platform: str,
     source_id: str,
     payload: PostCommentRefreshRequest | None = None,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict:
     from trr_backend.socials.analytics import get_post_comments as _get_post_comments
     from trr_backend.socials.control_plane import refresh_post as _refresh_post
@@ -810,7 +847,7 @@ async def requeue_instagram_mirror_jobs(
     failed_only: bool = Query(default=False),
     date_start: datetime | None = Query(default=None),
     date_end: datetime | None = Query(default=None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict:
     from trr_backend.socials.instagram.media_mirror import requeue_instagram_media_mirror_jobs
 
@@ -844,7 +881,7 @@ async def requeue_platform_mirror_jobs(
     failed_only: bool = Query(default=False),
     date_start: datetime | None = Query(default=None),
     date_end: datetime | None = Query(default=None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict:
     from trr_backend.socials.control_plane import requeue_media_mirror_jobs
 
@@ -879,7 +916,7 @@ async def export_season_analytics_csv(
     timezone: str = Query(default="America/New_York"),
     week: int | None = Query(default=None, ge=0, le=200),
     platforms: str | None = Query(default=None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> Response:
     from trr_backend.socials.analytics import (
         build_csv,
@@ -920,7 +957,7 @@ async def export_season_analytics_pdf(
     timezone: str = Query(default="America/New_York"),
     week: int | None = Query(default=None, ge=0, le=200),
     platforms: str | None = Query(default=None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> Response:
     from trr_backend.socials.analytics import (
         build_pdf,

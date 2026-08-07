@@ -8,12 +8,12 @@ from unittest.mock import MagicMock
 import pytest
 
 from trr_backend.repositories import media_assets
-from trr_backend.repositories import social_season_analytics as social_repo
+from trr_backend.socials import social_season_analytics_impl as social_repo
 
 
 def test_is_allowed_domain_valid() -> None:
     """Test domain allowlist validation for allowed domains."""
-    from scripts.mirror_media_assets_to_s3 import is_allowed_domain
+    from scripts.media.mirror_media_assets_to_s3 import is_allowed_domain
 
     # These should be allowed (default allowlist)
     assert is_allowed_domain("https://image.tmdb.org/t/p/original/foo.jpg") is True
@@ -23,7 +23,7 @@ def test_is_allowed_domain_valid() -> None:
 
 def test_is_allowed_domain_blocked() -> None:
     """Test domain allowlist validation for blocked domains."""
-    from scripts.mirror_media_assets_to_s3 import is_allowed_domain
+    from scripts.media.mirror_media_assets_to_s3 import is_allowed_domain
 
     # These should NOT be allowed
     assert is_allowed_domain("https://evil.com/image.jpg") is False
@@ -33,7 +33,7 @@ def test_is_allowed_domain_blocked() -> None:
 
 def test_is_allowed_domain_invalid_url() -> None:
     """Test domain allowlist validation for malformed URLs."""
-    from scripts.mirror_media_assets_to_s3 import is_allowed_domain
+    from scripts.media.mirror_media_assets_to_s3 import is_allowed_domain
 
     assert is_allowed_domain("") is False
     assert is_allowed_domain("not-a-url") is False
@@ -42,7 +42,7 @@ def test_is_allowed_domain_invalid_url() -> None:
 
 def test_compute_next_retry_at_exponential_backoff() -> None:
     """Test exponential backoff calculation for retry scheduling."""
-    from scripts.mirror_media_assets_to_s3 import _compute_next_retry_at
+    from scripts.media.mirror_media_assets_to_s3 import _compute_next_retry_at
 
     base_hours = 1.0
     now = datetime.now(UTC)
@@ -70,7 +70,7 @@ def test_compute_next_retry_at_exponential_backoff() -> None:
 
 def test_build_s3_key_content_addressed() -> None:
     """Test S3 key generation uses sha256 prefix for partitioning."""
-    from scripts.mirror_media_assets_to_s3 import _build_s3_key
+    from scripts.media.mirror_media_assets_to_s3 import _build_s3_key
 
     sha256 = "abc123def456789"
     key = _build_s3_key(sha256, "image/jpeg")
@@ -83,7 +83,7 @@ def test_build_s3_key_content_addressed() -> None:
 
 def test_build_s3_key_different_content_types() -> None:
     """Test S3 key generation handles various content types."""
-    from scripts.mirror_media_assets_to_s3 import _build_s3_key
+    from scripts.media.mirror_media_assets_to_s3 import _build_s3_key
 
     sha256 = "deadbeef12345678"
 
@@ -99,7 +99,7 @@ def test_build_s3_key_different_content_types() -> None:
 
 def test_guess_extension_normalizes_jpeg() -> None:
     """Test .jpe is normalized to .jpg."""
-    from scripts.mirror_media_assets_to_s3 import _guess_extension
+    from scripts.media.mirror_media_assets_to_s3 import _guess_extension
 
     # Some systems return .jpe for image/jpeg
     # Our code normalizes to .jpg
@@ -109,7 +109,7 @@ def test_guess_extension_normalizes_jpeg() -> None:
 
 def test_mirror_single_asset_domain_not_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test mirroring skips assets with disallowed domains."""
-    from scripts.mirror_media_assets_to_s3 import mirror_single_asset
+    from scripts.media.mirror_media_assets_to_s3 import mirror_single_asset
 
     db = MagicMock()
     # Mock the update_ingest_status response chain
@@ -137,12 +137,13 @@ def test_mirror_single_asset_domain_not_allowed(monkeypatch: pytest.MonkeyPatch)
     )
 
     assert result.status == "skipped"
+    assert result.error is not None
     assert "allowlist" in result.error.lower()
 
 
 def test_mirror_single_asset_dry_run_no_changes() -> None:
     """Test dry run mode doesn't make actual changes."""
-    from scripts.mirror_media_assets_to_s3 import mirror_single_asset
+    from scripts.media.mirror_media_assets_to_s3 import mirror_single_asset
 
     db = MagicMock()
     asset = {
@@ -173,7 +174,7 @@ def test_mirror_single_asset_dry_run_no_changes() -> None:
 
 def test_handle_retryable_error_increments_count() -> None:
     """Test retryable errors increment retry count."""
-    from scripts.mirror_media_assets_to_s3 import _handle_retryable_error
+    from scripts.media.mirror_media_assets_to_s3 import _handle_retryable_error
 
     db = MagicMock()
     # Mock the update_ingest_status call
@@ -198,7 +199,7 @@ def test_handle_retryable_error_increments_count() -> None:
 
 def test_handle_retryable_error_max_retries_exceeded() -> None:
     """Test max retries results in skipped status."""
-    from scripts.mirror_media_assets_to_s3 import _handle_retryable_error
+    from scripts.media.mirror_media_assets_to_s3 import _handle_retryable_error
 
     db = MagicMock()
     db.schema.return_value.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock(
@@ -217,12 +218,13 @@ def test_handle_retryable_error_max_retries_exceeded() -> None:
     )
 
     assert result.status == "skipped"
+    assert result.error is not None
     assert "Max retries" in result.error
 
 
 def test_update_summary_tracks_bytes() -> None:
     """Test summary correctly aggregates bytes transferred."""
-    from scripts.mirror_media_assets_to_s3 import MirrorResult, MirrorSummary, _update_summary
+    from scripts.media.mirror_media_assets_to_s3 import MirrorResult, MirrorSummary, _update_summary
 
     summary = MirrorSummary()
 

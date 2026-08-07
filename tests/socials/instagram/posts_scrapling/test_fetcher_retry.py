@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -69,7 +70,7 @@ class _TrackingClient:
 def test_rebuild_http_client_closes_previous_client(monkeypatch) -> None:
     fetcher = _make_fetcher()
     old = _TrackingClient()
-    fetcher._http_client = old
+    fetcher._http_client = cast(Any, old)
     monkeypatch.setattr(
         "trr_backend.socials.instagram.posts_scrapling.fetcher.httpx.AsyncClient",
         lambda **_kwargs: _TrackingClient(),

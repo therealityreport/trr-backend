@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from psycopg2.errors import UndefinedColumn, UndefinedTable
@@ -418,7 +419,7 @@ def test_completion_compare_unsampled_executes_legacy_once(monkeypatch) -> None:
 def test_completion_sidecar_schema_missing_logs_hashed_event_and_retries_legacy_once(monkeypatch) -> None:
     secret_handle = "private_handle_8492"
     calls: list[str] = []
-    logged: list[tuple[str, dict[str, object]]] = []
+    logged: list[tuple[str, dict[str, Any]]] = []
     monkeypatch.setattr(repository.payload_sidecars, "payload_read_mode", lambda: "sidecar")
 
     def fake_fetch_one(query, _params, *, pool_name):

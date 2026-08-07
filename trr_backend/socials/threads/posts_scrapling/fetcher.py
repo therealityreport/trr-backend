@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote
 
 from trr_backend.socials._scrapling_http_utils import (
@@ -256,7 +256,7 @@ class ThreadsPostsScraplingFetcher:
             self._fetcher = build_stealthy_fetcher()
         self._scrapling_used = True
         self._request_count += 1
-        return await self._fetcher.async_fetch(
+        return await cast("Any", self._fetcher).async_fetch(
             url,
             **self._scrapling_fetcher_options.kwargs,
             headless=self._headless,

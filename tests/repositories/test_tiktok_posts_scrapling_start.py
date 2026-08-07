@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from trr_backend.repositories import social_season_analytics as repo
+from trr_backend.socials import social_season_analytics_impl as repo
 
 
 def test_start_tiktok_posts_rejects_empty_account() -> None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 from trr_backend.db import pg
 from trr_backend.socials.model_types import SeasonContext
@@ -133,7 +133,7 @@ def _update_instagram_post_source_media_fields(
         and media_urls is not field_unset
         and instagram_posts_has_column("media_urls", conn=conn)
     ):
-        _add("media_urls", list(media_urls or []), as_jsonb=True)
+        _add("media_urls", list(cast("list[str] | None", media_urls) or []), as_jsonb=True)
 
     if not assignments:
         return

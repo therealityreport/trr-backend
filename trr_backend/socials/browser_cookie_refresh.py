@@ -9,11 +9,11 @@ import re
 import shutil
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +156,7 @@ def _read_rate_limit_timestamp(lock_file: Path) -> float | None:
     if not isinstance(payload, dict):
         return None
     try:
-        return float(payload.get("last_attempt_monotonic"))
+        return float(cast("Any", payload.get("last_attempt_monotonic")))
     except (TypeError, ValueError):
         return None
 
@@ -431,7 +431,7 @@ def open_cookie_refresh_context(
     return CookieRefreshBrowserContext(context=context, browser=browser)
 
 
-def cookie_payload(cookies: list[dict[str, Any]], *, domains: tuple[str, ...]) -> dict[str, str]:
+def cookie_payload(cookies: Sequence[Mapping[str, Any]], *, domains: tuple[str, ...]) -> dict[str, str]:
     payload: dict[str, str] = {}
     for cookie in cookies:
         domain = str(cookie.get("domain") or "").lower()

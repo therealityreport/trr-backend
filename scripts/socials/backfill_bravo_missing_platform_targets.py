@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from trr_backend.db import pg
-from trr_backend.repositories import social_season_analytics as social_repo
+from trr_backend.socials import social_season_analytics_impl as social_repo
 from trr_backend.utils.env import load_env
 
 TARGET_PLATFORMS = {"instagram", "tiktok", "twitter", "facebook", "threads"}
@@ -92,7 +92,7 @@ def _insert_target_row(
     season_id: str,
     show_id: str,
     target: dict[str, Any],
-    updated_by: str,
+    updated_by: str | None,
 ) -> None:
     platform = str(target.get("platform") or "").strip().lower()
     with pg.db_cursor() as cur:

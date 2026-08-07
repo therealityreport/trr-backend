@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -42,7 +42,7 @@ def get_admin_operations_health(
         le=86_400,
     ),
     limit: int = Query(default=200, ge=1, le=500),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     try:
         return admin_operations.get_admin_operations_health(
@@ -58,7 +58,7 @@ def get_admin_operations_health(
 @router.post("/stale/cancel")
 def force_cancel_stale_admin_operations(
     payload: ForceCancelStaleOperationsRequest | None = None,
-    user: InternalAdminUser = None,
+    user: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     try:
         return admin_operations.force_cancel_stale_operations(
@@ -86,7 +86,7 @@ def force_cancel_stale_admin_operations(
 @router.post("/cancel")
 def cancel_admin_operations(
     payload: BulkCancelOperationsRequest | None = None,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     try:
         return admin_operations.request_bulk_operation_cancels(
@@ -103,7 +103,7 @@ def cancel_admin_operations(
 @router.get("/{operation_id}")
 def get_admin_operation(
     operation_id: UUID,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     operation = admin_operations.get_operation(str(operation_id))
     if not operation:
@@ -124,7 +124,7 @@ def stream_admin_operation(
     operation_id: UUID,
     request: Request,
     after_seq: int = Query(default=0, ge=0),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> StreamingResponse:
     operation = admin_operations.get_operation(str(operation_id))
     if not operation:
@@ -136,7 +136,7 @@ def stream_admin_operation(
 def cancel_admin_operation(
     operation_id: UUID,
     request: Request,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     request_id = (request.headers.get("x-trr-request-id") or "").strip() or None
     prior_operation = admin_operations.get_operation(str(operation_id))

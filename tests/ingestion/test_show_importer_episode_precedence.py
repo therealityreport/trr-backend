@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 from trr_backend.ingestion.shows_from_lists import CandidateShow
 from trr_backend.integrations.imdb.title_metadata_client import ImdbEpisodesPageMetadata, ImdbSeasonEpisode
 
@@ -153,7 +155,7 @@ def test_imdb_episode_fields_take_precedence_and_tmdb_fills_provider_fields(monk
         imdb_fetch_episodes=True,
         tmdb_fetch_seasons=True,
         enrich_show_metadata=False,
-        supabase_client=object(),
+        supabase_client=cast(Any, object()),
     )
 
     final_episode = episode_store[1]

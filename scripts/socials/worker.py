@@ -16,10 +16,11 @@ import sys
 import threading
 import time
 from datetime import UTC, datetime
+from typing import cast
 
 from trr_backend.db import pg
-from trr_backend.repositories import social_season_analytics as social_repo
 from trr_backend.repositories.social_sync_orchestrator import tick_sync_orchestrator
+from trr_backend.socials import social_season_analytics_impl as social_repo
 from trr_backend.socials.control_plane import (
     _resolve_runtime_version_stamp,
     cancel_claimed_job_before_processing,
@@ -111,7 +112,7 @@ class WorkerHeartbeat:
             if current_job_id is not _UNSET:
                 self._state["current_job_id"] = current_job_id
             if metadata_updates:
-                metadata = dict(self._state.get("metadata") or {})
+                metadata = dict(cast("dict[str, object]", self._state.get("metadata") or {}))
                 metadata.update(metadata_updates)
                 self._state["metadata"] = metadata
 
@@ -122,7 +123,7 @@ class WorkerHeartbeat:
                 "stage": self._state.get("stage"),
                 "run_id": self._state.get("run_id"),
                 "current_job_id": self._state.get("current_job_id"),
-                "metadata": dict(self._state.get("metadata") or {}),
+                "metadata": dict(cast("dict[str, object]", self._state.get("metadata") or {})),
             }
 
     def pulse(self) -> None:
@@ -141,7 +142,7 @@ class WorkerHeartbeat:
                 status=current_status,
                 run_id=(str(state.get("run_id")) if state.get("run_id") else None),
                 current_job_id=(str(state.get("current_job_id")) if state.get("current_job_id") else None),
-                metadata=dict(state.get("metadata") or {}),
+                metadata=dict(cast("dict[str, object]", state.get("metadata") or {})),
                 supported_platforms=self._supported_platforms,
             )
             self._last_written_status = current_status
@@ -163,7 +164,7 @@ class WorkerHeartbeat:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=2.0)
-        metadata = self._snapshot().get("metadata") or {}
+        metadata = cast("dict[str, object]", self._snapshot().get("metadata") or {})
         metadata = {**dict(metadata), "stop_reason": reason}
         try:
             mark_worker_stopped(
@@ -287,7 +288,9 @@ def _resolve_tandem_stage_groups(
     )
     run_config = _metadata_dict(run_row.get("config"))
     run_platforms = [
-        str(item or "").strip().lower() for item in list(run_config.get("platforms") or []) if str(item or "").strip()
+        str(item or "").strip().lower()
+        for item in list(cast("list[object]", run_config.get("platforms") or []))
+        if str(item or "").strip()
     ]
     effective_platform = normalized_platform or (run_platforms[0] if len(run_platforms) == 1 else None)
     pipeline_ingest_mode = str(run_config.get("pipeline_ingest_mode") or "").strip().lower()
@@ -336,7 +339,7 @@ def _metadata_dict(value: object) -> dict[str, object]:
 
 def _normalize_non_negative_int(value: object) -> int:
     try:
-        return max(0, int(value or 0))
+        return max(0, int(cast("int | str", value or 0)))
     except (TypeError, ValueError):
         return 0
 
@@ -577,7 +580,7 @@ def _apply_post_persist_truthfulness_diagnostics(job: dict[str, object]) -> tupl
 
 
 def _single_target_catalog_progress_for_run(run_id: str, run_result: dict[str, object]) -> dict[str, object] | None:
-    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials import social_season_analytics_impl as repo
 
     config = _metadata_dict(run_result.get("config"))
     if (
@@ -586,11 +589,13 @@ def _single_target_catalog_progress_for_run(run_id: str, run_result: dict[str, o
     ):
         return None
     platforms = [
-        str(item or "").strip().lower() for item in list(config.get("platforms") or []) if str(item or "").strip()
+        str(item or "").strip().lower()
+        for item in list(cast("list[object]", config.get("platforms") or []))
+        if str(item or "").strip()
     ]
     accounts = [
         str(item or "").strip().lstrip("@").lower()
-        for item in list(config.get("accounts_override") or [])
+        for item in list(cast("list[object]", config.get("accounts_override") or []))
         if str(item or "").strip()
     ]
     if len(platforms) != 1 or len(accounts) != 1:
@@ -609,7 +614,7 @@ def _build_run_completion_metadata(run_id: str, run_result: dict[str, object]) -
         return metadata_updates
     alert_codes = [
         str(item.get("code") or "").strip()
-        for item in list(progress.get("alerts") or [])
+        for item in list(cast("list[object]", progress.get("alerts") or []))
         if isinstance(item, dict) and str(item.get("code") or "").strip()
     ]
     metadata_updates["run_clean_completion"] = len(alert_codes) == 0
@@ -766,7 +771,7 @@ def _poll_process(proc: subprocess.Popen) -> int | None:
     poll = getattr(proc, "poll", None)
     if callable(poll):
         try:
-            return poll()
+            return cast("int | None", poll())
         except Exception:  # noqa: BLE001
             return None
     return None
@@ -1144,7 +1149,7 @@ def main() -> int:
                         break
                     continue
                 heartbeat.set_state(status="working", stage=stage_filter or "any")
-                claimed_config = dict(claimed.get("config") or {})
+                claimed_config = dict(cast("dict[str, object]", claimed.get("config") or {}))
                 heartbeat.set_state(
                     status="working",
                     stage=str(claimed_config.get("stage") or stage_filter or "any"),

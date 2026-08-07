@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from typing import Any
 
 SOURCE_PATH = Path(__file__).resolve().parents[2] / "trr_backend" / "socials" / "tiktok" / "ops.py"
 
@@ -10,7 +11,7 @@ def _run_smoke(monkeypatch):
     import trr_backend.socials.control_plane.dispatch_runtime as dispatch_runtime
     import trr_backend.socials.tiktok.ops as ops
 
-    calls: list[tuple[str, object]] = []
+    calls: list[tuple[str, Any]] = []
     monkeypatch.setattr(
         dispatch_runtime.legacy,
         "_create_run",

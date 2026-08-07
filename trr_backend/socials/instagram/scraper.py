@@ -23,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -1491,7 +1491,10 @@ class InstagramScraper:
                     self.last_retrieval_meta["retrieval_transport"] = "playwright"
                     return dict(result["payload"])
                 failure = dict((result or {}).get("failure") or {})
-                failure_payload = failure.get("payload") if isinstance(failure.get("payload"), dict) else {}
+                failure_payload_value = failure.get("payload")
+                failure_payload: dict[str, Any] = (
+                    failure_payload_value if isinstance(failure_payload_value, dict) else {}
+                )
                 failure_message = str(failure_payload.get("message") or "").strip().lower() or None
                 status_code = failure.get("status")
                 try:
@@ -2445,7 +2448,7 @@ class InstagramScraper:
         updated = 0
         for post in posts:
             if not getattr(post, "owner_profile_pic_url", None):
-                post.owner_profile_pic_url = resolved_profile_pic
+                cast(Any, post).owner_profile_pic_url = resolved_profile_pic
                 updated += 1
             owner_detail = getattr(post, "owner_detail", None)
             if owner_detail and not getattr(owner_detail, "profile_pic_url", None):
@@ -2597,9 +2600,8 @@ class InstagramScraper:
         """Extract post owner/author detail."""
         owner = node.get("owner", {}) if isinstance(node.get("owner"), dict) else {}
         user = node.get("user", {}) if isinstance(node.get("user"), dict) else {}
-        user_hd_pic = (
-            user.get("hd_profile_pic_url_info") if isinstance(user.get("hd_profile_pic_url_info"), dict) else {}
-        )
+        user_hd_pic_value = user.get("hd_profile_pic_url_info")
+        user_hd_pic: dict[str, Any] = user_hd_pic_value if isinstance(user_hd_pic_value, dict) else {}
         username = str(node.get("ownerUsername") or owner.get("username") or user.get("username") or "").strip()
         if not username:
             return None
@@ -2776,7 +2778,8 @@ class InstagramScraper:
         result["has_audio"] = self._coerce_bool_or_none(node.get("has_audio"))
         result["media_repost_count"] = _extract_repost_count(node)
 
-        caption = node.get("caption") if isinstance(node.get("caption"), dict) else {}
+        caption_value = node.get("caption")
+        caption: dict[str, Any] = caption_value if isinstance(caption_value, dict) else {}
         result["caption_id"] = str(caption.get("pk") or caption.get("id") or "").strip() or None
         result["caption_is_edited"] = self._coerce_bool_or_none(
             node.get("caption_is_edited") if "caption_is_edited" in node else caption.get("is_edited")
@@ -2785,7 +2788,8 @@ class InstagramScraper:
             caption.get("has_translation") if "has_translation" in caption else caption.get("hasTranslation")
         )
 
-        location = node.get("location") if isinstance(node.get("location"), dict) else {}
+        location_value = node.get("location")
+        location: dict[str, Any] = location_value if isinstance(location_value, dict) else {}
         result["location_id"] = (
             str(
                 node.get("locationId") or node.get("location_id") or location.get("id") or location.get("pk") or ""
@@ -5449,8 +5453,9 @@ class InstagramScraper:
                     "posts_checked": len(seen_pks),
                     "pages_scanned": scroll_count,
                 }
-                if "network_policy_recorder" in locals() and network_policy_recorder is not None:
-                    self.last_retrieval_meta["network_policy"] = network_policy_recorder.to_metadata()
+                local_network_policy_recorder = locals().get("network_policy_recorder")
+                if local_network_policy_recorder is not None:
+                    self.last_retrieval_meta["network_policy"] = local_network_policy_recorder.to_metadata()
                 if total_posts:
                     self.last_retrieval_meta["total_posts"] = total_posts
                 return posts

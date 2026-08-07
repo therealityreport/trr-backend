@@ -262,8 +262,10 @@ def extract_imdb_image_urls(html: str, limit: int = 30) -> list[str]:
     base_order: list[str] = []
     best_by_base: dict[str, tuple[str, int]] = {}
     for img in images:
-        src = img.get("src")
-        srcset = img.get("srcset")
+        src_attr = img.get("src")
+        src = src_attr if isinstance(src_attr, str) else None
+        srcset_attr = img.get("srcset")
+        srcset = srcset_attr if isinstance(srcset_attr, str) else None
         picked = _normalize_image_url(_pick_best_url(srcset, src))
         if not picked:
             continue

@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable
 from http.cookies import SimpleCookie
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 import httpx
@@ -116,7 +117,7 @@ def _extract_set_cookie_header_values(response: Any) -> dict[str, str]:
     headers = getattr(response, "headers", None) or {}
     header_values: list[str] = []
     try:
-        get_list = getattr(headers, "get_list", None)
+        get_list: Callable[..., Any] | None = getattr(headers, "get_list", None)
         if callable(get_list):
             header_values.extend(str(value) for value in get_list("set-cookie") if value)
     except Exception:  # noqa: BLE001
@@ -161,7 +162,7 @@ def extract_response_cookies(response: Any) -> dict[str, str]:
                 extraction_errors.append(f"items:{exc.__class__.__name__}")
         if hasattr(cookies_attr, "get_dict"):
             try:
-                for k, v in cookies_attr.get_dict().items():
+                for k, v in cast("Any", cookies_attr).get_dict().items():
                     result[str(k)] = str(v)
             except Exception as exc:  # noqa: BLE001
                 extraction_errors.append(f"get_dict:{exc.__class__.__name__}")

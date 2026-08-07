@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -86,7 +87,7 @@ def test_retire_matches_marks_duplicate_comment_media_jobs_cancelled(monkeypatch
         "_fetch_matches",
         lambda **_kwargs: [{"id": "job-1", "identity_key": "post-1:comment-1"}],
     )
-    calls: list[dict[str, object]] = []
+    calls: list[dict[str, Any]] = []
     monkeypatch.setattr(
         mod.pg,
         "execute_returning",

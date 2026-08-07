@@ -7,6 +7,7 @@ No network; all IO is mocked or structural.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -23,7 +24,7 @@ from trr_backend.socials.instagram.request_client import (
 # ---------- Bug #5: 401 is not retryable ----------
 
 
-def _fake_response(status_code: int, *, headers: dict[str, str] | None = None, text: str = "") -> SimpleNamespace:
+def _fake_response(status_code: int, *, headers: dict[str, str] | None = None, text: str = "") -> Any:
     return SimpleNamespace(
         status_code=status_code,
         headers=headers or {"content-type": "text/html"},

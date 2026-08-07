@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from types import ModuleType, SimpleNamespace
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -42,7 +43,7 @@ def test_build_stealthy_fetcher_lazily_imports_scrapling_fetchers(monkeypatch: p
     mock_scrapling = ModuleType("scrapling")
     mock_fetchers = ModuleType("scrapling.fetchers")
     mock_fetcher_cls = MagicMock(return_value="fetcher")
-    mock_fetchers.StealthyFetcher = mock_fetcher_cls
+    cast(Any, mock_fetchers).StealthyFetcher = mock_fetcher_cls
     monkeypatch.setitem(sys.modules, "scrapling", mock_scrapling)
     monkeypatch.setitem(sys.modules, "scrapling.fetchers", mock_fetchers)
 
@@ -65,7 +66,7 @@ def test_build_proxy_rotator_uses_scrapling_fetchers_path(monkeypatch: pytest.Mo
 
     mock_fetchers = ModuleType("scrapling.fetchers")
     mock_rotator_cls = MagicMock(return_value="rotator")
-    mock_fetchers.ProxyRotator = mock_rotator_cls
+    cast(Any, mock_fetchers).ProxyRotator = mock_rotator_cls
     monkeypatch.setitem(sys.modules, "scrapling.fetchers", mock_fetchers)
 
     assert build_proxy_rotator(["http://one", "", "http://two"]) == "rotator"
@@ -77,7 +78,7 @@ def test_build_proxy_rotator_supports_browser_proxy_dict(monkeypatch: pytest.Mon
 
     mock_fetchers = ModuleType("scrapling.fetchers")
     mock_rotator_cls = MagicMock(return_value="rotator")
-    mock_fetchers.ProxyRotator = mock_rotator_cls
+    cast(Any, mock_fetchers).ProxyRotator = mock_rotator_cls
     monkeypatch.setitem(sys.modules, "scrapling.fetchers", mock_fetchers)
 
     proxy = {"server": "http://gate.example:7000", "username": "user", "password": "secret"}

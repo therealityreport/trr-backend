@@ -16,13 +16,13 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 
 def _load_social_repo():
-    from trr_backend.repositories import social_season_analytics as social_repo
+    from trr_backend.socials import social_season_analytics_impl as social_repo
 
     return social_repo
 
@@ -146,7 +146,7 @@ def benchmark_instagram_catalog_full_history(
     latest_progress: dict[str, Any] | None = None
     while True:
         latest_progress = social_repo.get_social_account_catalog_run_progress("instagram", account_handle, run_id)
-        run_status = str(latest_progress.get("run_status") or "").strip().lower()
+        run_status = str(cast(Any, latest_progress).get("run_status") or "").strip().lower()
         if run_status in {"completed", "failed", "cancelled"}:
             break
         if time.monotonic() >= deadline:

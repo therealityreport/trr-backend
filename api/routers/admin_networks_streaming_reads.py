@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
@@ -31,7 +31,7 @@ def _log_read(route: str, *, query_count: int, payload: dict[str, Any], cache_st
 
 
 @router.get("/summary")
-def get_networks_streaming_summary(_: InternalAdminUser = None) -> dict[str, Any]:
+def get_networks_streaming_summary(_: InternalAdminUser = cast(InternalAdminUser, None)) -> dict[str, Any]:
     started_at = time.perf_counter()
     payload, query_count, cache_status = networks_streaming_reads_service.get_networks_streaming_summary()
     _log_read(
@@ -45,7 +45,7 @@ def get_networks_streaming_summary(_: InternalAdminUser = None) -> dict[str, Any
 
 
 @router.post("/summary/cache/invalidate")
-def invalidate_summary_cache(_: InternalAdminUser = None) -> dict[str, bool]:
+def invalidate_summary_cache(_: InternalAdminUser = cast(InternalAdminUser, None)) -> dict[str, bool]:
     invalidate_networks_streaming_summary_cache()
     logger.info("[admin-networks-streaming-read] route=summary-invalidate-cache")
     return {"success": True}
@@ -56,7 +56,7 @@ def get_networks_streaming_detail(
     entity_type: str | None = Query(default=None),
     entity_key: str | None = Query(default=None),
     entity_slug: str | None = Query(default=None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
     normalized_type = str(entity_type or "").strip().lower()
@@ -83,7 +83,7 @@ def get_networks_streaming_detail(
             cache_status="miss",
             started_at=started_at,
         )
-        return JSONResponse(return_payload, status_code=404)
+        return cast("dict[str, Any]", JSONResponse(return_payload, status_code=404))
     _log_read(
         "detail",
         query_count=query_count,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any, cast
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATION = REPO_ROOT / "supabase/migrations/20260428145222_instagram_queryable_profile_schema.sql"
@@ -162,13 +163,19 @@ def test_new_profile_raw_tables_are_service_role_only() -> None:
         "social.instagram_profile_relationships",
     ):
         assert f"alter table {table} enable row level security;" in sql
-        assert table in re.search(
-            r"grant all privileges on table (?P<tables>.*?) to service_role;",
-            sql,
+        assert table in cast(
+            Any,
+            re.search(
+                r"grant all privileges on table (?P<tables>.*?) to service_role;",
+                sql,
+            ),
         ).group("tables")
-        assert table in re.search(
-            r"revoke all on table (?P<tables>.*?) from public, anon, authenticated;",
-            sql,
+        assert table in cast(
+            Any,
+            re.search(
+                r"revoke all on table (?P<tables>.*?) from public, anon, authenticated;",
+                sql,
+            ),
         ).group("tables")
 
     assert not re.search(
@@ -196,13 +203,19 @@ def test_socialblade_and_following_snapshot_tables_are_service_role_only() -> No
     ):
         assert f"create table if not exists {table}" in sql
         assert f"alter table {table} enable row level security;" in sql
-        assert table in re.search(
-            r"grant all privileges on table (?P<tables>.*?) to service_role;",
-            sql,
+        assert table in cast(
+            Any,
+            re.search(
+                r"grant all privileges on table (?P<tables>.*?) to service_role;",
+                sql,
+            ),
         ).group("tables")
-        assert table in re.search(
-            r"revoke all on table (?P<tables>.*?) from public, anon, authenticated;",
-            sql,
+        assert table in cast(
+            Any,
+            re.search(
+                r"revoke all on table (?P<tables>.*?) from public, anon, authenticated;",
+                sql,
+            ),
         ).group("tables")
 
     assert "source_is_complete boolean not null default false" in sql

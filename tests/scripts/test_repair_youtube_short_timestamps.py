@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Any
 
 import scripts.socials.repair_youtube_short_timestamps as mod
 
@@ -89,7 +90,7 @@ def test_main_apply_updates_rows(monkeypatch, capsys) -> None:
 
 
 def test_repair_row_updates_only_epochish_rows(monkeypatch) -> None:
-    calls: list[dict[str, object]] = []
+    calls: list[dict[str, Any]] = []
     monkeypatch.setattr(
         mod.pg,
         "execute_returning",

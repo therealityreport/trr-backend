@@ -4,7 +4,10 @@ import argparse
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from trr_backend.ingestion.shows_from_lists import CandidateShow
 
 from trr_backend.db.admin import create_supabase_admin_client
 from trr_backend.db.session import DbSession
@@ -525,7 +528,7 @@ def extract_tmdb_series_id(show: dict[str, Any]) -> int | None:
     return None
 
 
-def build_candidates(show_rows: Iterable[dict[str, Any]]) -> list["CandidateShow"]:  # noqa: F821, UP037
+def build_candidates(show_rows: Iterable[dict[str, Any]]) -> list[CandidateShow]:
     from trr_backend.ingestion.shows_from_lists import CandidateShow
 
     candidates: list[CandidateShow] = []

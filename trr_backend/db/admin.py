@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from functools import lru_cache
+from typing import Any
 
 import httpx
 
@@ -64,10 +65,11 @@ def call_rpc_with_cache_reload_hint(
     schema: str,
     function_name: str,
     params: dict,
-) -> any:
+) -> Any:
     response = db.schema(schema).rpc(function_name, params).execute()
-    if getattr(response, "error", None):
-        raise RuntimeError(response.error.message)
+    error = getattr(response, "error", None)
+    if error:
+        raise RuntimeError(error.message)
     return response.data
 
 

@@ -3,10 +3,32 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any, cast
+
 from fastapi import APIRouter
 
 from ._shared import *
 from .season_runs import *
+
+if TYPE_CHECKING:
+    # These underscore-prefixed helpers are re-exported at runtime by the star
+    # imports above via each module's dynamic ``__all__``; the imports below
+    # only make them visible to static type checkers.
+    from ._shared import (
+        _is_local_or_dev_runtime,
+        _parse_platform_query,
+        _remote_worker_unavailable_message,
+        _resolve_social_execution_modes,
+        _start_runs_in_background,
+        _to_social_read_http_exception,
+        _value_error_to_bad_request,
+        _worker_health_detail,
+    )
+    from .season_runs import (
+        _INGEST_JOBS_DEFAULT_LIMIT,
+        _INGEST_JOBS_MAX_LIMIT,
+        _blocked_remote_only_platforms,
+    )
 
 router = APIRouter()
 
@@ -16,7 +38,7 @@ def get_shared_account_sources_route(
     source_scope: Literal["bravo", "network", "creator", "community", "news"] = Query(default="network"),
     include_inactive: bool = Query(default=True),
     platforms: str | None = Query(default=None, description="Comma-separated platform list"),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     from trr_backend.socials.control_plane.shared_source_config import get_shared_account_sources
 
@@ -69,7 +91,7 @@ async def ingest_shared_social_accounts(
 
     queue_enabled = is_queue_enabled()
     remote_plane_enforced = is_remote_job_plane_enabled()
-    blocked_platforms = _blocked_remote_only_platforms(payload.platforms)
+    blocked_platforms = _blocked_remote_only_platforms(cast("list[str] | None", payload.platforms))
     requires_modal_executor = bool(blocked_platforms)
     used_inline_fallback = False
     worker_health: dict[str, Any] | None = None
@@ -167,7 +189,7 @@ async def ingest_shared_social_accounts(
         queue_enabled=queue_enabled,
         used_inline_fallback=used_inline_fallback,
     )
-    response_payload = {
+    response_payload: dict[str, Any] = {
         **result,
         "status": "queued" if queue_enabled else "started",
         "run_id": run_id,
@@ -192,7 +214,7 @@ def get_shared_ingest_runs(
     status: str | None = Query(default=None),
     source_scope: Literal["bravo", "network", "creator", "community", "news"] | None = Query(default=None),
     run_id: str | None = Query(default=None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> list[dict[str, Any]]:
     from trr_backend.socials.control_plane.shared_accounts import list_shared_runs
 
@@ -218,7 +240,7 @@ def get_shared_review_queue(
     source_scope: Literal["bravo", "network", "creator", "community", "news"] = Query(default="network"),
     review_status: Literal["open", "resolved", "ignored"] = Query(default="open"),
     limit: int = Query(default=100, ge=1, le=500),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     from trr_backend.socials.control_plane.shared_accounts import list_shared_review_queue
 
@@ -239,7 +261,7 @@ def get_shared_review_queue(
 def resolve_shared_review_queue(
     item_id: str,
     payload: SharedReviewResolveRequest,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     from trr_backend.socials.control_plane.shared_accounts import resolve_shared_review_queue_item
 
@@ -258,7 +280,7 @@ def resolve_shared_review_queue(
 def get_season_shared_status_route(
     season_id: UUID,
     source_scope: Literal["bravo", "network", "creator", "community", "news"] = Query(default="network"),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     from trr_backend.socials.control_plane.shared_accounts import get_season_shared_status
 

@@ -99,7 +99,8 @@ def parse_search_response(
         if not domain or _is_excluded_domain(domain):
             continue
 
-        image = match.get("image") if isinstance(match.get("image"), dict) else {}
+        raw_image = match.get("image")
+        image = raw_image if isinstance(raw_image, dict) else {}
         width = _parse_int(image.get("width"))
         height = _parse_int(image.get("height"))
 

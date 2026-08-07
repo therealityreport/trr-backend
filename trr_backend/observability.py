@@ -9,10 +9,11 @@ import traceback
 from contextvars import ContextVar, Token
 from copy import copy
 from datetime import UTC, datetime
+from importlib import import_module
 from logging.handlers import QueueHandler, QueueListener
 from queue import Full, Queue
 from threading import Lock
-from typing import Any
+from typing import Any, cast
 from urllib import request as urllib_request
 
 _TRACE_ID: ContextVar[str] = ContextVar("trr_trace_id", default="")
@@ -25,8 +26,18 @@ _SENTRY_LOCK = Lock()
 _sentry_initialized = False
 _better_stack_listener: QueueListener | None = None
 
+Counter: Any
+Gauge: Any
+Histogram: Any
+generate_latest: Any
+
 try:  # pragma: no cover - optional dependency in local/test envs
-    from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
+    _prometheus_client = import_module("prometheus_client")
+    CONTENT_TYPE_LATEST = _prometheus_client.CONTENT_TYPE_LATEST
+    Counter = _prometheus_client.Counter
+    Gauge = _prometheus_client.Gauge
+    Histogram = _prometheus_client.Histogram
+    generate_latest = _prometheus_client.generate_latest
 except Exception:  # pragma: no cover - dependency may be absent
     CONTENT_TYPE_LATEST = "text/plain; version=0.0.4; charset=utf-8"
     Counter = None
@@ -180,7 +191,7 @@ class NonBlockingQueueHandler(QueueHandler):
     def filter(self, record: logging.LogRecord) -> bool:
         if record.name == "urllib3":
             return False
-        return super().filter(record)
+        return cast(bool, super().filter(record))
 
     def prepare(self, record: logging.LogRecord) -> logging.LogRecord:
         prepared = copy(record)

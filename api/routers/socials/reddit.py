@@ -3,10 +3,22 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any, cast
+
 from fastapi import APIRouter
 
 from ._shared import *
 from ._surfaces import RouteRecord, routes_matching
+
+if TYPE_CHECKING:
+    # These underscore-prefixed helpers are re-exported at runtime by
+    # ``from ._shared import *`` via _shared's dynamic ``__all__``; the
+    # declarations below only make them visible to static type checkers.
+    from ._shared import (
+        _internal_error_response,
+        _run_admin_repo_call,
+        _value_error_to_bad_request,
+    )
 
 router = APIRouter()
 
@@ -243,7 +255,7 @@ def serialize_reddit_backfill_payload(payload: Any) -> dict[str, Any]:
 async def start_reddit_refresh_run(
     payload: RedditRefreshRunRequest,
     background_tasks: BackgroundTasks,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     try:
         serialized = _serialize_reddit_refresh_payload(payload)
@@ -269,7 +281,7 @@ async def start_reddit_refresh_run(
 async def backfill_reddit_refresh_runs(
     payload: RedditRefreshBackfillRequest,
     request: Request,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     from trr_backend.pipeline.admin_operations import start_operation_for_stream
     from trr_backend.repositories.reddit_refresh import (
@@ -317,7 +329,7 @@ async def list_reddit_refresh_runs(
     period_key: str | None = Query(default=None, min_length=1, max_length=200),
     status: str | None = Query(default=None),
     limit: int = Query(default=25, ge=1, le=100),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     from trr_backend.repositories.reddit_refresh import list_refresh_runs
 
@@ -346,7 +358,7 @@ async def list_reddit_refresh_runs(
 
 
 @router.get("/reddit/runs/{run_id}")
-async def get_reddit_refresh_run(run_id: UUID, _: InternalAdminUser = None) -> dict[str, Any]:
+async def get_reddit_refresh_run(run_id: UUID, _: InternalAdminUser = cast(Any, None)) -> dict[str, Any]:
     from trr_backend.repositories.reddit_refresh import get_refresh_run
 
     try:
@@ -363,7 +375,7 @@ async def get_reddit_cached_period_payload(
     community_id: UUID = Query(...),
     season_id: UUID = Query(...),
     period_key: str = Query(..., min_length=1, max_length=160),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     from trr_backend.repositories.reddit_refresh import (
         get_cached_period_payload,
@@ -412,7 +424,7 @@ async def get_reddit_cached_period_payload(
 @router.post("/reddit/cache/bulk")
 async def get_reddit_cached_period_payload_bulk(
     payload: RedditCacheBulkRequest,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     from trr_backend.repositories.reddit_refresh import (
         get_cached_period_payload,
@@ -511,9 +523,11 @@ async def get_reddit_cached_period_payload_bulk(
                 )
                 matched_period_key = None
             else:
-                discovery = snapshot.get("discovery") if isinstance(snapshot.get("discovery"), dict) else None
+                snapshot_discovery = snapshot.get("discovery")
+                discovery = snapshot_discovery if isinstance(snapshot_discovery, dict) else None
+                snapshot_partial_failures = snapshot.get("partial_failures")
                 partial_failures.extend(
-                    snapshot.get("partial_failures") if isinstance(snapshot.get("partial_failures"), list) else []
+                    snapshot_partial_failures if isinstance(snapshot_partial_failures, list) else []
                 )
 
         return {
@@ -540,7 +554,7 @@ async def get_reddit_community_analytics_summary(
     community_id: UUID,
     scope: Literal["season", "all"] = Query(default="season"),
     season_id: UUID | None = Query(default=None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     from trr_backend.repositories.reddit_refresh import get_reddit_community_analytics_summary
 
@@ -572,7 +586,7 @@ async def get_reddit_community_analytics_shows(
     community_id: UUID,
     scope: Literal["season", "all"] = Query(default="season"),
     season_id: UUID | None = Query(default=None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     from trr_backend.repositories.reddit_refresh import get_reddit_community_show_breakdown
 
@@ -604,7 +618,7 @@ async def get_reddit_community_analytics_flairs(
     community_id: UUID,
     scope: Literal["season", "all"] = Query(default="season"),
     season_id: UUID | None = Query(default=None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     from trr_backend.repositories.reddit_refresh import get_reddit_community_flair_breakdown
 
@@ -640,7 +654,7 @@ async def get_reddit_community_analytics_flair_detail(
     container_key: str | None = Query(default=None, max_length=160),
     page: int = Query(default=1, ge=1, le=10_000),
     per_page: int = Query(default=50, ge=1, le=200),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     from trr_backend.repositories.reddit_refresh import get_reddit_community_flair_detail
 
@@ -681,7 +695,7 @@ async def get_reddit_community_analytics_posts(
     flair_key: str | None = Query(default=None, max_length=200),
     page: int = Query(default=1, ge=1, le=10_000),
     per_page: int = Query(default=50, ge=1, le=200),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     from trr_backend.repositories.reddit_refresh import list_reddit_community_posts
 
@@ -721,7 +735,7 @@ async def get_reddit_community_analytics_posts(
 async def auto_categorize_community_flairs(
     community_id: UUID,
     body: AutoCategorizeFlairsRequest,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     """Auto-categorize a community's post flairs as 'cast' or 'season' using show data."""
     from trr_backend.repositories.reddit_flair_categorizer import auto_categorize_flairs
@@ -744,7 +758,7 @@ async def auto_categorize_community_flairs(
 @router.post("/reddit/auto-categorize-flairs-batch")
 async def auto_categorize_flairs_batch(
     body: AutoCategorizeFlairsRequest,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     """Auto-categorize flairs for ALL communities linked to a show."""
     from trr_backend.repositories.reddit_flair_categorizer import auto_categorize_flairs_batch

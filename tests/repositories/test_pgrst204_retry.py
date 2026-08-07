@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from trr_backend.db.postgrest_cache import is_pgrst204_error
+from trr_backend.db.session import DbSession
 from trr_backend.models.shows import ShowUpsert
 from trr_backend.repositories.shows import (
     ShowRepositoryError,
@@ -123,7 +125,7 @@ def test_insert_show_retries_on_pgrst204(
     client = _FakeClient(fail_count=1)
     show = ShowUpsert(name="Test Show", description="A test", premiere_date="2025-01-01")
 
-    result = insert_show(client, show)
+    result = insert_show(cast(DbSession, client), show)
 
     assert result["name"] == "Test Show"
     assert client._attempts == 2
@@ -138,7 +140,7 @@ def test_insert_show_raises_after_max_retries(mock_reload: MagicMock) -> None:
     show = ShowUpsert(name="Test Show", description="A test", premiere_date="2025-01-01")
 
     with pytest.raises(ShowRepositoryError) as excinfo:
-        insert_show(client, show)
+        insert_show(cast(DbSession, client), show)
 
     msg = str(excinfo.value)
     assert "PostgREST schema cache may still be stale" in msg
@@ -155,7 +157,7 @@ def test_update_show_retries_on_pgrst204(
     # First call fails with PGRST204, second succeeds
     client = _FakeClient(fail_count=1)
 
-    result = update_show(client, "test-uuid", {"description": "Updated"})
+    result = update_show(cast(DbSession, client), "test-uuid", {"description": "Updated"})
 
     assert result["name"] == "Test Show"
     assert client._attempts == 2
@@ -169,7 +171,7 @@ def test_update_show_raises_after_max_retries(mock_reload: MagicMock) -> None:
     client = _FakeClient(fail_count=100)
 
     with pytest.raises(ShowRepositoryError) as excinfo:
-        update_show(client, "test-uuid", {"description": "Updated"})
+        update_show(cast(DbSession, client), "test-uuid", {"description": "Updated"})
 
     msg = str(excinfo.value)
     assert "PostgREST schema cache may still be stale" in msg

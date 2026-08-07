@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 from trr_backend.db import pg
@@ -225,7 +225,7 @@ def main(argv: list[str] | None = None) -> int:
             if _normalize_row_id(row.get("media_asset_id"))
         )
     )
-    media_links = _fetch_all_media_links_for_assets(asset_ids) if asset_ids else []
+    media_links = _fetch_all_media_links_for_assets(cast("list[str]", asset_ids)) if asset_ids else []
     links_by_asset: dict[str, list[dict[str, Any]]] = defaultdict(list)
     target_link_ids = [link_id for row in target_media_links if (link_id := _normalize_row_id(row.get("id")))]
     for row in media_links:

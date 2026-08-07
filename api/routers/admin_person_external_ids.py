@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import logging
 from datetime import date
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -75,10 +78,12 @@ def sync_person_external_ids(
     request: Request,
     person_id: str,
     payload: SyncPersonExternalIdsRequest,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> SyncPersonExternalIdsResponse:
     try:
-        rows = external_ids_repo.sync_person_external_ids(person_id, _to_input_records(payload))
+        rows = external_ids_repo.sync_person_external_ids(
+            person_id, cast("list[Mapping[str, Any]]", _to_input_records(payload))
+        )
     except external_ids_repo.UnsupportedPersonExternalIdSourceError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except external_ids_repo.PersonExternalIdNotFoundError as error:

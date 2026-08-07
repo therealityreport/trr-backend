@@ -6,7 +6,7 @@ import os
 import sys
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from scripts._sync_common import (
     add_show_filter_args,
@@ -309,7 +309,8 @@ def main(argv: list[str] | None = None) -> int:
     if not api_key:
         raise RuntimeError("TMDB_API_KEY is required for TMDb watch provider sync.")
 
-    db = load_env_and_db(skip_db=args.skip_db)
+    # args.skip_db exits above, so load_env_and_db always returns a live session here.
+    db = cast(DbSession, load_env_and_db(skip_db=args.skip_db))
     if not args.dry_run and not args.skip_db:
         assert_core_sync_state_table_exists(db)
 

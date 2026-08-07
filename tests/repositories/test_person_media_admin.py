@@ -106,7 +106,7 @@ def test_remove_cover_photo_reports_whether_a_row_was_deleted(
 )
 def test_update_thumbnail_crop_preserves_the_existing_flat_result_contract(
     monkeypatch: pytest.MonkeyPatch,
-    origin: str,
+    origin: person_media_admin.ThumbnailCropOrigin,
     raw_row: dict[str, object],
     expected_link_id: str | None,
 ) -> None:
@@ -119,6 +119,7 @@ def test_update_thumbnail_crop_preserves_the_existing_flat_result_contract(
     monkeypatch.setattr(person_media_admin.pg, "execute_returning", fake_execute_returning)
     crop = raw_row.get("metadata", raw_row.get("context"))
     crop_payload = crop["thumbnail_crop"] if isinstance(crop, dict) else None
+    assert crop_payload is not None
 
     result, query_count = person_media_admin.update_thumbnail_crop(
         origin=origin,

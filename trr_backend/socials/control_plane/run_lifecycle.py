@@ -163,7 +163,7 @@ def _normalize_run_source_scope(value: str | None, *, default: str = "network") 
 
 
 def _create_run(
-    context: legacy.SeasonContext | None,
+    context: Any | None,  # legacy SeasonContext (late-bound provider; not statically importable)
     *,
     source_scope: str,
     initiated_by: str | None,

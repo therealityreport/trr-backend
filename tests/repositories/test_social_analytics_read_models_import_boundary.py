@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -68,8 +69,9 @@ def test_fresh_import_orders_publish_exact_provider(order: tuple[str, str]) -> N
 
 
 def test_provider_publication_is_idempotent_and_rejects_mismatch() -> None:
-    assert read_models._PROVIDER_STATE == "READY"
-    assert read_models._PROVIDER_NAMESPACE is legacy_impl.__dict__
+    provider_view = cast(Any, read_models)
+    assert provider_view._PROVIDER_STATE == "READY"
+    assert provider_view._PROVIDER_NAMESPACE is legacy_impl.__dict__
     read_models._configure_legacy_provider(legacy_impl.__dict__)
     with pytest.raises(RuntimeError, match="PROVIDER_MISMATCH"):
         read_models._configure_legacy_provider({})

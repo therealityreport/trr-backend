@@ -120,7 +120,8 @@ def snapshot(
     }
     with _connect() as conn, conn.cursor() as cur:
         cur.execute(_read_sql(SCRIPTS_DB / "fk_index_observer_snapshot.sql"), payload)
-        row = cur.fetchone()
+        # The connection uses a dict-style row factory, so rows support string keys.
+        row: Any = cur.fetchone()
     if not row:
         raise RuntimeError("Observer snapshot returned no rows.")
     snapshot_json = row["snapshot"]

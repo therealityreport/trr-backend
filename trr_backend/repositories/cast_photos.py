@@ -244,6 +244,7 @@ def upsert_cast_photos(
         if dedupe_on == "image_url_canonical" and not row.get("image_url_canonical"):
             raise CastPhotoRepositoryError("image_url_canonical is required for canonical cast photo upserts.")
 
+    response: Any = None
     for attempt in range(_PGRST204_MAX_RETRIES + 1):
         try:
             response = db.schema("core").rpc(rpc_name, {"rows": payload}).execute()
@@ -267,6 +268,7 @@ def update_cast_photo_hosted_fields(db: DbSession, photo_id: str, patch: Mapping
     if not payload:
         raise CastPhotoRepositoryError("Hosted fields update payload is empty.")
 
+    response: Any = None
     for attempt in range(_PGRST204_MAX_RETRIES + 1):
         try:
             response = db.schema("core").table("cast_photos").update(payload).eq("id", str(photo_id)).execute()

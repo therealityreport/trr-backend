@@ -77,7 +77,7 @@ def test_reply_only_fast_path_reason_requires_no_top_level_resume() -> None:
 def test_incomplete_fill_uses_reply_only_when_persisted_reply_gap_exists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials import social_season_analytics_impl as repo
     from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
 
     fetch_calls: list[dict[str, Any]] = []
@@ -224,7 +224,7 @@ def test_incomplete_fill_uses_reply_only_when_persisted_reply_gap_exists(
 def test_reported_gap_without_fetch_failure_is_retryable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials import social_season_analytics_impl as repo
     from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
 
     fetch_calls: list[dict[str, Any]] = []

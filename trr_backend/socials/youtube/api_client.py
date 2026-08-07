@@ -75,11 +75,12 @@ class YouTubeDataApiClient:
         if not isinstance(items, list) or not items:
             return None
         item = items[0] if isinstance(items[0], dict) else {}
-        snippet = item.get("snippet") if isinstance(item.get("snippet"), dict) else {}
-        content_details = item.get("contentDetails") if isinstance(item.get("contentDetails"), dict) else {}
-        related = (
-            content_details.get("relatedPlaylists") if isinstance(content_details.get("relatedPlaylists"), dict) else {}
-        )
+        snippet_raw = item.get("snippet")
+        snippet = snippet_raw if isinstance(snippet_raw, dict) else {}
+        content_details_raw = item.get("contentDetails")
+        content_details = content_details_raw if isinstance(content_details_raw, dict) else {}
+        related_raw = content_details.get("relatedPlaylists")
+        related = related_raw if isinstance(related_raw, dict) else {}
         return {
             "channel_id": str(item.get("id") or "").strip() or None,
             "title": str(snippet.get("title") or "").strip() or None,
@@ -160,15 +161,17 @@ class YouTubeDataApiClient:
                 max_results=50,
             )
             api_calls += 1
-            page_items = payload.get("items") if isinstance(payload.get("items"), list) else []
+            page_items_raw = payload.get("items")
+            page_items = page_items_raw if isinstance(page_items_raw, list) else []
             for page_item in page_items:
                 if not isinstance(page_item, dict):
                     continue
-                content_details = (
-                    page_item.get("contentDetails") if isinstance(page_item.get("contentDetails"), dict) else {}
-                )
-                snippet = page_item.get("snippet") if isinstance(page_item.get("snippet"), dict) else {}
-                resource_id = snippet.get("resourceId") if isinstance(snippet.get("resourceId"), dict) else {}
+                content_details_raw = page_item.get("contentDetails")
+                content_details = content_details_raw if isinstance(content_details_raw, dict) else {}
+                snippet_raw = page_item.get("snippet")
+                snippet = snippet_raw if isinstance(snippet_raw, dict) else {}
+                resource_id_raw = snippet.get("resourceId")
+                resource_id = resource_id_raw if isinstance(resource_id_raw, dict) else {}
                 video_id = str(content_details.get("videoId") or resource_id.get("videoId") or "").strip()
                 published_at = str(content_details.get("videoPublishedAt") or snippet.get("publishedAt") or "").strip()
                 if not video_id:
@@ -193,8 +196,10 @@ class YouTubeDataApiClient:
 
         merged_items: list[dict[str, Any]] = []
         for item in items:
-            content_details = item.get("contentDetails") if isinstance(item.get("contentDetails"), dict) else {}
-            snippet = item.get("snippet") if isinstance(item.get("snippet"), dict) else {}
+            content_details_raw = item.get("contentDetails")
+            content_details = content_details_raw if isinstance(content_details_raw, dict) else {}
+            snippet_raw = item.get("snippet")
+            snippet = snippet_raw if isinstance(snippet_raw, dict) else {}
             video_id = str(content_details.get("videoId") or snippet.get("resourceId", {}).get("videoId") or "").strip()
             if not video_id:
                 continue

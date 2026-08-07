@@ -3,10 +3,22 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, cast
+
 from fastapi import APIRouter
 
 from ._shared import *
 from .social_landing import *
+
+if TYPE_CHECKING:
+    from ._shared import (
+        _is_local_or_dev_runtime,
+        _remote_worker_unavailable_message,
+        _resolve_social_execution_modes,
+        _social_execution_mode_deprecation_payload,
+        _worker_health_detail,
+    )
+    from .social_landing import _load_social_auth_or_503
 
 router = APIRouter()
 
@@ -91,9 +103,9 @@ async def scrape_instagram(
         date_end=request.date_end,
         delay_seconds=request.delay_seconds,
         max_pages=request.max_pages,
-        show_id=request.show_id,
+        show_id=cast("int | None", request.show_id),
         season_number=request.season_number,
-        person_id=request.person_id,
+        person_id=cast("int | None", request.person_id),
     )
 
     try:

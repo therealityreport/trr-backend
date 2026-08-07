@@ -15,6 +15,7 @@ import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
+from importlib import import_module
 from typing import Any
 from urllib.parse import quote, urlparse
 
@@ -936,7 +937,8 @@ class TwitterScraper:
         if not isinstance(payload, dict):
             return None
 
-        user = payload.get("user") if isinstance(payload.get("user"), dict) else {}
+        user_value = payload.get("user")
+        user: dict[str, Any] = user_value if isinstance(user_value, dict) else {}
         username = str(user.get("screen_name") or "").strip()
         profile_url = f"https://x.com/{username}" if username else None
         avatar_url = str(user.get("profile_image_url_https") or user.get("profile_image_url") or "").strip() or None
@@ -1540,9 +1542,10 @@ class TwitterScraper:
             self._last_twikit_search_error = self._twikit_search_unavailable_reason or "twikit_unavailable"
             return []
 
+        twikit_credentials: dict = self._twikit_credentials
         self._last_twikit_search_error = None
         try:
-            from twikit import Client as TwikitClient  # noqa: F811
+            twikit_client_cls = import_module("twikit").Client
         except ImportError:
             logger.warning("twikit not installed; skipping twikit search fallback")
             self._last_twikit_search_error = "twikit_unavailable"
@@ -1559,15 +1562,15 @@ class TwitterScraper:
             return "twikit_page_error"
 
         async def _run_search() -> list[Any]:
-            client = TwikitClient("en-US")
-            auth_token = str(self._twikit_credentials.get("auth_token", "") or "").strip()
-            ct0 = str(self._twikit_credentials.get("ct0", "") or "").strip()
+            client = twikit_client_cls("en-US")
+            auth_token = str(twikit_credentials.get("auth_token", "") or "").strip()
+            ct0 = str(twikit_credentials.get("ct0", "") or "").strip()
             if auth_token and ct0:
                 client.set_cookies({"auth_token": auth_token, "ct0": ct0})
             else:
-                username = str(self._twikit_credentials.get("username", "") or "").strip()
-                email = str(self._twikit_credentials.get("email", "") or "").strip()
-                password = str(self._twikit_credentials.get("password", "") or "").strip()
+                username = str(twikit_credentials.get("username", "") or "").strip()
+                email = str(twikit_credentials.get("email", "") or "").strip()
+                password = str(twikit_credentials.get("password", "") or "").strip()
                 if not username or not password:
                     return []
                 await client.login(
@@ -1614,7 +1617,7 @@ class TwitterScraper:
             except RuntimeError:
                 return asyncio.run(_run_search())
             if loop.is_running():
-                import nest_asyncio
+                nest_asyncio = import_module("nest_asyncio")
 
                 nest_asyncio.apply()
             return loop.run_until_complete(_run_search())
@@ -1881,7 +1884,7 @@ class TwitterScraper:
             try:
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
-                    import nest_asyncio
+                    nest_asyncio = import_module("nest_asyncio")
 
                     nest_asyncio.apply()
                 captured_payloads = loop.run_until_complete(_capture_payloads())
@@ -1955,8 +1958,10 @@ class TwitterScraper:
         if not self._twikit_credentials:
             return []
 
+        twikit_credentials: dict = self._twikit_credentials
+
         try:
-            from twikit import Client as TwikitClient  # noqa: F811
+            twikit_client_cls = import_module("twikit").Client
         except ImportError:
             logger.warning("twikit not installed; skipping twikit fallback")
             return []
@@ -1964,19 +1969,19 @@ class TwitterScraper:
         import asyncio
 
         async def _search() -> list[Tweet]:
-            client = TwikitClient("en-US")
+            client = twikit_client_cls("en-US")
 
             # Prefer cookie-based auth (bypasses Cloudflare)
-            auth_token = self._twikit_credentials.get("auth_token", "")
-            ct0 = self._twikit_credentials.get("ct0", "")
+            auth_token = twikit_credentials.get("auth_token", "")
+            ct0 = twikit_credentials.get("ct0", "")
 
             if auth_token and ct0:
                 logger.info("twikit: using cookie-based auth")
                 client.set_cookies({"auth_token": auth_token, "ct0": ct0})
             else:
-                username = self._twikit_credentials.get("username", "")
-                email = self._twikit_credentials.get("email", "")
-                password = self._twikit_credentials.get("password", "")
+                username = twikit_credentials.get("username", "")
+                email = twikit_credentials.get("email", "")
+                password = twikit_credentials.get("password", "")
 
                 try:
                     await client.login(
@@ -2092,7 +2097,7 @@ class TwitterScraper:
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                import nest_asyncio
+                nest_asyncio = import_module("nest_asyncio")
 
                 nest_asyncio.apply()
             return loop.run_until_complete(_search())
@@ -2898,7 +2903,7 @@ class TwitterScraper:
             try:
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
-                    import nest_asyncio
+                    nest_asyncio = import_module("nest_asyncio")
 
                     nest_asyncio.apply()
                 captured_payloads = loop.run_until_complete(_capture_payloads())

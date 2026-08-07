@@ -150,7 +150,7 @@ def _image_url_from_item(item: ET.Element) -> str | None:
 
 
 def _meta_content(soup: BeautifulSoup, *, property_name: str | None = None, name: str | None = None) -> str | None:
-    attrs: dict[str, str] = {}
+    attrs: dict[str, Any] = {}
     if property_name:
         attrs["property"] = property_name
     if name:

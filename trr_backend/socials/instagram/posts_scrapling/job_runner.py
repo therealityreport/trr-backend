@@ -6,19 +6,23 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from trr_backend.db import pg
 from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsScraplingFetcher
 from trr_backend.socials.post_persist_truthfulness import apply_post_persist_truthfulness_metadata
 
-try:
+if TYPE_CHECKING:
     from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsWarmupError
-except ImportError:  # pragma: no cover - removed once the fetcher worker lands.
+    from trr_backend.socials.instagram.scrapling_session import InstagramScraplingSession
+else:
+    try:
+        from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsWarmupError
+    except ImportError:  # pragma: no cover - removed once the fetcher worker lands.
 
-    class InstagramPostsWarmupError(RuntimeError):
-        error_code = "instagram_posts_warmup_failed"
-        retryable = False
+        class InstagramPostsWarmupError(RuntimeError):
+            error_code = "instagram_posts_warmup_failed"
+            retryable = False
 
 
 from trr_backend.socials.instagram import auth_cooldown
@@ -906,10 +910,13 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
         # is off (or only one identity exists), in which case rotate_session only
         # swaps the proxy sticky session. Acquired at session-resolve.
         identity_provider = build_posts_identity_provider(session) if session is not None else None
+        # Type-narrowing alias: session is only dereferenced on the authenticated
+        # branch (anonymous_enabled False), where it is always non-None.
+        active_session = cast("InstagramScraplingSession", session)
         fetcher = InstagramPostsScraplingFetcher(
-            cookies=[] if anonymous_enabled else session.cookies,
-            raw_cookies={} if anonymous_enabled else session.auth_session.cookies,
-            browser_account_id=None if anonymous_enabled else session.browser_account_id,
+            cookies=[] if anonymous_enabled else active_session.cookies,
+            raw_cookies={} if anonymous_enabled else active_session.auth_session.cookies,
+            browser_account_id=None if anonymous_enabled else active_session.browser_account_id,
             proxy_config=proxy_config,
             fast_mode=fast_mode,
             identity_provider=identity_provider,
@@ -931,9 +938,9 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
             reverse_proxy_session_key = f"{proxy_session_key}:reverse"
             reverse_proxy_config = select_posts_proxy(session_key=reverse_proxy_session_key)
             reverse_fetcher = InstagramPostsScraplingFetcher(
-                cookies=[] if anonymous_enabled else session.cookies,
-                raw_cookies={} if anonymous_enabled else session.auth_session.cookies,
-                browser_account_id=None if anonymous_enabled else session.browser_account_id,
+                cookies=[] if anonymous_enabled else active_session.cookies,
+                raw_cookies={} if anonymous_enabled else active_session.auth_session.cookies,
+                browser_account_id=None if anonymous_enabled else active_session.browser_account_id,
                 proxy_config=reverse_proxy_config,
                 fast_mode=fast_mode,
                 auth_state="anonymous" if anonymous_enabled else "authenticated",
@@ -1042,8 +1049,8 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                 await reverse_fetcher.aclose()
 
         try:
+            phase_started = time.monotonic()
             try:
-                phase_started = time.monotonic()
                 await fetcher.warmup(account_handle)
                 warmup_duration_ms += int((time.monotonic() - phase_started) * 1000)
             except InstagramPostsWarmupError as exc:
@@ -1407,9 +1414,8 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
         total_pages_fetched = pages_fetched + reverse_pages_fetched
         elapsed_ms = int((time.monotonic() - started_monotonic) * 1000)
         doc_ids_attempted = _posts_pagination_doc_ids_attempted(fetcher_metadata)
-        proxy_pacing = (
-            fetcher_metadata.get("proxy_pacing") if isinstance(fetcher_metadata.get("proxy_pacing"), dict) else {}
-        )
+        proxy_pacing_raw = fetcher_metadata.get("proxy_pacing")
+        proxy_pacing = proxy_pacing_raw if isinstance(proxy_pacing_raw, dict) else {}
         performance_metadata = {
             "elapsed_ms": elapsed_ms,
             "warmup_duration_ms": warmup_duration_ms,

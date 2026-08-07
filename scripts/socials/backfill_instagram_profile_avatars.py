@@ -12,7 +12,7 @@ from typing import Any
 
 try:
     from trr_backend.db import pg
-    from trr_backend.repositories import social_season_analytics as social_repo
+    from trr_backend.socials import social_season_analytics_impl as social_repo
     from trr_backend.socials.instagram import InstagramScraper
     from trr_backend.utils.env import load_env
 except ModuleNotFoundError:  # pragma: no cover - script execution convenience
@@ -20,7 +20,7 @@ except ModuleNotFoundError:  # pragma: no cover - script execution convenience
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
     from trr_backend.db import pg
-    from trr_backend.repositories import social_season_analytics as social_repo
+    from trr_backend.socials import social_season_analytics_impl as social_repo
     from trr_backend.socials.instagram import InstagramScraper
     from trr_backend.utils.env import load_env
 
@@ -69,12 +69,12 @@ class _AvatarBackfillPost:
             self.owner_detail = SimpleNamespace(**owner_detail_raw)
             if not getattr(self.owner_detail, "profile_pic_url", None) and self.owner_profile_pic_url:
                 self.owner_detail.profile_pic_url = self.owner_profile_pic_url
-        self.tagged_users_detail = [
+        self.tagged_users_detail: list[Any] = [
             SimpleNamespace(**item)
             for item in social_repo._as_json_object_list(row.get("tagged_users_detail"))  # noqa: SLF001
             if isinstance(item, dict)
         ]
-        self.collaborators_detail = [
+        self.collaborators_detail: list[Any] = [
             SimpleNamespace(**item)
             for item in social_repo._as_json_object_list(row.get("collaborators_detail"))  # noqa: SLF001
             if isinstance(item, dict)

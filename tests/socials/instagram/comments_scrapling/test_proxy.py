@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 from trr_backend.socials.instagram.comments_scrapling import proxy as comments_proxy
 
 
@@ -63,7 +65,7 @@ def test_explicit_proxy_urls_shard_deterministically_by_session_key(monkeypatch)
     first = comments_proxy.select_comments_proxy(session_key="thetraitorsus:comments:1")
     repeated = comments_proxy.select_comments_proxy(session_key="thetraitorsus:comments:1")
     shard_values = {
-        comments_proxy.select_comments_proxy(session_key=f"thetraitorsus:comments:{index}").browser_proxy
+        cast(Any, comments_proxy.select_comments_proxy(session_key=f"thetraitorsus:comments:{index}")).browser_proxy
         for index in range(1, 12)
     }
 
@@ -185,6 +187,7 @@ def test_explicit_decodo_provider_enables_comments_proxy(monkeypatch):
 
     assert config is not None
     assert isinstance(config.browser_proxy, dict)
+    assert config.api_proxy_url is not None
     assert config.browser_proxy["username"] == "global-user"
     assert "-session-" not in config.browser_proxy["username"]
     assert "sessionduration" not in config.api_proxy_url
@@ -208,6 +211,7 @@ def test_explicit_decodo_provider_can_opt_into_sticky_comments_proxy(monkeypatch
     assert config is not None
     assert isinstance(config.browser_proxy, dict)
     assert config.session_mode == "sticky"
+    assert config.api_proxy_url is not None
     assert config.browser_proxy["username"].startswith("global-user-session-")
     assert "-sessionduration-10" in config.browser_proxy["username"]
     assert "sessionduration-10" in config.api_proxy_url
@@ -246,4 +250,5 @@ def test_public_proxy_flag_enables_sticky_per_egress_fingerprint(monkeypatch):
     assert cfg_a.fingerprint != cfg_b.fingerprint
     # Same shard -> deterministic, stable fingerprint.
     cfg_a2 = comments_proxy.select_comments_proxy(public_mode=True, session_key="bravotv:public:0")
+    assert cfg_a2 is not None
     assert cfg_a2.fingerprint == cfg_a.fingerprint

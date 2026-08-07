@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, cast
 
 from trr_backend.db import pg
 
@@ -149,7 +149,7 @@ def _get_communities_for_show(show_id: str) -> list[dict[str, Any]]:
     with pg.db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, (show_id,))
-            cols = [desc[0] for desc in cur.description]
+            cols = [desc[0] for desc in cast(Any, cur.description)]
             return [dict(zip(cols, row, strict=False)) for row in cur.fetchall()]
 
 

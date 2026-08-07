@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from typing import Any
 
 import pytest
 
 from trr_backend.db import pg
-from trr_backend.repositories import social_season_analytics as social_repo
+from trr_backend.socials import social_season_analytics_impl as social_repo
 
 
 @pytest.fixture()
@@ -18,7 +19,7 @@ def live_test_db():
 
 
 def test_upsert_instagram_comment_tree_uses_composite_conflict_cols(monkeypatch) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     class _Comment:
         comment_id = "same-comment"
@@ -73,7 +74,7 @@ def test_upsert_instagram_comment_tree_uses_composite_conflict_cols(monkeypatch)
 def test_platform_comment_context_row_for_media_mirror_uses_post_scoped_identity_for_instagram(
     monkeypatch,
 ) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     def _fake_fetch_one(sql, params):  # noqa: ANN001
         captured["sql"] = sql

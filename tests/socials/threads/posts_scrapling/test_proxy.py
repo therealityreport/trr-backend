@@ -75,6 +75,7 @@ def test_select_threads_posts_proxy_decodo(monkeypatch: pytest.MonkeyPatch) -> N
     assert proxy.proxy_rotator == {"browser_proxy": proxy.browser_proxy}
     assert proxy.fingerprint == "gate.decodo.com:7000:decodo"
     assert proxy.session_mode == "rotating"
+    assert isinstance(proxy.browser_proxy, dict)
     assert "-session-" not in proxy.browser_proxy["username"]
     assert "sessionduration" not in proxy.api_proxy_url
     assert rotator_calls == [proxy.browser_proxy]
@@ -95,6 +96,7 @@ def test_select_threads_posts_proxy_decodo_sticky_opt_in(monkeypatch: pytest.Mon
     assert proxy is not None
     assert isinstance(proxy.browser_proxy, dict)
     assert proxy.session_mode == "sticky"
+    assert proxy.api_proxy_url is not None
     assert proxy.browser_proxy["username"].startswith("user-session-")
     assert "-sessionduration-10" in proxy.browser_proxy["username"]
     assert "sessionduration-10" in proxy.api_proxy_url

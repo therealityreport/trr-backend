@@ -67,6 +67,7 @@ def test_select_posts_proxy_decodo(monkeypatch):
     assert result.browser_proxy["server"] == "http://gate.decodo.com:7000"
     assert result.browser_proxy["username"] == "user1"
     assert result.browser_proxy["password"] == "p@ss!"
+    assert result.api_proxy_url is not None
     assert "p%40ss%21" in result.api_proxy_url
     assert "-session-" not in result.browser_proxy["username"]
     assert "sessionduration" not in result.api_proxy_url
@@ -100,6 +101,8 @@ def test_select_posts_proxy_decodo_sticky_session(monkeypatch):
     result = select_posts_proxy()
     assert result is not None
     assert result.session_mode == "sticky"
+    assert isinstance(result.browser_proxy, dict)
+    assert result.api_proxy_url is not None
     assert "-session-" in result.browser_proxy["username"]
     assert "-sessionduration-10" in result.browser_proxy["username"]
     assert "sessionduration-10" in result.api_proxy_url

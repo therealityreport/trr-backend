@@ -268,7 +268,8 @@ def parse_imdb_episodes_page(html: str, *, season: int | None = None) -> ImdbEpi
             if episode_no is not None:
                 break
         if episode_no is None:
-            meta = container.find(attrs={"itemprop": "episodeNumber"})
+            episode_number_attrs: dict[str, Any] = {"itemprop": "episodeNumber"}
+            meta = container.find(name=None, attrs=episode_number_attrs)
             if meta:
                 episode_no = _as_int(meta.get("content") or meta.get_text(" ", strip=True))
 

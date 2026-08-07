@@ -9,13 +9,14 @@ advertise reported_comment_count=0 and stay complete.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 
 from trr_backend.socials.instagram.comments_scrapling.job_runner import (
     _comments_scrape_is_complete,
 )
 
 
-def _result(*, reported, observed, fetch_reason: str = "") -> SimpleNamespace:
+def _result(*, reported, observed, fetch_reason: str = "") -> Any:
     return SimpleNamespace(
         fetch_failed=False,
         auth_failed=False,

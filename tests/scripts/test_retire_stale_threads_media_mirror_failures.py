@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from typing import Any
 
 import scripts.socials.retire_stale_threads_media_mirror_failures as mod
 
@@ -80,7 +81,7 @@ def test_main_apply_retires_matching_rows(monkeypatch, capsys) -> None:
 
 
 def test_retire_matches_updates_only_stale_threads_failures(monkeypatch) -> None:
-    calls: list[dict[str, object]] = []
+    calls: list[dict[str, Any]] = []
     monkeypatch.setattr(
         mod.pg,
         "execute_returning",

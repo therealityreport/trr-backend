@@ -38,7 +38,7 @@ class InstagramResumeState:
         }
 
     @classmethod
-    def from_metadata(cls, payload: dict[str, object] | None) -> InstagramResumeState | None:
+    def from_metadata(cls, payload: dict[str, Any] | None) -> InstagramResumeState | None:
         if not isinstance(payload, dict):
             return None
         best_before_raw = str(payload.get("best_before") or "").strip()

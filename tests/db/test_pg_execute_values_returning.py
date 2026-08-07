@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, cast
 
 from trr_backend.db import pg
 
@@ -37,7 +37,7 @@ def test_execute_values_returning_aggregates_execute_values_fetch(monkeypatch) -
     result = pg.execute_values_returning(
         "insert into social.test_table (id) values %s returning id",
         [(index,) for index in range(250)],
-        conn=object(),
+        conn=cast(Any, object()),
     )
 
     assert result == fetched_rows

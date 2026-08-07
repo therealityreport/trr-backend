@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from typing import Any
 
 import pytest
 
@@ -62,7 +63,7 @@ def test_quiz_and_event_read_write_queries_are_schema_qualified(
 def test_create_event_locks_parent_before_allocating_sort_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[tuple[str, str, object, object]] = []
+    calls: list[tuple[str, str, Any, object]] = []
     connection = object()
 
     @contextmanager

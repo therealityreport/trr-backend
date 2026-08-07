@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-import trr_backend.repositories.social_season_analytics as social_repo
+import trr_backend.socials.social_season_analytics_impl as social_repo
 
 
 def test_build_social_account_profile_hashtag_timeline_payload_ranks_years_and_segments() -> None:

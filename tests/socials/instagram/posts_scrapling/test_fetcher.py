@@ -87,7 +87,7 @@ def test_public_fetcher_strips_authenticated_cookies(_mock_scrapling):
 def test_requests_fallback_can_disable_graphql_recovery(_mock_scrapling):
     from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsScraplingFetcher
 
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     class _FallbackScraper:
         last_retrieval_meta = {"error_code": "instagram_graphql_checkpoint_required"}
@@ -577,7 +577,9 @@ def test_warmup_redirect_loop_stops_after_one_document_without_graphql(_mock_scr
     assert exc_info.value.error_code == "instagram_posts_redirect_loop"
     assert exc_info.value.retryable is False
     assert fetcher._fetcher.async_fetch.await_count == 1
-    assert fetcher._fetcher.async_fetch.await_args.kwargs["retries"] == 1
+    await_args = fetcher._fetcher.async_fetch.await_args
+    assert await_args is not None
+    assert await_args.kwargs["retries"] == 1
     fetcher._fetch_graphql.assert_not_awaited()
     metadata = fetcher.runtime_metadata
     assert metadata["requests_fallback"]["active"] is False

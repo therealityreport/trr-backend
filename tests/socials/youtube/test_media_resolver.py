@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -69,7 +70,7 @@ def test_resolve_youtube_media_falls_back_to_watch_page_streaming_data(monkeypat
     </body></html>
     """
 
-    result = media_resolver.resolve_youtube_media("abc123", session=_FakeSession(html=html))
+    result = media_resolver.resolve_youtube_media("abc123", session=cast(Any, _FakeSession(html=html)))
 
     assert result.source == "watch_page_streaming_data"
     assert result.media_urls[0] == "https://video.test/1080.mp4"
@@ -94,7 +95,7 @@ def test_resolve_youtube_media_accepts_videoplayback_mime_query_without_suffix(
     </body></html>
     """
 
-    result = media_resolver.resolve_youtube_media("abc123", session=_FakeSession(html=html))
+    result = media_resolver.resolve_youtube_media("abc123", session=cast(Any, _FakeSession(html=html)))
 
     assert result.source == "watch_page_streaming_data"
     assert result.media_urls == [stream_url]
@@ -110,7 +111,7 @@ def test_resolve_youtube_media_falls_back_to_og_tags(monkeypatch: pytest.MonkeyP
     </head></html>
     """
 
-    result = media_resolver.resolve_youtube_media("abc123", session=_FakeSession(html=html))
+    result = media_resolver.resolve_youtube_media("abc123", session=cast(Any, _FakeSession(html=html)))
 
     assert result.source == "og_fallback"
     assert result.media_urls == ["https://cdn.test/fallback.mp4"]

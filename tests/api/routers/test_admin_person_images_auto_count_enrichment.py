@@ -59,7 +59,7 @@ class _FakeDb:
 
 def test_auto_count_cast_photos_persists_face_boxes_face_crops_and_auto_people(monkeypatch) -> None:
     photo_id = "11111111-1111-1111-1111-111111111111"
-    db = _FakeDb(
+    db: Any = _FakeDb(
         {
             "cast_photos": [
                 {
@@ -157,7 +157,7 @@ def test_auto_count_cast_photos_persists_face_boxes_face_crops_and_auto_people(m
 def test_auto_count_cast_photos_force_recount_allows_identity_without_trr_show(monkeypatch) -> None:
     photo_id = "11111111-1111-1111-1111-111111111111"
     owner_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-    db = _FakeDb(
+    db: Any = _FakeDb(
         {
             "cast_photos": [
                 {
@@ -234,7 +234,7 @@ def test_auto_count_cast_photos_force_recount_allows_identity_without_trr_show(m
 
 
 def test_auto_count_media_links_persists_face_boxes_face_crops_and_auto_people(monkeypatch) -> None:
-    db = _FakeDb({"media_links": []})
+    db: Any = _FakeDb({"media_links": []})
 
     monkeypatch.setattr(
         "trr_backend.services.person_images.detection.is_runtime_configured",
@@ -323,7 +323,7 @@ def test_auto_count_cast_photos_promotes_owner_by_similarity_and_assigns_remaini
     photo_id = "11111111-1111-1111-1111-111111111111"
     owner_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
     guest_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
-    db = _FakeDb(
+    db: Any = _FakeDb(
         {
             "cast_photos": [
                 {
@@ -424,7 +424,7 @@ def test_auto_count_cast_photos_does_not_force_owner_to_best_unrelated_similarit
     photo_id = "11111111-1111-1111-1111-111111111111"
     owner_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
     guest_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
-    db = _FakeDb(
+    db: Any = _FakeDb(
         {
             "cast_photos": [
                 {
@@ -520,7 +520,7 @@ def test_auto_count_cast_photos_keeps_existing_thumbnail_crop_without_confident_
         "mode": "auto",
         "strategy": "legacy_auto",
     }
-    db = _FakeDb(
+    db: Any = _FakeDb(
         {
             "cast_photos": [
                 {
@@ -590,7 +590,7 @@ def test_auto_count_cast_photos_keeps_existing_thumbnail_crop_without_confident_
 
 def test_auto_count_cast_photos_backfills_face_metadata_when_people_count_already_exists(monkeypatch) -> None:
     photo_id = "11111111-1111-1111-1111-111111111111"
-    db = _FakeDb(
+    db: Any = _FakeDb(
         {
             "cast_photos": [
                 {
@@ -674,7 +674,7 @@ def test_auto_count_cast_photos_backfills_face_metadata_when_people_count_alread
 
 def test_auto_count_cast_photos_generates_person_fallback_boxes_when_no_faces_detected(monkeypatch) -> None:
     photo_id = "11111111-1111-1111-1111-111111111111"
-    db = _FakeDb(
+    db: Any = _FakeDb(
         {
             "cast_photos": [
                 {

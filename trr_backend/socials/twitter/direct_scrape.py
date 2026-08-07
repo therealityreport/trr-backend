@@ -263,7 +263,7 @@ def fetch_tweet_quotes(
         }
 
 
-def _load_auth_values(load_auth: Callable[[], tuple[Any, Any, Any]]) -> tuple[Any, Any, Any]:
+def _load_auth_values(load_auth: Callable[[], tuple[Any, ...]]) -> tuple[Any, Any, Any]:
     values = load_auth()
     if len(values) == 2:
         twitter_cookies, twitter_bearer = values

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from importlib import import_module
 from typing import Any
 from unittest.mock import patch
 from uuid import uuid4
@@ -96,17 +97,16 @@ def test_post_social_account_comments_run_resume_route_errors(
     expected_status: int,
     expected_code: str,
 ) -> None:
-    from trr_backend.repositories.social_season_analytics import (
-        SocialIngestConflictError,
-        SocialIngestValidationError,
-    )
+    # The compatibility alias module swaps itself for the implementation module
+    # at import time, so resolve the exception classes via an Any-typed handle.
+    season_analytics: Any = import_module("trr_backend.repositories.social_season_analytics")
 
     run_id = uuid4()
     error: Exception
     if exception == "conflict":
-        error = SocialIngestConflictError(expected_code, "Comments run is already active.")
+        error = season_analytics.SocialIngestConflictError(expected_code, "Comments run is already active.")
     else:
-        error = SocialIngestValidationError(expected_code, "Comments run cannot be resumed.")
+        error = season_analytics.SocialIngestValidationError(expected_code, "Comments run cannot be resumed.")
 
     with patch(
         "trr_backend.socials.pipelines.comments.instagram.resume_social_account_comments_run",

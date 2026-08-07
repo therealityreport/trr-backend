@@ -6,6 +6,7 @@ import os
 import sys
 import types
 from dataclasses import dataclass
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -280,7 +281,7 @@ def test_get_s3_client_falls_back_to_env_creds_when_profile_missing(monkeypatch:
 
     monkeypatch.setattr(s3_mirror.boto3, "Session", _fake_session)
 
-    client = s3_mirror.get_s3_client()
+    client = cast("dict[str, Any]", s3_mirror.get_s3_client())
 
     assert session_calls == [{"region_name": "us-east-1"}]
     assert client["service_name"] == "s3"
@@ -332,7 +333,7 @@ def test_get_s3_client_uses_endpoint_url_for_r2(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr(s3_mirror.boto3, "Session", _fake_session)
 
-    client = s3_mirror.get_s3_client()
+    client = cast("dict[str, Any]", s3_mirror.get_s3_client())
 
     assert session_calls == [{"region_name": "auto"}]
     assert client["endpoint_url"] == "https://example-account.r2.cloudflarestorage.com"
@@ -340,11 +341,12 @@ def test_get_s3_client_uses_endpoint_url_for_r2(monkeypatch: pytest.MonkeyPatch)
     assert client["aws_secret_access_key"] == "secret"
     assert client["region_name"] == "auto"
     assert isinstance(client["config"], Config)
-    assert client["config"].signature_version == "s3v4"
-    assert client["config"].connect_timeout == 10
-    assert client["config"].read_timeout == 90
-    assert client["config"].retries == {"max_attempts": 3, "mode": "standard"}
-    assert client["config"].s3 == {"addressing_style": "path"}
+    config = cast(Any, client["config"])
+    assert config.signature_version == "s3v4"
+    assert config.connect_timeout == 10
+    assert config.read_timeout == 90
+    assert config.retries == {"max_attempts": 3, "mode": "standard"}
+    assert config.s3 == {"addressing_style": "path"}
 
 
 def test_mirror_urls_to_s3_isolates_failures_and_deduplicates(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -441,8 +443,8 @@ def test_build_monochrome_logo_variants_preserves_transparency() -> None:
     black = Image.open(io.BytesIO(black_payload[0])).convert("RGBA")
     white = Image.open(io.BytesIO(white_payload[0])).convert("RGBA")
 
-    assert black.getpixel((0, 0))[3] == 0
-    assert white.getpixel((0, 0))[3] == 0
+    assert cast("tuple[int, int, int, int]", black.getpixel((0, 0)))[3] == 0
+    assert cast("tuple[int, int, int, int]", white.getpixel((0, 0)))[3] == 0
     assert black.getpixel((2, 2)) == (0, 0, 0, 255)
     assert white.getpixel((2, 2)) == (255, 255, 255, 255)
 

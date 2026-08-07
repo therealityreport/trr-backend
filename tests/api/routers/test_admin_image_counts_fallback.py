@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
 
 from api.routers import admin_image_counts as counts
+
+if TYPE_CHECKING:
+    from api.auth import InternalAdminUser
+    from api.deps import SupabaseAdminClient
 
 
 class _FakeResponse:
@@ -85,7 +90,12 @@ def test_auto_count_cast_photo_falls_back_to_original_url(monkeypatch) -> None:
     monkeypatch.setattr(counts, "has_manual_tags", lambda _row: False)
     monkeypatch.setattr(counts, "upsert_cast_photo_tags", lambda *args, **kwargs: None)
 
-    out = counts.auto_count_cast_photo(photo_id=UUID(str(photo_id)), force=False, db=db, _=None)
+    out = counts.auto_count_cast_photo(
+        photo_id=UUID(str(photo_id)),
+        force=False,
+        db=cast("SupabaseAdminClient", db),
+        _=cast("InternalAdminUser", None),
+    )
     assert out.people_count == 2
     assert out.detector == "simulated"
 
@@ -124,7 +134,12 @@ def test_auto_count_cast_photo_retries_next_url_when_first_fails(monkeypatch) ->
     monkeypatch.setattr(counts, "has_manual_tags", lambda _row: False)
     monkeypatch.setattr(counts, "upsert_cast_photo_tags", lambda *args, **kwargs: None)
 
-    out = counts.auto_count_cast_photo(photo_id=UUID(str(photo_id)), force=False, db=db, _=None)
+    out = counts.auto_count_cast_photo(
+        photo_id=UUID(str(photo_id)),
+        force=False,
+        db=cast("SupabaseAdminClient", db),
+        _=cast("InternalAdminUser", None),
+    )
     assert out.people_count == 1
     assert out.detector == "simulated"
     assert len(calls) >= 2
@@ -158,7 +173,12 @@ def test_auto_count_media_asset_falls_back_to_source_url(monkeypatch) -> None:
     monkeypatch.setattr(counts, "has_people_count", lambda _ctx: False)
     monkeypatch.setattr(counts, "update_person_links_context", lambda *_args, **_kwargs: None)
 
-    out = counts.auto_count_media_asset(asset_id=UUID(str(asset_id)), force=False, db=db, _=None)
+    out = counts.auto_count_media_asset(
+        asset_id=UUID(str(asset_id)),
+        force=False,
+        db=cast("SupabaseAdminClient", db),
+        _=cast("InternalAdminUser", None),
+    )
     assert out.people_count == 3
     assert out.detector == "simulated"
 
@@ -188,7 +208,12 @@ def test_auto_count_media_asset_still_requires_any_link(monkeypatch) -> None:
     monkeypatch.setattr(counts, "list_person_links_by_asset_id", lambda _db, _id: [])
 
     with pytest.raises(HTTPException) as excinfo:
-        counts.auto_count_media_asset(asset_id=UUID(str(asset_id)), force=False, db=db, _=None)
+        counts.auto_count_media_asset(
+            asset_id=UUID(str(asset_id)),
+            force=False,
+            db=cast("SupabaseAdminClient", db),
+            _=cast("InternalAdminUser", None),
+        )
     assert excinfo.value.status_code == 404
 
 
@@ -247,7 +272,12 @@ def test_auto_count_cast_photo_passes_owner_references_and_returns_references_us
         lambda _db, _person_id, *, used_references: used_references,
     )
 
-    out = counts.auto_count_cast_photo(photo_id=UUID(str(photo_id)), force=False, db=db, _=None)
+    out = counts.auto_count_cast_photo(
+        photo_id=UUID(str(photo_id)),
+        force=False,
+        db=cast("SupabaseAdminClient", db),
+        _=cast("InternalAdminUser", None),
+    )
     assert received_owner_refs == expected_references
     assert out.references_used == expected_references
 
@@ -317,7 +347,12 @@ def test_auto_count_media_asset_passes_owner_references_and_returns_references_u
         lambda _db, _person_id, *, used_references: used_references,
     )
 
-    out = counts.auto_count_media_asset(asset_id=UUID(str(asset_id)), force=False, db=db, _=None)
+    out = counts.auto_count_media_asset(
+        asset_id=UUID(str(asset_id)),
+        force=False,
+        db=cast("SupabaseAdminClient", db),
+        _=cast("InternalAdminUser", None),
+    )
     assert received_owner_refs == expected_references
     assert out.references_used == expected_references
 
@@ -388,7 +423,12 @@ def test_auto_count_cast_photo_passes_person_reference_images(monkeypatch) -> No
         lambda *_args, **_kwargs: {"used": []},
     )
 
-    counts.auto_count_cast_photo(photo_id=UUID(str(photo_id)), force=False, db=db, _=None)
+    counts.auto_count_cast_photo(
+        photo_id=UUID(str(photo_id)),
+        force=False,
+        db=cast("SupabaseAdminClient", db),
+        _=cast("InternalAdminUser", None),
+    )
     assert received_person_refs == expected_person_reference_images
 
 
@@ -468,7 +508,12 @@ def test_auto_count_media_asset_passes_person_reference_images(monkeypatch) -> N
         lambda *_args, **_kwargs: {"used": []},
     )
 
-    counts.auto_count_media_asset(asset_id=UUID(str(asset_id)), force=False, db=db, _=None)
+    counts.auto_count_media_asset(
+        asset_id=UUID(str(asset_id)),
+        force=False,
+        db=cast("SupabaseAdminClient", db),
+        _=cast("InternalAdminUser", None),
+    )
     assert received_person_refs == expected_person_reference_images
 
 
@@ -509,7 +554,12 @@ def test_auto_count_cast_photo_force_enables_identity_even_when_not_trr_eligible
 
     monkeypatch.setattr(counts, "_build_detection_boxes", _fake_build_detection_boxes)
 
-    counts.auto_count_cast_photo(photo_id=UUID(str(photo_id)), force=True, db=db, _=None)
+    counts.auto_count_cast_photo(
+        photo_id=UUID(str(photo_id)),
+        force=True,
+        db=cast("SupabaseAdminClient", db),
+        _=cast("InternalAdminUser", None),
+    )
     assert captured["allow_identity_assignment"] is True
 
 
@@ -562,7 +612,12 @@ def test_auto_count_media_asset_force_enables_identity_even_when_not_trr_eligibl
 
     monkeypatch.setattr(counts, "_build_detection_boxes", _fake_build_detection_boxes)
 
-    counts.auto_count_media_asset(asset_id=UUID(str(asset_id)), force=True, db=db, _=None)
+    counts.auto_count_media_asset(
+        asset_id=UUID(str(asset_id)),
+        force=True,
+        db=cast("SupabaseAdminClient", db),
+        _=cast("InternalAdminUser", None),
+    )
     assert captured["allow_identity_assignment"] is True
 
 
@@ -613,7 +668,12 @@ def test_auto_count_cast_photo_returns_face_boxes(monkeypatch) -> None:
     monkeypatch.setattr(counts, "auto_thumbnail_crop", lambda _result: None)
     monkeypatch.setattr(counts, "face_centroid", lambda _result: None)
 
-    out = counts.auto_count_cast_photo(photo_id=UUID(str(photo_id)), force=False, db=db, _=None)
+    out = counts.auto_count_cast_photo(
+        photo_id=UUID(str(photo_id)),
+        force=False,
+        db=cast("SupabaseAdminClient", db),
+        _=cast("InternalAdminUser", None),
+    )
     assert out.people_count == 2
     assert len(out.face_boxes) == 2
     assert out.face_boxes[0].x == 0.1
@@ -671,7 +731,12 @@ def test_auto_count_cast_photo_uses_person_fallback_boxes_when_faces_missing(mon
     monkeypatch.setattr(counts, "auto_thumbnail_crop", lambda _result: None)
     monkeypatch.setattr(counts, "face_centroid", lambda _result: None)
 
-    out = counts.auto_count_cast_photo(photo_id=UUID(str(photo_id)), force=False, db=db, _=None)
+    out = counts.auto_count_cast_photo(
+        photo_id=UUID(str(photo_id)),
+        force=False,
+        db=cast("SupabaseAdminClient", db),
+        _=cast("InternalAdminUser", None),
+    )
     assert out.people_count == 2
     assert len(out.face_boxes) == 2
     assert out.face_boxes[0].source_kind == "person_fallback"
@@ -968,7 +1033,12 @@ def test_auto_count_cast_photo_returns_owner_thumbnail_crop_when_confident_match
     monkeypatch.setattr(counts, "has_manual_tags", lambda _row: False)
     monkeypatch.setattr(counts, "upsert_cast_photo_tags", lambda *args, **kwargs: None)
 
-    out = counts.auto_count_cast_photo(photo_id=UUID(str(photo_id)), force=False, db=db, _=None)
+    out = counts.auto_count_cast_photo(
+        photo_id=UUID(str(photo_id)),
+        force=False,
+        db=cast("SupabaseAdminClient", db),
+        _=cast("InternalAdminUser", None),
+    )
     assert out.thumbnail_crop is not None
     assert out.thumbnail_crop["x"] == 30.0
     assert out.thumbnail_crop["y"] == 35.5
@@ -1016,5 +1086,10 @@ def test_auto_count_media_asset_returns_existing_context_crop_when_not_regenerat
     monkeypatch.setattr(counts, "auto_thumbnail_crop", lambda _result: None)
     monkeypatch.setattr(counts, "face_centroid", lambda _result: None)
 
-    out = counts.auto_count_media_asset(asset_id=UUID(str(asset_id)), force=False, db=db, _=None)
+    out = counts.auto_count_media_asset(
+        asset_id=UUID(str(asset_id)),
+        force=False,
+        db=cast("SupabaseAdminClient", db),
+        _=cast("InternalAdminUser", None),
+    )
     assert out.thumbnail_crop == {"x": 52.0, "y": 33.0, "zoom": 1.08, "mode": "manual"}

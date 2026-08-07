@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 
 import pytest
 
@@ -74,7 +75,7 @@ def test_reddit_http_client_reuses_cached_oauth_token(monkeypatch) -> None:
 
     client = reddit_refresh.RedditHttpClient()
     session = TokenSession()
-    client.session = session
+    client.session = cast(Any, session)
 
     assert client._get_oauth_token() == "cached-access-token"  # noqa: SLF001
     assert client._get_oauth_token() == "cached-access-token"  # noqa: SLF001
@@ -106,7 +107,7 @@ def test_reddit_http_client_coalesces_concurrent_cold_oauth_refreshes(monkeypatc
 
     client = reddit_refresh.RedditHttpClient()
     session = TokenSession()
-    client.session = session
+    client.session = cast(Any, session)
     caller_count = 12
     start = threading.Barrier(caller_count + 1)
     tokens: list[str | None] = []
@@ -1102,7 +1103,7 @@ def test_execute_refresh_run_updates_live_progress(monkeypatch) -> None:
 
     assert result["status"] == "completed"
     progress_updates = [
-        item.get("progress")
+        cast("dict[str, Any]", item.get("progress"))
         for item in running_updates
         if isinstance(item, dict) and isinstance(item.get("progress"), dict)
     ]
@@ -1916,7 +1917,7 @@ def test_execute_refresh_run_marks_coverage_incomplete_partial_reason(monkeypatc
         "claim_token": "claim-token-1",
         "updated_at": datetime.now(tz=UTC),
     }
-    updates: list[dict[str, object]] = []
+    updates: list[dict[str, Any]] = []
 
     monkeypatch.setattr(reddit_refresh.pg, "fetch_one", lambda *args, **kwargs: run_row)  # noqa: ANN002, ANN003, ARG005
     monkeypatch.setattr(reddit_refresh, "_touch_refresh_run_heartbeat", lambda **kwargs: None)

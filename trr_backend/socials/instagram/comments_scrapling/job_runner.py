@@ -12,7 +12,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import timedelta
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 from psycopg2 import errors as psycopg_errors
 
@@ -1574,7 +1574,7 @@ def _load_public_replay_guard_rows(
             "materialized_post_count": _safe_int(row.get("materialized_post_count")) or 0,
             "prior_public_fetched_comment_count": _safe_int(row.get("prior_public_fetched_comment_count")) or 0,
             "prior_public_audit_at": (
-                row.get("prior_public_audit_at").isoformat()
+                cast(Any, row.get("prior_public_audit_at")).isoformat()
                 if hasattr(row.get("prior_public_audit_at"), "isoformat")
                 else row.get("prior_public_audit_at")
             ),
@@ -2024,13 +2024,13 @@ def _top_level_checkpoint_summary(
     items = list(merged_by_shortcode.values())
     return {
         "total_count": int(
-            checkpoint_metadata.get("total_count")
+            cast(Any, checkpoint_metadata.get("total_count"))
             if isinstance(checkpoint_metadata, dict)
             else len(items) or len(items)
         ),
         "retained_count": len(items),
         "dropped_count": int(
-            checkpoint_metadata.get("dropped_count") if isinstance(checkpoint_metadata, dict) else 0 or 0
+            cast(Any, checkpoint_metadata.get("dropped_count")) if isinstance(checkpoint_metadata, dict) else 0 or 0
         ),
         "truncated": bool(checkpoint_metadata.get("truncated")) if isinstance(checkpoint_metadata, dict) else False,
         "stop_reasons": dict(Counter(str(item.get("stop_reason") or "unknown") for item in items)),
@@ -2206,13 +2206,16 @@ def _append_checkpoint_items(
 ) -> None:
     if not items:
         return
-    summary = dict(metadata.get(summary_key) if isinstance(metadata.get(summary_key), dict) else {})
+    summary_raw = metadata.get(summary_key)
+    summary: dict[str, Any] = dict(summary_raw) if isinstance(summary_raw, dict) else {}
     existing_summary_items = [item for item in (summary.get("items") or []) if isinstance(item, dict)]
     summary_items = [*existing_summary_items, *items]
     metadata[summary_key] = {**summary, **_checkpoint_summary(summary_items)}
 
-    runtime = dict(metadata.get("fetcher_runtime") if isinstance(metadata.get("fetcher_runtime"), dict) else {})
-    checkpoint_metadata = dict(runtime.get(runtime_key) if isinstance(runtime.get(runtime_key), dict) else {})
+    runtime_raw = metadata.get("fetcher_runtime")
+    runtime: dict[str, Any] = dict(runtime_raw) if isinstance(runtime_raw, dict) else {}
+    checkpoint_raw = runtime.get(runtime_key)
+    checkpoint_metadata: dict[str, Any] = dict(checkpoint_raw) if isinstance(checkpoint_raw, dict) else {}
     existing_runtime_items = [item for item in (checkpoint_metadata.get("items") or []) if isinstance(item, dict)]
     runtime_items = [*existing_runtime_items, *items]
     runtime[runtime_key] = {**checkpoint_metadata, **_checkpoint_summary(runtime_items)}
@@ -2284,7 +2287,8 @@ def _audit_cursor_resume_metadata_from_rows(
 def _merge_audit_cursor_resume_metadata(job: dict[str, Any], audit_metadata: Mapping[str, Any]) -> dict[str, Any]:
     if not audit_metadata:
         return job
-    metadata = dict(job.get("metadata") if isinstance(job.get("metadata"), dict) else {})
+    metadata_raw = job.get("metadata")
+    metadata: dict[str, Any] = dict(metadata_raw) if isinstance(metadata_raw, dict) else {}
     top_items = [
         item
         for item in ((audit_metadata.get("top_level_checkpoint_summary") or {}).get("items") or [])

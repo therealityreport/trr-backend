@@ -24,7 +24,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from dotenv import dotenv_values
 
@@ -121,7 +121,8 @@ def _extract_cookies(profile_path: Path) -> dict[str, str]:
         "https://www.instagram.com",
         cookie_file=str(cookie_file),
     )
-    return cookies
+    # Without as_cookies=True, chrome_cookies returns a name->value dict; typing-only cast.
+    return cast("dict[str, str]", cookies)
 
 
 def _validate_cookies(cookies: dict[str, str]) -> tuple[bool, str]:

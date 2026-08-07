@@ -16,7 +16,7 @@ class _FakeFacebookScraper:
     def __init__(self, *, posts: list[Any], retrieval_meta: dict[str, Any]) -> None:
         self.posts = posts
         self.last_retrieval_meta = dict(retrieval_meta)
-        self.config: Any | None = None
+        self.config: Any = None
 
     def scrape(self, config: Any, *, progress_cb=None) -> list[Any]:
         self.config = config

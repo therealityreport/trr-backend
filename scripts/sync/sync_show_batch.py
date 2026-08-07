@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from typing import Any
+from typing import Any, cast
 
 from scripts._sync_common import add_show_filter_args, fetch_show_rows, load_env_and_db
 
@@ -126,7 +126,7 @@ def sync_single_show(
                 capture_output=True,
                 text=True,
                 timeout=300,  # 5 minute timeout per step
-                env={**subprocess.os.environ, **env},
+                env={**cast(Any, subprocess).os.environ, **env},
                 check=False,
             )
 

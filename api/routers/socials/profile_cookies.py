@@ -3,10 +3,21 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, cast
+
 from fastapi import APIRouter
 
 from ._shared import *
 from .profile_reads import *
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from ._shared import _require_instagram_auth_refresh_confirmation
+    from .profile_reads import (
+        _cookie_health_auth_probe_metadata,
+        _instagram_comments_auth_probe_is_rate_limited,
+    )
 
 router = APIRouter()
 
@@ -18,13 +29,21 @@ def get_cookie_health_route(
     force: bool = Query(default=False, description="Bypass validation cache"),
     posts_auth: bool = Query(default=False, description="Include Instagram Modal posts endpoint auth probe"),
     comments_auth: bool = Query(default=False, description="Include Instagram Modal comments endpoint auth probe"),
-    user: InternalAdminUser = None,
+    user: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     from trr_backend.socials.control_plane.runtime import check_platform_cookie_health
-    from trr_backend.socials.pipelines.account_catalog.launch import (
-        probe_modal_instagram_comments_auth_health,
-        probe_modal_instagram_posts_auth_health,
-    )
+
+    if TYPE_CHECKING:
+        # These probes are injected into the launch module's globals at runtime
+        # by its provider bridge, so static checkers cannot see them as import
+        # symbols.
+        probe_modal_instagram_comments_auth_health = cast("Callable[..., dict[str, Any]]", None)
+        probe_modal_instagram_posts_auth_health = cast("Callable[..., dict[str, Any]]", None)
+    else:
+        from trr_backend.socials.pipelines.account_catalog.launch import (
+            probe_modal_instagram_comments_auth_health,
+            probe_modal_instagram_posts_auth_health,
+        )
 
     health = check_platform_cookie_health(platform, force=force)
     auth_probe_blocked = False
@@ -169,7 +188,7 @@ def post_cookie_refresh_route(
     platform: str,
     account_handle: str,
     payload: CookieRefreshRequest,
-    user: InternalAdminUser = None,
+    user: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     from trr_backend.socials.control_plane.runtime import (
         check_platform_cookie_health,

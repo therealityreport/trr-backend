@@ -17,6 +17,7 @@ import re
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import cast
 from urllib.parse import urlparse
 
 from trr_backend.scraping.url_image_scraper import (
@@ -227,11 +228,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Candidates: {manifest['total_candidates']}")
     print(f"Downloaded: {manifest['downloaded']}")
     print(f"Skipped existing: {manifest['skipped_existing']}")
-    print(f"Errors: {len(manifest['errors'])}")
+    manifest_errors = cast("list[str]", manifest["errors"])
+    print(f"Errors: {len(manifest_errors)}")
 
-    if manifest["errors"]:
+    if manifest_errors:
         print("Download errors:", file=sys.stderr)
-        for err in manifest["errors"]:
+        for err in manifest_errors:
             print(f"- {err}", file=sys.stderr)
 
     return 0

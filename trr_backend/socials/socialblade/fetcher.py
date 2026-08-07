@@ -17,7 +17,7 @@ import asyncio
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote, unquote, urlparse
 
 import httpx
@@ -228,13 +228,17 @@ class SocialBladeScraplingFetcher:
 
             def apply_captured_payload() -> None:
                 nonlocal stats, rankings, metrics, chart_data, history_source
+                # Only invoked when captured_payload_available confirmed the
+                # captured user dict and history rows list via isinstance.
+                captured_user_payload = cast("dict[str, Any]", captured_user)
+                captured_rows = cast("list[Any]", captured_history_rows)
                 stats, rankings = socialblade_parser._build_profile_stats_from_user_payload(
-                    captured_user,
+                    captured_user_payload,
                     platform=self._platform,
                 )
                 metrics = socialblade_parser._history_rows_to_metrics(
-                    captured_history_rows,
-                    limit=len(captured_history_rows),
+                    captured_rows,
+                    limit=len(captured_rows),
                     platform=self._platform,
                 )
                 table_chart = socialblade_parser._followers_chart_from_table(metrics, metric_label="Followers")

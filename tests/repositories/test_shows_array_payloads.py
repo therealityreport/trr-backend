@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from typing import cast
+
+from trr_backend.db.session import DbSession
 from trr_backend.models.shows import ShowUpsert
 from trr_backend.repositories.shows import insert_show
 
@@ -37,7 +40,7 @@ def test_insert_show_converts_array_columns_to_pg_literals() -> None:
         networks=["Bravo", "Peacock"],
     )
 
-    result = insert_show(client, show)
+    result = insert_show(cast(DbSession, client), show)
 
     assert result["name"] == "Test Show"
     assert client.insert_payload is not None

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from trr_backend.integrations.tmdb_person import (
     TMDbExternalIds,
@@ -44,7 +44,7 @@ def test_fetch_tmdb_person_details_normalizes_json_string_aliases() -> None:
         )
     )
 
-    details = fetch_tmdb_person_details(123, session=session, retries=1)
+    details = fetch_tmdb_person_details(123, session=cast(Any, session), retries=1)
 
     assert details is not None
     assert details.tmdb_id == 123

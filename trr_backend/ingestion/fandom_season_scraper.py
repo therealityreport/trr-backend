@@ -3,9 +3,10 @@ from __future__ import annotations
 import hashlib
 import re
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from bs4 import BeautifulSoup
+from bs4.element import Tag
 
 _REVISION_PATTERNS = (
     r"fandom_revid:(\d+)",
@@ -22,7 +23,7 @@ def _normalize_text(value: str | None) -> str | None:
     return text or None
 
 
-def _find_article_root(soup: BeautifulSoup) -> BeautifulSoup:
+def _find_article_root(soup: BeautifulSoup) -> Tag:
     for selector in (
         "div.mw-parser-output",
         "div.page-content",
@@ -73,7 +74,7 @@ def _canonicalize_section(title: str | None) -> str:
     return normalized
 
 
-def _extract_table_rows(node: BeautifulSoup) -> list[dict[str, str | None]]:
+def _extract_table_rows(node: Tag) -> list[dict[str, str | None]]:
     rows = node.find_all("tr")
     if not rows:
         return []
@@ -90,7 +91,7 @@ def _extract_table_rows(node: BeautifulSoup) -> list[dict[str, str | None]]:
     return out
 
 
-def _extract_dynamic_sections(article_root: BeautifulSoup) -> list[dict[str, Any]]:
+def _extract_dynamic_sections(article_root: Tag) -> list[dict[str, Any]]:
     sections: list[dict[str, Any]] = []
     for heading in article_root.find_all(["h2", "h3", "h4"]):
         title = _normalize_text(heading.get_text(" ", strip=True))
@@ -111,13 +112,13 @@ def _extract_dynamic_sections(article_root: BeautifulSoup) -> list[dict[str, Any
                     paragraphs.append(text)
                 continue
             if sibling_name in {"ul", "ol"}:
-                for li in sibling.find_all("li"):
+                for li in cast(Tag, sibling).find_all("li"):
                     text = _normalize_text(li.get_text(" ", strip=True))
                     if text:
                         bullets.append(text)
                 continue
             if sibling_name == "table":
-                table_rows.extend(_extract_table_rows(sibling))
+                table_rows.extend(_extract_table_rows(cast(Tag, sibling)))
 
         if not paragraphs and not bullets and not table_rows:
             continue
@@ -134,7 +135,7 @@ def _extract_dynamic_sections(article_root: BeautifulSoup) -> list[dict[str, Any
     return sections
 
 
-def _extract_summary(article_root: BeautifulSoup) -> str | None:
+def _extract_summary(article_root: Tag) -> str | None:
     for paragraph in article_root.find_all("p"):
         text = _normalize_text(paragraph.get_text(" ", strip=True))
         if text:

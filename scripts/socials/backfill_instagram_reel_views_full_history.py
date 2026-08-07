@@ -9,7 +9,7 @@ from collections import Counter
 from typing import Any
 
 from trr_backend.db import pg
-from trr_backend.repositories import social_season_analytics as social_repo
+from trr_backend.socials import social_season_analytics_impl as social_repo
 from trr_backend.utils.env import load_env
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
@@ -118,11 +118,12 @@ def _collect_run_diagnostics(*, season_id: str, run_id: str) -> dict[str, Any]:
 
     for job in jobs:
         status_counts[str(job.get("status") or "unknown").strip().lower() or "unknown"] += 1
-        metadata = job.get("metadata") if isinstance(job.get("metadata"), dict) else {}
-        retrieval_meta = metadata.get("retrieval_meta") if isinstance(metadata.get("retrieval_meta"), dict) else {}
-        scrape_counters = (
-            retrieval_meta.get("scrape_counters") if isinstance(retrieval_meta.get("scrape_counters"), dict) else {}
-        )
+        metadata_value = job.get("metadata")
+        metadata = metadata_value if isinstance(metadata_value, dict) else {}
+        retrieval_meta_value = metadata.get("retrieval_meta")
+        retrieval_meta = retrieval_meta_value if isinstance(retrieval_meta_value, dict) else {}
+        scrape_counters_value = retrieval_meta.get("scrape_counters")
+        scrape_counters = scrape_counters_value if isinstance(scrape_counters_value, dict) else {}
         diagnostics["posts_scanned"] += int(scrape_counters.get("posts") or 0)
         diagnostics["views_updated"] += int(retrieval_meta.get("details_refresh_views_updated") or 0)
         diagnostics["views_preserved_missing"] += int(
@@ -132,21 +133,15 @@ def _collect_run_diagnostics(*, season_id: str, run_id: str) -> dict[str, Any]:
         diagnostics["detail_fetch_skipped_limit"] += int(
             retrieval_meta.get("details_refresh_detail_fetch_skipped_limit") or 0
         )
-        details_sources = (
-            retrieval_meta.get("details_refresh_views_sources")
-            if isinstance(retrieval_meta.get("details_refresh_views_sources"), dict)
-            else {}
-        )
+        details_sources_value = retrieval_meta.get("details_refresh_views_sources")
+        details_sources = details_sources_value if isinstance(details_sources_value, dict) else {}
         for source, count in details_sources.items():
             source_key = str(source or "").strip() or "unknown"
             views_sources[source_key] += int(count or 0)
         fail_reasons = retrieval_meta.get("details_refresh_errors_by_reason")
         if not isinstance(fail_reasons, dict):
-            fail_reasons = (
-                retrieval_meta.get("comment_fetch_failures_by_reason")
-                if isinstance(retrieval_meta.get("comment_fetch_failures_by_reason"), dict)
-                else {}
-            )
+            fail_reasons_fallback = retrieval_meta.get("comment_fetch_failures_by_reason")
+            fail_reasons = fail_reasons_fallback if isinstance(fail_reasons_fallback, dict) else {}
         for reason, count in fail_reasons.items():
             reason_key = str(reason or "").strip() or "unknown"
             failures_by_reason[reason_key] += int(count or 0)

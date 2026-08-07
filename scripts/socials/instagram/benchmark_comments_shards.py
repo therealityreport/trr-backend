@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
@@ -282,7 +282,7 @@ def _int_from_nested(mapping: dict[str, Any], *keys: str) -> int:
         if isinstance(value, bool):
             continue
         try:
-            parsed = int(value)
+            parsed = int(cast(Any, value))
         except (TypeError, ValueError):
             continue
         return max(0, parsed)

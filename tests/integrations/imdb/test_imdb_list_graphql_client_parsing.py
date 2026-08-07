@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -27,6 +28,7 @@ def test_parse_title_list_main_page_fixture_extracts_expected_fields() -> None:
     assert rupaul.end_year is None
     assert rupaul.episodes_total == 220
     assert rupaul.title_type == "tvSeries"
+    assert rupaul.primary_image_url is not None
     assert rupaul.primary_image_url.endswith("sample1.jpg")
     assert rupaul.primary_image_caption == "Poster"
     assert rupaul.certificate == "TV-14"
@@ -42,6 +44,7 @@ def test_parse_title_list_main_page_fixture_extracts_expected_fields() -> None:
     assert rhoslc.description == "Follows the affluent wives in Salt Lake City."
     assert rhoslc.release_year == 2020
     assert rhoslc.episodes_total == 70
+    assert rhoslc.primary_image_url is not None
     assert rhoslc.primary_image_url.endswith("sample2.jpg")
     assert rhoslc.primary_image_caption == "Key art"
     assert rhoslc.genres == ("Reality-TV", "Drama")
@@ -132,6 +135,6 @@ def test_fetch_imdb_list_items_falls_back_to_html_when_graphql_fails(monkeypatch
             return _FakeResponse(404, "")
 
     session = _FakeSession()
-    items = mod.fetch_imdb_list_items("ls123456789", session=session, max_pages=1, use_graphql=True)
+    items = mod.fetch_imdb_list_items("ls123456789", session=cast(Any, session), max_pages=1, use_graphql=True)
     assert {i.imdb_id for i in items} == {"tt1111111", "tt2222222", "tt3333333"}
     assert all(i.extra.get("source") == "jsonld" for i in items)

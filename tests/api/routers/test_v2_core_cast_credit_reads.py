@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fastapi import FastAPI
@@ -331,7 +331,7 @@ def test_database_capacity_problem_is_safe_and_stable(
 
 
 def test_v2_core_cast_credit_openapi_is_explicit_public_and_capped(client: TestClient) -> None:
-    schema = client.app.openapi()
+    schema = cast("Any", client.app).openapi()
     expected = {
         "/api/v2/shows/{show_id}/cast": ("listPublicCoreShowCastV2", "show_id"),
         "/api/v2/seasons/{season_id}/cast": ("listPublicCoreSeasonCastV2", "season_id"),

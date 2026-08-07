@@ -560,17 +560,19 @@ class LateModuleProvider(LateNamespaceProvider):
         """Register a module-identity callback without exposing a namespace proxy."""
 
         with self._lock:
+            adapter: PublicationCallback
             for existing, existing_adapter in self._module_publication_callbacks:
                 if existing is callback:
                     adapter = existing_adapter
                     break
             else:
 
-                def adapter(_namespace: Namespace, module: ModuleType | None) -> None:
+                def _adapter(_namespace: Namespace, module: ModuleType | None) -> None:
                     if module is None:
                         raise RuntimeError(f"{self._prefix}_INVALID: published module identity is unavailable")
                     callback(module)
 
+                adapter = _adapter
                 self._module_publication_callbacks.append((callback, adapter))
         self.register_publication_callback(adapter)
 

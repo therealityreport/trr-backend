@@ -379,7 +379,8 @@ def create_media_link(
     )
     query_count = 1
     if existing is not None:
-        existing_context = existing.get("context") if isinstance(existing.get("context"), dict) else {}
+        existing_context_raw = existing.get("context")
+        existing_context: dict[str, Any] = existing_context_raw if isinstance(existing_context_raw, dict) else {}
         next_context = {**existing_context, **normalized_context}
         if next_context != existing_context:
             rows = pg.execute_returning(
@@ -425,7 +426,8 @@ def update_media_link_context(
     if existing is None:
         return None, query_count
 
-    existing_context = existing.get("context") if isinstance(existing.get("context"), dict) else {}
+    existing_context_raw = existing.get("context")
+    existing_context: dict[str, Any] = existing_context_raw if isinstance(existing_context_raw, dict) else {}
     next_context = dict(existing_context)
     for key in ("people_count", "people_count_source", "thumbnail_crop"):
         if key in patch:

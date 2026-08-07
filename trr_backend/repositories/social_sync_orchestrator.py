@@ -9,7 +9,7 @@ import os
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from threading import Thread
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 from trr_backend.db import pg
@@ -116,7 +116,8 @@ def _normalize_platforms(platforms: list[str] | None) -> list[str]:
 def _as_hosted_tagged_url_map(social_repo: Any, value: Any) -> dict[str, str]:
     repo_helper = getattr(social_repo, "_as_json_string_map", None)
     if callable(repo_helper):
-        return dict(repo_helper(value) or {})
+        mapped = cast("dict[str, str] | None", repo_helper(value))
+        return dict(mapped or {})
 
     result: dict[str, str] = {}
     if not isinstance(value, dict):
@@ -574,7 +575,8 @@ def _build_avatar_coverage_snapshot(
         posts_scanned = len(row)
         missing_avatar_count = 0
         for payload in row:
-            post_json = payload.get("post_json") if isinstance(payload.get("post_json"), dict) else {}
+            post_json_value = payload.get("post_json")
+            post_json: dict[str, Any] = post_json_value if isinstance(post_json_value, dict) else {}
             if platform == "instagram":
                 owner_source = str(post_json.get("owner_profile_pic_url") or "").strip()
                 owner_hosted = str(post_json.get("hosted_owner_profile_pic_url") or "").strip()
@@ -675,12 +677,14 @@ def _build_avatar_coverage_snapshot(
 
 
 def _sync_snapshot_up_to_date(snapshot: dict[str, Any]) -> bool:
-    comments = snapshot.get("comments_coverage") if isinstance(snapshot.get("comments_coverage"), dict) else {}
-    assets = snapshot.get("asset_coverage") if isinstance(snapshot.get("asset_coverage"), dict) else {}
-    comment_media = (
-        snapshot.get("comment_media_coverage") if isinstance(snapshot.get("comment_media_coverage"), dict) else {}
-    )
-    avatars = snapshot.get("avatar_coverage") if isinstance(snapshot.get("avatar_coverage"), dict) else {}
+    comments_value = snapshot.get("comments_coverage")
+    comments: dict[str, Any] = comments_value if isinstance(comments_value, dict) else {}
+    assets_value = snapshot.get("asset_coverage")
+    assets: dict[str, Any] = assets_value if isinstance(assets_value, dict) else {}
+    comment_media_value = snapshot.get("comment_media_coverage")
+    comment_media: dict[str, Any] = comment_media_value if isinstance(comment_media_value, dict) else {}
+    avatars_value = snapshot.get("avatar_coverage")
+    avatars: dict[str, Any] = avatars_value if isinstance(avatars_value, dict) else {}
     return (
         bool(comments.get("up_to_date"))
         and bool(assets.get("up_to_date"))
@@ -880,8 +884,11 @@ def _coverage_dimension_payload(
 ) -> dict[str, Any] | None:
     if not isinstance(coverage, dict):
         return None
-    by_platform = coverage.get("by_platform") if isinstance(coverage.get("by_platform"), dict) else {}
-    platform_slice = by_platform.get(platform) if isinstance(by_platform.get(platform), dict) else None
+    by_platform_value = coverage.get("by_platform")
+    by_platform: dict[str, Any] = by_platform_value if isinstance(by_platform_value, dict) else {}
+    platform_slice_value = by_platform.get(platform)
+    platform_slice = platform_slice_value if isinstance(platform_slice_value, dict) else None
+    payload: dict[str, Any]
     if platform_slice is not None:
         payload = dict(platform_slice)
     else:
@@ -895,7 +902,8 @@ def _coverage_dimension_payload(
             "pending_count": int(coverage.get("pending_count") or 0),
         }
     if dimension == "avatars" and not payload:
-        payload = dict(by_platform.get(platform)) if isinstance(by_platform.get(platform), dict) else {}
+        avatar_slice_value = by_platform.get(platform)
+        payload = dict(avatar_slice_value) if isinstance(avatar_slice_value, dict) else {}
     if dimension == "comments":
         saved_comments = int(payload.get("saved_comments") or 0)
         reported_comments = int(payload.get("reported_comments") or 0)
@@ -903,8 +911,9 @@ def _coverage_dimension_payload(
         if effective_reported_comments > reported_comments:
             payload["reported_comments_raw"] = reported_comments
             payload["reported_comments"] = effective_reported_comments
-        comment_sync_status = (
-            dict(payload.get("comment_sync_status")) if isinstance(payload.get("comment_sync_status"), dict) else {}
+        comment_sync_status_value = payload.get("comment_sync_status")
+        comment_sync_status: dict[str, Any] = (
+            dict(comment_sync_status_value) if isinstance(comment_sync_status_value, dict) else {}
         )
         if comment_sync_status:
             expected_count = int(comment_sync_status.get("expected_count") or 0)
@@ -927,10 +936,9 @@ def _build_coverage_by_dimension(snapshot: dict[str, Any]) -> dict[str, Any]:
     if effective_total_reported_comments > total_reported_comments:
         comments_coverage["total_reported_comments_raw"] = total_reported_comments
         comments_coverage["total_reported_comments"] = effective_total_reported_comments
-    total_comment_sync_status = (
-        dict(comments_coverage.get("comment_sync_status"))
-        if isinstance(comments_coverage.get("comment_sync_status"), dict)
-        else {}
+    total_comment_sync_status_value = comments_coverage.get("comment_sync_status")
+    total_comment_sync_status: dict[str, Any] = (
+        dict(total_comment_sync_status_value) if isinstance(total_comment_sync_status_value, dict) else {}
     )
     if total_comment_sync_status:
         expected_count = int(total_comment_sync_status.get("expected_count") or 0)
@@ -982,7 +990,8 @@ def _infer_worker_version(worker_health: dict[str, Any] | None, *, platform: str
         supported_platforms = [str(value or "").strip().lower() for value in worker.get("supported_platforms") or []]
         if supported_platforms and platform not in supported_platforms:
             continue
-        metadata = worker.get("metadata") if isinstance(worker.get("metadata"), dict) else {}
+        metadata_value = worker.get("metadata")
+        metadata: dict[str, Any] = metadata_value if isinstance(metadata_value, dict) else {}
         for key in ("worker_version", "image_version", "release_version", "git_sha"):
             value = str(metadata.get(key) or "").strip()
             if value:
@@ -1506,12 +1515,14 @@ def _build_missing_comment_targets(
 
 
 def _next_pass_kind_from_snapshot(snapshot: dict[str, Any]) -> SyncPassKind | None:
-    comments = snapshot.get("comments_coverage") if isinstance(snapshot.get("comments_coverage"), dict) else {}
-    assets = snapshot.get("asset_coverage") if isinstance(snapshot.get("asset_coverage"), dict) else {}
-    comment_media = (
-        snapshot.get("comment_media_coverage") if isinstance(snapshot.get("comment_media_coverage"), dict) else {}
-    )
-    avatars = snapshot.get("avatar_coverage") if isinstance(snapshot.get("avatar_coverage"), dict) else {}
+    comments_value = snapshot.get("comments_coverage")
+    comments: dict[str, Any] = comments_value if isinstance(comments_value, dict) else {}
+    assets_value = snapshot.get("asset_coverage")
+    assets: dict[str, Any] = assets_value if isinstance(assets_value, dict) else {}
+    comment_media_value = snapshot.get("comment_media_coverage")
+    comment_media: dict[str, Any] = comment_media_value if isinstance(comment_media_value, dict) else {}
+    avatars_value = snapshot.get("avatar_coverage")
+    avatars: dict[str, Any] = avatars_value if isinstance(avatars_value, dict) else {}
     if not bool(comments.get("up_to_date")):
         return "comments_only"
     if (
@@ -2038,7 +2049,9 @@ def evaluate_sync_session(sync_session_id: str) -> dict[str, Any]:
             )
             return _serialize_sync_session(row)
 
-        current_pass_kind = str(row.get("current_pass_kind") or "").strip().lower() or "posts_and_comments"
+        current_pass_kind = cast(
+            "SyncPassKind", str(row.get("current_pass_kind") or "").strip().lower() or "posts_and_comments"
+        )
         current_pass_attempt = int(row.get("current_pass_attempt") or 1)
         next_pass_kind = _next_pass_kind_from_snapshot(completeness_snapshot)
         if run_status == "cancelled" or status == "cancelling":

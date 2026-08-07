@@ -88,7 +88,8 @@ def build_guard_payload(*, allow_stale: bool = False) -> dict[str, Any]:
 
 
 def _print_compact(payload: dict[str, Any]) -> None:
-    stale_claims = payload.get("stale_media_claims") if isinstance(payload.get("stale_media_claims"), dict) else {}
+    stale_claims_raw = payload.get("stale_media_claims")
+    stale_claims: dict[str, Any] = stale_claims_raw if isinstance(stale_claims_raw, dict) else {}
     stale_total = int(stale_claims.get("total") or 0)
     status = "blocked" if payload.get("blocked") else "ok"
     print(f"media_queue_guard={status} stale_media_claims={stale_total}")

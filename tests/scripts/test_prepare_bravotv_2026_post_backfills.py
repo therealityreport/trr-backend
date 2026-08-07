@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import argparse
 import json
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -9,13 +11,16 @@ from scripts.socials import prepare_bravotv_2026_post_backfills as prep
 
 
 def test_build_prepared_commands_defaults_to_three_separate_platforms() -> None:
-    args = SimpleNamespace(
-        platform=None,
-        date_start="2026-01-01T00:00:00Z",
-        date_end="2026-12-31T23:59:59Z",
-        tiktok_account="bravotv",
-        twitter_account="bravotv",
-        youtube_account="bravo",
+    args = cast(
+        argparse.Namespace,
+        SimpleNamespace(
+            platform=None,
+            date_start="2026-01-01T00:00:00Z",
+            date_end="2026-12-31T23:59:59Z",
+            tiktok_account="bravotv",
+            twitter_account="bravotv",
+            youtube_account="bravo",
+        ),
     )
 
     commands = prep.build_prepared_commands(args)
@@ -67,7 +72,7 @@ def test_json_dry_run_outputs_machine_readable_json(capsys) -> None:
 
 
 def test_run_executes_selected_platform(monkeypatch) -> None:
-    calls: list[dict[str, object]] = []
+    calls: list[dict[str, Any]] = []
 
     def _fake_run(argv, *, cwd, check):
         calls.append({"argv": tuple(argv), "cwd": cwd, "check": check})
@@ -90,13 +95,16 @@ def test_run_executes_selected_platform(monkeypatch) -> None:
 
 
 def test_prepared_commands_do_not_limit_catalog_post_discovery_to_details() -> None:
-    args = SimpleNamespace(
-        platform=["twitter"],
-        date_start="2026-01-01T00:00:00Z",
-        date_end="2026-12-31T23:59:59Z",
-        tiktok_account="bravotv",
-        twitter_account="bravotv",
-        youtube_account="bravo",
+    args = cast(
+        argparse.Namespace,
+        SimpleNamespace(
+            platform=["twitter"],
+            date_start="2026-01-01T00:00:00Z",
+            date_end="2026-12-31T23:59:59Z",
+            tiktok_account="bravotv",
+            twitter_account="bravotv",
+            youtube_account="bravo",
+        ),
     )
 
     command = prep.build_prepared_commands(args)[0]

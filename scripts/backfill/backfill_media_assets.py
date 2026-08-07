@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Any
+from typing import Any, cast
 
 from scripts._sync_common import load_env_and_db
 from trr_backend.db.session import DbSession
@@ -187,7 +187,8 @@ def _backfill_entity(
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv or sys.argv[1:])
     entity_type = _resolve_entity_type(args)
-    db = load_env_and_db()
+    # load_env_and_db only returns None when skip_db=True, which is not used here.
+    db = cast("DbSession", load_env_and_db())
 
     if entity_type in ("show", "all"):
         _backfill_entity(

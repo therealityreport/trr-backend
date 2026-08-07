@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -58,7 +58,7 @@ def sync_media_link_tags(
     request: Request,
     link_id: str,
     payload: MediaLinkTagsRequest,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> MediaLinkTagsResponse:
     try:
         result = media_link_tags_repo.sync_media_link_tags(

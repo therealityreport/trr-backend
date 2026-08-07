@@ -2,14 +2,15 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
-from trr_backend.repositories import social_season_analytics as social_repo
+from trr_backend.socials import social_season_analytics_impl as social_repo
 
 
 def test_execute_run_with_inline_worker_registration_registers_and_stops(monkeypatch: pytest.MonkeyPatch) -> None:
-    events: list[tuple[str, dict[str, object]]] = []
+    events: list[tuple[str, dict[str, Any]]] = []
 
     monkeypatch.setattr(
         social_repo,
@@ -111,7 +112,7 @@ def test_refresh_tiktok_post_detail_uses_stored_canonical_url(monkeypatch: pytes
     monkeypatch.setattr(social_repo, "_upsert_tiktok_post", lambda *_args, **_kwargs: {"id": "post-1"})
 
     payload = social_repo._refresh_tiktok_post_detail_sync(
-        SimpleNamespace(),
+        cast(Any, SimpleNamespace()),
         source_id="123",
         account="renamed-handle",
         row_json={"raw_data": {"url": "https://www.tiktok.com/@_/video/123"}},

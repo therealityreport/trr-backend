@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query
@@ -106,7 +106,7 @@ class GenerateCastPhotoVariantsResponse(BaseModel):
     variants: list[CastPhotoVariantItem]
 
 
-def _raise_cast_photo_tags_database_error(operation: str, error: Exception) -> None:
+def _raise_cast_photo_tags_database_error(operation: str, error: Exception) -> NoReturn:
     logger.warning("Cast photo tags database operation failed: %s", operation, exc_info=True)
     raise HTTPException(status_code=502, detail=f"Database error during {operation}") from error
 

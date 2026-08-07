@@ -7,9 +7,12 @@ import argparse
 import subprocess
 import sys
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from scripts._sync_common import load_env_and_db
+
+if TYPE_CHECKING:
+    from trr_backend.db.session import DbSession
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -52,7 +55,7 @@ def run_command(cmd: list[str], step_name: str, verbose: bool) -> tuple[bool, st
             capture_output=True,
             text=True,
             timeout=300,
-            env={**subprocess.os.environ, "PYTHONPATH": "."},
+            env={**cast(Any, subprocess).os.environ, "PYTHONPATH": "."},
             check=False,
         )
 
@@ -96,7 +99,8 @@ def get_show_cast_person_ids(db, show_id: str) -> list[dict[str, Any]]:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv or sys.argv[1:])
-    db = load_env_and_db()
+    # load_env_and_db defaults to skip_db=False, so it always returns a live session here.
+    db = cast("DbSession", load_env_and_db())
 
     imdb_id = args.imdb_id
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 from types import ModuleType
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -107,7 +107,7 @@ def test_fixed_bindings_and_module_identity_are_validated() -> None:
     module = ModuleType(module_name)
     sys.modules[module_name] = module
     try:
-        module.marker = object()
+        cast(Any, module).marker = object()
         module_provider = LateModuleProvider(owner, prefix="MODULE_PROVIDER")
         with pytest.raises(RuntimeError, match="loaded module namespace"):
             module_provider.configure({})

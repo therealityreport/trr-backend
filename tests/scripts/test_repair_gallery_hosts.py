@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import importlib
-
 import pytest
 
-mod = importlib.import_module("scripts.media.repair_gallery_hosts")
+import scripts.media.repair_gallery_hosts as mod
 
 
 def _candidate(

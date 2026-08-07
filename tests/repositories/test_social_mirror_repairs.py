@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from trr_backend.repositories import social_season_analytics as social_repo
+from trr_backend.socials import social_season_analytics_impl as social_repo
 from trr_backend.socials.control_plane import COMMENT_MEDIA_MIRROR_STAGE, IngestOptions, SeasonContext
 
 

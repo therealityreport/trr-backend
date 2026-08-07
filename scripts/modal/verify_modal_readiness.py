@@ -13,7 +13,7 @@ import sys
 from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 DEFAULT_APP_NAME = "trr-backend-jobs"
 DEFAULT_RUNTIME_SECRET = "trr-backend-runtime"
@@ -97,7 +97,8 @@ def _load_get_app_objects() -> Callable[..., dict[str, Any]]:
         from modal.experimental import get_app_objects as modal_get_app_objects
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError("Modal experimental helpers are unavailable") from exc
-    return modal_get_app_objects
+    # Modal's synchronicity wrapper exposes a sync callable at runtime; typing-only cast.
+    return cast("Callable[..., dict[str, Any]]", modal_get_app_objects)
 
 
 def _load_modal_function_class() -> Any:
@@ -582,7 +583,7 @@ def invoke_modal_function_with_timeout(function_handle: Any, *args: Any, timeout
     timeout_seconds = max(1, int(timeout_seconds or DEFAULT_REMOTE_PROBE_TIMEOUT_SECONDS))
     spawn = getattr(function_handle, "spawn", None)
     if callable(spawn):
-        function_call = None
+        function_call: Any = None
         try:
             function_call = spawn(*args, **kwargs)
             return function_call.get(timeout=timeout_seconds)
@@ -735,7 +736,7 @@ def modal_lookup_failure_summary(
 
 def _resolve_instagram_comments_probe_shortcode(account_handle: str) -> str | None:
     try:
-        from trr_backend.repositories import social_season_analytics as social_repo
+        from trr_backend.socials import social_season_analytics_impl as social_repo
 
         return social_repo._instagram_comments_auth_probe_shortcode(account_handle)  # noqa: SLF001
     except Exception:  # noqa: BLE001

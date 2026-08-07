@@ -7,7 +7,7 @@ import logging
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,7 @@ SCREEN_TIME_FACE_CONTRACT_KEY = (
     f"{SCREEN_TIME_FACE_DIMENSIONS}d:l2_unit"
 )
 
-_deepface_module: object | None = None
+_deepface_module: Any | None = None
 _deepface_last_error: str | None = None
 
 
@@ -91,7 +91,7 @@ def _deepface_version() -> str | None:
         return None
 
 
-def get_deepface_runtime() -> object | None:
+def get_deepface_runtime() -> Any | None:
     global _deepface_last_error, _deepface_module
 
     if _deepface_module is not None:
@@ -183,7 +183,7 @@ def extract_face_embedding(face: object) -> Any:
         arr = np.asarray(candidate, dtype=np.float32).reshape(-1)
         if getattr(arr, "size", 0) != SCREEN_TIME_FACE_DIMENSIONS:
             continue
-        normalized = normalize_embedding(arr)
+        normalized = normalize_embedding(cast("Sequence[float]", arr))
         return np.asarray(normalized, dtype=np.float32)
     return None
 

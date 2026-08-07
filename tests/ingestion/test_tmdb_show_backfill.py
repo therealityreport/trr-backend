@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from trr_backend.ingestion.tmdb_show_backfill import (
     build_tmdb_show_patch,
@@ -28,7 +30,7 @@ def test_resolve_tmdb_id_single_result() -> None:
 
 
 def test_resolve_tmdb_id_prefers_name_match() -> None:
-    results = [
+    results: list[Mapping[str, Any]] = [
         {"id": 101, "name": "Sample Show", "first_air_date": "2020-01-01"},
         {"id": 202, "name": "Different Show", "first_air_date": "2020-01-01"},
     ]
@@ -38,7 +40,7 @@ def test_resolve_tmdb_id_prefers_name_match() -> None:
 
 
 def test_resolve_tmdb_id_ambiguous_when_scores_tie() -> None:
-    results = [
+    results: list[Mapping[str, Any]] = [
         {"id": 101, "name": "Same Name", "first_air_date": "2020-01-01", "popularity": 10.0},
         {"id": 202, "name": "Same Name", "first_air_date": "2020-01-01", "popularity": 10.0},
     ]

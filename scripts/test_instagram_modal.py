@@ -2,6 +2,7 @@
 
 import json
 import sys
+from typing import Any, cast
 
 import modal
 
@@ -12,7 +13,7 @@ app = modal.App("trr-instagram-test")
 
 
 @app.function(
-    image=_FUNCTION_IMAGE_BINDINGS["run_social_job"],
+    image=cast(modal.Image, _FUNCTION_IMAGE_BINDINGS["run_social_job"]),
     secrets=_secrets,
     timeout=90,
 )
@@ -21,7 +22,7 @@ def test_instagram_graphql():
     from trr_backend.socials.instagram import InstagramScraper
 
     cookies = _load_instagram_cookies()
-    result = {
+    result: dict[str, Any] = {
         "has_sessionid": bool(cookies.get("sessionid")),
         "has_csrftoken": bool(cookies.get("csrftoken")),
     }

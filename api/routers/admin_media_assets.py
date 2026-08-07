@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from typing import cast
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query
@@ -115,8 +116,8 @@ class ReplaceFromUrlResponse(BaseModel):
 def mirror_media_asset(
     asset_id: UUID,
     payload: MirrorMediaAssetRequest | None = None,
-    db: SupabaseAdminClient = None,
-    _: InternalAdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> MirrorMediaAssetResponse:
     asset_id_str = str(asset_id)
     payload = payload or MirrorMediaAssetRequest()
@@ -180,8 +181,8 @@ def mirror_media_asset(
         )
         return MirrorMediaAssetResponse(
             asset_id=asset_id_str,
-            hosted_url=row.get("hosted_url"),
-            hosted_key=row.get("hosted_key"),
+            hosted_url=cast("str | None", row.get("hosted_url")),
+            hosted_key=cast("str | None", row.get("hosted_key")),
             status="skipped",
         )
 
@@ -198,10 +199,12 @@ def mirror_media_asset(
             )
             hosted_url = patch["hosted_url"]
             hosted_key = row.get("hosted_key")
-            file_size = int(row.get("hosted_bytes") or 0) or None
+            file_size = int(cast("int", row.get("hosted_bytes") or 0)) or None
             content_type = row.get("hosted_content_type")
         else:
             now_iso = str(patch.get("hosted_at") or datetime.now(UTC).isoformat())
+            width_value = patch.get("width")
+            height_value = patch.get("height")
             update_asset_with_mirror_result(
                 db,
                 asset_id=asset_id_str,
@@ -214,8 +217,8 @@ def mirror_media_asset(
                     str(patch.get("hosted_content_type")) if patch.get("hosted_content_type") is not None else None
                 ),
                 hosted_etag=(str(patch.get("hosted_etag")) if patch.get("hosted_etag") is not None else None),
-                width=int(patch.get("width")) if patch.get("width") is not None else None,
-                height=int(patch.get("height")) if patch.get("height") is not None else None,
+                width=int(width_value) if width_value is not None else None,
+                height=int(height_value) if height_value is not None else None,
                 completed_at=now_iso,
                 metadata=patch.get("metadata") if isinstance(patch.get("metadata"), dict) else None,
             )
@@ -247,8 +250,8 @@ def mirror_media_asset(
 def generate_variants_for_media_asset(
     asset_id: UUID,
     payload: GenerateMediaAssetVariantsRequest | None = None,
-    db: SupabaseAdminClient = None,
-    _: InternalAdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> GenerateMediaAssetVariantsResponse:
     asset_id_str = str(asset_id)
     payload = payload or GenerateMediaAssetVariantsRequest()
@@ -287,8 +290,8 @@ def generate_variants_for_media_asset(
 @router.delete("/media-assets/{asset_id}", response_model=DeleteMediaAssetResponse)
 def delete_media_asset(
     asset_id: UUID,
-    db: SupabaseAdminClient = None,
-    _: InternalAdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> DeleteMediaAssetResponse:
     """
     Delete a media asset from the unified media_assets/media_links model.
@@ -357,8 +360,8 @@ def delete_media_asset(
 def detect_text_overlay_media_asset(
     asset_id: UUID,
     force: bool = Query(default=False),
-    db: SupabaseAdminClient = None,
-    _: InternalAdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> DetectTextOverlayResponse:
     """
     Detect whether a media asset contains overlaid text and persist results to core.media_assets.metadata.
@@ -413,8 +416,8 @@ def detect_text_overlay_media_asset(
 )
 def reverse_image_search(
     asset_id: UUID,
-    db: SupabaseAdminClient = None,
-    _: InternalAdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> ReverseImageSearchResponse:
     asset_id_str = str(asset_id)
     response = (
@@ -467,8 +470,8 @@ def reverse_image_search(
 def replace_from_url(
     asset_id: UUID,
     payload: ReplaceFromUrlRequest,
-    db: SupabaseAdminClient = None,
-    _: InternalAdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> ReplaceFromUrlResponse:
     asset_id_str = str(asset_id)
     response = (

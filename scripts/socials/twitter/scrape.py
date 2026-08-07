@@ -18,6 +18,7 @@ import logging
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any, cast
 
 # Add project root to path (scripts/socials/twitter -> project root)
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
@@ -180,8 +181,8 @@ def _print_persist_summary(summary: dict[str, object] | None) -> None:
     print("\nPersistence summary:")
     print(f"  - succeeded: {bool(summary.get('succeeded'))}")
     print(f"  - scrape_run_id: {summary.get('scrape_run_id') or 'none'}")
-    print(f"  - tweets_upserted: {int(summary.get('tweets_upserted') or 0)}")
-    print(f"  - tweet_memberships_created: {int(summary.get('tweet_memberships_created') or 0)}")
+    print(f"  - tweets_upserted: {int(cast(Any, summary.get('tweets_upserted')) or 0)}")
+    print(f"  - tweet_memberships_created: {int(cast(Any, summary.get('tweet_memberships_created')) or 0)}")
     if summary.get("error"):
         print(f"  - error: {summary['error']}")
 
@@ -394,7 +395,7 @@ Examples:
     twikit_loader = None
 
     try:
-        from trr_backend.repositories.social_season_analytics import (
+        from trr_backend.socials.social_season_analytics_impl import (
             _load_twikit_credentials,
             _load_twitter_auth,
         )

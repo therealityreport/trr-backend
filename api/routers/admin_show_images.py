@@ -15,7 +15,7 @@ import json
 import logging
 import time
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
@@ -521,8 +521,8 @@ async def get_show_images_stream(
     show_id: UUID,
     connection: Request,
     request: ShowGetImagesRequest | None = None,
-    db: SupabaseAdminClient = None,
-    _: InternalAdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> StreamingResponse:
     """Fetch Getty+NBCUMV images for a show with SSE streaming progress."""
     request = request or ShowGetImagesRequest()

@@ -13,7 +13,7 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 
 from trr_backend.db import pg
 from trr_backend.socials.post_persist_truthfulness import apply_post_persist_truthfulness_metadata
@@ -347,7 +347,7 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
             nonlocal required_catalog_upsert_failures
             nonlocal fetcher_metadata, stop_reason, canonical_fallback_metadata
 
-            cookies = dict(session.raw_cookies or session.cookies or {})
+            cookies: dict[str, Any] = dict(cast("Any", session.raw_cookies or session.cookies or {}))
             fallback_posts, fallback_metadata = await _await_operation_with_heartbeat(
                 asyncio.to_thread(
                     _scrape_canonical_tiktok_fallback_posts,

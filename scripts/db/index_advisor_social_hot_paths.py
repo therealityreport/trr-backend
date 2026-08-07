@@ -306,7 +306,8 @@ def _verify_extension(cur: psycopg2.extensions.cursor) -> dict[str, str]:
         where e.extname = 'index_advisor'
         """
     )
-    row = cur.fetchone()
+    # The connection uses a dict-style row factory, so rows support string keys.
+    row: Any = cur.fetchone()
     if not row:
         raise RuntimeError("index_advisor extension is not installed; no advisor report was written.")
     if row["nspname"] != "extensions":

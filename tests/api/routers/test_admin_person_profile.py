@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -9,12 +10,12 @@ from api import deps as deps_mod
 from api.routers import admin_person_profile as mod
 
 
-def _parse_sse_events(events: list[str]) -> list[tuple[str, dict[str, object]]]:
-    parsed: list[tuple[str, dict[str, object]]] = []
+def _parse_sse_events(events: list[str]) -> list[tuple[str, dict[str, Any]]]:
+    parsed: list[tuple[str, dict[str, Any]]] = []
     for raw in events:
         blocks = [block for block in raw.strip().split("\n") if block]
         event_name = "message"
-        payload: dict[str, object] = {}
+        payload: dict[str, Any] = {}
         for block in blocks:
             if block.startswith("event:"):
                 event_name = block.split(":", 1)[1].strip()
@@ -40,7 +41,9 @@ def test_merge_source_aliases_preserves_per_source_records() -> None:
 
 def test_load_related_shows_for_person_falls_back_to_v_show_cast(monkeypatch: pytest.MonkeyPatch) -> None:
     person_id = str(uuid4())
-    fallback_rows = [{"show_id": "show-1", "show_name": "Watch What Happens Live", "show_imdb_id": "tt123"}]
+    fallback_rows: list[dict[str, object]] = [
+        {"show_id": "show-1", "show_name": "Watch What Happens Live", "show_imdb_id": "tt123"}
+    ]
     fetch_all_calls: list[str] = []
 
     def _fake_fetch_all(query: str, params: list[object]) -> list[dict[str, object]]:
@@ -189,7 +192,7 @@ def test_run_person_profile_refresh_keeps_going_when_one_source_fails(monkeypatc
     result = mod._run_person_profile_refresh(
         person_id=person_id,
         payload=mod.RefreshProfileRequest(),
-        db=None,
+        db=cast("Any", None),
         actor="admin@example.com",
     )
 
@@ -242,7 +245,7 @@ def test_run_person_profile_refresh_counts_only_successful_credit_updates(
     result = mod._run_person_profile_refresh(
         person_id=person_id,
         payload=mod.RefreshProfileRequest(),
-        db=None,
+        db=cast("Any", None),
         actor="admin@example.com",
     )
 
@@ -309,7 +312,7 @@ def test_run_person_profile_refresh_reports_missing_sources_as_skips(
     result = mod._run_person_profile_refresh(
         person_id=person_id,
         payload=mod.RefreshProfileRequest(refresh_links=False, refresh_credits=False),
-        db=None,
+        db=cast("Any", None),
         actor="admin@example.com",
     )
 
@@ -347,7 +350,7 @@ def test_build_refresh_profile_event_stream_emits_progress_and_complete(monkeypa
         mod._build_refresh_profile_event_stream(
             person_id=person_id,
             payload=mod.RefreshProfileRequest(),
-            db=None,
+            db=cast("Any", None),
             actor="admin@example.com",
         )
     )

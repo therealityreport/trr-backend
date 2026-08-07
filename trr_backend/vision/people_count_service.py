@@ -7,7 +7,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from threading import Lock
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from trr_backend.modal_dispatch import get_trr_modal_function_handle
 
@@ -471,7 +471,9 @@ def _normalize_owner_reference_images(
         normalized_entry = _normalize_reference_entry(raw_entry)
         if normalized_entry is None:
             continue
-        signature = "|".join(str(url).strip().lower() for url in (normalized_entry.get("url_candidates") or []))
+        signature = "|".join(
+            str(url).strip().lower() for url in cast("list[object]", normalized_entry.get("url_candidates") or [])
+        )
         if not signature or signature in seen_signatures:
             continue
         seen_signatures.add(signature)
@@ -506,7 +508,9 @@ def _normalize_person_reference_images(
             normalized_entry = _normalize_reference_entry(raw_entry)
             if normalized_entry is None:
                 continue
-            signature = "|".join(str(url).strip().lower() for url in (normalized_entry.get("url_candidates") or []))
+            signature = "|".join(
+                str(url).strip().lower() for url in cast("list[object]", normalized_entry.get("url_candidates") or [])
+            )
             if not signature or signature in seen_signatures:
                 continue
             seen_signatures.add(signature)
@@ -798,8 +802,9 @@ def count_people_batch(
         if not image_url:
             normalized_images.append({})
             continue
+        raw_item_prefer_fast_pass = entry.get("prefer_fast_pass")
         item_prefer_fast_pass = (
-            entry.get("prefer_fast_pass") if isinstance(entry.get("prefer_fast_pass"), bool) else prefer_fast_pass
+            raw_item_prefer_fast_pass if isinstance(raw_item_prefer_fast_pass, bool) else prefer_fast_pass
         )
         candidate_person_ids = entry.get("candidate_person_ids")
         owner_person_id = entry.get("owner_person_id")

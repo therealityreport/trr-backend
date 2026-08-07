@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -787,7 +788,7 @@ def _persist_without_season_context(
             payload["_reply_depth"] = reply_depth
             replies.append(payload)
 
-    dedupe_payloads = getattr(repo, "_dedupe_instagram_comment_payloads_for_upsert", None)
+    dedupe_payloads: Callable[..., Any] | None = getattr(repo, "_dedupe_instagram_comment_payloads_for_upsert", None)
     if callable(dedupe_payloads):
         top_level = dedupe_payloads(top_level)
         replies = dedupe_payloads(replies)
@@ -805,7 +806,9 @@ def _persist_without_season_context(
         if not batch:
             return 0, 0
         load_baseline = getattr(repo, "_load_instagram_comment_write_baseline", None)
-        count_new_or_changed = getattr(repo, "_count_new_or_changed_instagram_comment_payloads", None)
+        count_new_or_changed: Callable[..., Any] | None = getattr(
+            repo, "_count_new_or_changed_instagram_comment_payloads", None
+        )
         write_baseline = load_baseline(batch, conn=conn) if callable(load_baseline) and batch else {}
         preserve_ranked = getattr(repo, "_preserve_existing_ranked_instagram_comment_values", None)
         if callable(preserve_ranked) and write_baseline:

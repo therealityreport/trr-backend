@@ -141,7 +141,7 @@ def _extract_logo_candidates_from_html(*, html: str, page_url: str, limit: int) 
     soup = BeautifulSoup(html or "", "html.parser")
     scored: list[tuple[int, str]] = []
 
-    def add_candidate(raw_url: str | None, attrs_text: str, *, is_meta: bool) -> None:
+    def add_candidate(raw_url: Any, attrs_text: str, *, is_meta: bool) -> None:
         url = _normalize_text(raw_url)
         if not url:
             return
@@ -153,11 +153,12 @@ def _extract_logo_candidates_from_html(*, html: str, page_url: str, limit: int) 
         score = _score_candidate_url(url=absolute, attrs_text=attrs_text, is_meta=is_meta)
         scored.append((score, absolute))
 
-    for selector in (
+    meta_selectors: tuple[tuple[str, dict[str, Any]], ...] = (
         ("meta", {"property": "og:image"}),
         ("meta", {"name": "og:image"}),
         ("meta", {"name": "twitter:image"}),
-    ):
+    )
+    for selector in meta_selectors:
         tag = soup.find(selector[0], attrs=selector[1])
         if tag is None:
             continue

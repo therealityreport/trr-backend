@@ -11,7 +11,7 @@ import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 try:
     from scripts._db_url import resolve_db_url
@@ -507,7 +507,10 @@ def main() -> int:
 
     entries: list[dict[str, str]] = []
     with _connect() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor() as raw_cur:
+            # The connection is created with cursor_factory=RealDictCursor, so
+            # the runtime cursor is a RealDictCursor despite the base stub type.
+            cur = cast("RealDictCursor", raw_cur)
             schemas = _list_schemas(cur)
             for schema in schemas:
                 for table in _list_tables(cur, schema):

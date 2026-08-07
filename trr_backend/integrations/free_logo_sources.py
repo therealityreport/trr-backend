@@ -135,6 +135,8 @@ def _safe_get(
 ) -> requests.Response | None:
     read_timeout = timeout_seconds if timeout_seconds > 0 else DEFAULT_READ_TIMEOUT_SECONDS
     timeout = (min(DEFAULT_CONNECT_TIMEOUT_SECONDS, read_timeout), read_timeout)
+    # range(max(1, attempts)) always yields at least one iteration, so response is always bound.
+    response: requests.Response | None = None
     for attempt in range(max(1, attempts)):
         try:
             response = session.get(
@@ -503,7 +505,8 @@ def suggest_logos_fandom_query_values(
         container = soup.select_one(".mw-parser-output") or soup.body or soup
         linked_slugs: list[str] = []
         for anchor in container.find_all("a", href=True):
-            slug = _normalize_logos_fandom_page_slug(anchor.get("href") or "")
+            href_attr = anchor.get("href")
+            slug = _normalize_logos_fandom_page_slug(href_attr if isinstance(href_attr, str) else "")
             if not _is_valid_logos_fandom_suggestion_slug(slug):
                 continue
             if slug.casefold() in current_set:

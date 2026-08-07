@@ -4,13 +4,16 @@ import re
 import unicodedata
 import urllib.error
 import urllib.request
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
-try:
+if TYPE_CHECKING:
     import requests
-except Exception:  # noqa: BLE001
-    requests = None
+else:
+    try:
+        import requests
+    except Exception:  # noqa: BLE001
+        requests = None
 
 from bs4 import BeautifulSoup
 
@@ -62,7 +65,7 @@ else:
     _FETCH_ERRORS = (urllib.error.URLError,)
 
 
-def _normalize_text(value: str | None) -> str:
+def _normalize_text(value: object | None) -> str:
     if value is None:
         return ""
     clean = _ZERO_WIDTH_RE.sub("", str(value))

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from trr_backend.vision import people_count_service as client
@@ -11,7 +13,7 @@ def test_count_people_uses_local_backend_without_screenalytics_api_url(
     monkeypatch.delenv("SCREENALYTICS_API_URL", raising=False)
     monkeypatch.setenv("TRR_ADMIN_IMAGE_EXECUTION_BACKEND", "local")
 
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     def _fake_local(payload: dict[str, object]) -> dict[str, object]:
         captured.update(payload)
@@ -41,7 +43,7 @@ def test_count_people_uses_modal_backend_when_configured(monkeypatch: pytest.Mon
     monkeypatch.setenv("TRR_MODAL_APP_NAME", "trr-backend-jobs")
     monkeypatch.setenv("TRR_MODAL_VISION_FUNCTION", "run_admin_vision")
 
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     def _fake_modal(payload: dict[str, object], *, batch: bool = False) -> dict[str, object]:
         captured["payload"] = payload

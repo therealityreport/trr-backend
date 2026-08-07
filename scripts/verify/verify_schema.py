@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import cast
 
 from scripts._db_url import resolve_db_url
 
@@ -118,7 +119,7 @@ def main(argv: list[str] | None = None) -> int:
 
     conn = psycopg2.connect(_resolve_db_url(), cursor_factory=RealDictCursor)
     try:
-        cur = conn.cursor()
+        cur = cast(RealDictCursor, conn.cursor())
         ok = True
 
         ok &= _check_view(cur, "core", "tmdb_series")

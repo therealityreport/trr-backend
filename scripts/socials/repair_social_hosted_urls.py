@@ -6,7 +6,7 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse, urlunparse
 
 try:
@@ -18,7 +18,7 @@ except ImportError as exc:  # pragma: no cover - depends on local environment
 try:
     from scripts._db_url import resolve_db_url
     from trr_backend.media.s3_mirror import get_cdn_base_url
-    from trr_backend.repositories import social_season_analytics as social_repo
+    from trr_backend.socials import social_season_analytics_impl as social_repo
     from trr_backend.utils.env import load_env
 except ModuleNotFoundError:  # pragma: no cover - script execution convenience
     repo_root = Path(__file__).resolve().parents[2]
@@ -26,7 +26,7 @@ except ModuleNotFoundError:  # pragma: no cover - script execution convenience
         sys.path.insert(0, str(repo_root))
     from scripts._db_url import resolve_db_url
     from trr_backend.media.s3_mirror import get_cdn_base_url
-    from trr_backend.repositories import social_season_analytics as social_repo
+    from trr_backend.socials import social_season_analytics_impl as social_repo
     from trr_backend.utils.env import load_env
 
 
@@ -257,7 +257,7 @@ def _fetch_rows(
         tuple(params),
     )
     rows = cur.fetchall()
-    return rows if isinstance(rows, list) else []
+    return cast("list[dict[str, object]]", rows) if isinstance(rows, list) else []
 
 
 def _repair_platform(
@@ -402,7 +402,7 @@ def main(argv: list[str] | None = None) -> int:
     by_platform: dict[str, dict[str, int]] = {}
     totals = RepairStats()
     try:
-        cur = conn.cursor()
+        cur = cast(RealDictCursor, conn.cursor())
         for platform in platforms:
             table = social_repo.PLATFORM_POST_TABLES[platform]
             stats = _repair_platform(

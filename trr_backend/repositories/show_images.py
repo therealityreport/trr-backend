@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -135,7 +135,7 @@ def assert_core_show_images_table_exists(db: DbSession) -> None:
 
 def _upsert_show_images_table(
     db: DbSession,
-    rows: list[Mapping[str, Any]],
+    rows: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
     if not rows:
         return []
@@ -143,6 +143,7 @@ def _upsert_show_images_table(
     other_rows = [row for row in rows if row not in tmdb_rows]
 
     results: list[dict[str, Any]] = []
+    response: Any = None
 
     if other_rows:
         for attempt in range(_PGRST204_MAX_RETRIES + 1):
@@ -201,6 +202,7 @@ def upsert_show_images(
 
 
 def delete_tmdb_show_images(db: DbSession, *, tmdb_id: int) -> None:
+    response: Any = None
     for attempt in range(_PGRST204_MAX_RETRIES + 1):
         try:
             response = (
@@ -311,6 +313,7 @@ def fetch_show_images_missing_hosted(
 
         rows: list[dict[str, Any]] = []
         for query in queries:
+            response: Any = None
             for attempt in range(_PGRST204_MAX_RETRIES + 1):
                 try:
                     response = query.execute()
@@ -347,6 +350,7 @@ def update_show_image_hosted_fields(
     if not payload:
         raise ShowImageRepositoryError("Hosted fields update payload is empty.")
 
+    response: Any = None
     for attempt in range(_PGRST204_MAX_RETRIES + 1):
         try:
             response = db.schema("core").table("show_images").update(payload).eq("id", str(image_id)).execute()

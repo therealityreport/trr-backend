@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from psycopg2.extras import Json, RealDictCursor, execute_values
 
@@ -334,7 +334,7 @@ class DbQuery:
                 count_sql = f"SELECT COUNT(*) FROM {self._schema}.{self._table}{where_sql}"
                 with conn.cursor() as count_cur:
                     count_cur.execute(count_sql, params)
-                    count_val = int(count_cur.fetchone()[0])
+                    count_val = int(cast("Any", count_cur.fetchone())[0])
         data: Any
         if self._single:
             data = dict(rows[0]) if rows else None

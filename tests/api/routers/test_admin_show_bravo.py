@@ -7,6 +7,7 @@ import re
 import time
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -2153,7 +2154,7 @@ def test_bravo_profile_social_sources_persist_canonical_ids_and_entity_links(
 ) -> None:
     from api.routers import admin_show_bravo, admin_show_links
 
-    db = _InsertOnlyDb()
+    db: Any = _InsertOnlyDb()
     links: list[dict[str, object]] = []
     monkeypatch.setattr(admin_show_bravo, "_fetch_active_person_external_id", lambda *args, **kwargs: None)
     monkeypatch.setattr(admin_show_links, "_upsert_link", lambda _db, **kwargs: links.append(kwargs) or kwargs)
@@ -2188,7 +2189,7 @@ def test_bravo_profile_social_sources_skip_generic_bravo_handles(
 ) -> None:
     from api.routers import admin_show_bravo, admin_show_links
 
-    db = _InsertOnlyDb()
+    db: Any = _InsertOnlyDb()
     links: list[dict[str, object]] = []
     monkeypatch.setattr(admin_show_bravo, "_fetch_active_person_external_id", lambda *args, **kwargs: None)
     monkeypatch.setattr(admin_show_links, "_upsert_link", lambda _db, **kwargs: links.append(kwargs) or kwargs)
@@ -2212,7 +2213,7 @@ def test_bravo_profile_social_sources_skip_approved_link_on_canonical_conflict(
 ) -> None:
     from api.routers import admin_show_bravo, admin_show_links
 
-    db = _InsertOnlyDb()
+    db: Any = _InsertOnlyDb()
     links: list[dict[str, object]] = []
 
     def _existing_owner(*_args: object, **kwargs: object) -> dict[str, str] | None:

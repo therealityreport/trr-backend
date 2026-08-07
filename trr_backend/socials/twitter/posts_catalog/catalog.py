@@ -525,7 +525,8 @@ def _persist_shared_catalog_posts(
 ) -> list[dict[str, Any]]:
     if deps.persist_shared_catalog_posts_with_progress is None:
         raise RuntimeError("persist_shared_catalog_posts_with_progress dependency is required in shared catalog mode")
-    if deps.upsert_shared_catalog_post is None:
+    upsert_shared_catalog_post = deps.upsert_shared_catalog_post
+    if upsert_shared_catalog_post is None:
         raise RuntimeError("upsert_shared_catalog_post dependency is required in shared catalog mode")
 
     return deps.persist_shared_catalog_posts_with_progress(
@@ -535,7 +536,7 @@ def _persist_shared_catalog_posts(
         items=posts,
         retrieval_meta=retrieval_meta,
         progress_cb=progress_cb,
-        upsert_item=lambda tweet: deps.upsert_shared_catalog_post(
+        upsert_item=lambda tweet: upsert_shared_catalog_post(
             platform="twitter",
             run_id=run_id,
             account_handle=account_handle,
@@ -585,7 +586,7 @@ def _fetch_tweet_replies(
     delay: float,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[Any]:
-    fetch = getattr(scraper, "fetch_tweet_replies", None)
+    fetch: Callable[..., Any] | None = getattr(scraper, "fetch_tweet_replies", None)
     if not callable(fetch):
         raise AttributeError("fetch_tweet_replies")
     page_budget = _twitter_page_budget_for_expected_count(page_budget_count)
@@ -628,7 +629,7 @@ def _fetch_tweet_quotes(
     delay: float,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[Any]:
-    fetch = getattr(scraper, "fetch_tweet_quotes", None)
+    fetch: Callable[..., Any] | None = getattr(scraper, "fetch_tweet_quotes", None)
     if not callable(fetch):
         return []
     page_budget = _twitter_page_budget_for_expected_count(page_budget_count)

@@ -21,14 +21,14 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 import requests
 
 from scripts._sync_common import load_env_and_db
 from trr_backend.db.session import DbSession
-from trr_backend.object_storage import build_s3_client, load_object_storage_config
+from trr_backend.object_storage import ObjectStorageConfig, build_s3_client, load_object_storage_config
 from trr_backend.repositories.media_assets import (
     fetch_assets_for_mirroring,
     update_asset_with_mirror_result,
@@ -478,6 +478,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv or sys.argv[1:])
 
     # Validate S3 configuration
+    storage: ObjectStorageConfig | None = None
     if not args.dry_run:
         storage = load_object_storage_config(require_bucket=True, require_public_base_url=True)
         if not storage.bucket:
@@ -535,12 +536,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.verbose:
             print(f"\nBatch {batch_num}/{total_batches} ({len(batch)} assets):")
 
+        # Non-dry runs always bind storage above; typing-only cast for pyright.
+        storage_cfg = cast("ObjectStorageConfig", storage)
         summary = process_batch(
             db,
             batch,
             s3_client=s3_client,
-            bucket=storage.bucket,
-            cdn_base_url=storage.public_base_url,
+            bucket=storage_cfg.bucket,
+            cdn_base_url=cast("str", storage_cfg.public_base_url),
             max_retries=args.max_retries,
             backoff_hours=args.retry_backoff_hours,
             concurrency=args.concurrency,

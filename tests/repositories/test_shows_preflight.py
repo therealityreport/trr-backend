@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 
+from trr_backend.db.session import DbSession
 from trr_backend.repositories.shows import ShowRepositoryError, assert_core_shows_table_exists
 
 
@@ -50,7 +53,7 @@ class _FakeClient:
 
 def test_assert_core_shows_table_exists_passes_when_no_error() -> None:
     client = _FakeClient(response=_FakeResponse(error=None))
-    assert_core_shows_table_exists(client)  # should not raise
+    assert_core_shows_table_exists(cast(DbSession, client))  # should not raise
 
 
 def test_assert_core_shows_table_exists_raises_on_missing_relation_error_code() -> None:
@@ -58,7 +61,7 @@ def test_assert_core_shows_table_exists_raises_on_missing_relation_error_code() 
         response=_FakeResponse(error=_FakeError(code="42P01", message='relation "core.shows" does not exist'))
     )
     with pytest.raises(ShowRepositoryError) as excinfo:
-        assert_core_shows_table_exists(client)
+        assert_core_shows_table_exists(cast(DbSession, client))
     msg = str(excinfo.value)
     assert "supabase db push" in msg
     assert "supabase/migrations/0004_core_shows.sql" in msg
@@ -67,7 +70,7 @@ def test_assert_core_shows_table_exists_raises_on_missing_relation_error_code() 
 def test_assert_core_shows_table_exists_raises_on_missing_relation_exception() -> None:
     client = _FakeClient(exc=RuntimeError('relation "core.shows" does not exist'))
     with pytest.raises(ShowRepositoryError) as excinfo:
-        assert_core_shows_table_exists(client)
+        assert_core_shows_table_exists(cast(DbSession, client))
     msg = str(excinfo.value)
     assert "supabase db push" in msg
     assert "supabase/migrations/0004_core_shows.sql" in msg

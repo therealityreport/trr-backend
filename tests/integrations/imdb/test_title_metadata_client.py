@@ -4,6 +4,7 @@ import sys
 from contextlib import nullcontext
 from dataclasses import dataclass
 from types import ModuleType
+from typing import Any, cast
 
 from trr_backend.integrations.imdb import title_metadata_client as mod
 
@@ -41,7 +42,7 @@ def test_fetch_episodes_page_uses_scrapling_on_blocked_imdb_response(monkeypatch
 
     monkeypatch.setattr(mod, "_fetch_episodes_page_via_scrapling", fake_scrapling)
 
-    client = mod.HttpImdbTitleMetadataClient(session=_BlockedSession())
+    client = mod.HttpImdbTitleMetadataClient(session=cast(Any, _BlockedSession()))
     html = client.fetch_episodes_page("tt6645582", season=0)
 
     assert html == fallback_html
@@ -61,7 +62,7 @@ def test_scrapling_episode_fallback_passes_the_shared_browser_locale(monkeypatch
             return _Response(status_code=200, text="<html></html>")
 
     fake_fetchers = ModuleType("scrapling.fetchers")
-    fake_fetchers.StealthyFetcher = FakeStealthyFetcher
+    cast(Any, fake_fetchers).StealthyFetcher = FakeStealthyFetcher
     monkeypatch.setitem(sys.modules, "scrapling.fetchers", fake_fetchers)
     monkeypatch.setattr(mod, "exclusive_runtime_lock", lambda _name: nullcontext())
 

@@ -16,7 +16,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from trr_backend.db import pg  # noqa: E402
-from trr_backend.repositories import social_season_analytics as social_repo  # noqa: E402
+from trr_backend.socials import social_season_analytics_impl as social_repo  # noqa: E402
 from trr_backend.socials.instagram.comments_scrapling.fetcher import (  # noqa: E402
     InstagramCommentsFetchResult,
 )

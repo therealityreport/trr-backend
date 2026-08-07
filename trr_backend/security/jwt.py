@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import jwt
 from jwt import DecodeError, ExpiredSignatureError, InvalidSignatureError, InvalidTokenError
+
+if TYPE_CHECKING:
+    from jwt.types import Options
 
 
 def _get_jwt_secret() -> str:
@@ -140,7 +143,7 @@ def verify_jwt_token(token: str) -> dict[str, Any]:
     secret = _get_jwt_secret()
     expected_issuer = expected_supabase_issuer()
     expected_project_ref = expected_supabase_project_ref()
-    options = {
+    options: Options = {
         "verify_aud": False,
         "verify_iss": False,
         "verify_iat": True,

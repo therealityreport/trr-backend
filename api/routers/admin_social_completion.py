@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 from datetime import UTC, datetime
+from typing import cast
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -75,7 +76,7 @@ def get_social_profile_completion_summary(
     platform: str,
     account_handle: str,
     year: str | None = Query(default=None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, object] | JSONResponse:
     normalized_platform = _normalize_platform(platform)
     normalized_handle = _normalize_account_handle(account_handle)
@@ -84,10 +85,13 @@ def get_social_profile_completion_summary(
 
     normalized_year = _read_year(year)
     try:
-        return completion_repo.get_social_completion_summary(
-            platform=normalized_platform,
-            account_handle=normalized_handle,
-            year=normalized_year,
+        return cast(
+            "dict[str, object]",
+            completion_repo.get_social_completion_summary(
+                platform=normalized_platform,
+                account_handle=normalized_handle,
+                year=normalized_year,
+            ),
         )
     except Exception as error:
         if is_database_service_unavailable_error(error):
@@ -108,10 +112,10 @@ def get_social_profile_completion_summary(
 @router.get("/landing-scrape-job-health")
 def get_social_landing_scrape_job_health(
     request: Request,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, object]:
     try:
-        return completion_repo.get_social_landing_scrape_job_health()
+        return cast("dict[str, object]", completion_repo.get_social_landing_scrape_job_health())
     except Exception as error:
         if is_database_service_unavailable_error(error):
             raise _database_unavailable_exception(error, request) from error

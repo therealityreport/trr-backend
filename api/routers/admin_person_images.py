@@ -1262,23 +1262,18 @@ def _hydrate_refresh_request_getty_prefetch(
         str(value).strip() for value in (prefetch_payload.get("deferred_editorial_ids") or []) if str(value).strip()
     ]
     enrichment_pending = str(prefetch_payload.get("enrichment_status") or "").strip().lower() == "pending"
+    merged_value = prefetch_payload.get("merged")
+    merged_events_value = prefetch_payload.get("merged_events")
+    query_summaries_value = prefetch_payload.get("query_summaries")
     return request.model_copy(
         update={
             "getty_prefetch_attempted": True,
             "getty_prefetch_succeeded": True,
             "getty_prefetch_error_code": None,
-            "getty_prefetched_assets": (
-                list(prefetch_payload.get("merged")) if isinstance(prefetch_payload.get("merged"), list) else []
-            ),
-            "getty_prefetched_events": (
-                list(prefetch_payload.get("merged_events"))
-                if isinstance(prefetch_payload.get("merged_events"), list)
-                else []
-            ),
+            "getty_prefetched_assets": (list(merged_value) if isinstance(merged_value, list) else []),
+            "getty_prefetched_events": (list(merged_events_value) if isinstance(merged_events_value, list) else []),
             "getty_prefetched_queries": (
-                list(prefetch_payload.get("query_summaries"))
-                if isinstance(prefetch_payload.get("query_summaries"), list)
-                else []
+                list(query_summaries_value) if isinstance(query_summaries_value, list) else []
             ),
             "getty_prefetch_mode": str(prefetch_payload.get("prefetch_mode") or prefetch_mode).strip() or prefetch_mode,
             "getty_deferred_enrichment": enrichment_pending,

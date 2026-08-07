@@ -16,6 +16,7 @@ def test_select_socialblade_decodo_defaults_to_rotating(monkeypatch):
 
     assert config is not None
     assert isinstance(config.browser_proxy, dict)
+    assert config.api_proxy_url is not None
     assert config.browser_proxy["username"] == "decodo-user"
     assert "-session-" not in config.browser_proxy["username"]
     assert "sessionduration" not in config.api_proxy_url
@@ -36,6 +37,7 @@ def test_select_socialblade_decodo_sticky_opt_in(monkeypatch):
 
     assert config is not None
     assert isinstance(config.browser_proxy, dict)
+    assert config.api_proxy_url is not None
     assert config.browser_proxy["username"].startswith("decodo-user-session-")
     assert "-sessionduration-10" in config.browser_proxy["username"]
     assert "sessionduration-10" in config.api_proxy_url

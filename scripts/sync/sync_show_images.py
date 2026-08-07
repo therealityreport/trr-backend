@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
 from scripts._sync_common import add_show_filter_args, fetch_show_rows, load_env_and_db
@@ -22,6 +22,9 @@ from trr_backend.repositories.show_images import (
     update_show_image_hosted_fields,
     upsert_show_images,
 )
+
+if TYPE_CHECKING:
+    from trr_backend.db.session import DbSession
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -100,14 +103,18 @@ def _build_show_records(show_rows: list[dict[str, object]]) -> list[ShowRecord]:
             show_uuid = UUID(str(show_id))
         except Exception:
             continue
+        description = row.get("description")
+        premiere_date = row.get("premiere_date")
+        imdb_id = row.get("imdb_id")
+        tmdb_id = row.get("tmdb_id")
         records.append(
             ShowRecord(
                 id=show_uuid,
                 name=str(row.get("name") or ""),
-                description=row.get("description") if isinstance(row.get("description"), str) else None,
-                premiere_date=row.get("premiere_date") if isinstance(row.get("premiere_date"), str) else None,
-                imdb_id=row.get("imdb_id") if isinstance(row.get("imdb_id"), str) else None,
-                tmdb_id=row.get("tmdb_id") if isinstance(row.get("tmdb_id"), int) else None,
+                description=description if isinstance(description, str) else None,
+                premiere_date=premiere_date if isinstance(premiere_date, str) else None,
+                imdb_id=imdb_id if isinstance(imdb_id, str) else None,
+                tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
             )
         )
     return records
@@ -191,7 +198,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.skip_db:
         print("ERROR: --skip-db is not supported for this script (database access required).", file=sys.stderr)
         return 2
-    db = load_env_and_db()
+    # load_env_and_db defaults to skip_db=False, so it always returns a live session here.
+    db = cast("DbSession", load_env_and_db())
     assert_core_show_images_table_exists(db)
 
     show_rows = fetch_show_rows(db, args)

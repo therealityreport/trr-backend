@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from queue import Empty, SimpleQueue
 from time import perf_counter
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse, urlunparse
 from uuid import UUID, uuid4
 
@@ -901,7 +901,7 @@ def _get_cached_fandom_page_directory_entry(
     *,
     preferred_community_domain: str | None = None,
 ) -> dict[str, Any] | None:
-    canonical_candidate = _canonicalize_url(candidate_url)
+    canonical_candidate = _canonicalize_url(cast("str", candidate_url))
     if not canonical_candidate:
         return None
     normalized_domain = normalize_fandom_community_domain(str(urlparse(canonical_candidate).hostname or ""))
@@ -974,7 +974,10 @@ def _is_valid_cached_fandom_season_page(
         return False
     if not any(_extract_season_number_from_text(value) == season_number for value in candidates):
         return False
-    anchor_titles = _collect_fandom_season_show_anchor_titles(show_name=show_name, show_seed_urls=show_seed_urls)
+    anchor_titles = _collect_fandom_season_show_anchor_titles(
+        show_name=show_name,
+        show_seed_urls=cast("list[str] | tuple[str, ...] | None", show_seed_urls),
+    )
     if anchor_titles:
         return _matches_fandom_season_show_anchor(candidates, anchor_titles=anchor_titles)
     if not show_name:
@@ -3799,7 +3802,10 @@ def _validate_person_knowledge_url(
             candidate_url=candidate,
             expected_name=expected_name,
         ):
-            return _canonicalize_url(str(cached_fandom_entry.get("page_url") or candidate)), "valid"
+            return (
+                _canonicalize_url(str(cast("dict[str, Any]", cached_fandom_entry).get("page_url") or candidate)),
+                "valid",
+            )
         return (None, "fetch_error") if error else (None, "invalid")
     if status_code in {404, 410}:
         return None, "invalid"
@@ -3816,7 +3822,10 @@ def _validate_person_knowledge_url(
             candidate_url=candidate,
             expected_name=expected_name,
         ):
-            return _canonicalize_url(str(cached_fandom_entry.get("page_url") or candidate)), "valid"
+            return (
+                _canonicalize_url(str(cast("dict[str, Any]", cached_fandom_entry).get("page_url") or candidate)),
+                "valid",
+            )
     if status_code >= 400:
         return None, "invalid"
     if not html:
@@ -4289,14 +4298,17 @@ def _discover_show_links(show_id: str, *, stats: dict[str, Any] | None = None) -
                         candidate_url=candidate_url,
                         show_name=show_name,
                     ):
-                        resolved = _canonicalize_url(str(cached_entry.get("page_url") or candidate_url))
+                        resolved = _canonicalize_url(
+                            str(cast("dict[str, Any]", cached_entry).get("page_url") or candidate_url)
+                        )
                         source_value = fandom_source if idx == 0 else f"{fandom_source}:derived_show_page"
                         normalized = record_fandom_row(
                             candidate_url=candidate_url,
                             html="",
                             resolved_url=resolved,
                             source_value=source_value,
-                            title_hint=str(cached_entry.get("page_title") or "").strip() or None,
+                            title_hint=str(cast("dict[str, Any]", cached_entry).get("page_title") or "").strip()
+                            or None,
                         )
                         if idx > 0 and normalized and not _is_internal_fandom_seed_url(normalized):
                             found_derived_show_page = True
@@ -4363,9 +4375,10 @@ def _discover_show_links(show_id: str, *, stats: dict[str, Any] | None = None) -
                             record_fandom_row(
                                 candidate_url=candidate_url,
                                 html="",
-                                resolved_url=str(cached_entry.get("page_url") or candidate_url),
+                                resolved_url=str(cast("dict[str, Any]", cached_entry).get("page_url") or candidate_url),
                                 source_value=f"{fandom_source}:derived_show_page",
-                                title_hint=str(cached_entry.get("page_title") or "").strip() or None,
+                                title_hint=str(cast("dict[str, Any]", cached_entry).get("page_title") or "").strip()
+                                or None,
                             )
                             found_derived_show_page = True
                         continue
@@ -4880,7 +4893,7 @@ def _validated_fandom_season_url(
             show_name=show_name,
             show_seed_urls=show_seed_urls,
         ):
-            return _canonicalize_url(str(cached_entry.get("page_url") or canonical_candidate))
+            return _canonicalize_url(str(cast("dict[str, Any]", cached_entry).get("page_url") or canonical_candidate))
         return None
 
     resolved = _canonicalize_url(final_url or canonical_candidate)

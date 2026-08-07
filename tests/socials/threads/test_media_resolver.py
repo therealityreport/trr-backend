@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 from trr_backend.socials.threads import media_resolver
 
 
@@ -34,7 +36,7 @@ def test_resolve_threads_media_accepts_image_probe_and_records_evidence() -> Non
         },
     }
 
-    result = media_resolver.resolve_threads_media(post_data, session=session, validate_urls=True)
+    result = media_resolver.resolve_threads_media(post_data, session=cast(Any, session), validate_urls=True)
 
     assert result.source == "threads_graphql_post_data"
     assert result.media_urls == ["https://threads-cdn.test/image-no-extension"]
@@ -51,7 +53,7 @@ def test_resolve_threads_media_rejects_html_probe_response() -> None:
         ],
     }
 
-    result = media_resolver.resolve_threads_media(post_data, session=session, validate_urls=True)
+    result = media_resolver.resolve_threads_media(post_data, session=cast(Any, session), validate_urls=True)
 
     assert result.media_urls == []
     assert result.attempts[0]["reason_code"] == "threads_media_urls_not_accessible"

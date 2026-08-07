@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import argparse
 import signal
 import subprocess
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -55,7 +57,8 @@ def test_worker_heartbeat_seeds_auth_capabilities(monkeypatch) -> None:
     heartbeat = worker.WorkerHeartbeat(worker_id="worker-1", stage="posts", run_id=None)
     snapshot = heartbeat._snapshot()  # noqa: SLF001
 
-    assert snapshot["metadata"]["auth_capabilities"] == {
+    snapshot_metadata = cast("dict[str, Any]", snapshot["metadata"])
+    assert snapshot_metadata["auth_capabilities"] == {
         "instagram_authenticated": True,
         "tiktok_authenticated": False,
     }
@@ -105,12 +108,13 @@ def test_apply_post_persist_truthfulness_diagnostics_adds_silent_drop_alert(monk
 
     assert silent_drop_alert is True
     assert persisted and persisted[0][0] == "job-1"
-    assert updated_job["metadata"]["persist_counters"] == {
+    updated_metadata = cast("dict[str, Any]", updated_job["metadata"])
+    assert updated_metadata["persist_counters"] == {
         "posts_upserted": 0,
         "posts_skipped": 6,
         "posts_skipped_by_reason": {"canonical_upsert_returned_none": 6},
     }
-    assert updated_job["metadata"]["diagnostics"]["post_persist_truthfulness"] == {
+    assert updated_metadata["diagnostics"]["post_persist_truthfulness"] == {
         "platform": "instagram",
         "account": "thetraitorsus",
         "posts_checked": 6,
@@ -122,7 +126,7 @@ def test_apply_post_persist_truthfulness_diagnostics_adds_silent_drop_alert(monk
         "status_resolution": "completed_with_silent_drop_alert",
         "operator_summary": "Instagram posts persistence completed with zero saved posts after checking live posts.",
     }
-    assert updated_job["metadata"]["alerts"] == [
+    assert updated_metadata["alerts"] == [
         {
             "code": "instagram_posts_persist_zero_saved",
             "severity": "warning",
@@ -169,13 +173,14 @@ def test_apply_post_persist_truthfulness_diagnostics_surfaces_skip_counters_with
     )
 
     assert silent_drop_alert is False
-    assert "alerts" not in updated_job["metadata"]
-    assert updated_job["metadata"]["persist_counters"] == {
+    updated_metadata = cast("dict[str, Any]", updated_job["metadata"])
+    assert "alerts" not in updated_metadata
+    assert updated_metadata["persist_counters"] == {
         "posts_upserted": 3,
         "posts_skipped": 1,
         "posts_skipped_by_reason": {"missing_shortcode": 1},
     }
-    assert updated_job["metadata"]["diagnostics"]["post_persist_truthfulness"]["silent_drop_detected"] is False
+    assert updated_metadata["diagnostics"]["post_persist_truthfulness"]["silent_drop_detected"] is False
 
 
 def test_apply_post_persist_truthfulness_diagnostics_suppresses_alert_when_media_persisted(monkeypatch) -> None:
@@ -227,11 +232,12 @@ def test_apply_post_persist_truthfulness_diagnostics_suppresses_alert_when_media
         }
     )
 
-    truthfulness = updated_job["metadata"]["diagnostics"]["post_persist_truthfulness"]
+    updated_metadata = cast("dict[str, Any]", updated_job["metadata"])
+    truthfulness = updated_metadata["diagnostics"]["post_persist_truthfulness"]
     assert silent_drop_alert is False
     assert truthfulness["media_assets_persisted"] == 20
     assert truthfulness["silent_drop_detected"] is False
-    assert "alerts" not in updated_job["metadata"]
+    assert "alerts" not in updated_metadata
 
 
 def test_apply_post_persist_truthfulness_diagnostics_reads_threads_alias(monkeypatch) -> None:
@@ -272,8 +278,9 @@ def test_apply_post_persist_truthfulness_diagnostics_reads_threads_alias(monkeyp
     )
 
     assert silent_drop_alert is True
-    assert updated_job["metadata"]["posts_scrapling_persist_diagnostics"]["posts_skipped"] == 2
-    assert updated_job["metadata"]["diagnostics"]["post_persist_truthfulness"]["platform"] == "threads"
+    updated_metadata = cast("dict[str, Any]", updated_job["metadata"])
+    assert updated_metadata["posts_scrapling_persist_diagnostics"]["posts_skipped"] == 2
+    assert updated_metadata["diagnostics"]["post_persist_truthfulness"]["platform"] == "threads"
 
 
 def test_main_queue_parallel_fanout_spawns_child_workers(monkeypatch) -> None:
@@ -983,9 +990,9 @@ def test_wait_for_children_times_out_and_terminates_hung_child(monkeypatch) -> N
     events: list[str] = []
 
     class _HungProc:
-        def wait(self, timeout=None):  # noqa: ANN001
+        def wait(self, timeout: float | None = None):
             if timeout is None or timeout > 0:
-                raise subprocess.TimeoutExpired(cmd="hung", timeout=timeout)
+                raise subprocess.TimeoutExpired(cmd="hung", timeout=cast("float", timeout))
             raise subprocess.TimeoutExpired(cmd="hung", timeout=timeout)
 
         def poll(self):
@@ -998,7 +1005,7 @@ def test_wait_for_children_times_out_and_terminates_hung_child(monkeypatch) -> N
             events.append("kill")
 
     exit_code = worker._wait_for_children(  # noqa: SLF001
-        [_HungProc()],
+        cast("list[subprocess.Popen]", [_HungProc()]),
         context_label="queue fanout",
         wait_timeout_seconds=0.1,
         terminate_grace_seconds=0.1,
@@ -1018,7 +1025,7 @@ def test_resolve_worker_execution_limits_are_unbounded_by_default_and_use_new_en
     monkeypatch.delenv("SOCIAL_WORKER_MAX_JOBS_PER_INVOCATION", raising=False)
     monkeypatch.delenv("SOCIAL_WORKER_MAX_RUN_SECONDS", raising=False)
 
-    args = SimpleNamespace(max_jobs_per_invocation=None, max_run_seconds=None)
+    args = cast("argparse.Namespace", SimpleNamespace(max_jobs_per_invocation=None, max_run_seconds=None))
 
     assert worker._resolve_worker_execution_limits(args) == (None, None)  # noqa: SLF001
 
@@ -1032,7 +1039,7 @@ def test_resolve_worker_execution_limits_prefers_cli_overrides(monkeypatch) -> N
     monkeypatch.setenv("SOCIAL_EXECUTE_RUN_MAX_JOBS", "25")
     monkeypatch.setenv("SOCIAL_EXECUTE_RUN_MAX_SECONDS", "90")
 
-    args = SimpleNamespace(max_jobs_per_invocation=4, max_run_seconds=12.5)
+    args = cast("argparse.Namespace", SimpleNamespace(max_jobs_per_invocation=4, max_run_seconds=12.5))
 
     assert worker._resolve_worker_execution_limits(args) == (4, 12.5)  # noqa: SLF001
 
@@ -1152,7 +1159,7 @@ def test_spawn_child_worker_propagates_caps_for_run_id_children(monkeypatch) -> 
         max_run_seconds=90.0,
     )
 
-    cmd = captured["cmd"]
+    cmd = cast("list[str]", captured["cmd"])
     assert "--run-id" in cmd
     assert "--max-jobs-per-invocation" in cmd
     assert "--max-run-seconds" in cmd

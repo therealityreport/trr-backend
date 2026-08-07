@@ -3,11 +3,43 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any, cast
+
 from fastapi import APIRouter
 
 from ._shared import *
 from .catalog_reads import *
 from .catalog_operations import *
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    # These underscore-prefixed helpers are re-exported at runtime by the star
+    # imports above via each module's dynamic ``__all__``; the imports below
+    # only make them visible to static type checkers.
+    from ._shared import (
+        _clear_account_profile_caches,
+        _lookup_error_to_not_found,
+        _value_error_to_bad_request,
+        _worker_health_detail,
+    )
+    from .catalog_reads import (
+        _attach_instagram_apply_metadata,
+        _finalize_social_account_catalog_route_response,
+        _instagram_2025_backfill_apply_confirmation,
+        _instagram_2025_backfill_apply_pending_metadata,
+        _instagram_backfill_requires_apply_confirmation,
+        _queue_catalog_backfill_finalize_task,
+        _resolve_social_account_catalog_route_execution,
+        _twitter_catalog_backfill_default_window,
+    )
+
+    # ``SOCIAL_ACCOUNT_CATALOG_BACKFILL_SELECTED_TASKS`` is injected into the
+    # launch module's globals at runtime by its provider bridge, so static
+    # checkers cannot see it as an import symbol; the route imports it lazily
+    # inside an ``else`` branch below, and this annotation-only declaration
+    # gives type checkers its type without binding anything at runtime.
+    SOCIAL_ACCOUNT_CATALOG_BACKFILL_SELECTED_TASKS: tuple[str, ...]
 
 router = APIRouter()
 
@@ -243,9 +275,15 @@ async def post_social_account_catalog_remediate_drift_route(
     user: InternalAdminUser,
 ) -> dict[str, Any]:
     """Cancel and optionally replace a stale catalog run under the runtime-supersession guard."""
-    from trr_backend.socials.pipelines.account_catalog.launch import (
-        remediate_social_account_catalog_runtime_supersession,
-    )
+    if TYPE_CHECKING:
+        # ``remediate_social_account_catalog_runtime_supersession`` is injected
+        # into the launch module's globals at runtime by its provider bridge,
+        # so static checkers cannot see it as an import symbol.
+        remediate_social_account_catalog_runtime_supersession = cast("Callable[..., dict[str, Any]]", None)
+    else:
+        from trr_backend.socials.pipelines.account_catalog.launch import (
+            remediate_social_account_catalog_runtime_supersession,
+        )
 
     initiated_by = (user or {}).get("email")
     try:
@@ -409,10 +447,18 @@ async def post_social_account_catalog_resume_tail_route(
     background_tasks: BackgroundTasks,
     user: InternalAdminUser,
 ) -> dict[str, Any]:
-    from trr_backend.socials.pipelines.account_catalog.launch import (
-        SOCIAL_ACCOUNT_CATALOG_BACKFILL_SELECTED_TASKS,
-        launch_social_account_catalog_backfill,
-    )
+    if TYPE_CHECKING:
+        # ``SOCIAL_ACCOUNT_CATALOG_BACKFILL_SELECTED_TASKS`` is covered by the
+        # module-level annotation-only declaration above; only the statically
+        # visible symbol is imported here for type checkers.
+        from trr_backend.socials.pipelines.account_catalog.launch import (
+            launch_social_account_catalog_backfill,
+        )
+    else:
+        from trr_backend.socials.pipelines.account_catalog.launch import (
+            SOCIAL_ACCOUNT_CATALOG_BACKFILL_SELECTED_TASKS,
+            launch_social_account_catalog_backfill,
+        )
     from trr_backend.socials.control_plane.runtime import (
         SocialIngestConflictError,
         SocialIngestValidationError,

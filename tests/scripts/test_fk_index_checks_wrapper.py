@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -12,7 +13,7 @@ import scripts.db.run_fk_index_checks as checks_mod
 class _FakeCursor:
     def __init__(self, result_sets: list[list[dict]]):
         self._result_sets = result_sets
-        self.executed: list[tuple[str, object]] = []
+        self.executed: list[tuple[str, Any]] = []
 
     def execute(self, sql: str, params=None) -> None:  # noqa: ANN001
         self.executed.append((sql, params))

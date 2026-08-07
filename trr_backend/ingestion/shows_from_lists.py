@@ -594,7 +594,8 @@ def _find_next_imdb_list_page(soup: BeautifulSoup, current_url: str) -> str | No
 
 def _find_next_imdb_list_page_for_list(soup: BeautifulSoup, current_url: str, *, base_url: str) -> str | None:
     for a in soup.find_all("a", href=True):
-        aria = (a.get("aria-label") or "").strip()
+        aria_attr = a.get("aria-label")
+        aria = (aria_attr if isinstance(aria_attr, str) else "").strip()
         text = a.get_text(strip=True)
         if "next" not in (aria + " " + text).casefold():
             continue

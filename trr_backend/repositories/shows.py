@@ -227,6 +227,7 @@ def insert_show(db: DbSession, show: ShowUpsert) -> dict[str, Any]:
 
     payload = _prepare_payload_arrays(payload)
 
+    response: Any = None
     for attempt in range(_PGRST204_MAX_RETRIES + 1):
         try:
             response = db.schema("core").table("shows").insert(payload).execute()
@@ -255,6 +256,7 @@ def insert_show(db: DbSession, show: ShowUpsert) -> dict[str, Any]:
 
 def update_show(db: DbSession, show_id: UUID | str, patch: Mapping[str, Any]) -> dict[str, Any]:
     payload = _prepare_payload_arrays(dict(patch))
+    response: Any = None
     for attempt in range(_PGRST204_MAX_RETRIES + 1):
         try:
             response = db.schema("core").table("shows").update(payload).eq("id", str(show_id)).execute()

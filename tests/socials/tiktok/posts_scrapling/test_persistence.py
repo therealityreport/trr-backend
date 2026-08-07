@@ -4,6 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -500,7 +501,7 @@ def test_persist_tiktok_posts_tracks_skipped_reasons(monkeypatch):
     result = persist_tiktok_posts(
         account_handle="testuser",
         post_items=[
-            "not-a-dict",
+            cast("dict[str, Any]", "not-a-dict"),
             {},
             {"id": "bad"},
             {"id": "good"},

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from trr_backend.repositories import social_season_analytics as repo
+from trr_backend.socials import social_season_analytics_impl as repo
 
 
 def test_instagram_posts_scrapling_worker_lane_constant() -> None:

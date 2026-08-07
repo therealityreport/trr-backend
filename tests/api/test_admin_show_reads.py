@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -622,7 +624,7 @@ def test_show_cast_returns_contract(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_show_cast_forwards_include_photos_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    recorded: dict[str, object] = {}
+    recorded: dict[str, Any] = {}
 
     def fake_get_show_cast(show_id: str, **kwargs):
         recorded["show_id"] = show_id

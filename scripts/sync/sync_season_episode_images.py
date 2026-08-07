@@ -5,7 +5,7 @@ import argparse
 import sys
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from scripts._sync_common import add_show_filter_args, fetch_show_rows, load_env_and_db
 from trr_backend.integrations.tmdb.client import (
@@ -33,6 +33,9 @@ from trr_backend.repositories.season_images import (
     update_season_image_hosted_fields,
     upsert_season_images,
 )
+
+if TYPE_CHECKING:
+    from trr_backend.db.session import DbSession
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -214,7 +217,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.skip_db:
         print("ERROR: --skip-db is not supported for this script (database access required).", file=sys.stderr)
         return 2
-    db = load_env_and_db()
+    # load_env_and_db defaults to skip_db=False, so it always returns a live session here.
+    db = cast("DbSession", load_env_and_db())
     assert_core_season_images_table_exists(db)
 
     api_key = resolve_api_key() or None

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -107,7 +108,7 @@ def test_resolve_tiktok_media_skips_ytdlp_when_disabled(monkeypatch: pytest.Monk
     result = media_resolver.resolve_tiktok_media(
         "12345",
         canonical_url="https://www.tiktok.com/@bravotv/video/12345",
-        session=_FakeSession(html=html),
+        session=cast(Any, _FakeSession(html=html)),
         allow_ytdlp=False,
     )
 
@@ -124,7 +125,7 @@ def test_resolve_tiktok_media_rejects_unsafe_canonical_url(monkeypatch: pytest.M
     result = media_resolver.resolve_tiktok_media(
         "12345",
         canonical_url="http://127.0.0.1/video/12345",
-        session=_FakeSession(html=""),
+        session=cast(Any, _FakeSession(html="")),
     )
 
     assert result.media_urls == []
@@ -175,7 +176,7 @@ def test_resolve_tiktok_media_falls_back_to_watch_page_json(monkeypatch: pytest.
     result = media_resolver.resolve_tiktok_media(
         "12345",
         canonical_url="https://www.tiktok.com/@bravotv/video/12345",
-        session=_FakeSession(html=html),
+        session=cast(Any, _FakeSession(html=html)),
     )
 
     assert result.source == "watch_page_json"
@@ -208,7 +209,7 @@ def test_resolve_tiktok_media_falls_back_to_unofficial_api(monkeypatch: pytest.M
     result = media_resolver.resolve_tiktok_media(
         "12345",
         canonical_url="https://www.tiktok.com/@bravotv/video/12345",
-        session=_FakeSession(html="<html><body>no-json</body></html>"),
+        session=cast(Any, _FakeSession(html="<html><body>no-json</body></html>")),
     )
 
     assert result.source == "unofficial_api"
@@ -285,7 +286,7 @@ def test_resolve_tiktok_media_uses_unofficial_when_watch_url_not_downloadable(
     result = media_resolver.resolve_tiktok_media(
         "12345",
         canonical_url="https://www.tiktok.com/@bravotv/video/12345",
-        session=_FakeSession(html=html),
+        session=cast(Any, _FakeSession(html=html)),
         allow_ytdlp=False,
         validate_download_url=True,
     )
@@ -333,7 +334,7 @@ def test_resolve_tiktok_media_accepts_no_suffix_video_probe_and_records_evidence
     result = media_resolver.resolve_tiktok_media(
         "12345",
         canonical_url="https://www.tiktok.com/@bravotv/video/12345",
-        session=_FakeSession(html=html),
+        session=cast(Any, _FakeSession(html=html)),
         allow_ytdlp=False,
         validate_download_url=True,
     )
@@ -396,7 +397,7 @@ def test_resolve_tiktok_media_rejects_html_probe_response(
     result = media_resolver.resolve_tiktok_media(
         "12345",
         canonical_url="https://www.tiktok.com/@bravotv/video/12345",
-        session=_FakeSession(html=html),
+        session=cast(Any, _FakeSession(html=html)),
         allow_ytdlp=False,
         validate_download_url=True,
     )

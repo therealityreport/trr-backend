@@ -7,7 +7,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 try:
@@ -149,7 +149,7 @@ def _fetch_rows(
             (max(1, int(limit)),),
         )
     rows = cur.fetchall()
-    return rows if isinstance(rows, list) else []
+    return cast("list[dict[str, Any]]", rows) if isinstance(rows, list) else []
 
 
 def _repair_rows(
@@ -206,7 +206,7 @@ def main(argv: list[str] | None = None) -> int:
 
     conn = psycopg2.connect(_resolve_db_url(), cursor_factory=RealDictCursor)
     try:
-        cur = conn.cursor()
+        cur = cast(RealDictCursor, conn.cursor())
         stats = _repair_rows(
             cur,
             season_id=season_id,

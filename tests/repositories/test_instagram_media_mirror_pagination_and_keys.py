@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from trr_backend.repositories import social_season_analytics as social_repo
+from trr_backend.socials import social_season_analytics_impl as social_repo
 
 
 def test_build_mirror_source_key_uses_post_uuid_in_unknown_instagram_fallback() -> None:

@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
-import scripts.sync_tmdb_watch_providers as mod
+import scripts.sync_tmdb_watch_providers as _sync_tmdb_watch_providers
+
+mod: Any = _sync_tmdb_watch_providers
 
 
 def test_parse_watch_providers_payload_builds_rows() -> None:

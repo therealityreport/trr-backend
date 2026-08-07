@@ -29,7 +29,7 @@ from typing import Any
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import trr_backend.repositories.social_season_analytics as social_repo
+import trr_backend.socials.social_season_analytics_impl as social_repo
 from trr_backend.socials.control_plane import IngestOptions, SeasonContext
 
 

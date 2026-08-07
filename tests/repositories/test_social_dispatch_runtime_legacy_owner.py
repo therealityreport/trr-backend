@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -109,8 +110,8 @@ def test_dispatch_runtime_uses_late_module_provider_without_a_legacy_bootstrap_i
     assert "_published" not in dispatch_runtime.__dict__
     assert dispatch_runtime.register_provider_publication_callback.__self__ is dispatch_runtime._PROVIDER
     assert (
-        dispatch_runtime.register_provider_publication_callback.__func__
-        is dispatch_runtime._PROVIDER.register_module_publication_callback.__func__
+        cast(Any, dispatch_runtime.register_provider_publication_callback).__func__
+        is cast(Any, dispatch_runtime._PROVIDER.register_module_publication_callback).__func__
     )
 
 

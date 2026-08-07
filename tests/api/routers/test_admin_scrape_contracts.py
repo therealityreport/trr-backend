@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -18,7 +19,7 @@ def test_import_image_item_accepts_new_kinds() -> None:
     # Pydantic should accept expanded ImageKind literals.
     item = ImportImageItem(
         candidate_id="abc",
-        url="https://example.com/x.jpg",
+        url=cast("Any", "https://example.com/x.jpg"),
         kind="promo",
         caption=None,
         person_ids=None,
@@ -30,15 +31,15 @@ def test_import_image_item_rejects_unknown_kind() -> None:
     with pytest.raises(ValidationError):
         ImportImageItem(
             candidate_id="abc",
-            url="https://example.com/x.jpg",
-            kind="not-a-kind",
+            url=cast("Any", "https://example.com/x.jpg"),
+            kind=cast("Any", "not-a-kind"),
         )
 
 
 def test_import_image_item_accepts_logo_target_fields() -> None:
     item = ImportImageItem(
         candidate_id="logo-1",
-        url="https://example.com/logo.png",
+        url=cast("Any", "https://example.com/logo.png"),
         kind="logo",
         logo_target_type="publication",
         logo_target_key="deadline.com",
@@ -56,7 +57,7 @@ def test_import_image_item_rejects_unknown_logo_target_type() -> None:
     with pytest.raises(ValidationError):
         ImportImageItem(
             candidate_id="logo-2",
-            url="https://example.com/logo.png",
+            url=cast("Any", "https://example.com/logo.png"),
             kind="logo",
             logo_target_type="invalid-target",  # type: ignore[arg-type]
             logo_target_key="foo",
@@ -68,7 +69,7 @@ def test_import_image_item_requires_logo_target_type_for_logo_images() -> None:
     with pytest.raises(ValidationError):
         ImportImageItem(
             candidate_id="logo-3",
-            url="https://example.com/logo.png",
+            url=cast("Any", "https://example.com/logo.png"),
             kind="logo",
         )
 
@@ -77,7 +78,7 @@ def test_import_image_item_rejects_logo_metadata_for_non_logo_images() -> None:
     with pytest.raises(ValidationError):
         ImportImageItem(
             candidate_id="poster-1",
-            url="https://example.com/poster.jpg",
+            url=cast("Any", "https://example.com/poster.jpg"),
             kind="poster",
             logo_target_type="show",
         )
@@ -87,7 +88,7 @@ def test_import_image_item_rejects_person_ids_for_logo_images() -> None:
     with pytest.raises(ValidationError):
         ImportImageItem(
             candidate_id="logo-4",
-            url="https://example.com/logo.png",
+            url=cast("Any", "https://example.com/logo.png"),
             kind="logo",
             logo_target_type="publication",
             person_ids=[uuid4()],
@@ -98,7 +99,7 @@ def test_import_image_item_dedupes_person_ids_and_trims_optional_text() -> None:
     person_id = uuid4()
     item = ImportImageItem(
         candidate_id="cast-1",
-        url="https://example.com/cast.jpg",
+        url=cast("Any", "https://example.com/cast.jpg"),
         kind="cast",
         caption="  Caption  ",
         context_section="  gallery  ",

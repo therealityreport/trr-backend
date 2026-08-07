@@ -323,7 +323,8 @@ def _find_all_images(node: Any) -> Mapping[str, Any] | None:
 
 
 def _extract_page_info(all_images: Mapping[str, Any]) -> dict[str, Any]:
-    page_info = all_images.get("pageInfo") if isinstance(all_images.get("pageInfo"), Mapping) else {}
+    raw_page_info = all_images.get("pageInfo")
+    page_info: Mapping[str, Any] = raw_page_info if isinstance(raw_page_info, Mapping) else {}
     has_next = page_info.get("hasNextPage")
     if has_next is None:
         has_next = page_info.get("has_next_page")

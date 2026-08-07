@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import requests
 
@@ -93,7 +93,8 @@ def _now_utc_iso() -> str:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv or sys.argv[1:])
-    db = load_env_and_db()
+    # load_env_and_db only returns None when skip_db=True, which is not used here.
+    db = cast("DbSession", load_env_and_db())
     api_key, bearer = _require_tmdb_auth()
 
     rows = _fetch_show_rows(db, args)

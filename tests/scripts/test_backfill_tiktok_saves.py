@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -60,7 +61,7 @@ def test_fetch_saves_retries_handle_url_after_canonical_miss() -> None:
         ]
     )
     saves, error = mod._fetch_saves(
-        session=session,
+        session=cast(Any, session),
         cookies={},
         video_urls=mod._candidate_video_urls(account="creator", video_id="123"),
         video_id="123",

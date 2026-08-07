@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 
@@ -373,8 +374,8 @@ def test_authenticated_followup_bucket_uses_auth_only_targets(monkeypatch) -> No
 
 
 def test_public_recovery_launches_public_relay_run(monkeypatch) -> None:
-    captured: dict[str, object] = {}
-    merged: list[dict[str, object]] = []
+    captured: dict[str, Any] = {}
+    merged: list[dict[str, Any]] = []
 
     monkeypatch.setattr(
         "trr_backend.socials.pipelines.comments.instagram.get_social_account_comments_public_recovery_bucket",
@@ -445,7 +446,7 @@ def test_public_recovery_launches_public_relay_run(monkeypatch) -> None:
 
 
 def test_public_recovery_appends_public_retry_jobs_to_active_run(monkeypatch) -> None:
-    created_jobs: list[dict[str, object]] = []
+    created_jobs: list[dict[str, Any]] = []
     dispatched: list[str] = []
 
     monkeypatch.setattr(
@@ -510,8 +511,8 @@ def test_public_recovery_appends_public_retry_jobs_to_active_run(monkeypatch) ->
 
 
 def test_public_recovery_active_run_uses_append_mode_without_immediate_dispatch(monkeypatch) -> None:
-    append_calls: list[dict[str, object]] = []
-    merged: list[dict[str, object]] = []
+    append_calls: list[dict[str, Any]] = []
+    merged: list[dict[str, Any]] = []
 
     monkeypatch.setattr(
         "trr_backend.socials.pipelines.comments.instagram.get_social_account_comments_public_recovery_bucket",
@@ -582,8 +583,8 @@ def test_public_recovery_active_run_uses_append_mode_without_immediate_dispatch(
 
 
 def test_authenticated_followup_launches_authenticated_cursor_run(monkeypatch) -> None:
-    captured: dict[str, object] = {}
-    merged: list[dict[str, object]] = []
+    captured: dict[str, Any] = {}
+    merged: list[dict[str, Any]] = []
 
     monkeypatch.setattr(
         "trr_backend.socials.pipelines.comments.instagram.get_social_account_comments_authenticated_followup_bucket",
@@ -655,7 +656,7 @@ def test_authenticated_followup_launches_authenticated_cursor_run(monkeypatch) -
 
 
 def test_comments_progress_counts_use_rollup_not_live_comment_count(monkeypatch) -> None:
-    calls: list[dict[str, object]] = []
+    calls: list[dict[str, Any]] = []
 
     def _fetch_all(query, params=None, **_kwargs):
         calls.append({"query": query, "params": params})
@@ -703,7 +704,7 @@ def test_audit_cursor_retry_defaults_include_network_stops() -> None:
 
 
 def test_audit_cursor_recovery_show_filter_uses_saved_post_metadata(monkeypatch) -> None:
-    calls: list[dict[str, object]] = []
+    calls: list[dict[str, Any]] = []
 
     def _fetch_all(query, params=None, **_kwargs):
         calls.append({"query": query, "params": params})
@@ -741,7 +742,7 @@ def test_audit_cursor_recovery_show_filter_uses_saved_post_metadata(monkeypatch)
 
 
 def test_audit_cursor_retry_attaches_to_active_run_when_worker_guard_blocks(monkeypatch) -> None:
-    calls: list[dict[str, object]] = []
+    calls: list[dict[str, Any]] = []
 
     monkeypatch.setattr(
         "trr_backend.socials.pipelines.comments.instagram.get_instagram_comments_audit_cursor_recovery",
@@ -800,7 +801,7 @@ def test_audit_cursor_retry_attaches_to_active_run_when_worker_guard_blocks(monk
 
 
 def test_audit_cursor_split_creates_standalone_target_job_without_source_job(monkeypatch) -> None:
-    created_jobs: list[dict[str, object]] = []
+    created_jobs: list[dict[str, Any]] = []
     dispatched: list[str] = []
 
     monkeypatch.setattr(
@@ -866,8 +867,8 @@ def test_audit_cursor_split_creates_standalone_target_job_without_source_job(mon
 
 
 def test_audit_cursor_split_force_rerun_replaces_existing_one_target_job(monkeypatch) -> None:
-    created_jobs: list[dict[str, object]] = []
-    fetch_one_calls: list[dict[str, object]] = []
+    created_jobs: list[dict[str, Any]] = []
+    fetch_one_calls: list[dict[str, Any]] = []
 
     monkeypatch.setattr(
         "trr_backend.socials.pipelines.comments.instagram.pg.fetch_all",

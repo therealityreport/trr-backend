@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from typing import Any
+
 from trr_backend.repositories import face_references
 from trr_backend.services import face_reference_embeddings as embeddings
 
 
 def test_register_reference_image_persists_ready_insightface_seed(monkeypatch) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
     monkeypatch.setattr(
         embeddings,
         "_build_embedding",

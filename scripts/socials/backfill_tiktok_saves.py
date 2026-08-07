@@ -11,7 +11,7 @@ from typing import Any
 import requests
 
 from trr_backend.db import pg
-from trr_backend.repositories import social_season_analytics as social_repo
+from trr_backend.socials import social_season_analytics_impl as social_repo
 from trr_backend.socials.tiktok.scraper import TikTokScraper
 from trr_backend.utils.env import load_env
 
@@ -164,8 +164,10 @@ def _extract_candidate_item(payload: Any, *, video_id: str) -> dict[str, Any] | 
 
 
 def _extract_saves_from_item(item: dict[str, Any]) -> int:
-    stats = item.get("stats") if isinstance(item.get("stats"), dict) else {}
-    stats_v2 = item.get("statsV2") if isinstance(item.get("statsV2"), dict) else {}
+    stats_raw = item.get("stats")
+    stats: dict[str, Any] = stats_raw if isinstance(stats_raw, dict) else {}
+    stats_v2_raw = item.get("statsV2")
+    stats_v2: dict[str, Any] = stats_v2_raw if isinstance(stats_v2_raw, dict) else {}
     return _coerce_non_negative_int(
         stats_v2.get("collectCount")
         or stats_v2.get("collect_count")

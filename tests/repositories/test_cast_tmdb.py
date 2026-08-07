@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
 
+from trr_backend.db.session import DbSession
 from trr_backend.repositories.cast_tmdb import CastTMDbRepositoryError, upsert_cast_tmdb
 
 
@@ -62,7 +63,7 @@ def test_upsert_cast_tmdb_normalizes_also_known_as(raw_value: Any, expected: lis
         "also_known_as": raw_value,
     }
 
-    result = upsert_cast_tmdb(db, row)
+    result = upsert_cast_tmdb(cast(DbSession, db), row)
 
     assert result == {"id": "row-1"}
     assert table.upsert_on_conflict == "person_id"
@@ -84,7 +85,7 @@ def test_upsert_cast_tmdb_adds_context_to_upsert_errors() -> None:
     }
 
     with pytest.raises(CastTMDbRepositoryError) as exc_info:
-        upsert_cast_tmdb(db, row)
+        upsert_cast_tmdb(cast(DbSession, db), row)
 
     message = str(exc_info.value)
     assert "Supabase error upserting cast_tmdb" in message
@@ -104,7 +105,7 @@ def test_upsert_cast_tmdb_adds_context_to_response_error() -> None:
     }
 
     with pytest.raises(CastTMDbRepositoryError) as exc_info:
-        upsert_cast_tmdb(db, row)
+        upsert_cast_tmdb(cast(DbSession, db), row)
 
     message = str(exc_info.value)
     assert "Supabase error upserting cast_tmdb" in message

@@ -29,10 +29,17 @@ TIKTOK_DEFAULT_MAX_POSTS: int = 10_000
 
 
 class TikTokHttpResponse(Protocol):
-    status_code: int
-    headers: Any
-    text: str
-    content: bytes
+    @property
+    def status_code(self) -> int: ...
+
+    @property
+    def headers(self) -> Any: ...
+
+    @property
+    def text(self) -> str: ...
+
+    @property
+    def content(self) -> bytes: ...
 
     def json(self) -> Any: ...
 

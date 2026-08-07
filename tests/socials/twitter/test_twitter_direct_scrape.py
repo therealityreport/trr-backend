@@ -4,7 +4,7 @@ import inspect
 import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fastapi import HTTPException
@@ -338,14 +338,17 @@ def test_syndication_filter_treats_naive_window_bounds_as_utc(monkeypatch: pytes
         }
 
     scraper = TwitterScraper()
-    scraper.session = SimpleNamespace(
-        get=lambda *_args, **_kwargs: _Response(
-            [
-                _entry("before-window", "Sat Jan 31 23:59:59 +0000 2026"),
-                _entry("start-boundary", "Sun Feb 01 00:00:00 +0000 2026"),
-                _entry("end-boundary", "Mon Feb 02 00:00:00 +0000 2026"),
-            ]
-        )
+    scraper.session = cast(
+        Any,
+        SimpleNamespace(
+            get=lambda *_args, **_kwargs: _Response(
+                [
+                    _entry("before-window", "Sat Jan 31 23:59:59 +0000 2026"),
+                    _entry("start-boundary", "Sun Feb 01 00:00:00 +0000 2026"),
+                    _entry("end-boundary", "Mon Feb 02 00:00:00 +0000 2026"),
+                ]
+            )
+        ),
     )
     monkeypatch.setattr(scraper, "_rate_limit", lambda *_args, **_kwargs: None)
 

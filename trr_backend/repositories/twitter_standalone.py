@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from trr_backend.db import pg
 from trr_backend.socials.control_plane import _adapt_payload_json_values, _pg_upsert_many
@@ -116,7 +116,7 @@ def _insert_scrape_query_run(payload: dict[str, Any], *, conn: Any | None = None
         RETURNING *
     """
     with pg.db_cursor(conn=conn) as cur:
-        return pg.fetch_one_with_cursor(cur, sql, [adapted[column] for column in columns])
+        return cast("dict[str, Any]", pg.fetch_one_with_cursor(cur, sql, [adapted[column] for column in columns]))
 
 
 def _insert_scrape_query_memberships(

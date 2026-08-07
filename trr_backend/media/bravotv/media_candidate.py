@@ -64,7 +64,8 @@ def _default_display_eligible(source: str, record: Mapping[str, Any]) -> bool:
 
 
 def _build_bridge_keys(record: Mapping[str, Any]) -> dict[str, Any]:
-    raw = record.get("raw") if isinstance(record.get("raw"), Mapping) else {}
+    raw_value = record.get("raw")
+    raw: Mapping[str, Any] = raw_value if isinstance(raw_value, Mapping) else {}
     nup_filename = _clean_str(record.get("nup_filename")) or _clean_str(raw.get("lbx_filename"))
     return _compact_dict(
         {
@@ -115,7 +116,8 @@ class MediaCandidate:
 
 def candidate_from_normalized_record(record: Mapping[str, Any]) -> MediaCandidate:
     source = str(record.get("source") or "unknown").strip().lower() or "unknown"
-    raw = dict(record.get("raw")) if isinstance(record.get("raw"), Mapping) else {}
+    raw_value = record.get("raw")
+    raw: dict[str, Any] = dict(raw_value) if isinstance(raw_value, Mapping) else {}
     review_reasons: list[str] = []
     if source == "getty":
         review_reasons.append("metadata_only")

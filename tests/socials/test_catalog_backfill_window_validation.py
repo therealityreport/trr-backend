@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
-import trr_backend.repositories.social_season_analytics as social_repo
+import trr_backend.socials.social_season_analytics_impl as social_repo
 from trr_backend.socials.social_season_analytics_impl import (
     _normalize_catalog_backfill_window,
     resolve_social_account_catalog_action_seed,
@@ -26,7 +27,7 @@ from trr_backend.socials.social_season_analytics_impl import (
         },
     ],
 )
-def test_catalog_action_seed_rejects_ambiguous_windows(kwargs: dict[str, str]) -> None:
+def test_catalog_action_seed_rejects_ambiguous_windows(kwargs: dict[str, Any]) -> None:
     with pytest.raises(ValueError):
         resolve_social_account_catalog_action_seed(**kwargs)
 

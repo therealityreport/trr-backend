@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import ValidationError
@@ -208,7 +208,10 @@ async def update_typography_set(request: Request, _: InternalAdminUser) -> Typog
             **({"name": body.name} if "name" in body.model_fields_set else {}),
             **({"area": body.area} if "area" in body.model_fields_set else {}),
             **({"seed_source": body.seed_source} if "seed_source" in body.model_fields_set else {}),
-            **({"roles": _roles_payload(body.roles)} if "roles" in body.model_fields_set else {}),
+            **cast(
+                "dict[str, Any]",
+                {"roles": _roles_payload(body.roles)} if "roles" in body.model_fields_set else {},
+            ),
         )
         if updated is None:
             raise _problem(

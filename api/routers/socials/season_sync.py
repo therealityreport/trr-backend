@@ -3,10 +3,43 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any, cast
+
 from fastapi import APIRouter
 
 from ._shared import *
 from .season_runs import *
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+
+    # These underscore-prefixed helpers are re-exported at runtime by the star
+    # imports above via each module's dynamic ``__all__``; the declarations
+    # below only make them visible to static type checkers.
+    from ._shared import (
+        _internal_error_response,
+        _is_local_or_dev_runtime,
+        _parse_platform_query,
+        _remote_worker_unavailable_message,
+        _resolve_social_execution_modes,
+        _run_admin_repo_call,
+        _social_execution_mode_deprecation_payload,
+        _start_runs_in_background,
+        _to_social_read_http_exception,
+        _value_error_to_bad_request,
+        _worker_health_detail,
+    )
+    from .season_runs import (
+        _blocked_remote_only_platforms,
+        _build_ingest_scope_payload,
+        _build_sync_session_stream_payload,
+        _execute_with_timeout,
+        _inline_execution_timeout_seconds,
+        _normalize_run_summary_payload,
+        _resolve_ingest_window,
+        _run_inline_season_ingest,
+        _social_sync_sse_chunk,
+    )
 
 router = APIRouter()
 
@@ -15,7 +48,7 @@ router = APIRouter()
 async def get_season_targets(
     season_id: UUID,
     source_scope: Literal["bravo", "network", "creator", "community", "news"] = Query(default="network"),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> dict:
     from trr_backend.socials.control_plane.dispatch_runtime import legacy as social_repo
 
@@ -72,7 +105,7 @@ async def ingest_season_social(
     season_id: UUID,
     payload: SeasonSocialIngestRequest,
     background_tasks: BackgroundTasks,
-    user: InternalAdminUser = None,
+    user: InternalAdminUser = cast(Any, None),
 ) -> dict:
     from trr_backend.socials.control_plane.runtime import (
         SocialIngestValidationError,
@@ -91,7 +124,7 @@ async def ingest_season_social(
     try:
         queue_enabled = is_queue_enabled()
         remote_plane_enforced = is_remote_job_plane_enabled()
-        blocked_platforms = _blocked_remote_only_platforms(payload.platforms)
+        blocked_platforms = _blocked_remote_only_platforms(cast("list[str] | None", payload.platforms))
         requires_modal_executor = bool(blocked_platforms)
         used_inline_fallback = False
         warnings: list[str] = []
@@ -330,7 +363,7 @@ async def ingest_season_social(
             resolved_week=resolved_week,
             date_start=resolved_date_start,
             date_end=resolved_date_end,
-            platforms=payload.platforms,
+            platforms=cast("list[str] | None", payload.platforms),
         )
         response_payload["execution_owner"] = execution_owner_label()
         response_payload["execution_mode_canonical"] = execution_mode_canonical
@@ -359,7 +392,7 @@ async def orchestrate_season_social_ingest(
     season_id: UUID,
     payload: SeasonSocialOrchestrationRequest,
     background_tasks: BackgroundTasks,
-    user: InternalAdminUser = None,
+    user: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     from trr_backend.socials.control_plane.runtime import SocialWorkerUnavailableError
     from trr_backend.socials.control_plane.worker_health import (
@@ -465,7 +498,7 @@ async def create_season_sync_session(
     payload: SeasonSocialIngestRequest,
     request: Request,
     _: BackgroundTasks,
-    user: InternalAdminUser = None,
+    user: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     from trr_backend.socials.control_plane.runtime import SocialWorkerUnavailableError
     from trr_backend.socials.control_plane.worker_health import (
@@ -485,7 +518,7 @@ async def create_season_sync_session(
         )
         queue_enabled = is_queue_enabled()
         remote_plane_enforced = is_remote_job_plane_enabled()
-        blocked_platforms = _blocked_remote_only_platforms(payload.platforms)
+        blocked_platforms = _blocked_remote_only_platforms(cast("list[str] | None", payload.platforms))
         requires_modal_executor = bool(blocked_platforms)
         if not queue_enabled and requires_modal_executor:
             raise HTTPException(
@@ -548,7 +581,7 @@ async def create_season_sync_session(
                         "worker_health": worker_health_detail,
                     },
                 ) from exc
-        resolved_date_start, resolved_date_end, _ = _resolve_ingest_window(
+        resolved_date_start, resolved_date_end, _resolved_week_unused = _resolve_ingest_window(
             season_id=sid,
             source_scope=source_scope,
             week_index=payload.week_index,
@@ -588,7 +621,7 @@ async def create_season_sync_session(
 async def get_season_sync_session(
     season_id: UUID,
     sync_session_id: UUID,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_sync_orchestrator import evaluate_sync_session
 
@@ -614,9 +647,9 @@ async def stream_season_sync_session(
     season_id: UUID,
     sync_session_id: UUID,
     request: Request,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> StreamingResponse:
-    async def event_stream() -> Any:
+    async def event_stream() -> AsyncGenerator[bytes, None]:
         sync_session_token = str(sync_session_id)
         season_token = str(season_id)
         sequence = 0
@@ -625,7 +658,8 @@ async def stream_season_sync_session(
                 break
             try:
                 payload = await _build_sync_session_stream_payload(sync_session_token)
-                session_payload = payload.get("sync_session") if isinstance(payload.get("sync_session"), dict) else {}
+                session_payload_raw = payload.get("sync_session")
+                session_payload = session_payload_raw if isinstance(session_payload_raw, dict) else {}
                 if str(session_payload.get("season_id") or "") != season_token:
                     yield _social_sync_sse_chunk(
                         "error",
@@ -675,7 +709,7 @@ async def stream_season_sync_session(
 async def cancel_season_sync_session(
     season_id: UUID,
     sync_session_id: UUID,
-    user: InternalAdminUser = None,
+    user: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_sync_orchestrator import cancel_sync_session
 
@@ -701,7 +735,7 @@ async def retry_season_sync_session(
     season_id: UUID,
     sync_session_id: UUID,
     payload: SyncSessionRetryRequest,
-    user: InternalAdminUser = None,
+    user: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_sync_orchestrator import retry_sync_session
 
@@ -743,7 +777,7 @@ async def get_season_ingest_schedule_preview(
     runner_b_start_offset_hours: int | None = Query(default=None, ge=0, le=168),
     day_weight_profile: Literal["default", "rhoslc_default"] = Query(default="default"),
     priority_mode: Literal["default", "episode_peak_weighted"] = Query(default="default"),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> dict:
     from trr_backend.socials.control_plane import preview_ingest_schedule
 

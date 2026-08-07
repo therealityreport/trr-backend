@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import argparse
 from types import SimpleNamespace
+from typing import cast
 
 import scripts.backfill.backfill_media_assets as mod
 
 
-def _base_args(**overrides):
+def _base_args(**overrides) -> argparse.Namespace:
     values = {
         "entity_type": "all",
         "table": None,
@@ -15,7 +17,7 @@ def _base_args(**overrides):
         "verbose": False,
     }
     values.update(overrides)
-    return SimpleNamespace(**values)
+    return cast(argparse.Namespace, SimpleNamespace(**values))
 
 
 def test_resolve_entity_type_supports_new_legacy_tables() -> None:

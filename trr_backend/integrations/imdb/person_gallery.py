@@ -8,13 +8,16 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlparse
 
-try:
+if TYPE_CHECKING:
     import requests
-except Exception:  # noqa: BLE001
-    requests = None
+else:
+    try:
+        import requests
+    except Exception:  # noqa: BLE001
+        requests = None
 
 from bs4 import BeautifulSoup
 
@@ -178,7 +181,8 @@ def _find_all_images(node: Any) -> Mapping[str, Any] | None:
 
 
 def _extract_page_info(all_images: Mapping[str, Any]) -> dict[str, Any]:
-    page_info = all_images.get("pageInfo") if isinstance(all_images.get("pageInfo"), Mapping) else {}
+    raw_page_info = all_images.get("pageInfo")
+    page_info: Mapping[str, Any] = raw_page_info if isinstance(raw_page_info, Mapping) else {}
     has_next = page_info.get("hasNextPage")
     if has_next is None:
         has_next = page_info.get("has_next_page")
@@ -625,8 +629,10 @@ def parse_imdb_person_mediaindex_images(html: str, imdb_person_id: str) -> list[
     best_by_id: dict[str, dict[str, Any]] = {}
 
     for img in images:
-        src = img.get("src")
-        srcset = img.get("srcset")
+        src_attr = img.get("src")
+        srcset_attr = img.get("srcset")
+        src = src_attr if isinstance(src_attr, str) else None
+        srcset = srcset_attr if isinstance(srcset_attr, str) else None
         picked, picked_width = _pick_best_candidate(srcset, src)
         picked = _normalize_image_url(picked)
         if not picked or not picked.startswith(_MEDIA_AMAZON_PREFIX):
@@ -864,7 +870,8 @@ def _extract_section_links(
         names: list[str] = []
         seen: set[str] = set()
         for link in links:
-            href = link.get("href") or ""
+            href_attr = link.get("href")
+            href = href_attr if isinstance(href_attr, str) else ""
             match = pattern.search(href)
             if not match:
                 continue

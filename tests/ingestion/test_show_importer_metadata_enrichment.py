@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Any, cast
 from unittest.mock import MagicMock
 from uuid import UUID
 
@@ -54,7 +55,7 @@ def test_show_importer_applies_show_update_patches(monkeypatch):
         dry_run=False,
         annotate_imdb_episodic=False,
         enrich_show_metadata=True,
-        supabase_client=fake_db,
+        supabase_client=cast(Any, fake_db),
     )
 
     assert result.created == 0

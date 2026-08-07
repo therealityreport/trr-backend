@@ -203,11 +203,11 @@ def test_persist_with_replies_mode_raises_error(monkeypatch: pytest.MonkeyPatch)
     """--persist is not supported in --replies or --quotes mode; expect SystemExit(2)."""
     import sys
 
+    import scripts.socials.twitter.scrape as scrape_mod
+
     # --replies + --persist
     with pytest.raises(SystemExit) as excinfo:
         monkeypatch.setattr(sys, "argv", ["scrape", "--replies", "--tweet", "123", "--persist"])
-        import scripts.socials.twitter.scrape as scrape_mod
-
         scrape_mod.main()
     assert excinfo.value.code == 2
 

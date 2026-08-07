@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -134,15 +135,18 @@ def test_record_endpoint_response_accepts_transport_agnostic_response() -> None:
 
     scraper._record_endpoint_response(  # noqa: SLF001
         endpoint="fetch_posts",
-        response=_FakeResponse(
-            status_code=200,
-            headers={
-                "content-type": "application/json",
-                "content-length": "2",
-                "x-tt-logid": "agnostic-logid",
-            },
-            text="{}",
-            content=b"{}",
+        response=cast(
+            Any,
+            _FakeResponse(
+                status_code=200,
+                headers={
+                    "content-type": "application/json",
+                    "content-length": "2",
+                    "x-tt-logid": "agnostic-logid",
+                },
+                text="{}",
+                content=b"{}",
+            ),
         ),
     )
 

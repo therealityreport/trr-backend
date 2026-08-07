@@ -164,7 +164,8 @@ def _run_modal(args: argparse.Namespace, job_id: str) -> dict[str, Any]:
 
 
 def _print_compact(payload: dict[str, Any]) -> None:
-    job = payload.get("job") if isinstance(payload.get("job"), dict) else {}
+    job_raw = payload.get("job")
+    job: dict[str, Any] = job_raw if isinstance(job_raw, dict) else {}
     print(
         "job_id={job_id} mode={mode} dry_run={dry_run} claimed={claimed} status={status} shortcode={shortcode}".format(
             job_id=payload.get("job_id"),

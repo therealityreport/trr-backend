@@ -24,6 +24,7 @@ def test_resolve_media_job_by_shortcode_filters_claimable_media_job(monkeypatch)
 
     row = cli.resolve_media_job(args)
 
+    assert row is not None
     assert row["job_id"] == "job-1"
     assert "j.status = any(%s::text[])" in captured["query"]
     assert captured["params"] == [

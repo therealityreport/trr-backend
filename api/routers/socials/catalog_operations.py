@@ -3,10 +3,28 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any, cast
+
 from fastapi import APIRouter
 
 from ._shared import *
 from .catalog_reads import *
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    # These underscore-prefixed helpers (and the ``InstagramCommentsLoadStrategy``
+    # alias) are re-exported at runtime by the star imports above via each
+    # module's dynamic ``__all__``; the imports below only make them visible to
+    # static type checkers.
+    from ._shared import (
+        _clear_account_profile_caches,
+        _lookup_error_to_not_found,
+        _require_instagram_auth_refresh_confirmation,
+        _resolve_account_profile_catalog_freshness,
+        _to_social_read_http_exception,
+        _value_error_to_bad_request,
+    )
 
 router = APIRouter()
 
@@ -19,7 +37,14 @@ def _cancel_catalog_run_in_background(
     cancelled_by: str | None,
 ) -> None:
     from trr_backend.socials.control_plane.shared_accounts import cancel_social_account_catalog_run
-    from trr_backend.socials.pipelines.account_catalog.launch import reconcile_cancelled_shared_run
+
+    if TYPE_CHECKING:
+        # ``reconcile_cancelled_shared_run`` is injected into the launch
+        # module's globals at runtime by its provider bridge, so static
+        # checkers cannot see it as an import symbol.
+        reconcile_cancelled_shared_run = cast("Callable[[str], dict[str, Any]]", None)
+    else:
+        from trr_backend.socials.pipelines.account_catalog.launch import reconcile_cancelled_shared_run
 
     normalized_platform = str(platform or "").strip().lower()
     normalized_account = str(account_handle or "").strip().lower()
@@ -76,7 +101,15 @@ class SocialAccountCompletionRetryTargetsRequest(BaseModel):
     run_id: UUID | None = None
     retry_targets: dict[str, list[dict[str, Any]]] | list[dict[str, Any]] = Field(default_factory=dict)
     source_scope: str = Field(default="network", max_length=64)
-    comments_load_strategy: InstagramCommentsLoadStrategy = Field(default="public_relay")
+    # Mirrors ``_shared.InstagramCommentsLoadStrategy``; spelled inline because
+    # the alias reaches this module through a wildcard import, which static
+    # checkers cannot treat as a type alias.
+    comments_load_strategy: Literal[
+        "instagram_comments_endpoint_cursor",
+        "cursor_api",
+        "single_session_load_all",
+        "public_relay",
+    ] = Field(default="public_relay")
     comments_worker_count: int | None = Field(default=None, ge=1, le=24)
     dispatch_immediately: bool = Field(default=True)
     dry_run: bool = Field(default=False)
@@ -182,7 +215,7 @@ def post_social_account_catalog_gap_analysis_run_route(
     platform: str,
     account_handle: str,
     request: Request,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     try:
         operation = _start_social_catalog_gap_analysis_operation(
@@ -218,7 +251,13 @@ def post_social_account_catalog_run_cancel_route(
     background_tasks: BackgroundTasks,
     user: InternalAdminUser,
 ) -> dict[str, Any]:
-    from trr_backend.socials.pipelines.account_catalog.launch import request_cancel_social_account_catalog_run
+    if TYPE_CHECKING:
+        # ``request_cancel_social_account_catalog_run`` is injected into the
+        # launch module's globals at runtime by its provider bridge, so static
+        # checkers cannot see it as an import symbol.
+        request_cancel_social_account_catalog_run = cast("Callable[..., dict[str, Any]]", None)
+    else:
+        from trr_backend.socials.pipelines.account_catalog.launch import request_cancel_social_account_catalog_run
 
     try:
         result = request_cancel_social_account_catalog_run(
@@ -297,7 +336,7 @@ def post_social_account_catalog_freshness_route(
     account_handle: str,
     force: bool = Query(default=False, description="Bypass cached freshness and run the deep live-profile probe"),
     statement_timeout_ms: int = Query(default=3000, ge=1000, le=30000),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     try:
         return _resolve_account_profile_catalog_freshness(

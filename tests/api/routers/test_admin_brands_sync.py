@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -246,7 +247,7 @@ def test_resolve_sync_target_types_falls_back_to_page_defaults() -> None:
 
 
 def test_sync_brand_logos_validates_required_scope_fields() -> None:
-    db = SimpleNamespace()
+    db: Any = SimpleNamespace()
     with pytest.raises(ValueError, match="page is required"):
         admin_brands._sync_brand_logos(
             payload=admin_brands.BrandLogosSyncRequest(scope="page", page=None),
@@ -571,7 +572,7 @@ def test_select_logo_option_skips_feature_selection_when_set_featured_false() ->
                 asset_id="asset-1",
                 set_featured=False,
             ),
-            db=object(),
+            db=cast("Any", object()),
         )
 
     assert result["selected"]["id"] == "asset-1"
@@ -608,7 +609,7 @@ def test_select_logo_option_features_candidate_when_set_featured_true() -> None:
                 ),
                 set_featured=True,
             ),
-            db=object(),
+            db=cast("Any", object()),
         )
 
     assert result["selected"]["id"] == "asset-1"
@@ -617,7 +618,7 @@ def test_select_logo_option_features_candidate_when_set_featured_true() -> None:
 
 
 def test_sync_brand_logos_reports_related_pair_metrics() -> None:
-    db = SimpleNamespace()
+    db: Any = SimpleNamespace()
     with (
         patch(
             "api.routers.admin_brands._load_sync_targets",
@@ -688,7 +689,7 @@ def test_sync_brand_logos_uses_saved_source_query_overrides() -> None:
             return [override_candidate]
         return []
 
-    db = SimpleNamespace()
+    db: Any = SimpleNamespace()
     with (
         patch(
             "api.routers.admin_brands._load_sync_targets",

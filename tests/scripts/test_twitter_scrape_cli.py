@@ -69,7 +69,7 @@ def test_cli_uses_load_env_and_passes_cookie_map_to_twikit_loader(
 
 
 def test_cli_quotes_mode_forwards_max_pages(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured_max_pages = {"value": None}
+    captured_max_pages: dict[str, int | None] = {"value": None}
 
     class _FakeScraper:
         def __init__(self, *, cookies: dict, bearer_token: str | None, twikit_credentials: dict | None):  # noqa: ARG002

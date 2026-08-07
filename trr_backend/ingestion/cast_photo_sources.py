@@ -16,14 +16,17 @@ from __future__ import annotations
 import hashlib
 import re
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 from uuid import UUID
 
-try:
+if TYPE_CHECKING:
     import requests
-except ImportError:
-    requests = None
+else:
+    try:
+        import requests
+    except ImportError:
+        requests = None
 
 
 def _canonical_url(url: str) -> str:
@@ -278,7 +281,8 @@ def _imdb_row_matches_filters(
                 return True
 
     if allowed_title_keywords:
-        title_names = row.get("title_names") if isinstance(row.get("title_names"), list) else []
+        title_names_raw = row.get("title_names")
+        title_names: list[Any] = title_names_raw if isinstance(title_names_raw, list) else []
         caption = row.get("caption")
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
         source_page_title = metadata.get("source_page_title") if isinstance(metadata, dict) else None
@@ -673,7 +677,8 @@ def fetch_imdb_cast_photos(
         reason_rank = {"solo_self": 0, "traitors_cast_group": 1, "episode_still_frame": 2}
 
         def _strict_priority(row: dict[str, Any]) -> tuple[int, int, int]:
-            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            metadata_raw = row.get("metadata")
+            metadata: dict[str, Any] = metadata_raw if isinstance(metadata_raw, dict) else {}
             reason = str(metadata.get("imdb_filter_reason") or "").strip().lower()
             rank = reason_rank.get(reason, 3)
             people_count = _imdb_row_people_count(row)

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Any
+from typing import Any, cast
 
 import requests
 
@@ -65,7 +65,8 @@ def _fetch_show_rows(db: DbSession, args: argparse.Namespace) -> list[dict[str, 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv or sys.argv[1:])
-    db = load_env_and_db()
+    # load_env_and_db defaults to skip_db=False, so it always returns a live session here.
+    db = cast(DbSession, load_env_and_db())
     api_key, bearer = _require_tmdb_auth()
 
     rows = _fetch_show_rows(db, args)

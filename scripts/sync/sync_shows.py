@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
 from scripts._sync_common import add_show_filter_args, fetch_show_rows, load_env_and_db
@@ -11,6 +12,9 @@ from trr_backend.models.shows import ShowRecord
 from trr_backend.repositories.show_images import upsert_show_images
 from trr_backend.repositories.shows import update_show
 from trr_backend.utils.array_merge import merge_int_arrays, merge_str_arrays
+
+if TYPE_CHECKING:
+    from trr_backend.db.session import DbSession
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -48,12 +52,14 @@ def _build_show_records(show_rows: list[dict[str, object]]) -> list[ShowRecord]:
             show_uuid = UUID(str(show_id))
         except Exception:
             continue
+        description = row.get("description")
+        premiere_date = row.get("premiere_date")
         records.append(
             ShowRecord(
                 id=show_uuid,
                 name=str(row.get("name") or ""),
-                description=row.get("description") if isinstance(row.get("description"), str) else None,
-                premiere_date=row.get("premiere_date") if isinstance(row.get("premiere_date"), str) else None,
+                description=description if isinstance(description, str) else None,
+                premiere_date=premiere_date if isinstance(premiere_date, str) else None,
                 imdb_id=_extract_imdb_id(row),
                 tmdb_id=_extract_tmdb_id(row),
             )
@@ -66,7 +72,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.skip_db:
         print("ERROR: --skip-db is not supported for this script (database access required).", file=sys.stderr)
         return 2
-    db = load_env_and_db()
+    # load_env_and_db defaults to skip_db=False, so it always returns a live session here.
+    db = cast("DbSession", load_env_and_db())
 
     show_rows = fetch_show_rows(db, args)
     if not show_rows:

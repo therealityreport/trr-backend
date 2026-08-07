@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any, cast
 
+from trr_backend.db.session import DbSession
 from trr_backend.repositories import show_images as show_images_repo
 
 
 class _FakeQuery:
-    def __init__(self, table_name: str, responses: dict[str, list[dict[str, object]]], log: dict[str, object]) -> None:
+    def __init__(self, table_name: str, responses: dict[str, list[dict[str, object]]], log: dict[str, Any]) -> None:
         self.table_name = table_name
         self.responses = responses
         self.log = log
@@ -44,7 +46,7 @@ class _FakeQuery:
 
 
 class _FakeSchema:
-    def __init__(self, responses: dict[str, list[dict[str, object]]], log: dict[str, object]) -> None:
+    def __init__(self, responses: dict[str, list[dict[str, object]]], log: dict[str, Any]) -> None:
         self.responses = responses
         self.log = log
 
@@ -53,7 +55,7 @@ class _FakeSchema:
 
 
 class _FakeDb:
-    def __init__(self, responses: dict[str, list[dict[str, object]]], log: dict[str, object]) -> None:
+    def __init__(self, responses: dict[str, list[dict[str, object]]], log: dict[str, Any]) -> None:
         self.responses = responses
         self.log = log
 
@@ -62,7 +64,7 @@ class _FakeDb:
 
 
 def test_fetch_show_images_missing_hosted_applies_imdb_filter_and_selects_joined_show_metadata() -> None:
-    log: dict[str, object] = {}
+    log: dict[str, Any] = {}
     db = _FakeDb(
         {
             "shows": [{"id": "show-1"}],
@@ -77,7 +79,7 @@ def test_fetch_show_images_missing_hosted_applies_imdb_filter_and_selects_joined
         log,
     )
 
-    rows = show_images_repo.fetch_show_images_missing_hosted(db, source="tmdb", imdb_id="tt1234567")
+    rows = show_images_repo.fetch_show_images_missing_hosted(cast(DbSession, db), source="tmdb", imdb_id="tt1234567")
 
     assert rows == [{"id": "img-1", "show_id": "show-1", "shows": {"imdb_id": "tt1234567"}}]
     assert log["selects"]["show_images"].count("shows(imdb_id)") == 1

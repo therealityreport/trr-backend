@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 from trr_backend.db import pg
 from trr_backend.repositories import person_external_ids
@@ -55,7 +55,7 @@ def get_person_external_ids(
     )
     if not rows:
         return None, 1
-    return _map_person_records(rows), 1
+    return _map_person_records(cast("list[Mapping[str, Any]]", rows)), 1
 
 
 def list_person_external_ids_by_person_ids(

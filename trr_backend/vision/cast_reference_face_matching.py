@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Sequence
-from typing import Any
+from importlib import import_module
+from typing import Any, cast
 
 from trr_backend.services.face_reference_contract import (
     FACE_REFERENCE_EMBEDDING_CONTRACT_KEY,
@@ -15,7 +16,7 @@ from trr_backend.services.face_reference_contract import (
 
 logger = logging.getLogger(__name__)
 
-_face_analysis_model: object | None = None
+_face_analysis_model: Any | None = None
 _face_analysis_last_error: str | None = None
 _face_analysis_provider_selected: str | None = None
 
@@ -78,7 +79,7 @@ def _face_model_profile_candidates() -> list[str]:
     return deduped
 
 
-def get_face_analysis_model() -> object | None:
+def get_face_analysis_model() -> Any | None:
     global _face_analysis_last_error, _face_analysis_model, _face_analysis_provider_selected
 
     if _face_analysis_model is not None:
@@ -88,7 +89,8 @@ def get_face_analysis_model() -> object | None:
         return None
 
     try:
-        from insightface.app import FaceAnalysis
+        insightface_app: Any = import_module("insightface.app")
+        face_analysis_class = insightface_app.FaceAnalysis
     except Exception as exc:  # noqa: BLE001
         _face_analysis_last_error = str(exc)
         return None
@@ -96,7 +98,7 @@ def get_face_analysis_model() -> object | None:
     det_size = (640, 640)
     for profile in _face_model_profile_candidates():
         try:
-            model = FaceAnalysis(name=profile)
+            model = face_analysis_class(name=profile)
             model.prepare(ctx_id=-1, det_size=det_size)
             _face_analysis_model = model
             providers = getattr(model, "providers", None)
@@ -130,7 +132,7 @@ def extract_face_embedding(face: object) -> Any:
         arr = np.asarray(candidate, dtype=np.float32).reshape(-1)
         if getattr(arr, "size", 0) != FACE_REFERENCE_EMBEDDING_DIMENSIONS:
             continue
-        normalized = normalize_embedding(arr)
+        normalized = normalize_embedding(cast("Sequence[float]", arr))
         return np.asarray(normalized, dtype=np.float32)
     return None
 

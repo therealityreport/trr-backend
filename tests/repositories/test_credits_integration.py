@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -36,7 +37,7 @@ def db_client():
 
 
 @pytest.fixture
-def test_show(db_client) -> dict[str, Any]:
+def test_show(db_client) -> Iterator[dict[str, Any]]:
     """Create a test show and clean up after."""
     show_id = str(uuid.uuid4())
     show_data = {
@@ -57,7 +58,7 @@ def test_show(db_client) -> dict[str, Any]:
 
 
 @pytest.fixture
-def test_season(db_client, test_show) -> dict[str, Any]:
+def test_season(db_client, test_show) -> Iterator[dict[str, Any]]:
     """Create a test season."""
     season_id = str(uuid.uuid4())
     season_data = {
@@ -74,7 +75,7 @@ def test_season(db_client, test_show) -> dict[str, Any]:
 
 
 @pytest.fixture
-def test_episodes(db_client, test_show, test_season) -> list[dict[str, Any]]:
+def test_episodes(db_client, test_show, test_season) -> Iterator[list[dict[str, Any]]]:
     """Create two test episodes."""
     episodes = []
     for i in range(1, 3):
@@ -97,7 +98,7 @@ def test_episodes(db_client, test_show, test_season) -> list[dict[str, Any]]:
 
 
 @pytest.fixture
-def test_people(db_client) -> list[dict[str, Any]]:
+def test_people(db_client) -> Iterator[list[dict[str, Any]]]:
     """Create two test people and clean up after."""
     people = []
     for i in range(1, 3):
@@ -119,7 +120,7 @@ def test_people(db_client) -> list[dict[str, Any]]:
 
 
 @pytest.fixture
-def test_credits(db_client, test_show, test_people) -> list[dict[str, Any]]:
+def test_credits(db_client, test_show, test_people) -> Iterator[list[dict[str, Any]]]:
     """Create test credits for each person on the show."""
     credits = []
     for i, person in enumerate(test_people):
@@ -142,7 +143,7 @@ def test_credits(db_client, test_show, test_people) -> list[dict[str, Any]]:
 
 
 @pytest.fixture
-def test_occurrences(db_client, test_credits, test_episodes) -> list[dict[str, Any]]:
+def test_occurrences(db_client, test_credits, test_episodes) -> Iterator[list[dict[str, Any]]]:
     """Create credit occurrences: person 1 in both episodes, person 2 in episode 1 only."""
     occurrences = []
 

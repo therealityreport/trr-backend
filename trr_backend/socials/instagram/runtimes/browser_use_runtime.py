@@ -57,7 +57,9 @@ class BrowserUseRuntime:
 
     def healthcheck(self) -> RuntimeHealth:
         try:
-            import browser_use  # noqa: F401
+            # Optional dependency: resolved via builtins.__import__ so tests can
+            # intercept it; the module is not statically resolvable here.
+            __import__("browser_use")
         except ImportError as exc:
             return RuntimeHealth(
                 healthy=False,

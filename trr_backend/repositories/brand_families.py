@@ -5,7 +5,7 @@ import logging
 import re
 from collections import defaultdict
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from urllib.parse import unquote, urljoin, urlparse, urlunparse
 
 import requests
@@ -153,7 +153,7 @@ def _member_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
         "entity_key": str(row.get("entity_key") or ""),
         "entity_display_name": str(row.get("entity_display_name") or ""),
         "source": str(row.get("source") or "manual"),
-        "confidence": float(row.get("confidence")) if row.get("confidence") is not None else None,
+        "confidence": float(cast(Any, row.get("confidence"))) if row.get("confidence") is not None else None,
         "metadata": row.get("metadata") if isinstance(row.get("metadata"), dict) else {},
         "created_by": str(row.get("created_by") or "") or None,
         "updated_by": str(row.get("updated_by") or "") or None,
@@ -1240,7 +1240,8 @@ def _wiki_api_wikidata_id(url: str) -> str | None:
     for page in pages.values():
         if not isinstance(page, dict):
             continue
-        pageprops = page.get("pageprops") if isinstance(page.get("pageprops"), dict) else {}
+        pageprops_raw = page.get("pageprops")
+        pageprops: dict[str, Any] = pageprops_raw if isinstance(pageprops_raw, dict) else {}
         wikibase_item = _normalize_text(pageprops.get("wikibase_item"))
         if wikibase_item:
             return wikibase_item.upper()

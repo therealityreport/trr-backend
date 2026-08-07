@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from trr_backend.services import retained_cast_screentime_runtime as runtime
 
@@ -72,7 +73,7 @@ def test_run_screentime_analysis_persists_retained_outputs_and_finalizes(monkeyp
         "effective_runtime_seconds": 40.0,
     }
 
-    update_calls: list[dict[str, object]] = []
+    update_calls: list[dict[str, Any]] = []
     artifact_payloads: list[list[dict[str, object]]] = []
     uploaded_evidence: list[tuple[str, bytes, str]] = []
 
@@ -244,7 +245,7 @@ def test_generate_segment_clip_persists_backend_generated_clip(monkeypatch) -> N
         "duration_ms": 3000,
         "metadata": {"display_name": "Person One"},
     }
-    persisted_evidence: list[list[dict[str, object]]] = []
+    persisted_evidence: list[list[dict[str, Any]]] = []
     uploaded_clips: list[tuple[str, bytes, str]] = []
 
     monkeypatch.setattr(runtime, "load_run_contract", lambda run_id: dict(run_contract, id=run_id))

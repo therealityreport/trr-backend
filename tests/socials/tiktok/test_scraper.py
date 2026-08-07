@@ -3,7 +3,7 @@
 import builtins
 from datetime import datetime
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 from trr_backend.socials.tiktok.scraper import TikTokScrapeConfig, TikTokScraper
 
@@ -509,7 +509,7 @@ def _reply_payload(reply_ids: list[str], *, has_more: bool = True, cursor: int =
 
 def _comment_scraper_with_session(session: _CommentApiSession, monkeypatch) -> TikTokScraper:
     scraper = TikTokScraper(cookies={"sessionid": "cookie"}, direct_comment_api_enabled_override=True)
-    scraper.session = session
+    scraper.session = cast(Any, session)
     monkeypatch.setattr(scraper, "_rate_limit", lambda *_args, **_kwargs: None)
     return scraper
 

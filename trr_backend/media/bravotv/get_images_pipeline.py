@@ -8,7 +8,7 @@ from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote, urlparse
 
 import httpx
@@ -130,7 +130,7 @@ def _normalize_sources(sources: Sequence[str] | str | None, *, mode: str) -> lis
 
 
 def _selected_source_families(selection: Sequence[str], *, mode: str) -> list[str]:
-    base_allowed = list(PERSON_SOURCE_FAMILIES if mode == "person" else SHOW_SOURCE_FAMILIES)
+    base_allowed: list[str] = list(PERSON_SOURCE_FAMILIES if mode == "person" else SHOW_SOURCE_FAMILIES)
     if "all" in selection:
         return base_allowed
     allowed = base_allowed + list(DIRECT_GETTY_FAMILY_ARTIFACTS)
@@ -382,7 +382,7 @@ def _split_caption_people(value: str | None) -> list[str]:
 def _collect_known_people_names(raw_payloads: Mapping[str, Any]) -> list[str]:
     names: list[str] = []
     seen: set[str] = set()
-    getty_rows = raw_payloads.get("getty") if isinstance(raw_payloads.get("getty"), list) else []
+    getty_rows = cast("list[Any]", raw_payloads.get("getty")) if isinstance(raw_payloads.get("getty"), list) else []
     for asset in getty_rows:
         people = asset.get("people") if isinstance(asset, dict) else None
         if isinstance(people, list):
@@ -397,13 +397,13 @@ def _collect_known_people_names(raw_payloads: Mapping[str, Any]) -> list[str]:
             if candidate.casefold() not in seen:
                 seen.add(candidate.casefold())
                 names.append(candidate)
-    nbcumv_rows = raw_payloads.get("nbcumv") if isinstance(raw_payloads.get("nbcumv"), list) else []
+    nbcumv_rows = cast("list[Any]", raw_payloads.get("nbcumv")) if isinstance(raw_payloads.get("nbcumv"), list) else []
     for asset in nbcumv_rows:
         for candidate in _split_caption_people(asset.get("lbx_caption") if isinstance(asset, dict) else None):
             if candidate.casefold() not in seen:
                 seen.add(candidate.casefold())
                 names.append(candidate)
-    bravo_rows = raw_payloads.get("bravo") if isinstance(raw_payloads.get("bravo"), list) else []
+    bravo_rows = cast("list[Any]", raw_payloads.get("bravo")) if isinstance(raw_payloads.get("bravo"), list) else []
     for asset in bravo_rows:
         people_names = asset.get("gallery_people_names") if isinstance(asset, dict) else None
         if isinstance(people_names, list):
@@ -412,7 +412,9 @@ def _collect_known_people_names(raw_payloads: Mapping[str, Any]) -> list[str]:
                 if name and name.casefold() not in seen:
                     seen.add(name.casefold())
                     names.append(name)
-    peacock_rows = raw_payloads.get("peacock") if isinstance(raw_payloads.get("peacock"), list) else []
+    peacock_rows = (
+        cast("list[Any]", raw_payloads.get("peacock")) if isinstance(raw_payloads.get("peacock"), list) else []
+    )
     for asset in peacock_rows:
         people_names = asset.get("people_names") if isinstance(asset, dict) else None
         if isinstance(people_names, list):
@@ -592,7 +594,9 @@ def _normalize_getty_record(asset: dict[str, Any], *, known_people: Sequence[str
             break
     if season_number is None:
         season_number = _parse_season_from_text(asset.get("event_name"))
-    dimensions = asset.get("assetDimensions") if isinstance(asset.get("assetDimensions"), dict) else {}
+    dimensions = (
+        cast("dict[str, Any]", asset.get("assetDimensions")) if isinstance(asset.get("assetDimensions"), dict) else {}
+    )
     return {
         "source": "getty",
         "source_id": _best_text(asset.get("editorial_id"), detail_url),
@@ -729,7 +733,7 @@ def _normalize_peacock_record(asset: dict[str, Any], *, known_people: Sequence[s
 def _normalize_candidate_records(raw_payloads: Mapping[str, Any]) -> list[dict[str, Any]]:
     known_people = _collect_known_people_names(raw_payloads)
     normalized: list[dict[str, Any]] = []
-    for asset in raw_payloads.get("getty") if isinstance(raw_payloads.get("getty"), list) else []:
+    for asset in cast("list[Any]", raw_payloads.get("getty")) if isinstance(raw_payloads.get("getty"), list) else []:
         if isinstance(asset, dict):
             record = _normalize_getty_record(asset, known_people=known_people)
             candidate = candidate_from_normalized_record(record).to_dict()
@@ -738,7 +742,7 @@ def _normalize_candidate_records(raw_payloads: Mapping[str, Any]) -> list[dict[s
             record["display_eligible"] = candidate["display_eligible"]
             record["bridge_keys"] = candidate["bridge_keys"]
             normalized.append(record)
-    for asset in raw_payloads.get("nbcumv") if isinstance(raw_payloads.get("nbcumv"), list) else []:
+    for asset in cast("list[Any]", raw_payloads.get("nbcumv")) if isinstance(raw_payloads.get("nbcumv"), list) else []:
         if isinstance(asset, dict):
             record = _normalize_nbcumv_record(asset, known_people=known_people)
             candidate = candidate_from_normalized_record(record).to_dict()
@@ -747,7 +751,7 @@ def _normalize_candidate_records(raw_payloads: Mapping[str, Any]) -> list[dict[s
             record["display_eligible"] = candidate["display_eligible"]
             record["bridge_keys"] = candidate["bridge_keys"]
             normalized.append(record)
-    for asset in raw_payloads.get("bravo") if isinstance(raw_payloads.get("bravo"), list) else []:
+    for asset in cast("list[Any]", raw_payloads.get("bravo")) if isinstance(raw_payloads.get("bravo"), list) else []:
         if isinstance(asset, dict):
             record = _normalize_bravo_record(asset, known_people=known_people)
             candidate = candidate_from_normalized_record(record).to_dict()
@@ -756,7 +760,9 @@ def _normalize_candidate_records(raw_payloads: Mapping[str, Any]) -> list[dict[s
             record["display_eligible"] = candidate["display_eligible"]
             record["bridge_keys"] = candidate["bridge_keys"]
             normalized.append(record)
-    for asset in raw_payloads.get("peacock") if isinstance(raw_payloads.get("peacock"), list) else []:
+    for asset in (
+        cast("list[Any]", raw_payloads.get("peacock")) if isinstance(raw_payloads.get("peacock"), list) else []
+    ):
         if isinstance(asset, dict):
             record = _normalize_peacock_record(asset, known_people=known_people)
             candidate = candidate_from_normalized_record(record).to_dict()
@@ -1072,7 +1078,7 @@ def acquire_best_image(record: dict[str, Any]) -> dict[str, Any]:
     per_source = record.get("per_source") if isinstance(record.get("per_source"), dict) else {}
     nbcumv_record = per_source.get("nbcumv") if isinstance(per_source, dict) else None
     if isinstance(nbcumv_record, dict):
-        raw = nbcumv_record.get("raw") if isinstance(nbcumv_record.get("raw"), dict) else {}
+        raw = cast("dict[str, Any]", nbcumv_record.get("raw")) if isinstance(nbcumv_record.get("raw"), dict) else {}
         lbx_id = str(raw.get("lbx_id") or "").strip()
         filename = str(raw.get("lbx_filename") or "").strip()
         if lbx_id and filename:
@@ -1198,11 +1204,15 @@ def _normalize_external_ids(person_name: str) -> dict[str, Any]:
     if not rows:
         return {}
     row = rows[0] if isinstance(rows[0], dict) else {}
-    external_ids = row.get("external_ids") if isinstance(row.get("external_ids"), dict) else {}
+    external_ids = cast("dict[str, Any]", row.get("external_ids")) if isinstance(row.get("external_ids"), dict) else {}
     return {
         "person_id": row.get("id"),
         "imdb_id": str(external_ids.get("imdb") or "").strip() or None,
-        "tmdb_id": int(external_ids.get("tmdb")) if str(external_ids.get("tmdb") or "").strip().isdigit() else None,
+        "tmdb_id": (
+            int(cast("str | int", external_ids.get("tmdb")))
+            if str(external_ids.get("tmdb") or "").strip().isdigit()
+            else None
+        ),
     }
 
 
@@ -1359,7 +1369,7 @@ def _filter_nbcumv_show_assets(
         if season is not None:
             season_value = asset.get("lbx_seasonNumber") or asset.get("lbx_season")
             try:
-                if int(season_value) != int(season):
+                if int(cast("str | int", season_value)) != int(season):
                     continue
             except (TypeError, ValueError):
                 continue
@@ -1413,7 +1423,7 @@ def _nbcumv_asset_matches_scope(
     if show_name:
         show_values = [
             asset.get("lbx_showTitle"),
-            *(asset.get("showTitles") if isinstance(asset.get("showTitles"), list) else []),
+            *(cast("list[Any]", asset.get("showTitles")) if isinstance(asset.get("showTitles"), list) else []),
         ]
         if not any(_text_contains(value, show_name) for value in show_values):
             return False
@@ -1421,7 +1431,7 @@ def _nbcumv_asset_matches_scope(
         asset.get("lbx_caption"),
         asset.get("lbx_headline"),
         asset.get("lbx_keywords"),
-        *(asset.get("keywords") if isinstance(asset.get("keywords"), list) else []),
+        *(cast("list[Any]", asset.get("keywords")) if isinstance(asset.get("keywords"), list) else []),
     ]
     return any(_text_contains_person_name(value, person_name) for value in person_values)
 
@@ -1954,7 +1964,7 @@ def _assign_to_people(merged_catalog: list[dict[str, Any]], *, output_dir: Path)
     )[:25]
     total_images = len(merged_catalog)
     for item in top_people:
-        item["pct"] = f"{(item['image_count'] / total_images * 100):.1f}%" if total_images else "0.0%"
+        item["pct"] = f"{(cast(int, item['image_count']) / total_images * 100):.1f}%" if total_images else "0.0%"
     return {
         "total_images": total_images,
         "persons_identified": len(top_people),
@@ -1978,7 +1988,9 @@ def _build_source_distribution_report(
         for source in record.get("sources") or []:
             source_counts[str(source)] += 1
         strategy_counts[str(record.get("bridge_strategy") or "unknown")] += 1
-        acquisition = record.get("acquisition") if isinstance(record.get("acquisition"), dict) else {}
+        acquisition = (
+            cast("dict[str, Any]", record.get("acquisition")) if isinstance(record.get("acquisition"), dict) else {}
+        )
         if acquisition.get("watermarked") is True:
             watermarked += 1
         if acquisition.get("status") == "uploaded":

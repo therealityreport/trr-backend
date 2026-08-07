@@ -77,15 +77,18 @@ def test_runner_source_keeps_the_exact_function_scoped_import_signature_and_repo
     arguments = runner.args
     assert arguments.posonlyargs == []
     assert [argument.arg for argument in arguments.args] == ["job"]
+    assert arguments.args[0].annotation is not None
     assert ast.unparse(arguments.args[0].annotation) == "dict[str, Any]"
     assert arguments.defaults == []
     assert arguments.vararg is None
     assert [argument.arg for argument in arguments.kwonlyargs] == ["worker_id"]
+    assert arguments.kwonlyargs[0].annotation is not None
     assert ast.unparse(arguments.kwonlyargs[0].annotation) == "str | None"
     assert len(arguments.kw_defaults) == 1
     assert isinstance(arguments.kw_defaults[0], ast.Constant)
     assert arguments.kw_defaults[0].value is None
     assert arguments.kwarg is None
+    assert runner.returns is not None
     assert ast.unparse(runner.returns) == "dict[str, Any]"
 
     repo_attributes = {

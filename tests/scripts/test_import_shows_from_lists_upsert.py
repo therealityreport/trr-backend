@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 from trr_backend.ingestion.show_importer import upsert_candidates_into_supabase
@@ -9,7 +10,7 @@ from trr_backend.ingestion.shows_from_lists import CandidateShow
 def test_upsert_candidates_inserts_when_missing(monkeypatch):
     from trr_backend.ingestion import show_importer as mod
 
-    fake_db = object()
+    fake_db = cast(Any, object())
     monkeypatch.setattr(mod, "assert_core_shows_table_exists", lambda *args, **kwargs: None)
     monkeypatch.setattr(mod, "find_show_by_imdb_id", lambda *args, **kwargs: None)
     monkeypatch.setattr(mod, "find_show_by_tmdb_id", lambda *args, **kwargs: None)
@@ -55,7 +56,7 @@ def test_upsert_candidates_updates_show_columns_without_clobber(monkeypatch):
         "listed_on": ["old-source"],
     }
 
-    fake_db = object()
+    fake_db = cast(Any, object())
     monkeypatch.setattr(mod, "find_show_by_imdb_id", lambda *args, **kwargs: existing)
     monkeypatch.setattr(mod, "find_show_by_tmdb_id", lambda *args, **kwargs: None)
     monkeypatch.setattr(mod, "insert_show", MagicMock())
@@ -103,7 +104,7 @@ def test_upsert_candidates_updates_show_columns_without_clobber(monkeypatch):
 def test_upsert_candidates_avoids_removed_show_social_columns(monkeypatch):
     from trr_backend.ingestion import show_importer as mod
 
-    fake_db = object()
+    fake_db = cast(Any, object())
     monkeypatch.setattr(mod, "assert_core_shows_table_exists", lambda *args, **kwargs: None)
     monkeypatch.setattr(mod, "_now_utc_iso", lambda: "2026-02-28T00:00:00Z")
 

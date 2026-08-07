@@ -7,6 +7,7 @@ import json
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any, cast
 
 try:
     from trr_backend.db import pg
@@ -41,7 +42,7 @@ def _normalize_run_id(run_id: str) -> str:
 
 
 def _fetch_run(run_id: str, *, conn: object | None = None) -> dict[str, object]:
-    kwargs = {"conn": conn} if conn is not None else {}
+    kwargs: dict[str, Any] = {"conn": conn} if conn is not None else {}
     run = pg.fetch_one(
         """
         select
@@ -61,7 +62,7 @@ def _fetch_run(run_id: str, *, conn: object | None = None) -> dict[str, object]:
 
 
 def _fetch_open_jobs(run_id: str, *, conn: object | None = None) -> list[dict[str, object]]:
-    kwargs = {"conn": conn} if conn is not None else {}
+    kwargs: dict[str, Any] = {"conn": conn} if conn is not None else {}
     return pg.fetch_all(
         """
         select
@@ -175,7 +176,7 @@ def _fetch_summary_counters(run_id: str, *, conn: object | None = None) -> dict[
         from job_rows
         """,
         [run_id, sorted(ACTIVE_JOB_COUNTER_STATUSES), sorted(ACTIVE_JOB_COUNTER_STATUSES)],
-        conn=conn,
+        conn=cast(Any, conn),
     )
     if not row:
         return {
@@ -204,7 +205,7 @@ def _run_lock_key(run_id: str) -> int:
 
 def _normalize_non_negative_int(value: object) -> int:
     try:
-        return max(0, int(value or 0))
+        return max(0, int(cast(Any, value) or 0))
     except (TypeError, ValueError):
         return 0
 

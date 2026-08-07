@@ -22,7 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from trr_backend.db import pg  # noqa: E402
-from trr_backend.repositories import social_season_analytics as repo  # noqa: E402
+from trr_backend.socials import social_season_analytics_impl as repo  # noqa: E402
 from trr_backend.socials.instagram.post_normalizer import normalize_instagram_post  # noqa: E402
 
 

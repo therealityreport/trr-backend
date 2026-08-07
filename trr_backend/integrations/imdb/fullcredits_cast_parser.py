@@ -10,7 +10,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from trr_backend.integrations.imdb.credits_client import ImdbTitleCredits
@@ -448,7 +448,8 @@ def _extract_cast_group_id_from_soup(soup: BeautifulSoup) -> str | None:
     for span in soup.find_all("span", id=_IMDB_CAST_GROUP_ID_RE):
         label = span.get_text(strip=True)
         if label and label.casefold() == "cast":
-            return span.get("id")
+            span_id = span.get("id")
+            return span_id if isinstance(span_id, str) else None
 
     return None
 
@@ -695,7 +696,8 @@ def _parse_cast_items_from_legacy_table(
         name_anchor = row.find("a", href=re.compile(r"/name/nm\d+", re.IGNORECASE))
         if not name_anchor:
             continue
-        name_id = _extract_imdb_name_id(name_anchor.get("href"))
+        name_href = name_anchor.get("href")
+        name_id = _extract_imdb_name_id(name_href if isinstance(name_href, str) else None)
         name = name_anchor.get_text(strip=True)
         if not name_id or not name:
             continue
@@ -737,7 +739,8 @@ def parse_fullcredits_html(html: str, *, series_id: str | None = None) -> FullCr
 
     cast_section = None
     if job_category_id:
-        cast_section = soup.find(attrs={"data-testid": f"sub-section-{job_category_id}"})
+        testid_attrs: dict[str, Any] = {"data-testid": f"sub-section-{job_category_id}"}
+        cast_section = soup.find(name=None, attrs=testid_attrs)
 
     cast_rows: list[CastRow] = []
     if cast_section is not None:
@@ -1154,7 +1157,8 @@ def _try_graphql_fetch(
     )
 
     # Create client with optional extra headers
-    graphql_client = ImdbGraphQLPersistedClient(extra_headers=extra_headers or {})
+    # The client only reads headers, so passing a Mapping through is safe; cast keeps runtime identical.
+    graphql_client = ImdbGraphQLPersistedClient(extra_headers=cast("dict[str, str]", extra_headers or {}))
 
     # Fetch all credits (unfiltered)
     all_edges = fetch_title_credits_paginated_v2(series_id, client=graphql_client)

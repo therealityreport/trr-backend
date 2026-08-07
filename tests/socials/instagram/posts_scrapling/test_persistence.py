@@ -5,7 +5,7 @@ import subprocess
 import sys
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -496,7 +496,7 @@ def test_persist_instagram_posts_tracks_skip_reasons_and_accumulates_job_metadat
         del label
         yield fake_conn
 
-    captured_updates: list[dict[str, object]] = []
+    captured_updates: list[dict[str, Any]] = []
     captured_queries: list[tuple[str, object | None]] = []
     fake_conn = object()
 
@@ -536,7 +536,7 @@ def test_persist_instagram_posts_tracks_skip_reasons_and_accumulates_job_metadat
     result = persist_instagram_posts(
         account_handle="traitors",
         post_nodes=[
-            "not-a-dict",
+            cast("dict[str, Any]", "not-a-dict"),
             {"__typename": "GraphImage"},
             {
                 "shortcode": "keep-me",
@@ -600,7 +600,7 @@ def test_persist_instagram_posts_merges_existing_reverse_diagnostics_under_row_l
 
     fake_conn = object()
     captured_queries: list[tuple[str, object | None]] = []
-    captured_updates: list[dict[str, object]] = []
+    captured_updates: list[dict[str, Any]] = []
 
     @contextmanager
     def _fake_conn(*, label: str | None = None):
@@ -635,7 +635,7 @@ def test_persist_instagram_posts_merges_existing_reverse_diagnostics_under_row_l
     result = persist_instagram_posts(
         account_handle="traitors",
         post_nodes=[
-            "not-a-dict",
+            cast("dict[str, Any]", "not-a-dict"),
             {"__typename": "GraphImage"},
         ],
         run_id="run-1",
@@ -674,7 +674,7 @@ def test_persist_instagram_posts_persists_inline_comment_samples(
         yield object()
 
     captured_comment_batches: list[tuple[str, list[Any]]] = []
-    captured_updates: list[dict[str, object]] = []
+    captured_updates: list[dict[str, Any]] = []
     fake_context = object()
 
     monkeypatch.setattr(pg, "db_connection", _fake_conn)

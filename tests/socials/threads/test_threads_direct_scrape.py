@@ -24,7 +24,7 @@ class _FakeScraper:
         self.cookies = cookies
         self.posts = list(posts or [])
         self.error = error
-        self.config: Any | None = None
+        self.config: Any = None
         self.last_retrieval_meta = {"source": "threads_graphql_api", "pages_scanned": 1}
 
     def scrape(self, config: Any) -> list[Any]:

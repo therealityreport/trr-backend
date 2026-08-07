@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs, unquote, urlparse
 from uuid import UUID
 
@@ -399,7 +399,9 @@ def insert_growth_snapshot(
         raise RuntimeError("SocialBlade snapshot insert returned no rows")
     row = dict(rows[0])
     scraped_at_raw = row.get("scraped_at")
-    row["scraped_at"] = scraped_at_raw.isoformat() if hasattr(scraped_at_raw, "isoformat") else scraped_at_raw
+    row["scraped_at"] = (
+        cast(Any, scraped_at_raw).isoformat() if hasattr(scraped_at_raw, "isoformat") else scraped_at_raw
+    )
     return row
 
 
@@ -505,7 +507,9 @@ def _row_to_response(row: dict[str, Any]) -> dict[str, Any]:
     previous_run = _build_previous_run_snapshot(raw_response.get("previous_run"))
     account_handle = str(row.get("account_handle") or row.get("instagram_handle") or "").strip()
     scraped_at_raw = row.get("scraped_at")
-    scraped_at_value = scraped_at_raw.isoformat() if hasattr(scraped_at_raw, "isoformat") else str(scraped_at_raw or "")
+    scraped_at_value = (
+        cast(Any, scraped_at_raw).isoformat() if hasattr(scraped_at_raw, "isoformat") else str(scraped_at_raw or "")
+    )
     freshness_status = "missing"
     is_stale = True
     age_hours: float | None = None

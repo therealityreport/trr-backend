@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from types import ModuleType
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -333,10 +334,11 @@ class TestRedisBroker:
 
             status = broker.status()
             assert status["connected"] is False
-            assert status["last_error"]["type"] == "OSError"
-            assert "cache.example.com" not in status["last_error"]["message"]
-            assert "secret" not in status["last_error"]["message"]
-            assert "<redis-host>" in status["last_error"]["message"]
+            last_error: Any = status["last_error"]
+            assert last_error["type"] == "OSError"
+            assert "cache.example.com" not in last_error["message"]
+            assert "secret" not in last_error["message"]
+            assert "<redis-host>" in last_error["message"]
 
         _run_async(_test())
 
@@ -350,7 +352,8 @@ class TestRedisBroker:
 
         assert status["initialized"] is False
         assert status["mode"] == "redis"
-        assert status["redis"]["host_class"] == "local"
+        redis_status: Any = status["redis"]
+        assert redis_status["host_class"] == "local"
         assert status["multi_worker_policy"] == {
             "workers_requested": 3,
             "require_redis_for_multi_worker": True,

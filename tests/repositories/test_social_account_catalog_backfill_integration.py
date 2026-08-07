@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 from dotenv import load_dotenv
 
-import trr_backend.repositories.social_season_analytics as social_repo
+import trr_backend.socials.social_season_analytics_impl as social_repo
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_DB_TESTS", "").lower() not in ("1", "true", "yes"),

@@ -14,6 +14,7 @@ attribute bug should crash loudly), which is asserted at the unit level here.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -32,7 +33,7 @@ def _result(
     observed,
     fetch_reason: str = "",
     diagnostic_metadata: dict | None = None,
-) -> SimpleNamespace:
+) -> Any:
     return SimpleNamespace(
         fetch_failed=False,
         auth_failed=False,

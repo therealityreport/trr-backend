@@ -207,6 +207,7 @@ def test_resolve_post_detail_contract(monkeypatch) -> None:
     )
 
     assert query_count == 1
+    assert payload is not None
     assert payload["reddit_post_id"] == "post-1"
     assert payload["detail_slug"].startswith("my-title--u-bravofan")
 
@@ -416,6 +417,7 @@ def test_get_reddit_post_details_by_community_and_season_contract(monkeypatch) -
     )
 
     assert query_count == 7
+    assert payload is not None
     assert payload["reddit_post_id"] == "post-1"
     assert payload["comment_summary"]["reply_comments"] == 1
     assert payload["media_summary"]["mirrored_media"] == 1

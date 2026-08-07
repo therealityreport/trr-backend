@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import socket
-from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -105,7 +105,7 @@ def test_safe_requests_get_revalidates_redirect_targets() -> None:
             return None
 
     class _FakeClient:
-        def get(self, *_args, **_kwargs) -> SimpleNamespace:
+        def get(self, *_args, **_kwargs) -> Any:
             return _FakeResponse()
 
     with pytest.raises(UnsafeMediaUrlError, match="media_url_blocked_ip"):

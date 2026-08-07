@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -65,7 +66,8 @@ def test_parse_imdb_list_page_html_fallback_extracts_optional_fields() -> None:
     assert first.year == 2024
     assert first.extra.get("source") == "html"
     assert first.extra.get("rank") == 1
-    assert isinstance(first.extra.get("description"), str) and "long description" in first.extra.get("description")
+    description = first.extra.get("description")
+    assert isinstance(description, str) and "long description" in description
 
     second = next(i for i in items if i.imdb_id == "tt8888888")
     assert second.title == "Fallback Series Two"
@@ -86,7 +88,7 @@ def test_fetch_imdb_list_items_parses_jsonld_and_paginates() -> None:
         }
     )
 
-    items = fetch_imdb_list_items("ls123456789", session=session, max_pages=3, use_graphql=False)
+    items = fetch_imdb_list_items("ls123456789", session=cast(Any, session), max_pages=3, use_graphql=False)
     assert {i.imdb_id for i in items} == {"tt1111111", "tt2222222", "tt3333333"}
     assert any(i.title == "Sample Series One" for i in items)
 
@@ -103,7 +105,7 @@ def test_fetch_imdb_list_items_stops_when_no_new_ids() -> None:
         }
     )
 
-    items = fetch_imdb_list_items("ls123456789", session=session, max_pages=5, use_graphql=False)
+    items = fetch_imdb_list_items("ls123456789", session=cast(Any, session), max_pages=5, use_graphql=False)
     assert {i.imdb_id for i in items} == {"tt1111111", "tt2222222"}
     assert session.calls == [
         "https://www.imdb.com/list/ls123456789/",
@@ -131,7 +133,7 @@ def test_fetch_tmdb_list_items_parses_tv_items_and_external_ids(monkeypatch: pyt
     )
     monkeypatch.setattr(mod, "fetch_tv_external_ids", lambda *args, **kwargs: {"imdb_id": "tt9999999"})
 
-    items = fetch_tmdb_list_items("8301263", api_key="fake", session=object(), resolve_external_ids=True)
+    items = fetch_tmdb_list_items("8301263", api_key="fake", session=cast(Any, object()), resolve_external_ids=True)
     assert len(items) == 1
     assert items[0].tmdb_id == 100
     assert items[0].imdb_id == "tt9999999"

@@ -652,14 +652,14 @@ def _enrich_one_show(
 ) -> ShowEnrichmentPatch | None:
     show_update: dict[str, Any] = {}
     # Flat lists for merged attributes (from all sources)
-    genres: list[str] = []
-    keywords: list[str] = []
-    tags: list[str] = []
-    networks: list[str] = []
-    streaming_providers: list[str] = []
+    genres: list[str] | None = []
+    keywords: list[str] | None = []
+    tags: list[str] | None = []
+    networks: list[str] | None = []
+    streaming_providers: list[str] | None = []
     tmdb_network_ids: list[int] = []
     tmdb_production_company_ids: list[int] = []
-    alternative_names: list[str] = []
+    alternative_names: list[str] | None = []
     alternative_name_rows: list[dict[str, Any]] = []
     show_images_rows: list[dict[str, Any]] = []
 

@@ -150,17 +150,18 @@ def _build_reviewed_leaderboard(
             )
         if not state.get("display_name"):
             state["display_name"] = _segment_display_name(segment)
+    entries: list[dict[str, Any]] = [
+        {
+            "person_id": item["person_id"],
+            "display_name": item.get("display_name"),
+            "screen_time_seconds": round(float(item["screen_time_seconds"]), 3),
+            "frame_count": int(item["frame_count"]),
+            "confidence_avg": item.get("confidence_avg"),
+        }
+        for item in totals.values()
+    ]
     leaderboard = sorted(
-        [
-            {
-                "person_id": item["person_id"],
-                "display_name": item.get("display_name"),
-                "screen_time_seconds": round(float(item["screen_time_seconds"]), 3),
-                "frame_count": int(item["frame_count"]),
-                "confidence_avg": item.get("confidence_avg"),
-            }
-            for item in totals.values()
-        ],
+        entries,
         key=lambda item: (float(item["screen_time_seconds"]), int(item["frame_count"])),
         reverse=True,
     )

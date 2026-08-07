@@ -7,6 +7,32 @@ from fastapi import APIRouter
 
 from ._shared import *
 from .profile_reads import *
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    # Type-only declarations for underscore-prefixed helpers that are injected
+    # at runtime via the dynamic ``__all__`` star exports above.
+    from ._shared import (
+        _ACCOUNT_PROFILE_CACHE_MAX_ENTRIES,
+        _ACCOUNT_PROFILE_CACHE_TTL_SECONDS,
+        _ACCOUNT_PROFILE_POSTS_CACHE,
+        _ACCOUNT_PROFILE_POSTS_CACHE_LOCK,
+        _account_profile_cache_key,
+        _clear_account_profile_caches,
+        _get_ttl_cached_payload,
+        _lookup_error_to_not_found,
+        _require_instagram_auth_refresh_confirmation,
+        _resolve_account_profile_singleflight,
+        _set_ttl_cached_payload,
+        _start_runs_in_background,
+        _to_social_read_http_exception,
+        _value_error_to_bad_request,
+        _worker_health_detail,
+    )
+    from .profile_reads import (
+        _enqueue_instagram_comments_audit_cursor_retries_background,
+        _resolve_social_account_comments_route_execution,
+    )
 
 router = APIRouter()
 
@@ -21,7 +47,7 @@ def get_social_account_profile_comments_route(
     search: str | None = Query(default=None),
     sort_by: str | None = Query(default=None),
     sort_dir: str | None = Query(default=None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     started_at = perf_counter()
     cache_key = _account_profile_cache_key(
@@ -121,7 +147,7 @@ def get_social_account_comments_audit_cursor_retries_route(
     show_filter: list[str] | None = Query(default=None),
     date_start: str | None = Query(default=None, max_length=64),
     date_end: str | None = Query(default=None, max_length=64),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     from trr_backend.socials.pipelines.comments.instagram import get_instagram_comments_audit_cursor_recovery
 
@@ -359,7 +385,7 @@ def get_social_account_comments_scrape_progress_route(
     platform: str,
     account_handle: str,
     run_id: UUID,
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast("InternalAdminUser", None),
 ) -> dict[str, Any]:
     from trr_backend.socials.pipelines.comments.instagram import get_social_account_comments_scrape_run_progress
 
@@ -367,7 +393,10 @@ def get_social_account_comments_scrape_progress_route(
         surface="comments-run-progress",
         platform=platform,
         account_handle=account_handle,
-        extra=str(run_id),
+        # NOTE: passes a str where the helper annotates tuple[Any, ...]; the
+        # helper unpacks it char-by-char, which still yields a unique key per
+        # run_id. Cast keeps runtime behavior byte-identical.
+        extra=cast("tuple[Any, ...]", str(run_id)),
     )
     try:
         return _resolve_account_profile_singleflight(

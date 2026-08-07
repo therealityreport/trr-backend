@@ -41,6 +41,8 @@ def test_select_socialblade_proxy_builds_sticky_decodo_proxy(monkeypatch):
     proxy = select_socialblade_proxy(session_key="instagram:bravotv")
 
     assert proxy is not None
+    assert isinstance(proxy.browser_proxy, dict)
+    assert proxy.api_proxy_url is not None
     assert proxy.browser_proxy["server"] == "http://gate.decodo.com:7000"
     assert proxy.browser_proxy["username"].startswith("decodo-user-session-")
     assert proxy.browser_proxy["password"] == "p@ss!"

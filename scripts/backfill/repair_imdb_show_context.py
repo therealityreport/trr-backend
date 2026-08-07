@@ -56,7 +56,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def _is_request_context_row(row: dict[str, Any]) -> bool:
-    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    raw_metadata = row.get("metadata")
+    metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
     source = str(metadata.get("show_context_source") or "").strip().lower()
     return source in REQUEST_CONTEXT_SOURCES
 

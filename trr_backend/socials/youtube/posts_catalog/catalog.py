@@ -388,7 +388,8 @@ def _persist_shared_catalog_posts(
 ) -> list[dict[str, Any]]:
     if deps.persist_shared_catalog_posts_with_progress is None:
         raise RuntimeError("persist_shared_catalog_posts_with_progress dependency is required in shared catalog mode")
-    if deps.upsert_shared_catalog_post is None:
+    upsert_shared_catalog_post = deps.upsert_shared_catalog_post
+    if upsert_shared_catalog_post is None:
         raise RuntimeError("upsert_shared_catalog_post dependency is required in shared catalog mode")
 
     return deps.persist_shared_catalog_posts_with_progress(
@@ -398,7 +399,7 @@ def _persist_shared_catalog_posts(
         items=posts,
         retrieval_meta=retrieval_meta,
         progress_cb=progress_cb,
-        upsert_item=lambda video: deps.upsert_shared_catalog_post(
+        upsert_item=lambda video: upsert_shared_catalog_post(
             platform="youtube",
             run_id=run_id,
             account_handle=canonical_handle,

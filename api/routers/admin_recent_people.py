@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
@@ -37,7 +37,7 @@ def _user_uid(admin: dict[str, Any], explicit_uid: str | None) -> str:
 def list_recent_people(
     limit: int = Query(default=_DEFAULT_LIMIT, ge=1, le=50),
     x_trr_admin_user_uid: str | None = Header(default=None, alias="X-TRR-Admin-User-Uid"),
-    admin: InternalAdminUser = None,
+    admin: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     people, _query_count = recent_people_repo.list_recent_people(
         _user_uid(admin or {}, x_trr_admin_user_uid),
@@ -56,7 +56,7 @@ def list_recent_people(
 def record_recent_person(
     body: RecentPersonViewRequest,
     x_trr_admin_user_uid: str | None = Header(default=None, alias="X-TRR-Admin-User-Uid"),
-    admin: InternalAdminUser = None,
+    admin: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, bool]:
     person_id = str(body.person_id or "").strip()
     if not _UUID_RE.fullmatch(person_id):

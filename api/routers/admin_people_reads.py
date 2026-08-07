@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import time
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
@@ -96,7 +96,7 @@ def resolve_person_slug(
     slug: str = Query(min_length=1),
     show_id: str | None = Query(default=None),
     show_slug: str | None = Query(default=None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
     request_role = _request_role(request)
@@ -125,7 +125,9 @@ def resolve_person_slug(
 
 
 @router.get("/{person_id}")
-def get_person_detail(request: Request, person_id: str, _: InternalAdminUser = None) -> dict[str, Any]:
+def get_person_detail(
+    request: Request, person_id: str, _: InternalAdminUser = cast(InternalAdminUser, None)
+) -> dict[str, Any]:
     started_at = time.perf_counter()
     request_role = _request_role(request)
     cache_key = f"person:{person_id}:detail"
@@ -152,7 +154,9 @@ def get_person_detail(request: Request, person_id: str, _: InternalAdminUser = N
 
 
 @router.get("/{person_id}/cover-photo")
-def get_person_cover_photo(request: Request, person_id: str, _: InternalAdminUser = None) -> dict[str, Any]:
+def get_person_cover_photo(
+    request: Request, person_id: str, _: InternalAdminUser = cast(InternalAdminUser, None)
+) -> dict[str, Any]:
     started_at = time.perf_counter()
     request_role = _request_role(request)
     cache_key = f"person:{person_id}:cover-photo"
@@ -187,7 +191,7 @@ def get_person_gallery(
     include_broken: bool = Query(default=False),
     include_total_count: bool = Query(default=True),
     sources: str | None = Query(default=None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
     request_role = _request_role(request)
@@ -228,7 +232,7 @@ def get_person_gallery(
 
 
 @router.post("/{person_id}/cache/invalidate")
-def invalidate_person_cache(person_id: str, _: InternalAdminUser = None) -> dict[str, bool]:
+def invalidate_person_cache(person_id: str, _: InternalAdminUser = cast(InternalAdminUser, None)) -> dict[str, bool]:
     invalidate_person_read_cache(person_id=person_id)
     logger.info("[admin-people-read] route=invalidate-cache person_id=%s", person_id)
     return {"success": True}

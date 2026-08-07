@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -267,7 +268,7 @@ def test_preview_endpoint_forwards_new_cloudsearch_filters(
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     mock_db = MagicMock()
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     def _fake_search_images(filters):
         captured["filters"] = filters

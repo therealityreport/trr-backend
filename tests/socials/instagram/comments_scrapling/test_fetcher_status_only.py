@@ -1054,7 +1054,9 @@ def test_coauthor_relay_prefers_authenticated_session_for_parent_comments() -> N
     assert posted_variables["__relay_internal__pv__PolarisIsLoggedInrelayprovider"] is True
     assert posted_variables["media_id"] == "123"
     fetcher._fetch_public_relay_child_comments_for_status_only.assert_awaited_once()
-    assert fetcher._fetch_public_relay_child_comments_for_status_only.await_args.kwargs["relay_is_logged_in"] is True
+    child_await_args = fetcher._fetch_public_relay_child_comments_for_status_only.await_args
+    assert child_await_args is not None
+    assert child_await_args.kwargs["relay_is_logged_in"] is True
 
 
 def test_public_relay_parent_pagination_defaults_to_uncapped(monkeypatch) -> None:

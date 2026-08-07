@@ -7,7 +7,7 @@ import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -304,7 +304,8 @@ def main(argv: list[str] | None = None) -> int:
         print("No cast rows found for IMDb show id.")
         return 0
 
-    results: list[dict[str, Any]] = [None] * len(cast_members)
+    # Placeholder slots are all overwritten below (every index has a future); cast is runtime-identity.
+    results: list[dict[str, Any]] = cast("list[dict[str, Any]]", [None] * len(cast_members))
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         future_map = {
             executor.submit(
