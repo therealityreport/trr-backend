@@ -52,6 +52,10 @@ def _coerce_utc_datetime(value: datetime | None) -> datetime | None:
     return value.astimezone(UTC)
 
 
+def _dict_or_empty(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
 class _DeferredTikTokHttpClient:
     """Lazy wrapper so the default yt-dlp path does not eagerly build direct transports."""
 
@@ -291,7 +295,7 @@ class TikTokScraper:
             (str(value or "").strip() for value in self._proxy_urls_input if str(value or "").strip()),
             None,
         )
-        self._direct_http_client: requests.Session | None = None
+        self._direct_http_client: _TikTokHttpClientBase | None = None
         self.session = _DeferredTikTokHttpClient(self)
         self._request_count = 0
         self._consecutive_success = 0
@@ -384,7 +388,7 @@ class TikTokScraper:
         parsed = urlparse(str(proxy_url))
         return parsed.hostname or str(proxy_url)
 
-    def _create_session(self) -> requests.Session:
+    def _create_session(self) -> _TikTokHttpClientBase:
         """Create a session with retry logic."""
         return build_tiktok_http_client(
             self._http_client_name_input,
@@ -394,13 +398,13 @@ class TikTokScraper:
             impersonate=self._curl_cffi_impersonate if self._http_client_name_input == "curl_cffi" else None,
         )
 
-    def _ensure_http_client(self) -> requests.Session:
+    def _ensure_http_client(self) -> _TikTokHttpClientBase:
         if self._direct_http_client is None:
             self._direct_http_client = self._create_session()
         return self._direct_http_client
 
     @property
-    def _http_client(self) -> requests.Session:
+    def _http_client(self) -> _TikTokHttpClientBase:
         """Back-compat alias for tests and direct API callers."""
         return self._ensure_http_client()
 
@@ -1210,8 +1214,8 @@ class TikTokScraper:
         thumbnail_url = self._extract_thumbnail_url(item)
 
         # Author info
-        author = item.get("author") if isinstance(item.get("author"), dict) else {}
-        author_meta = item.get("authorMeta") if isinstance(item.get("authorMeta"), dict) else {}
+        author = _dict_or_empty(item.get("author"))
+        author_meta = _dict_or_empty(item.get("authorMeta"))
         username = str(
             author.get("uniqueId")
             or author.get("unique_id")
@@ -1239,16 +1243,16 @@ class TikTokScraper:
         )
 
         # Stats
-        stats = item.get("stats") if isinstance(item.get("stats"), dict) else {}
-        stats_v2 = item.get("statsV2") if isinstance(item.get("statsV2"), dict) else {}
+        stats = _dict_or_empty(item.get("stats"))
+        stats_v2 = _dict_or_empty(item.get("statsV2"))
 
         # Music info
-        music = item.get("music") if isinstance(item.get("music"), dict) else {}
-        music_meta = item.get("musicMeta") if isinstance(item.get("musicMeta"), dict) else {}
+        music = _dict_or_empty(item.get("music"))
+        music_meta = _dict_or_empty(item.get("musicMeta"))
 
         # Video info
-        video = item.get("video") if isinstance(item.get("video"), dict) else {}
-        video_meta = item.get("videoMeta") if isinstance(item.get("videoMeta"), dict) else {}
+        video = _dict_or_empty(item.get("video"))
+        video_meta = _dict_or_empty(item.get("videoMeta"))
         duration = int(video.get("duration") or video_meta.get("duration") or 0)
         hashtags = self._dedupe_preserve_order(
             [*self._extract_structured_hashtags(item), *self._extract_hashtags(description)]
@@ -1341,8 +1345,8 @@ class TikTokScraper:
     def _extract_user_detail_avatar_url(self, user_data: dict | None) -> str | None:
         if not isinstance(user_data, dict):
             return None
-        user_info = user_data.get("userInfo") if isinstance(user_data.get("userInfo"), dict) else {}
-        user = user_info.get("user") if isinstance(user_info.get("user"), dict) else {}
+        user_info = _dict_or_empty(user_data.get("userInfo"))
+        user = _dict_or_empty(user_info.get("user"))
         return self._pick_best_avatar_url(
             user.get("avatarLarger"),
             user.get("avatar_larger"),
@@ -1359,9 +1363,9 @@ class TikTokScraper:
     def _extract_user_detail_profile_snapshot(self, user_data: dict | None, username: str) -> dict[str, Any]:
         if not isinstance(user_data, dict):
             return {}
-        user_info = user_data.get("userInfo") if isinstance(user_data.get("userInfo"), dict) else {}
-        user = user_info.get("user") if isinstance(user_info.get("user"), dict) else {}
-        stats = user_info.get("stats") if isinstance(user_info.get("stats"), dict) else {}
+        user_info = _dict_or_empty(user_data.get("userInfo"))
+        user = _dict_or_empty(user_info.get("user"))
+        stats = _dict_or_empty(user_info.get("stats"))
         resolved_username = str(
             user.get("uniqueId") or user.get("unique_id") or user.get("uniqueIdModifyTime") or username or ""
         ).strip()
@@ -1708,10 +1712,12 @@ class TikTokScraper:
         try:
             with sync_playwright() as playwright:
                 browser = launch_browser(playwright, headless=True)
+                assert browser is not None  # launch_browser always returns a browser
                 context = browser.new_context(
                     viewport={"width": 1280, "height": 900},
                     user_agent=user_agent,
                 )
+                assert context is not None  # new_context always returns a context
                 browser_cookies = self._browser_cookie_payload()
                 if browser_cookies:
                     context.add_cookies(browser_cookies)
@@ -2760,7 +2766,7 @@ class TikTokScraper:
         created_at = self._coerce_timestamp(
             data.get("create_time") or data.get("createTime") or data.get("createTimeISO") or data.get("timestamp")
         )
-        user = data.get("user") if isinstance(data.get("user"), dict) else {}
+        user = _dict_or_empty(data.get("user"))
         resolved_post_url = str(post_url or data.get("videoWebUrl") or "").strip()
         resolved_video_id = str(
             video_id or data.get("aweme_id") or data.get("awemeId") or data.get("item_id") or data.get("itemId") or ""

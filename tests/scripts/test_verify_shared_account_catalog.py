@@ -67,7 +67,7 @@ def test_main_applies_workspace_runtime_env_before_loading_backend_repo(
     )
     monkeypatch.setitem(
         sys.modules,
-        "trr_backend.repositories.social_season_analytics",
+        "trr_backend.socials.social_season_analytics_impl",
         SimpleNamespace(
             get_social_account_catalog_verification=lambda *args, **kwargs: {
                 "verified": True,

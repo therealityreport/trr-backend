@@ -8,7 +8,8 @@ import json
 import re
 import time
 from datetime import UTC, datetime, timedelta
-from unittest.mock import MagicMock, patch
+from typing import Any, cast
+from unittest.mock import MagicMock, call, patch
 from uuid import uuid4
 
 import jwt
@@ -259,12 +260,12 @@ def test_refresh_show_bravo_target_disables_cast_matrix_sync_for_unified_refresh
     show_id = str(uuid4())
 
     with patch("api.routers.admin_show_sync._show_is_bravo", return_value=True):
-        with patch("api.routers.admin_show_sync.admin_show_bravo._assert_show_sync_ready_for_bravo"):
+        with patch("api.routers.admin_show_bravo._assert_show_sync_ready_for_bravo"):
             with patch(
                 "api.routers.admin_show_sync._resolve_show_official_page_url",
                 return_value="https://www.bravotv.com/summer-house",
             ):
-                with patch("api.routers.admin_show_sync.admin_show_bravo.commit_bravo_import") as commit_mock:
+                with patch("api.routers.admin_show_bravo.commit_bravo_import") as commit_mock:
                     _refresh_show_bravo_target(
                         show_id=show_id,
                         show_row={"id": show_id, "name": "Summer House", "networks": ["Bravo"]},
@@ -288,12 +289,12 @@ def test_cast_profiles_refresh_people_profiles_without_cast_matrix_sync() -> Non
         "api.routers.admin_show_sync._list_refresh_cast_members",
         return_value=[{"person_id": person_id, "person_name": "Carl Radke"}],
     ):
-        with patch("api.routers.admin_show_sync.admin_show_roles.sync_cast_matrix_for_show") as sync_mock:
+        with patch("api.routers.admin_show_roles.sync_cast_matrix_for_show") as sync_mock:
             with patch(
-                "api.routers.admin_show_sync.admin_person_profile._run_person_profile_refresh",
+                "api.routers.admin_person_profile._run_person_profile_refresh",
                 return_value={"status": "ok", "failures": [], "skips": []},
             ) as profile_mock:
-                with patch("api.routers.admin_show_sync.admin_person_images.refresh_person_images") as images_mock:
+                with patch("api.routers.admin_person_images.refresh_person_images") as images_mock:
                     result = _run_cast_person_refresh_stage(
                         show_id=show_id,
                         show_row={"id": show_id, "name": "Summer House", "networks": ["Bravo"]},
@@ -322,7 +323,7 @@ def test_cast_media_refresh_uses_only_allowed_show_level_sources() -> None:
         "api.routers.admin_show_sync._list_refresh_cast_members",
         return_value=[{"person_id": person_id, "person_name": "Paige DeSorbo"}],
     ):
-        with patch("api.routers.admin_show_sync.admin_person_images.refresh_person_images") as images_mock:
+        with patch("api.routers.admin_person_images.refresh_person_images") as images_mock:
             result = _run_cast_person_refresh_stage(
                 show_id=show_id,
                 show_row={"id": show_id, "name": "Summer House", "networks": ["Bravo"]},
@@ -462,7 +463,7 @@ class TestSyncNetworksStreaming:
     def test_runs_three_steps_and_aggregates_metrics(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
-        received = {"entities": None, "providers": None, "links": None, "show_logos": None}
+        received: dict[str, Any] = {"entities": None, "providers": None, "links": None, "show_logos": None}
         from api.routers.admin_show_sync import SyncNetworksStreamingStepResult
 
         def fake_entities(argv):
@@ -900,15 +901,18 @@ class TestSyncNetworksStreaming:
                         status="success",
                         duration_ms=1,
                         exit_code=0,
-                        metrics={
-                            "links_enriched": 1,
-                            "logos_mirrored": 0,
-                            "completion_total": 2,
-                            "completion_resolved": 2,
-                            "completion_unresolved": 0,
-                            "completion_percent": 100.0,
-                            "failures": 0,
-                        },
+                        metrics=cast(
+                            "dict[str, int]",
+                            {
+                                "links_enriched": 1,
+                                "logos_mirrored": 0,
+                                "completion_total": 2,
+                                "completion_resolved": 2,
+                                "completion_unresolved": 0,
+                                "completion_percent": 100.0,
+                                "failures": 0,
+                            },
+                        ),
                     ),
                     "",
                 )
@@ -2304,7 +2308,7 @@ def test_retry_refresh_target_reuses_parent_refresh_flags_in_child_payload() -> 
             await retry_refresh_target(
                 show_id="show-123",
                 target="cast_media",
-                request=_Request(),
+                request=cast("Any", _Request()),
                 payload={"parent_operation_id": "parent-1"},
                 db=MagicMock(),
             )
@@ -2323,3 +2327,60 @@ def test_retry_refresh_target_reuses_parent_refresh_flags_in_child_payload() -> 
             "force_new_operation": False,
         },
     }
+
+
+def test_retry_refresh_target_resets_parent_to_running_with_keyword_status() -> None:
+    """autospec enforces the real keyword-only signature of
+    update_operation_status: a positional status argument would raise
+    TypeError here."""
+    from api.routers.admin_show_sync import retry_refresh_target
+
+    class _Request:
+        headers = {"x-trr-request-id": "req-retry-2"}
+
+    async def _run():
+        with (
+            patch(
+                "api.routers.admin_show_sync.admin_operations_repo.get_operation",
+                return_value={
+                    "id": "parent-1",
+                    "request_payload": {
+                        "show_id": "show-123",
+                        "payload": {"targets": ["show_core", "cast_media"]},
+                    },
+                },
+            ),
+            patch(
+                "api.routers.admin_show_sync.admin_operations_repo.create_sub_operation",
+                return_value={
+                    "id": "child-1",
+                    "request_payload": {},
+                },
+            ),
+            patch(
+                "api.routers.admin_show_sync.supports_admin_operation",
+                return_value=False,
+            ),
+            patch(
+                "api.routers.admin_show_sync.build_show_refresh_operation_producer",
+                return_value="producer",
+            ),
+            patch(
+                "api.routers.admin_show_sync.ensure_operation_execution",
+            ),
+            patch(
+                "api.routers.admin_show_sync.admin_operations_repo.update_operation_status",
+                autospec=True,
+            ) as update_operation_status,
+        ):
+            await retry_refresh_target(
+                show_id="show-123",
+                target="cast_media",
+                request=cast("Any", _Request()),
+                payload={"parent_operation_id": "parent-1"},
+                db=MagicMock(),
+            )
+            return update_operation_status.call_args_list
+
+    calls = asyncio.run(_run())
+    assert calls == [call("parent-1", status="running")]

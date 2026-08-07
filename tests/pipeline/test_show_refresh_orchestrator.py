@@ -129,6 +129,27 @@ class TestShowRefreshOrchestratorCreateOperations:
         assert mock_admin_ops.create_or_attach_operation.call_count == 1
         assert mock_admin_ops.create_sub_operation.call_count == 2
 
+    @patch(
+        "trr_backend.pipeline.show_refresh_orchestrator.admin_operations.update_operation_status",
+        autospec=True,
+    )
+    @patch("trr_backend.pipeline.show_refresh_orchestrator.admin_operations.create_sub_operation")
+    @patch("trr_backend.pipeline.show_refresh_orchestrator.admin_operations.create_or_attach_operation")
+    def test_create_operations_marks_parent_failed_with_keyword_status_on_error(
+        self, mock_create_or_attach, mock_create_sub, mock_update_status
+    ):
+        """autospec enforces the real keyword-only signature: a positional
+        status argument would raise TypeError here."""
+        parent_op = {"id": 1, "operation_type": "admin_show_refresh", "status": "pending"}
+        mock_create_or_attach.return_value = (parent_op, False)
+        mock_create_sub.side_effect = RuntimeError("child creation failed")
+
+        orch = ShowRefreshOrchestrator(show_id=42, targets=["show_core"])
+        with pytest.raises(RuntimeError, match="child creation failed"):
+            orch.create_operations()
+
+        mock_update_status.assert_called_once_with("1", status="failed")
+
     @patch("trr_backend.pipeline.show_refresh_orchestrator.admin_operations")
     def test_create_operations_passes_correct_payload_per_target(self, mock_admin_ops):
         parent_op = {"id": 1, "operation_type": "admin_show_refresh", "status": "pending"}
@@ -207,19 +228,23 @@ class TestShowRefreshOrchestratorDispatchWave:
 
     @patch("trr_backend.pipeline.show_refresh_orchestrator.is_remote_job_plane_enabled", return_value=False)
     @patch("trr_backend.pipeline.show_refresh_orchestrator.supports_admin_operation", return_value=True)
-    @patch("trr_backend.pipeline.show_refresh_orchestrator.ensure_operation_execution")
-    def test_dispatch_wave_falls_back_to_local_when_modal_disabled(self, mock_ensure, mock_supports, mock_remote):
+    def test_dispatch_wave_falls_back_to_local_when_modal_disabled(self, mock_supports, mock_remote):
         orch = ShowRefreshOrchestrator(show_id=42, targets=["show_core"])
         orch._parent_id = "1"
         orch.request_id = "req-abc"
         sub_ops = [_make_sub_op("show_core", 10)]
         producer_factory = MagicMock(return_value="fake-producer")
+        local_executor = MagicMock(return_value=True)
 
-        count = orch.dispatch_wave(sub_ops, producer_factory=producer_factory)
+        count = orch.dispatch_wave(
+            sub_ops,
+            producer_factory=producer_factory,
+            local_executor=local_executor,
+        )
 
         assert count == 0
         producer_factory.assert_called_once_with(sub_ops[0])
-        mock_ensure.assert_called_once_with("10", producer="fake-producer", request_id="req-abc")
+        local_executor.assert_called_once_with("10", producer="fake-producer", request_id="req-abc")
 
     @patch("trr_backend.pipeline.show_refresh_orchestrator.is_remote_job_plane_enabled", return_value=False)
     @patch("trr_backend.pipeline.show_refresh_orchestrator.supports_admin_operation", return_value=False)
@@ -234,21 +259,25 @@ class TestShowRefreshOrchestratorDispatchWave:
     @patch("trr_backend.pipeline.show_refresh_orchestrator.is_remote_job_plane_enabled", return_value=True)
     @patch("trr_backend.pipeline.show_refresh_orchestrator.supports_admin_operation", return_value=True)
     @patch("trr_backend.pipeline.show_refresh_orchestrator.dispatch_admin_operation", return_value=False)
-    @patch("trr_backend.pipeline.show_refresh_orchestrator.ensure_operation_execution")
     def test_dispatch_wave_falls_back_when_modal_dispatch_returns_false(
-        self, mock_ensure, mock_dispatch, mock_supports, mock_remote
+        self, mock_dispatch, mock_supports, mock_remote
     ):
         """If Modal is enabled but dispatch_admin_operation returns False, fall back to local."""
         orch = ShowRefreshOrchestrator(show_id=42, targets=["show_core"])
         orch._parent_id = "1"
         sub_ops = [_make_sub_op("show_core", 10)]
         producer_factory = MagicMock(return_value="fake-producer")
+        local_executor = MagicMock(return_value=True)
 
-        count = orch.dispatch_wave(sub_ops, producer_factory=producer_factory)
+        count = orch.dispatch_wave(
+            sub_ops,
+            producer_factory=producer_factory,
+            local_executor=local_executor,
+        )
 
         assert count == 0
         producer_factory.assert_called_once()
-        mock_ensure.assert_called_once()
+        local_executor.assert_called_once()
 
 
 class TestShowRefreshOrchestratorGetWaves:
@@ -296,7 +325,7 @@ class TestShowRefreshOrchestratorUpdateParentStatus:
         status = orch.update_parent_status()
 
         assert status == "completed"
-        mock_admin_ops.update_operation_status.assert_called_once_with("1", "completed")
+        mock_admin_ops.update_operation_status.assert_called_once_with("1", status="completed")
 
     @patch("trr_backend.pipeline.show_refresh_orchestrator.admin_operations")
     def test_update_parent_status_does_not_persist_running_status(self, mock_admin_ops):
@@ -325,7 +354,7 @@ class TestShowRefreshOrchestratorUpdateParentStatus:
         status = orch.update_parent_status()
 
         assert status == "failed"
-        mock_admin_ops.update_operation_status.assert_called_once_with("1", "failed")
+        mock_admin_ops.update_operation_status.assert_called_once_with("1", status="failed")
 
     @patch("trr_backend.pipeline.show_refresh_orchestrator.admin_operations")
     def test_update_parent_status_persists_cancelled(self, mock_admin_ops):
@@ -337,4 +366,23 @@ class TestShowRefreshOrchestratorUpdateParentStatus:
         status = orch.update_parent_status()
 
         assert status == "cancelled"
-        mock_admin_ops.update_operation_status.assert_called_once_with("1", "cancelled")
+        mock_admin_ops.update_operation_status.assert_called_once_with("1", status="cancelled")
+
+    @patch(
+        "trr_backend.pipeline.show_refresh_orchestrator.admin_operations.update_operation_status",
+        autospec=True,
+    )
+    @patch(
+        "trr_backend.pipeline.show_refresh_orchestrator.admin_operations.aggregate_parent_status",
+        return_value="completed",
+    )
+    def test_update_parent_status_calls_repo_with_keyword_status(self, _mock_aggregate, mock_update_status):
+        """autospec enforces the real keyword-only signature: a positional
+        status argument would raise TypeError here."""
+        orch = ShowRefreshOrchestrator(show_id=42, targets=["show_core"])
+        orch._parent_id = "1"
+
+        status = orch.update_parent_status()
+
+        assert status == "completed"
+        mock_update_status.assert_called_once_with("1", status="completed")

@@ -42,7 +42,7 @@ def test_finalize_sub_operation_keeps_parent_running_while_sibling_active() -> N
         result = admin_ops_pipeline.finalize_sub_operation("child-1", "failed")
 
     assert result == "running"
-    update_status.assert_called_once_with("child-1", "failed")
+    update_status.assert_called_once_with("child-1", status="failed")
     append_event.assert_not_called()
 
 
@@ -78,7 +78,10 @@ def test_finalize_sub_operation_marks_parent_failed_after_all_children_finish() 
         result = admin_ops_pipeline.finalize_sub_operation("child-1", "failed")
 
     assert result == "failed"
-    assert update_status.call_args_list == [call("child-1", "failed"), call("parent-1", "failed")]
+    assert update_status.call_args_list == [
+        call("child-1", status="failed"),
+        call("parent-1", status="failed"),
+    ]
     append_event.assert_called_once()
     event_kwargs = append_event.call_args.kwargs
     assert event_kwargs["event_type"] == "error"
@@ -86,6 +89,45 @@ def test_finalize_sub_operation_marks_parent_failed_after_all_children_finish() 
         "show_core": "failed",
         "links": "completed",
     }
+
+
+def test_finalize_sub_operation_uses_keyword_status_against_real_repo_signature() -> None:
+    """autospec enforces the real keyword-only signature of
+    update_operation_status: a positional status argument would raise
+    TypeError here, for both the child and the parent update sites."""
+    with (
+        patch.object(
+            admin_ops_pipeline.admin_operations,
+            "get_operation",
+            return_value={"id": "child-1", "parent_operation_id": "parent-1", "refresh_target": "show_core"},
+        ),
+        patch.object(
+            admin_ops_pipeline.admin_operations,
+            "aggregate_parent_status",
+            return_value="completed",
+        ),
+        patch.object(
+            admin_ops_pipeline.admin_operations,
+            "get_sub_operations",
+            return_value=[{"refresh_target": "show_core", "status": "completed"}],
+        ),
+        patch.object(
+            admin_ops_pipeline.admin_operations,
+            "update_operation_status",
+            autospec=True,
+        ) as update_status,
+        patch.object(
+            admin_ops_pipeline.admin_operations,
+            "append_operation_event",
+        ),
+    ):
+        result = admin_ops_pipeline.finalize_sub_operation("child-1", "completed")
+
+    assert result == "completed"
+    assert update_status.call_args_list == [
+        call("child-1", status="completed"),
+        call("parent-1", status="completed"),
+    ]
 
 
 def test_wait_for_sub_operation_dependencies_treats_missing_dependencies_as_satisfied() -> None:

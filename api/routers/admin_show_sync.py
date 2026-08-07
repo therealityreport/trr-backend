@@ -21,7 +21,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock, Thread, current_thread
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Body, File, Form, HTTPException, Request, UploadFile
@@ -42,14 +42,6 @@ import scripts.sync.sync_tmdb_show_entities as sync_tmdb_show_entities
 import scripts.sync.sync_tmdb_watch_providers as sync_tmdb_watch_providers
 from api.auth import InternalAdminUser
 from api.deps import SupabaseAdminClient
-from api.routers import (
-    admin_person_images,
-    admin_person_profile,
-    admin_show_bravo,
-    admin_show_links,
-    admin_show_news,
-    admin_show_roles,
-)
 from trr_backend.db import pg
 from trr_backend.db.admin import create_supabase_admin_client
 from trr_backend.ingestion.show_importer import (
@@ -73,6 +65,14 @@ from trr_backend.media.s3_mirror import (
     upload_bytes_to_s3,
 )
 from trr_backend.modal_dispatch import dispatch_admin_operation, supports_admin_operation
+from trr_backend.pipeline.admin_operation_registry import (
+    get_person_images_capabilities,
+    get_person_profile_capabilities,
+    get_show_bravo_capabilities,
+    get_show_links_capabilities,
+    get_show_news_capabilities,
+    get_show_roles_capabilities,
+)
 from trr_backend.pipeline.admin_operations import (
     ensure_operation_execution,
     operation_stream_response,
@@ -141,7 +141,7 @@ class ShowCoreAutoRefreshSettingsResponse(BaseModel):
 
 @router.get("/settings/show-core-auto-refresh", response_model=ShowCoreAutoRefreshSettingsResponse)
 def get_show_core_auto_refresh_settings(
-    _admin: InternalAdminUser = None,
+    _admin: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> ShowCoreAutoRefreshSettingsResponse:
     return ShowCoreAutoRefreshSettingsResponse.model_validate(
         admin_runtime_settings.get_show_core_auto_refresh_settings()
@@ -151,7 +151,7 @@ def get_show_core_auto_refresh_settings(
 @router.put("/settings/show-core-auto-refresh", response_model=ShowCoreAutoRefreshSettingsResponse)
 def update_show_core_auto_refresh_settings(
     payload: ShowCoreAutoRefreshSettingsRequest,
-    admin: InternalAdminUser = None,
+    admin: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> ShowCoreAutoRefreshSettingsResponse:
     return ShowCoreAutoRefreshSettingsResponse.model_validate(
         admin_runtime_settings.set_show_core_auto_refresh_paused(
@@ -308,9 +308,12 @@ def _get_known_person_source_total(
 
 
 def _extract_tag_people_titles(metadata: dict[str, Any]) -> tuple[list[str], list[str], list[str], list[str]]:
-    tags = metadata.get("tags") if isinstance(metadata.get("tags"), dict) else {}
-    people = tags.get("people") if isinstance(tags.get("people"), list) else []
-    titles = tags.get("titles") if isinstance(tags.get("titles"), list) else []
+    raw_tags = metadata.get("tags")
+    tags: dict[str, Any] = raw_tags if isinstance(raw_tags, dict) else {}
+    raw_people = tags.get("people")
+    people: list[Any] = raw_people if isinstance(raw_people, list) else []
+    raw_titles = tags.get("titles")
+    titles: list[Any] = raw_titles if isinstance(raw_titles, list) else []
 
     people_names: list[str] = []
     people_ids: list[str] = []
@@ -370,7 +373,8 @@ def _enrich_imdb_mediaindex_rows_with_episode_context(
 
     imdb_title_ids: list[str] = []
     for row in rows:
-        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        raw_row_metadata = row.get("metadata")
+        metadata: dict[str, Any] = raw_row_metadata if isinstance(raw_row_metadata, dict) else {}
         _, _, _, title_ids = _extract_tag_people_titles(metadata)
         imdb_title_ids.extend(title_ids)
     imdb_title_ids = list(dict.fromkeys([value for value in imdb_title_ids if value]))
@@ -396,7 +400,8 @@ def _enrich_imdb_mediaindex_rows_with_episode_context(
                     episodes_by_imdb[imdb_episode_id] = episode
 
     for row in rows:
-        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        raw_loop_metadata = row.get("metadata")
+        metadata = raw_loop_metadata if isinstance(raw_loop_metadata, dict) else {}
         people_names, people_ids, title_names, title_ids = _extract_tag_people_titles(metadata)
         if people_names:
             metadata["people_names"] = people_names
@@ -532,6 +537,7 @@ def _enqueue_show_core_refreshes_for_list_sync(
                         operation_id=str(sub_op["id"]),
                         db=db,
                     ),
+                    local_executor=ensure_operation_execution,
                 )
             operations.append(
                 SyncFromListsAutoRefreshOperation(
@@ -705,8 +711,8 @@ class LogoImportResponse(BaseModel):
 @router.post("/sync-from-lists", response_model=SyncFromListsResponse)
 def sync_from_lists(
     payload: SyncFromListsRequest | None = None,
-    db: SupabaseAdminClient = None,
-    _: InternalAdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> SyncFromListsResponse:
     """
     Sync shows from IMDb/TMDb lists (Stage 1) + enrich show metadata (Stage 2).
@@ -1595,8 +1601,8 @@ def _run_brand_family_wikipedia_import_step(*, dry_run: bool) -> SyncNetworksStr
 @router.post("/sync-networks-streaming", response_model=SyncNetworksStreamingResponse)
 def sync_networks_streaming(
     payload: SyncNetworksStreamingRequest | None = None,
-    db: SupabaseAdminClient = None,
-    _: InternalAdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> SyncNetworksStreamingResponse:
     payload = payload or SyncNetworksStreamingRequest()
 
@@ -1685,13 +1691,13 @@ def sync_networks_streaming(
     if payload.skip_s3:
         show_logos_args.append("--skip-s3")
 
-    tmdb_entities, _ = _run_script_step_with_metrics(
+    tmdb_entities, _tmdb_entities_output = _run_script_step_with_metrics(
         "tmdb_show_entities",
         sync_tmdb_show_entities.main,
         entities_args,
         ["networks_upserted", "production_companies_upserted", "logos_mirrored", "failures"],
     )
-    tmdb_watch_providers, _ = _run_script_step_with_metrics(
+    tmdb_watch_providers, _tmdb_watch_providers_output = _run_script_step_with_metrics(
         "tmdb_watch_providers",
         sync_tmdb_watch_providers.main,
         providers_args,
@@ -1727,7 +1733,7 @@ def sync_networks_streaming(
             "failures",
         ],
     )
-    show_logos, _ = _run_script_step_with_metrics(
+    show_logos, _show_logos_output = _run_script_step_with_metrics(
         "show_logos",
         sync_show_logos.main,
         show_logos_args,
@@ -1858,8 +1864,8 @@ def sync_networks_streaming(
 def list_networks_streaming_overrides(
     entity_type: Literal["network", "streaming", "production"] | None = None,
     active_only: bool = True,
-    db: SupabaseAdminClient = None,
-    _: InternalAdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> list[NetworksStreamingOverride]:
     query = db.schema("admin").table("network_streaming_overrides").select("*").order("updated_at", desc=True)
     if entity_type:
@@ -1876,8 +1882,8 @@ def list_networks_streaming_overrides(
 @router.post("/networks-streaming/overrides", response_model=NetworksStreamingOverride)
 def create_networks_streaming_override(
     payload: UpsertNetworksStreamingOverrideRequest,
-    db: SupabaseAdminClient = None,
-    admin: InternalAdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    admin: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> NetworksStreamingOverride:
     raw = payload.model_dump()
     raw["updated_by"] = str(getattr(admin, "email", "") or "")
@@ -1906,8 +1912,8 @@ def create_networks_streaming_override(
 def patch_networks_streaming_override(
     override_id: UUID,
     payload: PatchNetworksStreamingOverrideRequest,
-    db: SupabaseAdminClient = None,
-    admin: InternalAdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    admin: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> NetworksStreamingOverride:
     patch = _sanitize_override_payload(payload.model_dump(exclude_unset=True), partial=True)
     patch["updated_by"] = str(getattr(admin, "email", "") or "")
@@ -1926,8 +1932,8 @@ def patch_networks_streaming_override(
 @router.delete("/networks-streaming/overrides/{override_id}")
 def delete_networks_streaming_override(
     override_id: UUID,
-    db: SupabaseAdminClient = None,
-    _: InternalAdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, str]:
     response = db.schema("admin").table("network_streaming_overrides").delete().eq("id", str(override_id)).execute()
     if hasattr(response, "error") and response.error:
@@ -1940,8 +1946,8 @@ def delete_networks_streaming_override(
 @router.post("/logos/import-url", response_model=LogoImportResponse)
 def import_logo_url(
     payload: LogoImportUrlRequest,
-    db: SupabaseAdminClient = None,
-    admin: InternalAdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    admin: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> LogoImportResponse:
     source_url = _text(payload.source_url)
     if not source_url.startswith("http://") and not source_url.startswith("https://"):
@@ -2145,8 +2151,8 @@ async def import_logo_file(
     production_company_id: int | None = Form(None),
     entity_key: str | None = Form(None),
     file: UploadFile = File(...),
-    db: SupabaseAdminClient = None,
-    admin: InternalAdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    admin: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> LogoImportResponse:
     filename = _text(file.filename) or "upload"
     content_type = _text(file.content_type) or "application/octet-stream"
@@ -2304,8 +2310,8 @@ async def import_logo_file(
 @router.post("/logos/set-primary", response_model=LogoImportResponse)
 def set_logo_primary(
     payload: LogoSetPrimaryRequest,
-    db: SupabaseAdminClient = None,
-    _: InternalAdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> LogoImportResponse:
     if payload.target_type == "show":
         show_id = str(payload.show_id) if payload.show_id else ""
@@ -2726,7 +2732,8 @@ def _combine_step_results(results: list[tuple[str, RefreshStepResult]]) -> Refre
 def _resolve_show_imdb_id(show_row: dict[str, Any] | None) -> str | None:
     if not isinstance(show_row, dict):
         return None
-    external_ids = show_row.get("external_ids") if isinstance(show_row.get("external_ids"), dict) else {}
+    raw_external_ids = show_row.get("external_ids")
+    external_ids: dict[str, Any] = raw_external_ids if isinstance(raw_external_ids, dict) else {}
     return str(show_row.get("imdb_id") or external_ids.get("imdb_id") or external_ids.get("imdb") or "").strip() or None
 
 
@@ -3204,6 +3211,7 @@ def _refresh_show_videos_target(
     db: SupabaseAdminClient,
     admin_user: InternalAdminUser | dict[str, Any] | None,
 ) -> int:
+    admin_show_bravo = get_show_bravo_capabilities()
     official_page_url = _resolve_show_official_page_url(show_id, show_row=show_row)
     if not official_page_url:
         raise HTTPException(status_code=409, detail="Official show page is not configured for Bravo video import.")
@@ -3223,6 +3231,7 @@ def _refresh_show_news_target(
     db: SupabaseAdminClient,
     admin_user: InternalAdminUser | dict[str, Any] | None,
 ) -> int:
+    admin_show_news = get_show_news_capabilities()
     admin_show_news._run_google_news_sync_impl(
         show_id_str=show_id,
         force=True,
@@ -3250,6 +3259,7 @@ def _refresh_show_links_target(
     db: SupabaseAdminClient,
     admin_user: InternalAdminUser | dict[str, Any] | None,
 ) -> dict[str, Any]:
+    admin_show_links = get_show_links_capabilities()
     actor = str((admin_user or {}).get("email") or (admin_user or {}).get("id") or "admin")
     return admin_show_links._run_show_link_discovery(
         show_id_str=show_id,
@@ -3264,6 +3274,7 @@ def _list_refresh_cast_members(
     show_id: str,
     db: SupabaseAdminClient,
 ) -> list[dict[str, str]]:
+    admin_show_bravo = get_show_bravo_capabilities()
     rows = admin_show_bravo._build_show_cast_index(db, show_id)
     deduped: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -3289,6 +3300,8 @@ def _run_cast_person_refresh_stage(
     admin_user: InternalAdminUser | dict[str, Any] | None,
     mode: Literal["profile_only", "media_only"],
 ) -> RefreshStepResult:
+    admin_person_images = get_person_images_capabilities()
+    admin_person_profile = get_person_profile_capabilities()
     started = time.perf_counter()
     members = _list_refresh_cast_members(show_id=show_id, db=db)
     if not members:
@@ -3445,6 +3458,7 @@ def _run_profile_links_sync_phase(
     db: SupabaseAdminClient,
     admin_user: InternalAdminUser | dict[str, Any] | None,
 ) -> RefreshStepResult:
+    admin_show_roles = get_show_roles_capabilities()
     return _run_inline_step(
         "profile_links_sync",
         lambda: (
@@ -3471,6 +3485,7 @@ def _run_bio_sync_phase(
     operation_id: str | None,
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> tuple[RefreshStepResult, list[dict[str, str]]]:
+    admin_person_profile = get_person_profile_capabilities()
     started = time.perf_counter()
     members = _list_refresh_cast_members(show_id=show_id_str, db=db)
     if not members:
@@ -3555,6 +3570,7 @@ def _run_network_augmentation_phase(
     db: SupabaseAdminClient,
     admin_user: InternalAdminUser | dict[str, Any] | None,
 ) -> RefreshStepResult:
+    admin_show_roles = get_show_roles_capabilities()
     if not _show_is_bravo(show_row):
         return RefreshStepResult(
             status="skipped",
@@ -3591,6 +3607,7 @@ def _run_media_ingest_phase(
     members: list[dict[str, str]] | None,
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> RefreshStepResult:
+    admin_person_images = get_person_images_capabilities()
     started = time.perf_counter()
     selected_members = members or _list_refresh_cast_members(show_id=show_id_str, db=db)
     if not selected_members:
@@ -3660,6 +3677,7 @@ def _refresh_show_bravo_target(
     db: SupabaseAdminClient,
     admin_user: InternalAdminUser | dict[str, Any] | None,
 ) -> int:
+    admin_show_bravo = get_show_bravo_capabilities()
     if not _show_is_bravo(show_row):
         raise RefreshStepSkippedError("Show is not Bravo-eligible.")
 
@@ -3688,8 +3706,8 @@ def _refresh_show_bravo_target(
 def refresh_show(
     show_id: UUID,
     payload: ShowRefreshRequest,
-    db: SupabaseAdminClient = None,
-    _: InternalAdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    _: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> ShowRefreshResponse:
     """
     Refresh a single show for one or more target areas by invoking existing sync scripts.
@@ -3922,13 +3940,16 @@ def refresh_show(
         if target == "links":
             links_result = _run_inline_step(
                 "links_discover",
-                lambda: (
-                    _refresh_show_links_target(
-                        show_id=show_id_str,
-                        db=db,
-                        admin_user=_,
-                    )
-                    and 0
+                cast(
+                    "Callable[[], int | None]",
+                    lambda: (
+                        _refresh_show_links_target(
+                            show_id=show_id_str,
+                            db=db,
+                            admin_user=_,
+                        )
+                        and 0
+                    ),
                 ),
             )
             results["links_discover"] = links_result
@@ -3990,8 +4011,8 @@ def refresh_show_stream(
     show_id: UUID,
     payload: ShowRefreshRequest,
     request: Request,
-    db: SupabaseAdminClient = None,
-    admin: InternalAdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    admin: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> StreamingResponse:
     """
     Stream refresh progress for one or more targets as SSE.
@@ -4491,13 +4512,16 @@ def refresh_show_stream(
                     "links_discover",
                     lambda sid=show_id_str, local_db=db, local_admin=admin: _run_inline_step(
                         "links_discover",
-                        lambda: (
-                            _refresh_show_links_target(
-                                show_id=sid,
-                                db=local_db,
-                                admin_user=local_admin,
-                            )
-                            and 0
+                        cast(
+                            "Callable[[], int | None]",
+                            lambda: (
+                                _refresh_show_links_target(
+                                    show_id=sid,
+                                    db=local_db,
+                                    admin_user=local_admin,
+                                )
+                                and 0
+                            ),
                         ),
                     ),
                     "links",
@@ -4613,7 +4637,7 @@ def refresh_show_stream(
         client_workflow_id = str(request.headers.get("x-trr-flow-key") or "").strip() or None
         orchestrator = ShowRefreshOrchestrator(
             show_id=show_id_str,
-            targets=[t.value if hasattr(t, "value") else str(t) for t in ordered],
+            targets=[cast(Any, t).value if hasattr(t, "value") else str(t) for t in ordered],
             initiated_by=actor,
             request_payload=request_payload,
             request_id=request_id,
@@ -4632,6 +4656,7 @@ def refresh_show_stream(
                     operation_id=str(sub_op["id"]),
                     db=db,
                 ),
+                local_executor=ensure_operation_execution,
             )
 
         return operation_stream_response_for_parent(parent_id, request=request)
@@ -4980,7 +5005,7 @@ def build_show_refresh_operation_producer(
         stream_response = refresh_show_stream(
             show_id=UUID(show_id_str),
             payload=payload,
-            request=_InternalRequest(current_request_id=request_id, current_operation_id=operation_id),
+            request=cast(Request, _InternalRequest(current_request_id=request_id, current_operation_id=operation_id)),
             db=local_db,
             admin={"id": initiated_by},
         )
@@ -4998,7 +5023,7 @@ async def retry_refresh_target(
     target: str,
     request: Request,
     payload: dict = Body(...),
-    db: SupabaseAdminClient = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
 ):
     """Retry a single failed refresh target by creating a new sub-operation."""
     if target not in VALID_REFRESH_TARGETS:
@@ -5035,7 +5060,7 @@ async def retry_refresh_target(
     )
 
     # Reset parent to running since we have a new pending child
-    admin_operations_repo.update_operation_status(parent_operation_id, "running")
+    admin_operations_repo.update_operation_status(parent_operation_id, status="running")
 
     # Dispatch to Modal or local
     if supports_admin_operation("admin_show_refresh") and is_remote_job_plane_enabled():
@@ -5056,8 +5081,8 @@ def refresh_show_photos_stream(
     show_id: UUID,
     request: Request,
     payload: RefreshShowPhotosRequest | None = None,
-    db: SupabaseAdminClient = None,
-    admin_user: InternalAdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    admin_user: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> StreamingResponse:
     """
     High-fidelity gallery refresh for a show with live SSE progress updates.
@@ -5089,7 +5114,8 @@ def refresh_show_photos_stream(
         raise HTTPException(status_code=404, detail=f"Show {show_id_str} not found")
     show_row = show_resp.data[0] or {}
     show_name = str(show_row.get("name") or "").strip() or None
-    external_ids = show_row.get("external_ids") if isinstance(show_row.get("external_ids"), dict) else {}
+    raw_show_external_ids = show_row.get("external_ids")
+    external_ids: dict[str, Any] = raw_show_external_ids if isinstance(raw_show_external_ids, dict) else {}
     show_imdb_id = (
         str(show_row.get("imdb_id") or external_ids.get("imdb_id") or external_ids.get("imdb") or "").strip() or None
     )
@@ -5110,6 +5136,18 @@ def refresh_show_photos_stream(
         return data
 
     def event_generator():
+        if TYPE_CHECKING:
+            # Type-only declarations for names that are conditionally bound below.
+            # TYPE_CHECKING is False at runtime, so these never execute and the
+            # runtime binding behavior is unchanged.
+            targets: list[dict[str, Any]] = []
+            pid = ""
+            pname: Any = None
+            imdb_pid: Any = None
+            tmdb_pid: Any = None
+
+            def _tag_show_context(rows: list[dict]) -> None: ...
+
         from uuid import UUID as _UUID
 
         from trr_backend.ingestion.cast_photo_sources import (
@@ -5513,7 +5551,7 @@ def refresh_show_photos_stream(
                         source="all",
                         show_id=show_id_str,
                         kind=None,
-                        limit=None,
+                        limit=cast(int, None),
                         include_hosted=bool(payload.force_mirror),
                         cdn_base_url=cdn_base_url,
                     )
@@ -5556,7 +5594,7 @@ def refresh_show_photos_stream(
                     show_id=show_id_str,
                     tmdb_id=int(show_tmdb_id) if isinstance(show_tmdb_id, int) else None,
                     season_number=season_scope,
-                    limit=None,
+                    limit=cast(int, None),
                     include_hosted=bool(payload.force_mirror),
                     cdn_base_url=cdn_base_url,
                 )
@@ -5596,7 +5634,7 @@ def refresh_show_photos_stream(
                         tmdb_id=int(show_tmdb_id) if isinstance(show_tmdb_id, int) else None,
                         season_number=season_scope,
                         episode_number=None,
-                        limit=None,
+                        limit=cast(int, None),
                         include_hosted=bool(payload.force_mirror),
                         cdn_base_url=cdn_base_url,
                     )
@@ -5754,19 +5792,23 @@ def refresh_show_photos_stream(
                         people_rows.extend(resp.data)
 
                 # Build inputs per person.
-                targets: list[dict[str, object]] = []
+                targets: list[dict[str, Any]] = []
                 for person in people_rows:
                     pid = str(person.get("id") or "").strip()
                     if not pid:
                         continue
                     full_name = str(person.get("full_name") or "").strip() or None
-                    external_ids = person.get("external_ids") if isinstance(person.get("external_ids"), dict) else {}
+                    raw_person_external_ids = person.get("external_ids")
+                    external_ids: dict[str, Any] = (
+                        raw_person_external_ids if isinstance(raw_person_external_ids, dict) else {}
+                    )
 
                     imdb_person_id = str(external_ids.get("imdb") or "").strip() or None
                     tmdb_person_id = None
                     try:
-                        if external_ids.get("tmdb_id") or external_ids.get("tmdb"):
-                            tmdb_person_id = int(external_ids.get("tmdb_id") or external_ids.get("tmdb"))
+                        raw_person_tmdb_id = external_ids.get("tmdb_id") or external_ids.get("tmdb")
+                        if raw_person_tmdb_id:
+                            tmdb_person_id = int(raw_person_tmdb_id)
                     except Exception:
                         tmdb_person_id = None
 
@@ -5777,9 +5819,10 @@ def refresh_show_photos_stream(
                     if tmdb_row:
                         if not imdb_person_id:
                             imdb_person_id = str(tmdb_row.get("imdb_id") or "").strip() or imdb_person_id
-                        if tmdb_person_id is None and tmdb_row.get("tmdb_id"):
+                        raw_tmdb_row_id = tmdb_row.get("tmdb_id")
+                        if tmdb_person_id is None and raw_tmdb_row_id:
                             try:
-                                tmdb_person_id = int(tmdb_row.get("tmdb_id"))
+                                tmdb_person_id = int(raw_tmdb_row_id)
                             except Exception:
                                 tmdb_person_id = tmdb_person_id
 
@@ -6462,7 +6505,7 @@ def build_show_refresh_photos_operation_producer(
         local_db = db or create_supabase_admin_client()
         response = refresh_show_photos_stream(
             show_id=UUID(show_id_str),
-            request=_InternalStreamRequest(),
+            request=cast(Request, _InternalStreamRequest()),
             payload=payload,
             db=local_db,
             admin_user={"id": initiated_by},

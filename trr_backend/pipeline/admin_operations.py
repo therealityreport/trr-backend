@@ -12,7 +12,7 @@ import time
 from collections.abc import AsyncGenerator, Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from threading import Event, Lock, Thread
-from typing import Any
+from typing import Any, cast
 
 from fastapi import Request
 from fastapi.responses import StreamingResponse
@@ -23,6 +23,7 @@ from trr_backend.job_plane import (
     is_remote_job_plane_enabled,
 )
 from trr_backend.modal_dispatch import dispatch_admin_operation, modal_execution_metadata, supports_admin_operation
+from trr_backend.pipeline.admin_operation_registry import build_registered_admin_operation_producer
 from trr_backend.repositories import admin_operations
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,18 @@ _FUTURES: dict[str, Future[Any]] = {}
 _FUTURES_LOCK = Lock()
 _LAST_PURGE_MONOTONIC = 0.0
 _LOCAL_RUNTIME_MARKERS = frozenset({"local", "dev", "development", "test"})
+
+
+# Keep the refresh dependency contract in the operation layer so remote
+# workers do not need to import the orchestration module back into it.
+SHOW_REFRESH_TARGET_DEPENDENCY_GRAPH: dict[str, list[str]] = {
+    "show_core": [],
+    "links": ["show_core"],
+    "bravo": ["show_core"],
+    "cast_profiles": ["show_core"],
+    "cast_media": ["cast_profiles"],
+    "official_images": ["bravo", "cast_profiles"],
+}
 
 
 def _env_truthy(name: str) -> bool:
@@ -294,7 +307,7 @@ def _run_operation_worker(
         elif inspect.isasyncgen(produced):
             asyncio.run(_consume_async_chunks(operation_id, produced, request_id=request_id))
         elif inspect.isawaitable(produced):
-            awaited = asyncio.run(produced)
+            awaited = asyncio.run(cast("Any", produced))
             if inspect.isasyncgen(awaited):
                 asyncio.run(_consume_async_chunks(operation_id, awaited, request_id=request_id))
             elif isinstance(awaited, (list, tuple, set)):
@@ -477,65 +490,13 @@ def _resolve_remote_operation_producer(
     operation_type: str,
     request_payload: dict[str, Any],
 ) -> Callable[[], Any] | None:
-    """Build a producer callable from persisted operation metadata."""
+    """Build a router-owned producer callable from persisted operation metadata."""
     normalized_type = str(operation_type or "").strip().lower()
-    if normalized_type == "admin_asset_batch_jobs":
-        from api.routers.admin_asset_batch_jobs import build_batch_jobs_operation_producer
-
-        return build_batch_jobs_operation_producer(request_payload=request_payload)
-    if normalized_type == "admin_scrape_import_images":
-        from api.routers.admin_scrape import build_scrape_import_operation_producer
-
-        return build_scrape_import_operation_producer(request_payload=request_payload)
-    if normalized_type == "admin_show_links_discover":
-        from api.routers.admin_show_links import build_show_links_discovery_operation_producer
-
-        return build_show_links_discovery_operation_producer(request_payload=request_payload)
-    if normalized_type == "admin_show_bravo_preview":
-        from api.routers.admin_show_bravo import build_bravo_preview_operation_producer
-
-        return build_bravo_preview_operation_producer(request_payload=request_payload)
-    if normalized_type == "admin_show_refresh":
-        from api.routers.admin_show_sync import build_show_refresh_operation_producer
-
-        return build_show_refresh_operation_producer(request_payload=request_payload, operation_id=operation_id)
-    if normalized_type == "admin_show_refresh_photos":
-        from api.routers.admin_show_sync import build_show_refresh_photos_operation_producer
-
-        return build_show_refresh_photos_operation_producer(request_payload=request_payload)
-    if normalized_type == "admin_person_refresh_images":
-        from api.routers.admin_person_images import build_person_refresh_images_operation_producer
-
-        return build_person_refresh_images_operation_producer(
-            request_payload=request_payload,
-            operation_id=operation_id,
-        )
-    if normalized_type == "admin_person_refresh_profile":
-        from api.routers.admin_person_profile import build_person_refresh_profile_operation_producer
-
-        return build_person_refresh_profile_operation_producer(
-            request_payload=request_payload,
-            operation_id=operation_id,
-        )
-    if normalized_type == "admin_person_reprocess_images":
-        from api.routers.admin_person_images import build_person_reprocess_images_operation_producer
-
-        return build_person_reprocess_images_operation_producer(
-            request_payload=request_payload,
-            operation_id=operation_id,
-        )
-    if normalized_type == "admin_reddit_refresh_backfill":
-        from trr_backend.repositories.reddit_refresh import build_reddit_refresh_backfill_operation_producer
-
-        return build_reddit_refresh_backfill_operation_producer(
-            request_payload=request_payload,
-            operation_id=operation_id,
-        )
-    if normalized_type == "admin_bravotv_image_run":
-        from api.routers.admin_bravotv_images import build_bravotv_image_operation_producer
-
-        return build_bravotv_image_operation_producer(request_payload=request_payload)
-    return None
+    return build_registered_admin_operation_producer(
+        normalized_type,
+        request_payload,
+        operation_id,
+    )
 
 
 def _run_remote_claimed_operation(operation: dict[str, Any]) -> None:
@@ -544,7 +505,8 @@ def _run_remote_claimed_operation(operation: dict[str, Any]) -> None:
         return
 
     operation_type = str(operation.get("operation_type") or "").strip()
-    request_payload = operation.get("request_payload") if isinstance(operation.get("request_payload"), dict) else {}
+    request_payload_raw = operation.get("request_payload")
+    request_payload = request_payload_raw if isinstance(request_payload_raw, dict) else {}
     request_id = str(operation.get("request_id") or "").strip() or None
     claim_token = str(operation.get("claim_token") or "").strip() or None
 
@@ -930,13 +892,16 @@ def finalize_sub_operation(operation_id: str, status: str) -> str | None:
     if not parent_id:
         return None
 
-    # Update this sub-operation's status
-    admin_operations.update_operation_status(operation_id, status)
+    # Update this sub-operation's status. The membership check mirrors the
+    # repository's own validation and narrows `status` to OperationStatus.
+    if status not in ("pending", "running", "completed", "failed", "cancelled", "cancelling"):
+        raise ValueError(f"Unsupported operation status: {status}")
+    admin_operations.update_operation_status(operation_id, status=status)
 
     # Recompute parent
     parent_status = admin_operations.aggregate_parent_status(parent_id)
     if parent_status in ("completed", "failed", "cancelled"):
-        admin_operations.update_operation_status(parent_id, parent_status)
+        admin_operations.update_operation_status(parent_id, status=parent_status)
 
         # Emit parent-level terminal event
         children = admin_operations.get_sub_operations(parent_id)
@@ -970,8 +935,6 @@ def wait_for_sub_operation_dependencies(
 
     Returns True if dependencies satisfied, False if timed out or a dependency failed.
     """
-    from trr_backend.pipeline.show_refresh_orchestrator import TARGET_DEPENDENCY_GRAPH
-
     op = admin_operations.get_operation(operation_id)
     if not op:
         return False
@@ -981,7 +944,7 @@ def wait_for_sub_operation_dependencies(
     if not parent_id or not target:
         return True  # Not a sub-operation — no dependencies
 
-    deps = TARGET_DEPENDENCY_GRAPH.get(target, [])
+    deps = SHOW_REFRESH_TARGET_DEPENDENCY_GRAPH.get(target, [])
     if not deps:
         return True  # No dependencies — safe to run
 

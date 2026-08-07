@@ -8,7 +8,7 @@ import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import requests
@@ -919,7 +919,8 @@ def _tmdb_image_sort_key(image: Mapping[str, Any]) -> tuple[int, int, float, str
         bucket = 2
 
     # vote data is now in image["raw"]["vote_count"] and image["raw"]["vote_average"]
-    raw = image.get("raw") if isinstance(image.get("raw"), Mapping) else {}
+    raw_value = image.get("raw")
+    raw: Mapping[str, Any] = raw_value if isinstance(raw_value, Mapping) else {}
     vote_count = raw.get("vote_count")
     vote_count_int = int(vote_count) if isinstance(vote_count, int) else 0
     vote_average = raw.get("vote_average")
@@ -1118,14 +1119,14 @@ def collect_candidates_from_lists(
     imdb_candidates: list[CandidateShow] = []
     for url in imdb_list_urls:
         list_id = parse_imdb_list_id(url)
-        items: list[ImdbListItem] = fetch_imdb_list_items(
+        imdb_items: list[ImdbListItem] = fetch_imdb_list_items(
             url,
             session=session,
             use_graphql=bool(imdb_use_graphql),
             extra_headers=imdb_extra_headers,
         )
         tag = f"imdb-list:{list_id}"
-        for item in items:
+        for item in imdb_items:
             imdb_candidates.append(
                 CandidateShow(
                     imdb_id=item.imdb_id,
@@ -1147,7 +1148,7 @@ def collect_candidates_from_lists(
         except Exception:
             list_id_int = None
 
-        items: list[TmdbListItem] = fetch_tmdb_list_items(
+        tmdb_items: list[TmdbListItem] = fetch_tmdb_list_items(
             value,
             api_key=tmdb_api_key,
             session=tmdb_session,
@@ -1155,7 +1156,7 @@ def collect_candidates_from_lists(
         )
         list_tag = f"tmdb-list:{list_id_int}" if list_id_int is not None else f"tmdb-list:{value}"
 
-        for item in items:
+        for item in tmdb_items:
             tmdb_candidates.append(
                 CandidateShow(
                     imdb_id=item.imdb_id,
@@ -1195,6 +1196,727 @@ def annotate_candidates_imdb_episodic(
             probe_job_category_id,
         )
     return seasons_by_imdb_id
+
+
+def _upsert_imdb_episodes_for_show(
+    db: DbSession,
+    *,
+    show_id: str,
+    imdb_series_id_str: str | None,
+    tmdb_id_int: int | None,
+    imdb_client: HttpImdbTitleMetadataClient,
+    imdb_payload_cache: dict[tuple[str, int | None], dict[str, Any]],
+    imdb_html_cache: dict[tuple[str, int | None], str],
+    tmdb_find_api_key: str | None,
+    tmdb_find_session: requests.Session,
+    tmdb_find_cache: dict[str, dict[str, Any] | None],
+) -> None:
+    if not imdb_series_id_str:
+        print(f"IMDb episodes: skipping show_id={show_id} (missing imdb_series_id)", file=sys.stderr)
+    else:
+        try:
+            cache_key = (imdb_series_id_str, None)
+            overview: Any
+            payload = imdb_payload_cache.get(cache_key)
+            if payload is None:
+                try:
+                    payload = imdb_client.fetch_episodes_payload(
+                        imdb_series_id_str, allow_html_fallback=False
+                    )
+                    imdb_payload_cache[cache_key] = payload
+                except Exception:  # noqa: BLE001
+                    payload = None
+
+            if isinstance(payload, Mapping):
+                overview = parse_imdb_episodes_payload(payload)
+            else:
+                if cache_key in imdb_html_cache:
+                    overview_html = imdb_html_cache[cache_key]
+                else:
+                    overview_html = imdb_client.fetch_episodes_page(imdb_series_id_str)
+                    imdb_html_cache[cache_key] = overview_html
+                overview = parse_imdb_episodes_page(overview_html)
+            season_numbers = [int(s) for s in overview.available_seasons if isinstance(s, int)]
+            season_numbers = [s for s in season_numbers if 0 <= s <= 50]
+            if not season_numbers:
+                print(
+                    f"IMDb episodes: no seasons found show_id={show_id} imdb_id={imdb_series_id_str}",
+                    file=sys.stderr,
+                )
+            else:
+                fetched_at = _now_utc_iso()
+                upsert_seasons(
+                    db,
+                    [
+                        {
+                            "show_id": show_id,
+                            "season_number": season_no,
+                            "imdb_series_id": imdb_series_id_str,
+                            "language": "en-US",
+                            "fetched_at": fetched_at,
+                            "external_ids": _merge_external_ids(
+                                {},
+                                {"imdb": imdb_series_id_str},
+                            )
+                            or None,
+                        }
+                        for season_no in season_numbers
+                    ],
+                )
+                season_rows = fetch_seasons_by_show(db, show_id=show_id, season_numbers=season_numbers)
+                season_id_by_number: dict[int, str] = {}
+                for s in season_rows:
+                    sn = s.get("season_number")
+                    sid = s.get("id")
+                    if isinstance(sn, int) and isinstance(sid, str) and sid:
+                        season_id_by_number[sn] = sid
+
+                seasons_failed = 0
+                episodes_upserted = 0
+
+                for season_no in season_numbers:
+                    season_id_val = season_id_by_number.get(season_no)
+                    if not season_id_val:
+                        continue
+                    try:
+                        existing_eps = fetch_episodes_for_show_season(
+                            db, show_id=show_id, season_number=int(season_no)
+                        )
+                        existing_by_number: dict[int, dict[str, Any]] = {}
+                        for existing_ep in existing_eps:
+                            ep_no = existing_ep.get("episode_number")
+                            if isinstance(ep_no, int):
+                                existing_by_number[ep_no] = existing_ep
+
+                        cache_key = (imdb_series_id_str, int(season_no))
+                        payload = imdb_payload_cache.get(cache_key)
+                        if payload is None:
+                            try:
+                                payload = imdb_client.fetch_episodes_payload(
+                                    imdb_series_id_str,
+                                    season=season_no,
+                                    allow_html_fallback=False,
+                                )
+                                imdb_payload_cache[cache_key] = payload
+                            except Exception:  # noqa: BLE001
+                                payload = None
+
+                        if isinstance(payload, Mapping):
+                            episodes = parse_imdb_season_episodes_payload(payload, season=season_no)
+                        else:
+                            if cache_key in imdb_html_cache:
+                                season_html = imdb_html_cache[cache_key]
+                            else:
+                                season_html = imdb_client.fetch_episodes_page(
+                                    imdb_series_id_str, season=season_no
+                                )
+                                imdb_html_cache[cache_key] = season_html
+                            episodes = parse_imdb_season_episodes_page(season_html, season=season_no)
+                        episode_rows: list[dict[str, Any]] = []
+                        for ep in episodes:
+                            if ep.season != season_no:
+                                continue
+                            existing = existing_by_number.get(int(ep.episode), {})
+                            episode_row: dict[str, Any] = {
+                                "show_id": show_id,
+                                "season_id": season_id_val,
+                                "season_number": int(season_no),
+                                "episode_number": int(ep.episode),
+                                "fetched_at": fetched_at,
+                            }
+                            if ep.imdb_episode_id:
+                                episode_row["imdb_episode_id"] = ep.imdb_episode_id
+                            if ep.title:
+                                episode_row["title"] = ep.title
+                            if ep.overview:
+                                # IMDb is authoritative for canonical episode text when present.
+                                episode_row["overview"] = ep.overview
+                                episode_row["synopsis"] = ep.overview
+                            if ep.air_date:
+                                episode_row["air_date"] = ep.air_date
+                            if ep.imdb_rating is not None:
+                                episode_row["imdb_rating"] = ep.imdb_rating
+                            if ep.imdb_vote_count is not None:
+                                episode_row["imdb_vote_count"] = ep.imdb_vote_count
+                            if ep.imdb_primary_image_url:
+                                episode_row["imdb_primary_image_url"] = ep.imdb_primary_image_url
+                            if ep.imdb_primary_image_caption:
+                                episode_row["imdb_primary_image_caption"] = (
+                                    ep.imdb_primary_image_caption
+                                )
+                            if ep.imdb_primary_image_width is not None:
+                                episode_row["imdb_primary_image_width"] = ep.imdb_primary_image_width
+                            if ep.imdb_primary_image_height is not None:
+                                episode_row["imdb_primary_image_height"] = ep.imdb_primary_image_height
+
+                            tmdb_episode_id = existing.get("tmdb_episode_id")
+                            if tmdb_episode_id is None and tmdb_id_int is None and ep.imdb_episode_id:
+                                payload = _fetch_tmdb_find_payload(
+                                    ep.imdb_episode_id,
+                                    api_key=tmdb_find_api_key,
+                                    session=tmdb_find_session,
+                                    cache=tmdb_find_cache,
+                                    label="episode",
+                                )
+                                tmdb_episode_id = _extract_tmdb_episode_id(payload)
+                            if isinstance(tmdb_episode_id, int):
+                                episode_row["tmdb_episode_id"] = tmdb_episode_id
+
+                            external_updates: dict[str, Any] = {}
+                            if ep.imdb_episode_id:
+                                external_updates["imdb"] = ep.imdb_episode_id
+                            if isinstance(tmdb_episode_id, int):
+                                external_updates["tmdb"] = tmdb_episode_id
+                            merged_external_ids = _merge_external_ids(
+                                existing.get("external_ids"),
+                                external_updates,
+                            )
+                            if merged_external_ids is not None:
+                                episode_row["external_ids"] = merged_external_ids
+                            episode_rows.append(episode_row)
+
+                        if episode_rows:
+                            upsert_episodes(db, episode_rows)
+                            episodes_upserted += len(episode_rows)
+                    except Exception as exc:  # noqa: BLE001
+                        seasons_failed += 1
+                        print(
+                            f"IMDb episodes: failed show_id={show_id} imdb_id={imdb_series_id_str} "
+                            f"season={season_no} error={exc}",
+                            file=sys.stderr,
+                        )
+
+                print(
+                    "IMDb episodes summary "
+                    f"show_id={show_id} imdb_id={imdb_series_id_str} "
+                    f"seasons={len(season_numbers)} seasons_failed={seasons_failed} "
+                    f"episodes_upserted={episodes_upserted}",
+                    file=sys.stderr,
+                )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"IMDb episodes: failed show_id={show_id} imdb_id={imdb_series_id_str} "
+                f"(unexpected error={exc})",
+                file=sys.stderr,
+            )
+
+
+def _upsert_tmdb_seasons_for_show(
+    db: DbSession,
+    *,
+    row: dict[str, Any],
+    show_id: str,
+    imdb_series_id_str: str | None,
+    tmdb_id_int: int | None,
+    tmdb_season_language: str,
+    tmdb_season_include_lang: str,
+    tmdb_season_session: requests.Session,
+    tmdb_season_cache: dict[tuple[int, int, str, tuple[str, ...], str], dict[str, Any]],
+) -> None:
+    if tmdb_id_int is None:
+        print(f"TMDb seasons: skipping show_id={show_id} (missing tmdb_series_id)", file=sys.stderr)
+    else:
+        tmdb_meta_map: Mapping[str, Any] = {}
+        tmdb_meta = row.get("tmdb_meta")
+        if isinstance(tmdb_meta, Mapping):
+            tmdb_meta_map = tmdb_meta
+        else:
+            external_ids = row.get("external_ids")
+            external_ids_map = external_ids if isinstance(external_ids, dict) else {}
+            legacy_meta = external_ids_map.get("tmdb_meta")
+            tmdb_meta_map = legacy_meta if isinstance(legacy_meta, Mapping) else {}
+        raw_seasons = tmdb_meta_map.get("seasons")
+        season_numbers: list[int] = []
+        if isinstance(raw_seasons, list):
+            for s in raw_seasons:
+                if not isinstance(s, Mapping):
+                    continue
+                sn = s.get("season_number")
+                if isinstance(sn, int):
+                    season_numbers.append(sn)
+                elif isinstance(sn, str) and sn.strip().isdigit():
+                    season_numbers.append(int(sn.strip()))
+        season_numbers = sorted({n for n in season_numbers if 0 <= n <= 50})
+        if not season_numbers:
+            print(
+                f"TMDb seasons: no seasons found show_id={show_id} tmdb_id={tmdb_id_int}",
+                file=sys.stderr,
+            )
+        else:
+            upsert_seasons(
+                db,
+                [
+                    {
+                        "show_id": show_id,
+                        "season_number": season_no,
+                        "tmdb_series_id": int(tmdb_id_int),
+                        "language": tmdb_season_language,
+                        "external_ids": _merge_external_ids(
+                            {},
+                            {"tmdb": int(tmdb_id_int)},
+                        )
+                        or None,
+                    }
+                    for season_no in season_numbers
+                ],
+            )
+            season_rows = fetch_seasons_by_show(db, show_id=show_id, season_numbers=season_numbers)
+            season_id_by_number: dict[int, str] = {}
+            season_existing_by_number: dict[int, dict[str, Any]] = {}
+            for s in season_rows:
+                sn = s.get("season_number")
+                sid = s.get("id")
+                if isinstance(sn, int) and isinstance(sid, str) and sid:
+                    season_id_by_number[sn] = sid
+                    season_existing_by_number[sn] = s
+
+            seasons_failed = 0
+            seasons_fetched = 0
+            episodes_upserted = 0
+            posters_upserted = 0
+
+            for season_no in season_numbers:
+                season_id_val = season_id_by_number.get(season_no)
+                if not season_id_val:
+                    continue
+                existing_season = season_existing_by_number.get(season_no, {})
+
+                fetched_at = _now_utc_iso()
+                try:
+                    payload = fetch_tv_season_details(
+                        int(tmdb_id_int),
+                        int(season_no),
+                        api_key=None,
+                        session=tmdb_season_session,
+                        language=tmdb_season_language,
+                        include_image_language=tmdb_season_include_lang,
+                        append_to_response=["external_ids", "images"],
+                        cache=tmdb_season_cache,
+                    )
+                    seasons_fetched += 1
+
+                    ext = payload.get("external_ids")
+                    ext_map = ext if isinstance(ext, Mapping) else {}
+
+                    season_patch: dict[str, Any] = {
+                        "show_id": show_id,
+                        "season_number": int(season_no),
+                        "tmdb_series_id": int(tmdb_id_int),
+                        "tmdb_season_id": payload.get("id")
+                        if isinstance(payload.get("id"), int)
+                        else None,
+                        "tmdb_season_object_id": payload.get("_id")
+                        if isinstance(payload.get("_id"), str)
+                        else None,
+                        "name": payload.get("name") if isinstance(payload.get("name"), str) else None,
+                        "overview": payload.get("overview")
+                        if isinstance(payload.get("overview"), str)
+                        else None,
+                        "air_date": payload.get("air_date")
+                        if isinstance(payload.get("air_date"), str)
+                        else None,
+                        "poster_path": payload.get("poster_path")
+                        if isinstance(payload.get("poster_path"), str)
+                        else None,
+                        "external_tvdb_id": ext_map.get("tvdb_id")
+                        if isinstance(ext_map.get("tvdb_id"), int)
+                        else None,
+                        "external_wikidata_id": ext_map.get("wikidata_id")
+                        if isinstance(ext_map.get("wikidata_id"), str)
+                        else None,
+                        "language": tmdb_season_language,
+                        "fetched_at": fetched_at,
+                    }
+                    external_updates: dict[str, Any] = {}
+                    if isinstance(imdb_series_id_str, str) and imdb_series_id_str.strip():
+                        external_updates["imdb"] = imdb_series_id_str.strip()
+                    tmdb_season_id_val = season_patch.get("tmdb_season_id")
+                    if isinstance(tmdb_season_id_val, int):
+                        external_updates["tmdb"] = tmdb_season_id_val
+                    elif tmdb_id_int is not None:
+                        external_updates["tmdb"] = int(tmdb_id_int)
+                    merged_external_ids = _merge_external_ids(
+                        existing_season.get("external_ids"),
+                        external_updates,
+                    )
+                    if merged_external_ids is not None:
+                        season_patch["external_ids"] = merged_external_ids
+                    if isinstance(season_patch.get("name"), str) and season_patch["name"].strip():
+                        season_patch["title"] = season_patch["name"]
+                    if (
+                        isinstance(season_patch.get("air_date"), str)
+                        and season_patch["air_date"].strip()
+                    ):
+                        season_patch["premiere_date"] = season_patch["air_date"]
+
+                    upsert_seasons(db, [season_patch])
+
+                    existing_eps = fetch_episodes_for_show_season(
+                        db, show_id=show_id, season_number=int(season_no)
+                    )
+                    existing_by_number: dict[int, dict[str, Any]] = {}
+                    for e in existing_eps:
+                        ep_no = e.get("episode_number")
+                        if isinstance(ep_no, int):
+                            existing_by_number[ep_no] = e
+
+                    episode_rows: list[dict[str, Any]] = []
+                    raw_eps = payload.get("episodes")
+                    if isinstance(raw_eps, list):
+                        for ep in raw_eps:
+                            if not isinstance(ep, Mapping):
+                                continue
+                            ep_no = ep.get("episode_number")
+                            if not isinstance(ep_no, int):
+                                continue
+
+                            existing = existing_by_number.get(ep_no, {})
+                            existing_title = existing.get("title")
+                            existing_overview = existing.get("overview")
+                            existing_synopsis = existing.get("synopsis")
+                            existing_air_date = existing.get("air_date")
+
+                            tmdb_title = ep.get("name") if isinstance(ep.get("name"), str) else None
+                            tmdb_overview = (
+                                ep.get("overview") if isinstance(ep.get("overview"), str) else None
+                            )
+                            tmdb_air = (
+                                ep.get("air_date") if isinstance(ep.get("air_date"), str) else None
+                            )
+
+                            title_val = (
+                                existing_title.strip()
+                                if isinstance(existing_title, str) and existing_title.strip()
+                                else (
+                                    tmdb_title.strip()
+                                    if isinstance(tmdb_title, str) and tmdb_title.strip()
+                                    else None
+                                )
+                            )
+                            air_val = (
+                                existing_air_date
+                                if isinstance(existing_air_date, str) and existing_air_date.strip()
+                                else (
+                                    tmdb_air.strip()
+                                    if isinstance(tmdb_air, str) and tmdb_air.strip()
+                                    else None
+                                )
+                            )
+
+                            episode_row: dict[str, Any] = {
+                                "show_id": show_id,
+                                "season_id": season_id_val,
+                                "season_number": int(season_no),
+                                "episode_number": int(ep_no),
+                                "tmdb_series_id": int(tmdb_id_int),
+                                "fetched_at": fetched_at,
+                            }
+                            if title_val:
+                                episode_row["title"] = title_val
+                            if (
+                                isinstance(tmdb_overview, str)
+                                and tmdb_overview.strip()
+                                and not (
+                                    isinstance(existing_overview, str) and existing_overview.strip()
+                                )
+                            ):
+                                overview_value = tmdb_overview.strip()
+                                episode_row["overview"] = overview_value
+                                if not (
+                                    isinstance(existing_synopsis, str) and existing_synopsis.strip()
+                                ):
+                                    episode_row["synopsis"] = overview_value
+                            if air_val:
+                                episode_row["air_date"] = air_val
+
+                            if isinstance(ep.get("id"), int):
+                                episode_row["tmdb_episode_id"] = ep.get("id")
+                            episode_type_val = ep.get("episode_type")
+                            if isinstance(episode_type_val, str) and episode_type_val.strip():
+                                episode_row["episode_type"] = episode_type_val
+                            production_code_val = ep.get("production_code")
+                            if isinstance(production_code_val, str) and production_code_val.strip():
+                                episode_row["production_code"] = production_code_val
+                            if isinstance(ep.get("runtime"), int):
+                                episode_row["runtime"] = ep.get("runtime")
+                            still_path_val = ep.get("still_path")
+                            if isinstance(still_path_val, str) and still_path_val.strip():
+                                episode_row["still_path"] = still_path_val
+                            vote_average_val = ep.get("vote_average")
+                            if isinstance(vote_average_val, (int, float)):
+                                episode_row["tmdb_vote_average"] = float(vote_average_val)
+                            if isinstance(ep.get("vote_count"), int):
+                                episode_row["tmdb_vote_count"] = ep.get("vote_count")
+
+                            existing_external_ids = existing.get("external_ids")
+                            existing_imdb_episode_id = existing.get("imdb_episode_id")
+                            external_updates: dict[str, Any] = {}
+                            if (
+                                isinstance(existing_imdb_episode_id, str)
+                                and existing_imdb_episode_id.strip()
+                            ):
+                                external_updates["imdb"] = existing_imdb_episode_id.strip()
+                            tmdb_episode_id = episode_row.get("tmdb_episode_id")
+                            if isinstance(tmdb_episode_id, int):
+                                external_updates["tmdb"] = tmdb_episode_id
+                            merged_external_ids = _merge_external_ids(
+                                existing_external_ids,
+                                external_updates,
+                            )
+                            if merged_external_ids is not None:
+                                episode_row["external_ids"] = merged_external_ids
+
+                            episode_rows.append(episode_row)
+
+                    if episode_rows:
+                        upsert_episodes(db, episode_rows)
+                        episodes_upserted += len(episode_rows)
+
+                    images_obj = payload.get("images")
+                    images_map = images_obj if isinstance(images_obj, Mapping) else {}
+                    posters = images_map.get("posters")
+                    poster_rows: list[dict[str, Any]] = []
+                    if isinstance(posters, list):
+                        # TMDb season images payload here is "posters". Do not label as backdrop.
+                        shared_metadata = {
+                            "image_roles": ["poster"],
+                            "season_backdrop": False,
+                        }
+                        for poster in posters:
+                            if not isinstance(poster, Mapping):
+                                continue
+                            file_path = poster.get("file_path")
+                            if not isinstance(file_path, str) or not file_path.strip():
+                                continue
+                            width = poster.get("width")
+                            height = poster.get("height")
+                            aspect_ratio = poster.get("aspect_ratio")
+                            if not isinstance(width, int) or not isinstance(height, int):
+                                continue
+                            if isinstance(aspect_ratio, (int, float)):
+                                aspect_ratio_val: float = float(aspect_ratio)
+                            elif height > 0:
+                                aspect_ratio_val = float(width) / float(height)
+                            else:
+                                aspect_ratio_val = 0.0
+
+                            url_original = f"https://image.tmdb.org/t/p/original{file_path}"
+                            poster_rows.append(
+                                {
+                                    "show_id": show_id,
+                                    "season_id": season_id_val,
+                                    "tmdb_series_id": int(tmdb_id_int),
+                                    "season_number": int(season_no),
+                                    "source": "tmdb",
+                                    "kind": "poster",
+                                    "iso_639_1": poster.get("iso_639_1")
+                                    if isinstance(poster.get("iso_639_1"), str)
+                                    else None,
+                                    "file_path": file_path,
+                                    "source_image_id": file_path,
+                                    "url": url_original,
+                                    "url_path": file_path,
+                                    "width": int(width),
+                                    "height": int(height),
+                                    "aspect_ratio": aspect_ratio_val,
+                                    "fetched_at": fetched_at,
+                                    "metadata": dict(shared_metadata),
+                                }
+                            )
+
+                    if poster_rows:
+                        upsert_season_images(db, poster_rows)
+                        posters_upserted += len(poster_rows)
+
+                except TmdbClientError as exc:
+                    seasons_failed += 1
+                    print(
+                        f"TMDb seasons: failed tmdb_id={tmdb_id_int} season={season_no} "
+                        f"(HTTP {exc.status_code if exc.status_code is not None else 'unknown'})",
+                        file=sys.stderr,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    seasons_failed += 1
+                    print(
+                        f"TMDb seasons: failed tmdb_id={tmdb_id_int} season={season_no} "
+                        f"(unexpected error={exc})",
+                        file=sys.stderr,
+                    )
+
+                if season_numbers and (
+                    seasons_fetched == 1
+                    or seasons_fetched % 5 == 0
+                    or seasons_fetched == len(season_numbers)
+                ):
+                    print(
+                        f"TMDb seasons: processed {seasons_fetched}/{len(season_numbers)} show_id={show_id} tmdb_id={tmdb_id_int} "  # noqa: E501
+                        f"(failed={seasons_failed})",
+                        file=sys.stderr,
+                    )
+
+            print(
+                "TMDb seasons summary "
+                f"show_id={show_id} tmdb_id={tmdb_id_int} "
+                f"seasons={len(season_numbers)} fetched={seasons_fetched} failed={seasons_failed} "
+                f"episodes_upserted={episodes_upserted} season_posters_upserted={posters_upserted}",
+                file=sys.stderr,
+            )
+
+
+def _enrich_upserted_show_metadata(
+    *,
+    db: DbSession | None,
+    supabase_client: DbSession | None,
+    dry_run: bool,
+    upserted_show_rows: list[dict[str, Any]],
+    enrich_region: str,
+    enrich_concurrency: int,
+    enrich_max_enrich: int | None,
+    enrich_force_refresh: bool,
+    enrich_imdb_sleep_ms: int,
+) -> None:
+    show_records: list[ShowRecord] = []
+    by_id: dict[str, dict[str, Any]] = {}
+    for row in upserted_show_rows:
+        row_id = row.get("id")
+        if not isinstance(row_id, str) or not row_id:
+            continue
+        by_id[row_id] = row
+
+        try:
+            show_id = UUID(row_id)
+        except Exception:
+            show_id = uuid4()
+
+        tmdb_id_val = row.get("tmdb_id")
+        show_records.append(
+            ShowRecord(
+                id=show_id,
+                name=str(row.get("name") or ""),
+                description=row.get("description") if isinstance(row.get("description"), str) else None,
+                premiere_date=row.get("premiere_date") if isinstance(row.get("premiere_date"), str) else None,
+                imdb_id=(row.get("imdb_id") if isinstance(row.get("imdb_id"), str) else None),
+                tmdb_id=(int(tmdb_id_val) if isinstance(tmdb_id_val, int) else None),
+            )
+        )
+
+    summary = enrich_shows_after_upsert(
+        show_records,
+        region=enrich_region,
+        concurrency=enrich_concurrency,
+        max_enrich=enrich_max_enrich,
+        force_refresh=enrich_force_refresh,
+        dry_run=dry_run,
+        imdb_sleep_ms=enrich_imdb_sleep_ms,
+    )
+
+    print(
+        "ENRICH summary "
+        f"attempted={summary.attempted} "
+        f"updated={summary.updated} "
+        f"skipped_complete={summary.skipped_complete} "
+        f"skipped={summary.skipped} "
+        f"failed={summary.failed}"
+    )
+
+    if summary.failures:
+        print(f"ENRICH failed={summary.failed} (show metadata).")
+        for failure in summary.failures[:10]:
+            print(f"ENRICH FAIL show_id={failure.show_id} name={failure.name!r} error={failure.message}")
+        if len(summary.failures) > 10:
+            print(f"ENRICH FAIL ... and {len(summary.failures) - 10} more")
+
+    for patch in summary.patches:
+        row = by_id.get(str(patch.show_id))
+        if row is None:
+            # Dry-run rows have synthetic UUIDs; fall back to searching by UUID object.
+            row = next((r for r in upserted_show_rows if str(r.get("id")) == str(patch.show_id)), None)
+        if row is None:
+            continue
+
+        update_patch: dict[str, Any] = {}
+        for key, value in (patch.show_update or {}).items():
+            if row.get(key) != value:
+                update_patch[key] = value
+
+        merged_genres = _merge_str_arrays(row.get("genres"), patch.genres)
+        if merged_genres is not None:
+            update_patch["genres"] = merged_genres
+
+        merged_keywords = _merge_str_arrays(row.get("keywords"), patch.keywords)
+        if merged_keywords is not None:
+            update_patch["keywords"] = merged_keywords
+
+        merged_tags = _merge_str_arrays(row.get("tags"), patch.tags)
+        if merged_tags is not None:
+            update_patch["tags"] = merged_tags
+
+        merged_networks = _merge_str_arrays(row.get("networks"), patch.networks)
+        if merged_networks is not None:
+            update_patch["networks"] = merged_networks
+
+        merged_streaming = _merge_str_arrays(row.get("streaming_providers"), patch.streaming_providers)
+        if merged_streaming is not None:
+            update_patch["streaming_providers"] = merged_streaming
+
+        merged_tmdb_network_ids = _merge_int_arrays(row.get("tmdb_network_ids"), patch.tmdb_network_ids)
+        if merged_tmdb_network_ids is not None:
+            update_patch["tmdb_network_ids"] = merged_tmdb_network_ids
+
+        merged_tmdb_company_ids = _merge_int_arrays(
+            row.get("tmdb_production_company_ids"), patch.tmdb_production_company_ids
+        )
+        if merged_tmdb_company_ids is not None:
+            update_patch["tmdb_production_company_ids"] = merged_tmdb_company_ids
+
+        merged_alt_names = _merge_str_arrays(
+            _filter_ascii_strings(row.get("alternative_names")),
+            _filter_ascii_strings(patch.alternative_names),
+        )
+        if merged_alt_names is not None:
+            update_patch["alternative_names"] = merged_alt_names
+
+        if patch.show_images_rows:
+            if dry_run:
+                print(f"ENRICH images show_id={patch.show_id} rows={len(patch.show_images_rows)} source=imdb")
+            elif supabase_client is not None:
+                try:
+                    upsert_show_images(supabase_client, patch.show_images_rows)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"ENRICH images failed show_id={patch.show_id} error={exc}", file=sys.stderr)
+
+        if patch.alternative_name_rows:
+            if dry_run:
+                print(
+                    f"ENRICH alt_names show_id={patch.show_id} rows={len(patch.alternative_name_rows)} source=tmdb"
+                )
+            elif supabase_client is not None:
+                try:
+                    rows = [
+                        {
+                            **r,
+                            "show_id": str(patch.show_id),
+                        }
+                        for r in patch.alternative_name_rows
+                    ]
+                    supabase_client.schema("core").table("show_alternative_names").upsert(
+                        rows,
+                        on_conflict="show_id,name,language,country,source",
+                    ).execute()
+                except Exception as exc:  # noqa: BLE001
+                    print(f"ENRICH alt_names failed show_id={patch.show_id} error={exc}", file=sys.stderr)
+
+        if not update_patch:
+            continue
+
+        if dry_run:
+            print(f"ENRICH UPDATE show id={patch.show_id} patch_keys={sorted(update_patch.keys())}")
+            continue
+
+        if db is None:
+            raise RuntimeError("Supabase client is not available for enrichment.")
+        updated_row = update_show(db, patch.show_id, update_patch)
+        print(f"ENRICH UPDATED show id={updated_row.get('id')} name={updated_row.get('name')!r}")
 
 
 def upsert_candidates_into_supabase(
@@ -1395,8 +2117,8 @@ def upsert_candidates_into_supabase(
                 elif db is not None:
                     merge_shows(
                         db,
-                        source_show_id=existing_by_tmdb.get("id"),
-                        target_show_id=existing_by_imdb.get("id"),
+                        source_show_id=cast("UUID | str", existing_by_tmdb.get("id")),
+                        target_show_id=cast("UUID | str", existing_by_imdb.get("id")),
                     )
                 existing = existing_by_imdb
 
@@ -1417,7 +2139,7 @@ def upsert_candidates_into_supabase(
                     }
                 )
             else:
-                inserted = insert_show(db, show_upsert)
+                inserted = insert_show(cast(DbSession, db), show_upsert)
                 created += 1
                 created_now = True
                 upserted_show_rows.append(inserted)
@@ -1507,7 +2229,7 @@ def upsert_candidates_into_supabase(
                 upserted_show_rows.append(merged_existing)
                 existing = merged_existing
             else:
-                updated_row = update_show(db, existing["id"], patch)
+                updated_row = update_show(cast(DbSession, db), existing["id"], patch)
                 updated += 1
                 upserted_show_rows.append(updated_row)
                 existing = updated_row
@@ -1644,547 +2366,32 @@ def upsert_candidates_into_supabase(
 
                 # --- IMDb: enumerate episodes per season (no credits) ---
                 if imdb_fetch_episodes:
-                    if not imdb_series_id_str:
-                        print(f"IMDb episodes: skipping show_id={show_id} (missing imdb_series_id)", file=sys.stderr)
-                    else:
-                        try:
-                            cache_key = (imdb_series_id_str, None)
-                            overview: Any
-                            payload = imdb_payload_cache.get(cache_key)
-                            if payload is None:
-                                try:
-                                    payload = imdb_client.fetch_episodes_payload(
-                                        imdb_series_id_str, allow_html_fallback=False
-                                    )
-                                    imdb_payload_cache[cache_key] = payload
-                                except Exception:  # noqa: BLE001
-                                    payload = None
-
-                            if isinstance(payload, Mapping):
-                                overview = parse_imdb_episodes_payload(payload)
-                            else:
-                                if cache_key in imdb_html_cache:
-                                    overview_html = imdb_html_cache[cache_key]
-                                else:
-                                    overview_html = imdb_client.fetch_episodes_page(imdb_series_id_str)
-                                    imdb_html_cache[cache_key] = overview_html
-                                overview = parse_imdb_episodes_page(overview_html)
-                            season_numbers = [int(s) for s in overview.available_seasons if isinstance(s, int)]
-                            season_numbers = [s for s in season_numbers if 0 <= s <= 50]
-                            if not season_numbers:
-                                print(
-                                    f"IMDb episodes: no seasons found show_id={show_id} imdb_id={imdb_series_id_str}",
-                                    file=sys.stderr,
-                                )
-                            else:
-                                fetched_at = _now_utc_iso()
-                                upsert_seasons(
-                                    db,
-                                    [
-                                        {
-                                            "show_id": show_id,
-                                            "season_number": season_no,
-                                            "imdb_series_id": imdb_series_id_str,
-                                            "language": "en-US",
-                                            "fetched_at": fetched_at,
-                                            "external_ids": _merge_external_ids(
-                                                {},
-                                                {"imdb": imdb_series_id_str},
-                                            )
-                                            or None,
-                                        }
-                                        for season_no in season_numbers
-                                    ],
-                                )
-                                season_rows = fetch_seasons_by_show(db, show_id=show_id, season_numbers=season_numbers)
-                                season_id_by_number: dict[int, str] = {}
-                                for s in season_rows:
-                                    sn = s.get("season_number")
-                                    sid = s.get("id")
-                                    if isinstance(sn, int) and isinstance(sid, str) and sid:
-                                        season_id_by_number[sn] = sid
-
-                                seasons_failed = 0
-                                episodes_upserted = 0
-
-                                for season_no in season_numbers:
-                                    season_id_val = season_id_by_number.get(season_no)
-                                    if not season_id_val:
-                                        continue
-                                    try:
-                                        existing_eps = fetch_episodes_for_show_season(
-                                            db, show_id=show_id, season_number=int(season_no)
-                                        )
-                                        existing_by_number: dict[int, dict[str, Any]] = {}
-                                        for existing_ep in existing_eps:
-                                            ep_no = existing_ep.get("episode_number")
-                                            if isinstance(ep_no, int):
-                                                existing_by_number[ep_no] = existing_ep
-
-                                        cache_key = (imdb_series_id_str, int(season_no))
-                                        payload = imdb_payload_cache.get(cache_key)
-                                        if payload is None:
-                                            try:
-                                                payload = imdb_client.fetch_episodes_payload(
-                                                    imdb_series_id_str,
-                                                    season=season_no,
-                                                    allow_html_fallback=False,
-                                                )
-                                                imdb_payload_cache[cache_key] = payload
-                                            except Exception:  # noqa: BLE001
-                                                payload = None
-
-                                        if isinstance(payload, Mapping):
-                                            episodes = parse_imdb_season_episodes_payload(payload, season=season_no)
-                                        else:
-                                            if cache_key in imdb_html_cache:
-                                                season_html = imdb_html_cache[cache_key]
-                                            else:
-                                                season_html = imdb_client.fetch_episodes_page(
-                                                    imdb_series_id_str, season=season_no
-                                                )
-                                                imdb_html_cache[cache_key] = season_html
-                                            episodes = parse_imdb_season_episodes_page(season_html, season=season_no)
-                                        episode_rows: list[dict[str, Any]] = []
-                                        for ep in episodes:
-                                            if ep.season != season_no:
-                                                continue
-                                            existing = existing_by_number.get(int(ep.episode), {})
-                                            episode_row: dict[str, Any] = {
-                                                "show_id": show_id,
-                                                "season_id": season_id_val,
-                                                "season_number": int(season_no),
-                                                "episode_number": int(ep.episode),
-                                                "fetched_at": fetched_at,
-                                            }
-                                            if ep.imdb_episode_id:
-                                                episode_row["imdb_episode_id"] = ep.imdb_episode_id
-                                            if ep.title:
-                                                episode_row["title"] = ep.title
-                                            if ep.overview:
-                                                # IMDb is authoritative for canonical episode text when present.
-                                                episode_row["overview"] = ep.overview
-                                                episode_row["synopsis"] = ep.overview
-                                            if ep.air_date:
-                                                episode_row["air_date"] = ep.air_date
-                                            if ep.imdb_rating is not None:
-                                                episode_row["imdb_rating"] = ep.imdb_rating
-                                            if ep.imdb_vote_count is not None:
-                                                episode_row["imdb_vote_count"] = ep.imdb_vote_count
-                                            if ep.imdb_primary_image_url:
-                                                episode_row["imdb_primary_image_url"] = ep.imdb_primary_image_url
-                                            if ep.imdb_primary_image_caption:
-                                                episode_row["imdb_primary_image_caption"] = (
-                                                    ep.imdb_primary_image_caption
-                                                )
-                                            if ep.imdb_primary_image_width is not None:
-                                                episode_row["imdb_primary_image_width"] = ep.imdb_primary_image_width
-                                            if ep.imdb_primary_image_height is not None:
-                                                episode_row["imdb_primary_image_height"] = ep.imdb_primary_image_height
-
-                                            tmdb_episode_id = existing.get("tmdb_episode_id")
-                                            if tmdb_episode_id is None and tmdb_id_int is None and ep.imdb_episode_id:
-                                                payload = _fetch_tmdb_find_payload(
-                                                    ep.imdb_episode_id,
-                                                    api_key=tmdb_find_api_key,
-                                                    session=tmdb_find_session,
-                                                    cache=tmdb_find_cache,
-                                                    label="episode",
-                                                )
-                                                tmdb_episode_id = _extract_tmdb_episode_id(payload)
-                                            if isinstance(tmdb_episode_id, int):
-                                                episode_row["tmdb_episode_id"] = tmdb_episode_id
-
-                                            external_updates: dict[str, Any] = {}
-                                            if ep.imdb_episode_id:
-                                                external_updates["imdb"] = ep.imdb_episode_id
-                                            if isinstance(tmdb_episode_id, int):
-                                                external_updates["tmdb"] = tmdb_episode_id
-                                            merged_external_ids = _merge_external_ids(
-                                                existing.get("external_ids"),
-                                                external_updates,
-                                            )
-                                            if merged_external_ids is not None:
-                                                episode_row["external_ids"] = merged_external_ids
-                                            episode_rows.append(episode_row)
-
-                                        if episode_rows:
-                                            upsert_episodes(db, episode_rows)
-                                            episodes_upserted += len(episode_rows)
-                                    except Exception as exc:  # noqa: BLE001
-                                        seasons_failed += 1
-                                        print(
-                                            f"IMDb episodes: failed show_id={show_id} imdb_id={imdb_series_id_str} "
-                                            f"season={season_no} error={exc}",
-                                            file=sys.stderr,
-                                        )
-
-                                print(
-                                    "IMDb episodes summary "
-                                    f"show_id={show_id} imdb_id={imdb_series_id_str} "
-                                    f"seasons={len(season_numbers)} seasons_failed={seasons_failed} "
-                                    f"episodes_upserted={episodes_upserted}",
-                                    file=sys.stderr,
-                                )
-                        except Exception as exc:  # noqa: BLE001
-                            print(
-                                f"IMDb episodes: failed show_id={show_id} imdb_id={imdb_series_id_str} "
-                                f"(unexpected error={exc})",
-                                file=sys.stderr,
-                            )
+                    _upsert_imdb_episodes_for_show(
+                        db,
+                        show_id=show_id,
+                        imdb_series_id_str=imdb_series_id_str,
+                        tmdb_id_int=tmdb_id_int,
+                        imdb_client=imdb_client,
+                        imdb_payload_cache=imdb_payload_cache,
+                        imdb_html_cache=imdb_html_cache,
+                        tmdb_find_api_key=tmdb_find_api_key,
+                        tmdb_find_session=tmdb_find_session,
+                        tmdb_find_cache=tmdb_find_cache,
+                    )
 
                 # --- TMDb: enrich seasons/episodes and persist season posters (no credits) ---
                 if tmdb_fetch_seasons:
-                    if tmdb_id_int is None:
-                        print(f"TMDb seasons: skipping show_id={show_id} (missing tmdb_series_id)", file=sys.stderr)
-                    else:
-                        tmdb_meta_map: Mapping[str, Any] = {}
-                        tmdb_meta = row.get("tmdb_meta")
-                        if isinstance(tmdb_meta, Mapping):
-                            tmdb_meta_map = tmdb_meta
-                        else:
-                            external_ids = row.get("external_ids")
-                            external_ids_map = external_ids if isinstance(external_ids, dict) else {}
-                            legacy_meta = external_ids_map.get("tmdb_meta")
-                            tmdb_meta_map = legacy_meta if isinstance(legacy_meta, Mapping) else {}
-                        raw_seasons = tmdb_meta_map.get("seasons")
-                        season_numbers: list[int] = []
-                        if isinstance(raw_seasons, list):
-                            for s in raw_seasons:
-                                if not isinstance(s, Mapping):
-                                    continue
-                                sn = s.get("season_number")
-                                if isinstance(sn, int):
-                                    season_numbers.append(sn)
-                                elif isinstance(sn, str) and sn.strip().isdigit():
-                                    season_numbers.append(int(sn.strip()))
-                        season_numbers = sorted({n for n in season_numbers if 0 <= n <= 50})
-                        if not season_numbers:
-                            print(
-                                f"TMDb seasons: no seasons found show_id={show_id} tmdb_id={tmdb_id_int}",
-                                file=sys.stderr,
-                            )
-                        else:
-                            upsert_seasons(
-                                db,
-                                [
-                                    {
-                                        "show_id": show_id,
-                                        "season_number": season_no,
-                                        "tmdb_series_id": int(tmdb_id_int),
-                                        "language": tmdb_season_language,
-                                        "external_ids": _merge_external_ids(
-                                            {},
-                                            {"tmdb": int(tmdb_id_int)},
-                                        )
-                                        or None,
-                                    }
-                                    for season_no in season_numbers
-                                ],
-                            )
-                            season_rows = fetch_seasons_by_show(db, show_id=show_id, season_numbers=season_numbers)
-                            season_id_by_number: dict[int, str] = {}
-                            season_existing_by_number: dict[int, dict[str, Any]] = {}
-                            for s in season_rows:
-                                sn = s.get("season_number")
-                                sid = s.get("id")
-                                if isinstance(sn, int) and isinstance(sid, str) and sid:
-                                    season_id_by_number[sn] = sid
-                                    season_existing_by_number[sn] = s
-
-                            seasons_failed = 0
-                            seasons_fetched = 0
-                            episodes_upserted = 0
-                            posters_upserted = 0
-
-                            for season_no in season_numbers:
-                                season_id_val = season_id_by_number.get(season_no)
-                                if not season_id_val:
-                                    continue
-                                existing_season = season_existing_by_number.get(season_no, {})
-
-                                fetched_at = _now_utc_iso()
-                                try:
-                                    payload = fetch_tv_season_details(
-                                        int(tmdb_id_int),
-                                        int(season_no),
-                                        api_key=None,
-                                        session=tmdb_season_session,
-                                        language=tmdb_season_language,
-                                        include_image_language=tmdb_season_include_lang,
-                                        append_to_response=["external_ids", "images"],
-                                        cache=tmdb_season_cache,
-                                    )
-                                    seasons_fetched += 1
-
-                                    ext = payload.get("external_ids")
-                                    ext_map = ext if isinstance(ext, Mapping) else {}
-
-                                    season_patch: dict[str, Any] = {
-                                        "show_id": show_id,
-                                        "season_number": int(season_no),
-                                        "tmdb_series_id": int(tmdb_id_int),
-                                        "tmdb_season_id": payload.get("id")
-                                        if isinstance(payload.get("id"), int)
-                                        else None,
-                                        "tmdb_season_object_id": payload.get("_id")
-                                        if isinstance(payload.get("_id"), str)
-                                        else None,
-                                        "name": payload.get("name") if isinstance(payload.get("name"), str) else None,
-                                        "overview": payload.get("overview")
-                                        if isinstance(payload.get("overview"), str)
-                                        else None,
-                                        "air_date": payload.get("air_date")
-                                        if isinstance(payload.get("air_date"), str)
-                                        else None,
-                                        "poster_path": payload.get("poster_path")
-                                        if isinstance(payload.get("poster_path"), str)
-                                        else None,
-                                        "external_tvdb_id": ext_map.get("tvdb_id")
-                                        if isinstance(ext_map.get("tvdb_id"), int)
-                                        else None,
-                                        "external_wikidata_id": ext_map.get("wikidata_id")
-                                        if isinstance(ext_map.get("wikidata_id"), str)
-                                        else None,
-                                        "language": tmdb_season_language,
-                                        "fetched_at": fetched_at,
-                                    }
-                                    external_updates: dict[str, Any] = {}
-                                    if isinstance(imdb_series_id_str, str) and imdb_series_id_str.strip():
-                                        external_updates["imdb"] = imdb_series_id_str.strip()
-                                    tmdb_season_id_val = season_patch.get("tmdb_season_id")
-                                    if isinstance(tmdb_season_id_val, int):
-                                        external_updates["tmdb"] = tmdb_season_id_val
-                                    elif tmdb_id_int is not None:
-                                        external_updates["tmdb"] = int(tmdb_id_int)
-                                    merged_external_ids = _merge_external_ids(
-                                        existing_season.get("external_ids"),
-                                        external_updates,
-                                    )
-                                    if merged_external_ids is not None:
-                                        season_patch["external_ids"] = merged_external_ids
-                                    if isinstance(season_patch.get("name"), str) and season_patch["name"].strip():
-                                        season_patch["title"] = season_patch["name"]
-                                    if (
-                                        isinstance(season_patch.get("air_date"), str)
-                                        and season_patch["air_date"].strip()
-                                    ):
-                                        season_patch["premiere_date"] = season_patch["air_date"]
-
-                                    upsert_seasons(db, [season_patch])
-
-                                    existing_eps = fetch_episodes_for_show_season(
-                                        db, show_id=show_id, season_number=int(season_no)
-                                    )
-                                    existing_by_number: dict[int, dict[str, Any]] = {}
-                                    for e in existing_eps:
-                                        ep_no = e.get("episode_number")
-                                        if isinstance(ep_no, int):
-                                            existing_by_number[ep_no] = e
-
-                                    episode_rows: list[dict[str, Any]] = []
-                                    raw_eps = payload.get("episodes")
-                                    if isinstance(raw_eps, list):
-                                        for ep in raw_eps:
-                                            if not isinstance(ep, Mapping):
-                                                continue
-                                            ep_no = ep.get("episode_number")
-                                            if not isinstance(ep_no, int):
-                                                continue
-
-                                            existing = existing_by_number.get(ep_no, {})
-                                            existing_title = existing.get("title")
-                                            existing_overview = existing.get("overview")
-                                            existing_synopsis = existing.get("synopsis")
-                                            existing_air_date = existing.get("air_date")
-
-                                            tmdb_title = ep.get("name") if isinstance(ep.get("name"), str) else None
-                                            tmdb_overview = (
-                                                ep.get("overview") if isinstance(ep.get("overview"), str) else None
-                                            )
-                                            tmdb_air = (
-                                                ep.get("air_date") if isinstance(ep.get("air_date"), str) else None
-                                            )
-
-                                            title_val = (
-                                                existing_title.strip()
-                                                if isinstance(existing_title, str) and existing_title.strip()
-                                                else (
-                                                    tmdb_title.strip()
-                                                    if isinstance(tmdb_title, str) and tmdb_title.strip()
-                                                    else None
-                                                )
-                                            )
-                                            air_val = (
-                                                existing_air_date
-                                                if isinstance(existing_air_date, str) and existing_air_date.strip()
-                                                else (
-                                                    tmdb_air.strip()
-                                                    if isinstance(tmdb_air, str) and tmdb_air.strip()
-                                                    else None
-                                                )
-                                            )
-
-                                            episode_row: dict[str, Any] = {
-                                                "show_id": show_id,
-                                                "season_id": season_id_val,
-                                                "season_number": int(season_no),
-                                                "episode_number": int(ep_no),
-                                                "tmdb_series_id": int(tmdb_id_int),
-                                                "fetched_at": fetched_at,
-                                            }
-                                            if title_val:
-                                                episode_row["title"] = title_val
-                                            if (
-                                                isinstance(tmdb_overview, str)
-                                                and tmdb_overview.strip()
-                                                and not (
-                                                    isinstance(existing_overview, str) and existing_overview.strip()
-                                                )
-                                            ):
-                                                overview_value = tmdb_overview.strip()
-                                                episode_row["overview"] = overview_value
-                                                if not (
-                                                    isinstance(existing_synopsis, str) and existing_synopsis.strip()
-                                                ):
-                                                    episode_row["synopsis"] = overview_value
-                                            if air_val:
-                                                episode_row["air_date"] = air_val
-
-                                            if isinstance(ep.get("id"), int):
-                                                episode_row["tmdb_episode_id"] = ep.get("id")
-                                            if (
-                                                isinstance(ep.get("episode_type"), str)
-                                                and ep.get("episode_type").strip()
-                                            ):
-                                                episode_row["episode_type"] = ep.get("episode_type")
-                                            if (
-                                                isinstance(ep.get("production_code"), str)
-                                                and ep.get("production_code").strip()
-                                            ):
-                                                episode_row["production_code"] = ep.get("production_code")
-                                            if isinstance(ep.get("runtime"), int):
-                                                episode_row["runtime"] = ep.get("runtime")
-                                            if isinstance(ep.get("still_path"), str) and ep.get("still_path").strip():
-                                                episode_row["still_path"] = ep.get("still_path")
-                                            if isinstance(ep.get("vote_average"), (int, float)):
-                                                episode_row["tmdb_vote_average"] = float(ep.get("vote_average"))
-                                            if isinstance(ep.get("vote_count"), int):
-                                                episode_row["tmdb_vote_count"] = ep.get("vote_count")
-
-                                            existing_external_ids = existing.get("external_ids")
-                                            existing_imdb_episode_id = existing.get("imdb_episode_id")
-                                            external_updates: dict[str, Any] = {}
-                                            if (
-                                                isinstance(existing_imdb_episode_id, str)
-                                                and existing_imdb_episode_id.strip()
-                                            ):
-                                                external_updates["imdb"] = existing_imdb_episode_id.strip()
-                                            tmdb_episode_id = episode_row.get("tmdb_episode_id")
-                                            if isinstance(tmdb_episode_id, int):
-                                                external_updates["tmdb"] = tmdb_episode_id
-                                            merged_external_ids = _merge_external_ids(
-                                                existing_external_ids,
-                                                external_updates,
-                                            )
-                                            if merged_external_ids is not None:
-                                                episode_row["external_ids"] = merged_external_ids
-
-                                            episode_rows.append(episode_row)
-
-                                    if episode_rows:
-                                        upsert_episodes(db, episode_rows)
-                                        episodes_upserted += len(episode_rows)
-
-                                    images_obj = payload.get("images")
-                                    images_map = images_obj if isinstance(images_obj, Mapping) else {}
-                                    posters = images_map.get("posters")
-                                    poster_rows: list[dict[str, Any]] = []
-                                    if isinstance(posters, list):
-                                        # TMDb season images payload here is "posters". Do not label as backdrop.
-                                        shared_metadata = {
-                                            "image_roles": ["poster"],
-                                            "season_backdrop": False,
-                                        }
-                                        for poster in posters:
-                                            if not isinstance(poster, Mapping):
-                                                continue
-                                            file_path = poster.get("file_path")
-                                            if not isinstance(file_path, str) or not file_path.strip():
-                                                continue
-                                            width = poster.get("width")
-                                            height = poster.get("height")
-                                            aspect_ratio = poster.get("aspect_ratio")
-                                            if not isinstance(width, int) or not isinstance(height, int):
-                                                continue
-                                            if isinstance(aspect_ratio, (int, float)):
-                                                aspect_ratio_val: float = float(aspect_ratio)
-                                            elif height > 0:
-                                                aspect_ratio_val = float(width) / float(height)
-                                            else:
-                                                aspect_ratio_val = 0.0
-
-                                            url_original = f"https://image.tmdb.org/t/p/original{file_path}"
-                                            poster_rows.append(
-                                                {
-                                                    "show_id": show_id,
-                                                    "season_id": season_id_val,
-                                                    "tmdb_series_id": int(tmdb_id_int),
-                                                    "season_number": int(season_no),
-                                                    "source": "tmdb",
-                                                    "kind": "poster",
-                                                    "iso_639_1": poster.get("iso_639_1")
-                                                    if isinstance(poster.get("iso_639_1"), str)
-                                                    else None,
-                                                    "file_path": file_path,
-                                                    "source_image_id": file_path,
-                                                    "url": url_original,
-                                                    "url_path": file_path,
-                                                    "width": int(width),
-                                                    "height": int(height),
-                                                    "aspect_ratio": aspect_ratio_val,
-                                                    "fetched_at": fetched_at,
-                                                    "metadata": dict(shared_metadata),
-                                                }
-                                            )
-
-                                    if poster_rows:
-                                        upsert_season_images(db, poster_rows)
-                                        posters_upserted += len(poster_rows)
-
-                                except TmdbClientError as exc:
-                                    seasons_failed += 1
-                                    print(
-                                        f"TMDb seasons: failed tmdb_id={tmdb_id_int} season={season_no} "
-                                        f"(HTTP {exc.status_code if exc.status_code is not None else 'unknown'})",
-                                        file=sys.stderr,
-                                    )
-                                except Exception as exc:  # noqa: BLE001
-                                    seasons_failed += 1
-                                    print(
-                                        f"TMDb seasons: failed tmdb_id={tmdb_id_int} season={season_no} "
-                                        f"(unexpected error={exc})",
-                                        file=sys.stderr,
-                                    )
-
-                                if season_numbers and (
-                                    seasons_fetched == 1
-                                    or seasons_fetched % 5 == 0
-                                    or seasons_fetched == len(season_numbers)
-                                ):
-                                    print(
-                                        f"TMDb seasons: processed {seasons_fetched}/{len(season_numbers)} show_id={show_id} tmdb_id={tmdb_id_int} "  # noqa: E501
-                                        f"(failed={seasons_failed})",
-                                        file=sys.stderr,
-                                    )
-
-                            print(
-                                "TMDb seasons summary "
-                                f"show_id={show_id} tmdb_id={tmdb_id_int} "
-                                f"seasons={len(season_numbers)} fetched={seasons_fetched} failed={seasons_failed} "
-                                f"episodes_upserted={episodes_upserted} season_posters_upserted={posters_upserted}",
-                                file=sys.stderr,
-                            )
+                    _upsert_tmdb_seasons_for_show(
+                        db,
+                        row=row,
+                        show_id=show_id,
+                        imdb_series_id_str=imdb_series_id_str,
+                        tmdb_id_int=tmdb_id_int,
+                        tmdb_season_language=tmdb_season_language,
+                        tmdb_season_include_lang=tmdb_season_include_lang,
+                        tmdb_season_session=tmdb_season_session,
+                        tmdb_season_cache=tmdb_season_cache,
+                    )
 
                 if idx == 1 or idx % 10 == 0 or idx == total_shows:
                     print(f"Seasons/Episodes: processed {idx}/{total_shows}", file=sys.stderr)
@@ -2328,147 +2535,17 @@ def upsert_candidates_into_supabase(
 
     # Stage 2 enrichment: populate core.shows metadata columns.
     if enrich_show_metadata:
-        show_records: list[ShowRecord] = []
-        by_id: dict[str, dict[str, Any]] = {}
-        for row in upserted_show_rows:
-            row_id = row.get("id")
-            if not isinstance(row_id, str) or not row_id:
-                continue
-            by_id[row_id] = row
-
-            try:
-                show_id = UUID(row_id)
-            except Exception:
-                show_id = uuid4()
-
-            show_records.append(
-                ShowRecord(
-                    id=show_id,
-                    name=str(row.get("name") or ""),
-                    description=row.get("description") if isinstance(row.get("description"), str) else None,
-                    premiere_date=row.get("premiere_date") if isinstance(row.get("premiere_date"), str) else None,
-                    imdb_id=(row.get("imdb_id") if isinstance(row.get("imdb_id"), str) else None),
-                    tmdb_id=(int(row.get("tmdb_id")) if isinstance(row.get("tmdb_id"), int) else None),
-                )
-            )
-
-        summary = enrich_shows_after_upsert(
-            show_records,
-            region=enrich_region,
-            concurrency=enrich_concurrency,
-            max_enrich=enrich_max_enrich,
-            force_refresh=enrich_force_refresh,
+        _enrich_upserted_show_metadata(
+            db=db,
+            supabase_client=supabase_client,
             dry_run=dry_run,
-            imdb_sleep_ms=enrich_imdb_sleep_ms,
+            upserted_show_rows=upserted_show_rows,
+            enrich_region=enrich_region,
+            enrich_concurrency=enrich_concurrency,
+            enrich_max_enrich=enrich_max_enrich,
+            enrich_force_refresh=enrich_force_refresh,
+            enrich_imdb_sleep_ms=enrich_imdb_sleep_ms,
         )
-
-        print(
-            "ENRICH summary "
-            f"attempted={summary.attempted} "
-            f"updated={summary.updated} "
-            f"skipped_complete={summary.skipped_complete} "
-            f"skipped={summary.skipped} "
-            f"failed={summary.failed}"
-        )
-
-        if summary.failures:
-            print(f"ENRICH failed={summary.failed} (show metadata).")
-            for failure in summary.failures[:10]:
-                print(f"ENRICH FAIL show_id={failure.show_id} name={failure.name!r} error={failure.message}")
-            if len(summary.failures) > 10:
-                print(f"ENRICH FAIL ... and {len(summary.failures) - 10} more")
-
-        for patch in summary.patches:
-            row = by_id.get(str(patch.show_id))
-            if row is None:
-                # Dry-run rows have synthetic UUIDs; fall back to searching by UUID object.
-                row = next((r for r in upserted_show_rows if str(r.get("id")) == str(patch.show_id)), None)
-            if row is None:
-                continue
-
-            update_patch: dict[str, Any] = {}
-            for key, value in (patch.show_update or {}).items():
-                if row.get(key) != value:
-                    update_patch[key] = value
-
-            merged_genres = _merge_str_arrays(row.get("genres"), patch.genres)
-            if merged_genres is not None:
-                update_patch["genres"] = merged_genres
-
-            merged_keywords = _merge_str_arrays(row.get("keywords"), patch.keywords)
-            if merged_keywords is not None:
-                update_patch["keywords"] = merged_keywords
-
-            merged_tags = _merge_str_arrays(row.get("tags"), patch.tags)
-            if merged_tags is not None:
-                update_patch["tags"] = merged_tags
-
-            merged_networks = _merge_str_arrays(row.get("networks"), patch.networks)
-            if merged_networks is not None:
-                update_patch["networks"] = merged_networks
-
-            merged_streaming = _merge_str_arrays(row.get("streaming_providers"), patch.streaming_providers)
-            if merged_streaming is not None:
-                update_patch["streaming_providers"] = merged_streaming
-
-            merged_tmdb_network_ids = _merge_int_arrays(row.get("tmdb_network_ids"), patch.tmdb_network_ids)
-            if merged_tmdb_network_ids is not None:
-                update_patch["tmdb_network_ids"] = merged_tmdb_network_ids
-
-            merged_tmdb_company_ids = _merge_int_arrays(
-                row.get("tmdb_production_company_ids"), patch.tmdb_production_company_ids
-            )
-            if merged_tmdb_company_ids is not None:
-                update_patch["tmdb_production_company_ids"] = merged_tmdb_company_ids
-
-            merged_alt_names = _merge_str_arrays(
-                _filter_ascii_strings(row.get("alternative_names")),
-                _filter_ascii_strings(patch.alternative_names),
-            )
-            if merged_alt_names is not None:
-                update_patch["alternative_names"] = merged_alt_names
-
-            if patch.show_images_rows:
-                if dry_run:
-                    print(f"ENRICH images show_id={patch.show_id} rows={len(patch.show_images_rows)} source=imdb")
-                elif supabase_client is not None:
-                    try:
-                        upsert_show_images(supabase_client, patch.show_images_rows)
-                    except Exception as exc:  # noqa: BLE001
-                        print(f"ENRICH images failed show_id={patch.show_id} error={exc}", file=sys.stderr)
-
-            if patch.alternative_name_rows:
-                if dry_run:
-                    print(
-                        f"ENRICH alt_names show_id={patch.show_id} rows={len(patch.alternative_name_rows)} source=tmdb"
-                    )
-                elif supabase_client is not None:
-                    try:
-                        rows = [
-                            {
-                                **r,
-                                "show_id": str(patch.show_id),
-                            }
-                            for r in patch.alternative_name_rows
-                        ]
-                        supabase_client.schema("core").table("show_alternative_names").upsert(
-                            rows,
-                            on_conflict="show_id,name,language,country,source",
-                        ).execute()
-                    except Exception as exc:  # noqa: BLE001
-                        print(f"ENRICH alt_names failed show_id={patch.show_id} error={exc}", file=sys.stderr)
-
-            if not update_patch:
-                continue
-
-            if dry_run:
-                print(f"ENRICH UPDATE show id={patch.show_id} patch_keys={sorted(update_patch.keys())}")
-                continue
-
-            if db is None:
-                raise RuntimeError("Supabase client is not available for enrichment.")
-            updated_row = update_show(db, patch.show_id, update_patch)
-            print(f"ENRICH UPDATED show id={updated_row.get('id')} name={updated_row.get('name')!r}")
 
     return ShowImportResult(created=created, updated=updated, skipped=skipped, upserted_show_rows=upserted_show_rows)
 

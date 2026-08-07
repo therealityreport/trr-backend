@@ -270,7 +270,8 @@ def apply_media_asset_replacement(
     )
     hosted_url = build_hosted_url(s3_key)
 
-    existing_metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    metadata_value = row.get("metadata")
+    existing_metadata = metadata_value if isinstance(metadata_value, dict) else {}
     getty_metadata = {
         k: v
         for k, v in existing_metadata.items()
@@ -335,7 +336,7 @@ def apply_media_asset_replacement(
     db.schema("core").table("media_assets").update(update_payload).eq("id", asset_id).execute()
 
     try:
-        generate_media_asset_variants(db, asset_id)
+        generate_media_asset_variants(db, asset_id=asset_id)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Variant generation failed after replace for %s: %s", asset_id, exc)
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 from trr_backend.integrations.picdetective import ReverseImageCandidate
 from trr_backend.media import getty_replacement
 from trr_backend.scraping.url_image_scraper import ImageCandidate, ScrapeResult
@@ -106,3 +108,45 @@ def test_resolve_public_replacement_from_page_prefers_closest_ratio_over_larger_
     assert replacement is not None
     assert replacement.image_url == "https://cdn.example.com/b.jpg"
     assert replacement.source_domain == "bravotv.com"
+
+
+def test_apply_media_asset_replacement_generates_variants_with_keyword_asset_id(
+    monkeypatch,
+) -> None:
+    """After a successful replacement, variant generation must be invoked with
+    the keyword-only asset_id. The fake mirrors the real keyword-only
+    signature of generate_media_asset_variants, so a positional call would
+    raise TypeError (swallowed by the caller) and leave variant_calls empty."""
+    monkeypatch.setattr(
+        getty_replacement,
+        "download_and_hash_image",
+        lambda *args, **kwargs: (b"image-bytes", "sha-1", "image/jpeg"),
+    )
+    monkeypatch.setattr(getty_replacement, "get_s3_client", lambda: MagicMock())
+    monkeypatch.setattr(getty_replacement, "get_s3_bucket", lambda: "test-bucket")
+    monkeypatch.setattr(getty_replacement, "build_hosted_url", lambda key: f"https://cdn.test/{key}")
+
+    variant_calls: list[tuple[object, str]] = []
+
+    def _fake_generate_variants(db, *, asset_id, crop=None, force=False):
+        variant_calls.append((db, asset_id))
+        return []
+
+    monkeypatch.setattr(getty_replacement, "generate_media_asset_variants", _fake_generate_variants)
+
+    db = MagicMock()
+    result = getty_replacement.apply_media_asset_replacement(
+        db,
+        asset_id="asset-1",
+        row={"source": "getty", "source_url": "https://gettyimages.com/x", "metadata": {}},
+        replacement=getty_replacement.ResolvedPublicReplacement(
+            page_url="https://www.bravotv.com/story",
+            source_domain="bravotv.com",
+            image_url="https://cdn.example.com/b.jpg",
+            width=1600,
+            height=900,
+        ),
+    )
+
+    assert result["status"] == "replaced"
+    assert variant_calls == [(db, "asset-1")]

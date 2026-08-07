@@ -7,25 +7,19 @@ sub-operation per target, and dispatches independent targets concurrently.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from trr_backend.job_plane import is_remote_job_plane_enabled
 from trr_backend.modal_dispatch import dispatch_admin_operation, supports_admin_operation
-from trr_backend.pipeline.admin_operations import ensure_operation_execution
+from trr_backend.pipeline.admin_operations import SHOW_REFRESH_TARGET_DEPENDENCY_GRAPH
 from trr_backend.repositories import admin_operations
 
 logger = logging.getLogger(__name__)
 
 # Dependency graph: target -> list of targets that must complete first.
 # A target with an empty list can run in the first wave.
-TARGET_DEPENDENCY_GRAPH: dict[str, list[str]] = {
-    "show_core": [],
-    "links": ["show_core"],
-    "bravo": ["show_core"],
-    "cast_profiles": ["show_core"],
-    "cast_media": ["cast_profiles"],
-    "official_images": ["bravo", "cast_profiles"],
-}
+TARGET_DEPENDENCY_GRAPH = SHOW_REFRESH_TARGET_DEPENDENCY_GRAPH
 
 
 def build_show_refresh_sub_operation_request_payload(
@@ -38,7 +32,8 @@ def build_show_refresh_sub_operation_request_payload(
 ) -> dict[str, Any]:
     """Build the canonical single-target payload for a show refresh sub-operation."""
     base_payload = dict(parent_request_payload) if isinstance(parent_request_payload, dict) else {}
-    nested_payload = dict(base_payload.get("payload")) if isinstance(base_payload.get("payload"), dict) else {}
+    nested_payload_raw = base_payload.get("payload")
+    nested_payload: dict[str, Any] = dict(nested_payload_raw) if isinstance(nested_payload_raw, dict) else {}
 
     nested_payload["targets"] = [refresh_target]
     for flag in ("skip_s3", "verbose", "reload_schema_cache", "force_new_operation"):
@@ -161,7 +156,7 @@ class ShowRefreshOrchestrator:
                 len(sub_ops),
                 len(self.targets),
             )
-            admin_operations.update_operation_status(self._parent_id, "failed")
+            admin_operations.update_operation_status(self._parent_id, status="failed")
             raise
 
         return self._parent_id, sub_ops
@@ -171,6 +166,7 @@ class ShowRefreshOrchestrator:
         sub_ops: list[dict[str, Any]],
         *,
         producer_factory: Any | None = None,
+        local_executor: Callable[..., bool] | None = None,
     ) -> int:
         """Dispatch a wave of sub-operations.
 
@@ -202,10 +198,12 @@ class ShowRefreshOrchestrator:
                     )
                     continue
 
-            # Fallback: local execution
-            if producer_factory is not None:
+            # Fallback: local execution. The caller supplies the executor so
+            # this orchestration layer remains one-way and does not import the
+            # operation runner back into its dependency graph.
+            if producer_factory is not None and local_executor is not None:
                 producer = producer_factory(sub_op)
-                ensure_operation_execution(op_id, producer=producer, request_id=self.request_id)
+                local_executor(op_id, producer=producer, request_id=self.request_id)
                 logger.info(
                     "Local execution for sub-operation: target=%s operation_id=%s parent=%s",
                     target,
@@ -214,7 +212,7 @@ class ShowRefreshOrchestrator:
                 )
             else:
                 raise RuntimeError(
-                    f"Cannot execute sub-operation: Modal unavailable and no producer_factory provided. "
+                    f"Cannot execute sub-operation: Modal unavailable and no local producer/executor provided. "
                     f"target={target} operation_id={op_id} parent={self._parent_id}"
                 )
 
@@ -236,5 +234,5 @@ class ShowRefreshOrchestrator:
             raise RuntimeError("No parent operation created yet")
         status = admin_operations.aggregate_parent_status(self._parent_id)
         if status in ("completed", "failed", "cancelled"):
-            admin_operations.update_operation_status(self._parent_id, status)
+            admin_operations.update_operation_status(self._parent_id, status=status)
         return status
