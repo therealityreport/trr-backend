@@ -7,6 +7,7 @@ import argparse
 import logging
 import os
 
+from trr_backend.pipeline.admin_operation_bootstrap import register_admin_operation_providers
 from trr_backend.pipeline.admin_operations import run_remote_operation_worker_loop
 from trr_backend.utils.env import load_env
 
@@ -40,6 +41,7 @@ def _env_operation_types(name: str) -> list[str]:
 
 def main() -> int:
     load_env()
+    register_admin_operation_providers()
     args = parse_args()
     logging.basicConfig(
         level=os.getenv("LOG_LEVEL", "INFO").upper(),
