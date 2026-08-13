@@ -100,4 +100,8 @@ def test_router_returns_bounded_json_response(monkeypatch) -> None:
 
 
 def test_computer_use_router_is_not_registered_in_main_app() -> None:
-    assert all(not route.path.startswith("/api/v1/computer-use") for route in main_app.routes)
+    assert all(
+        not route_path.startswith("/api/v1/computer-use")
+        for route in main_app.routes
+        if isinstance(route_path := getattr(route, "path", None), str)
+    )
