@@ -5,14 +5,14 @@ from __future__ import annotations
 import json
 import re
 from collections import defaultdict
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from api.auth import AdminUser
+from api.auth import AdminUser, InternalAdminUser
 from api.deps import SupabaseAdminClient
 from api.routers.admin_cast_photos import (
     GenerateCastPhotoVariantsRequest,
@@ -31,6 +31,7 @@ router = APIRouter(prefix="/admin/shows", tags=["admin-asset-batch-jobs"])
 
 BatchJobOperation = Literal["count", "crop", "id_text", "resize"]
 BatchTargetOrigin = Literal["cast_photos", "media_assets"]
+_INTERNAL_BATCH_USER = cast(InternalAdminUser, None)
 
 
 class BatchJobTarget(BaseModel):
@@ -93,9 +94,9 @@ def _normalize_crop_payload(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
     try:
-        x = float(value.get("x"))
-        y = float(value.get("y"))
-        zoom = float(value.get("zoom"))
+        x = float(cast(Any, value.get("x")))
+        y = float(cast(Any, value.get("y")))
+        zoom = float(cast(Any, value.get("zoom")))
     except (TypeError, ValueError):
         return None
     mode_raw = str(value.get("mode") or "auto").strip().lower()
@@ -199,9 +200,9 @@ def _resolve_resize_crop_payload(
     target_uuid = UUID(target_id)
     try:
         if origin == "cast_photos":
-            auto_count_cast_photo(target_uuid, force=force, db=db, _=None)
+            auto_count_cast_photo(target_uuid, force=force, db=db, _=_INTERNAL_BATCH_USER)
         else:
-            auto_count_media_asset(target_uuid, force=force, db=db, _=None)
+            auto_count_media_asset(target_uuid, force=force, db=db, _=_INTERNAL_BATCH_USER)
     except Exception:
         pass
 
@@ -229,7 +230,8 @@ def _fetch_target_scope_fields(
         return None, None, "not_found"
 
     row = rows[0] if isinstance(rows[0], dict) else {}
-    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    metadata_value = row.get("metadata")
+    metadata = metadata_value if isinstance(metadata_value, dict) else {}
     show_id = str(metadata.get("show_id") or "").strip() or None
     season_number = _parse_season_number(metadata.get("season_number"))
     if season_number is None:
@@ -251,17 +253,17 @@ def _execute_target_operation(
 
     if origin == "cast_photos":
         if operation in {"count", "crop"}:
-            auto_count_cast_photo(target_uuid, force=force, db=db, _=None)
+            auto_count_cast_photo(target_uuid, force=force, db=db, _=_INTERNAL_BATCH_USER)
             return
         if operation == "id_text":
-            detect_text_overlay_cast_photo(target_uuid, force=force, db=db, _=None)
+            detect_text_overlay_cast_photo(target_uuid, force=force, db=db, _=_INTERNAL_BATCH_USER)
             return
         if operation == "resize":
             generate_variants_for_cast_photo(
                 target_uuid,
                 payload=GenerateCastPhotoVariantsRequest(force=force),
                 db=db,
-                _=None,
+                _=_INTERNAL_BATCH_USER,
             )
             crop_payload, crop_source = _resolve_resize_crop_payload(
                 origin=origin,
@@ -273,23 +275,23 @@ def _execute_target_operation(
                 target_uuid,
                 payload=GenerateCastPhotoVariantsRequest(force=force, crop=crop_payload),
                 db=db,
-                _=None,
+                _=_INTERNAL_BATCH_USER,
             )
             return {"crop_source": crop_source}
 
     if origin == "media_assets":
         if operation in {"count", "crop"}:
-            auto_count_media_asset(target_uuid, force=force, db=db, _=None)
+            auto_count_media_asset(target_uuid, force=force, db=db, _=_INTERNAL_BATCH_USER)
             return
         if operation == "id_text":
-            detect_text_overlay_media_asset(target_uuid, force=force, db=db, _=None)
+            detect_text_overlay_media_asset(target_uuid, force=force, db=db, _=_INTERNAL_BATCH_USER)
             return
         if operation == "resize":
             generate_variants_for_media_asset(
                 target_uuid,
                 payload=GenerateMediaAssetVariantsRequest(force=force),
                 db=db,
-                _=None,
+                _=_INTERNAL_BATCH_USER,
             )
             crop_payload, crop_source = _resolve_resize_crop_payload(
                 origin=origin,
@@ -301,7 +303,7 @@ def _execute_target_operation(
                 target_uuid,
                 payload=GenerateMediaAssetVariantsRequest(force=force, crop=crop_payload),
                 db=db,
-                _=None,
+                _=_INTERNAL_BATCH_USER,
             )
             return {"crop_source": crop_source}
 
@@ -442,7 +444,7 @@ def _run_batch_jobs_events(
                 )
                 continue
 
-            origin = origin_raw
+            origin = cast(BatchTargetOrigin, origin_raw)
 
             if season_number is not None:
                 try:
@@ -710,8 +712,8 @@ def batch_jobs_for_show_stream(
     show_id: UUID,
     request: Request,
     payload: BatchJobsRequest | None = None,
-    db: SupabaseAdminClient = None,
-    admin: AdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    admin: AdminUser = cast(AdminUser, None),
 ) -> StreamingResponse:
     actor = str((admin or {}).get("email") or (admin or {}).get("id") or "admin")
     return _stream_batch_jobs(
@@ -729,8 +731,8 @@ def batch_jobs_for_show_season_stream(
     season_number: int,
     request: Request,
     payload: BatchJobsRequest | None = None,
-    db: SupabaseAdminClient = None,
-    admin: AdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    admin: AdminUser = cast(AdminUser, None),
 ) -> StreamingResponse:
     actor = str((admin or {}).get("email") or (admin or {}).get("id") or "admin")
     return _stream_batch_jobs(
