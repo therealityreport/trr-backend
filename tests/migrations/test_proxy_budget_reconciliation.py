@@ -4,7 +4,6 @@ import hashlib
 import re
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PREDECESSOR = REPO_ROOT / "supabase/migrations/20260629140000_instagram_comments_public_proxy_budget_ledger.sql"
 MIGRATION = REPO_ROOT / "supabase/migrations/20260806133000_reconcile_instagram_comments_public_proxy_budget_ledger.sql"
