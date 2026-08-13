@@ -49,9 +49,7 @@ def test_extracts_single_video_public_post_from_application_json() -> None:
                                     }
                                 ]
                             },
-                            "coauthor_producers": [
-                                {"pk": "co-1", "username": "peacock", "full_name": "Peacock"}
-                            ],
+                            "coauthor_producers": [{"pk": "co-1", "username": "peacock", "full_name": "Peacock"}],
                             "image_versions2": {
                                 "candidates": [
                                     {"url": "https://cdn.example.com/cover-low.jpg", "width": 640, "height": 800},
@@ -122,9 +120,7 @@ def test_extracts_carousel_children_and_selected_media_urls() -> None:
                                 "owner": {"id": "owner-2", "username": "traitorsus"},
                                 "edge_media_preview_like": {"count": 88},
                                 "edge_media_to_comment": {"count": 9},
-                                "edge_media_to_caption": {
-                                    "edges": [{"node": {"text": "Carousel night #Finale"}}]
-                                },
+                                "edge_media_to_caption": {"edges": [{"node": {"text": "Carousel night #Finale"}}]},
                                 "edge_media_to_tagged_user": {
                                     "edges": [
                                         {

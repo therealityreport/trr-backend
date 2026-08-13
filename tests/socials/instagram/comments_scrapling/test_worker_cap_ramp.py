@@ -11,7 +11,6 @@ so no live database is required.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -24,7 +23,6 @@ from trr_backend.socials.pipelines.comments.instagram import (
     _normalize_instagram_comments_worker_cap_config,
     _ramp_instagram_comments_worker_cap,
 )
-
 
 # --- launch-time cap config ------------------------------------------------
 
@@ -76,9 +74,7 @@ def test_normalize_returns_none_without_cap_key():
 
 
 def test_normalize_fills_defaults_for_partial_config():
-    normalized = _normalize_instagram_comments_worker_cap_config(
-        {"comments_worker_cap_current": 15}
-    )
+    normalized = _normalize_instagram_comments_worker_cap_config({"comments_worker_cap_current": 15})
     assert normalized is not None
     assert normalized["current"] == 4
     assert normalized["floor"] == 2
@@ -120,9 +116,7 @@ def test_aggregate_flags_hard_block_from_fetch_reasons():
             "metadata": {
                 "public_blocked_checked_count": 5,
                 "public_blocked_target_source_ids": ["a"],
-                "public_blocked_fetch_reasons": {
-                    "a": "instagram_comments_endpoint_auth_blocked"
-                },
+                "public_blocked_fetch_reasons": {"a": "instagram_comments_endpoint_auth_blocked"},
             }
         }
     ]

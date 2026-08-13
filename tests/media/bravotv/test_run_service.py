@@ -93,7 +93,8 @@ def test_upsert_media_asset_for_import_reuses_existing_asset_on_duplicate_hosted
         "upsert_media_assets",
         MagicMock(
             side_effect=RuntimeError(
-                'Supabase error upserting media_assets: duplicate key value violates unique constraint "media_assets_source_hosted_sha_uq"'
+                "Supabase error upserting media_assets: duplicate key value violates unique constraint "
+                '"media_assets_source_hosted_sha_uq"'
             )
         ),
     )
@@ -260,7 +261,9 @@ def test_import_supplemental_catalog_preserves_fandom_context_and_generates_vari
             with patch("trr_backend.media.bravotv.run_service._fetch_episode_slug_map", return_value={}):
                 with patch("trr_backend.media.bravotv.run_service.upsert_media_assets") as upsert_mock:
                     with patch("trr_backend.media.bravotv.run_service.create_media_link_for_entity") as link_mock:
-                        with patch("trr_backend.media.bravotv.run_service.generate_media_asset_variants") as variants_mock:
+                        with patch(
+                            "trr_backend.media.bravotv.run_service.generate_media_asset_variants"
+                        ) as variants_mock:
                             summary, imported = run_service._import_supplemental_catalog(
                                 run_id="run-3",
                                 target_person_id="person-1",

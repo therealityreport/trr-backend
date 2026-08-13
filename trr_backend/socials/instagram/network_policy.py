@@ -89,7 +89,7 @@ class InstagramNetworkPolicy:
     mode: str = "enforcing"
 
     @classmethod
-    def from_env(cls) -> "InstagramNetworkPolicy":
+    def from_env(cls) -> InstagramNetworkPolicy:
         enabled = _env_truthy("INSTAGRAM_BROWSER_NETWORK_POLICY_ENABLED", True)
         block_static_assets = _env_truthy("INSTAGRAM_BROWSER_BLOCK_STATIC_ASSETS", True)
         disable_extra_resources = _env_truthy("INSTAGRAM_BROWSER_DISABLE_EXTRA_RESOURCES", True)
@@ -161,10 +161,8 @@ class InstagramNetworkPolicyRecorder:
                 "request_count_by_host": dict(sorted(self.request_count_by_host.items())),
                 "blocked_request_count_by_host": dict(sorted(self.blocked_request_count_by_host.items())),
                 "blocked_reason_counts": dict(sorted(self.blocked_reason_counts.items())),
-                "blocked_bytes_estimate_by_host": {host: 0 for host in sorted(self.blocked_request_count_by_host)},
-                "static_cdn_blocked_request_count": int(
-                    self.blocked_request_count_by_host.get(STATIC_CDN_HOST, 0)
-                ),
+                "blocked_bytes_estimate_by_host": dict.fromkeys(sorted(self.blocked_request_count_by_host), 0),
+                "static_cdn_blocked_request_count": int(self.blocked_request_count_by_host.get(STATIC_CDN_HOST, 0)),
             }
         )
         return metadata
@@ -221,4 +219,3 @@ def merge_network_policy_metadata(
     result = dict(base or {})
     result["network_policy"] = (policy or default_instagram_network_policy()).to_metadata()
     return result
-

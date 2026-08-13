@@ -678,8 +678,5 @@ def fetch_tv_episode_external_ids(
     """Fetch external IDs for one TV episode from TMDb."""
 
     session = session or requests.Session()
-    url = (
-        f"{TMDB_API_BASE_URL}/tv/{int(tv_id)}/season/{int(season_number)}"
-        f"/episode/{int(episode_number)}/external_ids"
-    )
+    url = f"{TMDB_API_BASE_URL}/tv/{int(tv_id)}/season/{int(season_number)}/episode/{int(episode_number)}/external_ids"
     return _request_tmdb_json(session, url, api_key=api_key, bearer_token=bearer_token)

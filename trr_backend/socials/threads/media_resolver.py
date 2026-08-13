@@ -13,12 +13,13 @@ from typing import Any
 
 import requests
 from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
 from trr_backend.socials.media_url_safety import (
     MediaUrlSafetyPolicy,
     allowed_hosts_for_platform,
     safe_requests_head,
 )
-from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
 _VALID_MEDIA_CONTENT_TYPE_PREFIXES = ("image/", "video/")

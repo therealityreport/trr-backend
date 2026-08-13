@@ -55,7 +55,10 @@ def test_legacy_cursor_api_session_scope_canonicalizes_for_metadata():
         _normalize_comments_session_scope("cursor_api_worker", default="fallback")
         == "instagram_comments_endpoint_cursor_worker"
     )
-    assert _normalize_comments_session_scope("cursor_api", default="fallback") == "instagram_comments_endpoint_cursor_worker"
+    assert (
+        _normalize_comments_session_scope("cursor_api", default="fallback")
+        == "instagram_comments_endpoint_cursor_worker"
+    )
     assert _normalize_comments_session_scope(None, default="fallback") == "fallback"
 
 

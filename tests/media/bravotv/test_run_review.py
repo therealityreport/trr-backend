@@ -4,7 +4,6 @@ from pathlib import Path
 
 from trr_backend.media.bravotv.run_review import build_run_review_from_dir
 
-
 FIXTURE_ROOT = Path(__file__).resolve().parents[2] / "fixtures" / "media" / "bravotv_image_run"
 
 
