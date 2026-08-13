@@ -8,7 +8,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Mapping
 from datetime import date, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, unquote, urlparse, urlunparse
 
 try:
@@ -16,7 +16,13 @@ try:
 except Exception:  # noqa: BLE001
     requests = None
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
+
+if TYPE_CHECKING:
+    from requests import Session
+
+
+_SoupNode = BeautifulSoup | Tag
 
 _DEFAULT_HEADERS = {
     "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -31,7 +37,7 @@ _IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
 def fetch_fandom_person_html(
     url: str,
     *,
-    session: requests.Session | None = None,
+    session: Session | None = None,
     headers: Mapping[str, str] | None = None,
 ) -> tuple[str, str]:
     merged = {**_DEFAULT_HEADERS, **(headers or {})}
@@ -77,7 +83,7 @@ def fetch_fandom_person_html(
         return html, final_url
 
 
-def _normalize_text(value: str | None) -> str | None:
+def _normalize_text(value: object | None) -> str | None:
     if value is None:
         return None
     text = " ".join(str(value).split())
@@ -134,7 +140,7 @@ def _parse_birthdate(value: str | None) -> date | None:
     return None
 
 
-def _find_article_root(soup: BeautifulSoup) -> BeautifulSoup:
+def _find_article_root(soup: BeautifulSoup) -> _SoupNode:
     for selector in (
         "div.mw-parser-output",
         "div.page-content",
@@ -148,7 +154,7 @@ def _find_article_root(soup: BeautifulSoup) -> BeautifulSoup:
     return soup
 
 
-def _extract_summary(article_root: BeautifulSoup, soup: BeautifulSoup) -> str | None:
+def _extract_summary(article_root: _SoupNode, soup: BeautifulSoup) -> str | None:
     candidates: list[str] = []
 
     for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
@@ -184,7 +190,7 @@ def _extract_summary(article_root: BeautifulSoup, soup: BeautifulSoup) -> str | 
     return max(candidates, key=len)
 
 
-def _extract_structured_value_entries(container: BeautifulSoup) -> list[dict[str, str | None]]:
+def _extract_structured_value_entries(container: _SoupNode) -> list[dict[str, str | None]]:
     segments: list[str] = []
     current: list[str] = []
     for child in container.children:
@@ -235,7 +241,7 @@ def _extract_structured_value_entries(container: BeautifulSoup) -> list[dict[str
     return entries
 
 
-def _extract_link_entries(container: BeautifulSoup) -> list[dict[str, str | None]]:
+def _extract_link_entries(container: _SoupNode) -> list[dict[str, str | None]]:
     entries = _extract_structured_value_entries(container)
     if entries:
         return entries
@@ -246,7 +252,7 @@ def _extract_link_entries(container: BeautifulSoup) -> list[dict[str, str | None
     return []
 
 
-def _extract_list_values(container: BeautifulSoup) -> list[str]:
+def _extract_list_values(container: _SoupNode) -> list[str]:
     list_items = container.find_all("li")
     if list_items:
         items = [_normalize_text(li.get_text(" ", strip=True)) for li in list_items]
@@ -312,10 +318,10 @@ def _looks_like_image_url(url: str | None) -> bool:
     return any(lowered.endswith(ext) for ext in _IMAGE_EXTENSIONS) or "/images/" in lowered
 
 
-def _parse_data_attrs(raw: str | None) -> dict[str, Any]:
+def _parse_data_attrs(raw: object | None) -> dict[str, Any]:
     if not raw:
         return {}
-    unescaped = html_lib.unescape(raw)
+    unescaped = html_lib.unescape(str(raw))
     try:
         data = json.loads(unescaped)
     except json.JSONDecodeError:
@@ -359,7 +365,7 @@ def _normalize_fandom_image_url(url: str | None, *, source_page_url: str) -> str
 
 
 def _extract_image_entry(
-    container: BeautifulSoup,
+    container: _SoupNode,
     *,
     source_page_url: str,
     context_section: str,
@@ -379,8 +385,9 @@ def _extract_image_entry(
         parent = container.parent
         if parent and parent.name == "a" and parent.get("href"):
             anchor = parent
-    if anchor and _looks_like_image_url(anchor["href"]):
-        link = str(anchor["href"])
+    anchor_href = anchor.get("href") if anchor else None
+    if isinstance(anchor_href, str) and _looks_like_image_url(anchor_href):
+        link = anchor_href
         if not image_url:
             image_url = link
         elif "scale-to-width-down" in image_url and "scale-to-width-down" not in link:
@@ -394,23 +401,27 @@ def _extract_image_entry(
     if img:
         thumb_url = img.get("data-src") or img.get("src")
         alt_text = img.get("alt")
+        width_value = _normalize_text(img.get("width"))
         try:
-            width = int(img.get("width")) if img.get("width") else None
+            width = int(width_value) if width_value else None
         except ValueError:
             width = None
+        height_value = _normalize_text(img.get("height"))
         try:
-            height = int(img.get("height")) if img.get("height") else None
+            height = int(height_value) if height_value else None
         except ValueError:
             height = None
 
-    if data_attrs.get("width"):
+    data_width = _normalize_text(data_attrs.get("width"))
+    if data_width:
         try:
-            width = int(data_attrs.get("width"))
+            width = int(data_width)
         except (TypeError, ValueError):
             pass
-    if data_attrs.get("height"):
+    data_height = _normalize_text(data_attrs.get("height"))
+    if data_height:
         try:
-            height = int(data_attrs.get("height"))
+            height = int(data_height)
         except (TypeError, ValueError):
             pass
 
@@ -424,6 +435,8 @@ def _extract_image_entry(
     if not image_url:
         return None
     image_url = _normalize_fandom_image_url(image_url, source_page_url=source_page_url)
+    if not image_url:
+        return None
     if "scale-to-width-down" in image_url:
         expanded = _strip_scale_to_width(image_url)
         if expanded:
@@ -467,7 +480,7 @@ def _extract_image_entry(
 
 
 def _collect_section_images(
-    section: BeautifulSoup,
+    section: _SoupNode,
     *,
     source_page_url: str,
     context_section: str,
@@ -509,7 +522,7 @@ def _collect_section_images(
 
 
 def _parse_infobox(
-    article_root: BeautifulSoup, source_page_url: str
+    article_root: _SoupNode, source_page_url: str
 ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     infobox = article_root.select_one("aside.portable-infobox") or article_root.select_one(".portable-infobox")
     if not infobox:
@@ -590,7 +603,7 @@ def _parse_infobox(
     return fields, infobox_raw, photos
 
 
-def _find_heading(article_root: BeautifulSoup, label: str) -> BeautifulSoup | None:
+def _find_heading(article_root: _SoupNode, label: str) -> Tag | None:
     label_cf = label.casefold()
     for tag in article_root.find_all(["h2", "h3", "h4"]):
         text = _normalize_text(tag.get_text(" ", strip=True))
@@ -633,7 +646,7 @@ def _infer_gallery_context_type(label: str | None) -> str:
 
 
 def _parse_gallery_sections(
-    article_root: BeautifulSoup,
+    article_root: _SoupNode,
     *,
     source_page_url: str,
     seen: set[str],
@@ -649,6 +662,8 @@ def _parse_gallery_sections(
     current_season = _extract_season_number(current_section)
 
     for sibling in gallery_heading.next_siblings:
+        if not isinstance(sibling, Tag):
+            continue
         sibling_name = getattr(sibling, "name", None)
         if sibling_name == "h2":
             break
@@ -680,7 +695,7 @@ def _parse_gallery_sections(
 
 
 def _parse_taglines(
-    article_root: BeautifulSoup,
+    article_root: _SoupNode,
     *,
     source_page_url: str,
     seen: set[str],
@@ -735,7 +750,7 @@ def _parse_taglines(
 
 
 def _parse_reunion_seating(
-    article_root: BeautifulSoup,
+    article_root: _SoupNode,
     *,
     source_page_url: str,
     seen: set[str],
@@ -790,7 +805,7 @@ def _parse_reunion_seating(
     return seating, photos
 
 
-def _parse_trivia(article_root: BeautifulSoup) -> list[str] | None:
+def _parse_trivia(article_root: _SoupNode) -> list[str] | None:
     heading = _find_heading(article_root, "Trivia")
     if not heading:
         return None
@@ -822,7 +837,7 @@ def _canonicalize_section_title(title: str | None) -> str:
     return normalized
 
 
-def _extract_section_table_rows(table_node: BeautifulSoup) -> list[dict[str, str | None]]:
+def _extract_section_table_rows(table_node: _SoupNode) -> list[dict[str, str | None]]:
     rows = table_node.find_all("tr")
     if not rows:
         return []
@@ -840,7 +855,7 @@ def _extract_section_table_rows(table_node: BeautifulSoup) -> list[dict[str, str
     return out
 
 
-def _extract_dynamic_sections(article_root: BeautifulSoup) -> list[dict[str, Any]]:
+def _extract_dynamic_sections(article_root: _SoupNode) -> list[dict[str, Any]]:
     sections: list[dict[str, Any]] = []
     for heading in article_root.find_all(["h2", "h3", "h4"]):
         heading_title = _normalize_text(heading.get_text(" ", strip=True))
@@ -852,6 +867,8 @@ def _extract_dynamic_sections(article_root: BeautifulSoup) -> list[dict[str, Any
         table_rows: list[dict[str, str | None]] = []
 
         for sibling in heading.next_siblings:
+            if not isinstance(sibling, Tag):
+                continue
             sibling_name = getattr(sibling, "name", None)
             if sibling_name in {"h2", "h3", "h4"}:
                 break
@@ -935,7 +952,7 @@ def _infer_casting_summary(sections: list[dict[str, Any]], summary: str | None) 
 
 
 def _collect_article_images(
-    article_root: BeautifulSoup,
+    article_root: _SoupNode,
     *,
     source_page_url: str,
     seen: set[str],
