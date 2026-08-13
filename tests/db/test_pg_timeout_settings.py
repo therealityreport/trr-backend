@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import psycopg2.pool
 import pytest
 
+from trr_backend.db import pg as pg_module
 from trr_backend.db.pg import (
     DEFAULT_CONNECT_TIMEOUT_SECONDS,
     DEFAULT_IDLE_IN_TX_TIMEOUT_MS,
@@ -28,15 +28,15 @@ def _pool_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture()
-def captured_kwargs(monkeypatch: pytest.MonkeyPatch) -> dict:
-    """Patch ThreadedConnectionPool.__init__ to capture kwargs without connecting."""
+def captured_kwargs(monkeypatch: pytest.MonkeyPatch, _isolate_non_live_tests: None) -> dict:
+    """Replace the guarded pool constructor with a local kwargs capture fake."""
     captured: dict = {}
 
-    def capturing_init(self, minconn, maxconn, **kwargs):
+    def capturing_pool(minconn: int, maxconn: int, **kwargs: object) -> None:
         captured.update(kwargs)
         raise ConnectionError("intentional -- just capturing kwargs")
 
-    monkeypatch.setattr(psycopg2.pool.ThreadedConnectionPool, "__init__", capturing_init)
+    monkeypatch.setattr(pg_module, "ThreadedConnectionPool", capturing_pool)
     return captured
 
 
