@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import pytest
+
 from trr_backend.vision import text_overlay
+
+pytestmark = pytest.mark.vision
 
 
 @dataclass

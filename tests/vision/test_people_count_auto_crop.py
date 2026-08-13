@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import pytest
+
 from trr_backend.vision.people_count_service import FaceBbox, PeopleCountResult, auto_thumbnail_crop
+
+pytestmark = pytest.mark.vision
 
 
 def _result(*detections: FaceBbox) -> PeopleCountResult:
