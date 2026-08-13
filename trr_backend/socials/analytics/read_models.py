@@ -4,9 +4,479 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from trr_backend.socials.provider_registry import LateNamespaceProvider, register_legacy_patchable_namespace
+
+if TYPE_CHECKING:
+    import csv
+    import io
+    import logging
+    import time as time_module
+    from collections import defaultdict
+    from collections.abc import Sequence
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from datetime import UTC, datetime, timedelta
+    from typing import Literal, Protocol
+    from zoneinfo import ZoneInfo
+
+    from trr_backend.db import pg
+    from trr_backend.socials.instagram.constants import instagram_post_permalink
+    from trr_backend.socials.model_types import SeasonContext, SentimentAnalyzerContext, WeekWindow
+
+    WeekDetailSortField = Literal[
+        "engagement", "likes", "views", "comments_count", "shares", "retweets", "posted_at"
+    ]
+    WeekDetailSortDir = Literal["asc", "desc"]
+
+    class IngestTimeShard(Protocol):
+        shard_index: int
+        window_start: datetime
+        window_end: datetime
+        runner_lane: str
+        priority_score: float
+        day_offset: int
+        day_weight: float
+
+    class IngestShardSchedule(Protocol):
+        strategy: str
+        runner_count: int
+        window_shard_hours: int
+        runner_b_offset_hours: int
+        day_weight_profile: str
+        priority_mode: str
+        run_start: datetime | None
+        shards: list[IngestTimeShard]
+        day_weights: dict[int, float]
+
+    class SentimentRuleResult(Protocol):
+        label: str
+        score: float
+        confidence: float
+        ambiguous: bool
+
+    SUPPORTED_PLATFORMS: tuple[str, ...]
+    logger: logging.Logger
+    _WEEK_DETAIL_HANDLERS: dict[str, Any]
+    _WEEK_DETAIL_SUMMARY_FAST_HANDLERS: dict[str, Any]
+
+    def _now_utc() -> datetime: ...
+
+    def _resolve_requested_platforms(platforms: list[str] | None) -> list[str]: ...
+
+    def _coerce_dt(value: Any) -> datetime | None: ...
+
+    def _iso(dt: datetime | None) -> str | None: ...
+
+    def _relation_exists(qualified_name: str, *, conn: Any | None = None) -> bool: ...
+
+    def _platform_posts_has_column(platform: str, column: str, *, conn: Any | None = None) -> bool: ...
+
+    def _tiktok_saves_expr(alias: str) -> str: ...
+
+    def _tiktok_canonical_url_expr(alias: str) -> str: ...
+
+    def _youtube_is_short_expr(alias: str) -> str: ...
+
+    def _platform_thumbnail_expr(alias: str, platform: str) -> str: ...
+
+    def _platform_hosted_media_expr(alias: str) -> str: ...
+
+    def _instagram_posts_thumbnail_expr(alias: str = "p") -> str: ...
+
+    def _instagram_posts_json_array_expr(alias: str, key: str) -> str: ...
+
+    def _instagram_posts_json_text_expr(alias: str, key: str) -> str: ...
+
+    def _instagram_posts_json_int_expr(alias: str, key: str) -> str: ...
+
+    def _instagram_posts_json_timestamptz_expr(alias: str, key: str) -> str: ...
+
+    def _instagram_posts_duration_expr(alias: str = "p") -> str: ...
+
+    def _threads_should_enforce_rhoslc_relevance(*, context: SeasonContext | None) -> bool: ...
+
+    def _threads_build_relevance_terms(
+        season_id: str, *, source_scope: str, context: SeasonContext
+    ) -> tuple[list[str], list[str]]: ...
+
+    def _threads_extract_topic(raw_data: Any, *, text: str | None = None) -> str | None: ...
+
+    def _threads_text_topic_match(
+        *, text: str | None, raw_data: Any, hashtags: list[str], keywords: list[str]
+    ) -> bool: ...
+
+    def _threads_is_quote_interaction(*, is_reply: Any = None, raw_data: Any = None) -> bool: ...
+
+    def get_season_context(season_id: str, *, conn: Any | None = None) -> SeasonContext: ...
+
+    def _normalize_account_handle(value: Any) -> str: ...
+
+    def _target_accounts_by_platform(
+        season_id: str, *, source_scope: str, context: SeasonContext | None = None
+    ) -> dict[str, set[str]]: ...
+
+    def _normalize_non_negative_int(value: Any) -> int: ...
+
+    def _extract_media_asset_meta_from_raw_data(value: Any) -> dict[str, Any]: ...
+
+    def _normalize_youtube_title_description(
+        title: str | None, description: str | None, *, is_short: bool
+    ) -> tuple[str, str]: ...
+
+    def _as_json_object(value: Any) -> dict[str, Any]: ...
+
+    def _as_json_object_list(value: Any) -> list[dict[str, Any]]: ...
+
+    def _normalize_tiktok_sound_id(value: Any) -> str | None: ...
+
+    def _select_thumbnail_candidate(media_urls: list[str], fallback: str = "") -> str: ...
+
+    def _count_stored_threads_interactions(post_ids: list[str]) -> dict[str, dict[str, int]]: ...
+
+    def _youtube_effective_comment_count(*, reported_count: int | None, saved_count: int | None) -> int: ...
+
+    def _comment_lifecycle_supported(table: str, *, conn: Any | None = None) -> bool: ...
+
+    def _safe_percent(
+        numerator: int | float, denominator: int | float, *, precision: int = 1
+    ) -> float | None: ...
+
+    def _median_int(values: list[int]) -> int: ...
+
+    def list_jobs(
+        season_id: str,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        run_id: str | None = None,
+        status: str | None = None,
+        platform: str | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+    def _week_live_health_platform_specs() -> dict[str, dict[str, str]]: ...
+
+    def _week_live_health_asset_type(url: str | None) -> str | None: ...
+
+    def _week_live_health_to_url_list(value: Any) -> list[str]: ...
+
+    def _build_sentiment_context(context: SeasonContext) -> SentimentAnalyzerContext: ...
+
+    def _resolve_week_windows(
+        context: SeasonContext, *, timezone: str, source_scope: str, now_utc: datetime
+    ) -> tuple[list[WeekWindow], datetime]: ...
+
+    def _week_window_label(window: WeekWindow, *, timezone: str) -> str: ...
+
+    def _week_for_timestamp(ts: datetime, *, windows: list[WeekWindow], timezone: str) -> WeekWindow | None: ...
+
+    def _compute_post_metadata(
+        season_id: str,
+        *,
+        platforms: list[str],
+        start_dt: datetime,
+        end_dt: datetime,
+        target_accounts_by_platform: dict[str, set[str]],
+    ) -> dict[str, Any] | None: ...
+
+    def _build_rows(
+        season_id: str,
+        *,
+        platforms: list[str],
+        start_dt: datetime,
+        end_dt: datetime,
+        source_scope: str,
+        season_context: SeasonContext,
+        analyzer_context: SentimentAnalyzerContext,
+        target_accounts_by_platform: dict[str, set[str]],
+        include_post_text: bool = True,
+    ) -> list[dict[str, Any]]: ...
+
+    def _build_drivers(
+        rows: list[dict[str, Any]], *, analyzer_context: SentimentAnalyzerContext | None = None
+    ) -> dict[str, list[dict[str, Any]]]: ...
+
+    def _platform_int_payload(values: dict[str, Any] | None) -> dict[str, int]: ...
+
+    def _analytics_cache_key(
+        *,
+        season_id: str,
+        platforms: list[str] | None,
+        timezone: str,
+        week: int | None,
+        source_scope: str,
+        include_rows: bool,
+        include_jobs: bool,
+        include_flags: bool,
+        include_schedule: bool,
+        include_benchmark: bool,
+    ) -> tuple[Any, ...]: ...
+
+    def _get_cached_analytics(cache_key: tuple[Any, ...]) -> dict[str, Any] | None: ...
+
+    def _set_cached_analytics(cache_key: tuple[Any, ...], payload: dict[str, Any]) -> None: ...
+
+    def _comments_coverage_for_platform(
+        season_id: str,
+        *,
+        platform: str,
+        start_dt: datetime,
+        end_dt: datetime,
+        source_scope: str,
+        target_accounts_by_platform: dict[str, set[str]],
+        season_context: SeasonContext | None = None,
+    ) -> dict[str, int]: ...
+
+    def _resolve_coverage_window(
+        *,
+        context: SeasonContext,
+        timezone: str,
+        source_scope: str,
+        date_start: datetime | None,
+        date_end: datetime | None,
+    ) -> tuple[datetime, datetime, datetime]: ...
+
+    def _platform_failure_reason(platform: str, reason: str | None) -> str | None: ...
+
+    def _derive_media_failure_reason(
+        platform: str,
+        *,
+        post_failed_count: int = 0,
+        post_partial_count: int = 0,
+        post_pending_count: int = 0,
+        comment_failed_count: int = 0,
+        comment_pending_count: int = 0,
+    ) -> str | None: ...
+
+    def _build_comment_sync_status(
+        *,
+        expected_count: int,
+        fetched_count: int,
+        upserted_count: int,
+        stale_posts_count: int = 0,
+        failure_reason: str | None = None,
+        attempted: bool | None = None,
+        active_status: str | None = None,
+    ) -> dict[str, Any]: ...
+
+    def _build_media_mirror_status(
+        *,
+        source_count: int,
+        mirrored_count: int,
+        failed_count: int = 0,
+        pending_count: int = 0,
+        partial_count: int = 0,
+        last_job_id: str | None = None,
+        not_needed: bool = False,
+        attempted: bool | None = None,
+        active_status: str | None = None,
+        failure_reason: str | None = None,
+    ) -> dict[str, Any]: ...
+
+    def _extract_last_platform_job_id(posts: Sequence[Mapping[str, Any]]) -> str | None: ...
+
+    def _extract_last_platform_refresh_at(posts: Sequence[Mapping[str, Any]]) -> str | None: ...
+
+    def _extract_platform_post_failure_reasons(
+        platform: str, posts: Sequence[Mapping[str, Any]]
+    ) -> dict[str, str | None]: ...
+
+    def _build_platform_status_payload(
+        *,
+        posts_scanned: int,
+        comment_sync_status: Mapping[str, Any],
+        media_mirror_status: Mapping[str, Any],
+        last_refresh_at: str | None,
+        last_refresh_reason: str | None,
+        worker_run_id: str | None = None,
+        active_job_summary: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]: ...
+
+    def _resolve_week_run_rows_by_platform(
+        season_id: str,
+        *,
+        source_scope: str,
+        week_index: int,
+        platforms: Sequence[str] | None = None,
+    ) -> dict[str, dict[str, Any]]: ...
+
+    def _active_week_job_status_by_platform(
+        run_id: str | None,
+        *,
+        source_scope: str,
+        week_index: int,
+        platforms: Sequence[str],
+        run_rows_by_platform: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> dict[str, dict[str, Any]]: ...
+
+    def _primary_week_run_id(run_rows_by_platform: Mapping[str, Mapping[str, Any]]) -> str | None: ...
+
+    def _overlay_platform_status_with_active_jobs(
+        status_payload: Mapping[str, Any], *, active_job_status: Mapping[str, Any] | None
+    ) -> dict[str, Any]: ...
+
+    def _active_job_status_by_platform_for_coverage_window(
+        *,
+        context: SeasonContext,
+        timezone: str,
+        source_scope: str,
+        start_dt: datetime,
+        end_dt: datetime,
+        now_utc: datetime,
+        platforms: Sequence[str],
+    ) -> dict[str, dict[str, Any]]: ...
+
+    def _mirror_coverage_for_platform(
+        season_id: str,
+        *,
+        platform: str,
+        start_dt: datetime,
+        end_dt: datetime,
+        source_scope: str,
+        target_accounts_by_platform: dict[str, set[str]] | None = None,
+        season_context: SeasonContext | None = None,
+    ) -> dict[str, int]: ...
+
+    def _comment_media_coverage_for_platform(
+        season_id: str,
+        *,
+        platform: str,
+        start_dt: datetime,
+        end_dt: datetime,
+        source_scope: str,
+        target_accounts_by_platform: dict[str, set[str]] | None = None,
+    ) -> dict[str, int]: ...
+
+    def _json_text_list(value: Any, *, prefix: str = "", strip_prefix: str | None = None) -> list[str]: ...
+
+    def _normalize_week_detail_sort(
+        sort_field: str, sort_dir: str
+    ) -> tuple[WeekDetailSortField, WeekDetailSortDir]: ...
+
+    def _coerce_week_detail_sort_metric(value: Any) -> float: ...
+
+    def _parse_mentions(text: str | None) -> list[str]: ...
+
+    def _parse_hashtags(text: str | None) -> list[str]: ...
+
+    def _instagram_cover_source_from_post_row(post_row: dict[str, Any]) -> tuple[str | None, str | None]: ...
+
+    def _thread_comments(flat: list[dict[str, Any]]) -> list[dict[str, Any]]: ...
+
+    def _normalize_week_totals_payload(
+        totals: Mapping[str, Any] | None, *, total_posts: int | None = None
+    ) -> dict[str, Any]: ...
+
+    def _serialize_comment_tree(node: dict[str, Any]) -> dict[str, Any]: ...
+
+    def _tiktok_filter_sql(
+        *,
+        season_id: str,
+        date_start: datetime | None = None,
+        date_end: datetime | None = None,
+        cast_member_id: str | None = None,
+        hashtag: str | None = None,
+        keyword: str | None = None,
+        sound_id: str | None = None,
+    ) -> tuple[str, list[Any]]: ...
+
+    def _build_ingest_shard_schedule(
+        *,
+        date_start: datetime | None,
+        date_end: datetime | None,
+        runner_strategy: str | None,
+        runner_count: int | None,
+        window_shard_hours: int | None,
+        runner_b_start_offset_hours: int | None,
+        day_weight_profile: str | None,
+        priority_mode: str | None,
+    ) -> IngestShardSchedule: ...
+
+    def _resolve_depth_defaults(
+        *,
+        max_posts_per_target: int | None,
+        max_comments_per_post: int | None,
+        max_replies_per_post: int | None,
+        fetch_replies: bool,
+    ) -> tuple[int, int, int, bool]: ...
+
+    def _rule_based_sentiment_for_text(
+        text: str | None, *, analyzer_context: SentimentAnalyzerContext
+    ) -> SentimentRuleResult: ...
+
+    def sentiment_for_text(text: str | None) -> tuple[str, int]: ...
+
+    def _text_is_trailer_marker(value: str | None) -> bool: ...
+
+    def _video_matches_season(video: dict[str, Any], season_number: int) -> bool: ...
+
+    def _week_detail_instagram(
+        season_id: str,
+        *,
+        start_dt: datetime,
+        end_dt: datetime,
+        account_handles: set[str],
+        max_comments: int,
+        post_limit: int = 20,
+        post_offset: int = 0,
+        sort_field: str = "posted_at",
+        sort_dir: str = "desc",
+    ) -> dict[str, Any]: ...
+
+    def _week_detail_tiktok(
+        season_id: str,
+        *,
+        start_dt: datetime,
+        end_dt: datetime,
+        account_handles: set[str],
+        max_comments: int,
+        post_limit: int = 20,
+        post_offset: int = 0,
+        sort_field: str = "posted_at",
+        sort_dir: str = "desc",
+    ) -> dict[str, Any]: ...
+
+    def _week_summary_fast_tiktok(
+        *, season_id: str, start_dt: datetime, end_dt: datetime, account_handles: set[str]
+    ) -> dict[str, Any]: ...
+
+    def _week_summary_fast_youtube(
+        *, season_id: str, start_dt: datetime, end_dt: datetime, account_handles: set[str]
+    ) -> dict[str, Any]: ...
+
+    def _week_summary_fast_threads(
+        *,
+        season_id: str,
+        start_dt: datetime,
+        end_dt: datetime,
+        account_handles: set[str],
+        source_scope: str = "network",
+    ) -> dict[str, Any]: ...
+
+    def _text_contains_any_term(*, text: str | None, hashtags: list[str], keywords: list[str]) -> bool: ...
+
+    def _threads_post_matches_show_terms(
+        *, text: str | None, raw_data: Any, hashtags: list[str], keywords: list[str]
+    ) -> bool: ...
+
+    def _youtube_title_is_cross_show_excluded(title: str | None) -> bool: ...
+
+    def _youtube_video_matches_show_terms(
+        *,
+        title: str | None,
+        description: str | None,
+        tags: list[str] | None = None,
+        hashtags: list[str],
+        keywords: list[str],
+    ) -> bool: ...
+
+    def _youtube_post_matches_show_terms(
+        *,
+        context: SeasonContext | None,
+        title: str | None,
+        description: str | None,
+        post_hashtags: list[str] | None = None,
+    ) -> bool: ...
 
 _IMPORTED_CORE_NAMES: set[str] = set()
 _LOCAL_ROOM_NAMES: set[str] = set()
@@ -44,9 +514,13 @@ _PROVIDER = LateNamespaceProvider(
 )
 _require_provider_ready = _PROVIDER.require
 
-for _provider_bridge_name in _PROVIDER_BRIDGE_NAMES:
-    globals()[_provider_bridge_name] = _PROVIDER.callable_bridge(_provider_bridge_name)
-del _provider_bridge_name
+def _publish_provider_bridges() -> None:
+    for provider_bridge_name in _PROVIDER_BRIDGE_NAMES:
+        globals()[provider_bridge_name] = _PROVIDER.callable_bridge(provider_bridge_name)
+
+
+_publish_provider_bridges()
+del _publish_provider_bridges
 
 
 _configure_legacy_provider = _PROVIDER.configure
@@ -558,10 +1032,8 @@ def get_analytics(
     comments_saved_by_platform = dict.fromkeys(SUPPORTED_PLATFORMS, 0)
     reported_comments_by_platform = dict.fromkeys(SUPPORTED_PLATFORMS, 0)
     for week_row in weekly_platform_posts:
-        comments_payload = week_row.get("comments") if isinstance(week_row.get("comments"), dict) else {}
-        reported_payload = (
-            week_row.get("reported_comments") if isinstance(week_row.get("reported_comments"), dict) else {}
-        )
+        comments_payload = _as_json_object(week_row.get("comments"))
+        reported_payload = _as_json_object(week_row.get("reported_comments"))
         for platform in SUPPORTED_PLATFORMS:
             comments_saved_by_platform[platform] += int(comments_payload.get(platform, 0))
             reported_comments_by_platform[platform] += int(reported_payload.get(platform, 0))
@@ -3489,8 +3961,8 @@ def build_csv(snapshot: dict[str, Any]) -> str:
     rows = snapshot.get("rows") or []
     summary = snapshot.get("summary") or {}
     data_quality = summary.get("data_quality") if isinstance(summary.get("data_quality"), dict) else {}
-    weekly_flags = snapshot.get("weekly_flags") if isinstance(snapshot.get("weekly_flags"), list) else []
-    benchmark = snapshot.get("benchmark") if isinstance(snapshot.get("benchmark"), dict) else {}
+    weekly_flags = _as_json_object_list(snapshot.get("weekly_flags"))
+    benchmark = _as_json_object(snapshot.get("benchmark"))
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(
@@ -3543,11 +4015,9 @@ def build_csv(snapshot: dict[str, Any]) -> str:
         )
 
     if benchmark:
-        current = benchmark.get("current") if isinstance(benchmark.get("current"), dict) else {}
-        prev = benchmark.get("previous_week") if isinstance(benchmark.get("previous_week"), dict) else {}
-        trailing = (
-            benchmark.get("trailing_3_week_avg") if isinstance(benchmark.get("trailing_3_week_avg"), dict) else {}
-        )
+        current = _as_json_object(benchmark.get("current"))
+        prev = _as_json_object(benchmark.get("previous_week"))
+        trailing = _as_json_object(benchmark.get("trailing_3_week_avg"))
         writer.writerow(["benchmark", "week_index", benchmark.get("week_index")])
         writer.writerow(["benchmark", "current_posts", current.get("posts")])
         writer.writerow(["benchmark", "current_comments", current.get("comments")])
