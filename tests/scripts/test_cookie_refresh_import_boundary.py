@@ -22,37 +22,46 @@ def _run_fresh_python(lines: list[str]) -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_cookie_refresh_uses_exact_dispatch_runtime_proxy_without_legacy_import() -> None:
+def test_cookie_refresh_uses_a_late_control_plane_proxy_without_monolith_import() -> None:
     source = SOURCE_PATH.read_text(encoding="utf-8")
     tree = ast.parse(source)
     imports = [node for node in tree.body if isinstance(node, ast.ImportFrom)]
 
     assert any(
-        node.module == "trr_backend.socials.control_plane.dispatch_runtime"
-        and [(alias.name, alias.asname) for alias in node.names] == [("legacy", "social_repo")]
+        [(alias.name, alias.asname) for alias in node.names] == [("legacy", "social_repo")]
+        and node.module == "trr_backend.socials.control_plane.dispatch_runtime"
         for node in imports
     )
-    assert "trr_backend.repositories.social_season_analytics" not in source
     assert "trr_backend.socials.social_season_analytics_impl" not in source
+    assert "trr_backend.repositories.social_season_analytics" not in source
+    assert "__import__(" not in source
 
 
-def test_cookie_refresh_exact_proxy_preserves_import_time_handler_bindings() -> None:
+def test_cookie_refresh_import_succeeds_in_a_fresh_process() -> None:
+    _run_fresh_python(
+        [
+            "import trr_backend.socials.ops.cookie_refresh as leaf",
+            "import sys",
+            "assert 'trr_backend.socials.social_season_analytics_impl' not in sys.modules",
+            (
+                "assert set(leaf.PLATFORM_HANDLERS) == {'instagram', 'tiktok', 'twitter', "
+                "'facebook', 'threads', 'socialblade'}"
+            ),
+        ]
+    )
+
+
+def test_cookie_refresh_handler_bindings_are_late_and_preserve_legacy_patches() -> None:
     _run_fresh_python(
         [
             "import importlib",
             "legacy = importlib.import_module('trr_backend.socials.social_season_analytics_impl')",
-            "before = object()",
-            "after = object()",
-            "legacy._load_instagram_cookies = before",
             "leaf = importlib.import_module('trr_backend.socials.ops.cookie_refresh')",
-            "runtime = importlib.import_module('trr_backend.socials.control_plane.dispatch_runtime')",
-            "repository_alias = importlib.import_module('trr_backend.repositories.social_season_analytics')",
-            "assert runtime.legacy is legacy",
-            "assert repository_alias is legacy",
-            "assert leaf.social_repo is legacy",
-            "assert leaf.PLATFORM_HANDLERS['instagram'].load is before",
-            "legacy._load_instagram_cookies = after",
-            "assert leaf.PLATFORM_HANDLERS['instagram'].load is before",
+            "assert leaf.PLATFORM_HANDLERS['instagram'].load is leaf._load_instagram_cookies",
+            "legacy._load_instagram_cookies = lambda: {'sessionid': 'before'}",
+            "assert leaf.PLATFORM_HANDLERS['instagram'].load() == {'sessionid': 'before'}",
+            "legacy._load_instagram_cookies = lambda: {'sessionid': 'after'}",
+            "assert leaf.PLATFORM_HANDLERS['instagram'].load() == {'sessionid': 'after'}",
         ]
     )
 
@@ -63,7 +72,7 @@ def test_cookie_refresh_path_helpers_keep_live_proxy_lookup() -> None:
             "import importlib",
             "from pathlib import Path",
             "leaf = importlib.import_module('trr_backend.socials.ops.cookie_refresh')",
-            "legacy = leaf.social_repo",
+            "legacy = importlib.import_module('trr_backend.socials.social_season_analytics_impl')",
             "calls = []",
             "legacy._default_tiktok_cookie_file_path = lambda: Path('/tmp/default.json')",
             "legacy._platform_cookie_refresh_target_path = (",
