@@ -5,11 +5,273 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from trr_backend.socials.control_plane.backfill_runbook import instagram_backfill_runbook_metadata
 from trr_backend.socials.instagram.media_completion import build_media_completion_payload
 from trr_backend.socials.provider_registry import LateNamespaceProvider, LateProviderProxy
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from datetime import datetime
+
+    from trr_backend.db import pg
+
+    CATALOG_SUPPORTED_PLATFORMS: tuple[str, ...]
+    POST_CLASSIFY_STAGE: str
+    SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE: str
+    SHARED_ACCOUNT_DISCOVERY_STAGE: str
+    SHARED_ACCOUNT_POSTS_STAGE: str
+    SOCIAL_CATALOG_PROGRESS_POOL_NAME: str
+    _CATALOG_LAUNCH_FINALIZING_RECOVERY_GRACE_SECONDS: int
+    _RUN_AUTH_REPAIR_AUTO_RESUME_PENDING_KEY: str
+    _RUN_AUTH_REPAIR_REPAIRABLE_REASON_KEY: str
+    _RUN_AUTH_REPAIR_RESUME_STAGE_KEY: str
+    _RUN_AUTH_REPAIR_STATUS_KEY: str
+    _RUN_FAILURE_DISMISSED_AT_KEY: str
+    _RUN_PROGRESS_ACTIVE_JOB_STATUSES: set[str]
+
+    def _as_text_list(value: Any, *, prefix: str = "", strip_prefix: str | None = None) -> list[str]: ...
+
+    def _assert_social_account_profile_exists(
+        platform: str, account_handle: str, *, conn: Any | None = None
+    ) -> list[dict[str, Any]]: ...
+
+    def _best_known_social_account_total_posts(
+        platform: str,
+        account_handle: str,
+        *,
+        materialized_total_posts: int | None = None,
+        catalog_total_posts: int | None = None,
+        allow_live_refresh: bool = True,
+    ) -> int: ...
+
+    def _build_catalog_run_progress_alerts(
+        *,
+        platform: str,
+        frontier_progress: Mapping[str, Any],
+        payload: Mapping[str, Any],
+        recovery: Mapping[str, Any] | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+    def _build_run_progress_snapshot_payload(
+        *,
+        run_row: Mapping[str, Any],
+        job_rows: list[dict[str, Any]],
+        run_id: str,
+        season_id: str | None,
+        recent_log_limit: int = 20,
+        summary_override: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]: ...
+
+    def _build_terminal_catalog_run_progress_payload(
+        *,
+        run_row: Mapping[str, Any],
+        job_rows: list[dict[str, Any]],
+        run_id: str,
+        run_config: Mapping[str, Any],
+        platform: str,
+        account_handle: str,
+        recent_log_limit: int,
+    ) -> dict[str, Any]: ...
+
+    def _cached_live_profile_total_posts(platform: str, account_handle: str) -> int | None: ...
+
+    def _cached_live_profile_total_posts_cached_only(platform: str, account_handle: str) -> int | None: ...
+
+    def _can_fast_path_terminal_catalog_progress(
+        *,
+        run_row: Mapping[str, Any],
+        configured_platforms: set[str],
+        configured_accounts: set[str],
+        normalized_platform: str,
+        normalized_account: str,
+    ) -> bool: ...
+
+    def _catalog_launch_finalizing_is_stale(
+        run_config: Mapping[str, Any], *, now: datetime | None = None
+    ) -> bool: ...
+
+    def _catalog_launch_task_resolution_pending(value: Any) -> bool: ...
+
+    def _catalog_run_auth_repair_environment(platform: str) -> dict[str, Any]: ...
+
+    def _catalog_run_auth_repair_resume_stage(
+        *, repairable_reason: str | None, run_config: Mapping[str, Any], frontier_progress: Mapping[str, Any]
+    ) -> str | None: ...
+
+    def _catalog_run_intent_metadata(run_config: Mapping[str, Any] | None) -> dict[str, str | None]: ...
+
+    def _catalog_run_last_transport_response(
+        *, frontier_progress: Mapping[str, Any], job_rows: Sequence[Mapping[str, Any]]
+    ) -> dict[str, Any]: ...
+
+    def _catalog_run_repairable_auth_reason(
+        *,
+        platform: str,
+        job_rows: Sequence[Mapping[str, Any]],
+        frontier_progress: Mapping[str, Any],
+        last_error_code: str | None,
+    ) -> str | None: ...
+
+    def _coerce_dt(value: Any) -> datetime | None: ...
+
+    def _derive_catalog_run_state(
+        *,
+        run_status: str,
+        scrape_complete: bool,
+        classify_incomplete: bool,
+        stages_payload: Mapping[str, Any],
+        frontier_progress: Mapping[str, Any],
+        recovery: Mapping[str, Any] | None = None,
+    ) -> str: ...
+
+    def _finalize_run_status(run_id: str, *, force_recompute: bool = False) -> dict[str, Any]: ...
+
+    def _iso(dt: datetime | None) -> str | None: ...
+
+    def _load_catalog_run_row_by_id(run_id: str, *, conn: Any | None = None) -> dict[str, Any]: ...
+
+    def _load_shared_account_source_row(
+        *, source_scope: str, platform: str, account_handle: str
+    ) -> dict[str, Any] | None: ...
+
+    def _load_social_account_catalog_jobs(
+        *,
+        run_id: str,
+        platform: str,
+        account_handle: str,
+        conn: Any | None = None,
+        features: Mapping[str, Any] | None = None,
+        pool_name: str = "default",
+    ) -> list[dict[str, Any]]: ...
+
+    def _load_social_account_catalog_run_row(
+        *,
+        platform: str,
+        account_handle: str,
+        run_id: str,
+        conn: Any | None = None,
+        verify_account: bool = True,
+        pool_name: str = "default",
+    ) -> dict[str, Any]: ...
+
+    def _metadata_dict(value: Any) -> dict[str, Any]: ...
+
+    def _normalize_non_negative_int(value: Any) -> int: ...
+
+    def _normalize_optional_social_account_catalog_backfill_selected_tasks(selected_tasks: Any) -> list[str]: ...
+
+    def _normalize_platform_name(value: Any) -> str: ...
+
+    def _normalize_social_account_profile_handle(account_handle: Any) -> str: ...
+
+    def _normalize_social_account_profile_platform(platform: Any) -> str: ...
+
+    def _now_utc() -> datetime: ...
+
+    def _queued_jobs_by_type(stages_payload: Mapping[str, Any]) -> dict[str, int]: ...
+
+    def _relation_exists(qualified_name: str, *, conn: Any | None = None) -> bool: ...
+
+    def _repair_finalizing_catalog_launch_after_jobs(
+        *,
+        run_row: Mapping[str, Any],
+        job_rows: Sequence[Mapping[str, Any]],
+        platform: str,
+        account_handle: str,
+        conn: Any | None = None,
+    ) -> dict[str, Any] | None: ...
+
+    def _resolve_run_attached_followups(
+        *,
+        run_config: Mapping[str, Any] | None,
+        run_id: str | None = None,
+        run_status: str | None = None,
+        comments_run_id: str | None = None,
+        conn: Any | None = None,
+        run_status_by_id: Mapping[str, str] | None = None,
+        media_jobs_by_id: Mapping[str, Mapping[str, Any]] | None = None,
+        media_jobs_by_run_id: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+    ) -> dict[str, dict[str, Any]]: ...
+
+    def _run_progress_persist_counters(job_rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]: ...
+
+    def _run_progress_stage_from_row(row: Mapping[str, Any]) -> str: ...
+
+    def _run_progress_summary_needs_refresh(
+        stored_summary: Mapping[str, Any], computed_summary: Mapping[str, Any]
+    ) -> bool: ...
+
+    def _scrape_jobs_features(*, conn: Any | None = None) -> dict[str, bool]: ...
+
+    def _shared_account_expected_total_posts_from_config(
+        config: Mapping[str, Any] | None, *, platform: Any, account_handle: Any
+    ) -> int: ...
+
+    def _shared_account_frontier_progress(
+        *, run_id: str, platform: str, account_handle: str
+    ) -> dict[str, Any]: ...
+
+    def _shared_account_partition_progress(
+        *, run_id: str, platform: str, account_handle: str
+    ) -> dict[str, Any]: ...
+
+    def _shared_account_recovery_payload(
+        *, job_rows: Sequence[Mapping[str, Any]], now: datetime
+    ) -> dict[str, Any] | None: ...
+
+    def _shared_catalog_mode(config: Mapping[str, Any] | None) -> bool: ...
+
+    def _shared_catalog_total_posts(
+        platform: str,
+        account_handle: str,
+        *,
+        statuses: list[str] | None = None,
+        conn: Any | None = None,
+    ) -> int: ...
+
+    def _shared_profile_contract(
+        *,
+        source_scope: str,
+        platform: str,
+        account_handle: str,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]: ...
+
+    def _social_account_profile_total_posts(
+        platform: str, account_handle: str, *, search: str | None = None, conn: Any | None = None
+    ) -> int: ...
+
+    def _summarize_run_progress_job_rows(job_rows: Sequence[Mapping[str, Any]]) -> dict[str, int]: ...
+
+    def _update_run_summary(
+        run_id: str, *, force_recompute: bool = False, conn: Any | None = None
+    ) -> dict[str, Any]: ...
+
+    def instagram_posts_acceleration_flags() -> dict[str, Any]: ...
+
+    def latest_instagram_profile_pagination_state(
+        *,
+        account_handle: str,
+        source_scope: str = "network",
+        run_id: str | None = None,
+        direction: str = "forward",
+    ) -> dict[str, Any]: ...
+
+    def recover_dispatch_blocked_no_progress_jobs(*, limit: int = 100) -> list[dict[str, Any]]: ...
+
+    def recover_pending_social_account_catalog_launch(
+        *, platform: str, account_handle: str, run_id: str
+    ) -> dict[str, Any]: ...
+
+    def recover_stale_unclaimed_dispatched_jobs(
+        *,
+        run_id: str | None = None,
+        platform: str | None = None,
+        account_handle: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]: ...
 
 _IMPORTED_CORE_NAMES: set[str] = set()
 _LOCAL_ROOM_NAMES: set[str] = set()
@@ -938,7 +1200,7 @@ def _build_catalog_terminal_progress_payload(
 ) -> dict[str, Any]:
     payload = _build_terminal_catalog_run_progress_payload(
         run_row=run_row,
-        job_rows=list(job_rows),
+        job_rows=[dict(job_row) for job_row in job_rows],
         run_id=run_id,
         run_config=run_config,
         platform=platform,
