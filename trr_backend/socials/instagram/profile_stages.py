@@ -10,7 +10,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse, urlunparse
 from trr_backend.db import pg as _local_pg
 from trr_backend.socials.instagram.auth_runtime import (
@@ -23,6 +23,52 @@ from trr_backend.socials.post_persist_truthfulness import (
     _normalize_non_negative_int as _local_normalize_non_negative_int,
 )
 from trr_backend.socials.source_scopes import normalize_source_scope
+
+if TYPE_CHECKING:
+    def _adapt_payload_json_values(payload: Mapping[str, Any]) -> dict[str, Any]: ...
+
+    def _coerce_dt(value: Any) -> datetime | None: ...
+
+    def _column_exists(schema: str, table: str, column: str, *, conn: Any | None = None) -> bool: ...
+
+    def _iso(dt: datetime | None) -> str | None: ...
+
+    def _load_instagram_cookies(*args: Any, **kwargs: Any) -> dict[str, str]: ...
+
+    def _load_shared_account_source_row(
+        *, source_scope: str, platform: str, account_handle: str
+    ) -> dict[str, Any] | None: ...
+
+    def _metadata_dict(value: Any) -> dict[str, Any]: ...
+
+    def _normalize_account_handle(value: Any) -> str: ...
+
+    def _normalize_non_negative_int(value: Any) -> int: ...
+
+    def _normalize_social_account_profile_handle(value: Any) -> str: ...
+
+    def _now_utc() -> datetime: ...
+
+    def _pg_upsert(
+        table: str,
+        payload: dict[str, Any],
+        *,
+        conflict_col: str | Sequence[str],
+        conn: Any | None = None,
+        include_inserted_flag: bool = False,
+    ) -> dict[str, Any] | None: ...
+
+    def _touch_shared_account_source(
+        *,
+        source_scope: str,
+        platform: str,
+        account_handle: str,
+        run_id: str | None = None,
+        job_id: str | None = None,
+        last_scrape_status: str | None = None,
+        last_classified_at: datetime | None = None,
+        metadata_updates: Mapping[str, Any] | None = None,
+    ) -> None: ...
 
 logger = logging.getLogger(__name__)
 INSTAGRAM_PROFILE_SNAPSHOT_STAGE = "instagram_profile_snapshot"
@@ -212,6 +258,18 @@ def _local_touch_shared_account_source(
     )
 
 
+def _profile_payload_rows(value: object) -> list[Mapping[str, Any]]:
+    return [item for item in value if isinstance(item, Mapping)] if isinstance(value, list) else []
+
+
+def _profile_relationship_payload(
+    value: Mapping[str, Any] | Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | list[dict[str, Any]]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    return [dict(item) for item in value]
+
+
 for _provider_name, _local_provider in (
     ("_adapt_payload_json_values", _local_adapt_payload_json_values),
     ("_coerce_dt", _local_coerce_dt),
@@ -305,9 +363,7 @@ def _instagram_following_rows_from_payload(
     source_page_ordinal: int,
     starting_rank: int,
 ) -> tuple[list[dict[str, Any]], str | None, bool]:
-    raw_rows = payload.get("users")
-    if not isinstance(raw_rows, list):
-        raw_rows = payload.get("items") if isinstance(payload.get("items"), list) else []
+    raw_rows = _profile_payload_rows(payload.get("users") if isinstance(payload.get("users"), list) else payload.get("items"))
     rows: list[dict[str, Any]] = []
     for index, raw_row in enumerate(raw_rows):
         if not isinstance(raw_row, Mapping):
@@ -1246,7 +1302,7 @@ def persist_instagram_profile_relationships(
         raise RuntimeError("Unable to materialize owner Instagram profile for relationship sync.")
 
     result = normalize_instagram_profile_relationships(
-        relationship_payloads,
+        _profile_relationship_payload(relationship_payloads),
         owner_username=normalized_owner,
         intended_relationship_type=intended_relationship_type,
         source_cursor=source_cursor,
