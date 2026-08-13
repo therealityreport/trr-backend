@@ -135,6 +135,7 @@ def test_record_response_bytes_invokes_observability(monkeypatch: pytest.MonkeyP
         calls.append((provider, account, host, n))
 
     monkeypatch.setattr(observability, "record_proxy_bytes", _spy)
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_POSTS_PROXY_PROVIDER", raising=False)
     f = _make_fetcher("@spyacct")
     f._record_proxy_response(_FakeResponse(host="i.instagram.com", content=b"z" * 321))
     assert calls == [("none", "@spyacct", "i.instagram.com", 321)]
