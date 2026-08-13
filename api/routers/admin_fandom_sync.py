@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -23,6 +23,8 @@ from trr_backend.repositories.cast_fandom import upsert_cast_fandom
 from trr_backend.repositories.season_fandom import list_season_fandom, upsert_season_fandom
 
 logger = logging.getLogger(__name__)
+_INTERNAL_ADMIN_DEFAULT = cast(InternalAdminUser, None)
+_SUPABASE_ADMIN_DEFAULT = cast(SupabaseAdminClient, None)
 
 router = APIRouter(tags=["admin-fandom-sync"])
 
@@ -230,9 +232,9 @@ def _merge_person_payload(
         if isinstance(cleanup_payload.get("sections"), list):
             aggregated["dynamic_sections"] = cleanup_payload.get("sections")
         if isinstance(cleanup_payload.get("citations"), list):
-            citations = cleanup_payload.get("citations")
+            citations = cast(list[dict[str, Any]], cleanup_payload.get("citations"))
         if isinstance(cleanup_payload.get("conflicts"), list):
-            conflicts = cleanup_payload.get("conflicts")
+            conflicts = cast(list[dict[str, Any]], cleanup_payload.get("conflicts"))
         overrides = cleanup_payload.get("canonical_field_overrides")
         if isinstance(overrides, dict):
             for key, value in overrides.items():
@@ -317,7 +319,7 @@ def _merge_season_payload(
         if _row_has_value(cleanup_payload.get("casting_summary")) and not _row_has_value(summary):
             summary = cleanup_payload.get("casting_summary")
         if isinstance(cleanup_payload.get("sections"), list):
-            sections = cleanup_payload.get("sections")
+            sections = cast(list[dict[str, Any]], cleanup_payload.get("sections"))
         if isinstance(cleanup_payload.get("citations"), list):
             citations = cleanup_payload.get("citations")
         if isinstance(cleanup_payload.get("conflicts"), list):
@@ -484,7 +486,11 @@ def _collect_season_preview(
 
 
 @router.get("/admin/person/{person_id}/fandom")
-def get_person_fandom(person_id: UUID, db: SupabaseAdminClient = None, _: InternalAdminUser = None):
+def get_person_fandom(
+    person_id: UUID,
+    db: SupabaseAdminClient = _SUPABASE_ADMIN_DEFAULT,
+    _: InternalAdminUser = _INTERNAL_ADMIN_DEFAULT,
+):
     response = (
         db.schema("core")
         .table("cast_fandom")
@@ -501,8 +507,8 @@ def get_person_fandom(person_id: UUID, db: SupabaseAdminClient = None, _: Intern
 def preview_person_fandom_sync(
     person_id: UUID,
     payload: FandomSyncRequest,
-    db: SupabaseAdminClient = None,
-    _: InternalAdminUser = None,
+    db: SupabaseAdminClient = _SUPABASE_ADMIN_DEFAULT,
+    _: InternalAdminUser = _INTERNAL_ADMIN_DEFAULT,
 ):
     person_name = _resolve_person_name(db, str(person_id))
     candidate_pages, selected_pages, parsed_rows, warnings = _collect_person_preview(
@@ -528,8 +534,8 @@ def preview_person_fandom_sync(
 def commit_person_fandom_sync(
     person_id: UUID,
     payload: FandomSyncCommitRequest,
-    db: SupabaseAdminClient = None,
-    _: InternalAdminUser = None,
+    db: SupabaseAdminClient = _SUPABASE_ADMIN_DEFAULT,
+    _: InternalAdminUser = _INTERNAL_ADMIN_DEFAULT,
 ):
     person_name = _resolve_person_name(db, str(person_id))
     preview_request = FandomSyncRequest(
@@ -568,8 +574,8 @@ def commit_person_fandom_sync(
 def get_season_fandom_data(
     show_id: UUID,
     season_number: int,
-    db: SupabaseAdminClient = None,
-    _: InternalAdminUser = None,
+    db: SupabaseAdminClient = _SUPABASE_ADMIN_DEFAULT,
+    _: InternalAdminUser = _INTERNAL_ADMIN_DEFAULT,
 ):
     season_context = _resolve_season_context(db, show_id=str(show_id), season_number=season_number)
     rows = list_season_fandom(db, season_id=season_context["season_id"])
@@ -581,8 +587,8 @@ def preview_season_fandom_sync(
     show_id: UUID,
     season_number: int,
     payload: FandomSyncRequest,
-    db: SupabaseAdminClient = None,
-    _: InternalAdminUser = None,
+    db: SupabaseAdminClient = _SUPABASE_ADMIN_DEFAULT,
+    _: InternalAdminUser = _INTERNAL_ADMIN_DEFAULT,
 ):
     season_context = _resolve_season_context(db, show_id=str(show_id), season_number=season_number)
     query_name = season_context["season_title"] or (
@@ -613,8 +619,8 @@ def commit_season_fandom_sync(
     show_id: UUID,
     season_number: int,
     payload: FandomSyncCommitRequest,
-    db: SupabaseAdminClient = None,
-    _: InternalAdminUser = None,
+    db: SupabaseAdminClient = _SUPABASE_ADMIN_DEFAULT,
+    _: InternalAdminUser = _INTERNAL_ADMIN_DEFAULT,
 ):
     season_context = _resolve_season_context(db, show_id=str(show_id), season_number=season_number)
     query_name = season_context["season_title"] or (
