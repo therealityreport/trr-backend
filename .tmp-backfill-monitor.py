@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """Poll the BravoTV backfill run and print one line per meaningful change."""
-import sys
+
 import time
 
 import psycopg2

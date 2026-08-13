@@ -9,8 +9,8 @@ from typing import Any
 import requests
 
 from scripts._sync_common import add_show_filter_args, fetch_show_rows, load_env_and_db
-from scripts.sync.episode_id_reconciliation import reconcile_episode_imdb_ids_from_tmdb
 from scripts.sync import sync_episodes, sync_seasons
+from scripts.sync.episode_id_reconciliation import reconcile_episode_imdb_ids_from_tmdb
 from trr_backend.integrations.tmdb.client import resolve_api_key
 from trr_backend.repositories.shows import update_show
 

@@ -41,8 +41,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Alias entity set to sync: all, shows, or cast. Default: all.",
     )
     parser.add_argument("--show-id", action="append", default=[], help="Limit to a show UUID. Repeatable.")
-    parser.add_argument("--source", default=DEFAULT_ALIAS_SOURCE, help=f"Alias source label, default: {DEFAULT_ALIAS_SOURCE}")
-    parser.add_argument("--apply", action="store_true", help="Upsert aliases. Without this flag the command only previews.")
+    parser.add_argument(
+        "--source", default=DEFAULT_ALIAS_SOURCE, help=f"Alias source label, default: {DEFAULT_ALIAS_SOURCE}"
+    )
+    parser.add_argument(
+        "--apply", action="store_true", help="Upsert aliases. Without this flag the command only previews."
+    )
     parser.add_argument("--pretty", action="store_true", help="Pretty-print the JSON result.")
     return parser.parse_args(list(argv) if argv is not None else None)
 
@@ -385,7 +389,7 @@ def _summary(rows: Sequence[Mapping[str, str]]) -> dict[str, list[str]]:
     for row in rows:
         label = str(row.get("show_name") or row.get("show_id") or "").strip()
         grouped.setdefault(label, []).append(str(row.get("name") or "").strip())
-    return {key: values for key, values in sorted(grouped.items())}
+    return dict(sorted(grouped.items()))
 
 
 def _person_summary(rows: Sequence[Mapping[str, str]]) -> dict[str, list[str]]:
@@ -393,7 +397,7 @@ def _person_summary(rows: Sequence[Mapping[str, str]]) -> dict[str, list[str]]:
     for row in rows:
         label = str(row.get("person_name") or row.get("person_id") or "").strip()
         grouped.setdefault(label, []).append(str(row.get("name") or "").strip())
-    return {key: values for key, values in sorted(grouped.items())}
+    return dict(sorted(grouped.items()))
 
 
 def main(argv: Sequence[str] | None = None) -> int:

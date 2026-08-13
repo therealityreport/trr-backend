@@ -55,15 +55,9 @@ def load_sync_fix_config(config_path: Path = DEFAULT_SYNC_FIX_CONFIG_PATH) -> tu
     if not isinstance(payload, dict):
         raise ValueError(f"{config_path} must contain a JSON object")
 
-    paths = tuple(
-        path
-        for path in (_normalize_config_path(item) for item in payload.get("sync_fix_paths", []))
-        if path
-    )
+    paths = tuple(path for path in (_normalize_config_path(item) for item in payload.get("sync_fix_paths", [])) if path)
     required_dirs = tuple(
-        path
-        for path in (_normalize_config_path(item) for item in payload.get("required_local_dirs", []))
-        if path
+        path for path in (_normalize_config_path(item) for item in payload.get("required_local_dirs", [])) if path
     )
     if not paths:
         raise ValueError(f"{config_path} must define at least one sync_fix_paths entry")

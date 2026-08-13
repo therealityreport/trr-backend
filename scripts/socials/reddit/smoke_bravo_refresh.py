@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -40,7 +40,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, object]:
     smoke_id = uuid4().hex[:12]
     period_key = (
         str(args.period_key or "").strip()
-        or f"bravo-reddit-smoke-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{smoke_id}"
+        or f"bravo-reddit-smoke-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}-{smoke_id}"
     )
     return {
         "community_id": str(args.community_id or "").strip(),

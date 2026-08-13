@@ -11,7 +11,6 @@ if str(SCRIPTS_ROOT) not in sys.path:
 
 from media.sync_bravotv_galleries import main  # noqa: E402
 
-
 if __name__ == "__main__":
     print(
         "Deprecated: scripts/sync/sync_bravotv_galleries.py; use scripts/media/sync_bravotv_galleries.py instead.",
