@@ -12,11 +12,11 @@ import shutil
 import socket
 import subprocess
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import lru_cache
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote, unquote, urlparse
 
 import boto3
@@ -183,6 +183,16 @@ def _response_content_length_exceeds(headers: Mapping[str, Any], max_bytes: int)
         return False
 
 
+def _head_content_length(head: Mapping[str, Any], fallback: int) -> int:
+    content_length = head.get("ContentLength")
+    return int(content_length) if content_length is not None else fallback
+
+
+def _row_metadata(row: Mapping[str, Any]) -> dict[str, Any]:
+    metadata = row.get("metadata")
+    return metadata if isinstance(metadata, dict) else {}
+
+
 def _read_response_bytes_with_cap(response: Any, *, max_bytes: int) -> tuple[bytes, int | None, str | None]:
     parts: list[bytes] = []
     size_bytes = 0
@@ -192,7 +202,7 @@ def _read_response_bytes_with_cap(response: Any, *, max_bytes: int) -> tuple[byt
         iterator = iter_content(chunk_size=_MEDIA_MIRROR_CHUNK_SIZE_BYTES)
 
     if iterator is not None:
-        for chunk in iterator:
+        for chunk in cast(Iterable[bytes], iterator):
             if not chunk:
                 continue
             size_bytes += len(chunk)
@@ -310,7 +320,7 @@ def _iter_unique_http_urls(candidates: list[str | None]) -> list[str]:
 
 
 def _getty_preferred_source_url(row: Mapping[str, Any]) -> str | None:
-    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    metadata = _row_metadata(row)
     return next(
         (
             candidate.strip()
@@ -339,7 +349,7 @@ def _build_cast_photo_download_urls(
     referer: str | None,
 ) -> list[str]:
     if source == "getty":
-        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        metadata = _row_metadata(row)
         return _iter_unique_http_urls(
             [
                 _getty_preferred_source_url(row),
@@ -924,7 +934,8 @@ def _derive_alpha_mask_from_opaque_logo(image):
     bg_img = Image.new("RGB", rgb.size, bg)
     diff = ImageChops.difference(rgb, bg_img).convert("L")
     # Start with a strict threshold; relax later via luminance fallback if needed.
-    alpha = diff.point(lambda px: 255 if px > 18 else 0)
+    threshold_alpha: Callable[[int], float] = lambda px: 255 if px > 18 else 0
+    alpha = diff.point(threshold_alpha)
     alpha = alpha.filter(ImageFilter.MedianFilter(size=3))
 
     bbox = alpha.getbbox()
@@ -1065,7 +1076,7 @@ def _apply_logo_variant_upload(
         hosted_etag = etag
     else:
         hosted_content_type = head.get("ContentType") or content_type
-        hosted_bytes = int(head.get("ContentLength")) if head.get("ContentLength") is not None else len(data)
+        hosted_bytes = _head_content_length(head, len(data))
         hosted_etag = _sanitize_etag(head.get("ETag"))
 
     mirrored = int(force or existing_sha != sha256 or not existing_key or not existing_url)
@@ -1496,7 +1507,7 @@ def mirror_url_to_s3(
         hosted_key=key,
         sha256=sha256,
         content_type=(head.get("ContentType") or content_type or "application/octet-stream"),
-        size_bytes=int(head.get("ContentLength")) if head.get("ContentLength") is not None else size_bytes,
+        size_bytes=_head_content_length(head, size_bytes),
         status="skipped",
         error=None,
     )
@@ -1716,7 +1727,7 @@ def mirror_cast_photo_row(
         hosted_etag = etag
     else:
         hosted_content_type = head.get("ContentType") or content_type
-        hosted_bytes = int(head.get("ContentLength")) if head.get("ContentLength") is not None else len(data)
+        hosted_bytes = _head_content_length(head, len(data))
         hosted_etag = _sanitize_etag(head.get("ETag"))
 
     hosted_url = build_hosted_url(key)
@@ -1792,7 +1803,7 @@ def mirror_media_asset_row(
     if not isinstance(source_url, str) or not source_url.strip():
         return None
 
-    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    metadata = _row_metadata(row)
     referer = (
         metadata.get("page_url")
         if isinstance(metadata.get("page_url"), str)
@@ -1829,7 +1840,7 @@ def mirror_media_asset_row(
         hosted_etag = etag
     else:
         hosted_content_type = head.get("ContentType") or content_type
-        hosted_bytes = int(head.get("ContentLength")) if head.get("ContentLength") is not None else len(data)
+        hosted_bytes = _head_content_length(head, len(data))
         hosted_etag = _sanitize_etag(head.get("ETag"))
 
     hosted_url = build_hosted_url(key)
@@ -1953,7 +1964,7 @@ def mirror_tmdb_logo_row(
         hosted_etag = etag
     else:
         hosted_content_type = head.get("ContentType") or png_content_type
-        hosted_bytes = int(head.get("ContentLength")) if head.get("ContentLength") is not None else len(png_bytes)
+        hosted_bytes = _head_content_length(head, len(png_bytes))
         hosted_etag = _sanitize_etag(head.get("ETag"))
 
     hosted_url = build_hosted_url(key)
@@ -2038,7 +2049,7 @@ def mirror_external_logo_row(
         hosted_etag = etag
     else:
         hosted_content_type = head.get("ContentType") or png_content_type
-        hosted_bytes = int(head.get("ContentLength")) if head.get("ContentLength") is not None else len(png_bytes)
+        hosted_bytes = _head_content_length(head, len(png_bytes))
         hosted_etag = _sanitize_etag(head.get("ETag"))
 
     hosted_url = build_hosted_url(key)
@@ -2204,7 +2215,7 @@ def mirror_show_image_row(
         hosted_etag = etag
     else:
         hosted_content_type = head.get("ContentType") or content_type
-        hosted_bytes = int(head.get("ContentLength")) if head.get("ContentLength") is not None else len(data)
+        hosted_bytes = _head_content_length(head, len(data))
         hosted_etag = _sanitize_etag(head.get("ETag"))
 
     hosted_url = build_hosted_url(key)
@@ -2297,7 +2308,7 @@ def mirror_season_image_row(
         hosted_etag = etag
     else:
         hosted_content_type = head.get("ContentType") or content_type
-        hosted_bytes = int(head.get("ContentLength")) if head.get("ContentLength") is not None else len(data)
+        hosted_bytes = _head_content_length(head, len(data))
         hosted_etag = _sanitize_etag(head.get("ETag"))
 
     hosted_url = build_hosted_url(key)
@@ -2671,7 +2682,7 @@ def mirror_episode_image_row(
         hosted_etag = etag
     else:
         hosted_content_type = head.get("ContentType") or content_type
-        hosted_bytes = int(head.get("ContentLength")) if head.get("ContentLength") is not None else len(data)
+        hosted_bytes = _head_content_length(head, len(data))
         hosted_etag = _sanitize_etag(head.get("ETag"))
 
     hosted_url = build_hosted_url(key)

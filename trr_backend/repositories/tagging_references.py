@@ -21,8 +21,8 @@ class TaggingReferenceImage(TypedDict, total=False):
     url_candidates: list[str]
     source_url: str
     hosted_url: str
-    media_asset_id: str
-    link_id: str
+    media_asset_id: str | None
+    link_id: str | None
     rank: int
     reasons: list[str]
 
@@ -47,10 +47,10 @@ class FacebankInitialReferenceImage(TypedDict, total=False):
     source_url: str
     hosted_url: str
     hosted_key: str
-    media_asset_id: str
-    link_id: str
-    source: str
-    kind: str
+    media_asset_id: str | None
+    link_id: str | None
+    source: str | None
+    kind: str | None
     width: int | None
     height: int | None
     is_primary: bool
@@ -226,6 +226,16 @@ def _read_tagging_reference(context: Any) -> dict[str, Any] | None:
     return None
 
 
+def _row_context(row: dict[str, Any]) -> dict[str, Any]:
+    context = row.get("context")
+    return context if isinstance(context, dict) else {}
+
+
+def _row_metadata(row: dict[str, Any]) -> dict[str, Any]:
+    metadata = row.get("metadata")
+    return metadata if isinstance(metadata, dict) else {}
+
+
 def _row_timestamp(row: dict[str, Any]) -> datetime | None:
     for key in (
         "link_updated_at",
@@ -273,7 +283,7 @@ def _is_manual_upload(row: dict[str, Any]) -> bool:
     source = str(row.get("source") or "").strip().lower()
     if source in {"user_upload", "upload", "manual_upload"}:
         return True
-    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    metadata = _row_metadata(row)
     if metadata.get("upload_id"):
         return True
     if str(metadata.get("source_variant") or "").strip().lower() == "user_upload":
@@ -284,7 +294,7 @@ def _is_manual_upload(row: dict[str, Any]) -> bool:
 def _is_seeded(row: dict[str, Any]) -> bool:
     if bool(row.get("facebank_seed")):
         return True
-    context = row.get("context") if isinstance(row.get("context"), dict) else {}
+    context = _row_context(row)
     tag_ref = _read_tagging_reference(context)
     if tag_ref and bool(tag_ref.get("selected")):
         return True
@@ -292,8 +302,8 @@ def _is_seeded(row: dict[str, Any]) -> bool:
 
 
 def _is_starred(row: dict[str, Any]) -> bool:
-    context = row.get("context") if isinstance(row.get("context"), dict) else {}
-    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    context = _row_context(row)
+    metadata = _row_metadata(row)
     for value in (
         context.get("starred"),
         context.get("is_starred"),
@@ -344,8 +354,8 @@ def _is_event_or_glamour_source(row: dict[str, Any]) -> bool:
     source = str(row.get("source") or "").strip().lower()
     if source in {"getty", "nbcumv"}:
         return True
-    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-    context = row.get("context") if isinstance(row.get("context"), dict) else {}
+    metadata = _row_metadata(row)
+    context = _row_context(row)
     for value in (
         metadata.get("gallery_bucket_type"),
         metadata.get("media_type_label"),
@@ -440,8 +450,8 @@ def _row_matches_show_priority(
     request_show_id: str | None,
     request_show_name: str | None,
 ) -> bool:
-    context = row.get("context") if isinstance(row.get("context"), dict) else {}
-    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    context = _row_context(row)
+    metadata = _row_metadata(row)
 
     effective_show_ids = set(show_ids)
     if request_show_id:
@@ -574,7 +584,7 @@ def _list_gallery_rows(db: Any, person_id: str) -> list[dict[str, Any]]:
 def _selected_from_context(rows: list[dict[str, Any]]) -> list[TaggingReferenceImage]:
     selected: list[TaggingReferenceImage] = []
     for row in rows:
-        context = row.get("context") if isinstance(row.get("context"), dict) else {}
+        context = _row_context(row)
         tag_ref = _read_tagging_reference(context)
         if not tag_ref or not bool(tag_ref.get("selected")):
             continue
@@ -590,18 +600,20 @@ def _selected_from_context(rows: list[dict[str, Any]]) -> list[TaggingReferenceI
             if isinstance(reasons_raw, list)
             else []
         )
-        selected.append(
-            {
-                "url": str(url).strip(),
-                **({"source_url": source_url} if source_url else {}),
-                **({"hosted_url": hosted_url} if hosted_url else {}),
-                **({"url_candidates": url_candidates} if url_candidates else {}),
-                "media_asset_id": str(row.get("media_asset_id") or "").strip() or None,
-                "link_id": str(row.get("link_id") or "").strip() or None,
-                "rank": max(1, rank),
-                "reasons": reasons,
-            }
-        )
+        selected_entry: TaggingReferenceImage = {
+            "url": str(url).strip(),
+            "media_asset_id": str(row.get("media_asset_id") or "").strip() or None,
+            "link_id": str(row.get("link_id") or "").strip() or None,
+            "rank": max(1, rank),
+            "reasons": reasons,
+        }
+        if source_url:
+            selected_entry["source_url"] = source_url
+        if hosted_url:
+            selected_entry["hosted_url"] = hosted_url
+        if url_candidates:
+            selected_entry["url_candidates"] = url_candidates
+        selected.append(selected_entry)
 
     selected.sort(key=lambda entry: int(entry.get("rank") or 0))
     for index, entry in enumerate(selected, start=1):
@@ -616,7 +628,7 @@ def _is_profile_stale(rows: list[dict[str, Any]], *, force_refresh: bool) -> tup
     selected_rows = []
     latest_computed_at: datetime | None = None
     for row in rows:
-        context = row.get("context") if isinstance(row.get("context"), dict) else {}
+        context = _row_context(row)
         tag_ref = _read_tagging_reference(context)
         if not tag_ref or not bool(tag_ref.get("selected")):
             continue
@@ -638,7 +650,7 @@ def _is_profile_stale(rows: list[dict[str, Any]], *, force_refresh: bool) -> tup
             return True, latest_computed_at
 
     latest_row_timestamp = max(
-        (_row_timestamp(row) for row in rows),
+        (timestamp for row in rows if (timestamp := _row_timestamp(row)) is not None),
         default=None,
     )
     if latest_row_timestamp and latest_row_timestamp > latest_computed_at:
@@ -724,8 +736,8 @@ def _rank_candidates(
         source_url = str(row.get("source_url") or "").strip() if _is_http_url(row.get("source_url")) else None
         hosted_url = str(row.get("hosted_url") or "").strip() if _is_http_url(row.get("hosted_url")) else None
 
-        context = row.get("context") if isinstance(row.get("context"), dict) else {}
-        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        context = _row_context(row)
+        metadata = _row_metadata(row)
 
         is_manual = _is_manual_upload(row)
         is_seeded = _is_seeded(row)
@@ -787,7 +799,7 @@ def _rank_candidates(
                 "manual_boost": 1 if is_manual else 0,
                 "show_boost": 1 if show_priority else 0,
                 "timestamp": _row_timestamp(row) or datetime.fromtimestamp(0, tz=UTC),
-                "position": int(row.get("position")) if isinstance(row.get("position"), int) else 2**31,
+                "position": row_position if isinstance((row_position := row.get("position")), int) else 2**31,
             }
         )
 
@@ -817,22 +829,27 @@ def _rank_candidates(
             skipped.append({"url": str(candidate.get("url") or ""), "reason": "duplicate_url"})
             continue
 
-        selected.append(
-            {
-                "url": str(candidate.get("url") or ""),
-                **({"source_url": candidate.get("source_url")} if candidate.get("source_url") else {}),
-                **({"hosted_url": candidate.get("hosted_url")} if candidate.get("hosted_url") else {}),
-                **(
-                    {"url_candidates": list(candidate.get("url_candidates") or [])}
-                    if candidate.get("url_candidates")
-                    else {}
-                ),
-                "media_asset_id": media_asset_id,
-                "link_id": candidate.get("link_id"),
-                "rank": len(selected) + 1,
-                "reasons": list(candidate.get("reasons") or []),
-            }
-        )
+        candidate_source_url = candidate.get("source_url")
+        candidate_hosted_url = candidate.get("hosted_url")
+        candidate_url_candidates = candidate.get("url_candidates")
+        candidate_link_id = candidate.get("link_id")
+        candidate_reasons = candidate.get("reasons")
+        selected_entry: TaggingReferenceImage = {
+            "url": str(candidate.get("url") or ""),
+            "media_asset_id": media_asset_id if isinstance(media_asset_id, str) else None,
+            "link_id": candidate_link_id if isinstance(candidate_link_id, str) else None,
+            "rank": len(selected) + 1,
+            "reasons": [reason for reason in candidate_reasons if isinstance(reason, str)]
+            if isinstance(candidate_reasons, list)
+            else [],
+        }
+        if isinstance(candidate_source_url, str):
+            selected_entry["source_url"] = candidate_source_url
+        if isinstance(candidate_hosted_url, str):
+            selected_entry["hosted_url"] = candidate_hosted_url
+        if isinstance(candidate_url_candidates, list) and all(isinstance(url, str) for url in candidate_url_candidates):
+            selected_entry["url_candidates"] = candidate_url_candidates
+        selected.append(selected_entry)
         if media_asset_id:
             seen_asset_ids.add(media_asset_id)
         if canonical_url:
@@ -864,8 +881,8 @@ def _rank_facebank_initial_candidates(
             skipped.append({"url": served_url, "reason": "very_low_resolution"})
             continue
 
-        context = row.get("context") if isinstance(row.get("context"), dict) else {}
-        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        context = _row_context(row)
+        metadata = _row_metadata(row)
         manual = _is_manual_upload(row)
         seeded = bool(row.get("facebank_seed"))
         starred = _is_starred(row)
@@ -927,7 +944,7 @@ def _rank_facebank_initial_candidates(
                 "longest_edge": longest_edge,
                 "area": area,
                 "timestamp": _row_timestamp(row) or datetime.fromtimestamp(0, tz=UTC),
-                "position": int(row.get("position")) if isinstance(row.get("position"), int) else 2**31,
+                "position": row_position if isinstance((row_position := row.get("position")), int) else 2**31,
                 "reasons": reasons,
             }
         )
@@ -972,30 +989,31 @@ def _rank_facebank_initial_candidates(
             return False
 
         row = candidate["row"]
-        selected.append(
-            {
-                "served_url": str(candidate["served_url"]),
-                **({"source_url": row.get("source_url")} if _is_http_url(row.get("source_url")) else {}),
-                **({"hosted_url": row.get("hosted_url")} if _is_http_url(row.get("hosted_url")) else {}),
-                **(
-                    {"hosted_key": str(row.get("hosted_key") or "").strip()}
-                    if str(row.get("hosted_key") or "").strip()
-                    else {}
-                ),
-                "media_asset_id": media_asset_id or None,
-                "link_id": str(row.get("link_id") or "").strip() or None,
-                "source": str(row.get("source") or "").strip() or None,
-                "kind": str(row.get("kind") or "").strip() or None,
-                "width": _coerce_int(row.get("width")),
-                "height": _coerce_int(row.get("height")),
-                "is_primary": bool(row.get("is_primary")),
-                "position": _coerce_int(row.get("position")),
-                "facebank_seed": bool(row.get("facebank_seed")),
-                "rank": len(selected) + 1,
-                "selection_bucket": int(candidate["bucket"]),
-                "selection_reasons": list(candidate.get("reasons") or []),
-            }
-        )
+        selected_entry: FacebankInitialReferenceImage = {
+            "served_url": str(candidate["served_url"]),
+            "media_asset_id": media_asset_id or None,
+            "link_id": str(row.get("link_id") or "").strip() or None,
+            "source": str(row.get("source") or "").strip() or None,
+            "kind": str(row.get("kind") or "").strip() or None,
+            "width": _coerce_int(row.get("width")),
+            "height": _coerce_int(row.get("height")),
+            "is_primary": bool(row.get("is_primary")),
+            "position": _coerce_int(row.get("position")),
+            "facebank_seed": bool(row.get("facebank_seed")),
+            "rank": len(selected) + 1,
+            "selection_bucket": int(candidate["bucket"]),
+            "selection_reasons": [reason for reason in candidate.get("reasons", []) if isinstance(reason, str)],
+        }
+        source_url = row.get("source_url")
+        hosted_url = row.get("hosted_url")
+        hosted_key = str(row.get("hosted_key") or "").strip()
+        if _is_http_url(source_url):
+            selected_entry["source_url"] = str(source_url)
+        if _is_http_url(hosted_url):
+            selected_entry["hosted_url"] = str(hosted_url)
+        if hosted_key:
+            selected_entry["hosted_key"] = hosted_key
+        selected.append(selected_entry)
         if media_asset_id:
             seen_asset_ids.add(media_asset_id)
         if canonical_url:
@@ -1256,18 +1274,20 @@ def sync_owner_tagging_reference_usage(
             preferred_url=preferred_url or None,
         )
 
-        selected.append(
-            {
-                "url": str(preferred_url).strip(),
-                **({"source_url": source_url} if source_url else {}),
-                **({"hosted_url": hosted_url} if hosted_url else {}),
-                **({"url_candidates": url_candidates} if url_candidates else {}),
-                "media_asset_id": str(matched_row.get("media_asset_id") or "").strip() or None,
-                "link_id": matched_link_id,
-                "rank": idx,
-                "reasons": reasons,
-            }
-        )
+        selected_entry: TaggingReferenceImage = {
+            "url": str(preferred_url).strip(),
+            "media_asset_id": str(matched_row.get("media_asset_id") or "").strip() or None,
+            "link_id": matched_link_id,
+            "rank": idx,
+            "reasons": reasons,
+        }
+        if source_url:
+            selected_entry["source_url"] = source_url
+        if hosted_url:
+            selected_entry["hosted_url"] = hosted_url
+        if url_candidates:
+            selected_entry["url_candidates"] = url_candidates
+        selected.append(selected_entry)
 
     if preserve_existing:
         existing_selected = _selected_from_context(rows)
@@ -1276,26 +1296,27 @@ def sync_owner_tagging_reference_usage(
             if not existing_link_id or existing_link_id in seen_link_ids:
                 continue
             seen_link_ids.add(existing_link_id)
-            selected.append(
-                {
-                    "url": str(existing.get("url") or "").strip(),
-                    **({"source_url": existing.get("source_url")} if existing.get("source_url") else {}),
-                    **({"hosted_url": existing.get("hosted_url")} if existing.get("hosted_url") else {}),
-                    **(
-                        {"url_candidates": list(existing.get("url_candidates") or [])}
-                        if existing.get("url_candidates")
-                        else {}
-                    ),
-                    "media_asset_id": str(existing.get("media_asset_id") or "").strip() or None,
-                    "link_id": existing_link_id,
-                    "rank": len(selected) + 1,
-                    "reasons": [
-                        str(reason).strip()
-                        for reason in (existing.get("reasons") or [])
-                        if isinstance(reason, str) and str(reason).strip()
-                    ],
-                }
-            )
+            selected_entry: TaggingReferenceImage = {
+                "url": str(existing.get("url") or "").strip(),
+                "media_asset_id": str(existing.get("media_asset_id") or "").strip() or None,
+                "link_id": existing_link_id,
+                "rank": len(selected) + 1,
+                "reasons": [
+                    str(reason).strip()
+                    for reason in (existing.get("reasons") or [])
+                    if isinstance(reason, str) and str(reason).strip()
+                ],
+            }
+            source_url = existing.get("source_url")
+            hosted_url = existing.get("hosted_url")
+            url_candidates = existing.get("url_candidates")
+            if isinstance(source_url, str) and source_url:
+                selected_entry["source_url"] = source_url
+            if isinstance(hosted_url, str) and hosted_url:
+                selected_entry["hosted_url"] = hosted_url
+            if isinstance(url_candidates, list):
+                selected_entry["url_candidates"] = [url for url in url_candidates if isinstance(url, str)]
+            selected.append(selected_entry)
 
     for index, entry in enumerate(selected, start=1):
         entry["rank"] = index
