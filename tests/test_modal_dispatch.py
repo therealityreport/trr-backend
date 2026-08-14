@@ -384,6 +384,39 @@ def test_dispatch_cast_screentime_subtitle_extraction_uses_media_function(
     }
 
 
+def test_dispatch_show_season_media_watch_worker_preserves_fenced_watch_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_spawn_named_modal_function(**kwargs):
+        captured.update(kwargs)
+        return {"dispatched": True, "call_id": "fc-watch"}
+
+    monkeypatch.setattr(modal_dispatch, "_spawn_named_modal_function", _fake_spawn_named_modal_function)
+    watch = {"id": "watch-123", "target_season_number": 7}
+
+    result = modal_dispatch.dispatch_show_season_media_watch_worker(
+        watch=watch,
+        lease_owner="admin-media-watch:owner-123",
+        lease_fence=12,
+        backfill=True,
+    )
+
+    assert result == {"dispatched": True, "call_id": "fc-watch"}
+    assert captured == {
+        "function_name": "run_show_season_media_watch_worker",
+        "log_label": "show-season media watch",
+        "dispatcher_name": "media-watchers",
+        "kwargs": {
+            "watch": watch,
+            "lease_owner": "admin-media-watch:owner-123",
+            "lease_fence": 12,
+            "backfill": True,
+        },
+    }
+
+
 def test_dispatch_socialblade_scrape_passes_platform_and_following_sidecar(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

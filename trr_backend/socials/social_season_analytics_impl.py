@@ -37,7 +37,7 @@ from functools import lru_cache
 from pathlib import Path
 from threading import Lock, Thread, current_thread, main_thread
 from types import SimpleNamespace
-from typing import Any, Literal, cast
+from typing import Any, Literal, Protocol, cast
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
@@ -100,6 +100,44 @@ from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
 from trr_backend.socials.twitter import Tweet, TwitterScrapeConfig, TwitterScraper
 
 logger = logging.getLogger(__name__)
+
+
+class _CookieRefreshCallable(Protocol):
+    def __call__(
+        self,
+        *,
+        username: str,
+        password: str,
+        cookie_file: str | Path,
+        headless: bool,
+        timeout_seconds: int,
+    ) -> dict[str, str]: ...
+
+
+class _ExecuteReturningWithPool(Protocol):
+    def __call__(
+        self,
+        query: str,
+        params: Iterable[Any] | None = None,
+        *,
+        conn: Any | None = None,
+        pool_name: str = "default",
+    ) -> list[dict[str, Any]]: ...
+
+
+class _IncrementRunCountersOnJobFinishWithConn(Protocol):
+    def __call__(
+        self,
+        *,
+        run_id: str,
+        stage: str,
+        prior_status: str,
+        new_status: str,
+        prior_items_found: int,
+        new_items_found: int,
+        conn: Any | None = None,
+    ) -> None: ...
+
 
 SOCIAL_CATALOG_PROGRESS_POOL_NAME = "social_progress"
 
@@ -2061,11 +2099,12 @@ def _job_requires_trusted_local_worker_lane(job_config: Mapping[str, Any] | None
     required_lane = _job_required_worker_lane(job_config)
     if required_lane == TRUSTED_LOCAL_WORKER_LANE:
         return True
+    config = job_config or {}
     return _shared_account_catalog_requires_trusted_local_worker_lane(
-        platform=platform or job_config.get("platform"),
-        pipeline_ingest_mode=str(job_config.get("pipeline_ingest_mode") or SHARED_ACCOUNT_ASYNC_INGEST_MODE),
-        date_start=_coerce_dt(job_config.get("date_start")),
-        date_end=_coerce_dt(job_config.get("date_end")),
+        platform=platform or config.get("platform"),
+        pipeline_ingest_mode=str(config.get("pipeline_ingest_mode") or SHARED_ACCOUNT_ASYNC_INGEST_MODE),
+        date_start=_coerce_dt(config.get("date_start")),
+        date_end=_coerce_dt(config.get("date_end")),
     )
 
 
@@ -3440,6 +3479,7 @@ def _probe_modal_remote_auth_health_uncached(platform: str) -> dict[str, Any] | 
     if not probe_function_name:
         return None
 
+    timeout_seconds = 8.0
     try:
         handle = get_trr_modal_function_handle(
             probe_function_name,
@@ -3570,6 +3610,7 @@ def probe_modal_instagram_posts_auth_health(account_handle: str) -> dict[str, An
             "execution_backend": "modal",
         }
 
+    timeout_seconds = 12.0
     try:
         handle = get_trr_modal_function_handle(
             probe_function_name,
@@ -3789,6 +3830,7 @@ def probe_modal_instagram_comments_auth_health(
             "execution_backend": "modal",
         }
 
+    timeout_seconds = 30.0
     try:
         handle = get_trr_modal_function_handle(
             probe_function_name,
@@ -4406,6 +4448,10 @@ def get_worker_health_for_lane(
 
 def _metadata_dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _as_string_mapping(value: Any) -> dict[str, Any]:
+    return cast(dict[str, Any], value) if isinstance(value, dict) else {}
 
 
 def _metadata_value_truthy(value: Any) -> bool:
@@ -5936,7 +5982,7 @@ def recover_dispatch_blocked_no_progress_jobs(*, limit: int = 100) -> list[dict[
     return impl(limit=limit)
 
 
-recover_dispatch_blocked_no_progress_jobs.__trr_delegates_to_control_plane__ = True
+cast(Any, recover_dispatch_blocked_no_progress_jobs).__trr_delegates_to_control_plane__ = True
 
 
 def recover_failed_instagram_comments_capacity_jobs(
@@ -7026,7 +7072,7 @@ def debug_ingest_job_with_openai(
         raise RuntimeError(f"openai_debug_failed: {final_error}")
 
     root_cause = str(ai_payload.get("root_cause") or "").strip() or "No root cause provided."
-    raw_confidence = ai_payload.get("confidence")
+    raw_confidence: Any = ai_payload.get("confidence")
     try:
         confidence = max(0.0, min(1.0, float(raw_confidence)))
     except (TypeError, ValueError):
@@ -8464,8 +8510,8 @@ def _facebook_primary_post_fetch_target(
         candidates.append(candidate)
 
     _add(post_url)
-    payload = raw_data if isinstance(raw_data, dict) else {}
-    nested = payload.get("raw_data") if isinstance(payload.get("raw_data"), dict) else {}
+    payload = _as_string_mapping(raw_data)
+    nested = _as_string_mapping(payload.get("raw_data"))
     for source in (payload, nested):
         for key in ("url", "permalink_url", "permalink", "canonical_url", "post_url", "share_url"):
             _add(source.get(key))
@@ -9190,7 +9236,7 @@ def _load_twitter_browser_cookies() -> dict[str, str]:
                     continue
             except Exception:
                 continue
-            for cookie in jar:
+            for cookie in cast(Iterable[Any], jar):
                 name = str(getattr(cookie, "name", "") or "")
                 value = str(getattr(cookie, "value", "") or "")
                 cookie_domain = str(getattr(cookie, "domain", "") or "").lower()
@@ -9503,7 +9549,7 @@ def _refresh_tiktok_cookies(stale_reason: str | None = None) -> dict[str, str]:
     from trr_backend.socials.tiktok.cookie_refresh import refresh_tiktok_cookies
 
     try:
-        refreshed = refresh_tiktok_cookies(
+        refreshed = cast(_CookieRefreshCallable, refresh_tiktok_cookies)(
             username=username,
             password=password,
             cookie_file=_platform_cookie_refresh_target_path(
@@ -9614,7 +9660,7 @@ def _refresh_facebook_cookies(stale_reason: str | None = None) -> dict[str, str]
     from trr_backend.socials.facebook.cookie_refresh import refresh_facebook_cookies
 
     try:
-        refreshed = refresh_facebook_cookies(
+        refreshed = cast(_CookieRefreshCallable, refresh_facebook_cookies)(
             username=username,
             password=password,
             cookie_file=_platform_cookie_refresh_target_path(
@@ -9729,7 +9775,7 @@ def _refresh_threads_cookies(stale_reason: str | None = None) -> dict[str, str]:
     from trr_backend.socials.threads.cookie_refresh import refresh_threads_cookies
 
     try:
-        refreshed = refresh_threads_cookies(
+        refreshed = cast(_CookieRefreshCallable, refresh_threads_cookies)(
             username=username,
             password=password,
             cookie_file=_platform_cookie_refresh_target_path(
@@ -10197,7 +10243,7 @@ def _do_interactive_refresh_tiktok(
 ) -> dict[str, str]:
     from trr_backend.socials.tiktok.cookie_refresh import refresh_tiktok_cookies
 
-    refreshed = refresh_tiktok_cookies(
+    refreshed = cast(_CookieRefreshCallable, refresh_tiktok_cookies)(
         username=username,
         password=password,
         cookie_file=_platform_cookie_refresh_target_path(
@@ -10250,7 +10296,7 @@ def _do_interactive_refresh_facebook(
     global _facebook_cookie_runtime_override, _facebook_cookie_validation_cache
     from trr_backend.socials.facebook.cookie_refresh import refresh_facebook_cookies
 
-    refreshed = refresh_facebook_cookies(
+    refreshed = cast(_CookieRefreshCallable, refresh_facebook_cookies)(
         username=username,
         password=password,
         cookie_file=_platform_cookie_refresh_target_path(
@@ -10276,7 +10322,7 @@ def _do_interactive_refresh_threads(
     global _threads_cookie_runtime_override, _threads_cookie_validation_cache
     from trr_backend.socials.threads.cookie_refresh import refresh_threads_cookies
 
-    refreshed = refresh_threads_cookies(
+    refreshed = cast(_CookieRefreshCallable, refresh_threads_cookies)(
         username=username,
         password=password,
         cookie_file=_platform_cookie_refresh_target_path(
@@ -10754,7 +10800,7 @@ def _get_targets_cached(season_id: str, source_scope: str) -> dict[str, Any]:
                         show_name=str(show_name or ""),
                         show_slug=None,
                         season_number=season_number,
-                        anchor_date=None,
+                        anchor_date=cast(date, None),
                     ),
                     normalized_hashtags,
                 )
@@ -10861,11 +10907,14 @@ def _list_matchable_seasons_cached(source_scope: str, platform: str) -> tuple[di
 
 
 def _list_matchable_seasons(*, source_scope: str, platform: str) -> list[dict[str, Any]]:
-    return copy.deepcopy(
-        _list_matchable_seasons_cached(
-            str(source_scope or "").strip().lower(),
-            _normalize_platform_name(platform),
-        )
+    return cast(
+        list[dict[str, Any]],
+        copy.deepcopy(
+            _list_matchable_seasons_cached(
+                str(source_scope or "").strip().lower(),
+                _normalize_platform_name(platform),
+            )
+        ),
     )
 
 
@@ -11754,7 +11803,7 @@ def _collect_social_post_image_hashes(row: Mapping[str, Any]) -> list[dict[str, 
 
 
 def _target_social_image_hashes(target: Mapping[str, Any]) -> list[dict[str, str]]:
-    config = target.get("config") if isinstance(target.get("config"), Mapping) else {}
+    config = _as_string_mapping(target.get("config"))
     evidence = target.get("evidence") if isinstance(target.get("evidence"), Mapping) else {}
     return _collect_social_image_hashes_from_value(
         {
@@ -11773,7 +11822,7 @@ def _social_image_hash_values(items: Sequence[Mapping[str, Any]]) -> set[str]:
 def _social_match_timing_payload(posted_at: datetime | None, target: Mapping[str, Any]) -> dict[str, Any]:
     context = target.get("context")
     anchor_date = context.anchor_date if isinstance(context, SeasonContext) else None
-    config = target.get("config") if isinstance(target.get("config"), Mapping) else {}
+    config = _as_string_mapping(target.get("config"))
     anchor_dt = _coerce_dt(
         target.get("anchor_datetime")
         or target.get("posted_at")
@@ -12842,7 +12891,7 @@ def _touch_job_dispatch_metadata(
         **existing_dispatch,
         "dispatch_backend": dispatch_backend,
         "dispatch_requested_at": _iso(_coerce_dt(dispatch_requested_at) or _now_utc()),
-        "dispatch_attempt_count": max(1, int(dispatch_attempt_count)),
+        "dispatch_attempt_count": max(1, int(cast(Any, dispatch_attempt_count))),
         "remote_invocation_id": _resolve_text(remote_invocation_id, "remote_invocation_id"),
         "remote_function_name": _resolve_text(remote_function_name, "remote_function_name"),
         "lease_expires_at": _resolve_dt(lease_expires_at, "lease_expires_at"),
@@ -13481,7 +13530,7 @@ def _cancel_duplicate_active_facebook_shared_post_jobs_after_completed_save(
     ):
         return []
 
-    rows = pg.execute_returning(
+    rows = cast(_ExecuteReturningWithPool, pg.execute_returning)(
         """
         update social.scrape_jobs j
         set
@@ -13646,7 +13695,7 @@ def _finish_job(
             counter_savepoint = "finish_job_counter_sync"
             _create_savepoint(conn, counter_savepoint)
             try:
-                _increment_run_counters_on_job_finish(
+                cast(_IncrementRunCountersOnJobFinishWithConn, _increment_run_counters_on_job_finish)(
                     run_id=str(row.get("run_id")),
                     stage=str(row.get("stage") or "unknown"),
                     prior_status=str(row.get("prior_status") or ""),
@@ -14953,7 +15002,7 @@ def recover_stale_unclaimed_dispatched_jobs(
     )
 
 
-recover_stale_unclaimed_dispatched_jobs.__trr_delegates_to_control_plane__ = True
+cast(Any, recover_stale_unclaimed_dispatched_jobs).__trr_delegates_to_control_plane__ = True
 
 
 def _parse_platform_time(ts: Any) -> datetime | None:
@@ -15400,17 +15449,17 @@ def _build_youtube_video_from_api_item(
 ) -> Any | None:
     from trr_backend.socials.youtube import YouTubeVideo
 
-    playlist_item = item.get("playlist_item") if isinstance(item.get("playlist_item"), dict) else {}
-    video = item.get("video") if isinstance(item.get("video"), dict) else {}
-    snippet = video.get("snippet") if isinstance(video.get("snippet"), dict) else {}
-    content_details = video.get("contentDetails") if isinstance(video.get("contentDetails"), dict) else {}
-    statistics = video.get("statistics") if isinstance(video.get("statistics"), dict) else {}
-    playlist_snippet = playlist_item.get("snippet") if isinstance(playlist_item.get("snippet"), dict) else {}
+    playlist_item = _as_string_mapping(item.get("playlist_item"))
+    video = _as_string_mapping(item.get("video"))
+    snippet = _as_string_mapping(video.get("snippet"))
+    content_details = _as_string_mapping(video.get("contentDetails"))
+    statistics = _as_string_mapping(video.get("statistics"))
+    playlist_snippet = _as_string_mapping(playlist_item.get("snippet"))
     video_id = str(item.get("video_id") or video.get("id") or "").strip()
     published_at_raw = str(
         snippet.get("publishedAt")
         or playlist_snippet.get("publishedAt")
-        or playlist_item.get("contentDetails", {}).get("videoPublishedAt")
+        or _as_string_mapping(playlist_item.get("contentDetails")).get("videoPublishedAt")
         or ""
     ).strip()
     published_at_dt = _coerce_dt(published_at_raw)
@@ -15422,7 +15471,7 @@ def _build_youtube_video_from_api_item(
     channel_title = str(snippet.get("channelTitle") or fallback_channel_title or account or "").strip()
     title = str(snippet.get("title") or playlist_snippet.get("title") or "").strip()
     description = str(snippet.get("description") or playlist_snippet.get("description") or "").strip()
-    thumbnails = snippet.get("thumbnails") if isinstance(snippet.get("thumbnails"), dict) else {}
+    thumbnails = _as_string_mapping(snippet.get("thumbnails"))
     thumbnail_url = (
         _youtube_pick_best_thumbnail(thumbnails) or f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg"
     )
@@ -16127,8 +16176,8 @@ def _normalize_tiktok_sound_ids(values: Any) -> list[str]:
 
 
 def _extract_tiktok_sound_fields(raw_data: dict[str, Any], post: Any) -> dict[str, Any]:
-    music = raw_data.get("music") if isinstance(raw_data.get("music"), dict) else {}
-    music_meta = raw_data.get("musicMeta") if isinstance(raw_data.get("musicMeta"), dict) else {}
+    music = _as_string_mapping(raw_data.get("music"))
+    music_meta = _as_string_mapping(raw_data.get("musicMeta"))
     sound_id = _normalize_tiktok_sound_id(
         music.get("id")
         or music.get("musicId")
@@ -17637,9 +17686,15 @@ def _try_build_social_media_reuse_result_from_existing_hashes(
             generated_at=generated_at,
             fallback_content_type=str(current_asset.get("content_type") or "application/octet-stream"),
             fallback_format=str(current_asset.get("format") or "").strip() or None,
-            fallback_width=current_asset.get("width") if isinstance(current_asset.get("width"), int) else None,
-            fallback_height=current_asset.get("height") if isinstance(current_asset.get("height"), int) else None,
-            fallback_bytes=current_asset.get("bytes") if isinstance(current_asset.get("bytes"), int) else None,
+            fallback_width=cast(
+                int | None, current_asset.get("width") if isinstance(current_asset.get("width"), int) else None
+            ),
+            fallback_height=cast(
+                int | None, current_asset.get("height") if isinstance(current_asset.get("height"), int) else None
+            ),
+            fallback_bytes=cast(
+                int | None, current_asset.get("bytes") if isinstance(current_asset.get("bytes"), int) else None
+            ),
         )
         if source_role == "cover" and hosted_thumbnail_entry is None:
             hosted_thumbnail_entry = entry
@@ -18173,7 +18228,7 @@ def _mirror_platform_media_to_s3_result(
                     source_url=original_source_url,
                     source_role=normalized_source_role,
                     variant_key=variant_key,
-                    generated_at=generated_at,
+                    generated_at=cast(str, generated_at),
                     fallback_content_type=normalized_upload_content_type,
                     fallback_format=ext.lstrip(".") or None,
                     fallback_width=width,
@@ -19318,7 +19373,7 @@ def _recover_platform_post_source_avatar(
             resolved_avatar_url = str(payload.get("author_avatar_url") or "").strip()
             recovery_source = str(payload.get("source") or "").strip() or "youtube_resolver"
         elif not resolved_avatar_url and normalized_platform == "tiktok" and source_id:
-            raw_data = post_row.get("raw_data") if isinstance(post_row.get("raw_data"), dict) else {}
+            raw_data = _as_string_mapping(post_row.get("raw_data"))
             canonical_url = str(raw_data.get("url") or "").strip()
             if not canonical_url:
                 username = str(raw_data.get("username") or "").strip().lstrip("@")
@@ -19635,7 +19690,7 @@ def _youtube_row_matches_owner_identity(
     if not normalized_expected_handle:
         return True
 
-    raw_data = row.get("raw_data") if isinstance(row.get("raw_data"), dict) else {}
+    raw_data = _as_string_mapping(row.get("raw_data"))
     candidate_values: list[Any] = [
         row.get("source_account"),
         row.get("channel_title"),
@@ -20001,18 +20056,21 @@ def _fetch_twitter_replies_compat(
     if not callable(fetch):
         raise AttributeError("fetch_tweet_replies")
     try:
-        return fetch(
-            tweet_id,
-            delay=delay,
-            search_max_pages=search_max_pages,
-            twikit_max_pages=twikit_max_pages,
+        return cast(
+            list[Any],
+            fetch(
+                tweet_id,
+                delay=delay,
+                search_max_pages=search_max_pages,
+                twikit_max_pages=twikit_max_pages,
+            ),
         )
     except TypeError as exc:
         # Backward compatibility for legacy scraper stubs that only accept
         # `(tweet_id, delay)`.
         message = str(exc)
         if "search_max_pages" in message or "twikit_max_pages" in message:
-            return fetch(tweet_id, delay=delay)
+            return cast(list[Any], fetch(tweet_id, delay=delay))
         raise
 
 
@@ -20027,7 +20085,7 @@ def _fetch_twitter_quotes_compat(
     if not callable(fetch):
         return [], "quotes_method_unavailable"
     quotes = fetch(tweet_id, delay=delay, max_pages=max_pages)
-    return list(quotes or []), None
+    return list(cast(Iterable[Any], quotes or [])), None
 
 
 def _trim_nested_comment_replies(comments: list[Any], *, max_replies_per_post: int) -> None:
@@ -21658,8 +21716,8 @@ def _instagram_canonical_post_tables_ready(*, conn: Any | None = None) -> bool:
 
 def _instagram_post_owner_id(post: Any, raw_data: Mapping[str, Any]) -> str | None:
     owner_detail = getattr(post, "owner_detail", None)
-    owner = raw_data.get("owner") if isinstance(raw_data.get("owner"), Mapping) else {}
-    user = raw_data.get("user") if isinstance(raw_data.get("user"), Mapping) else {}
+    owner = _as_string_mapping(raw_data.get("owner"))
+    user = _as_string_mapping(raw_data.get("user"))
     for candidate in (
         getattr(post, "owner_user_id", None),
         getattr(post, "owner_id", None),
@@ -23273,7 +23331,7 @@ def _update_platform_post_media_mirror_fields(
     if hosted_media_urls is not FIELD_UNSET and _platform_posts_has_column(
         normalized_platform, "hosted_media_urls", conn=conn
     ):
-        _add("hosted_media_urls", list(hosted_media_urls or []), as_jsonb=True)
+        _add("hosted_media_urls", list(cast(Iterable[Any], hosted_media_urls or [])), as_jsonb=True)
     if media_mirror_status is not FIELD_UNSET and _platform_posts_has_column(
         normalized_platform, "media_mirror_status", conn=conn
     ):
@@ -23282,7 +23340,9 @@ def _update_platform_post_media_mirror_fields(
         hosted_thumbnail_supplied = hosted_thumbnail_url is not FIELD_UNSET and bool(
             str(hosted_thumbnail_url or "").strip()
         )
-        hosted_media_supplied = hosted_media_urls is not FIELD_UNSET and bool(list(hosted_media_urls or []))
+        hosted_media_supplied = hosted_media_urls is not FIELD_UNSET and bool(
+            list(cast(Iterable[Any], hosted_media_urls or []))
+        )
         if hosted_thumbnail_supplied or hosted_media_supplied:
             _add("media_mirror_status", "mirrored")
     if media_mirror_error is not FIELD_UNSET and _platform_posts_has_column(
@@ -23292,7 +23352,7 @@ def _update_platform_post_media_mirror_fields(
     if media_mirror_attempt_count is not FIELD_UNSET and _platform_posts_has_column(
         normalized_platform, "media_mirror_attempt_count", conn=conn
     ):
-        _add("media_mirror_attempt_count", max(0, int(media_mirror_attempt_count)))
+        _add("media_mirror_attempt_count", max(0, int(cast(Any, media_mirror_attempt_count))))
     if media_mirror_last_attempt_at is not FIELD_UNSET and _platform_posts_has_column(
         normalized_platform, "media_mirror_last_attempt_at", conn=conn
     ):
@@ -23392,7 +23452,7 @@ def _update_youtube_post_source_media_fields(
     if thumbnail_url is not FIELD_UNSET and _platform_posts_has_column("youtube", "thumbnail_url"):
         _add("thumbnail_url", thumbnail_url)
     if media_urls is not FIELD_UNSET and _platform_posts_has_column("youtube", "media_urls"):
-        _add("media_urls", list(media_urls or []), as_jsonb=True)
+        _add("media_urls", list(cast(Iterable[Any], media_urls or [])), as_jsonb=True)
 
     if not assignments:
         return
@@ -23421,7 +23481,7 @@ def _enqueue_platform_media_mirror_job(
         return None
 
     post_id = str(post_row.get("id") or "").strip()
-    source_id = _platform_source_id(normalized_platform, post_row)
+    source_id = _platform_source_id(normalized_platform, dict(post_row))
     if not post_id:
         return None
     if not _platform_post_needs_media_mirror(normalized_platform, post_row, conn=conn):
@@ -23605,7 +23665,7 @@ def _bulk_enqueue_platform_media_mirror_jobs(
     creator_runtime_version = dict(_resolve_runtime_version_stamp_for_stage(INSTAGRAM_MEDIA_MIRROR_STAGE))
     rows: list[tuple[Any, ...]] = []
     for post_id, post_row in candidate_rows.items():
-        source_id = _platform_source_id(normalized_platform, post_row)
+        source_id = _platform_source_id(normalized_platform, dict(post_row))
         config_payload = {
             "run_id": run_id,
             "season_id": context.season_id if context else None,
@@ -23808,13 +23868,13 @@ def _update_platform_comment_media_mirror_fields(
         params.append(value)
 
     if hosted_media_urls is not FIELD_UNSET:
-        _add("hosted_media_urls", list(hosted_media_urls or []), as_jsonb=True)
+        _add("hosted_media_urls", list(cast(Iterable[Any], hosted_media_urls or [])), as_jsonb=True)
     if media_mirror_status is not FIELD_UNSET:
         _add("media_mirror_status", media_mirror_status)
     if media_mirror_error is not FIELD_UNSET:
         _add("media_mirror_error", media_mirror_error)
     if media_mirror_attempt_count is not FIELD_UNSET:
-        _add("media_mirror_attempt_count", max(0, int(media_mirror_attempt_count)))
+        _add("media_mirror_attempt_count", max(0, int(cast(Any, media_mirror_attempt_count))))
     if media_mirror_last_attempt_at is not FIELD_UNSET:
         _add("media_mirror_last_attempt_at", media_mirror_last_attempt_at)
     if media_mirror_last_job_id is not FIELD_UNSET:
@@ -23980,7 +24040,7 @@ def _update_tiktok_comment_media_mirror_fields(
         params.append(value)
 
     if hosted_media_urls is not FIELD_UNSET and _tiktok_comments_has_column("hosted_media_urls", conn=conn):
-        _add("hosted_media_urls", list(hosted_media_urls or []), as_jsonb=True)
+        _add("hosted_media_urls", list(cast(Iterable[Any], hosted_media_urls or [])), as_jsonb=True)
     if media_mirror_status is not FIELD_UNSET and _tiktok_comments_has_column("media_mirror_status", conn=conn):
         _add("media_mirror_status", media_mirror_status)
     if media_mirror_error is not FIELD_UNSET and _tiktok_comments_has_column("media_mirror_error", conn=conn):
@@ -23988,7 +24048,7 @@ def _update_tiktok_comment_media_mirror_fields(
     if media_mirror_attempt_count is not FIELD_UNSET and _tiktok_comments_has_column(
         "media_mirror_attempt_count", conn=conn
     ):
-        _add("media_mirror_attempt_count", max(0, int(media_mirror_attempt_count)))
+        _add("media_mirror_attempt_count", max(0, int(cast(Any, media_mirror_attempt_count))))
     if media_mirror_last_attempt_at is not FIELD_UNSET and _tiktok_comments_has_column(
         "media_mirror_last_attempt_at", conn=conn
     ):
@@ -24133,7 +24193,7 @@ def _update_twitter_comment_media_mirror_fields(
         params.append(value)
 
     if hosted_media_urls is not FIELD_UNSET and _platform_posts_has_column("twitter", "hosted_media_urls"):
-        _add("hosted_media_urls", list(hosted_media_urls or []), as_jsonb=True)
+        _add("hosted_media_urls", list(cast(Iterable[Any], hosted_media_urls or [])), as_jsonb=True)
     if media_mirror_status is not FIELD_UNSET and _platform_posts_has_column("twitter", "media_mirror_status"):
         _add("media_mirror_status", media_mirror_status)
     if media_mirror_error is not FIELD_UNSET and _platform_posts_has_column("twitter", "media_mirror_error"):
@@ -24141,7 +24201,7 @@ def _update_twitter_comment_media_mirror_fields(
     if media_mirror_attempt_count is not FIELD_UNSET and _platform_posts_has_column(
         "twitter", "media_mirror_attempt_count"
     ):
-        _add("media_mirror_attempt_count", max(0, int(media_mirror_attempt_count)))
+        _add("media_mirror_attempt_count", max(0, int(cast(Any, media_mirror_attempt_count))))
     if media_mirror_last_attempt_at is not FIELD_UNSET and _platform_posts_has_column(
         "twitter", "media_mirror_last_attempt_at"
     ):
@@ -24277,7 +24337,7 @@ def _load_comment_media_rows_for_post(
 ) -> list[dict[str, Any]]:
     normalized_platform = (platform or "").strip().lower()
     post_db_id = str(post_row.get("id") or "").strip()
-    source_id = _platform_source_id(normalized_platform, post_row)
+    source_id = _platform_source_id(normalized_platform, dict(post_row))
 
     def _fetch(sql: str, params: list[Any]) -> list[dict[str, Any]]:
         if conn is None:
@@ -24955,7 +25015,7 @@ def _preserve_existing_ranked_instagram_comment_values(
             payload["comment_index"] = existing.get("comment_index")
 
 
-def _upsert_instagram_comment_tree(
+def _core_upsert_instagram_comment_tree_impl(
     context: SeasonContext,
     *,
     job_id: str | None,
@@ -24986,7 +25046,7 @@ def _upsert_instagram_comment_tree(
             )
         total = 0
         for reply in getattr(comment, "replies", []) or []:
-            total += _upsert_instagram_comment_tree(
+            total += _core_upsert_instagram_comment_tree_impl(
                 context,
                 job_id=job_id,
                 run_id=run_id,
@@ -25085,6 +25145,7 @@ def _upsert_instagram_comment_tree(
         inserted = 1 if bool(row.pop("__trr_inserted", False)) else 0
         _record_comment_write_counts(persist_stats, total=1, inserted=inserted)
     if row and media_urls and enable_media_followups:
+        mirror_job_id: str | None = None
         try:
             with _SavepointScope(conn=conn, prefix="instagram_comment_media_mirror", index=1):
                 mirror_job_id = _enqueue_platform_comment_media_mirror_job(
@@ -25109,7 +25170,7 @@ def _upsert_instagram_comment_tree(
 
     total = 1 if row else 0
     for reply in getattr(comment, "replies", []) or []:
-        total += _upsert_instagram_comment_tree(
+        total += _core_upsert_instagram_comment_tree_impl(
             context,
             job_id=job_id,
             run_id=run_id,
@@ -25179,7 +25240,7 @@ def _instagram_comment_effective_reply_depth(comment: Any, *, parent_external_id
     return max(0, int(fallback or 0))
 
 
-def _batch_upsert_instagram_comments(
+def _core_batch_upsert_instagram_comments_impl(
     context: SeasonContext,
     *,
     job_id: str | None,
@@ -25398,6 +25459,7 @@ def _batch_upsert_instagram_comments(
                 payload = batch_by_comment_id.get(ext_id) or {}
                 media_urls = list(payload.get("media_urls") or [])
                 if media_urls and enable_media_followups:
+                    mirror_job_id: str | None = None
                     try:
                         with _SavepointScope(
                             conn=conn,
@@ -25458,6 +25520,7 @@ def _batch_upsert_instagram_comments(
                 payload = batch_by_comment_id.get(ext_id) or {}
                 media_urls = list(payload.get("media_urls") or [])
                 if media_urls and enable_media_followups:
+                    mirror_job_id: str | None = None
                     try:
                         with _SavepointScope(
                             conn=conn,
@@ -25487,10 +25550,6 @@ def _batch_upsert_instagram_comments(
         _record_comment_write_counts(persist_stats, total=batch_total, inserted=batch_inserted, changed=batch_changed)
 
     return total_upserted
-
-
-_core_upsert_instagram_comment_tree_impl = _upsert_instagram_comment_tree
-_core_batch_upsert_instagram_comments_impl = _batch_upsert_instagram_comments
 
 
 # Compatibility wrappers owned by trr_backend.socials.instagram.persistence;
@@ -25850,7 +25909,7 @@ def _ingest_instagram(
             date_end=opts.date_end,
             delay_seconds=post_delay_seconds,
             max_pages=None,
-            show_id=context.show_id,
+            show_id=cast(Any, context.show_id),
             season_number=context.season_number,
         )
         metrics_pages_scanned = 0
@@ -25965,7 +26024,7 @@ def _ingest_instagram(
                                 "[instagram] Metadata enrichment failed during details refresh for shortcode=%s",
                                 shortcode,
                             )
-                            parsed_post.metadata_source = None
+                            cast(Any, parsed_post).metadata_source = None
                             _mark_instagram_metadata_attempt(
                                 post=parsed_post,
                                 now_utc=now_utc,
@@ -26043,8 +26102,8 @@ def _ingest_instagram(
                             }
                         )
                         if source_thumbnail_url or source_media_urls or needs_media_repair:
-                            parsed_post.media_mirror_status = "pending"
-                            parsed_post.media_mirror_error = None
+                            cast(Any, parsed_post).media_mirror_status = "pending"
+                            cast(Any, parsed_post).media_mirror_error = None
                         upserted = _upsert_instagram_post(
                             context,
                             job_id=job_id,
@@ -26186,7 +26245,7 @@ def _ingest_instagram(
             date_end=opts.date_end,
             delay_seconds=post_delay_seconds,
             max_pages=None,
-            show_id=context.show_id,
+            show_id=cast(Any, context.show_id),
             season_number=context.season_number,
         )
         logger.info("[instagram] Scraping account=%s date_range=%s..%s", account, opts.date_start, opts.date_end)
@@ -26284,9 +26343,9 @@ def _ingest_instagram(
                     "[instagram] Metadata enrichment failed for shortcode=%s",
                     getattr(post, "shortcode", "?"),
                 )
-                post.metadata_source = None
-                post.metadata_scraped_at = now_utc
-                post.metadata_error = "metadata_enrichment_exception"
+                cast(Any, post).metadata_source = None
+                cast(Any, post).metadata_scraped_at = now_utc
+                cast(Any, post).metadata_error = "metadata_enrichment_exception"
 
             post_week_index = None
             post_ts = _parse_instagram_time(getattr(post, "taken_at", None))
@@ -26301,8 +26360,8 @@ def _ingest_instagram(
                 }
             )
             if source_thumbnail_url or source_media_urls:
-                post.media_mirror_status = "pending"
-                post.media_mirror_error = None
+                cast(Any, post).media_mirror_status = "pending"
+                cast(Any, post).media_mirror_error = None
 
             comments: list[Any] = []
             fail_reason = ""
@@ -27450,7 +27509,7 @@ def _ingest_tiktok(
             ),
             max_pages=None,
             scrape_mode="ytdlp",
-            show_id=context.show_id,
+            show_id=cast(Any, context.show_id),
             season_number=context.season_number,
         )
         logger.info("[tiktok] Scraping account=%s date_range=%s..%s", account, effective_date_start, opts.date_end)
@@ -28055,8 +28114,9 @@ def _ingest_youtube(
     if callable(resolve_channel_identity):
         try:
             resolved_identity = resolve_channel_identity(account, delay=0.25)
-            resolved_handle = _normalize_account_handle((resolved_identity or {}).get("canonical_handle"))
-            resolved_channel_id = str((resolved_identity or {}).get("channel_id") or "").strip() or None
+            resolved_identity_data = _as_string_mapping(resolved_identity)
+            resolved_handle = _normalize_account_handle(resolved_identity_data.get("canonical_handle"))
+            resolved_channel_id = str(resolved_identity_data.get("channel_id") or "").strip() or None
             if resolved_handle:
                 canonical_owner_handle = resolved_handle
             canonical_channel_id = resolved_channel_id
@@ -28364,7 +28424,7 @@ def _ingest_youtube(
             ),
             max_results=None if opts.max_posts_per_target <= 0 else max(1, opts.max_posts_per_target),
             enforce_keyword_filter=False,
-            show_id=context.show_id,
+            show_id=cast(Any, context.show_id),
             season_number=context.season_number,
         )
         effective_date_start = opts.date_start
@@ -28412,7 +28472,13 @@ def _ingest_youtube(
         ):
             window_days = max(
                 1,
-                int((_coerce_dt(opts.date_end) - _coerce_dt(effective_date_start)).total_seconds() // 86400) + 1,
+                int(
+                    (
+                        cast(datetime, _coerce_dt(opts.date_end)) - cast(datetime, _coerce_dt(effective_date_start))
+                    ).total_seconds()
+                    // 86400
+                )
+                + 1,
             )
             default_page_cap = 6 if window_days <= 45 else 10
             existing_window_page_cap = _resolve_positive_int_env(
@@ -28450,7 +28516,7 @@ def _ingest_youtube(
                 )
                 api_calls += int(api_payload.get("api_calls") or 0)
                 api_next_page_token = str(api_payload.get("next_page_token") or "").strip() or None
-                api_channel = api_payload.get("channel") if isinstance(api_payload.get("channel"), dict) else {}
+                api_channel = _as_string_mapping(api_payload.get("channel"))
                 if not canonical_channel_id:
                     canonical_channel_id = str(api_channel.get("channel_id") or "").strip() or canonical_channel_id
                 if api_channel and not canonical_owner_handle:
@@ -28517,9 +28583,9 @@ def _ingest_youtube(
         surface_cap_override_applied = False
         if videos:
             published_candidates = [
-                _coerce_dt(getattr(video, "published_at", None))
+                published_at
                 for video in videos
-                if _coerce_dt(getattr(video, "published_at", None)) is not None
+                if (published_at := _coerce_dt(getattr(video, "published_at", None))) is not None
             ]
             if published_candidates:
                 checkpoint_last_published_at = max(published_candidates)
@@ -29634,7 +29700,7 @@ def _ingest_twitter(
                 default=0.35,
             ),
             max_pages=10,
-            show_id=context.show_id,
+            show_id=cast(Any, context.show_id),
             season_number=context.season_number,
         )
         logger.info("[twitter] Searching query=%r date_range=%s..%s", config.query, date_start, date_end)
@@ -29832,6 +29898,7 @@ def _ingest_twitter(
                         quote_fetch_failed = False
                         fail_reason = ""
                         quote_fail_reason = ""
+                        replies: list[Any] = []
                         quotes: list[Any] = []
                         observed_comment_ids: set[str] = set()
                         local_comment_stats = _new_comment_persist_stats()
@@ -31569,7 +31636,7 @@ def _run_platform_media_mirror_stage(
                 raw_data = config.get("_raw_data")
                 if not isinstance(raw_data, dict) or not raw_data:
                     raw_data = post_row.get("raw_data") if isinstance(post_row.get("raw_data"), dict) else {}
-                resolution = resolve_threads_media(raw_data, validate_urls=False)
+                resolution = resolve_threads_media(_as_string_mapping(raw_data), validate_urls=False)
                 _heartbeat()
                 if resolution.media_urls:
                     source_media_urls = resolution.media_urls
@@ -31612,7 +31679,7 @@ def _run_platform_media_mirror_stage(
             context=context,
             platform=normalized_platform,
             post_row=post_row,
-            generated_at=_iso(now_utc),
+            generated_at=cast(str, _iso(now_utc)),
         )
         if reuse_result:
             _update_platform_post_media_mirror_fields(
@@ -31667,12 +31734,11 @@ def _run_platform_media_mirror_stage(
             media_mirror_last_job_id=job_id,
         )
         _heartbeat()
-    source_assets = []
-    if isinstance(source_media_asset_meta.get("source_assets"), list):
+    source_assets: list[dict[str, Any]] = []
+    source_assets_raw = source_media_asset_meta.get("source_assets")
+    if isinstance(source_assets_raw, list):
         source_assets = [
-            dict(item)
-            for item in source_media_asset_meta.get("source_assets")
-            if isinstance(item, dict) and str(item.get("url") or "").strip()
+            dict(item) for item in source_assets_raw if isinstance(item, dict) and str(item.get("url") or "").strip()
         ]
     if not source_assets:
         source_assets = [
@@ -32089,7 +32155,7 @@ def _run_platform_media_mirror_stage(
         )
 
     mirrored_assets = _normalize_non_negative_int(result.get("mirrored_count"))
-    source_assets = _normalize_non_negative_int(result.get("source_count"))
+    source_asset_count = _normalize_non_negative_int(result.get("source_count"))
     metadata = {
         "activity": {"phase": "media_mirror_end", "last_progress_at": _iso(now_utc)},
         "mirror": {
@@ -32099,7 +32165,7 @@ def _run_platform_media_mirror_stage(
             "status": str(result.get("status") or ""),
             "error": str(result.get("error") or "") or None,
             "mirrored_assets": mirrored_assets,
-            "source_assets": source_assets,
+            "source_assets": source_asset_count,
             "week_index": week_index,
             "selected_source": mirror_selected_source,
             "attempts": mirror_attempts,
@@ -33437,8 +33503,8 @@ def _cached_live_profile_snapshot(platform: str, account_handle: str) -> dict[st
                 # twikit is an optional dependency only required by the cookie/guest fallback
                 # below. Import it lazily so the GraphQL-first happy path above still resolves a
                 # snapshot in environments where twikit is not installed.
-                from twikit import Client as TwikitClient
-                from twikit.guest import GuestClient as TwikitGuestClient
+                from twikit import Client as TwikitClient  # pyright: ignore[reportMissingImports]
+                from twikit.guest import GuestClient as TwikitGuestClient  # pyright: ignore[reportMissingImports]
 
                 async def _load_snapshot() -> dict[str, Any]:
                     client: Any | None = None
@@ -33656,9 +33722,9 @@ def _persist_shared_catalog_posts_with_progress(
 
 def _shared_catalog_base_query_parts(platform: str) -> tuple[str, str, str]:
     normalized_platform = _normalize_platform_name(platform)
-    table = PLATFORM_CATALOG_POST_TABLES.get(normalized_platform)
-    source_id_column = PLATFORM_CATALOG_SOURCE_ID_COLUMN.get(normalized_platform)
-    posted_at_column = PLATFORM_CATALOG_POSTED_AT_COLUMN.get(normalized_platform)
+    table = cast(Mapping[str, str], PLATFORM_CATALOG_POST_TABLES).get(normalized_platform)
+    source_id_column = cast(Mapping[str, str], PLATFORM_CATALOG_SOURCE_ID_COLUMN).get(normalized_platform)
+    posted_at_column = cast(Mapping[str, str], PLATFORM_CATALOG_POSTED_AT_COLUMN).get(normalized_platform)
     if not table or not source_id_column or not posted_at_column:
         raise ValueError(f"Unsupported shared catalog platform: {platform}")
     return table, source_id_column, posted_at_column
@@ -35150,8 +35216,8 @@ def _catalog_run_intent_metadata(run_config: Mapping[str, Any] | None) -> dict[s
 def _normalize_attached_followups(value: Any) -> dict[str, dict[str, Any]]:
     payload = dict(value) if isinstance(value, Mapping) else {}
     normalized: dict[str, dict[str, Any]] = {}
-    comments_raw = dict(payload.get("comments")) if isinstance(payload.get("comments"), Mapping) else {}
-    media_raw = dict(payload.get("media")) if isinstance(payload.get("media"), Mapping) else {}
+    comments_raw = _as_string_mapping(payload.get("comments"))
+    media_raw = _as_string_mapping(payload.get("media"))
 
     comments_entry = {
         "run_id": str(comments_raw.get("run_id") or "").strip() or None,
@@ -35171,7 +35237,9 @@ def _normalize_attached_followups(value: Any) -> dict[str, dict[str, Any]]:
         "status": str(media_raw.get("status") or "").strip().lower() or None,
         "source": str(media_raw.get("source") or "").strip().lower() or None,
         "enqueued_job_ids": [
-            str(item).strip() for item in list(media_raw.get("enqueued_job_ids") or []) if str(item).strip()
+            str(item).strip()
+            for item in list(cast(Iterable[Any], media_raw.get("enqueued_job_ids") or []))
+            if str(item).strip()
         ],
         "enqueued_job_count": _normalize_non_negative_int(media_raw.get("enqueued_job_count")),
     }
@@ -38773,7 +38841,7 @@ def _instagram_catalog_comments_streaming_saved_source_ids(
         """,
         [normalized_run_id],
     )
-    return _dedupe_catalog_comments_source_ids(row.get("source_id") for row in rows)
+    return _dedupe_catalog_comments_source_ids([row.get("source_id") for row in rows])
 
 
 def reconcile_instagram_catalog_comments_streaming_targets(
@@ -40586,7 +40654,7 @@ def _hydrate_shared_tiktok_catalog_post(
         logger.exception("[tiktok] Failed to persist shared catalog comments video_id=%s", video_id or "?")
         return materialized_row
 
-    _merge_comment_persist_stats(counters, local_comment_stats)
+    _merge_comment_persist_stats(cast(dict[str, int], counters), local_comment_stats)
     if progress_cb:
         progress_cb(
             {
@@ -41171,7 +41239,7 @@ def _scrape_shared_youtube_posts(
                 account_handle=str(kwargs.get("account_handle") or account_handle),
                 config=enriched_config,
                 items=list(kwargs.get("items") or []),
-                retrieval_meta=kwargs.get("retrieval_meta"),
+                retrieval_meta=cast(MutableMapping[str, Any], kwargs.get("retrieval_meta") or {}),
                 progress_cb=kwargs.get("progress_cb"),
             )
         ),
@@ -43232,7 +43300,7 @@ def _run_shared_account_posts_stage(
         stop_reason = str(retrieval_meta.get("stop_reason") or retrieval_meta.get("last_stop_reason") or "").strip()
         stop_reason = stop_reason.lower()
         direct_total_posts = _normalize_non_negative_int(retrieval_meta.get("total_posts"))
-        reached_requested_start = bool(oldest_seen is not None and oldest_seen <= bounded_start)
+        reached_requested_start = bool(oldest_seen is not None and oldest_seen <= cast(datetime, bounded_start))
         source_exhausted = bool(direct_total_posts > 0 and scraped_posts >= direct_total_posts)
         explicit_start_stop = stop_reason in {
             "date_start_reached",
@@ -43535,6 +43603,9 @@ def _run_shared_post_classify_stage(
             processed_rows = matched_count + ambiguous_count + needs_review_count + unmatched_count
             _record_progress()
 
+        def _heartbeat() -> None:
+            _touch_classify_heartbeat()
+
         counts = _classify_shared_catalog_rows(
             run_id=run_id,
             platform=platform,
@@ -43542,7 +43613,7 @@ def _run_shared_post_classify_stage(
             account_handle=account_handle,
             source_ids=source_ids or None,
             progress_cb=_on_catalog_progress,
-            heartbeat_cb=lambda: _touch_classify_heartbeat(),
+            heartbeat_cb=_heartbeat,
         )
         matched_count = _normalize_non_negative_int(counts.get("assigned"))
         ambiguous_count = _normalize_non_negative_int(counts.get("ambiguous"))
@@ -43936,6 +44007,7 @@ def _execute_shared_claimed_job(job: Mapping[str, Any], *, worker_id: str | None
     platform = _normalize_platform_name(job.get("platform"))
     source_scope = str(config.get("source_scope") or job.get("source_scope") or "network").strip().lower()
     account_handle = _resolve_shared_account_handle(job, config)
+    dispatch_backend = ""
     try:
         if not account_handle:
             raise SharedStageRuntimeError(
@@ -44770,7 +44842,7 @@ def _dispatch_media_mirror_account_jobs(
         stages=stages,
         limit=max(safe_limit * 4, 50),
     )
-    running_counts = _current_modal_dispatch_running_counts()
+    running_counts = cast(tuple[Any, ...], _current_modal_dispatch_running_counts())
     if len(running_counts) == 4:
         running_by_stage, running_by_stage_platform, running_by_run, running_by_run_stage_platform = running_counts
         active_accounts_by_stage_platform = {}
@@ -45165,7 +45237,7 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
     )
 
     candidates = _list_candidate_jobs_for_modal_dispatch(run_id=run_id, limit=max(safe_limit * 4, 50))
-    running_counts = _current_modal_dispatch_running_counts()
+    running_counts = cast(tuple[Any, ...], _current_modal_dispatch_running_counts())
     if len(running_counts) == 4:
         (
             running_by_stage,
@@ -49262,8 +49334,8 @@ def _normalize_run_config_platforms(config: Mapping[str, Any]) -> list[str] | No
     if raw is None:
         return None
     if isinstance(raw, str):
-        normalized = _normalize_platform_name(raw)
-        return [normalized] if normalized else None
+        normalized_platform = _normalize_platform_name(raw)
+        return [normalized_platform] if normalized_platform else None
     if not isinstance(raw, list):
         return None
     normalized: list[str] = []
@@ -51935,7 +52007,7 @@ def _find_week_zero_start_from_social_rows(
         return min(trailer_like_season_specific)
     if trailer_like_generic:
         return min(trailer_like_generic)
-    return _coerce_dt(rows[0].get("ts")).astimezone(zone) if rows[0].get("ts") else None
+    return cast(datetime, _coerce_dt(rows[0].get("ts"))).astimezone(zone) if rows[0].get("ts") else None
 
 
 def _parse_local_override_datetime(value: Any, timezone: str) -> datetime | None:
@@ -53722,7 +53794,7 @@ def _comments_coverage_for_platform(
             hashtags, keywords = _threads_build_relevance_terms(
                 season_id,
                 source_scope=source_scope,
-                context=context,
+                context=cast(SeasonContext, context),
             )
             posts = [
                 post
@@ -54508,10 +54580,13 @@ def _overlay_platform_status_with_active_jobs(
     payload["sync_status"] = sync_status
     payload["stale"] = False
     payload["active_job_summary"] = active_job_summary
-    payload["last_refresh_reason"] = str(active_job_status.get("last_refresh_reason") or "").strip() or payload.get(
-        "last_refresh_reason"
+    active_job_status_data = _metadata_dict(active_job_status)
+    payload["last_refresh_reason"] = str(
+        active_job_status_data.get("last_refresh_reason") or ""
+    ).strip() or payload.get("last_refresh_reason")
+    payload["worker_run_id"] = str(active_job_status_data.get("worker_run_id") or "").strip() or payload.get(
+        "worker_run_id"
     )
-    payload["worker_run_id"] = str(active_job_status.get("worker_run_id") or "").strip() or payload.get("worker_run_id")
 
     stage_statuses = active_job_summary.get("stage_statuses")
     if isinstance(stage_statuses, Mapping):
@@ -54786,7 +54861,7 @@ def _mirror_coverage_for_platform(
             hashtags, keywords = _threads_build_relevance_terms(
                 season_id,
                 source_scope=source_scope,
-                context=context,
+                context=cast(SeasonContext, context),
             )
             rows = [
                 row
@@ -55060,7 +55135,7 @@ def _normalize_week_detail_sort(sort_field: str, sort_dir: str) -> tuple[WeekDet
     normalized_dir = str(sort_dir or "desc").strip().lower()
     if normalized_dir not in WEEK_DETAIL_SORT_DIRS:
         normalized_dir = "desc"
-    return normalized_field, normalized_dir
+    return cast(WeekDetailSortField, normalized_field), cast(WeekDetailSortDir, normalized_dir)
 
 
 def _week_detail_order_by_clause(
@@ -58196,13 +58271,13 @@ def _refresh_youtube_post_detail_sync(
                 "source": None,
                 "error": "fetch_exception",
             }
-    video.transcript_text = str(transcript_payload.get("text") or "").strip() or None
+    cast(Any, video).transcript_text = str(transcript_payload.get("text") or "").strip() or None
     transcript_segments = transcript_payload.get("segments")
-    video.transcript_segments = transcript_segments if isinstance(transcript_segments, list) else []
-    video.transcript_language = transcript_payload.get("language")
-    video.transcript_source = transcript_payload.get("source")
-    video.transcript_error = transcript_payload.get("error")
-    video.transcript_synced_at = _now_utc()
+    cast(Any, video).transcript_segments = transcript_segments if isinstance(transcript_segments, list) else []
+    cast(Any, video).transcript_language = transcript_payload.get("language")
+    cast(Any, video).transcript_source = transcript_payload.get("source")
+    cast(Any, video).transcript_error = transcript_payload.get("error")
+    cast(Any, video).transcript_synced_at = _now_utc()
     with pg.db_connection() as conn:
         upserted = _upsert_youtube_video(
             context,
@@ -58517,7 +58592,7 @@ def _refresh_post_media_sync(
         job_id=refresh_job_id,
         config=config,
     )
-    mirror_meta = meta.get("mirror") if isinstance(meta.get("mirror"), dict) else {}
+    mirror_meta = _as_string_mapping(meta.get("mirror"))
     return {
         "status": str(mirror_meta.get("status") or "success"),
         "processed": processed,
@@ -58606,7 +58681,7 @@ def refresh_post(
     context = get_season_context(season_id)
     identity = _refresh_load_platform_post_identity(season_id, platform=normalized_platform, source_id=source_id)
     account = str(identity.get("account") or "").strip()
-    row_json = identity.get("row_json") if isinstance(identity.get("row_json"), dict) else {}
+    row_json = _as_string_mapping(identity.get("row_json"))
     post_id = str(identity.get("id") or "").strip()
     refresh_trace_id = str(uuid4())
     warnings: list[str] = []
@@ -60054,7 +60129,7 @@ def _social_account_profile_metric_payload(platform: str, row: Mapping[str, Any]
     }
     if normalized_platform == "youtube":
         payload["engagement"] = likes + comments
-    return payload
+    return cast(dict[str, int | None], payload)
 
 
 def _social_account_profile_post_item(
@@ -60177,11 +60252,14 @@ def _social_account_profile_post_sort_value(row: Mapping[str, Any], sort_by: str
     if sort_by == "created":
         return _social_account_profile_row_datetime(row.get("posted_at")) or datetime.min.replace(tzinfo=UTC)
     if sort_by == "caption":
-        return _first_non_empty_str(
-            row.get("caption"),
-            row.get("description"),
-            row.get("text"),
-            row.get("title"),
+        return str(
+            _first_non_empty_str(
+                row.get("caption"),
+                row.get("description"),
+                row.get("text"),
+                row.get("title"),
+            )
+            or ""
         ).casefold()
     if sort_by == "post_total":
         return _normalize_non_negative_int(row.get("comments_count"))
@@ -64861,10 +64939,8 @@ def get_social_account_catalog_post_detail(
     )
     if post_id and saved_comments <= 0:
         saved_comments = _count_stored_comments([post_id], "instagram", conn=conn).get(post_id, 0)
-    raw_data = merged_row.get("raw_data") if isinstance(merged_row.get("raw_data"), dict) else {}
-    raw_facebook_crosspost = (
-        raw_data.get("facebook_crosspost") if isinstance(raw_data.get("facebook_crosspost"), dict) else {}
-    )
+    raw_data = _as_string_mapping(merged_row.get("raw_data"))
+    raw_facebook_crosspost = _as_string_mapping(raw_data.get("facebook_crosspost"))
     external_facebook_comments = max(
         _normalize_non_negative_int(merged_row.get("fb_comment_count")),
         _normalize_non_negative_int(raw_facebook_crosspost.get("comments_count")),
@@ -64875,20 +64951,16 @@ def get_social_account_catalog_post_detail(
     facebook_crosspost_source = (
         str(merged_row.get("facebook_crosspost_source") or raw_facebook_crosspost.get("source") or "").strip() or None
     )
-    crosspost_metadata = (
+    crosspost_metadata = _as_string_mapping(
         merged_row.get("crosspost_metadata")
         if isinstance(merged_row.get("crosspost_metadata"), dict)
         else raw_facebook_crosspost.get("metadata")
     )
-    if not isinstance(crosspost_metadata, dict):
-        crosspost_metadata = {}
-    social_context = (
+    social_context = _as_string_mapping(
         merged_row.get("social_context")
         if isinstance(merged_row.get("social_context"), dict)
         else raw_facebook_crosspost.get("social_context")
     )
-    if not isinstance(social_context, dict):
-        social_context = {}
     reported_comments = _normalize_non_negative_int(metrics.get("comments_count"))
     instagram_fetchable_comments = max(reported_comments - external_facebook_comments, 0)
     comment_completeness = {
@@ -67878,7 +67950,9 @@ def _instagram_payload_rows_for_read(
         if mode == "sidecar":
             row.update(new_payload)
             if resolved_row_kind == "catalog":
-                raw_data = row.get("raw_data") if isinstance(row.get("raw_data"), Mapping) else {}
+                raw_data = (
+                    cast(Mapping[str, Any], row.get("raw_data")) if isinstance(row.get("raw_data"), Mapping) else {}
+                )
                 if not row.get("hosted_media_urls") and isinstance(raw_data.get("hosted_media_urls"), list):
                     row["hosted_media_urls"] = raw_data["hosted_media_urls"]
                 if not row.get("hosted_thumbnail_url") and raw_data.get("hosted_thumbnail_url"):
@@ -68396,7 +68470,7 @@ for _provider_path in (
     "trr_backend.socials.pipelines.comments.instagram",
 ):
     __import__(_provider_path, fromlist=["_configure_legacy_provider"])._configure_legacy_provider(globals())
-del _provider_path
+globals().pop("_provider_path", None)
 
 from trr_backend.socials.provider_registry import publish_legacy_patch_namespace as _publish_legacy_patch_namespace
 

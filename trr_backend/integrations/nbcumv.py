@@ -6,11 +6,13 @@ import logging
 import os
 import re
 import zipfile
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from fractions import Fraction
 from functools import lru_cache
 from typing import Any
+from uuid import UUID
 
 from PIL import ExifTags, Image, ImageOps
 from requests import Session
@@ -118,6 +120,29 @@ class SearchFilters:
     live_date_end: str | None = None
     search_caption: str | None = None
     limit: int = 25
+
+
+class NBCUMVShowIdentityError(ValueError):
+    """The configured NBCUMV show identity is malformed before a request is made."""
+
+
+class NBCUMVUnknownShowError(LookupError):
+    """NBCUMV accepted the request shape but could not resolve the show identity."""
+
+
+class NBCUMVMalformedPageError(RuntimeError):
+    """A lookImages page cannot be safely used as a complete inventory page."""
+
+
+def _normalized_nbcumv_show_id(show_id: str) -> str:
+    """Return the canonical UUID used by NBCUMV's show-scoped GraphQL lookup."""
+    value = str(show_id or "").strip()
+    if not value:
+        raise NBCUMVShowIdentityError("NBCUMV show ID is required")
+    try:
+        return str(UUID(value))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise NBCUMVShowIdentityError(f"NBCUMV show ID is not a UUID: {value!r}") from exc
 
 
 def _normalize_title(value: str | None) -> str:
@@ -771,6 +796,148 @@ def list_show_images(show_id: str, *, session: Session | None = None, limit: int
     if session is None and limit is None:
         return [dict(item) for item in _list_show_images_cached(normalized_show_id)]
     return _list_show_images_uncached(normalized_show_id, session=session, limit=limit)
+
+
+def _look_images_page(
+    show_id: str,
+    *,
+    next_token: str | None,
+    page_size: int,
+    session: Session | None = None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Read and validate one complete-show page from the NBCUMV GraphQL API.
+
+    ``lookImages`` is deliberately separate from the older CloudSearch helpers:
+    CloudSearch can be useful for a search UI but is not an inventory-completeness
+    source.  The GraphQL field returns a wrapper around image metadata on some
+    deployments and direct image rows on others, so the parser accepts both
+    documented response layouts while rejecting an ambiguous page.
+    """
+    token_expr = _json_graphql(next_token) if next_token else "null"
+    query = f"""
+    query {{
+      lookImages(
+        category: show
+        id: {_json_graphql(show_id)}
+        limit: {max(1, min(DEFAULT_PAGE_SIZE, int(page_size)))}
+        nextToken: {token_expr}
+      ) {{
+        items {{
+          id
+          imgId
+          showId
+          img {{ {_IMAGE_FIELDS} }}
+        }}
+        nextToken
+      }}
+    }}
+    """
+    try:
+        data = _graphql_request(query, session=session)
+    except RuntimeError as exc:
+        message = str(exc).casefold()
+        if any(fragment in message for fragment in ("unknown show", "show not found", "invalid show", "not found")):
+            raise NBCUMVUnknownShowError(f"NBCUMV show was not found: {show_id}") from exc
+        raise
+
+    if "lookImages" not in data or data.get("lookImages") is None:
+        raise NBCUMVUnknownShowError(f"NBCUMV show was not found: {show_id}")
+    payload = data.get("lookImages")
+    if not isinstance(payload, dict):
+        raise NBCUMVMalformedPageError("NBCUMV lookImages response was not an object")
+
+    raw_items = payload.get("items")
+    if raw_items is None and isinstance(payload.get("images"), dict):
+        nested_images = payload["images"]
+        raw_items = nested_images.get("items")
+        page_token = nested_images.get("nextToken", payload.get("nextToken"))
+    else:
+        page_token = payload.get("nextToken")
+    if not isinstance(raw_items, list):
+        raise NBCUMVMalformedPageError("NBCUMV lookImages page was missing its items list")
+    if page_token is not None and (not isinstance(page_token, str) or not page_token.strip()):
+        raise NBCUMVMalformedPageError("NBCUMV lookImages page had an invalid nextToken")
+
+    images: list[dict[str, Any]] = []
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            raise NBCUMVMalformedPageError("NBCUMV lookImages page contained a non-object item")
+        image = (
+            raw_item.get("img")
+            if isinstance(raw_item.get("img"), dict)
+            else raw_item.get("image")
+            if isinstance(raw_item.get("image"), dict)
+            else raw_item
+        )
+        if not isinstance(image, dict):
+            raise NBCUMVMalformedPageError("NBCUMV lookImages item was missing image metadata")
+        source_id = str(
+            image.get("lbx_id") or image.get("id") or raw_item.get("imgId") or raw_item.get("id") or ""
+        ).strip()
+        if not source_id:
+            raise NBCUMVMalformedPageError("NBCUMV lookImages item was missing a stable image identity")
+        normalized_image = dict(image)
+        if raw_item is not image:
+            normalized_image.setdefault("look_image_id", raw_item.get("id"))
+            normalized_image.setdefault("look_image_img_id", raw_item.get("imgId"))
+            normalized_image.setdefault("look_image_show_id", raw_item.get("showId"))
+        images.append(normalized_image)
+    return images, page_token.strip() if isinstance(page_token, str) else None
+
+
+def iter_show_look_image_pages(
+    show_id: str,
+    *,
+    session: Session | None = None,
+    page_size: int = DEFAULT_PAGE_SIZE,
+) -> Iterable[list[dict[str, Any]]]:
+    """Yield complete GraphQL pages for an NBCUMV show's authoritative inventory.
+
+    A valid empty ``items`` list with no next token is a valid empty inventory.
+    Malformed configuration and a resolvable-but-unknown show intentionally raise
+    different errors so a watcher never records either case as an empty baseline.
+    """
+    normalized_show_id = _normalized_nbcumv_show_id(show_id)
+    if page_size < 1:
+        raise ValueError("NBCUMV lookImages page_size must be positive")
+
+    next_token: str | None = None
+    seen_tokens: set[str] = set()
+    while True:
+        if next_token is not None:
+            if next_token in seen_tokens:
+                raise NBCUMVMalformedPageError("NBCUMV lookImages repeated a nextToken")
+            seen_tokens.add(next_token)
+        page, next_token = _look_images_page(
+            normalized_show_id,
+            next_token=next_token,
+            page_size=page_size,
+            session=session,
+        )
+        yield page
+        if next_token is None:
+            return
+
+
+def iter_show_look_images(
+    show_id: str,
+    *,
+    session: Session | None = None,
+    page_size: int = DEFAULT_PAGE_SIZE,
+) -> Iterable[dict[str, Any]]:
+    """Yield every image in the complete authoritative ``lookImages`` inventory."""
+    for page in iter_show_look_image_pages(show_id, session=session, page_size=page_size):
+        yield from page
+
+
+def list_complete_show_look_images(
+    show_id: str,
+    *,
+    session: Session | None = None,
+    page_size: int = DEFAULT_PAGE_SIZE,
+) -> list[dict[str, Any]]:
+    """Materialize :func:`iter_show_look_images` for callers that need a snapshot."""
+    return list(iter_show_look_images(show_id, session=session, page_size=page_size))
 
 
 def build_show_image_index(

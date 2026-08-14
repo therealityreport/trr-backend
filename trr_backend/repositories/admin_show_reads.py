@@ -950,7 +950,7 @@ def _get_show_assets_impl(
             continue
         origin_table = str(row.get("origin_table") or "").strip()
         if origin_table == "media_assets":
-            context = row.get("context") if isinstance(row.get("context"), dict) else {}
+            context = _metadata_dict(row.get("context"))
             merged_metadata = _merged_metadata(row.get("metadata"), context)
             source_url = _pick_url_candidate(
                 _read_metadata_source_url(merged_metadata),
@@ -1134,7 +1134,7 @@ def _get_show_season_assets_impl(
         elif season_end_date is None:
             season_end_date = _to_date_only(datetime.now(UTC).isoformat())
         show_name = season_row.get("name") if isinstance(season_row.get("name"), str) else None
-        external_ids = season_row.get("external_ids") if isinstance(season_row.get("external_ids"), dict) else {}
+        external_ids = _metadata_dict(season_row.get("external_ids"))
         show_imdb_id = _pick_url_candidate(external_ids.get("imdb_id"), external_ids.get("imdb"))
 
     if season_id:
@@ -1179,7 +1179,7 @@ def _get_show_season_assets_impl(
                 _read_metadata_source_url(merged_metadata),
                 row.get("source_url"),
             )
-            context = row.get("context") if isinstance(row.get("context"), dict) else {}
+            context = _metadata_dict(row.get("context"))
             context_section = (
                 context.get("context_section") if isinstance(context.get("context_section"), str) else None
             )
@@ -3080,7 +3080,7 @@ def get_show_credits(show_id: str) -> tuple[dict[str, Any], int]:
     self_credit_metadata_by_person: dict[str, dict[str, Any]] = {}
     for row in self_credit_metadata_rows:
         person_id = str(row.get("person_id") or "").strip()
-        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        metadata = _metadata_dict(row.get("metadata"))
         if person_id and person_id not in self_credit_metadata_by_person:
             self_credit_metadata_by_person[person_id] = metadata
 
@@ -3129,7 +3129,7 @@ def get_show_credits(show_id: str) -> tuple[dict[str, Any], int]:
     source_page_url: str | None = None
     show_imdb_id: str | None = None
     for row in crew_rows:
-        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        metadata = _metadata_dict(row.get("metadata"))
         credit_category = str(row.get("credit_category") or "").strip()
         if not credit_category:
             continue

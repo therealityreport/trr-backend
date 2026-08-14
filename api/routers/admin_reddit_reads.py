@@ -6,7 +6,7 @@ import os
 import re
 import time
 from threading import Event, Lock
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Header, HTTPException, Query
@@ -18,6 +18,7 @@ from trr_backend.repositories import admin_reddit_reads as reddit_reads_repo
 from trr_backend.repositories import admin_reddit_sources as reddit_sources_repo
 
 logger = logging.getLogger(__name__)
+_INTERNAL_ADMIN_DEFAULT = cast(InternalAdminUser, None)
 
 router = APIRouter(prefix="/admin/reddit", tags=["admin-reddit-reads"])
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
@@ -288,7 +289,7 @@ def list_communities(
     include_inactive: bool = Query(default=False),
     include_global_threads_for_season: bool = Query(default=True),
     include_assigned_threads: bool = Query(default=False),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = _INTERNAL_ADMIN_DEFAULT,
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
     if trr_show_id is not None:
@@ -325,7 +326,7 @@ def create_community(
     x_trr_admin_user_uid: str | None = Header(default=None, alias="X-TRR-Admin-User-Uid"),
     x_trr_admin_user_email: str | None = Header(default=None, alias="X-TRR-Admin-User-Email"),
     x_trr_admin_user_id: str | None = Header(default=None, alias="X-TRR-Admin-User-Id"),
-    admin: InternalAdminUser = None,
+    admin: InternalAdminUser = _INTERNAL_ADMIN_DEFAULT,
 ) -> dict[str, Any]:
     trr_show_id = _required_string(body, "trr_show_id")
     _validate_uuid(trr_show_id, "trr_show_id")
@@ -356,7 +357,7 @@ def create_community(
 
 
 @router.get("/communities/{community_id}")
-def get_community(community_id: str, _: InternalAdminUser = None) -> dict[str, Any]:
+def get_community(community_id: str, _: InternalAdminUser = _INTERNAL_ADMIN_DEFAULT) -> dict[str, Any]:
     started_at = time.perf_counter()
     _validate_uuid(community_id, "community_id")
     cache_key = f"community:{community_id}"
@@ -380,7 +381,7 @@ def get_community(community_id: str, _: InternalAdminUser = None) -> dict[str, A
 def update_community(
     community_id: str,
     body: dict[str, Any],
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = _INTERNAL_ADMIN_DEFAULT,
 ) -> dict[str, Any]:
     _validate_uuid(community_id, "community_id")
     for key in (
@@ -420,7 +421,7 @@ def update_community(
 
 
 @router.delete("/communities/{community_id}")
-def delete_community(community_id: str, _: InternalAdminUser = None) -> dict[str, bool]:
+def delete_community(community_id: str, _: InternalAdminUser = _INTERNAL_ADMIN_DEFAULT) -> dict[str, bool]:
     _validate_uuid(community_id, "community_id")
     deleted, _query_count = reddit_sources_repo.delete_reddit_community(community_id)
     if not deleted:
@@ -434,7 +435,7 @@ def delete_community(community_id: str, _: InternalAdminUser = None) -> dict[str
 def update_community_post_flairs(
     community_id: str,
     body: dict[str, Any],
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = _INTERNAL_ADMIN_DEFAULT,
 ) -> dict[str, Any]:
     _validate_uuid(community_id, "community_id")
     post_flairs = _optional_string_array(body, "post_flairs")
@@ -463,7 +464,7 @@ def list_threads(
     trr_show_id: str | None = Query(default=None),
     trr_season_id: str | None = Query(default=None),
     include_global_threads_for_season: bool = Query(default=True),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = _INTERNAL_ADMIN_DEFAULT,
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
     if community_id is not None:
@@ -500,7 +501,7 @@ def create_thread(
     x_trr_admin_user_uid: str | None = Header(default=None, alias="X-TRR-Admin-User-Uid"),
     x_trr_admin_user_email: str | None = Header(default=None, alias="X-TRR-Admin-User-Email"),
     x_trr_admin_user_id: str | None = Header(default=None, alias="X-TRR-Admin-User-Id"),
-    admin: InternalAdminUser = None,
+    admin: InternalAdminUser = _INTERNAL_ADMIN_DEFAULT,
 ) -> dict[str, Any]:
     community_id = _required_string(body, "community_id")
     trr_show_id = _required_string(body, "trr_show_id")
@@ -562,7 +563,7 @@ def create_thread(
 
 
 @router.get("/threads/{thread_id}")
-def get_thread(thread_id: str, _: InternalAdminUser = None) -> dict[str, Any]:
+def get_thread(thread_id: str, _: InternalAdminUser = _INTERNAL_ADMIN_DEFAULT) -> dict[str, Any]:
     started_at = time.perf_counter()
     _validate_uuid(thread_id, "thread_id")
     cache_key = f"thread:{thread_id}"
@@ -586,7 +587,7 @@ def get_thread(thread_id: str, _: InternalAdminUser = None) -> dict[str, Any]:
 def update_thread(
     thread_id: str,
     body: dict[str, Any],
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = _INTERNAL_ADMIN_DEFAULT,
 ) -> dict[str, Any]:
     _validate_uuid(thread_id, "thread_id")
     if "community_id" in body:
@@ -647,7 +648,7 @@ def update_thread(
 
 
 @router.delete("/threads/{thread_id}")
-def delete_thread(thread_id: str, _: InternalAdminUser = None) -> dict[str, bool]:
+def delete_thread(thread_id: str, _: InternalAdminUser = _INTERNAL_ADMIN_DEFAULT) -> dict[str, bool]:
     _validate_uuid(thread_id, "thread_id")
     deleted, _query_count = reddit_sources_repo.delete_reddit_thread(thread_id)
     if not deleted:
@@ -660,7 +661,7 @@ def delete_thread(thread_id: str, _: InternalAdminUser = None) -> dict[str, bool
 def get_stored_post_counts(
     community_id: str,
     season_id: str = Query(...),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = _INTERNAL_ADMIN_DEFAULT,
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
     _validate_uuid(community_id, "community_id")
@@ -690,7 +691,7 @@ def get_analytics_summary(
     community_id: str,
     scope: str = Query(default="season"),
     season_id: str | None = Query(default=None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = _INTERNAL_ADMIN_DEFAULT,
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
     _validate_uuid(community_id, "community_id")
@@ -730,7 +731,7 @@ def get_stored_posts(
     container_key: str = Query(...),
     page: int = Query(default=1, ge=1),
     per_page: int = Query(default=200, ge=1, le=200),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = _INTERNAL_ADMIN_DEFAULT,
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
     _validate_uuid(community_id, "community_id")
@@ -772,7 +773,7 @@ def get_analytics_posts(
     flair_key: str | None = Query(default=None),
     page: int = Query(default=1, ge=1),
     per_page: int = Query(default=50, ge=1, le=200),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = _INTERNAL_ADMIN_DEFAULT,
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
     _validate_uuid(community_id, "community_id")
@@ -820,7 +821,7 @@ def resolve_post_detail(
     slug: str | None = Query(default=None),
     author: str | None = Query(default=None),
     post_id: str | None = Query(default=None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = _INTERNAL_ADMIN_DEFAULT,
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
     _validate_uuid(community_id, "community_id")
@@ -867,7 +868,7 @@ def get_post_detail(
     post_id: str,
     season_id: str = Query(...),
     comments_limit: str | None = Query(default=None),
-    _: InternalAdminUser = None,
+    _: InternalAdminUser = _INTERNAL_ADMIN_DEFAULT,
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
     _validate_uuid(community_id, "communityId")
@@ -897,7 +898,7 @@ def get_post_detail(
         )
     except HTTPException as exc:
         if exc.status_code == 404:
-            return JSONResponse({"error": str(exc.detail)}, status_code=404)
+            return cast(dict[str, Any], JSONResponse({"error": str(exc.detail)}, status_code=404))
         raise
     _log_read("post-detail", query_count=query_count, payload=payload, cache_status=cache_status, started_at=started_at)
     return payload

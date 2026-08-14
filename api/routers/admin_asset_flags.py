@@ -11,7 +11,7 @@ We treat "star" as a lightweight bookmark:
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Literal, cast
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException
@@ -190,8 +190,8 @@ def _clear_hosted_fields_payload(now_iso: str) -> dict:
 @router.post("/archive", response_model=ArchiveAssetResponse)
 def archive_asset(
     payload: ArchiveAssetRequest,
-    db: SupabaseAdminClient = None,
-    user: AdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    user: AdminUser = cast(AdminUser, None),
 ) -> ArchiveAssetResponse:
     asset_id_str = str(payload.asset_id)
     row = _fetch_row(db, origin=payload.origin, asset_id=asset_id_str)
@@ -212,8 +212,8 @@ def archive_asset(
             s3_error = str(exc)
 
     now_iso = datetime.now(UTC).isoformat()
-    metadata_in = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-    metadata_out = dict(metadata_in)
+    metadata_in = row.get("metadata")
+    metadata_out: dict[str, object] = dict(metadata_in) if isinstance(metadata_in, dict) else {}
     metadata_out["archived_at"] = now_iso
     if payload.reason:
         metadata_out["archived_reason"] = payload.reason
@@ -243,15 +243,15 @@ def archive_asset(
 @router.post("/star", response_model=StarAssetResponse)
 def star_asset(
     payload: StarAssetRequest,
-    db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    _: AdminUser = cast(AdminUser, None),
 ) -> StarAssetResponse:
     asset_id_str = str(payload.asset_id)
     row = _fetch_row(db, origin=payload.origin, asset_id=asset_id_str)
 
     now_iso = datetime.now(UTC).isoformat()
-    metadata_in = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-    metadata_out = dict(metadata_in)
+    metadata_in = row.get("metadata")
+    metadata_out: dict[str, object] = dict(metadata_in) if isinstance(metadata_in, dict) else {}
     metadata_out["starred"] = bool(payload.starred)
     if payload.starred:
         metadata_out["starred_at"] = now_iso
@@ -280,16 +280,16 @@ def star_asset(
 @router.post("/content-type", response_model=UpdateAssetContentTypeResponse)
 def update_asset_content_type(
     payload: UpdateAssetContentTypeRequest,
-    db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
+    _: AdminUser = cast(AdminUser, None),
 ) -> UpdateAssetContentTypeResponse:
     asset_id_str = str(payload.asset_id)
     content_type = _normalize_content_type(payload.content_type)
     now_iso = datetime.now(UTC).isoformat()
     row = _fetch_content_row(db, origin=payload.origin, asset_id=asset_id_str)
 
-    metadata_in = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-    metadata_out = dict(metadata_in)
+    metadata_in = row.get("metadata")
+    metadata_out: dict[str, object] = dict(metadata_in) if isinstance(metadata_in, dict) else {}
     metadata_out["content_type"] = content_type
 
     update_payload: dict[str, object] = {

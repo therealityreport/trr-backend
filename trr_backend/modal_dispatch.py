@@ -874,6 +874,26 @@ def dispatch_cast_screentime_subtitle_extraction(
     )
 
 
+def dispatch_show_season_media_watch_worker(
+    *,
+    watch: dict[str, Any],
+    lease_owner: str,
+    lease_fence: int,
+    backfill: bool,
+) -> dict[str, Any]:
+    return _spawn_named_modal_function(
+        function_name="run_show_season_media_watch_worker",
+        log_label="show-season media watch",
+        kwargs={
+            "watch": watch,
+            "lease_owner": lease_owner,
+            "lease_fence": lease_fence,
+            "backfill": backfill,
+        },
+        dispatcher_name="media-watchers",
+    )
+
+
 def dispatch_social_job(*, job_id: str, stage: str | None = None, priority_recovery: bool = False) -> dict[str, Any]:
     return _spawn_named_modal_function(
         function_name=modal_social_job_function_name_for_stage(stage, priority_recovery=priority_recovery),

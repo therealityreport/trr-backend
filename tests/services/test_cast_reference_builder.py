@@ -3,8 +3,20 @@ from __future__ import annotations
 import types
 
 import numpy as np
+import pytest
 
 from trr_backend.services import cast_reference_builder as builder
+
+
+@pytest.fixture(autouse=True)
+def _fake_cv2(monkeypatch) -> None:
+    fake_cv2 = types.SimpleNamespace(
+        COLOR_BGR2GRAY=0,
+        CV_64F=0,
+        cvtColor=lambda image, _conversion: image,
+        Laplacian=lambda _image, _depth: types.SimpleNamespace(var=lambda: 0.0),
+    )
+    monkeypatch.setattr(builder, "_lazy_cv2", lambda: fake_cv2)
 
 
 def _image():

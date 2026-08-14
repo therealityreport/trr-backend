@@ -274,6 +274,18 @@ def _normalize_string_list(values: Any) -> list[str]:
     return [deduped[key] for key in sorted(deduped.keys())]
 
 
+def _dict_value(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _list_value(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _dict_rows(value: Any) -> list[dict[str, Any]]:
+    return [row for row in _list_value(value) if isinstance(row, dict)]
+
+
 def _is_canonical_reddit_container_key(value: str | None) -> bool:
     normalized = str(value or "").strip().lower()
     if normalized in {"period-preseason", "period-postseason"}:
@@ -306,9 +318,9 @@ def _canonical_reddit_container_keys_for_season(season_id: str) -> list[str]:
         [season_id],
     )
     episode_keys = [
-        f"episode-{int(row.get('episode_number'))}"
+        f"episode-{episode_number}"
         for row in rows
-        if isinstance(row.get("episode_number"), int) and int(row.get("episode_number")) >= 1
+        if isinstance((episode_number := row.get("episode_number")), int) and episode_number >= 1
     ]
     if not episode_keys:
         return ["period-preseason", "episode-1", "period-postseason"]
@@ -531,7 +543,7 @@ def _iso_utc(value: datetime | None) -> str | None:
 
 
 def _derive_refresh_run_phase(diagnostics: dict[str, Any], status: str) -> str | None:
-    progress = diagnostics.get("progress") if isinstance(diagnostics.get("progress"), dict) else {}
+    progress = _dict_value(diagnostics.get("progress"))
     phase = str(progress.get("stage") or diagnostics.get("phase") or "").strip().lower()
     if phase:
         return phase
@@ -658,21 +670,15 @@ def _collect_partial_failures(
             failure["operator_hint"] = operator_hint
         failures.append(failure)
 
-    final_completeness = (
-        diagnostics.get("final_completeness") if isinstance(diagnostics.get("final_completeness"), dict) else {}
-    )
+    final_completeness = _dict_value(diagnostics.get("final_completeness"))
     if final_completeness.get("listing_complete") is False:
         failures.append({"phase": "listing", "reason": "listing_incomplete"})
     if final_completeness.get("backfill_complete") is False:
         failures.append({"phase": "search_backfill", "reason": "backfill_incomplete"})
 
-    result_payload = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else {}
-    search_backfill = (
-        result_payload.get("search_backfill") if isinstance(result_payload.get("search_backfill"), dict) else {}
-    )
-    query_diagnostics = (
-        search_backfill.get("query_diagnostics") if isinstance(search_backfill.get("query_diagnostics"), list) else []
-    )
+    result_payload = _dict_value(diagnostics.get("result"))
+    search_backfill = _dict_value(result_payload.get("search_backfill"))
+    query_diagnostics = _list_value(search_backfill.get("query_diagnostics"))
     for query_diag in query_diagnostics:
         if not isinstance(query_diag, dict):
             continue
@@ -687,7 +693,7 @@ def _collect_partial_failures(
             }
         )
 
-    detail_errors = diagnostics.get("errors") if isinstance(diagnostics.get("errors"), list) else []
+    detail_errors = _list_value(diagnostics.get("errors"))
     for detail_error in detail_errors:
         if not isinstance(detail_error, dict):
             continue
@@ -734,7 +740,7 @@ def _is_refresh_run_stalled(
 
 
 def _build_refresh_run_meta(row: Mapping[str, Any]) -> dict[str, Any]:
-    diagnostics = row.get("diagnostics") if isinstance(row.get("diagnostics"), dict) else {}
+    diagnostics = _dict_value(row.get("diagnostics"))
     status = str(row.get("status") or "").strip().lower()
     heartbeat_at = _parse_iso(row.get("heartbeat_at"))
     updated_at = _parse_iso(row.get("updated_at"))
@@ -1825,7 +1831,7 @@ def _walk_comment_nodes(
         if not isinstance(node, dict):
             continue
         kind = node.get("kind")
-        data = node.get("data") if isinstance(node.get("data"), dict) else {}
+        data = _dict_value(node.get("data"))
         if kind != "t1":
             continue
         comment_id = str(data.get("id") or "").strip()
@@ -2560,8 +2566,8 @@ def get_cached_period_payload(*, community_id: str, season_id: str, period_key: 
     if not run:
         return None
 
-    diagnostics = run.get("diagnostics") if isinstance(run.get("diagnostics"), dict) else {}
-    result_payload = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else {}
+    diagnostics = _dict_value(run.get("diagnostics"))
+    result_payload = _dict_value(diagnostics.get("result"))
 
     has_flair_mode = _column_exists("social", "reddit_period_post_matches", "flair_mode")
     if has_flair_mode:
@@ -2651,9 +2657,7 @@ def get_cached_period_payload(*, community_id: str, season_id: str, period_key: 
             if isinstance(result_payload.get("successful_sorts"), list)
             else ["new"]
         ),
-        "failed_sorts": (
-            result_payload.get("failed_sorts") if isinstance(result_payload.get("failed_sorts"), list) else []
-        ),
+        "failed_sorts": (_list_value(result_payload.get("failed_sorts"))),
         "rate_limited_sorts": (
             result_payload.get("rate_limited_sorts")
             if isinstance(result_payload.get("rate_limited_sorts"), list)
@@ -2671,7 +2675,7 @@ def get_cached_period_payload(*, community_id: str, season_id: str, period_key: 
         },
         "window_start": result_payload.get("window_start") if isinstance(result_payload, dict) else None,
         "window_end": result_payload.get("window_end") if isinstance(result_payload, dict) else None,
-        "terms": result_payload.get("terms") if isinstance(result_payload.get("terms"), list) else [],
+        "terms": _list_value(result_payload.get("terms")),
         "hints": hints,
         "threads": threads,
     }
@@ -2729,7 +2733,7 @@ def _update_run(
         "select diagnostics from social.reddit_refresh_runs where id = %s",
         [run_id],
     )
-    existing_diag = row.get("diagnostics") if isinstance(row, dict) and isinstance(row.get("diagnostics"), dict) else {}
+    existing_diag = _dict_value(row.get("diagnostics")) if isinstance(row, dict) else {}
     merged_diag = dict(existing_diag)
     if isinstance(diagnostics, dict):
         merged_diag.update(diagnostics)
@@ -2927,7 +2931,7 @@ def create_or_reuse_refresh_run(*, payload: dict[str, Any]) -> dict[str, Any]:
             )
             continue
 
-        existing_payload = existing.get("request_payload") if isinstance(existing.get("request_payload"), dict) else {}
+        existing_payload = _dict_value(existing.get("request_payload"))
         existing_hash = str(existing_payload.get("run_config_hash") or "").strip().lower()
         if not existing_hash:
             existing_hash = _build_run_config_hash(existing_payload)
@@ -3148,7 +3152,7 @@ def _discover_window(
     exhaustive = bool(payload.get("exhaustive_window")) and (period_start is not None or period_end is not None)
     search_backfill_enabled = bool(payload.get("search_backfill"))
 
-    sort_modes = payload.get("sort_modes") if isinstance(payload.get("sort_modes"), list) else ["new", "hot", "top"]
+    sort_modes = _list_value(payload.get("sort_modes")) or ["new", "hot", "top"]
     normalized_sorts = [
         str(sort).strip().lower() for sort in sort_modes if str(sort).strip().lower() in {"new", "hot", "top"}
     ]
@@ -3392,8 +3396,8 @@ def _discover_window(
 
 
 def _build_pass_summary(pass_index: int, result: dict[str, Any]) -> dict[str, Any]:
-    totals = result.get("totals") if isinstance(result.get("totals"), dict) else {}
-    search_backfill = result.get("search_backfill") if isinstance(result.get("search_backfill"), dict) else {}
+    totals = _dict_value(result.get("totals"))
+    search_backfill = _dict_value(result.get("search_backfill"))
     return {
         "pass_index": pass_index,
         "max_pages": _safe_int(result.get("max_pages_applied")),
@@ -3447,7 +3451,7 @@ def _merge_discovery_pass_results(results: list[dict[str, Any]]) -> dict[str, An
             max_backfill_pages_per_query_applied,
             _safe_int(result.get("max_backfill_pages_per_query_applied")),
         )
-        totals = result.get("totals") if isinstance(result.get("totals"), dict) else {}
+        totals = _dict_value(result.get("totals"))
         max_fetched_rows = max(max_fetched_rows, _safe_int(totals.get("fetched_rows")))
         for source in result.get("sources_fetched") or []:
             source_value = str(source).strip()
@@ -3461,7 +3465,7 @@ def _merge_discovery_pass_results(results: list[dict[str, Any]]) -> dict[str, An
                 continue
             terms_seen.add(term_value)
             merged_terms.append(term_value)
-        hints = result.get("hints") if isinstance(result.get("hints"), dict) else {}
+        hints = _dict_value(result.get("hints"))
         for term in hints.get("suggested_include_terms") or []:
             term_value = str(term).strip()
             if not term_value or term_value in include_seen:
@@ -3656,7 +3660,7 @@ def _run_detail_sync_phase(
                 with pg.db_connection() as conn:
                     result["comments_upserted"] = _upsert_comments(comments, conn=conn)
 
-            post_raw = post_row.get("raw_payload") if isinstance(post_row.get("raw_payload"), dict) else {}
+            post_raw = _dict_value(post_row.get("raw_payload"))
             media_urls: list[tuple[str, str]] = []
 
             post_url = str(post_raw.get("url") or post_row.get("url") or "").strip()
@@ -3804,7 +3808,7 @@ def execute_refresh_run(
     )
     claim_token = str(run.get("claim_token") or "").strip() or None
 
-    request_payload = run.get("request_payload") if isinstance(run.get("request_payload"), dict) else {}
+    request_payload = _dict_value(run.get("request_payload"))
     progress: dict[str, Any] = _base_progress_snapshot()
     last_progress_emit = 0.0
     monotonic_fields = {
@@ -3998,7 +4002,7 @@ def execute_refresh_run(
 
             # Optimization: only run incomplete parts on second pass. Collect
             # post IDs already seen to avoid re-processing.
-            first_threads = first_result.get("threads") if isinstance(first_result.get("threads"), list) else []
+            first_threads = _list_value(first_result.get("threads"))
             seen_post_ids = {
                 str(t.get("reddit_post_id") or "").strip()
                 for t in first_threads
@@ -4045,7 +4049,7 @@ def execute_refresh_run(
             minimum=0,
             maximum=500,
         )
-        target_threads = result.get("threads") if isinstance(result.get("threads"), list) else []
+        target_threads = _dict_rows(result.get("threads"))
         comment_targets: list[dict[str, Any]] = []
         existing_comment_counts: dict[str, int] = {}
         apply_progress({"stage": "persisting_posts"}, force=True)
@@ -4184,9 +4188,7 @@ def execute_refresh_run(
             "listing_complete": not incomplete_listing,
             "backfill_complete": not incomplete_backfill,
         }
-        detail_errors = (
-            (detail_result or {}).get("errors") if isinstance((detail_result or {}).get("errors"), list) else []
-        )
+        detail_errors = _list_value((detail_result or {}).get("errors"))
         error_count = comment_errors + len(detail_errors)
         useful_posts_stored = any(
             _safe_int(result.get("totals", {}).get(metric)) > 0
@@ -4466,9 +4468,9 @@ def get_refresh_run(run_id: str) -> dict[str, Any]:
     queued_ahead = _safe_int(active_counts.get("queued_ahead"))
     queue_position = queued_ahead + 1 if this_run_is_queued else None
 
-    diagnostics = row.get("diagnostics") if isinstance(row.get("diagnostics"), dict) else {}
+    diagnostics = _dict_value(row.get("diagnostics"))
     payload = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else None
-    request_payload = row.get("request_payload") if isinstance(row.get("request_payload"), dict) else {}
+    request_payload = _dict_value(row.get("request_payload"))
 
     run_meta = _build_refresh_run_meta(row)
     return {
@@ -4562,9 +4564,9 @@ def build_reddit_refresh_save_proof(run_id: str) -> dict[str, Any]:
         )
         or {}
     )
-    diagnostics = row.get("diagnostics") if isinstance(row.get("diagnostics"), dict) else {}
-    result = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else {}
-    totals = result.get("totals") if isinstance(result.get("totals"), dict) else {}
+    diagnostics = _dict_value(row.get("diagnostics"))
+    result = _dict_value(diagnostics.get("result"))
+    totals = _dict_value(result.get("totals"))
     fetched_count = max(_safe_int(row.get("total_rows")), _safe_int(totals.get("fetched_rows")))
     upserted_count = max(
         _safe_int(row.get("matched_rows")),
@@ -4650,7 +4652,7 @@ def list_refresh_runs(
 
     results: list[dict[str, Any]] = []
     for row in rows:
-        payload = row.get("request_payload") if isinstance(row.get("request_payload"), dict) else {}
+        payload = _dict_value(row.get("request_payload"))
         run_meta = _build_refresh_run_meta(row)
         results.append(
             {
@@ -4748,7 +4750,7 @@ def _fetch_latest_refresh_runs_for_season(
 
 def _classify_reddit_backfill_candidate(row: Mapping[str, Any]) -> tuple[bool, str | None]:
     status = str(row.get("status") or "").strip().lower()
-    diagnostics = row.get("diagnostics") if isinstance(row.get("diagnostics"), dict) else {}
+    diagnostics = _dict_value(row.get("diagnostics"))
     error_message = str(row.get("error_message") or "").strip() or None
     failure_reason_code = _derive_failure_reason_code(
         status=status,
@@ -4890,8 +4892,8 @@ def list_reddit_refresh_backfill_targets(
             )
             continue
 
-        diagnostics = row.get("diagnostics") if isinstance(row.get("diagnostics"), dict) else {}
-        request_payload = row.get("request_payload") if isinstance(row.get("request_payload"), dict) else {}
+        diagnostics = _dict_value(row.get("diagnostics"))
+        request_payload = _dict_value(row.get("request_payload"))
         latest_run_status = str(row.get("status") or "").strip().lower() or None
         latest_run_id = str(row.get("id") or "").strip() or None
         stale, stale_reason_code = _classify_reddit_backfill_candidate(row)
@@ -5244,7 +5246,7 @@ def build_reddit_refresh_backfill_operation_producer(
                 )
                 continue
 
-            initial_run = kickoff.get("run") if isinstance(kickoff.get("run"), dict) else {}
+            initial_run = _dict_value(kickoff.get("run"))
             current_run = initial_run
             run_id = str(initial_run.get("run_id") or "").strip() or None
             started_entry = {
@@ -5628,7 +5630,7 @@ def _fetch_reddit_analytics_extras(
                     }
                 )
                 continue
-            diagnostics = row.get("diagnostics") if isinstance(row.get("diagnostics"), dict) else {}
+            diagnostics = _dict_value(row.get("diagnostics"))
             latest_status = str(row.get("status") or "").strip().lower()
             failure_reason_code = _derive_failure_reason_code(
                 status=latest_status,

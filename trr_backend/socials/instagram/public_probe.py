@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from trr_backend.socials.instagram.permalink_metadata import fetch_permalink_metadata
 from trr_backend.socials.instagram.scraper import InstagramScraper

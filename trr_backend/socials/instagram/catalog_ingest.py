@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from trr_backend.socials.control_plane.run_lifecycle import _legacy_module as _published_legacy_module
 from trr_backend.socials.instagram import payload_sidecars as _payload_sidecars
@@ -17,6 +17,245 @@ from trr_backend.socials.provider_registry import (
     adopt_published,
     publish_module_slot,
 )
+
+if TYPE_CHECKING:
+    import hashlib
+    import logging
+    import os
+    import time as time_module
+    from collections import Counter
+    from contextlib import nullcontext
+    from datetime import UTC, datetime
+
+    from trr_backend.db import pg
+    from trr_backend.socials.model_types import SeasonContext
+
+    CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY: str
+    PLATFORM_CATALOG_POST_TABLES: dict[str, str]
+    SHARED_ACCOUNT_EXECUTION_LOCK_UNAVAILABLE_ERROR_CODE: str
+    logger: logging.Logger
+
+    class SharedStageRuntimeError(RuntimeError):
+        def __init__(
+            self,
+            message: str,
+            *,
+            error_code: str,
+            retryable: bool = False,
+            error_class: str | None = None,
+            runtime_metadata: Mapping[str, Any] | None = None,
+        ) -> None: ...
+
+    class SharedAccountCursorPartition:
+        partition_key: str
+        shard_index: int
+        shard_total: int
+        runner_lane: str
+        cursor_start: str | None
+        cursor_end: str | None
+        boundary_start_at: datetime | None
+        boundary_end_at: datetime | None
+        metadata: dict[str, Any]
+
+        def __init__(
+            self,
+            partition_key: str,
+            shard_index: int,
+            shard_total: int,
+            runner_lane: str,
+            cursor_start: str | None,
+            cursor_end: str | None,
+            boundary_start_at: datetime | None,
+            boundary_end_at: datetime | None,
+            metadata: dict[str, Any],
+        ) -> None: ...
+
+    def _apply_assignment_payload(payload: dict[str, Any], context: SeasonContext | None) -> None: ...
+
+    def _normalize_cursor_partition_token(value: Any) -> str | None: ...
+
+    def _catalog_backfill_run_scheduler_lanes(runner_count: int) -> list[str]: ...
+
+    def _catalog_full_history_posts_per_shard(platform: str | None) -> int: ...
+
+    def _now_utc() -> datetime: ...
+
+    def _env_truthy(name: str, *, default: bool = False) -> bool: ...
+
+    def _catalog_backfill_has_bounded_window(*, date_start: datetime | None, date_end: datetime | None) -> bool: ...
+
+    def _shared_account_expected_total_posts_from_config(
+        config: Mapping[str, Any] | None, *, platform: Any, account_handle: Any
+    ) -> int: ...
+
+    def _metadata_dict(value: Any) -> dict[str, Any]: ...
+
+    def _coerce_dt(value: Any) -> datetime | None: ...
+
+    def _iso(dt: datetime | None) -> str | None: ...
+
+    def _instagram_posts_has_column(column: str, *, conn: Any | None = None) -> bool: ...
+
+    def _load_instagram_cookies_from_sources(*args: Any, **kwargs: Any) -> Any: ...
+
+    def _validate_instagram_cookie_health(*args: Any, **kwargs: Any) -> Any: ...
+
+    def _normalize_non_negative_int(value: Any) -> int: ...
+
+    def _instagram_reported_comment_count_from_payload(payload: Any) -> int: ...
+
+    def _as_text_list(value: Any, *, prefix: str = "", strip_prefix: str | None = None) -> list[str]: ...
+
+    def _first_non_empty_str(*values: Any) -> str | None: ...
+
+    def _mark_instagram_metadata_attempt(
+        *, post: Any, now_utc: datetime, success: bool, error_code: str | None = None
+    ) -> None: ...
+
+    def _enrich_instagram_post_from_permalink(*, post: Any, scraper: Any, now_utc: datetime) -> None: ...
+
+    def _normalize_instagram_mirror_attempts(value: Any) -> list[dict[str, Any]]: ...
+
+    def _load_existing_social_account_posts(
+        platform: str,
+        account: str,
+        date_start: datetime | None,
+        date_end: datetime | None,
+        source_ids: set[str] | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+    def _pg_upsert(
+        table: str,
+        payload: dict[str, Any],
+        *,
+        conflict_col: str | Sequence[str],
+        conn: Any | None = None,
+        include_inserted_flag: bool = False,
+    ) -> dict[str, Any] | None: ...
+
+    def _pg_upsert_many(
+        table: str,
+        payloads: list[dict[str, Any]],
+        *,
+        conflict_col: str | Sequence[str],
+        conn: Any | None = None,
+        include_inserted_flag: bool = False,
+        coalesce_preserve_cols: Sequence[str] | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+    def _instagram_post_owner_id(post: Any, raw_data: Mapping[str, Any]) -> str | None: ...
+
+    def _sync_instagram_canonical_post(
+        *, legacy_row: Mapping[str, Any] | None, payload: Mapping[str, Any], post: Any, conn: Any | None
+    ) -> dict[str, Any] | None: ...
+
+    def _platform_post_needs_media_mirror(
+        platform: str,
+        post_row: dict[str, Any],
+        *,
+        conn: Any | None = None,
+        include_auxiliary_repairs: bool = True,
+    ) -> bool: ...
+
+    def _enqueue_instagram_media_mirror_job(*args: Any, **kwargs: Any) -> Any: ...
+
+    def _extract_instagram_post_detail_node(payload: dict[str, Any] | None) -> dict[str, Any] | None: ...
+
+    def _refresh_instagram_post_metrics_only(
+        *,
+        post_db_id: str,
+        likes: int,
+        comments_count: int,
+        views: int | None,
+        views_source: str | None = None,
+        views_raw_candidates: list[dict[str, Any]] | None = None,
+        conn: Any,
+    ) -> None: ...
+
+    def _shared_catalog_mode(config: Mapping[str, Any] | None) -> bool: ...
+
+    def _shared_catalog_post_url(
+        platform: str,
+        *,
+        account_handle: str,
+        source_id: str,
+        explicit: str | None,
+        post_format: object | None = None,
+        media_type: object | None = None,
+        raw_data: Mapping[str, object] | None = None,
+    ) -> str | None: ...
+
+    def _shared_catalog_payload_base(
+        *,
+        source_id: str,
+        account_handle: str,
+        posted_at: datetime | None,
+        permalink: str | None,
+        title: str | None = None,
+        caption: str | None = None,
+        description: str | None = None,
+        text: str | None = None,
+        media_type: str | None = None,
+        media_urls: list[str] | None = None,
+        thumbnail_url: str | None = None,
+        hashtags: list[str] | None = None,
+        mentions: list[str] | None = None,
+        collaborators: list[str] | None = None,
+        profile_tags: list[str] | None = None,
+        likes: int | None = None,
+        comments_count: int | None = None,
+        views: int | None = None,
+        shares: int | None = None,
+        retweets: int | None = None,
+        replies_count: int | None = None,
+        quotes: int | None = None,
+        raw_data: dict[str, Any] | None = None,
+        run_id: str | None = None,
+        music_info: dict[str, Any] | None = None,
+        audio_url: str | None = None,
+        paid_partnership: bool = False,
+        child_posts_data: list[dict[str, Any]] | None = None,
+        owner_username: str | None = None,
+        video_play_count: int | None = None,
+        video_duration: float | None = None,
+    ) -> dict[str, Any]: ...
+
+    def _sync_instagram_catalog_post_collaborators(
+        catalog_post_row: Mapping[str, Any], *, conn: Any | None = None
+    ) -> None: ...
+
+    def _shared_account_partition_key(
+        *,
+        run_id: str,
+        platform: str,
+        account_handle: str,
+        shard_index: int,
+        cursor_start: str | None,
+        cursor_end: str | None,
+    ) -> str: ...
+
+    def _shared_catalog_progress_interval_posts() -> int: ...
+
+    def _sanitize_instagram_browser_account_id(browser_account_id: str | None) -> str | None: ...
+
+    def _persist_shared_catalog_posts_batch(
+        *,
+        platform: str,
+        run_id: str | None,
+        account_handle: str,
+        posts: Sequence[Any],
+        job_id: str | None = None,
+        source_scope: str = "network",
+        enable_media_followups: bool = False,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> tuple[list[dict[str, Any]], list[str], dict[str, int]]: ...
+
+    def _normalize_shared_catalog_posts_batch_result(
+        value: Any,
+    ) -> tuple[list[dict[str, Any]], list[str], dict[str, int]]: ...
+
+    def _parse_instagram_time(value: Any) -> datetime | None: ...
+
 
 _IMPORTED_CORE_NAMES: set[str] = set()
 _LOCAL_ROOM_NAMES: set[str] = set()
@@ -590,7 +829,7 @@ def _instagram_post_payload(
         video_duration = float(video_duration_raw) if video_duration_raw is not None else None
     except (TypeError, ValueError):
         video_duration = None
-    caption_raw = raw_data.get("caption") if isinstance(raw_data.get("caption"), dict) else {}
+    caption_raw = _metadata_dict(raw_data.get("caption"))
     caption_id = getattr(post, "caption_id", None) or caption_raw.get("pk")
     caption_has_translation = getattr(post, "caption_has_translation", None)
     if caption_has_translation is None:

@@ -111,7 +111,7 @@ def _extract_text(node: Tag | None) -> str | None:
     return text if text else None
 
 
-def _first_non_empty(*values: str | None) -> str | None:
+def _first_non_empty(*values: object | None) -> str | None:
     for value in values:
         if isinstance(value, str):
             trimmed = value.strip()
@@ -121,14 +121,12 @@ def _first_non_empty(*values: str | None) -> str | None:
 
 
 def _meta_content(soup: BeautifulSoup, *, property_name: str | None = None, name: str | None = None) -> str | None:
-    attrs: dict[str, str] = {}
     if property_name:
-        attrs["property"] = property_name
-    if name:
-        attrs["name"] = name
-    if not attrs:
+        tag = soup.find("meta", property=property_name)
+    elif name:
+        tag = soup.find("meta", attrs={"name": lambda value: value == name})
+    else:
         return None
-    tag = soup.find("meta", attrs=attrs)
     if isinstance(tag, Tag):
         return _first_non_empty(tag.get("content"))
     return None
@@ -281,7 +279,10 @@ def _is_show_relevant_news_item(
 ) -> bool:
     article_url = item.get("article_url") if isinstance(item.get("article_url"), str) else ""
     headline = item.get("headline") if isinstance(item.get("headline"), str) else ""
-    path = urlparse(article_url).path.lower()
+    parsed_path = urlparse(article_url).path
+    path = (
+        parsed_path.lower() if isinstance(parsed_path, str) else parsed_path.decode("utf-8", errors="replace").lower()
+    )
     searchable = f"{headline} {article_url}".lower()
 
     show_slug = _show_slug_from_url(show_url)
@@ -656,7 +657,7 @@ def _collect_video_items(soup: BeautifulSoup, base_url: str) -> list[dict[str, A
             continue
 
         kicker = _first_non_empty(
-            _extract_text(card.find(attrs={"class": re.compile("kicker|eyebrow", re.IGNORECASE)})),
+            _extract_text(card.find(None, attrs={"class": re.compile("kicker|eyebrow", re.IGNORECASE)})),
             _extract_text(card.find("p")),
         )
 
@@ -713,7 +714,7 @@ def _collect_video_items(soup: BeautifulSoup, base_url: str) -> list[dict[str, A
         kicker = None
         if isinstance(card, Tag):
             kicker = _first_non_empty(
-                _extract_text(card.find(attrs={"class": re.compile("kicker|eyebrow", re.IGNORECASE)})),
+                _extract_text(card.find(None, attrs={"class": re.compile("kicker|eyebrow", re.IGNORECASE)})),
                 _extract_text(card.find("p")),
             )
 

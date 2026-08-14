@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 NORMALIZER_VERSION = "instagram-post-normalizer-v1"
 
@@ -384,9 +384,9 @@ def _extract_permalink(node: dict[str, Any], shortcode: str | None) -> str | Non
 
 
 def _extract_owner(node: dict[str, Any], *, account_handle: str | None) -> InstagramUser | None:
-    owner = node.get("owner") if isinstance(node.get("owner"), dict) else {}
-    user = node.get("user") if isinstance(node.get("user"), dict) else {}
-    user_hd_pic = user.get("hd_profile_pic_url_info") if isinstance(user.get("hd_profile_pic_url_info"), dict) else {}
+    owner = _as_mapping(node.get("owner"))
+    user = _as_mapping(node.get("user"))
+    user_hd_pic = _as_mapping(user.get("hd_profile_pic_url_info"))
     username = _string_or_none(
         _first_value(node, "ownerUsername", "owner_username") or owner.get("username") or user.get("username")
     )
@@ -477,7 +477,7 @@ def _extract_hashtags(node: dict[str, Any], caption: str) -> list[str]:
             normalized = _normalize_hashtag(raw)
             if normalized:
                 tags.append(normalized)
-    tags.extend(_normalize_hashtag(match) for match in _HASHTAG_RE.findall(caption or ""))
+    tags.extend(tag for match in _HASHTAG_RE.findall(caption or "") if (tag := _normalize_hashtag(match)))
     return _dedupe([tag for tag in tags if tag])
 
 
@@ -490,7 +490,7 @@ def _extract_mentions(node: dict[str, Any], caption: str) -> list[str]:
             normalized = _normalize_mention(raw)
             if normalized:
                 mentions.append(normalized)
-    mentions.extend(_normalize_mention(match) for match in _MENTION_RE.findall(caption or ""))
+    mentions.extend(mention for match in _MENTION_RE.findall(caption or "") if (mention := _normalize_mention(match)))
     return _dedupe([mention for mention in mentions if mention])
 
 
@@ -521,8 +521,8 @@ def _extract_tagged_users(node: dict[str, Any]) -> list[InstagramTaggedUser]:
         )
 
     for edge in _edges(node.get("edge_media_to_tagged_user")):
-        edge_node = edge.get("node") if isinstance(edge.get("node"), dict) else {}
-        user = edge_node.get("user") if isinstance(edge_node.get("user"), dict) else {}
+        edge_node = _as_mapping(edge.get("node"))
+        user = _as_mapping(edge_node.get("user"))
         add_user(user, _extract_position(edge_node, edge, source_prefix="graphql"))
 
     usertags = node.get("usertags")
@@ -530,7 +530,7 @@ def _extract_tagged_users(node: dict[str, Any]) -> list[InstagramTaggedUser]:
         for item in usertags.get("in") or []:
             if not isinstance(item, dict):
                 continue
-            user = item.get("user") if isinstance(item.get("user"), dict) else {}
+            user = _as_mapping(item.get("user"))
             add_user(user, _extract_position(item, source_prefix="rest_usertags"))
 
     tagged_users = node.get("taggedUsers")
@@ -538,7 +538,8 @@ def _extract_tagged_users(node: dict[str, Any]) -> list[InstagramTaggedUser]:
         for item in tagged_users:
             if not isinstance(item, dict):
                 continue
-            user = item.get("user") if isinstance(item.get("user"), dict) else item
+            raw_user = item.get("user")
+            user = _as_mapping(raw_user) if isinstance(raw_user, dict) else item
             add_user(user, _extract_position(item, source_prefix="apify_tagged_users"))
 
     # Phase 3.4: also read users_in_photo (alt REST shape) and any nested
@@ -550,7 +551,8 @@ def _extract_tagged_users(node: dict[str, Any]) -> list[InstagramTaggedUser]:
         for item in users_in_photo:
             if not isinstance(item, dict):
                 continue
-            user = item.get("user") if isinstance(item.get("user"), dict) else item
+            raw_user = item.get("user")
+            user = _as_mapping(raw_user) if isinstance(raw_user, dict) else item
             add_user(user, _extract_position(item, source_prefix="rest_users_in_photo"))
 
     image_versions2 = node.get("image_versions2")
@@ -566,7 +568,7 @@ def _extract_tagged_users(node: dict[str, Any]) -> list[InstagramTaggedUser]:
                 for item in candidate_usertags.get("in") or []:
                     if not isinstance(item, dict):
                         continue
-                    user = item.get("user") if isinstance(item.get("user"), dict) else {}
+                    user = _as_mapping(item.get("user"))
                     add_user(user, _extract_position(item, source_prefix="rest_image_versions2_usertags"))
 
     return tagged
@@ -593,7 +595,8 @@ def _extract_collaborators(node: dict[str, Any]) -> list[InstagramUser]:
                 username = _normalize_handle(value)
                 user: dict[str, Any] = {"username": username} if username else {}
             else:
-                user = value.get("user") if isinstance(value.get("user"), dict) else value
+                raw_user = value.get("user")
+                user = _as_mapping(raw_user) if isinstance(raw_user, dict) else value
             username = _normalize_handle(user.get("username"))
             if not username or username.lower() in seen:
                 continue
@@ -748,7 +751,7 @@ def _extract_child_posts(node: dict[str, Any]) -> list[InstagramChildPost]:
 
     sidecar = node.get("edge_sidecar_to_children")
     for index, edge in enumerate(_edges(sidecar)):
-        child = edge.get("node") if isinstance(edge.get("node"), dict) else {}
+        child = _as_mapping(edge.get("node"))
         children.append(_normalize_child_post(child, index))
     return children
 
@@ -844,7 +847,7 @@ def _determine_media_type(node: dict[str, Any]) -> str | None:
 
 
 def _extract_location(node: dict[str, Any]) -> InstagramLocation | None:
-    raw_location = node.get("location") if isinstance(node.get("location"), dict) else {}
+    raw_location = _as_mapping(node.get("location"))
     location_id = _string_or_none(
         _first_value(node, "locationId", "location_id") or raw_location.get("id") or raw_location.get("pk")
     )
@@ -980,8 +983,8 @@ def _extract_inline_comment_samples(node: dict[str, Any]) -> list[InstagramComme
 
 
 def _extract_comment_author(payload: dict[str, Any]) -> InstagramCommentAuthor:
-    owner = payload.get("owner") if isinstance(payload.get("owner"), dict) else {}
-    user = payload.get("user") if isinstance(payload.get("user"), dict) else {}
+    owner = _as_mapping(payload.get("owner"))
+    user = _as_mapping(payload.get("user"))
     return InstagramCommentAuthor(
         username=_string_or_none(
             _first_value(payload, "ownerUsername", "owner_username") or owner.get("username") or user.get("username")
@@ -1092,6 +1095,10 @@ def _first_value(mapping: dict[str, Any], *keys: str) -> Any:
 
 def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
+
+
+def _as_mapping(value: Any) -> dict[str, Any]:
+    return cast(dict[str, Any], value) if isinstance(value, dict) else {}
 
 
 def _string_or_none(value: Any) -> str | None:

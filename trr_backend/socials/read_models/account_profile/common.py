@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from trr_backend.socials.provider_registry import (
     LateNamespaceProvider,
@@ -17,6 +17,321 @@ from trr_backend.socials.read_models.account_profile.comment_breakdown import (
     instagram_facebook_comment_count_from_row,
     instagram_facebook_crosspost_payload_from_row,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+    from datetime import UTC, datetime, timedelta
+    from typing import Literal, TypeAlias
+
+    from psycopg2 import errors as psycopg_errors
+
+    from trr_backend.db import pg
+
+    SocialAccountProfileSummaryDetail: TypeAlias = Literal["full", "distribution", "lite"]
+    CATALOG_SUPPORTED_PLATFORMS: tuple[str, ...]
+    _SOCIAL_ACCOUNT_PROFILE_MAX_PAGE_SIZE: int
+    _SOCIAL_ACCOUNT_PROFILE_SUMMARY_ANALYSIS_LIMIT: int
+
+    def _normalize_social_account_profile_handle_term(value: Any) -> str: ...
+
+    def _social_account_profile_exact_jsonb_term_sql(array_exprs: Sequence[str], *, term_sql: str) -> str: ...
+
+    def _normalize_social_account_profile_hashtag_term(value: Any) -> str: ...
+
+    def _relation_exists(qualified_name: str, *, conn: Any | None = None) -> bool: ...
+
+    def _normalize_social_account_profile_platform(platform: Any) -> str: ...
+
+    def _social_account_profile_base_query_parts(platform: str) -> tuple[str, str, str]: ...
+
+    def _normalize_social_account_profile_handle(account_handle: Any) -> str: ...
+
+    def _comments_only_profile_order_by_sql(
+        *, sort_by: str | None, sort_dir: str | None, missing_comments_sql: str | None = None
+    ) -> str: ...
+
+    def _social_account_profile_owner_match_sql(platform: str, *, alias: str = "p") -> str: ...
+
+    def _comment_lifecycle_supported(table: str, *, conn: Any | None = None) -> bool: ...
+
+    def _normalize_non_negative_int(value: Any) -> int: ...
+
+    def _instagram_reported_comments_sql(alias: str = "p") -> str: ...
+
+    def _instagram_catalog_collaborator_membership_available(*, conn: Any | None = None) -> bool: ...
+
+    def _instagram_payload_sidecar_sql(*, row_kind: str, row_alias: str, mode: str) -> tuple[str, str]: ...
+
+    def _log_instagram_payload_schema_unavailable(*, surface: str, entity_identity: Any) -> None: ...
+
+    def _instagram_payload_rows_for_read(
+        rows: Sequence[Mapping[str, Any]], *, row_kind: str, mode: str, surface: str
+    ) -> list[dict[str, Any]]: ...
+
+    def _normalize_social_account_profile_post_sort_by(value: str | None) -> str: ...
+
+    def _normalize_social_account_profile_post_sort_dir(value: str | None) -> str: ...
+
+    def _social_account_profile_row_datetime(value: Any) -> datetime | None: ...
+
+    def _normalize_social_account_profile_summary_detail(detail: str | None) -> SocialAccountProfileSummaryDetail: ...
+
+    def _social_account_profile_summary_connection(label: str) -> Any: ...
+
+    def _social_profile_perf_span(breakdown: dict[str, float], key: str) -> Any: ...
+
+    def _call_profile_summary_loader_with_conn(
+        loader: Callable[..., Any], /, *args: Any, conn: Any | None = None, **kwargs: Any
+    ) -> Any: ...
+
+    def _assert_social_account_profile_exists(
+        platform: str, account_handle: str, *, conn: Any | None = None
+    ) -> list[dict[str, Any]]: ...
+
+    def _timed_social_account_profile_summary_query(
+        *,
+        platform: str,
+        account_handle: str,
+        query_name: str,
+        loader: Callable[[], Any],
+        fallback: Callable[[Exception], Any] | None = None,
+    ) -> Any: ...
+
+    def _shared_catalog_grouped_counts(
+        platform: str,
+        account_handle: str,
+        *,
+        group_by: Literal["show", "season"],
+        conn: Any | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+    def _social_account_profile_grouped_counts(
+        platform: str, account_handle: str, *, group_by: Literal["show", "season"]
+    ) -> list[dict[str, Any]]: ...
+
+    def _social_account_profile_analysis_rows(
+        platform: str,
+        account_handle: str,
+        *,
+        limit: int | None = None,
+        posted_since: datetime | None = None,
+        conn: Any | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+    def _social_account_profile_summary_totals_from_rows(
+        platform: str, account_handle: str, rows: Sequence[Mapping[str, Any]]
+    ) -> dict[str, Any]: ...
+
+    def _social_account_comments_recent_runs(
+        platform: str, account_handle: str, *, limit: int = 3, conn: Any | None = None
+    ) -> list[dict[str, Any]]: ...
+
+    def _instagram_social_account_comments_target_counts(*args: Any, **kwargs: Any) -> Any: ...
+
+    def _fetch_social_account_profile_assignment_rows(
+        platform: str,
+        account_handle: str,
+        *,
+        include_all_platform_scopes: bool = False,
+        conn: Any | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+    def _shared_catalog_summary_totals(
+        platform: str, account_handle: str, *, conn: Any | None = None
+    ) -> dict[str, Any]: ...
+
+    def _catalog_recent_runs_header(
+        platform: str, account_handle: str, *, limit: int = 3, conn: Any | None = None
+    ) -> list[dict[str, Any]]: ...
+
+    def _catalog_recent_runs(
+        platform: str,
+        account_handle: str,
+        *,
+        limit: int = 10,
+        conn: Any | None = None,
+        auto_recover_pending: bool = True,
+    ) -> list[dict[str, Any]]: ...
+
+    def _instagram_social_account_lite_header_stats(
+        account_handle: str, *, conn: Any | None = None
+    ) -> dict[str, Any]: ...
+
+    def _tiktok_social_account_lite_header_stats(account_handle: str, *, conn: Any | None = None) -> dict[str, Any]: ...
+
+    def _instagram_social_account_detail_rollup(account_handle: str, *, conn: Any | None = None) -> dict[str, Any]: ...
+
+    def _lite_social_account_catalog_run(row: Mapping[str, Any]) -> dict[str, Any]: ...
+
+    def _instagram_comments_saved_summary_from_detail_rollup(detail_rollup: Mapping[str, Any]) -> dict[str, int]: ...
+
+    def _status_is_active(status: str | None) -> bool: ...
+
+    def _resolve_social_account_comments_coverage_status(
+        coverage: Mapping[str, Any] | None,
+        *,
+        recent_runs: Sequence[Mapping[str, Any]] | None,
+        comments_saved_summary: Mapping[str, Any] | None,
+        active_run: Mapping[str, Any] | None,
+    ) -> dict[str, Any] | None: ...
+
+    def _instagram_media_coverage_from_detail_rollup(detail_rollup: Mapping[str, Any]) -> dict[str, int]: ...
+
+    def _merge_social_account_profile_summary_totals(
+        totals: Mapping[str, Any] | None, fallback_totals: Mapping[str, Any]
+    ) -> dict[str, Any]: ...
+
+    def _social_account_profile_summary_totals(
+        platform: str, account_handle: str, *, conn: Any | None = None
+    ) -> dict[str, Any]: ...
+
+    def _build_social_account_profile_hashtag_items(
+        rows: list[dict[str, Any]],
+        *,
+        platform: str,
+        account_handle: str,
+        assignment_rows: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+    def _social_account_profile_grouped_counts_from_rows(
+        platform: str, account_handle: str, rows: Sequence[Mapping[str, Any]]
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]: ...
+
+    def _social_account_profile_hashtag_items(
+        platform: str,
+        account_handle: str,
+        *,
+        assignment_rows: list[dict[str, Any]] | None = None,
+        lookback_days: int | None = None,
+        limit: int | None = None,
+        rows: Sequence[Mapping[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+    def _serialize_social_account_profile_post_buckets(
+        rows: list[dict[str, Any]], platform: str, *, account_handle: str
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]: ...
+
+    def _build_social_account_profile_entity_aggregates(
+        rows: list[dict[str, Any]], *, platform: str, account_handle: str
+    ) -> dict[str, list[dict[str, Any]]]: ...
+
+    def _social_account_profile_optional_identity_fields(
+        platform: str,
+        account_handle: str,
+        *,
+        source_rows: Sequence[Mapping[str, Any]],
+        analysis_rows: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]: ...
+
+    def _first_non_empty_str(*values: Any) -> str | None: ...
+
+    def _platform_profile_url_for_handle(platform: str, handle: Any) -> str | None: ...
+
+    def _social_account_profile_avatar_url(
+        platform: str, account_handle: str, rows: list[dict[str, Any]], *, conn: Any | None = None
+    ) -> str | None: ...
+
+    def _metadata_dict(value: Any) -> dict[str, Any]: ...
+
+    def _shared_profile_contract(
+        *,
+        source_scope: str,
+        platform: str,
+        account_handle: str,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]: ...
+
+    def _historical_catalog_expected_total_posts(platform: str, account_handle: str, *, limit: int = 10) -> int: ...
+
+    def _log_social_profile_perf(*, route: str, platform: str, handle: str, breakdown: Mapping[str, float]) -> None: ...
+
+    def _normalize_social_account_profile_comment_filter(value: str | None) -> str | None: ...
+
+    def _fetch_instagram_comments_only_profile_rows_page(
+        account_handle: str,
+        *,
+        page: int,
+        page_size: int,
+        search: str | None = None,
+        comment_filter: str | None = None,
+        sort_by: str | None = None,
+        sort_dir: str | None = None,
+        conn: Any | None = None,
+    ) -> tuple[list[dict[str, Any]], int]: ...
+
+    def _instagram_social_account_profile_dataset_rows(
+        account_handle: str,
+        *,
+        search: str | None = None,
+        limit: int | None = None,
+        posted_since: datetime | None = None,
+        collaborator_posted_since: datetime | None = None,
+        conn: Any | None = None,
+        comments_only: bool = False,
+        sort_by: str | None = None,
+        sort_dir: str | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+    def _social_account_profile_total_posts(
+        platform: str, account_handle: str, *, search: str | None = None, conn: Any | None = None
+    ) -> int: ...
+
+    def _fetch_social_account_profile_rows(
+        platform: str,
+        account_handle: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+        search: str | None = None,
+        projection: Literal["detail", "summary"] = "detail",
+        posted_since: datetime | None = None,
+        conn: Any | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+    def _build_social_account_profile_known_handle_identity_index(
+        platform: str, rows: Sequence[Mapping[str, Any]]
+    ) -> dict[str, set[str]]: ...
+
+    def _fetch_shared_catalog_rows(
+        platform: str,
+        account_handle: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+        statuses: list[str] | None = None,
+        source_ids: list[str] | None = None,
+        conn: Any | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+    def get_post_comments(*args: Any, **kwargs: Any) -> Any: ...
+
+    def _social_account_profile_post_url(
+        platform: str, row: Mapping[str, Any], *, account_handle: str
+    ) -> str | None: ...
+
+    def _social_discussion_items_from_post_detail(
+        platform: str,
+        detail_payload: Mapping[str, Any],
+        *,
+        post_id: str | None = None,
+        post_source_id: str | None = None,
+        post_url: str | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+    def _instagram_external_facebook_comments_sql(
+        alias: str = "p", *, fb_comment_count_expr: str | None = None
+    ) -> str: ...
+
+    def _format_instagram_profile_comment_row(row: Mapping[str, Any]) -> dict[str, Any]: ...
+
+    def _social_account_profile_window_to_lookback_days(window: str | None) -> int | None: ...
+
+    def _now_utc() -> datetime: ...
+
+    def _fetch_instagram_social_account_profile_entity_rows(
+        account_handle: str, *, posted_since: datetime | None = None, conn: Any | None = None
+    ) -> list[dict[str, Any]]: ...
+
 
 _IMPORTED_CORE_NAMES: set[str] = set()
 _LOCAL_ROOM_NAMES: set[str] = set()

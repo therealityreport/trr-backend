@@ -17,10 +17,11 @@ import os
 import re
 import socket
 import uuid
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import requests
@@ -445,9 +446,11 @@ def _candidate_width(url: str, descriptor: str | None) -> int:
     return url_score
 
 
-def _pick_best_url(srcset: str | None, src: str | None) -> tuple[str | None, int]:
+def _pick_best_url(srcset: object | None, src: object | None) -> tuple[str | None, int]:
     """Select the highest resolution URL from srcset or fall back to src."""
-    candidates = _parse_srcset(srcset or "")
+    srcset_text = srcset if isinstance(srcset, str) else ""
+    src_text = src if isinstance(src, str) else None
+    candidates = _parse_srcset(srcset_text)
 
     if candidates:
         scored: list[tuple[int, str]] = []
@@ -459,15 +462,15 @@ def _pick_best_url(srcset: str | None, src: str | None) -> tuple[str | None, int
             return scored[0][1], scored[0][0]
         return candidates[-1][0], 0
 
-    if src:
-        return src, _extract_width_from_url(src)
+    if src_text:
+        return src_text, _extract_width_from_url(src_text)
 
     return None, 0
 
 
-def _normalize_url(url: str | None, base_url: str) -> str | None:
+def _normalize_url(url: object | None, base_url: str) -> str | None:
     """Normalize a URL, handling protocol-relative and relative URLs."""
-    if not url:
+    if not isinstance(url, str) or not url:
         return None
 
     trimmed = url.strip()
@@ -725,9 +728,9 @@ def _get_nearby_text(element) -> str | None:
     return None
 
 
-def _normalize_text(value: str | None) -> str:
+def _normalize_text(value: object | None) -> str:
     """Collapse whitespace for stable context text."""
-    if not value:
+    if not isinstance(value, str) or not value:
         return ""
     return re.sub(r"\s+", " ", value).strip()
 
@@ -1111,9 +1114,7 @@ def extract_images_from_html(
         seen_urls.add(best_url)
 
         # Extract metadata
-        alt_text = img.get("alt") or img.get("title")
-        if alt_text:
-            alt_text = str(alt_text).strip()[:200]
+        alt_text = _normalize_text(img.get("alt") or img.get("title"))[:200] or None
 
         context = _get_nearby_text(img)
 
@@ -1124,8 +1125,8 @@ def extract_images_from_html(
         # Parse width/height attributes
         attr_width = img.get("width")
         attr_height = img.get("height")
-        parsed_width = int(attr_width) if attr_width and str(attr_width).isdigit() else None
-        parsed_height = int(attr_height) if attr_height and str(attr_height).isdigit() else None
+        parsed_width = int(str(attr_width)) if attr_width and str(attr_width).isdigit() else None
+        parsed_height = int(str(attr_height)) if attr_height and str(attr_height).isdigit() else None
 
         # Use extracted width if available, else attribute
         final_width = width if width > 0 else parsed_width
@@ -1188,9 +1189,7 @@ def extract_images_from_html(
 
         alt_text = None
         if img:
-            alt_text = img.get("alt") or img.get("title")
-            if alt_text:
-                alt_text = str(alt_text).strip()[:200]
+            alt_text = _normalize_text(img.get("alt") or img.get("title"))[:200] or None
 
         context = _get_nearby_text(picture)
 
@@ -1214,7 +1213,7 @@ def extract_images_from_html(
     # Extract Pinterest share-link media URLs (common on galleries like E! Online)
     for link in soup.find_all("a", href=True):
         href = link.get("href")
-        if not href:
+        if not isinstance(href, str) or not href:
             continue
 
         is_pinterest_button = link.get("data-pin-do") == "buttonPin" or "pinterest.com/pin/create/button" in href
@@ -1442,7 +1441,7 @@ def download_and_hash_image(
         size_bytes = 0
         iter_content = getattr(resp, "iter_content", None)
         if callable(iter_content):
-            for chunk in iter_content(chunk_size=_IMAGE_DOWNLOAD_CHUNK_SIZE_BYTES):
+            for chunk in cast(Iterable[bytes], iter_content(chunk_size=_IMAGE_DOWNLOAD_CHUNK_SIZE_BYTES)):
                 if not chunk:
                     continue
                 size_bytes += len(chunk)
@@ -1473,4 +1472,4 @@ def download_and_hash_image(
 
     sha256 = hashlib.sha256(data).hexdigest()
 
-    return data, sha256, content_type
+    return data, sha256, sniffed_content_type

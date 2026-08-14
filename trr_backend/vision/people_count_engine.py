@@ -83,7 +83,8 @@ def _lazy_numpy():
 
 def _lazy_cv2():
     try:
-        import cv2
+        # OpenCV is installed only in the dedicated vision runtime.
+        import cv2  # pyright: ignore[reportMissingImports]
     except Exception as exc:  # noqa: BLE001
         raise VisionEngineUnavailableError(
             "Vision runtime is missing OpenCV; use the dedicated Modal vision worker.",

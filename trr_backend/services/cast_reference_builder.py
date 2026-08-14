@@ -33,7 +33,8 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _lazy_cv2():
-    import cv2
+    # OpenCV is installed only in the dedicated vision runtime.
+    import cv2  # pyright: ignore[reportMissingImports]
 
     return cv2
 
