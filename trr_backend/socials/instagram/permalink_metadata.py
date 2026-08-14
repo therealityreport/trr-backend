@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from html import unescape
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
@@ -150,6 +150,18 @@ def _normalize_unique(values: list[str]) -> list[str]:
         seen.add(key)
         out.append(value)
     return out
+
+
+def _as_mapping(value: Any) -> dict[str, Any]:
+    return cast(dict[str, Any], value) if isinstance(value, dict) else {}
+
+
+def _decode_metadata_mapping(value: Any) -> dict[str, Any]:
+    mapping = _as_mapping(value)
+    return {
+        key.decode("utf-8", errors="replace") if isinstance(key, bytes) else str(key): item
+        for key, item in mapping.items()
+    }
 
 
 def _coerce_non_negative_int(value: Any) -> int | None:
@@ -454,8 +466,8 @@ def _facebook_crosspost_metadata_from_media(
     comments_count = _coerce_non_negative_int(media.get("fb_comment_count"))
     likes_count = _coerce_non_negative_int(media.get("fb_like_count"))
     is_shared_to_fb = _coerce_optional_bool(media.get("is_shared_to_fb"))
-    crosspost_metadata = media.get("crosspost_metadata") if isinstance(media.get("crosspost_metadata"), dict) else {}
-    social_context = media.get("social_context") if isinstance(media.get("social_context"), dict) else {}
+    crosspost_metadata = _decode_metadata_mapping(media.get("crosspost_metadata"))
+    social_context = _decode_metadata_mapping(media.get("social_context"))
     has_field = (
         comments_count is not None
         or likes_count is not None
@@ -675,7 +687,7 @@ def _extract_collaborators_detail(media: dict[str, Any]) -> list[dict[str, Any]]
         for item in values:
             if not isinstance(item, dict):
                 continue
-            user = item if "username" in item else (item.get("user") if isinstance(item.get("user"), dict) else {})
+            user = _as_mapping(item) if "username" in item else _as_mapping(item.get("user"))
             username = str(user.get("username") or "").strip()
             if not username or username.lower() in seen:
                 continue
@@ -701,15 +713,15 @@ def _extract_child_posts_data(media: dict[str, Any]) -> list[dict[str, Any]]:
     for index, item in enumerate(carousel_media):
         if not isinstance(item, dict):
             continue
+        original_width = item.get("original_width")
+        original_height = item.get("original_height")
         child = {
             "slide_index": index,
             "type": "Video" if _best_video_url(item) else "Image",
             "display_url": _best_image_url(item),
             "video_url": _best_video_url(item),
-            "width": int(item.get("original_width")) if isinstance(item.get("original_width"), (int, float)) else None,
-            "height": (
-                int(item.get("original_height")) if isinstance(item.get("original_height"), (int, float)) else None
-            ),
+            "width": int(original_width) if isinstance(original_width, (int, float)) else None,
+            "height": int(original_height) if isinstance(original_height, (int, float)) else None,
             "alt": str(item.get("accessibility_caption") or "").strip() or None,
             "tagged_users_detail": _extract_tagged_users_detail(item),
         }
@@ -1068,7 +1080,7 @@ def _graphql_extract_collaborators_detail(node: dict[str, Any]) -> list[dict[str
         for item in values:
             if not isinstance(item, dict):
                 continue
-            user = item if "username" in item else (item.get("user") if isinstance(item.get("user"), dict) else {})
+            user = _as_mapping(item) if "username" in item else _as_mapping(item.get("user"))
             username = str(user.get("username") or "").strip()
             if not username or username.lower() in seen:
                 continue
