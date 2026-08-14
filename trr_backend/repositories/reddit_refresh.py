@@ -2657,9 +2657,7 @@ def get_cached_period_payload(*, community_id: str, season_id: str, period_key: 
             if isinstance(result_payload.get("successful_sorts"), list)
             else ["new"]
         ),
-        "failed_sorts": (
-            _list_value(result_payload.get("failed_sorts"))
-        ),
+        "failed_sorts": (_list_value(result_payload.get("failed_sorts"))),
         "rate_limited_sorts": (
             result_payload.get("rate_limited_sorts")
             if isinstance(result_payload.get("rate_limited_sorts"), list)

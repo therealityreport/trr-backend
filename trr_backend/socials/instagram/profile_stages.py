@@ -25,6 +25,7 @@ from trr_backend.socials.post_persist_truthfulness import (
 from trr_backend.socials.source_scopes import normalize_source_scope
 
 if TYPE_CHECKING:
+
     def _adapt_payload_json_values(payload: Mapping[str, Any]) -> dict[str, Any]: ...
 
     def _coerce_dt(value: Any) -> datetime | None: ...
@@ -69,6 +70,7 @@ if TYPE_CHECKING:
         last_classified_at: datetime | None = None,
         metadata_updates: Mapping[str, Any] | None = None,
     ) -> None: ...
+
 
 logger = logging.getLogger(__name__)
 INSTAGRAM_PROFILE_SNAPSHOT_STAGE = "instagram_profile_snapshot"
@@ -363,7 +365,9 @@ def _instagram_following_rows_from_payload(
     source_page_ordinal: int,
     starting_rank: int,
 ) -> tuple[list[dict[str, Any]], str | None, bool]:
-    raw_rows = _profile_payload_rows(payload.get("users") if isinstance(payload.get("users"), list) else payload.get("items"))
+    raw_rows = _profile_payload_rows(
+        payload.get("users") if isinstance(payload.get("users"), list) else payload.get("items")
+    )
     rows: list[dict[str, Any]] = []
     for index, raw_row in enumerate(raw_rows):
         if not isinstance(raw_row, Mapping):

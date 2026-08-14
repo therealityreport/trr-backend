@@ -490,9 +490,7 @@ def _extract_mentions(node: dict[str, Any], caption: str) -> list[str]:
             normalized = _normalize_mention(raw)
             if normalized:
                 mentions.append(normalized)
-    mentions.extend(
-        mention for match in _MENTION_RE.findall(caption or "") if (mention := _normalize_mention(match))
-    )
+    mentions.extend(mention for match in _MENTION_RE.findall(caption or "") if (mention := _normalize_mention(match)))
     return _dedupe([mention for mention in mentions if mention])
 
 

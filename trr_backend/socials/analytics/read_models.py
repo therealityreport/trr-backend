@@ -24,9 +24,7 @@ if TYPE_CHECKING:
     from trr_backend.socials.instagram.constants import instagram_post_permalink
     from trr_backend.socials.model_types import SeasonContext, SentimentAnalyzerContext, WeekWindow
 
-    WeekDetailSortField = Literal[
-        "engagement", "likes", "views", "comments_count", "shares", "retweets", "posted_at"
-    ]
+    WeekDetailSortField = Literal["engagement", "likes", "views", "comments_count", "shares", "retweets", "posted_at"]
     WeekDetailSortDir = Literal["asc", "desc"]
 
     class IngestTimeShard(Protocol):
@@ -138,9 +136,7 @@ if TYPE_CHECKING:
 
     def _comment_lifecycle_supported(table: str, *, conn: Any | None = None) -> bool: ...
 
-    def _safe_percent(
-        numerator: int | float, denominator: int | float, *, precision: int = 1
-    ) -> float | None: ...
+    def _safe_percent(numerator: int | float, denominator: int | float, *, precision: int = 1) -> float | None: ...
 
     def _median_int(values: list[int]) -> int: ...
 
@@ -478,6 +474,7 @@ if TYPE_CHECKING:
         post_hashtags: list[str] | None = None,
     ) -> bool: ...
 
+
 _IMPORTED_CORE_NAMES: set[str] = set()
 _LOCAL_ROOM_NAMES: set[str] = set()
 _PROVIDER_BRIDGE_NAMES = {
@@ -513,6 +510,7 @@ _PROVIDER = LateNamespaceProvider(
     bridge_names=_PROVIDER_BRIDGE_NAMES,
 )
 _require_provider_ready = _PROVIDER.require
+
 
 def _publish_provider_bridges() -> None:
     for provider_bridge_name in _PROVIDER_BRIDGE_NAMES:

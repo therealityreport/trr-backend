@@ -88,9 +88,7 @@ if TYPE_CHECKING:
         normalized_account: str,
     ) -> bool: ...
 
-    def _catalog_launch_finalizing_is_stale(
-        run_config: Mapping[str, Any], *, now: datetime | None = None
-    ) -> bool: ...
+    def _catalog_launch_finalizing_is_stale(run_config: Mapping[str, Any], *, now: datetime | None = None) -> bool: ...
 
     def _catalog_launch_task_resolution_pending(value: Any) -> bool: ...
 
@@ -209,13 +207,9 @@ if TYPE_CHECKING:
         config: Mapping[str, Any] | None, *, platform: Any, account_handle: Any
     ) -> int: ...
 
-    def _shared_account_frontier_progress(
-        *, run_id: str, platform: str, account_handle: str
-    ) -> dict[str, Any]: ...
+    def _shared_account_frontier_progress(*, run_id: str, platform: str, account_handle: str) -> dict[str, Any]: ...
 
-    def _shared_account_partition_progress(
-        *, run_id: str, platform: str, account_handle: str
-    ) -> dict[str, Any]: ...
+    def _shared_account_partition_progress(*, run_id: str, platform: str, account_handle: str) -> dict[str, Any]: ...
 
     def _shared_account_recovery_payload(
         *, job_rows: Sequence[Mapping[str, Any]], now: datetime
@@ -272,6 +266,7 @@ if TYPE_CHECKING:
         account_handle: str | None = None,
         limit: int = 50,
     ) -> list[dict[str, Any]]: ...
+
 
 _IMPORTED_CORE_NAMES: set[str] = set()
 _LOCAL_ROOM_NAMES: set[str] = set()
