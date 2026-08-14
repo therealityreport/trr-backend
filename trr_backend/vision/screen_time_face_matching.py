@@ -101,7 +101,8 @@ def get_deepface_runtime() -> Any | None:
         return None
 
     try:
-        from deepface import DeepFace
+        # DeepFace is installed only in the dedicated vision runtime.
+        from deepface import DeepFace  # pyright: ignore[reportMissingImports]
     except Exception as exc:  # noqa: BLE001
         _deepface_last_error = str(exc)
         return None
