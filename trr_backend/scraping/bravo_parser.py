@@ -280,7 +280,9 @@ def _is_show_relevant_news_item(
     article_url = item.get("article_url") if isinstance(item.get("article_url"), str) else ""
     headline = item.get("headline") if isinstance(item.get("headline"), str) else ""
     parsed_path = urlparse(article_url).path
-    path = parsed_path.lower() if isinstance(parsed_path, str) else parsed_path.decode("utf-8", errors="replace").lower()
+    path = (
+        parsed_path.lower() if isinstance(parsed_path, str) else parsed_path.decode("utf-8", errors="replace").lower()
+    )
     searchable = f"{headline} {article_url}".lower()
 
     show_slug = _show_slug_from_url(show_url)

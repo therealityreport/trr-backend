@@ -12,7 +12,7 @@ import shutil
 import socket
 import subprocess
 import tempfile
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -933,8 +933,11 @@ def _derive_alpha_mask_from_opaque_logo(image):
 
     bg_img = Image.new("RGB", rgb.size, bg)
     diff = ImageChops.difference(rgb, bg_img).convert("L")
+
     # Start with a strict threshold; relax later via luminance fallback if needed.
-    threshold_alpha: Callable[[int], float] = lambda px: 255 if px > 18 else 0
+    def threshold_alpha(px: int) -> float:
+        return 255 if px > 18 else 0
+
     alpha = diff.point(threshold_alpha)
     alpha = alpha.filter(ImageFilter.MedianFilter(size=3))
 
