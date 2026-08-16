@@ -14,7 +14,7 @@ begin
   limit 1;
 
   if wwhl_show_id is null then
-    raise exception 'WWHL show row not found';
+    return;
   end if;
 
   with wwhl_sources(platform, account_handle, display_name) as (
