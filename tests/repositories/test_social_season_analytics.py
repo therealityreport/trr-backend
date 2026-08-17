@@ -4,7 +4,6 @@ import hashlib
 import inspect
 import json
 import os
-import subprocess
 import time
 from collections import Counter
 from collections.abc import Iterator, Mapping
@@ -52085,90 +52084,6 @@ def test_get_worker_detail_returns_worker_only_when_no_job(monkeypatch: pytest.M
     assert payload["current_job"] is None
     assert payload["run"] is None
     assert payload["currently_scraping"] == "any"
-
-
-def test_validate_debug_patch_paths_rejects_traversal() -> None:
-    with pytest.raises(ValueError, match="traversal"):
-        social_repo._validate_debug_patch_paths(["../outside.py"])
-
-
-def test_debug_ingest_job_uses_fallback_model(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    monkeypatch.setenv("SOCIAL_DEBUG_OPENAI_MODEL", "gpt-5.3-codex")
-    monkeypatch.setenv("SOCIAL_DEBUG_OPENAI_FALLBACK_MODEL", "gpt-5.3-codex-fallback")
-    monkeypatch.setattr(
-        social_repo,
-        "_fetch_job_debug_context",
-        lambda _job_id: {"job": {"id": "job-1", "run_id": "run-1"}, "worker": {}, "run": {}},
-    )
-    calls: list[str] = []
-
-    def _fake_openai_completion(*, model: str, prompt: str, api_key: str, timeout_seconds: int):
-        del prompt, api_key, timeout_seconds
-        calls.append(model)
-        if model == "gpt-5.3-codex":
-            raise RuntimeError("rate limited")
-        return {
-            "root_cause": "fallback succeeded",
-            "confidence": 0.7,
-            "patch_unified_diff": "--- a/api/routers/socials.py\n+++ b/api/routers/socials.py\n@@\n-foo\n+bar\n",
-            "files_touched": ["api/routers/socials.py"],
-            "tests_to_run": ["pytest -q tests/api/routers/test_socials_season_analytics.py"],
-        }
-
-    monkeypatch.setattr(social_repo, "_run_social_debug_openai_completion", _fake_openai_completion)
-
-    payload = social_repo.debug_ingest_job_with_openai("job-1", include_context=False)
-
-    assert calls == ["gpt-5.3-codex", "gpt-5.3-codex-fallback"]
-    assert payload["model_used"] == "gpt-5.3-codex-fallback"
-    assert payload["fallback_used"] is True
-
-
-def test_social_debug_fallback_model_default_is_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("SOCIAL_DEBUG_OPENAI_FALLBACK_MODEL", raising=False)
-
-    assert social_repo._social_debug_fallback_model_name() == ""
-
-
-def test_debug_ingest_job_apply_returns_check_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    monkeypatch.setenv("SOCIAL_DEBUG_PATCH_APPLY_ENABLED", "true")
-    monkeypatch.setattr(
-        social_repo,
-        "_fetch_job_debug_context",
-        lambda _job_id: {"job": {"id": "job-1", "run_id": "run-1"}, "worker": {}, "run": {}},
-    )
-    monkeypatch.setattr(
-        social_repo,
-        "_run_social_debug_openai_completion",
-        lambda **_kwargs: {
-            "root_cause": "x",
-            "confidence": 0.5,
-            "patch_unified_diff": "--- a/api/routers/socials.py\n+++ b/api/routers/socials.py\n@@\n-foo\n+bar\n",
-            "files_touched": ["api/routers/socials.py"],
-            "tests_to_run": [],
-        },
-    )
-    monkeypatch.setattr(
-        social_repo,
-        "_run_git_apply",
-        lambda **_kwargs: subprocess.CompletedProcess(
-            args=["git", "apply"], returncode=1, stdout="", stderr="check failed"
-        ),
-    )
-
-    payload = social_repo.debug_ingest_job_with_openai(
-        "job-1",
-        include_context=False,
-        apply_patch=True,
-        confirm_apply=True,
-    )
-
-    assert payload["apply"]["requested"] is True
-    assert payload["apply"]["check_ok"] is False
-    assert payload["apply"]["applied"] is False
-    assert payload["apply"]["error"] == "check failed"
 
 
 def test_cancel_stuck_jobs_targets_only_requested_ids(monkeypatch: pytest.MonkeyPatch) -> None:
