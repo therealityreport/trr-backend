@@ -26,9 +26,20 @@ def _debug_completion_payload() -> dict[str, object]:
     }
 
 
-def test_validate_debug_patch_paths_rejects_traversal() -> None:
-    with pytest.raises(ValueError, match="traversal"):
-        social_debug._validate_debug_patch_paths(["../outside.py"])
+@pytest.mark.parametrize(
+    ("paths", "error_match"),
+    [
+        ([], "did not include file paths"),
+        ([""], "path is empty"),
+        (["/tmp/outside.py"], "path is absolute"),
+        (["~/outside.py"], "path is absolute"),
+        (["../outside.py"], "path contains traversal"),
+        (["unapproved/outside.py"], "path outside allowlist"),
+    ],
+)
+def test_validate_debug_patch_paths_rejects_unsafe_paths(paths: list[str], error_match: str) -> None:
+    with pytest.raises(ValueError, match=error_match):
+        social_debug._validate_debug_patch_paths(paths)
 
 
 def test_debug_ingest_job_uses_fallback_model(monkeypatch: pytest.MonkeyPatch) -> None:
