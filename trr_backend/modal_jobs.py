@@ -735,6 +735,10 @@ def _inject_modal_runtime_defaults() -> None:
             os.environ.setdefault(key, value)
         else:
             os.environ[key] = value
+    if _env_flag("TRR_PREVIEW_READ_ONLY", default=False):
+        # The isolated preview never owns queue consumers or dispatch. Keep this
+        # explicit after canonical defaults, which otherwise pin the queue on.
+        os.environ["SOCIAL_QUEUE_ENABLED"] = "false"
     if (os.getenv("OBJECT_STORAGE_ACCESS_KEY_ID") or "").strip() and (
         os.getenv("OBJECT_STORAGE_SECRET_ACCESS_KEY") or ""
     ).strip():

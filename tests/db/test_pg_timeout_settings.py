@@ -24,6 +24,7 @@ def _pool_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("TRR_DB_CONNECT_TIMEOUT_SECONDS", raising=False)
     monkeypatch.delenv("TRR_DB_STATEMENT_TIMEOUT_MS", raising=False)
     monkeypatch.delenv("TRR_DB_IDLE_IN_TRANSACTION_TIMEOUT_MS", raising=False)
+    monkeypatch.delenv("TRR_PREVIEW_READ_ONLY", raising=False)
 
 
 @pytest.fixture()
@@ -97,6 +98,43 @@ class TestStatementTimeout:
             _build_pool_for_url(TEST_DSN)
 
         assert "statement_timeout=5000" in captured_kwargs["options"]
+
+    def test_uri_options_are_merged_with_timeout_settings(self, captured_kwargs: dict) -> None:
+        """Existing libpq URI options survive the backend timeout defaults."""
+        dsn = f"{TEST_DSN}?options=-c%20lock_timeout%3D2500"
+
+        with pytest.raises(ConnectionError, match="intentional"):
+            _build_pool_for_url(dsn)
+
+        assert captured_kwargs["options"] == (
+            "-c lock_timeout=2500 "
+            f"-c idle_in_transaction_session_timeout={DEFAULT_IDLE_IN_TX_TIMEOUT_MS} "
+            f"-c statement_timeout={DEFAULT_STATEMENT_TIMEOUT_MS}"
+        )
+
+    @pytest.mark.parametrize(
+        "pool_name",
+        ("default", "social_profile", "social_control", "social_progress", "health", "session_control"),
+    )
+    def test_preview_read_only_is_applied_to_every_pool_after_uri_options(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        captured_kwargs: dict,
+        pool_name: str,
+    ) -> None:
+        """Preview mode forces read-only after preserving earlier URI options."""
+        monkeypatch.setenv("TRR_PREVIEW_READ_ONLY", "1")
+        dsn = f"{TEST_DSN}?options=-c%20default_transaction_read_only%3Doff"
+
+        with pytest.raises(ConnectionError, match="intentional"):
+            _build_pool_for_url(dsn, pool_name=pool_name)
+
+        assert captured_kwargs["options"] == (
+            "-c default_transaction_read_only=off "
+            f"-c idle_in_transaction_session_timeout={DEFAULT_IDLE_IN_TX_TIMEOUT_MS} "
+            f"-c statement_timeout={DEFAULT_STATEMENT_TIMEOUT_MS} "
+            "-c default_transaction_read_only=on"
+        )
 
 
 class TestStatementTimeoutDetection:

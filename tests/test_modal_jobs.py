@@ -373,6 +373,18 @@ def test_inject_modal_runtime_defaults_keeps_safety_clamps_pinned(
     assert os.environ["TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT"] == "4"
 
 
+def test_inject_modal_runtime_defaults_disables_social_queue_in_read_only_preview(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The explicit preview control wins over the normal Modal queue default."""
+    monkeypatch.setenv("TRR_PREVIEW_READ_ONLY", "1")
+    monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "true")
+
+    modal_jobs._inject_modal_runtime_defaults()
+
+    assert os.environ["SOCIAL_QUEUE_ENABLED"] == "false"
+
+
 def test_operator_tunable_runtime_default_keys_exist_in_canonical_defaults() -> None:
     assert modal_jobs._OPERATOR_TUNABLE_RUNTIME_DEFAULT_KEYS <= modal_jobs._CANONICAL_MODAL_RUNTIME_DEFAULTS.keys()
 

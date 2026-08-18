@@ -24,6 +24,7 @@ def _clear_runtime_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "TRR_MODAL_MAINTENANCE_OWNER_REQUIRED",
         "TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED",
         "TRR_MODAL_RUNTIME_SCHEDULER_ENABLED",
+        "TRR_PREVIEW_READ_ONLY",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -98,6 +99,26 @@ def test_validate_startup_config_rejects_deployed_runtime_without_cors_origins(
     assert api_main._cors_allow_origins_for_runtime([]) == []
     with pytest.raises(RuntimeError, match="CORS_ALLOW_ORIGINS"):
         api_main._validate_cors_config()
+
+
+def test_preview_startup_skips_modal_maintenance_owner_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The state-free preview needs no scheduler owner because it starts no scheduler."""
+    _clear_runtime_env(monkeypatch)
+    monkeypatch.setenv("TRR_LOCAL_DEV", "1")
+    monkeypatch.setenv("TRR_PREVIEW_READ_ONLY", "1")
+
+    def _unexpected_owner_validation() -> None:
+        raise AssertionError("preview must not validate a scheduler owner")
+
+    monkeypatch.setattr(api_main, "_validate_modal_maintenance_owner_config", _unexpected_owner_validation)
+    monkeypatch.setattr(api_main, "log_database_resolution_summary", lambda: None)
+    monkeypatch.setattr(
+        api_main,
+        "resolve_database_url_candidate_details",
+        lambda: ({"connection_class": "session", "source": "TRR_DB_URL"},),
+    )
+
+    api_main._validate_startup_config()
 
 
 def test_modal_runtime_scheduler_is_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:

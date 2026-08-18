@@ -23,6 +23,10 @@ from psycopg2.extras import RealDictCursor, execute_values
 from psycopg2.pool import PoolError, ThreadedConnectionPool
 
 from trr_backend.db.connection import (
+    assert_preview_connection_read_only,
+    connection_uri_options,
+    preview_read_only_connect_kwargs,
+    preview_read_only_enabled,
     resolve_database_url_candidate_details,
     resolve_session_database_url_candidate_details,
 )
@@ -343,9 +347,10 @@ def probe_fresh_session_capacity(
             sslmode = _sslmode_for_url(url)
             if sslmode:
                 connect_kwargs["sslmode"] = sslmode
-            conn = psycopg2.connect(**connect_kwargs)
+            conn = psycopg2.connect(**connect_kwargs, **preview_read_only_connect_kwargs(url))
             connections.append(conn)
             conn.autocommit = True
+            assert_preview_connection_read_only(conn, label="fresh session capacity probe")
             with conn.cursor() as cur:
                 cur.execute("select 1")
                 cur.fetchone()
@@ -565,10 +570,29 @@ def _build_pool_for_url(url: str, *, pool_name: str = "default") -> ThreadedConn
     if statement_timeout_ms > 0:
         option_parts.append(f"statement_timeout={statement_timeout_ms}")
 
-    if option_parts:
-        connect_kwargs["options"] = " ".join(f"-c {part}" for part in option_parts)
+    if preview_read_only_enabled():
+        # Keep this last so an accidental URI-level `...=off` cannot undo the
+        # explicit isolated-preview safety guard.
+        option_parts.append("default_transaction_read_only=on")
 
-    return ThreadedConnectionPool(minconn=minconn, maxconn=maxconn, **connect_kwargs)
+    options = connection_uri_options(url)
+    options.extend(f"-c {part}" for part in option_parts)
+    if options:
+        connect_kwargs["options"] = " ".join(options)
+
+    pool = ThreadedConnectionPool(minconn=minconn, maxconn=maxconn, **connect_kwargs)
+    if not preview_read_only_enabled():
+        return pool
+    try:
+        conn = pool.getconn()
+        try:
+            assert_preview_connection_read_only(conn, label=f"{pool_name} pool")
+        finally:
+            pool.putconn(conn)
+    except Exception:
+        _close_pool_quietly(pool)
+        raise
+    return pool
 
 
 def _pool_counts(pool: ThreadedConnectionPool | None) -> tuple[int | None, int | None]:

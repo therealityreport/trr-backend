@@ -205,6 +205,7 @@ def _reset_pool_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         "TRR_DB_POOL_ACQUIRE_SLEEP_MS",
         "TRR_DB_POOL_CLOSE_AFTER_RETURN",
         "TRR_DB_CONNECT_TIMEOUT_SECONDS",
+        "TRR_PREVIEW_READ_ONLY",
     ):
         monkeypatch.delenv(name, raising=False)
     pg.close_pool()

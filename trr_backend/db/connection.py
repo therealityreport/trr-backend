@@ -11,8 +11,9 @@ import logging
 import os
 import subprocess
 import sys
+from collections.abc import Mapping
 from functools import lru_cache
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 import psycopg2
 
@@ -25,10 +26,17 @@ SESSION_DB_ENV = "TRR_DB_SESSION_URL"
 TRANSACTION_DB_ENV = "TRR_DB_TRANSACTION_URL"
 RUNTIME_LANE_ENV = "TRR_DB_RUNTIME_LANE"
 TRANSACTION_FLIGHT_TEST_ENV = "TRR_DB_TRANSACTION_FLIGHT_TEST"
+PREVIEW_READ_ONLY_ENV = "TRR_PREVIEW_READ_ONLY"
 
 
 class DatabaseConnectionError(RuntimeError):
     """Raised when database connection cannot be established."""
+
+    pass
+
+
+class PreviewReadOnlyError(RuntimeError):
+    """Raised when an isolated preview connection is not server-confirmed read-only."""
 
     pass
 
@@ -125,6 +133,52 @@ def derive_supavisor_transaction_url(session_url: str) -> str:
 
 def _env_truthy(name: str) -> bool:
     return (os.getenv(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def preview_read_only_enabled() -> bool:
+    """Return whether this process is the explicitly opt-in read-only preview."""
+    return _env_truthy(PREVIEW_READ_ONLY_ENV)
+
+
+def connection_uri_options(url: str) -> list[str]:
+    """Return existing libpq ``options`` values from a Postgres connection URI."""
+    return [
+        value.strip()
+        for key, value in parse_qsl(urlsplit(url).query, keep_blank_values=True)
+        if key.lower() == "options" and value.strip()
+    ]
+
+
+def preview_read_only_connect_kwargs(url: str) -> dict[str, str]:
+    """Return the explicit libpq option required by direct preview connections."""
+    if not preview_read_only_enabled():
+        return {}
+    options = connection_uri_options(url)
+    # Keep this last so an accidental URI-level `...=off` cannot undo the
+    # explicit isolated-preview safety guard.
+    options.append("-c default_transaction_read_only=on")
+    return {"options": " ".join(options)}
+
+
+def assert_preview_connection_read_only(conn: object, *, label: str) -> None:
+    """Fail closed unless PostgreSQL confirms a preview connection is read-only."""
+    if not preview_read_only_enabled():
+        return
+    try:
+        with conn.cursor() as cur:  # type: ignore[union-attr]
+            cur.execute("SHOW transaction_read_only")
+            row = cur.fetchone()
+    except Exception as error:  # noqa: BLE001 - re-raised without DSN details.
+        raise PreviewReadOnlyError(f"Preview database {label} could not verify transaction_read_only=on") from error
+
+    if isinstance(row, Mapping):
+        value = row.get("transaction_read_only")
+    elif isinstance(row, (list, tuple)):
+        value = row[0] if row else None
+    else:
+        value = row
+    if str(value or "").strip().lower() != "on":
+        raise PreviewReadOnlyError(f"Preview database {label} requires transaction_read_only=on")
 
 
 def transaction_flight_test_enabled() -> bool:
@@ -401,12 +455,15 @@ def ensure_ready_for_ingestion(
     url = database_url or resolve_database_url()
 
     try:
-        conn = psycopg2.connect(url)
-        with conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM pg_namespace WHERE nspname = 'core';")
-            core_schema = cur.fetchone()
-        conn.close()
-    except psycopg2.Error as error:
+        conn = psycopg2.connect(url, **preview_read_only_connect_kwargs(url))
+        try:
+            assert_preview_connection_read_only(conn, label="ingestion readiness")
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM pg_namespace WHERE nspname = 'core';")
+                core_schema = cur.fetchone()
+        finally:
+            conn.close()
+    except (psycopg2.Error, PreviewReadOnlyError) as error:
         raise DatabaseConnectionError(f"Failed to verify core schema: {error}") from error
 
     if not core_schema:
@@ -415,15 +472,20 @@ def ensure_ready_for_ingestion(
             "Ensure TRR_DB_URL points to your runtime Supabase database."
         )
 
-    if reload_schema_cache:
+    if reload_schema_cache and not preview_read_only_enabled():
         try:
-            conn = psycopg2.connect(url)
-            conn.autocommit = True
-            with conn.cursor() as cur:
-                cur.execute("SELECT pg_notify('pgrst', 'reload schema');")
-            conn.close()
+            conn = psycopg2.connect(url, **preview_read_only_connect_kwargs(url))
+            try:
+                conn.autocommit = True
+                assert_preview_connection_read_only(conn, label="ingestion schema-cache reload")
+                with conn.cursor() as cur:
+                    cur.execute("SELECT pg_notify('pgrst', 'reload schema');")
+            finally:
+                conn.close()
         except psycopg2.Error:
             pass  # Best effort - continue anyway
+    elif reload_schema_cache:
+        logger.info("Skipping PostgREST schema cache reload in read-only preview")
 
 
 def validate_supabase_connection(database_url: str | None = None) -> bool:

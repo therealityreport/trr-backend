@@ -12,7 +12,13 @@ import time
 
 import psycopg2
 
-from trr_backend.db.connection import resolve_database_url
+from trr_backend.db.connection import (
+    PreviewReadOnlyError,
+    assert_preview_connection_read_only,
+    preview_read_only_connect_kwargs,
+    preview_read_only_enabled,
+    resolve_database_url,
+)
 from trr_backend.observability import inc_suppressed_path_conversion
 
 logger = logging.getLogger(__name__)
@@ -40,12 +46,17 @@ def reload_postgrest_schema(database_url: str | None = None) -> None:
     url = database_url or resolve_database_url()
 
     try:
-        conn = psycopg2.connect(url)
-        conn.autocommit = True
-        with conn.cursor() as cur:
-            cur.execute("SELECT pg_notify('pgrst', 'reload schema');")
-        conn.close()
-    except psycopg2.Error as e:
+        conn = psycopg2.connect(url, **preview_read_only_connect_kwargs(url))
+        try:
+            conn.autocommit = True
+            assert_preview_connection_read_only(conn, label="PostgREST schema-cache reload")
+            if preview_read_only_enabled():
+                raise PostgrestCacheError("PostgREST schema cache reload is disabled in read-only preview")
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_notify('pgrst', 'reload schema');")
+        finally:
+            conn.close()
+    except (psycopg2.Error, PreviewReadOnlyError) as e:
         raise PostgrestCacheError(f"Failed to reload PostgREST schema cache: {e}") from e
 
 
@@ -159,11 +170,14 @@ def verify_core_schema_exists(database_url: str | None = None) -> bool:
     url = database_url or resolve_database_url()
 
     try:
-        conn = psycopg2.connect(url)
-        with conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM pg_namespace WHERE nspname = 'core';")
-            result = cur.fetchone()
-        conn.close()
+        conn = psycopg2.connect(url, **preview_read_only_connect_kwargs(url))
+        try:
+            assert_preview_connection_read_only(conn, label="PostgREST core-schema check")
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM pg_namespace WHERE nspname = 'core';")
+                result = cur.fetchone()
+        finally:
+            conn.close()
 
         if not result:
             raise PostgrestCacheError(
@@ -173,5 +187,5 @@ def verify_core_schema_exists(database_url: str | None = None) -> bool:
 
         return True
 
-    except psycopg2.Error as e:
+    except (psycopg2.Error, PreviewReadOnlyError) as e:
         raise PostgrestCacheError(f"Failed to verify core schema: {e}") from e

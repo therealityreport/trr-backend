@@ -141,6 +141,10 @@ def _cast_screentime_stale_sweeper_enabled() -> bool:
     return _env_flag("CAST_SCREENTIME_STALE_SWEEPER_ENABLED", False)
 
 
+def _preview_read_only_enabled() -> bool:
+    return pg.preview_read_only_enabled()
+
+
 def _cast_screentime_stale_sweeper_interval_seconds() -> int:
     raw = (os.getenv("CAST_SCREENTIME_STALE_SWEEPER_INTERVAL_SECONDS") or "").strip()
     try:
@@ -319,7 +323,8 @@ async def _run_cast_screentime_stale_sweeper(stop_event: asyncio.Event) -> None:
 
 def _validate_startup_config() -> None:
     """Validate high-impact service env configuration with actionable logs."""
-    _validate_modal_maintenance_owner_config()
+    if not _preview_read_only_enabled():
+        _validate_modal_maintenance_owner_config()
     _validate_cors_config()
     admin_shared_secret = (os.getenv("TRR_INTERNAL_ADMIN_SHARED_SECRET") or "").strip()
     supabase_jwt_secret = (os.getenv("SUPABASE_JWT_SECRET") or "").strip()
@@ -473,19 +478,23 @@ async def lifespan(app: FastAPI):
     logger.info("Starting up TRR Backend API...")
     _validate_startup_config()
     await asyncio.to_thread(_prewarm_database_pool)
-    await init_broker()
+    preview_read_only = _preview_read_only_enabled()
+    if preview_read_only:
+        logger.info("[startup-config] read_only_preview; broker and background tasks disabled")
+    else:
+        await init_broker()
     stale_sweeper_stop: asyncio.Event | None = None
     stale_sweeper_task: asyncio.Task[None] | None = None
     modal_scheduler_stop: asyncio.Event | None = None
     modal_scheduler_tasks: list[asyncio.Task[None]] = []
-    if _cast_screentime_stale_sweeper_enabled():
+    if not preview_read_only and _cast_screentime_stale_sweeper_enabled():
         stale_sweeper_stop = asyncio.Event()
         stale_sweeper_task = asyncio.create_task(_run_cast_screentime_stale_sweeper(stale_sweeper_stop))
         logger.info(
             "[startup-config] cast screentime stale-run sweeper enabled interval_seconds=%s",
             _cast_screentime_stale_sweeper_interval_seconds(),
         )
-    if _modal_runtime_scheduler_enabled():
+    if not preview_read_only and _modal_runtime_scheduler_enabled():
         modal_scheduler_stop = asyncio.Event()
         modal_scheduler_specs = [
             ("media_watch_poller", _modal_media_watch_interval_seconds(), _run_modal_media_watch_poller_once),
@@ -534,7 +543,8 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(task, timeout=5)
         except TimeoutError:
             task.cancel()
-    await shutdown_broker()
+    if not preview_read_only:
+        await shutdown_broker()
 
 
 app = FastAPI(
