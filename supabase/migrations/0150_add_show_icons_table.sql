@@ -16,35 +16,15 @@ CREATE INDEX IF NOT EXISTS idx_show_icons_show_key_created_at
 
 ALTER TABLE public.show_icons ENABLE ROW LEVEL SECURITY;
 
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1
-    FROM pg_policies
-    WHERE schemaname = 'public'
-      AND tablename = 'show_icons'
-      AND policyname = 'Allow public read on show_icons'
-  ) THEN
-    CREATE POLICY "Allow public read on show_icons"
-      ON public.show_icons
-      FOR SELECT
-      USING (true);
-  END IF;
-END $$;
+DROP POLICY IF EXISTS "Allow public read on show_icons" ON public.show_icons;
+CREATE POLICY "Allow public read on show_icons"
+  ON public.show_icons
+  FOR SELECT
+  USING (true);
 
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1
-    FROM pg_policies
-    WHERE schemaname = 'public'
-      AND tablename = 'show_icons'
-      AND policyname = 'Allow service role all on show_icons'
-  ) THEN
-    CREATE POLICY "Allow service role all on show_icons"
-      ON public.show_icons
-      FOR ALL
-      USING (auth.role() = 'service_role')
-      WITH CHECK (auth.role() = 'service_role');
-  END IF;
-END $$;
+DROP POLICY IF EXISTS "Allow service role all on show_icons" ON public.show_icons;
+CREATE POLICY "Allow service role all on show_icons"
+  ON public.show_icons
+  FOR ALL
+  USING (auth.role() = 'service_role')
+  WITH CHECK (auth.role() = 'service_role');
