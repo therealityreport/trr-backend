@@ -11,7 +11,7 @@ from psycopg2 import InterfaceError
 from psycopg2.extensions import TRANSACTION_STATUS_IDLE, TRANSACTION_STATUS_INTRANS
 from psycopg2.pool import PoolError
 
-from trr_backend.db import pg
+from trr_backend.db import connection, pg
 
 
 class _FakeConnection:
@@ -115,6 +115,21 @@ class _FakeThreadedPool(_FakePool):
     @property
     def putconn_count(self) -> int:
         return self.putconn_calls
+
+
+class _LazyPreviewPool(_FakePool):
+    """Creates a fresh physical connection for every checkout in preview tests."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.connections: list[_FakeConnection] = []
+
+    def getconn(self) -> _FakeConnection:
+        self.getconn_calls += 1
+        conn = _FakeConnection(query_results=[{"transaction_read_only": "on"}])
+        self.connections.append(conn)
+        self._used[id(conn)] = conn
+        return conn
 
 
 class _FakePoolClosedOnGetconn(_FakePool):
@@ -251,6 +266,90 @@ def test_db_read_connection_uses_autocommit_and_returns_clean_connection(
     assert fake_pool.connection.commit_calls == 0
     assert fake_pool.connection.rollback_calls == 0
     assert fake_pool.connection.autocommit is False
+    assert fake_pool.connection.executed_sql == []
+
+
+def test_preview_pool_reasserts_read_only_on_every_checkout_and_keeps_read_context_usable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_pool = _FakePool()
+    fake_pool.connection.query_results = [
+        {"transaction_read_only": "on"},
+        {"transaction_read_only": "on"},
+    ]
+    monkeypatch.setenv("TRR_PREVIEW_READ_ONLY", "1")
+    monkeypatch.setattr(pg, "_get_pool", lambda pool_name="default": fake_pool)
+
+    with pg.db_read_connection(label="preview-read") as conn:
+        assert conn.autocommit is True
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+
+    with pg.db_read_connection(label="preview-read"):
+        pass
+
+    assert fake_pool.getconn_calls == 2
+    assert fake_pool.putconn_calls == 2
+    assert fake_pool.connection.executed_sql == [
+        "SET default_transaction_read_only = on",
+        "SHOW transaction_read_only",
+        "SELECT 1",
+        "SET default_transaction_read_only = on",
+        "SHOW transaction_read_only",
+    ]
+    assert fake_pool.connection.autocommit is False
+
+
+def test_preview_pool_asserts_lazily_created_physical_connections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lazy_pool = _LazyPreviewPool()
+    monkeypatch.setenv("TRR_PREVIEW_READ_ONLY", "1")
+    monkeypatch.setattr(
+        pg,
+        "resolve_database_url_candidate_details",
+        lambda: (_detail("postgresql://db.example.com/postgres"),),
+    )
+    monkeypatch.setattr(pg, "ThreadedConnectionPool", lambda *args, **kwargs: lazy_pool)
+
+    with pg.db_read_connection(label="preview-lazy") as conn:
+        assert conn.autocommit is True
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+
+    assert lazy_pool.getconn_calls == 2
+    assert lazy_pool.putconn_calls == 2
+    assert lazy_pool.connections[0].executed_sql == [
+        "SET default_transaction_read_only = on",
+        "SHOW transaction_read_only",
+    ]
+    assert lazy_pool.connections[1].executed_sql == [
+        "SET default_transaction_read_only = on",
+        "SHOW transaction_read_only",
+        "SELECT 1",
+    ]
+    assert lazy_pool.connections[1].autocommit is False
+
+
+def test_preview_checkout_fails_closed_and_discards_unverified_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_pool = _FakePool()
+    fake_pool.connection.query_results = [{"transaction_read_only": "off"}]
+    monkeypatch.setenv("TRR_PREVIEW_READ_ONLY", "1")
+    monkeypatch.setattr(pg, "_get_pool", lambda pool_name="default": fake_pool)
+
+    with pytest.raises(connection.PreviewReadOnlyError, match="requires transaction_read_only=on"):
+        with pg.db_read_connection(label="preview-off"):
+            pass
+
+    assert fake_pool.getconn_calls == 1
+    assert fake_pool.putconn_calls == 1
+    assert fake_pool.closed_putconn_calls == 1
+    assert fake_pool.connection.executed_sql == [
+        "SET default_transaction_read_only = on",
+        "SHOW transaction_read_only",
+    ]
 
 
 def test_db_read_connection_uses_social_profile_pool_sizing(monkeypatch: pytest.MonkeyPatch) -> None:

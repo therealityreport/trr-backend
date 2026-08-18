@@ -23,6 +23,8 @@ class _Cursor:
 
     def execute(self, statement: str) -> None:
         self._connection.executed_sql.append(statement)
+        if statement == self._connection.fail_on_statement:
+            raise RuntimeError(f"intentional failure for {statement}")
 
     def fetchone(self) -> object | None:
         if not self._connection.results:
@@ -31,14 +33,33 @@ class _Cursor:
 
 
 class _Connection:
-    def __init__(self, results: list[object | None]) -> None:
+    def __init__(
+        self,
+        results: list[object | None],
+        *,
+        fail_on_statement: str | None = None,
+    ) -> None:
         self.results = list(results)
         self.executed_sql: list[str] = []
-        self.autocommit = False
+        self.autocommit_history: list[bool] = []
+        self._autocommit = False
         self.closed = False
+        self.fail_on_statement = fail_on_statement
+
+    @property
+    def autocommit(self) -> bool:
+        return self._autocommit
+
+    @autocommit.setter
+    def autocommit(self, value: bool) -> None:
+        self.autocommit_history.append(value)
+        self._autocommit = value
 
     def cursor(self) -> _Cursor:
         return _Cursor(self)
+
+    def get_transaction_status(self) -> int:
+        return 0
 
     def close(self) -> None:
         self.closed = True
@@ -75,7 +96,11 @@ def test_preview_pool_is_asserted_read_only_before_return(monkeypatch: pytest.Mo
     result = pg._build_pool_for_url("postgresql://database.example/postgres")
 
     assert result is pool
-    assert pool.connection.executed_sql == ["SHOW transaction_read_only"]
+    assert pool.connection.executed_sql == [
+        "SET default_transaction_read_only = on",
+        "SHOW transaction_read_only",
+    ]
+    assert pool.connection.autocommit_history == [True, False]
     assert pool.getconn_calls == 1
     assert pool.putconn_calls == 1
     assert pool.closeall_calls == 0
@@ -89,7 +114,11 @@ def test_preview_pool_fails_closed_when_read_only_is_off(monkeypatch: pytest.Mon
     with pytest.raises(connection.PreviewReadOnlyError, match="transaction_read_only=on"):
         pg._build_pool_for_url("postgresql://database.example/postgres")
 
-    assert pool.connection.executed_sql == ["SHOW transaction_read_only"]
+    assert pool.connection.executed_sql == [
+        "SET default_transaction_read_only = on",
+        "SHOW transaction_read_only",
+    ]
+    assert pool.connection.autocommit_history == [True, False]
     assert pool.getconn_calls == 1
     assert pool.putconn_calls == 1
     assert pool.closeall_calls == 1
@@ -118,7 +147,16 @@ def test_preview_fresh_session_probe_wraps_and_asserts_each_connection(monkeypat
     assert result["available"] is True
     assert len(created) == 2
     assert all(item.closed for item in created)
-    assert all(item.executed_sql == ["SHOW transaction_read_only", "select 1"] for item in created)
+    assert all(
+        item.executed_sql
+        == [
+            "SET default_transaction_read_only = on",
+            "SHOW transaction_read_only",
+            "select 1",
+        ]
+        for item in created
+    )
+    assert all(item.autocommit_history == [True] for item in created)
     assert all(
         item["options"] == "-c lock_timeout=2500 -c default_transaction_read_only=on" for item in captured_kwargs
     )
@@ -146,7 +184,11 @@ def test_preview_fresh_session_probe_fails_closed_when_read_only_is_off(monkeypa
     assert result["blocked"] is True
     assert result["error"] == "PreviewReadOnlyError"
     assert created[0].closed is True
-    assert created[0].executed_sql == ["SHOW transaction_read_only"]
+    assert created[0].executed_sql == [
+        "SET default_transaction_read_only = on",
+        "SHOW transaction_read_only",
+    ]
+    assert created[0].autocommit_history == [True]
 
 
 def test_preview_ingestion_readiness_skips_cache_reload_after_read_only_check(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -167,9 +209,11 @@ def test_preview_ingestion_readiness_skips_cache_reload_after_read_only_check(mo
     assert len(created) == 1
     assert created[0].closed is True
     assert created[0].executed_sql == [
+        "SET default_transaction_read_only = on",
         "SHOW transaction_read_only",
         "SELECT 1 FROM pg_namespace WHERE nspname = 'core';",
     ]
+    assert created[0].autocommit_history == [True, False]
     assert captured_kwargs == [{"options": "-c default_transaction_read_only=on"}]
 
 
@@ -182,7 +226,11 @@ def test_preview_ingestion_readiness_fails_closed_when_read_only_is_off(monkeypa
         connection.ensure_ready_for_ingestion("postgresql://database.example/postgres", reload_schema_cache=False)
 
     assert created.closed is True
-    assert created.executed_sql == ["SHOW transaction_read_only"]
+    assert created.executed_sql == [
+        "SET default_transaction_read_only = on",
+        "SHOW transaction_read_only",
+    ]
+    assert created.autocommit_history == [True, False]
 
 
 def test_preview_postgrest_schema_check_wraps_and_asserts_direct_connection(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -199,9 +247,11 @@ def test_preview_postgrest_schema_check_wraps_and_asserts_direct_connection(monk
     assert postgrest_cache.verify_core_schema_exists("postgresql://database.example/postgres") is True
     assert created.closed is True
     assert created.executed_sql == [
+        "SET default_transaction_read_only = on",
         "SHOW transaction_read_only",
         "SELECT 1 FROM pg_namespace WHERE nspname = 'core';",
     ]
+    assert created.autocommit_history == [True, False]
     assert captured_kwargs == [{"options": "-c default_transaction_read_only=on"}]
 
 
@@ -214,7 +264,71 @@ def test_preview_postgrest_cache_reload_is_refused_after_read_only_check(monkeyp
         postgrest_cache.reload_postgrest_schema("postgresql://database.example/postgres")
 
     assert created.closed is True
-    assert created.executed_sql == ["SHOW transaction_read_only"]
+    assert created.executed_sql == [
+        "SET default_transaction_read_only = on",
+        "SHOW transaction_read_only",
+    ]
+
+
+def test_preview_connection_active_guard_restores_autocommit_after_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _Connection([("on",)])
+    monkeypatch.setenv("TRR_PREVIEW_READ_ONLY", "1")
+
+    connection.assert_preview_connection_read_only(conn, label="direct success")
+
+    assert conn.executed_sql == ["SET default_transaction_read_only = on", "SHOW transaction_read_only"]
+    assert conn.autocommit is False
+    assert conn.autocommit_history == [True, False]
+
+
+@pytest.mark.parametrize(
+    ("failing_statement", "expected_sql"),
+    [
+        ("SET default_transaction_read_only = on", ["SET default_transaction_read_only = on"]),
+        (
+            "SHOW transaction_read_only",
+            ["SET default_transaction_read_only = on", "SHOW transaction_read_only"],
+        ),
+    ],
+)
+def test_preview_connection_active_guard_fails_closed_and_restores_autocommit(
+    monkeypatch: pytest.MonkeyPatch,
+    failing_statement: str,
+    expected_sql: list[str],
+) -> None:
+    conn = _Connection([], fail_on_statement=failing_statement)
+    monkeypatch.setenv("TRR_PREVIEW_READ_ONLY", "1")
+
+    with pytest.raises(connection.PreviewReadOnlyError, match="could not enforce transaction_read_only=on"):
+        connection.assert_preview_connection_read_only(conn, label="direct failure")
+
+    assert conn.executed_sql == expected_sql
+    assert conn.autocommit is False
+    assert conn.autocommit_history == [True, False]
+
+
+def test_preview_connection_active_guard_fails_closed_when_show_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = _Connection([("off",)])
+    monkeypatch.setenv("TRR_PREVIEW_READ_ONLY", "1")
+
+    with pytest.raises(connection.PreviewReadOnlyError, match="requires transaction_read_only=on"):
+        connection.assert_preview_connection_read_only(conn, label="direct off")
+
+    assert conn.executed_sql == ["SET default_transaction_read_only = on", "SHOW transaction_read_only"]
+    assert conn.autocommit is False
+    assert conn.autocommit_history == [True, False]
+
+
+def test_preview_connection_active_guard_is_a_normal_mode_no_op(monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = _Connection([("off",)])
+    monkeypatch.delenv("TRR_PREVIEW_READ_ONLY", raising=False)
+
+    connection.assert_preview_connection_read_only(conn, label="normal runtime")
+
+    assert conn.executed_sql == []
+    assert conn.autocommit_history == []
 
 
 def test_runtime_direct_psycopg_connectors_are_all_preview_guarded() -> None:

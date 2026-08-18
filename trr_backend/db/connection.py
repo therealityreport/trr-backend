@@ -161,15 +161,37 @@ def preview_read_only_connect_kwargs(url: str) -> dict[str, str]:
 
 
 def assert_preview_connection_read_only(conn: object, *, label: str) -> None:
-    """Fail closed unless PostgreSQL confirms a preview connection is read-only."""
+    """Actively enforce and verify the read-only preview setting on one connection."""
     if not preview_read_only_enabled():
         return
+
     try:
+        previous_autocommit = conn.autocommit  # type: ignore[union-attr]
+    except Exception as error:  # noqa: BLE001 - re-raised without DSN details.
+        raise PreviewReadOnlyError(f"Preview database {label} could not prepare transaction_read_only=on") from error
+
+    try:
+        # Supavisor can discard libpq startup options. Run SET and SHOW as
+        # autocommitted statements so the setting is session-visible before the
+        # next caller starts its own transaction, then restore the prior mode.
+        if not previous_autocommit:
+            conn.autocommit = True  # type: ignore[union-attr]
         with conn.cursor() as cur:  # type: ignore[union-attr]
+            cur.execute("SET default_transaction_read_only = on")
             cur.execute("SHOW transaction_read_only")
             row = cur.fetchone()
     except Exception as error:  # noqa: BLE001 - re-raised without DSN details.
-        raise PreviewReadOnlyError(f"Preview database {label} could not verify transaction_read_only=on") from error
+        raise PreviewReadOnlyError(f"Preview database {label} could not enforce transaction_read_only=on") from error
+    finally:
+        try:
+            # Restoring autocommit after the two statements leaves an otherwise
+            # healthy connection idle for the caller or pool.
+            if not getattr(conn, "closed", False) and conn.autocommit != previous_autocommit:  # type: ignore[union-attr]
+                conn.autocommit = previous_autocommit  # type: ignore[union-attr]
+        except Exception as error:  # noqa: BLE001 - cleanup must fail closed.
+            raise PreviewReadOnlyError(
+                f"Preview database {label} could not restore autocommit after transaction_read_only=on"
+            ) from error
 
     if isinstance(row, Mapping):
         value = row.get("transaction_read_only")

@@ -586,6 +586,8 @@ def _build_pool_for_url(url: str, *, pool_name: str = "default") -> ThreadedConn
     try:
         conn = pool.getconn()
         try:
+            if not _ensure_connection_idle(conn, label=f"{pool_name} pool", phase="pool-init"):
+                raise RuntimeError("discarded dirty pooled connection during preview pool initialization")
             assert_preview_connection_read_only(conn, label=f"{pool_name} pool")
         finally:
             pool.putconn(conn)
@@ -1159,6 +1161,14 @@ def _get_connection_with_retry(
                     except Exception:
                         logger.exception("[db-pool] discard_failed label=%s phase=checkout", label)
                     raise RuntimeError("discarded dirty pooled connection during checkout")
+                try:
+                    assert_preview_connection_read_only(conn, label=f"{pool_name} pool checkout")
+                except Exception:
+                    try:
+                        pool.putconn(conn, close=True)
+                    except Exception:
+                        logger.exception("[db-pool] discard_failed label=%s phase=preview-checkout", label)
+                    raise
                 checkout_id = _log_checkout(
                     pool=pool,
                     conn=conn,
