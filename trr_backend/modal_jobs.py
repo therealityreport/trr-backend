@@ -745,6 +745,19 @@ def _inject_modal_runtime_defaults() -> None:
         os.environ.pop("OBJECT_STORAGE_PROFILE", None)
 
 
+def _modal_preview_read_only_env() -> dict[str, str]:
+    """Return the explicit deployment-time preview control, when opted in."""
+    if _env_flag("TRR_PREVIEW_READ_ONLY", default=False):
+        return {"TRR_PREVIEW_READ_ONLY": "1"}
+    return {}
+
+
+def _modal_preview_read_only_function_kwargs() -> dict[str, dict[str, str]]:
+    """Avoid adding an empty decorator env map to normal production functions."""
+    preview_env = _modal_preview_read_only_env()
+    return {"env": preview_env} if preview_env else {}
+
+
 def _modal_api_runtime_env() -> dict[str, str]:
     """Return explicit, non-secret API rollout controls for Modal containers."""
     read_mode = str(os.getenv(_MODAL_INSTAGRAM_PAYLOAD_READ_MODE_ENV) or "legacy").strip().lower()
@@ -765,10 +778,12 @@ def _modal_api_runtime_env() -> dict[str, str]:
             raise RuntimeError(
                 f"{_MODAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE_ENV} must be greater than 0 and at most 1"
             )
-    return {
+    runtime_env = {
         _INSTAGRAM_PAYLOAD_READ_MODE_ENV: read_mode,
         _INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE_ENV: format(sample_rate, "g"),
     }
+    runtime_env.update(_modal_preview_read_only_env())
+    return runtime_env
 
 
 def _worker_id(worker_family: str) -> str:
@@ -837,6 +852,7 @@ app = modal.App(_APP_NAME, image=_image)
     image=_FUNCTION_IMAGE_BINDINGS["probe_browser_image_runtime"],
     retries=0,
     timeout=2 * 60,
+    **_modal_preview_read_only_function_kwargs(),
 )
 def probe_browser_image_runtime() -> dict[str, object]:
     """Prove the browser image can import and launch Chromium without state."""

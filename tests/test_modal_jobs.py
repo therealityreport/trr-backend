@@ -81,6 +81,8 @@ def modal_reload_guard():
         "TRR_MODAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE",
         "TRR_MODAL_RUNTIME_SECRET_NAME",
         "TRR_MODAL_SOCIAL_SECRET_NAME",
+        "TRR_PREVIEW_READ_ONLY",
+        "SOCIAL_QUEUE_ENABLED",
     )
     original_modules = {name: sys.modules.get(name) for name in module_names}
     original_env = {name: os.environ.get(name) for name in env_names}
@@ -1678,3 +1680,49 @@ def test_modal_api_deploy_env_overrides_named_secret_without_mutation(
         "SOCIAL_INSTAGRAM_PAYLOAD_READ_MODE": "compare",
         "SOCIAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE": "0.1",
     }
+
+
+def test_modal_preview_read_only_propagates_to_api_and_state_free_browser_canary(
+    monkeypatch: pytest.MonkeyPatch,
+    modal_reload_guard,
+) -> None:
+    """A preview import forwards only its explicit read-only control."""
+    partial_modal = types.ModuleType("modal")
+    monkeypatch.setitem(sys.modules, "modal", partial_modal)
+    monkeypatch.setenv("TRR_PREVIEW_READ_ONLY", "1")
+    monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "true")
+
+    reloaded = importlib.reload(modal_jobs)
+
+    assert reloaded.serve_backend_api._modal_function_options["env"] == {
+        "SOCIAL_INSTAGRAM_PAYLOAD_READ_MODE": "legacy",
+        "SOCIAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE": "0",
+        "TRR_PREVIEW_READ_ONLY": "1",
+    }
+    canary_options = reloaded.probe_browser_image_runtime._modal_function_options
+    assert canary_options["env"] == {"TRR_PREVIEW_READ_ONLY": "1"}
+    assert "secrets" not in canary_options
+    assert not {"volumes", "network_file_systems", "queues"} & canary_options.keys()
+    assert os.environ["SOCIAL_QUEUE_ENABLED"] == "false"
+
+
+def test_modal_preview_read_only_decorator_env_is_absent_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    modal_reload_guard,
+) -> None:
+    """Production imports retain their existing API and state-free canary options."""
+    partial_modal = types.ModuleType("modal")
+    monkeypatch.setitem(sys.modules, "modal", partial_modal)
+    monkeypatch.delenv("TRR_PREVIEW_READ_ONLY", raising=False)
+    monkeypatch.delenv("TRR_MODAL_INSTAGRAM_PAYLOAD_READ_MODE", raising=False)
+    monkeypatch.delenv("TRR_MODAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE", raising=False)
+
+    reloaded = importlib.reload(modal_jobs)
+
+    assert reloaded.serve_backend_api._modal_function_options["env"] == {
+        "SOCIAL_INSTAGRAM_PAYLOAD_READ_MODE": "legacy",
+        "SOCIAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE": "0",
+    }
+    canary_options = reloaded.probe_browser_image_runtime._modal_function_options
+    assert "env" not in canary_options
+    assert "secrets" not in canary_options
