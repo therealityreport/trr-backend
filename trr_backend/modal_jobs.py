@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import math
 import os
 import pathlib
 import socket
@@ -14,8 +13,19 @@ from datetime import UTC, datetime
 from importlib.metadata import version as package_version
 from typing import Any, Final, cast
 
+from trr_backend.modal_runtime_config import (
+    api_runtime_env as _modal_api_runtime_env,
+)
+from trr_backend.modal_runtime_config import (
+    preview_read_only_env,
+)
+from trr_backend.modal_runtime_config import (
+    preview_read_only_function_kwargs as _modal_preview_read_only_function_kwargs,
+)
 from trr_backend.observability import configure_runtime_observability
 from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
+
+_modal_preview_read_only_env = preview_read_only_env
 
 
 def _build_modal_stub_module():
@@ -288,12 +298,6 @@ _MODAL_LEAN_REQUIREMENTS: Final = _BACKEND_ROOT / "requirements.modal.lean.lock.
 _MODAL_BROWSER_REQUIREMENTS: Final = _BACKEND_ROOT / "requirements.modal.browser.lock.txt"
 _MODAL_VISION_REQUIREMENTS: Final = _BACKEND_ROOT / "requirements.modal.vision.lock.txt"
 _SOCIAL_IMAGE_PIP_PACKAGES: Final[tuple[str, ...]] = ()
-_INSTAGRAM_PAYLOAD_READ_MODE_ENV: Final = "SOCIAL_INSTAGRAM_PAYLOAD_READ_MODE"
-_MODAL_INSTAGRAM_PAYLOAD_READ_MODE_ENV: Final = "TRR_MODAL_INSTAGRAM_PAYLOAD_READ_MODE"
-_INSTAGRAM_PAYLOAD_READ_MODES: Final[frozenset[str]] = frozenset({"legacy", "compare", "sidecar"})
-_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE_ENV: Final = "SOCIAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE"
-_MODAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE_ENV: Final = "TRR_MODAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE"
-_DEFAULT_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE: Final = 0.1
 _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "TRR_RUNTIME_CAPACITY_CONTEXT": "hosted_modal",
     "TRR_DB_POOL_MINCONN": "1",
@@ -743,47 +747,6 @@ def _inject_modal_runtime_defaults() -> None:
         os.getenv("OBJECT_STORAGE_SECRET_ACCESS_KEY") or ""
     ).strip():
         os.environ.pop("OBJECT_STORAGE_PROFILE", None)
-
-
-def _modal_preview_read_only_env() -> dict[str, str]:
-    """Return the explicit deployment-time preview control, when opted in."""
-    if _env_flag("TRR_PREVIEW_READ_ONLY", default=False):
-        return {"TRR_PREVIEW_READ_ONLY": "1"}
-    return {}
-
-
-def _modal_preview_read_only_function_kwargs() -> dict[str, dict[str, str]]:
-    """Avoid adding an empty decorator env map to normal production functions."""
-    preview_env = _modal_preview_read_only_env()
-    return {"env": preview_env} if preview_env else {}
-
-
-def _modal_api_runtime_env() -> dict[str, str]:
-    """Return explicit, non-secret API rollout controls for Modal containers."""
-    read_mode = str(os.getenv(_MODAL_INSTAGRAM_PAYLOAD_READ_MODE_ENV) or "legacy").strip().lower()
-    if read_mode not in _INSTAGRAM_PAYLOAD_READ_MODES:
-        allowed = ", ".join(sorted(_INSTAGRAM_PAYLOAD_READ_MODES))
-        raise RuntimeError(f"{_MODAL_INSTAGRAM_PAYLOAD_READ_MODE_ENV} must be one of: {allowed}")
-    if read_mode != "compare":
-        sample_rate = 0.0
-    else:
-        raw_sample_rate = str(os.getenv(_MODAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE_ENV) or "").strip()
-        try:
-            sample_rate = float(raw_sample_rate) if raw_sample_rate else _DEFAULT_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE
-        except ValueError as exc:
-            raise RuntimeError(
-                f"{_MODAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE_ENV} must be greater than 0 and at most 1"
-            ) from exc
-        if not math.isfinite(sample_rate) or not 0.0 < sample_rate <= 1.0:
-            raise RuntimeError(
-                f"{_MODAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE_ENV} must be greater than 0 and at most 1"
-            )
-    runtime_env = {
-        _INSTAGRAM_PAYLOAD_READ_MODE_ENV: read_mode,
-        _INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE_ENV: format(sample_rate, "g"),
-    }
-    runtime_env.update(_modal_preview_read_only_env())
-    return runtime_env
 
 
 def _worker_id(worker_family: str) -> str:

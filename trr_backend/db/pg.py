@@ -30,6 +30,7 @@ from trr_backend.db.connection import (
     resolve_database_url_candidate_details,
     resolve_session_database_url_candidate_details,
 )
+from trr_backend.db.session_capacity import probe_fresh_session_capacity as _probe_fresh_session_capacity
 from trr_backend.observability import (
     record_postgres_pool_acquire_duration,
     record_postgres_pool_exhausted,
@@ -305,81 +306,20 @@ def probe_fresh_session_capacity(
 ) -> dict[str, Any]:
     """Reserve fresh Supavisor session slots briefly without initializing a named pool."""
 
-    safe_requested = max(0, min(int(requested_sessions), max(0, int(max_probe_sessions))))
-    candidates = resolve_session_database_url_candidate_details()
-    candidate = candidates[0] if candidates else {}
-    target = {
-        "source": candidate.get("source"),
-        "host_class": candidate.get("host_class"),
-        "connection_class": candidate.get("connection_class"),
-        "port": candidate.get("port"),
-    }
-    if safe_requested == 0:
-        return {
-            "available": True,
-            "blocked": False,
-            "reason": "no_session_slots_requested",
-            "requested_sessions": 0,
-            "reserved_sessions": 0,
-            "target": target,
-            "error": None,
-        }
-    url = str(candidate.get("url") or "").strip()
-    if not url:
-        return {
-            "available": False,
-            "blocked": True,
-            "reason": "database_configuration",
-            "requested_sessions": safe_requested,
-            "reserved_sessions": 0,
-            "target": target,
-            "error": "session_database_url_missing",
-        }
+    def _connect(url: str, connect_kwargs: dict[str, Any]) -> Any:
+        return psycopg2.connect(**connect_kwargs, **preview_read_only_connect_kwargs(url))
 
-    connections: list[Any] = []
-    try:
-        for _index in range(safe_requested):
-            connect_kwargs: dict[str, Any] = {
-                "dsn": url,
-                "application_name": "trr-backend:session-capacity-probe",
-                "connect_timeout": min(5, DEFAULT_CONNECT_TIMEOUT_SECONDS),
-            }
-            sslmode = _sslmode_for_url(url)
-            if sslmode:
-                connect_kwargs["sslmode"] = sslmode
-            conn = psycopg2.connect(**connect_kwargs, **preview_read_only_connect_kwargs(url))
-            connections.append(conn)
-            conn.autocommit = True
-            assert_preview_connection_read_only(conn, label="fresh session capacity probe")
-            with conn.cursor() as cur:
-                cur.execute("select 1")
-                cur.fetchone()
-        return {
-            "available": True,
-            "blocked": False,
-            "reason": "fresh_session_reservation_succeeded",
-            "requested_sessions": safe_requested,
-            "reserved_sessions": len(connections),
-            "target": target,
-            "error": None,
-        }
-    except Exception as exc:  # noqa: BLE001 - normalized below without leaking the DSN
-        reason = _database_service_unavailable_reason(_error_message(exc))
-        return {
-            "available": False,
-            "blocked": True,
-            "reason": reason,
-            "requested_sessions": safe_requested,
-            "reserved_sessions": len(connections),
-            "target": target,
-            "error": type(exc).__name__,
-        }
-    finally:
-        for conn in connections:
-            try:
-                conn.close()
-            except Exception:  # noqa: BLE001
-                logger.debug("fresh session capacity probe close failed", exc_info=True)
+    return _probe_fresh_session_capacity(
+        requested_sessions=requested_sessions,
+        max_probe_sessions=max_probe_sessions,
+        resolve_candidates=resolve_session_database_url_candidate_details,
+        connect=_connect,
+        assert_read_only=lambda conn: assert_preview_connection_read_only(conn, label="fresh session capacity probe"),
+        sslmode_for_url=_sslmode_for_url,
+        error_message=_error_message,
+        unavailable_reason=_database_service_unavailable_reason,
+        default_connect_timeout_seconds=DEFAULT_CONNECT_TIMEOUT_SECONDS,
+    )
 
 
 def _is_transient_transport_error(error: Exception) -> bool:
