@@ -2337,9 +2337,10 @@ class TestRefreshShowPhotosStream:
             "trr_backend.db.admin.create_supabase_admin_client",
             lambda *args, **kwargs: mock_db,
         )
+        object_storage_factory = MagicMock(return_value=MagicMock())
         monkeypatch.setattr(
-            "api.routers.admin_show_sync.get_s3_client",
-            lambda: MagicMock(),
+            "trr_backend.media.s3_mirror.get_object_storage_client",
+            object_storage_factory,
         )
         response = client.post(
             f"/api/v1/admin/shows/{show_id}/refresh-photos/stream",
@@ -2350,6 +2351,7 @@ class TestRefreshShowPhotosStream:
         )
 
         assert response.status_code == 200
+        object_storage_factory.assert_called_once_with()
         assert "Skipping cast photos (skip_cast_photos=true)." in response.text
         assert "Skipping cast photo mirroring (skip_cast_photos=true)." in response.text
         assert "Skipping cast photo prune (skip_cast_photos=true)." in response.text
