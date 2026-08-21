@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from trr_backend.socials.control_plane.dispatch_runtime import legacy as social_repo
+from trr_backend.socials.socialblade import auth as socialblade_auth
 
 PlatformCookieLoader = Callable[[], dict[str, str]]
 PlatformCookieValidator = Callable[[dict[str, str]], tuple[bool, str | None]]
@@ -59,75 +60,165 @@ def _threads_cookie_path() -> Path:
 
 
 def _socialblade_cookie_path() -> Path:
-    from trr_backend.socials.socialblade.auth import socialblade_cookie_file_path
+    return socialblade_auth.socialblade_cookie_file_path()
 
-    return socialblade_cookie_file_path()
+
+# The control-plane proxy is intentionally late-bound.  This operator module
+# must remain importable for --help before the legacy provider publishes, while
+# calls made after publication must continue to observe supported legacy
+# patches.  Do not resolve proxy attributes while constructing the table.
+def _load_instagram_cookies() -> dict[str, str]:
+    return social_repo._load_instagram_cookies()
+
+
+def _load_instagram_cookies_from_sources() -> dict[str, str]:
+    return social_repo._load_instagram_cookies_from_sources()
+
+
+def _validate_instagram_cookie_health(cookies: dict[str, str]) -> tuple[bool, str | None]:
+    return social_repo._validate_instagram_cookie_health(cookies)
+
+
+def _refresh_instagram_cookies(reason: str | None) -> dict[str, str]:
+    return social_repo._refresh_instagram_cookies(reason)
+
+
+def _instagram_cookie_path() -> Path:
+    return social_repo._instagram_cookie_refresh_target_path()
+
+
+def _load_tiktok_cookies() -> dict[str, str]:
+    return social_repo._load_tiktok_cookies()
+
+
+def _load_tiktok_cookies_from_sources() -> dict[str, str]:
+    return social_repo._load_tiktok_cookies_from_sources()
+
+
+def _validate_tiktok_cookie_health(cookies: dict[str, str]) -> tuple[bool, str | None]:
+    return social_repo._validate_tiktok_cookie_health(cookies)
+
+
+def _refresh_tiktok_cookies(reason: str | None) -> dict[str, str]:
+    return social_repo._refresh_tiktok_cookies(reason)
+
+
+def _load_twitter_cookies() -> dict[str, str]:
+    return social_repo._load_twitter_auth()[0]
+
+
+def _load_twitter_cookies_from_sources() -> dict[str, str]:
+    return social_repo._load_twitter_auth_from_sources()[0]
+
+
+def _validate_twitter_cookie_health(cookies: dict[str, str]) -> tuple[bool, str | None]:
+    return social_repo._validate_twitter_cookie_health(cookies)
+
+
+def _refresh_twitter_cookies(reason: str | None) -> dict[str, str]:
+    return social_repo._refresh_twitter_cookies(reason)
+
+
+def _load_facebook_cookies() -> dict[str, str]:
+    return social_repo._load_facebook_cookies()
+
+
+def _load_facebook_cookies_from_sources() -> dict[str, str]:
+    return social_repo._load_facebook_cookies_from_sources()
+
+
+def _validate_facebook_cookie_health(cookies: dict[str, str]) -> tuple[bool, str | None]:
+    return social_repo._validate_facebook_cookie_health(cookies)
+
+
+def _refresh_facebook_cookies(reason: str | None) -> dict[str, str]:
+    return social_repo._refresh_facebook_cookies(reason)
+
+
+def _load_threads_cookies() -> dict[str, str]:
+    return social_repo._load_threads_cookies()
+
+
+def _load_threads_cookies_from_sources() -> dict[str, str]:
+    return social_repo._load_threads_cookies_from_sources()
+
+
+def _validate_threads_cookie_health(cookies: dict[str, str]) -> tuple[bool, str | None]:
+    return social_repo._validate_threads_cookie_health(cookies)
+
+
+def _refresh_threads_cookies(reason: str | None) -> dict[str, str]:
+    return social_repo._refresh_threads_cookies(reason)
+
+
+def _load_socialblade_cookies() -> dict[str, str]:
+    return socialblade_auth.load_socialblade_cookies()
+
+
+def _load_socialblade_cookies_from_sources() -> dict[str, str]:
+    return socialblade_auth.load_socialblade_cookies_from_sources()
+
+
+def _validate_socialblade_cookie_health(cookies: dict[str, str]) -> tuple[bool, str | None]:
+    return socialblade_auth.validate_socialblade_cookie_health(cookies)
+
+
+def _refresh_socialblade_cookies(reason: str | None) -> dict[str, str]:
+    return socialblade_auth.refresh_socialblade_cookies(reason)
 
 
 PLATFORM_HANDLERS: dict[str, PlatformHandlers] = {
     "instagram": PlatformHandlers(
         platform="instagram",
-        load=social_repo._load_instagram_cookies,
-        load_from_sources=social_repo._load_instagram_cookies_from_sources,
-        validate=social_repo._validate_instagram_cookie_health,
-        refresh=social_repo._refresh_instagram_cookies,
-        cookie_file=social_repo._instagram_cookie_refresh_target_path,
+        load=_load_instagram_cookies,
+        load_from_sources=_load_instagram_cookies_from_sources,
+        validate=_validate_instagram_cookie_health,
+        refresh=_refresh_instagram_cookies,
+        cookie_file=_instagram_cookie_path,
         headless_env="SOCIAL_INSTAGRAM_COOKIE_REFRESH_HEADLESS",
     ),
     "tiktok": PlatformHandlers(
         platform="tiktok",
-        load=social_repo._load_tiktok_cookies,
-        load_from_sources=social_repo._load_tiktok_cookies_from_sources,
-        validate=social_repo._validate_tiktok_cookie_health,
-        refresh=social_repo._refresh_tiktok_cookies,
+        load=_load_tiktok_cookies,
+        load_from_sources=_load_tiktok_cookies_from_sources,
+        validate=_validate_tiktok_cookie_health,
+        refresh=_refresh_tiktok_cookies,
         cookie_file=_tiktok_cookie_path,
         headless_env="SOCIAL_TIKTOK_COOKIE_REFRESH_HEADLESS",
     ),
     "twitter": PlatformHandlers(
         platform="twitter",
-        load=lambda: social_repo._load_twitter_auth()[0],
-        load_from_sources=lambda: social_repo._load_twitter_auth_from_sources()[0],
-        validate=social_repo._validate_twitter_cookie_health,
-        refresh=social_repo._refresh_twitter_cookies,
+        load=_load_twitter_cookies,
+        load_from_sources=_load_twitter_cookies_from_sources,
+        validate=_validate_twitter_cookie_health,
+        refresh=_refresh_twitter_cookies,
         cookie_file=_twitter_cookie_path,
         headless_env="SOCIAL_TWITTER_COOKIE_REFRESH_HEADLESS",
     ),
     "facebook": PlatformHandlers(
         platform="facebook",
-        load=social_repo._load_facebook_cookies,
-        load_from_sources=social_repo._load_facebook_cookies_from_sources,
-        validate=social_repo._validate_facebook_cookie_health,
-        refresh=social_repo._refresh_facebook_cookies,
+        load=_load_facebook_cookies,
+        load_from_sources=_load_facebook_cookies_from_sources,
+        validate=_validate_facebook_cookie_health,
+        refresh=_refresh_facebook_cookies,
         cookie_file=_facebook_cookie_path,
         headless_env="SOCIAL_FACEBOOK_COOKIE_REFRESH_HEADLESS",
     ),
     "threads": PlatformHandlers(
         platform="threads",
-        load=social_repo._load_threads_cookies,
-        load_from_sources=social_repo._load_threads_cookies_from_sources,
-        validate=social_repo._validate_threads_cookie_health,
-        refresh=social_repo._refresh_threads_cookies,
+        load=_load_threads_cookies,
+        load_from_sources=_load_threads_cookies_from_sources,
+        validate=_validate_threads_cookie_health,
+        refresh=_refresh_threads_cookies,
         cookie_file=_threads_cookie_path,
         headless_env="SOCIAL_THREADS_COOKIE_REFRESH_HEADLESS",
     ),
     "socialblade": PlatformHandlers(
         platform="socialblade",
-        load=lambda: __import__(
-            "trr_backend.socials.socialblade.auth",
-            fromlist=["load_socialblade_cookies"],
-        ).load_socialblade_cookies(),
-        load_from_sources=lambda: __import__(
-            "trr_backend.socials.socialblade.auth",
-            fromlist=["load_socialblade_cookies_from_sources"],
-        ).load_socialblade_cookies_from_sources(),
-        validate=lambda cookies: __import__(
-            "trr_backend.socials.socialblade.auth",
-            fromlist=["validate_socialblade_cookie_health"],
-        ).validate_socialblade_cookie_health(cookies),
-        refresh=lambda reason: __import__(
-            "trr_backend.socials.socialblade.auth",
-            fromlist=["refresh_socialblade_cookies"],
-        ).refresh_socialblade_cookies(reason),
+        load=_load_socialblade_cookies,
+        load_from_sources=_load_socialblade_cookies_from_sources,
+        validate=_validate_socialblade_cookie_health,
+        refresh=_refresh_socialblade_cookies,
         cookie_file=_socialblade_cookie_path,
         headless_env="SOCIALBLADE_COOKIE_REFRESH_HEADLESS",
     ),

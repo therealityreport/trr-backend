@@ -34,8 +34,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from trr_backend.db.admin import create_supabase_admin_client
-from trr_backend.utils.env import load_env
+from trr_backend.db.admin import create_supabase_admin_client  # noqa: E402
+from trr_backend.utils.env import load_env  # noqa: E402
 
 # ── Constants ──
 

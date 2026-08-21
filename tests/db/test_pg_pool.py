@@ -273,10 +273,11 @@ def test_preview_pool_reasserts_read_only_on_every_checkout_and_keeps_read_conte
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_pool = _FakePool()
-    fake_pool.connection.query_results = [
+    query_results: list[dict[str, object] | None] = [
         {"transaction_read_only": "on"},
         {"transaction_read_only": "on"},
     ]
+    fake_pool.connection.query_results = query_results
     monkeypatch.setenv("TRR_PREVIEW_READ_ONLY", "1")
     monkeypatch.setattr(pg, "_get_pool", lambda pool_name="default": fake_pool)
 
@@ -335,7 +336,8 @@ def test_preview_checkout_fails_closed_and_discards_unverified_connection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_pool = _FakePool()
-    fake_pool.connection.query_results = [{"transaction_read_only": "off"}]
+    query_results: list[dict[str, object] | None] = [{"transaction_read_only": "off"}]
+    fake_pool.connection.query_results = query_results
     monkeypatch.setenv("TRR_PREVIEW_READ_ONLY", "1")
     monkeypatch.setattr(pg, "_get_pool", lambda pool_name="default": fake_pool)
 

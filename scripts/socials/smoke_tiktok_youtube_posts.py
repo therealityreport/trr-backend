@@ -52,11 +52,7 @@ def _resolve_youtube_window(parser: argparse.ArgumentParser, args: argparse.Name
 
 
 def _resolve_twitter_window(parser: argparse.ArgumentParser, args: argparse.Namespace) -> tuple[str, str]:
-    start = (
-        _parse_iso_date(parser, args.twitter_start, option="--twitter-start")
-        if args.twitter_start
-        else None
-    )
+    start = _parse_iso_date(parser, args.twitter_start, option="--twitter-start") if args.twitter_start else None
     end = _parse_iso_date(parser, args.twitter_end, option="--twitter-end") if args.twitter_end else None
     if start is None and end is None:
         return _resolve_youtube_window(parser, args)

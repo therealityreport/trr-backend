@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import pytest
+
 from trr_backend.vision import people_count_engine as engine
+
+pytestmark = pytest.mark.vision
 
 
 def test_compute_people_count_fast_pass_skips_reference_centroid_builders(

@@ -27,6 +27,8 @@ exit 0
         "PYTHON_BIN": str(fake_python),
         "CALLS_FILE": str(calls_file),
         "RESPAWN_DELAY": "0",
+        "TRR_REMOTE_EXECUTOR": "legacy_worker",
+        "TRR_MODAL_ENABLED": "0",
         "TRR_ADMIN_OPERATION_WORKER_ENABLED": "0",
         "TRR_REDDIT_REFRESH_WORKER_ENABLED": "1",
         "TRR_REDDIT_REFRESH_WORKER_COUNT": "1",

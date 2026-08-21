@@ -6,6 +6,7 @@ from pathlib import Path
 from dotenv import dotenv_values
 
 _OBJECT_STORAGE_PROFILE_ENV_KEYS = frozenset({"OBJECT_STORAGE_PROFILE"})
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _has_explicit_object_storage_credentials() -> bool:
@@ -16,10 +17,12 @@ def _has_explicit_object_storage_credentials() -> bool:
 
 
 def load_env(*, override: bool = False) -> Path | None:
-    repo_root = Path(__file__).resolve().parents[2]
+    if os.getenv("TRR_TEST_DISABLE_DOTENV") == "1":
+        return None
+
     candidates = [
         Path.cwd() / ".env",
-        repo_root / ".env",
+        REPO_ROOT / ".env",
     ]
     for path in candidates:
         if path.is_file():

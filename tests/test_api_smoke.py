@@ -270,7 +270,7 @@ class TestCORSConfiguration:
         response = client.options(
             "/api/v1/shows",
             headers={
-                "Origin": "http://localhost:3000",
+                "Origin": "https://trr.localhost",
                 "Access-Control-Request-Method": "GET",
             },
         )

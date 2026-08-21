@@ -19,8 +19,10 @@ SOURCE_ENV_PATH = REPO_ROOT / ".env"
 DEFAULT_DECODO_GATEWAY = "gate.decodo.com:10001"
 EXHAUSTED_TRAFFIC_RE = re.compile(
     r"\b(no|zero|0)\s+(traffic|balance|credit|credits)\b"
-    r"|\b(traffic|quota|balance|credit|credits|bandwidth)\b.*\b(exhausted|depleted|insufficient|used up|exceeded|limit|empty)\b"
-    r"|\b(exhausted|depleted|insufficient|used up|exceeded)\b.*\b(traffic|quota|balance|credit|credits|bandwidth)\b",
+    r"|\b(traffic|quota|balance|credit|credits|bandwidth)\b.*"
+    r"\b(exhausted|depleted|insufficient|used up|exceeded|limit|empty)\b"
+    r"|\b(exhausted|depleted|insufficient|used up|exceeded)\b.*"
+    r"\b(traffic|quota|balance|credit|credits|bandwidth)\b",
     re.IGNORECASE,
 )
 
@@ -166,7 +168,7 @@ def probe_proxy(config: ProxyConfig, *, target_host: str, target_port: int, time
             else:
                 sock = raw_socket
             with sock:
-                auth = base64.b64encode(f"{config.username}:{config.password}".encode("utf-8")).decode("ascii")
+                auth = base64.b64encode(f"{config.username}:{config.password}".encode()).decode("ascii")
                 request = (
                     f"CONNECT {target_host}:{target_port} HTTP/1.1\r\n"
                     f"Host: {target_host}:{target_port}\r\n"
@@ -212,9 +214,15 @@ def probe_proxy(config: ProxyConfig, *, target_host: str, target_port: int, time
 
 def remediation_for_failure(failure_class: str | None) -> str:
     if failure_class == "traffic_exhausted_or_plan_limit":
-        return "Upgrade/add Decodo residential traffic or wait for the residential proxy plan to renew; TRR does not need Web Scraping API activation for this smoke."
+        return (
+            "Upgrade/add Decodo residential traffic or wait for the residential proxy plan to renew; "
+            "TRR does not need Web Scraping API activation for this smoke."
+        )
     if failure_class == "proxy_auth_407":
-        return "Confirm the dashboard-generated Decodo residential proxy username, password, endpoint, and account access. A Web Scraping API token will not fix this TRR proxy path."
+        return (
+            "Confirm the dashboard-generated Decodo residential proxy username, password, endpoint, and account "
+            "access. A Web Scraping API token will not fix this TRR proxy path."
+        )
     if failure_class == "proxy_plan_or_account_blocked":
         return "Resolve the Decodo residential proxy account/plan block in the Decodo dashboard."
     return "Check network access and Decodo residential proxy dashboard status."
@@ -237,34 +245,43 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     try:
         config = load_proxy_config(Path(args.env_file))
     except ValueError as exc:
-        report.update({
-            "state": "advisory" if args.dry_run else "fail",
-            "reason": "decodo_proxy_config_malformed",
-            "remediation": str(exc),
-        })
+        report.update(
+            {
+                "state": "advisory" if args.dry_run else "fail",
+                "reason": "decodo_proxy_config_malformed",
+                "remediation": str(exc),
+            }
+        )
         return report
 
     if config is None:
-        report.update({
-            "state": "advisory" if args.dry_run else "fail",
-            "reason": "decodo_proxy_unconfigured",
-            "proxy_configured": False,
-            "remediation": "Set DECODO_PROXY_URL or DECODO_USERNAME, DECODO_PASSWORD, and DECODO_GATEWAY for TRR custom scraper residential proxy lanes.",
-        })
+        report.update(
+            {
+                "state": "advisory" if args.dry_run else "fail",
+                "reason": "decodo_proxy_unconfigured",
+                "proxy_configured": False,
+                "remediation": (
+                    "Set DECODO_PROXY_URL or DECODO_USERNAME, DECODO_PASSWORD, and DECODO_GATEWAY "
+                    "for TRR custom scraper residential proxy lanes."
+                ),
+            }
+        )
         return report
 
-    report.update({
-        "state": "ok",
-        "reason": None,
-        "proxy_configured": True,
-        "proxy_source": config.source,
-        "proxy": {
-            "url": redact_proxy_url(config.proxy_url),
-            "host": config.host,
-            "port": config.port,
-            "protocol": config.protocol,
-        },
-    })
+    report.update(
+        {
+            "state": "ok",
+            "reason": None,
+            "proxy_configured": True,
+            "proxy_source": config.source,
+            "proxy": {
+                "url": redact_proxy_url(config.proxy_url),
+                "host": config.host,
+                "port": config.port,
+                "protocol": config.protocol,
+            },
+        }
+    )
     if not args.live:
         return report
 
@@ -286,10 +303,16 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="TRR-only Decodo residential proxy smoke check.")
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--dry-run", action="store_true", default=True, help="Validate config shape only; send no network traffic.")
-    mode.add_argument("--live", action="store_true", help="Send one CONNECT probe through the Decodo residential proxy.")
+    mode.add_argument(
+        "--dry-run", action="store_true", default=True, help="Validate config shape only; send no network traffic."
+    )
+    mode.add_argument(
+        "--live", action="store_true", help="Send one CONNECT probe through the Decodo residential proxy."
+    )
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
-    parser.add_argument("--env-file", default=str(SOURCE_ENV_PATH), help="Env file to read after shell env and before launchctl.")
+    parser.add_argument(
+        "--env-file", default=str(SOURCE_ENV_PATH), help="Env file to read after shell env and before launchctl."
+    )
     parser.add_argument("--target-host", default="ip.decodo.com", help="CONNECT target host for live smoke.")
     parser.add_argument("--target-port", type=int, default=443, help="CONNECT target port for live smoke.")
     parser.add_argument("--timeout-seconds", type=float, default=20.0, help="Socket timeout for live smoke.")

@@ -77,7 +77,8 @@ def build_benchmark_payload(request: BenchmarkRequest, *, now: datetime | None =
             "posts_upserted": 0,
             "stop_reason": "benchmark_payload_only",
             "cooldown_state": "not_checked",
-            "decodo_mode": str(os.getenv("SOCIAL_INSTAGRAM_POSTS_PROXY_PROVIDER") or "").strip() or "direct_or_env_default",
+            "decodo_mode": str(os.getenv("SOCIAL_INSTAGRAM_POSTS_PROXY_PROVIDER") or "").strip()
+            or "direct_or_env_default",
         },
         "metrics": {
             "pages_per_second": None,

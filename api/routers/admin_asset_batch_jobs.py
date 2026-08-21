@@ -93,6 +93,15 @@ def _build_resize_center_fallback_crop_payload() -> dict[str, Any]:
 def _normalize_crop_payload(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
+    raw_x = value.get("x")
+    raw_y = value.get("y")
+    raw_zoom = value.get("zoom")
+    if not isinstance(raw_x, int | float | str):
+        return None
+    if not isinstance(raw_y, int | float | str):
+        return None
+    if not isinstance(raw_zoom, int | float | str):
+        return None
     try:
         x = float(cast(Any, value.get("x")))
         y = float(cast(Any, value.get("y")))
@@ -250,7 +259,6 @@ def _execute_target_operation(
     db: SupabaseAdminClient,
 ) -> dict[str, Any] | None:
     target_uuid = UUID(target_id)
-
     if origin == "cast_photos":
         if operation in {"count", "crop"}:
             auto_count_cast_photo(target_uuid, force=force, db=db, _=_INTERNAL_BATCH_USER)
@@ -715,6 +723,8 @@ def batch_jobs_for_show_stream(
     db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
     admin: AdminUser = cast(AdminUser, None),
 ) -> StreamingResponse:
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database dependency unavailable")
     actor = str((admin or {}).get("email") or (admin or {}).get("id") or "admin")
     return _stream_batch_jobs(
         show_id=show_id,
@@ -734,6 +744,8 @@ def batch_jobs_for_show_season_stream(
     db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
     admin: AdminUser = cast(AdminUser, None),
 ) -> StreamingResponse:
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database dependency unavailable")
     actor = str((admin or {}).get("email") or (admin or {}).get("id") or "admin")
     return _stream_batch_jobs(
         show_id=show_id,

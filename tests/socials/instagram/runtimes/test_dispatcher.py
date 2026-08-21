@@ -136,3 +136,31 @@ def test_raises_when_all_unsupported() -> None:
     )
     with pytest.raises(RuntimeUnsupported):
         _run(disp.fetch_post_detail("xyz"))
+
+
+def test_comments_dispatch_remains_control_plane_owned_after_legacy_sync(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Legacy comment patches must not replace the control-plane dispatcher."""
+    import importlib
+
+    importlib.import_module("trr_backend.socials.social_season_analytics_impl")
+    comments = importlib.import_module("trr_backend.socials.pipelines.comments.instagram")
+    dispatch_runtime = importlib.import_module("trr_backend.socials.control_plane.dispatch_runtime")
+    calls: list[dict[str, object]] = []
+
+    def fake_dispatch(*, run_id=None, limit=None):
+        calls.append({"run_id": run_id, "limit": limit})
+        return {"dispatched_job_ids": ["job-1"]}
+
+    monkeypatch.setattr(dispatch_runtime, "dispatch_due_social_jobs", fake_dispatch)
+    monkeypatch.setattr(
+        comments._core,
+        "dispatch_due_social_jobs",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("legacy dispatcher restored")),
+    )
+
+    comments._sync_core_overrides()
+    result = comments.dispatch_due_social_jobs(run_id="run-1", limit=3)
+
+    assert "dispatch_due_social_jobs" in comments._LOCAL_ROOM_NAMES
+    assert result == {"dispatched_job_ids": ["job-1"]}
+    assert calls == [{"run_id": "run-1", "limit": 3}]

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 from collections import Counter, defaultdict
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 REVIEW_REASON_LABELS = {
     "unmatched_source_row": "Unmatched source row",
@@ -179,7 +180,9 @@ def _quality_buckets(merged_catalog: list[dict[str, Any]], imported_records: lis
     return dict(sorted(counts.items()))
 
 
-def _duplicate_groups(merged_catalog: list[dict[str, Any]], imported_records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _duplicate_groups(
+    merged_catalog: list[dict[str, Any]], imported_records: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
     keys: dict[tuple[str, str], list[str]] = defaultdict(list)
     for row in merged_catalog:
         group_id = str(row.get("id") or "")
@@ -224,7 +227,10 @@ def _summarize_nup_lookup_report(report: Mapping[str, Any]) -> dict[str, dict[st
 
 def build_run_review(artifacts: Mapping[str, Any]) -> dict[str, Any]:
     merged_catalog = [_safe_dict(row) for row in _artifact_list(artifacts, "merged_catalog")]
-    bridge_rows = [_safe_dict(row) for row in (_artifact_list(artifacts, "bridge_rows") or _artifact_list(artifacts, "bridge_table"))]
+    bridge_rows = [
+        _safe_dict(row)
+        for row in (_artifact_list(artifacts, "bridge_rows") or _artifact_list(artifacts, "bridge_table"))
+    ]
     imported_records = [_safe_dict(row) for row in _artifact_list(artifacts, "imported_records")]
     review_candidates = [_safe_dict(row) for row in _artifact_list(artifacts, "review_candidates")]
     replacement_candidates = [_safe_dict(row) for row in _artifact_list(artifacts, "replacement_candidates")]
@@ -234,22 +240,26 @@ def build_run_review(artifacts: Mapping[str, Any]) -> dict[str, Any]:
     review_reason_counts = _review_reason_counts(review_candidates, bridge_rows, replacement_candidates)
     duplicate_groups = _duplicate_groups(merged_catalog, imported_records)
     if duplicate_groups:
-        review_reason_counts["duplicate_candidate"] = review_reason_counts.get("duplicate_candidate", 0) + len(duplicate_groups)
+        review_reason_counts["duplicate_candidate"] = review_reason_counts.get("duplicate_candidate", 0) + len(
+            duplicate_groups
+        )
     unmatched_rows = [
         row
         for row in bridge_rows
         if str(row.get("strategy") or "") in {"source_only", "manual_review"} and not row.get("group_id")
     ]
     failed_acquisitions = [
-        row
-        for row in merged_catalog
-        if str(_safe_dict(row.get("acquisition")).get("status") or "").lower() == "failed"
+        row for row in merged_catalog if str(_safe_dict(row.get("acquisition")).get("status") or "").lower() == "failed"
     ]
     if failed_acquisitions:
-        review_reason_counts["failed_download"] = review_reason_counts.get("failed_download", 0) + len(failed_acquisitions)
+        review_reason_counts["failed_download"] = review_reason_counts.get("failed_download", 0) + len(
+            failed_acquisitions
+        )
     entity_link_counts = _entity_link_counts(imported_records)
     if entity_link_counts.get("missing"):
-        review_reason_counts["missing_entity_link"] = review_reason_counts.get("missing_entity_link", 0) + entity_link_counts["missing"]
+        review_reason_counts["missing_entity_link"] = (
+            review_reason_counts.get("missing_entity_link", 0) + entity_link_counts["missing"]
+        )
 
     summary = {
         "total_merged_records": len(merged_catalog),

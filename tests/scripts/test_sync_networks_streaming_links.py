@@ -334,14 +334,17 @@ def test_process_entity_records_unresolved_when_variant_generation_fails() -> No
     }
     summary = mod.SyncSummary()
 
-    with patch.object(
-        mod,
-        "_resolve_entity_metadata",
-        return_value={
-            "wikidata_id": "Q111",
-            "wikipedia_url": "https://en.wikipedia.org/wiki/Peacock_(streaming_service)",
-            "wikimedia_logo_file": "Peacock_logo.svg",
-        },
+    with (
+        patch.object(
+            mod,
+            "_resolve_entity_metadata",
+            return_value={
+                "wikidata_id": "Q111",
+                "wikipedia_url": "https://en.wikipedia.org/wiki/Peacock_(streaming_service)",
+                "wikimedia_logo_file": "Peacock_logo.svg",
+            },
+        ),
+        patch.object(mod, "_collect_external_logo_candidates", return_value=({}, [], None)),
     ):
         with patch.object(
             mod,

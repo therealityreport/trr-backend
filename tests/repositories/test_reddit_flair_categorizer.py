@@ -11,7 +11,7 @@ class _FakeCursor:
         self._rows: list[tuple] = []
         self.description: list[tuple] | None = None
 
-    def __enter__(self) -> "_FakeCursor":
+    def __enter__(self) -> _FakeCursor:
         return self
 
     def __exit__(self, *exc_info: object) -> None:
@@ -73,9 +73,7 @@ def test_auto_categorize_flairs_matches_cast_and_seasons(monkeypatch) -> None:
         },
     )
 
-    result = reddit_flair_categorizer.auto_categorize_flairs(
-        community_id="community-1", show_id="show-1"
-    )
+    result = reddit_flair_categorizer.auto_categorize_flairs(community_id="community-1", show_id="show-1")
 
     assert result["total"] == 3
     assert result["matched"] == 2

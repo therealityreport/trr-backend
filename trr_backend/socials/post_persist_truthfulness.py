@@ -40,10 +40,7 @@ def build_post_persist_truthfulness(
     media_assets = _normalize_non_negative_int(media_assets_persisted)
     skipped_by_reason = _normalize_reason_counts(posts_skipped_by_reason)
     silent_drop_detected = (
-        str(status or "").strip().lower() == "completed"
-        and checked > 0
-        and upserted == 0
-        and media_assets <= 0
+        str(status or "").strip().lower() == "completed" and checked > 0 and upserted == 0 and media_assets <= 0
     )
     summary: dict[str, Any] = {
         "platform": normalized_platform,
@@ -58,7 +55,8 @@ def build_post_persist_truthfulness(
     if silent_drop_detected:
         summary["status_resolution"] = "completed_with_silent_drop_alert"
         summary["operator_summary"] = (
-            f"{normalized_platform.title()} posts persistence completed with zero saved posts after checking live posts."
+            f"{normalized_platform.title()} posts persistence completed with zero saved posts "
+            "after checking live posts."
         )
     return summary
 

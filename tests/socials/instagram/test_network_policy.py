@@ -122,4 +122,3 @@ def test_report_only_policy_records_but_does_not_abort() -> None:
     assert decision.blocked
     assert not policy.enforcing
     assert recorder.to_metadata()["blocked_request_count_by_host"][STATIC_CDN_HOST] == 1
-

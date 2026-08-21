@@ -1530,6 +1530,7 @@ def _load_sync_targets(
             normalized_url = _normalize_text(url)
             if normalized_url and normalized_url not in existing_urls and len(existing_urls) < 20:
                 existing_urls.append(normalized_url)
+        existing["discovered_from_urls"] = existing_urls
         if not existing.get("discovered_from") and row.get("discovered_from"):
             existing["discovered_from"] = row.get("discovered_from")
     ordered = sorted(

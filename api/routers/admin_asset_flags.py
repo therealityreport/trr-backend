@@ -187,12 +187,21 @@ def _clear_hosted_fields_payload(now_iso: str) -> dict:
     }
 
 
+def _metadata_payload(row: dict, *, field: str = "metadata") -> dict[str, object]:
+    metadata = row.get(field)
+    if not isinstance(metadata, dict):
+        return {}
+    return {str(key): value for key, value in metadata.items()}
+
+
 @router.post("/archive", response_model=ArchiveAssetResponse)
 def archive_asset(
     payload: ArchiveAssetRequest,
     db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
     user: AdminUser = cast(AdminUser, None),
 ) -> ArchiveAssetResponse:
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database dependency unavailable")
     asset_id_str = str(payload.asset_id)
     row = _fetch_row(db, origin=payload.origin, asset_id=asset_id_str)
 
@@ -246,6 +255,8 @@ def star_asset(
     db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
     _: AdminUser = cast(AdminUser, None),
 ) -> StarAssetResponse:
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database dependency unavailable")
     asset_id_str = str(payload.asset_id)
     row = _fetch_row(db, origin=payload.origin, asset_id=asset_id_str)
 
@@ -283,6 +294,8 @@ def update_asset_content_type(
     db: SupabaseAdminClient = cast(SupabaseAdminClient, None),
     _: AdminUser = cast(AdminUser, None),
 ) -> UpdateAssetContentTypeResponse:
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database dependency unavailable")
     asset_id_str = str(payload.asset_id)
     content_type = _normalize_content_type(payload.content_type)
     now_iso = datetime.now(UTC).isoformat()
@@ -317,8 +330,7 @@ def update_asset_content_type(
         )
         if not (hasattr(links_response, "error") and links_response.error):
             for link in links_response.data or []:
-                context_in = link.get("context") if isinstance(link.get("context"), dict) else {}
-                context_out = dict(context_in)
+                context_out = _metadata_payload(link, field="context")
                 context_out["content_type"] = content_type
                 context_out["context_type"] = context_type_value
                 try:

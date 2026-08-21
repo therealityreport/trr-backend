@@ -411,7 +411,7 @@ class TestRouteRegistration:
             response = client.options(
                 path,
                 headers={
-                    "Origin": "http://localhost:3000",
+                    "Origin": "https://trr.localhost",
                     "Access-Control-Request-Method": "GET",
                 },
             )

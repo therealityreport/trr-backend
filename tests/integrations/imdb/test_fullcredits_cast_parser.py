@@ -179,7 +179,7 @@ def test_fetch_fullcredits_page_uses_scrapling_fallback_before_browser_on_blocke
 def test_scrapling_response_html_decodes_response_body() -> None:
     from trr_backend.integrations.imdb.fullcredits_cast_parser import _scrapling_response_html
 
-    page = SimpleNamespace(body="<html>credits</html>".encode(), encoding="utf-8")
+    page = SimpleNamespace(body=b"<html>credits</html>", encoding="utf-8")
 
     assert _scrapling_response_html(page) == "<html>credits</html>"
 

@@ -2333,16 +2333,25 @@ class TestRefreshShowPhotosStream:
         query.execute.side_effect = [show_resp] + [empty_resp] * 20
         mock_db.schema.return_value.table.return_value = query
 
-        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
-            response = client.post(
-                f"/api/v1/admin/shows/{show_id}/refresh-photos/stream",
-                headers={"Authorization": f"Bearer {token}"},
-                json={
-                    "skip_cast_photos": True,
-                },
-            )
+        monkeypatch.setattr(
+            "trr_backend.db.admin.create_supabase_admin_client",
+            lambda *args, **kwargs: mock_db,
+        )
+        object_storage_factory = MagicMock(return_value=MagicMock())
+        monkeypatch.setattr(
+            "trr_backend.media.s3_mirror.get_object_storage_client",
+            object_storage_factory,
+        )
+        response = client.post(
+            f"/api/v1/admin/shows/{show_id}/refresh-photos/stream",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "skip_cast_photos": True,
+            },
+        )
 
         assert response.status_code == 200
+        object_storage_factory.assert_called_once_with()
         assert "Skipping cast photos (skip_cast_photos=true)." in response.text
         assert "Skipping cast photo mirroring (skip_cast_photos=true)." in response.text
         assert "Skipping cast photo prune (skip_cast_photos=true)." in response.text

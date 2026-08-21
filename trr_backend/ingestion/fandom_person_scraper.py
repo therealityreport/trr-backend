@@ -311,10 +311,10 @@ def _image_file_name(url: str | None) -> str | None:
     return name or None
 
 
-def _looks_like_image_url(url: str | None) -> bool:
+def _looks_like_image_url(url: Any) -> bool:
     if not url:
         return False
-    lowered = url.lower()
+    lowered = str(url).lower()
     return any(lowered.endswith(ext) for ext in _IMAGE_EXTENSIONS) or "/images/" in lowered
 
 
@@ -327,6 +327,15 @@ def _parse_data_attrs(raw: object | None) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalize_fandom_image_url(url: str | None, *, source_page_url: str) -> str | None:
@@ -676,6 +685,8 @@ def _parse_gallery_sections(
             continue
         if sibling_name is None:
             continue
+        if not isinstance(sibling, Tag):
+            continue
 
         entries = _collect_section_images(
             sibling,
@@ -873,17 +884,23 @@ def _extract_dynamic_sections(article_root: _SoupNode) -> list[dict[str, Any]]:
             if sibling_name in {"h2", "h3", "h4"}:
                 break
             if sibling_name == "p":
+                if not isinstance(sibling, Tag):
+                    continue
                 text = _normalize_text(sibling.get_text(" ", strip=True))
                 if text:
                     paragraphs.append(text)
                 continue
             if sibling_name in {"ul", "ol"}:
+                if not isinstance(sibling, Tag):
+                    continue
                 for item in sibling.find_all("li"):
                     text = _normalize_text(item.get_text(" ", strip=True))
                     if text:
                         bullets.append(text)
                 continue
             if sibling_name == "table":
+                if not isinstance(sibling, Tag):
+                    continue
                 table_rows.extend(_extract_section_table_rows(sibling))
 
         if not paragraphs and not bullets and not table_rows:

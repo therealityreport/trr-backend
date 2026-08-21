@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from trr_backend.vision import screen_time_face_matching as matching
+
+pytestmark = pytest.mark.vision
 
 
 def test_detect_faces_uses_deepface_represent(monkeypatch) -> None:

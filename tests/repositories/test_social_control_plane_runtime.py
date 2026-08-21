@@ -49,7 +49,7 @@ EXPECTED_SIGNATURES = {
     "_load_instagram_cookies": "() -> 'dict[str, str]'",
     "_load_threads_cookies": "() -> 'dict[str, str]'",
     "_load_tiktok_cookies": "() -> 'dict[str, str]'",
-    "_load_twikit_credentials": "() -> 'Any'",
+    "_load_twikit_credentials": "(twitter_cookies: 'Any' = None) -> 'Any'",
     "_load_twitter_auth": "() -> 'Any'",
     "_pg_upsert_many": "(*args: 'Any', **kwargs: 'Any') -> 'Any'",
     "_resolve_runtime_version_stamp": "() -> 'str'",
@@ -59,7 +59,7 @@ EXPECTED_SIGNATURES = {
     "load_instagram_cookies": "() -> 'dict[str, str]'",
     "load_threads_cookies": "() -> 'dict[str, str]'",
     "load_tiktok_cookies": "() -> 'dict[str, str]'",
-    "load_twikit_credentials": "() -> 'Any'",
+    "load_twikit_credentials": "(twitter_cookies: 'Any' = None) -> 'Any'",
     "load_twitter_auth": "() -> 'Any'",
     "pg_upsert_many": "(*args: 'Any', **kwargs: 'Any') -> 'Any'",
     "refresh_platform_cookies_interactive": "(*args: 'Any', **kwargs: 'Any') -> 'Any'",
@@ -225,16 +225,14 @@ def test_runtime_surface_cold_import_order_and_ast_proxy_contract() -> None:
     assert len(accepted_proxy_imports) == 1
     assert "_core" not in deleted_names
     assert core_references
-    assert (
-        package_imports["trr_backend.socials.control_plane.dispatch"]
-        < package_imports["trr_backend.socials.control_plane.runtime"]
-    )
+    assert package_imports == {}
 
     code = "\n".join(
         (
             "import importlib",
             "import sys",
             "runtime = importlib.import_module('trr_backend.socials.control_plane.runtime')",
+            "assert 'trr_backend.socials.social_season_analytics_impl' not in sys.modules",
             "owner = importlib.import_module('trr_backend.socials.control_plane.dispatch_runtime')",
             "impl = importlib.import_module('trr_backend.socials.social_season_analytics_impl')",
             "repo = importlib.import_module('trr_backend.repositories.social_season_analytics')",

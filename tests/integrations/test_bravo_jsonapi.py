@@ -319,8 +319,9 @@ def test_fetch_gallery_assets_appends_original_urls_from_legacy_gallery_html(mon
         <script data-drupal-selector="drupal-settings-json">
         {"ls_adobe_analytics":{"showSite":"Summer House","season":"Season 4","people":"Ciara Miller"}}
         </script>
-        <img src="/sites/bravo/files/styles/media_gallery_computer/public/field_media_items/2020/02/summer-house-ciara.jpg?itok=abc" />
         """
+            '<img src="/sites/bravo/files/styles/media_gallery_computer/public/field_media_items/2020/02/'
+            'summer-house-ciara.jpg?itok=abc" />'
         ),
     )
 

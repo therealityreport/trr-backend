@@ -70,6 +70,11 @@ class FacebankInitialReferenceProfile(TypedDict):
     generated_at: str
 
 
+def _mapping_or_empty(value: Any) -> dict[str, Any]:
+    """Return a row's JSON-object value without changing its runtime shape."""
+    return value if isinstance(value, dict) else {}
+
+
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 

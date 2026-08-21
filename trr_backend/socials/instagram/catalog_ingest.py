@@ -1257,12 +1257,13 @@ def _build_instagram_scraper_with_auth_fallback(
 ):
     from trr_backend.socials.instagram import InstagramScraper, build_authenticated_instagram_scraper
 
-    if require_validation is None:
-        require_validation = _env_truthy("INSTAGRAM_AUTH_RESOLVER_V2")
+    effective_require_validation = (
+        require_validation if require_validation is not None else _env_truthy("INSTAGRAM_AUTH_RESOLVER_V2")
+    )
     scraper = build_authenticated_instagram_scraper(
         browser_account_id=browser_account_id,
         caller_context=caller_context,
-        require_validation=require_validation,
+        require_validation=effective_require_validation,
     )
     if scraper is not None or not allow_public_fallback:
         return scraper
@@ -1925,7 +1926,7 @@ def _discover_instagram_cursor_partitions(
             if not has_next or not next_cursor:
                 break
             cursor = next_cursor
-            seen_cursors.add(cursor)
+            seen_cursors.add(next_cursor)
         shard_total = max(1, len(partitions))
         for partition in partitions:
             partition.shard_total = shard_total

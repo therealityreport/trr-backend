@@ -181,6 +181,12 @@ def _coerce_non_negative_int(value: Any) -> int | None:
         return None
 
 
+def _string_keyed_dict(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): item for key, item in value.items()}
+
+
 def _coerce_optional_bool(value: Any) -> bool | None:
     if isinstance(value, bool):
         return value

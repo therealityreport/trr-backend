@@ -64,6 +64,13 @@ def main() -> int:
     args = parse_args()
     load_env()
 
+    # Composition root: publish the late-bound legacy control-plane provider so
+    # the cookie-refresh leaf's proxy attributes resolve.  Importing the leaf
+    # alone leaves the provider UNCONFIGURED (by design — the leaf must stay
+    # importable for --help without the monolith); the CLI is the layer allowed
+    # to load it, mirroring scripts/socials/worker.py.  Idempotent once published.
+    import trr_backend.socials.social_season_analytics_impl  # noqa: F401
+
     platform_names = list(PLATFORM_HANDLERS) if args.platform == "all" else [args.platform]
     if (
         bool(args.force)

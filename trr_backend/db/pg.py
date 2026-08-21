@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
 from threading import Lock
 from typing import TYPE_CHECKING, Any, TypeVar, cast
@@ -306,8 +306,8 @@ def probe_fresh_session_capacity(
 ) -> dict[str, Any]:
     """Reserve fresh Supavisor session slots briefly without initializing a named pool."""
 
-    def _connect(url: str, connect_kwargs: dict[str, Any]) -> Any:
-        return psycopg2.connect(**connect_kwargs, **preview_read_only_connect_kwargs(url))
+    def _connect(url: str, connect_kwargs: Mapping[str, Any]) -> Any:
+        return cast(Any, psycopg2.connect)(**connect_kwargs, **preview_read_only_connect_kwargs(url))
 
     return _probe_fresh_session_capacity(
         requested_sessions=requested_sessions,

@@ -3,9 +3,12 @@ from __future__ import annotations
 import types
 
 import numpy as np
+import pytest
 
 from trr_backend.services.face_reference_contract import FACE_REFERENCE_EMBEDDING_CONTRACT_KEY
 from trr_backend.vision import cast_reference_face_matching as matching
+
+pytestmark = pytest.mark.vision
 
 
 def test_detect_faces_uses_insightface_faceanalysis(monkeypatch) -> None:

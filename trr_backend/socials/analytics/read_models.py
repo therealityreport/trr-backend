@@ -1063,10 +1063,8 @@ def get_analytics(
 
     last_post_dt = max((row["ts"] for row in posts), default=None)
     last_comment_dt = max((row["ts"] for row in comments), default=None)
-    freshness_anchor = max(
-        [value for value in [last_post_dt, last_comment_dt] if isinstance(value, datetime)],
-        default=None,
-    )
+    freshness_candidates = [value for value in [last_post_dt, last_comment_dt] if isinstance(value, datetime)]
+    freshness_anchor = max(freshness_candidates, default=None)
     data_freshness_minutes: int | None = None
     if isinstance(freshness_anchor, datetime):
         data_freshness_minutes = max(0, int((now - freshness_anchor).total_seconds() // 60))
@@ -4014,14 +4012,14 @@ def build_csv(snapshot: dict[str, Any]) -> str:
 
     if benchmark:
         current = _as_json_object(benchmark.get("current"))
-        prev = _as_json_object(benchmark.get("previous_week"))
-        trailing = _as_json_object(benchmark.get("trailing_3_week_avg"))
+        previous_week = _as_json_object(benchmark.get("previous_week"))
+        trailing_3_week_avg = _as_json_object(benchmark.get("trailing_3_week_avg"))
         writer.writerow(["benchmark", "week_index", benchmark.get("week_index")])
         writer.writerow(["benchmark", "current_posts", current.get("posts")])
         writer.writerow(["benchmark", "current_comments", current.get("comments")])
         writer.writerow(["benchmark", "current_engagement", current.get("engagement")])
-        writer.writerow(["benchmark", "previous_week_index", prev.get("week_index")])
-        writer.writerow(["benchmark", "trailing_window_size", trailing.get("window_size")])
+        writer.writerow(["benchmark", "previous_week_index", previous_week.get("week_index")])
+        writer.writerow(["benchmark", "trailing_window_size", trailing_3_week_avg.get("window_size")])
     return output.getvalue()
 
 

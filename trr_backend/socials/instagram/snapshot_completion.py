@@ -431,11 +431,7 @@ def _build_retry_target(
     retry_metadata: Mapping[str, Any],
 ) -> SnapshotRetryTarget:
     metadata = dict(retry_metadata)
-    reason = (
-        _string_value(metadata.pop("reason", None))
-        or _reason_from_evidence(missing_evidence)
-        or f"{part}_missing"
-    )
+    reason = _string_value(metadata.pop("reason", None)) or _reason_from_evidence(missing_evidence) or f"{part}_missing"
     retry_key = _string_value(metadata.pop("retry_key", None)) or _default_retry_key(part=part, target=target)
     attempt_count = _optional_int(metadata.pop("attempt_count", None))
     max_attempts = _optional_int(metadata.pop("max_attempts", None))
@@ -481,11 +477,7 @@ def _normalize_part_mapping(
     if value is None:
         return {}
     if isinstance(value, Mapping):
-        normalized = {
-            _normalize_part_name(part): evidence
-            for part, evidence in value.items()
-            if _string_value(part)
-        }
+        normalized = {_normalize_part_name(part): evidence for part, evidence in value.items() if _string_value(part)}
     elif isinstance(value, str):
         normalized = {_normalize_part_name(value): {}}
     else:
