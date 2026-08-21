@@ -151,7 +151,7 @@ def test_worker_health_shared_provider_fails_deterministically_when_unconfigured
         worker_health._core._worker_health_cache = None
 
 
-def test_worker_health_ordinary_import_truthfully_loads_package_root_legacy_debt() -> None:
+def test_worker_health_ordinary_import_defers_provider_until_late_publication() -> None:
     backend_root = Path(__file__).resolve().parents[2]
     script = "\n".join(
         (
@@ -161,6 +161,15 @@ def test_worker_health_ordinary_import_truthfully_loads_package_root_legacy_debt
             "import trr_backend.socials.control_plane.worker_health as leaf",
             "import trr_backend.socials.control_plane.queue_status as queue_status",
             "import trr_backend.socials.control_plane as control_plane",
+            "assert legacy_name not in sys.modules",
+            "assert queue_status._LEGACY_NAMESPACE is None",
+            "try:",
+            "    leaf._core.pg",
+            "except RuntimeError as exc:",
+            "    assert 'Queue-status provider is not configured' in str(exc)",
+            "else:",
+            "    raise AssertionError('unpublished provider must fail closed')",
+            "import trr_backend.socials.social_season_analytics_impl as legacy",
             "legacy = sys.modules[legacy_name]",
             "assert leaf._core is queue_status._legacy_repo()",
             "assert queue_status._LEGACY_NAMESPACE is legacy.__dict__",

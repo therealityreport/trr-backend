@@ -11,7 +11,7 @@ import trr_backend.socials.social_season_analytics_impl as legacy_core
 from trr_backend.socials.control_plane import backfill_health, queue_status
 
 
-def test_backfill_health_ordinary_import_uses_configured_live_provider() -> None:
+def test_backfill_health_ordinary_import_defers_provider_until_late_publication() -> None:
     backend_root = Path(__file__).resolve().parents[2]
     script = "\n".join(
         (
@@ -20,6 +20,15 @@ def test_backfill_health_ordinary_import_uses_configured_live_provider() -> None
             "assert legacy_name not in sys.modules",
             "import trr_backend.socials.control_plane.backfill_health as leaf",
             "import trr_backend.socials.control_plane.queue_status as queue_status",
+            "assert legacy_name not in sys.modules",
+            "assert queue_status._LEGACY_NAMESPACE is None",
+            "try:",
+            "    leaf._core._now_utc",
+            "except RuntimeError as exc:",
+            "    assert 'Queue-status provider is not configured' in str(exc)",
+            "else:",
+            "    raise AssertionError('unpublished provider must fail closed')",
+            "import trr_backend.socials.social_season_analytics_impl as legacy",
             "legacy = sys.modules[legacy_name]",
             "assert leaf._core is queue_status._legacy_repo()",
             "assert queue_status._LEGACY_NAMESPACE is legacy.__dict__",

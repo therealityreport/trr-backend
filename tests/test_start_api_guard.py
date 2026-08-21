@@ -12,8 +12,7 @@ def _install_fake_uvicorn(tmp_path: Path) -> Path:
     bin_dir.mkdir()
     fake_uvicorn = bin_dir / "uvicorn"
     fake_uvicorn.write_text(
-        "#!/usr/bin/env bash\n"
-        "printf '%s\\n' \"$@\" > \"$UVICORN_ARGS_FILE\"\n",
+        '#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" > "$UVICORN_ARGS_FILE"\n',
         encoding="utf-8",
     )
     fake_uvicorn.chmod(0o755)

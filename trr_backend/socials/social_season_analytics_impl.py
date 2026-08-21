@@ -13,6 +13,7 @@ import asyncio
 import copy
 import glob
 import hashlib
+import importlib
 import inspect
 import json
 import logging
@@ -467,7 +468,7 @@ INSTAGRAM_SHORTCODE_RE = re.compile(r"^[A-Za-z0-9_-]{5,32}$")
 YOUTUBE_HANDLE_URL_RE = re.compile(r"/@([A-Za-z0-9._-]+)")
 GENERIC_ACCOUNT_HANDLE_RE = re.compile(r"^[a-z0-9._-]{1,64}$")
 INSTAGRAM_ACCOUNT_HANDLE_RE = re.compile(r"^[a-z0-9._]{1,30}$")
-FIELD_UNSET = object()
+FIELD_UNSET, _DELEGATES_TO_CONTROL_PLANE_ATTRIBUTE = object(), "__trr_delegates_to_control_plane__"
 ANALYTICS_CACHE_TTL_SECONDS = 15.0
 _week_detail_cache_invalidator: Callable[[], None] | None = None
 
@@ -2083,7 +2084,7 @@ def _job_requires_dedicated_worker_lane(job_config: Mapping[str, Any] | None, *,
 
 
 def _job_requires_trusted_local_worker_lane(job_config: Mapping[str, Any] | None, *, platform: Any = None) -> bool:
-    required_lane = _job_required_worker_lane(job_config)
+    required_lane = _job_required_worker_lane(job_config or {})
     if required_lane == TRUSTED_LOCAL_WORKER_LANE:
         return True
     config = job_config or {}
@@ -3456,7 +3457,7 @@ def _probe_modal_remote_auth_health_uncached(platform: str) -> dict[str, Any] | 
     normalized_platform = _normalize_platform_name(platform)
     if not normalized_platform or not _platform_requires_remote_auth(normalized_platform):
         return None
-
+    timeout_seconds = 8.0
     try:
         import modal  # noqa: F401
     except Exception:  # noqa: BLE001
@@ -9211,11 +9212,11 @@ def _refresh_tiktok_cookies(stale_reason: str | None = None) -> dict[str, str]:
         refreshed = cast(_CookieRefreshCallable, refresh_tiktok_cookies)(
             username=username,
             password=password,
-            cookie_file=_platform_cookie_refresh_target_path(
-                _default_tiktok_cookie_file_path(),
-                "SOCIAL_TIKTOK_COOKIES_FILE",
-                "TIKTOK_COOKIES_FILE",
-            ),
+            cookie_file=str(_platform_cookie_refresh_target_path(
+                    _default_tiktok_cookie_file_path(),
+                    "SOCIAL_TIKTOK_COOKIES_FILE",
+                    "TIKTOK_COOKIES_FILE",
+                )),
             headless=(os.getenv("SOCIAL_TIKTOK_COOKIE_REFRESH_HEADLESS") or "true").strip().lower()
             not in {"0", "false", "off", "no"},
             timeout_seconds=_resolve_positive_int_env(
@@ -9322,11 +9323,11 @@ def _refresh_facebook_cookies(stale_reason: str | None = None) -> dict[str, str]
         refreshed = cast(_CookieRefreshCallable, refresh_facebook_cookies)(
             username=username,
             password=password,
-            cookie_file=_platform_cookie_refresh_target_path(
-                _default_facebook_cookie_file_path(),
-                "SOCIAL_FACEBOOK_COOKIES_FILE",
-                "FACEBOOK_COOKIES_FILE",
-            ),
+            cookie_file=str(_platform_cookie_refresh_target_path(
+                    _default_facebook_cookie_file_path(),
+                    "SOCIAL_FACEBOOK_COOKIES_FILE",
+                    "FACEBOOK_COOKIES_FILE",
+                )),
             headless=(os.getenv("SOCIAL_FACEBOOK_COOKIE_REFRESH_HEADLESS") or "true").strip().lower()
             not in {"0", "false", "off", "no"},
             timeout_seconds=_resolve_positive_int_env(
@@ -9437,9 +9438,9 @@ def _refresh_threads_cookies(stale_reason: str | None = None) -> dict[str, str]:
         refreshed = cast(_CookieRefreshCallable, refresh_threads_cookies)(
             username=username,
             password=password,
-            cookie_file=_platform_cookie_refresh_target_path(
-                _default_threads_cookie_file_path(), "SOCIAL_THREADS_COOKIES_FILE", "THREADS_COOKIES_FILE"
-            ),
+            cookie_file=str(_platform_cookie_refresh_target_path(
+                    _default_threads_cookie_file_path(), "SOCIAL_THREADS_COOKIES_FILE", "THREADS_COOKIES_FILE"
+                )),
             headless=(os.getenv("SOCIAL_THREADS_COOKIE_REFRESH_HEADLESS") or "true").strip().lower()
             not in {"0", "false", "off", "no"},
             timeout_seconds=_resolve_positive_int_env(
@@ -9905,11 +9906,11 @@ def _do_interactive_refresh_tiktok(
     refreshed = cast(_CookieRefreshCallable, refresh_tiktok_cookies)(
         username=username,
         password=password,
-        cookie_file=_platform_cookie_refresh_target_path(
-            _default_tiktok_cookie_file_path(),
-            "SOCIAL_TIKTOK_COOKIES_FILE",
-            "TIKTOK_COOKIES_FILE",
-        ),
+        cookie_file=str(_platform_cookie_refresh_target_path(
+                _default_tiktok_cookie_file_path(),
+                "SOCIAL_TIKTOK_COOKIES_FILE",
+                "TIKTOK_COOKIES_FILE",
+            )),
         headless=headless,
         timeout_seconds=timeout_seconds,
     )
@@ -9958,11 +9959,11 @@ def _do_interactive_refresh_facebook(
     refreshed = cast(_CookieRefreshCallable, refresh_facebook_cookies)(
         username=username,
         password=password,
-        cookie_file=_platform_cookie_refresh_target_path(
-            _default_facebook_cookie_file_path(),
-            "SOCIAL_FACEBOOK_COOKIES_FILE",
-            "FACEBOOK_COOKIES_FILE",
-        ),
+        cookie_file=str(_platform_cookie_refresh_target_path(
+                _default_facebook_cookie_file_path(),
+                "SOCIAL_FACEBOOK_COOKIES_FILE",
+                "FACEBOOK_COOKIES_FILE",
+            )),
         headless=headless,
         timeout_seconds=timeout_seconds,
     )
@@ -9984,11 +9985,11 @@ def _do_interactive_refresh_threads(
     refreshed = cast(_CookieRefreshCallable, refresh_threads_cookies)(
         username=username,
         password=password,
-        cookie_file=_platform_cookie_refresh_target_path(
-            _default_threads_cookie_file_path(),
-            "SOCIAL_THREADS_COOKIES_FILE",
-            "THREADS_COOKIES_FILE",
-        ),
+        cookie_file=str(_platform_cookie_refresh_target_path(
+                _default_threads_cookie_file_path(),
+                "SOCIAL_THREADS_COOKIES_FILE",
+                "THREADS_COOKIES_FILE",
+            )),
         headless=headless,
         timeout_seconds=timeout_seconds,
     )
@@ -13651,7 +13652,7 @@ def _increment_run_counters_on_job_finish(
     prior_status: str,
     new_status: str,
     prior_items_found: int,
-    new_items_found: int,
+    new_items_found: int, conn: Any | None = None,
 ) -> None:
     from trr_backend.socials.control_plane.run_lifecycle import _increment_run_counters_on_job_finish as impl
 
@@ -13661,7 +13662,7 @@ def _increment_run_counters_on_job_finish(
         prior_status=prior_status,
         new_status=new_status,
         prior_items_found=prior_items_found,
-        new_items_found=new_items_found,
+        new_items_found=new_items_found, conn=conn,
     )
 
 
@@ -17541,7 +17542,7 @@ def _mirror_platform_media_to_s3_result(
     uploaded_by_source_url: dict[str, dict[str, Any]] = {}
     saw_retryable_error = False
     instagram_refresh_scraper: Any | None = None
-    generated_at = _iso(_now_utc())
+    generated_at = _iso(_now_utc()) or ""
     last_progress_emit = 0.0
 
     def _emit_mirror_progress(*, force: bool = False) -> None:
@@ -22716,7 +22717,8 @@ def _platform_post_repair_reasons(
     mirror_status = str(post_row.get("media_mirror_status") or "").strip().lower()
     source_thumbnail_url, source_media_urls = _platform_post_source_urls(platform, post_row)
     source_id = _platform_source_id(platform, post_row)
-    raw_data = post_row.get("raw_data") if isinstance(post_row.get("raw_data"), dict) else {}
+    raw_data_value = post_row.get("raw_data")
+    raw_data: dict[str, Any] = raw_data_value if isinstance(raw_data_value, dict) else {}
     avatar_state = _platform_post_avatar_repair_state(platform, post_row)
     reasons: list[str] = []
 
@@ -28129,12 +28131,12 @@ def _ingest_youtube(
             and opts.date_end is not None
             and existing_post_lookup
         ):
+            effective_date_start_value = cast(datetime, _coerce_dt(effective_date_start))
+            date_end_value = cast(datetime, _coerce_dt(opts.date_end))
             window_days = max(
                 1,
                 int(
-                    (
-                        cast(datetime, _coerce_dt(opts.date_end)) - cast(datetime, _coerce_dt(effective_date_start))
-                    ).total_seconds()
+                    (date_end_value - effective_date_start_value).total_seconds()
                     // 86400
                 )
                 + 1,
@@ -29561,6 +29563,7 @@ def _ingest_twitter(
                         quotes: list[Any] = []
                         observed_comment_ids: set[str] = set()
                         local_comment_stats = _new_comment_persist_stats()
+                        replies: list[Any] = []
                         try:
                             replies = _fetch_twitter_replies_compat(
                                 scraper=scraper,
@@ -31393,14 +31396,14 @@ def _run_platform_media_mirror_stage(
             media_mirror_last_job_id=job_id,
         )
         _heartbeat()
-    source_assets: list[dict[str, Any]] = []
+    source_asset_records: list[dict[str, Any]] = []
     source_assets_raw = source_media_asset_meta.get("source_assets")
     if isinstance(source_assets_raw, list):
-        source_assets = [
+        source_asset_records = [
             dict(item) for item in source_assets_raw if isinstance(item, dict) and str(item.get("url") or "").strip()
         ]
-    if not source_assets:
-        source_assets = [
+    if not source_asset_records:
+        source_asset_records = [
             {
                 "url": str(url).strip(),
                 "type": "video" if _is_video_like_media_url(str(url).strip()) else "image",
@@ -31652,7 +31655,7 @@ def _run_platform_media_mirror_stage(
                 (result_manifest or {}).get("selection_policy") or "best_per_role_with_cover_display_variants"
             ),
             "selected_source": mirror_selected_source,
-            "source_assets": source_assets,
+            "source_assets": source_asset_records,
             "thumbnail_source": thumbnail_source,
             "hosted_assets": hosted_assets,
             "thumbnail_hosted": thumbnail_hosted,
@@ -33162,11 +33165,13 @@ def _cached_live_profile_snapshot(platform: str, account_handle: str) -> dict[st
                 # twikit is an optional dependency only required by the cookie/guest fallback
                 # below. Import it lazily so the GraphQL-first happy path above still resolves a
                 # snapshot in environments where twikit is not installed.
-                from twikit import Client as TwikitClient  # pyright: ignore[reportMissingImports]
-                from twikit.guest import GuestClient as TwikitGuestClient  # pyright: ignore[reportMissingImports]
+                twikit_module = importlib.import_module("twikit")
+                twikit_guest_module = importlib.import_module("twikit.guest")
+                twikit_client = twikit_module.Client
+                twikit_guest_client = twikit_guest_module.GuestClient
 
                 async def _load_snapshot() -> dict[str, Any]:
-                    client: Any | None = None
+                    client: Any = None
                     try:
                         auth_token = str((credentials or {}).get("auth_token") or "").strip()
                         ct0 = str((credentials or {}).get("ct0") or "").strip()
@@ -33174,17 +33179,17 @@ def _cached_live_profile_snapshot(platform: str, account_handle: str) -> dict[st
                         email = str((credentials or {}).get("email") or "").strip()
                         password = str((credentials or {}).get("password") or "").strip()
                         if auth_token and ct0:
-                            client = TwikitClient("en-US")
+                            client = twikit_client("en-US")
                             client.set_cookies({"auth_token": auth_token, "ct0": ct0})
                         elif username and password:
-                            client = TwikitClient("en-US")
+                            client = twikit_client("en-US")
                             await client.login(
                                 auth_info_1=username,
                                 auth_info_2=email or username,
                                 password=password,
                             )
                         else:
-                            client = TwikitGuestClient("en-US")
+                            client = twikit_guest_client("en-US")
                             await client.activate()
                         user = await client.get_user_by_screen_name(normalized_account)
                         return {
@@ -34873,7 +34878,7 @@ def _catalog_run_intent_metadata(run_config: Mapping[str, Any] | None) -> dict[s
 
 
 def _normalize_attached_followups(value: Any) -> dict[str, dict[str, Any]]:
-    payload = dict(value) if isinstance(value, Mapping) else {}
+    payload: Mapping[str, Any] = value if isinstance(value, Mapping) else {}
     normalized: dict[str, dict[str, Any]] = {}
     comments_raw = _as_string_mapping(payload.get("comments"))
     media_raw = _as_string_mapping(payload.get("media"))
@@ -53449,7 +53454,7 @@ def _comments_coverage_for_platform(
             params,
         )
         context = season_context
-        if _threads_should_enforce_rhoslc_relevance(context=context):
+        if context is not None and _threads_should_enforce_rhoslc_relevance(context=context):
             hashtags, keywords = _threads_build_relevance_terms(
                 season_id,
                 source_scope=source_scope,
@@ -54228,10 +54233,10 @@ def _overlay_platform_status_with_active_jobs(
     active_job_status: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     payload = dict(status_payload)
-    active_job_summary = _build_active_job_summary(active_job_status)
-    if active_job_summary is None:
+    active_job_summary_value = _build_active_job_summary(active_job_status)
+    if active_job_summary_value is None:
         return payload
-
+    active_job_summary: Mapping[str, Any] = active_job_summary_value
     sync_status = _canonicalize_week_job_live_status(active_job_summary.get("sync_status"))
     if not sync_status:
         return payload
@@ -54516,7 +54521,7 @@ def _mirror_coverage_for_platform(
     )
     if normalized_platform == "threads":
         context = season_context
-        if _threads_should_enforce_rhoslc_relevance(context=context):
+        if context is not None and _threads_should_enforce_rhoslc_relevance(context=context):
             hashtags, keywords = _threads_build_relevance_terms(
                 season_id,
                 source_scope=source_scope,
@@ -59776,7 +59781,7 @@ def _social_account_profile_metric_payload(platform: str, row: Mapping[str, Any]
             "engagement": likes + comments + reposts + retweets + replies + quotes,
         }
     engagement = likes + comments + shares + retweets + replies + quotes
-    payload = {
+    payload: dict[str, int | None] = {
         "likes": likes,
         "comments_count": comments,
         "views": views,
@@ -64694,6 +64699,7 @@ def get_social_account_catalog_post_detail(
         "is_verified": merged_row.get("owner_is_verified"),
     }
     saved_metrics = {**metrics, "saved_comments": saved_comments}
+    assignment = _metadata_dict(catalog_row)
     payload = {
         "platform": normalized_platform,
         "account_handle": normalized_account,
@@ -64715,9 +64721,9 @@ def get_social_account_catalog_post_detail(
             "id": str(merged_row.get("location_id") or location_raw.get("id") or "").strip() or None,
             "name": str(merged_row.get("location_name") or location_raw.get("name") or "").strip() or None,
         },
-        "assignment_status": str((catalog_row or {}).get("assignment_status") or "unassigned"),
-        "assignment_source": str((catalog_row or {}).get("assignment_source") or "").strip() or None,
-        "candidate_matches": list((catalog_row or {}).get("candidate_matches") or []),
+        "assignment_status": str(assignment.get("assignment_status") or "unassigned"),
+        "assignment_source": str(assignment.get("assignment_source") or "").strip() or None,
+        "candidate_matches": list(assignment.get("candidate_matches") or []),
         "show_id": str(merged_row.get("show_id") or "").strip() or None,
         "show_name": merged_row.get("show_name"),
         "show_slug": merged_row.get("show_slug"),
@@ -68113,6 +68119,7 @@ _configure_account_catalog_freshness_dependencies(
 )
 get_social_account_catalog_freshness = _canonical_get_social_account_catalog_freshness
 get_social_account_catalog_gap_analysis_status = _canonical_get_social_account_catalog_gap_analysis_status
+_provider_path = ""
 for _provider_path in (
     "trr_backend.socials.control_plane.queue_status",
     "trr_backend.socials.read_models.account_profile.common",  # noqa: E501

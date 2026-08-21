@@ -278,6 +278,10 @@ def _dict_value(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _dict_or_empty(value: Any) -> dict[str, Any]:
+    return _dict_value(value)
+
+
 def _list_value(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
@@ -5159,9 +5163,7 @@ def build_reddit_refresh_backfill_operation_producer(
                 )
                 return
 
-            request_payload_row = (
-                target.get("request_payload") if isinstance(target.get("request_payload"), dict) else {}
-            )
+            request_payload_row = _dict_or_empty(target.get("request_payload"))
             if not request_payload_row:
                 missing_payload = {
                     "container_key": target.get("container_key"),

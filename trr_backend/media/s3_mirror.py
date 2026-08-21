@@ -196,10 +196,12 @@ def _row_metadata(row: Mapping[str, Any]) -> dict[str, Any]:
 def _read_response_bytes_with_cap(response: Any, *, max_bytes: int) -> tuple[bytes, int | None, str | None]:
     parts: list[bytes] = []
     size_bytes = 0
-    iterator = None
+    iterator: Iterable[Any] | None = None
     iter_content = getattr(response, "iter_content", None)
     if callable(iter_content):
-        iterator = iter_content(chunk_size=_MEDIA_MIRROR_CHUNK_SIZE_BYTES)
+        candidate = iter_content(chunk_size=_MEDIA_MIRROR_CHUNK_SIZE_BYTES)
+        if isinstance(candidate, Iterable):
+            iterator = candidate
 
     if iterator is not None:
         for chunk in cast(Iterable[bytes], iterator):
@@ -1105,6 +1107,11 @@ def _head_object(s3_client, bucket: str, key: str) -> dict[str, Any] | None:
         raise
 
 
+def _head_content_length(head: Mapping[str, Any], fallback: int) -> int:
+    content_length = head.get("ContentLength")
+    return int(content_length) if content_length is not None else fallback
+
+
 def upload_bytes_to_s3(
     s3_client,
     *,
@@ -1673,7 +1680,8 @@ def mirror_cast_photo_row(
     force: bool = False,
     s3_client=None,
 ) -> dict[str, Any] | None:
-    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    metadata_value = row.get("metadata")
+    metadata: dict[str, Any] = metadata_value if isinstance(metadata_value, dict) else {}
     hosted_url = row.get("hosted_url")
     hosted_key = row.get("hosted_key")
     if not force:

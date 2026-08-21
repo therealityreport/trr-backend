@@ -17,7 +17,7 @@ import os
 import re
 import socket
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -735,6 +735,11 @@ def _normalize_text(value: object | None) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
+def _string_attribute(value: object) -> str | None:
+    """Narrow a BeautifulSoup attribute that is semantically a string."""
+    return cast(str | None, value)
+
+
 def _strip_html_text(value: str | None) -> str:
     """Convert a tiny HTML snippet into plain text."""
     return _normalize_text(BeautifulSoup(value or "", "html.parser").get_text(" ", strip=True))
@@ -886,7 +891,7 @@ def _extract_msn_context_by_cms_id(body_html: str) -> dict[str, str]:
     contexts: dict[str, str] = {}
 
     for img in soup.find_all("img"):
-        cms_id = _normalize_text(img.get("data-document-id"))
+        cms_id = _normalize_text(_string_attribute(img.get("data-document-id")))
         if not cms_id:
             continue
 
@@ -999,7 +1004,7 @@ def _extract_msn_images_from_payload(
     if isinstance(body_html, str) and body_html.strip():
         body_soup = BeautifulSoup(body_html, "html.parser")
         for img in body_soup.find_all("img"):
-            cms_id = _normalize_text(img.get("data-document-id"))
+            cms_id = _normalize_text(_string_attribute(img.get("data-document-id")))
             if not cms_id:
                 continue
             resource = best_by_cms.get(cms_id)
@@ -1075,10 +1080,10 @@ def extract_images_from_html(
                 # Skip Pinterest button icons embedded in share links
                 continue
 
-        src = img.get("src")
-        srcset = img.get("srcset")
-        data_src = img.get("data-src")
-        data_srcset = img.get("data-srcset")
+        src = _string_attribute(img.get("src"))
+        srcset = _string_attribute(img.get("srcset"))
+        data_src = _string_attribute(img.get("data-src"))
+        data_srcset = _string_attribute(img.get("data-srcset"))
 
         # Try data-* attributes first (lazy loading)
         best_url, width = _pick_best_url(data_srcset, data_src)
@@ -1156,7 +1161,7 @@ def extract_images_from_html(
         best_source_width = 0
 
         for source in picture.find_all("source"):
-            srcset = source.get("srcset")
+            srcset = _string_attribute(source.get("srcset"))
             if srcset:
                 url, width = _pick_best_url(srcset, None)
                 if url and width > best_source_width:
@@ -1166,8 +1171,8 @@ def extract_images_from_html(
         # Fall back to img inside picture
         img = picture.find("img")
         if img:
-            src = img.get("src")
-            srcset = img.get("srcset")
+            src = _string_attribute(img.get("src"))
+            srcset = _string_attribute(img.get("srcset"))
             url, width = _pick_best_url(srcset, src)
             if url and width > best_source_width:
                 best_source_url = url
@@ -1439,7 +1444,7 @@ def download_and_hash_image(
 
         chunks: list[bytes] = []
         size_bytes = 0
-        iter_content = getattr(resp, "iter_content", None)
+        iter_content = cast(Callable[..., Iterable[bytes]] | None, getattr(resp, "iter_content", None))
         if callable(iter_content):
             for chunk in cast(Iterable[bytes], iter_content(chunk_size=_IMAGE_DOWNLOAD_CHUNK_SIZE_BYTES)):
                 if not chunk:

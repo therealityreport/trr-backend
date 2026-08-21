@@ -859,6 +859,28 @@ def dispatch_cast_screentime_run(*, run_id: str) -> dict[str, Any]:
     )
 
 
+def dispatch_show_season_media_watch_worker(
+    *,
+    watch: dict[str, Any],
+    lease_owner: str,
+    lease_fence: int,
+    backfill: bool,
+) -> dict[str, Any]:
+    """Dispatch one already-claimed show-season media watch worker."""
+
+    return _spawn_named_modal_function(
+        function_name="run_show_season_media_watch_worker",
+        log_label="show-season media watch",
+        kwargs={
+            "watch": watch,
+            "lease_owner": lease_owner,
+            "lease_fence": lease_fence,
+            "backfill": backfill,
+        },
+        dispatcher_name="media-watchers",
+    )
+
+
 def dispatch_cast_screentime_subtitle_extraction(
     *,
     video_asset_id: str,
