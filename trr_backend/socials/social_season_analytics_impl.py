@@ -9212,11 +9212,13 @@ def _refresh_tiktok_cookies(stale_reason: str | None = None) -> dict[str, str]:
         refreshed = cast(_CookieRefreshCallable, refresh_tiktok_cookies)(
             username=username,
             password=password,
-            cookie_file=str(_platform_cookie_refresh_target_path(
+            cookie_file=str(
+                _platform_cookie_refresh_target_path(
                     _default_tiktok_cookie_file_path(),
                     "SOCIAL_TIKTOK_COOKIES_FILE",
                     "TIKTOK_COOKIES_FILE",
-                )),
+                )
+            ),
             headless=(os.getenv("SOCIAL_TIKTOK_COOKIE_REFRESH_HEADLESS") or "true").strip().lower()
             not in {"0", "false", "off", "no"},
             timeout_seconds=_resolve_positive_int_env(
@@ -9323,11 +9325,13 @@ def _refresh_facebook_cookies(stale_reason: str | None = None) -> dict[str, str]
         refreshed = cast(_CookieRefreshCallable, refresh_facebook_cookies)(
             username=username,
             password=password,
-            cookie_file=str(_platform_cookie_refresh_target_path(
+            cookie_file=str(
+                _platform_cookie_refresh_target_path(
                     _default_facebook_cookie_file_path(),
                     "SOCIAL_FACEBOOK_COOKIES_FILE",
                     "FACEBOOK_COOKIES_FILE",
-                )),
+                )
+            ),
             headless=(os.getenv("SOCIAL_FACEBOOK_COOKIE_REFRESH_HEADLESS") or "true").strip().lower()
             not in {"0", "false", "off", "no"},
             timeout_seconds=_resolve_positive_int_env(
@@ -9438,9 +9442,11 @@ def _refresh_threads_cookies(stale_reason: str | None = None) -> dict[str, str]:
         refreshed = cast(_CookieRefreshCallable, refresh_threads_cookies)(
             username=username,
             password=password,
-            cookie_file=str(_platform_cookie_refresh_target_path(
+            cookie_file=str(
+                _platform_cookie_refresh_target_path(
                     _default_threads_cookie_file_path(), "SOCIAL_THREADS_COOKIES_FILE", "THREADS_COOKIES_FILE"
-                )),
+                )
+            ),
             headless=(os.getenv("SOCIAL_THREADS_COOKIE_REFRESH_HEADLESS") or "true").strip().lower()
             not in {"0", "false", "off", "no"},
             timeout_seconds=_resolve_positive_int_env(
@@ -9906,11 +9912,13 @@ def _do_interactive_refresh_tiktok(
     refreshed = cast(_CookieRefreshCallable, refresh_tiktok_cookies)(
         username=username,
         password=password,
-        cookie_file=str(_platform_cookie_refresh_target_path(
+        cookie_file=str(
+            _platform_cookie_refresh_target_path(
                 _default_tiktok_cookie_file_path(),
                 "SOCIAL_TIKTOK_COOKIES_FILE",
                 "TIKTOK_COOKIES_FILE",
-            )),
+            )
+        ),
         headless=headless,
         timeout_seconds=timeout_seconds,
     )
@@ -9959,11 +9967,13 @@ def _do_interactive_refresh_facebook(
     refreshed = cast(_CookieRefreshCallable, refresh_facebook_cookies)(
         username=username,
         password=password,
-        cookie_file=str(_platform_cookie_refresh_target_path(
+        cookie_file=str(
+            _platform_cookie_refresh_target_path(
                 _default_facebook_cookie_file_path(),
                 "SOCIAL_FACEBOOK_COOKIES_FILE",
                 "FACEBOOK_COOKIES_FILE",
-            )),
+            )
+        ),
         headless=headless,
         timeout_seconds=timeout_seconds,
     )
@@ -9985,11 +9995,13 @@ def _do_interactive_refresh_threads(
     refreshed = cast(_CookieRefreshCallable, refresh_threads_cookies)(
         username=username,
         password=password,
-        cookie_file=str(_platform_cookie_refresh_target_path(
+        cookie_file=str(
+            _platform_cookie_refresh_target_path(
                 _default_threads_cookie_file_path(),
                 "SOCIAL_THREADS_COOKIES_FILE",
                 "THREADS_COOKIES_FILE",
-            )),
+            )
+        ),
         headless=headless,
         timeout_seconds=timeout_seconds,
     )
@@ -13652,7 +13664,8 @@ def _increment_run_counters_on_job_finish(
     prior_status: str,
     new_status: str,
     prior_items_found: int,
-    new_items_found: int, conn: Any | None = None,
+    new_items_found: int,
+    conn: Any | None = None,
 ) -> None:
     from trr_backend.socials.control_plane.run_lifecycle import _increment_run_counters_on_job_finish as impl
 
@@ -13662,7 +13675,8 @@ def _increment_run_counters_on_job_finish(
         prior_status=prior_status,
         new_status=new_status,
         prior_items_found=prior_items_found,
-        new_items_found=new_items_found, conn=conn,
+        new_items_found=new_items_found,
+        conn=conn,
     )
 
 
@@ -28135,11 +28149,7 @@ def _ingest_youtube(
             date_end_value = cast(datetime, _coerce_dt(opts.date_end))
             window_days = max(
                 1,
-                int(
-                    (date_end_value - effective_date_start_value).total_seconds()
-                    // 86400
-                )
-                + 1,
+                int((date_end_value - effective_date_start_value).total_seconds() // 86400) + 1,
             )
             default_page_cap = 6 if window_days <= 45 else 10
             existing_window_page_cap = _resolve_positive_int_env(
