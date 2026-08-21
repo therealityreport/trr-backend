@@ -13,6 +13,7 @@ import subprocess
 import sys
 from collections.abc import Mapping
 from functools import lru_cache
+from typing import Any, cast
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 import psycopg2
@@ -477,7 +478,7 @@ def ensure_ready_for_ingestion(
     url = database_url or resolve_database_url()
 
     try:
-        conn = psycopg2.connect(url, **preview_read_only_connect_kwargs(url))
+        conn = cast(Any, psycopg2.connect)(url, **preview_read_only_connect_kwargs(url))
         try:
             assert_preview_connection_read_only(conn, label="ingestion readiness")
             with conn.cursor() as cur:
@@ -496,7 +497,7 @@ def ensure_ready_for_ingestion(
 
     if reload_schema_cache and not preview_read_only_enabled():
         try:
-            conn = psycopg2.connect(url, **preview_read_only_connect_kwargs(url))
+            conn = cast(Any, psycopg2.connect)(url, **preview_read_only_connect_kwargs(url))
             try:
                 conn.autocommit = True
                 assert_preview_connection_read_only(conn, label="ingestion schema-cache reload")

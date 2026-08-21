@@ -2333,7 +2333,10 @@ class TestRefreshShowPhotosStream:
         query.execute.side_effect = [show_resp] + [empty_resp] * 20
         mock_db.schema.return_value.table.return_value = query
 
-        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with (
+            patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db),
+            patch("api.routers.admin_show_sync.get_s3_client", return_value=MagicMock()),
+        ):
             response = client.post(
                 f"/api/v1/admin/shows/{show_id}/refresh-photos/stream",
                 headers={"Authorization": f"Bearer {token}"},

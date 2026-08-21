@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import Any, cast
 
 import psycopg2
 
@@ -46,7 +47,7 @@ def reload_postgrest_schema(database_url: str | None = None) -> None:
     url = database_url or resolve_database_url()
 
     try:
-        conn = psycopg2.connect(url, **preview_read_only_connect_kwargs(url))
+        conn = cast(Any, psycopg2.connect)(url, **preview_read_only_connect_kwargs(url))
         try:
             conn.autocommit = True
             assert_preview_connection_read_only(conn, label="PostgREST schema-cache reload")
@@ -170,7 +171,7 @@ def verify_core_schema_exists(database_url: str | None = None) -> bool:
     url = database_url or resolve_database_url()
 
     try:
-        conn = psycopg2.connect(url, **preview_read_only_connect_kwargs(url))
+        conn = cast(Any, psycopg2.connect)(url, **preview_read_only_connect_kwargs(url))
         try:
             assert_preview_connection_read_only(conn, label="PostgREST core-schema check")
             with conn.cursor() as cur:

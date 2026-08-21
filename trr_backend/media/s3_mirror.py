@@ -1107,11 +1107,6 @@ def _head_object(s3_client, bucket: str, key: str) -> dict[str, Any] | None:
         raise
 
 
-def _head_content_length(head: Mapping[str, Any], fallback: int) -> int:
-    content_length = head.get("ContentLength")
-    return int(content_length) if content_length is not None else fallback
-
-
 def upload_bytes_to_s3(
     s3_client,
     *,

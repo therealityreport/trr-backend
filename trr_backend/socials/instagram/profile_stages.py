@@ -289,23 +289,6 @@ for _provider_name, _local_provider in (
 ):
     globals()[_provider_name] = _legacy_proxy(_provider_name, _local_provider)
 
-# The provider loop above intentionally publishes this monkeypatch surface at
-# runtime. Keep an explicit static manifest so type checkers can follow the
-# dynamically bound names without changing their legacy-provider behavior.
-_adapt_payload_json_values: Any
-_coerce_dt: Any
-_column_exists: Any
-_iso: Any
-_load_instagram_cookies: Any
-_load_shared_account_source_row: Any
-_metadata_dict: Any
-_normalize_account_handle: Any
-_normalize_non_negative_int: Any
-_normalize_social_account_profile_handle: Any
-_now_utc: Any
-_pg_upsert: Any
-_touch_shared_account_source: Any
-
 
 def _pg_runtime() -> Any:
     return _legacy_value("pg", _local_pg)
