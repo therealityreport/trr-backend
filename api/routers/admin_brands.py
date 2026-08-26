@@ -382,9 +382,7 @@ def _log_schema_fallback_once(*, key: str, message: str, error: Exception | None
 
 def _normalize_hostname_from_url(value: str) -> str:
     text = _normalize_text(value)
-    if not text:
-        return ""
-    if text.lower().startswith("data:image/svg+xml"):
+    if not text or text.lower().startswith("data:image/svg+xml"):
         return ""
     parsed = urlparse(text if "://" in text else f"https://{text}")
     host = _normalize_text(parsed.netloc or parsed.path).lower()

@@ -583,20 +583,15 @@ def _best_video_url(node: dict[str, Any]) -> str | None:
     best = _pick_best_url(node.get("video_versions"))
     if best:
         return best
-    for key in ("video_url",):
-        value = str(node.get(key) or "").strip()
-        if value:
-            return value
-    return None
+    value = str(node.get("video_url") or "").strip()
+    return value or None
 
 
 def _media_url_for_node(node: dict[str, Any]) -> str | None:
     if not isinstance(node, dict):
         return None
     video_url = _best_video_url(node)
-    if video_url:
-        return video_url
-    return _best_image_url(node)
+    return video_url or _best_image_url(node)
 
 
 def _classify_post_format(media: dict[str, Any]) -> str:
@@ -604,9 +599,9 @@ def _classify_post_format(media: dict[str, Any]) -> str:
         return "reel"
     carousel_media = media.get("carousel_media")
     carousel_count = media.get("carousel_media_count")
-    if isinstance(carousel_media, list) and carousel_media:
-        return "carousel"
-    if isinstance(carousel_count, int) and carousel_count > 1:
+    if (isinstance(carousel_media, list) and carousel_media) or (
+        isinstance(carousel_count, int) and carousel_count > 1
+    ):
         return "carousel"
     return "post"
 
@@ -819,9 +814,7 @@ def _duration_from_mpd(media: dict[str, Any]) -> int | None:
 
 def _extract_duration_seconds(media: dict[str, Any]) -> int | None:
     from_versions = _duration_from_video_versions(media)
-    if from_versions is not None:
-        return from_versions
-    return _duration_from_mpd(media)
+    return from_versions if from_versions is not None else _duration_from_mpd(media)
 
 
 def parse_permalink_metadata(media: dict[str, Any]) -> InstagramPermalinkMetadata:

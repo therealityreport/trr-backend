@@ -1846,7 +1846,6 @@ class SocialWorkerUnavailableError(ValueError):
 
 # ---------------------------------------------------------------------------
 # General helpers
-# ---------------------------------------------------------------------------
 
 
 def _now_utc() -> datetime:
@@ -3457,7 +3456,6 @@ def _probe_modal_remote_auth_health_uncached(platform: str) -> dict[str, Any] | 
     normalized_platform = _normalize_platform_name(platform)
     if not normalized_platform or not _platform_requires_remote_auth(normalized_platform):
         return None
-    timeout_seconds = 8.0
     try:
         import modal  # noqa: F401
     except Exception:  # noqa: BLE001
@@ -9500,7 +9498,6 @@ configure_threads_cookie_loader(lambda: _load_threads_cookies())
 
 # ---------------------------------------------------------------------------
 # Platform cookie handler registry (shared by API + CLI)
-# ---------------------------------------------------------------------------
 
 _COOKIE_REQUIRED_PLATFORMS = frozenset({"instagram", "tiktok", "twitter", "facebook", "threads"})
 _COOKIE_REFRESH_SUPPORTED_PLATFORMS = frozenset({"instagram", "tiktok", "twitter", "facebook", "threads"})
@@ -10013,7 +10010,6 @@ def _do_interactive_refresh_threads(
 
 # ---------------------------------------------------------------------------
 # Context + targets
-# ---------------------------------------------------------------------------
 
 
 @lru_cache(maxsize=256)
@@ -10935,7 +10931,6 @@ def put_targets(
 
 # ---------------------------------------------------------------------------
 # Shared account ingest helpers
-# ---------------------------------------------------------------------------
 
 
 def _resolve_pipeline_ingest_mode(value: str | None = None) -> str:
@@ -12052,7 +12047,6 @@ def get_season_shared_status(
 
 # ---------------------------------------------------------------------------
 # Ingest helpers
-# ---------------------------------------------------------------------------
 
 
 def _touch_worker_heartbeat_for_job(
@@ -16835,7 +16829,6 @@ def _build_mirror_shortcode(post: Any, *, source_urls: list[str]) -> str:
 
 # ---------------------------------------------------------------------------
 # Structured post & media display-name helpers
-# ---------------------------------------------------------------------------
 
 _PLATFORM_DISPLAY_LABELS = {
     "instagram": "Instagram",
@@ -22731,8 +22724,7 @@ def _platform_post_repair_reasons(
     mirror_status = str(post_row.get("media_mirror_status") or "").strip().lower()
     source_thumbnail_url, source_media_urls = _platform_post_source_urls(platform, post_row)
     source_id = _platform_source_id(platform, post_row)
-    raw_data_value = post_row.get("raw_data")
-    raw_data: dict[str, Any] = raw_data_value if isinstance(raw_data_value, dict) else {}
+    raw_data: dict[str, Any] = raw_data_value if isinstance((raw_data_value := post_row.get("raw_data")), dict) else {}
     avatar_state = _platform_post_avatar_repair_state(platform, post_row)
     reasons: list[str] = []
 
@@ -29573,7 +29565,6 @@ def _ingest_twitter(
                         quotes: list[Any] = []
                         observed_comment_ids: set[str] = set()
                         local_comment_stats = _new_comment_persist_stats()
-                        replies: list[Any] = []
                         try:
                             replies = _fetch_twitter_replies_compat(
                                 scraper=scraper,
@@ -33175,10 +33166,8 @@ def _cached_live_profile_snapshot(platform: str, account_handle: str) -> dict[st
                 # twikit is an optional dependency only required by the cookie/guest fallback
                 # below. Import it lazily so the GraphQL-first happy path above still resolves a
                 # snapshot in environments where twikit is not installed.
-                twikit_module = importlib.import_module("twikit")
-                twikit_guest_module = importlib.import_module("twikit.guest")
-                twikit_client = twikit_module.Client
-                twikit_guest_client = twikit_guest_module.GuestClient
+                twikit_module, twikit_guest_module = map(importlib.import_module, ("twikit", "twikit.guest"))
+                twikit_client, twikit_guest_client = twikit_module.Client, twikit_guest_module.GuestClient
 
                 async def _load_snapshot() -> dict[str, Any]:
                     client: Any = None
@@ -51050,7 +51039,6 @@ def get_week_live_health_snapshot(*args: Any, **kwargs: Any) -> Any:
 
 # ---------------------------------------------------------------------------
 # Analytics + exports
-# ---------------------------------------------------------------------------
 
 
 def _default_sentiment_context() -> SentimentAnalyzerContext:
@@ -53084,7 +53072,6 @@ def get_analytics(*args: Any, **kwargs: Any) -> Any:
 
 # ---------------------------------------------------------------------------
 # Comment coverage (saved vs platform-reported)
-# ---------------------------------------------------------------------------
 
 
 def _comments_coverage_for_platform(
@@ -54243,10 +54230,9 @@ def _overlay_platform_status_with_active_jobs(
     active_job_status: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     payload = dict(status_payload)
-    active_job_summary_value = _build_active_job_summary(active_job_status)
-    if active_job_summary_value is None:
+    active_job_summary = _build_active_job_summary(active_job_status)
+    if active_job_summary is None:
         return payload
-    active_job_summary: Mapping[str, Any] = active_job_summary_value
     sync_status = _canonicalize_week_job_live_status(active_job_summary.get("sync_status"))
     if not sync_status:
         return payload
@@ -54780,7 +54766,6 @@ def get_mirror_coverage(*args: Any, **kwargs: Any) -> Any:
 
 # ---------------------------------------------------------------------------
 # Week detail (drill-down into individual posts + comments for one week)
-# ---------------------------------------------------------------------------
 
 _MENTION_RE = re.compile(r"@([\w.]+)")
 _HASHTAG_RE = re.compile(r"(?<![\w.])#([A-Za-z0-9_]+)")
@@ -57323,7 +57308,6 @@ def get_week_detail_summary(*args: Any, **kwargs: Any) -> Any:
 
 # ---------------------------------------------------------------------------
 # Post detail — all comments for a single post, threaded
-# ---------------------------------------------------------------------------
 
 
 def _thread_comments(flat: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -68129,7 +68113,6 @@ _configure_account_catalog_freshness_dependencies(
 )
 get_social_account_catalog_freshness = _canonical_get_social_account_catalog_freshness
 get_social_account_catalog_gap_analysis_status = _canonical_get_social_account_catalog_gap_analysis_status
-_provider_path = ""
 for _provider_path in (
     "trr_backend.socials.control_plane.queue_status",
     "trr_backend.socials.read_models.account_profile.common",  # noqa: E501
