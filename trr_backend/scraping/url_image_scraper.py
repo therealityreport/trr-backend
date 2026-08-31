@@ -100,20 +100,19 @@ def _normalize_content_type(value: str | None) -> str:
 
 def _disallowed_image_content_type(value: str | None) -> bool:
     content_type = _normalize_content_type(value)
-    if not content_type:
-        return False
-    if content_type in {"text/html", "application/xhtml+xml", "application/json", "text/json"}:
-        return True
-    return content_type.endswith("+json")
+    return content_type in {
+        "text/html",
+        "application/xhtml+xml",
+        "application/json",
+        "text/json",
+    } or content_type.endswith("+json")
 
 
 def _looks_like_svg(data: bytes) -> bool:
     if not data:
         return False
     head = data.lstrip()[:4096].lower()
-    if head.startswith(b"<svg"):
-        return True
-    return head.startswith(b"<?xml") and b"<svg" in head
+    return head.startswith(b"<svg") or (head.startswith(b"<?xml") and b"<svg" in head)
 
 
 def _sniff_image_content_type(data: bytes) -> str | None:
@@ -828,18 +827,14 @@ def _extract_msn_article_id(url: str) -> str | None:
     parsed = urlparse(url)
     path = parsed.path or ""
     match = _MSN_ARTICLE_ID_RE.search(path)
-    if not match:
-        return None
-    return match.group(1)
+    return match.group(1) if match else None
 
 
 def _extract_msn_locale(url: str) -> str:
     """Extract locale from MSN URL path, defaulting to en-us."""
     parsed = urlparse(url)
     parts = [p for p in (parsed.path or "").split("/") if p]
-    if parts and _MSN_LOCALE_RE.match(parts[0]):
-        return parts[0].lower()
-    return "en-us"
+    return parts[0].lower() if parts and _MSN_LOCALE_RE.match(parts[0]) else "en-us"
 
 
 def _safe_int(value: Any) -> int | None:

@@ -454,6 +454,18 @@ def test_parse_permalink_metadata_duration_falls_back_to_dash_manifest() -> None
     assert metadata.duration_seconds == 66
 
 
+def test_parse_permalink_metadata_preserves_zero_rounded_video_duration() -> None:
+    efg = quote(json.dumps({"video_info": {"duration_s": 0.4}}))
+    metadata = parse_permalink_metadata(
+        {
+            "media_type": 2,
+            "video_versions": [{"url": f"https://cdn.test/video.mp4?efg={efg}"}],
+            "video_dash_manifest": '<MPD mediaPresentationDuration="PT1M5.5S"></MPD>',
+        }
+    )
+    assert metadata.duration_seconds == 0
+
+
 def test_parse_permalink_metadata_prefers_highest_width_media_candidates() -> None:
     metadata = parse_permalink_metadata(
         {
