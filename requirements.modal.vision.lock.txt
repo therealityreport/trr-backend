@@ -50,8 +50,6 @@ botocore==1.43.36
     #   s3transfer
 cachecontrol==0.14.4
     # via firebase-admin
-cachetools==6.2.6
-    # via pyiceberg
 cairocffi==1.7.1
     # via cairosvg
 cairosvg==2.9.0
@@ -79,7 +77,6 @@ click==8.4.2
     # via
     #   flask
     #   modal
-    #   pyiceberg
     #   uvicorn
 coloredlogs==15.0.1
     # via onnxruntime
@@ -113,7 +110,7 @@ docstring-parser==0.18.0
     # via anthropic
 easydict==1.13
     # via insightface
-fastapi==0.138.1
+fastapi==0.141.1
     # via
     #   -r requirements.modal.lean.in
     #   sentry-sdk
@@ -142,9 +139,7 @@ frozenlist==1.8.0
     #   aiohttp
     #   aiosignal
 fsspec==2026.6.0
-    # via
-    #   pyiceberg
-    #   torch
+    # via torch
 gast==0.7.0
     # via tensorflow
 gdown==6.1.0
@@ -307,9 +302,7 @@ ml-dtypes==0.5.4
     #   keras
     #   onnx
     #   tensorflow
-mmh3==5.2.1
-    # via pyiceberg
-modal==1.5.3
+modal==1.5.5
     # via -r requirements.modal.lean.in
 mpmath==1.3.0
     # via sympy
@@ -408,7 +401,7 @@ pillow==12.2.0
     #   scikit-image
     #   torchvision
     #   ultralytics
-postgrest==2.28.3
+postgrest==2.31.0
     # via
     #   -r requirements.modal.lean.in
     #   supabase
@@ -445,7 +438,7 @@ pyasn1-modules==0.4.2
     # via google-auth
 pycparser==3.0
     # via cffi
-pydantic==2.13.4
+pydantic==2.13.5
     # via
     #   -r requirements.modal.lean.in
     #   albumentations
@@ -453,27 +446,20 @@ pydantic==2.13.4
     #   fastapi
     #   google-genai
     #   postgrest
-    #   pyiceberg
     #   realtime
     #   storage3
     #   supabase-auth
-pydantic-core==2.46.4
+pydantic-core==2.46.5
     # via pydantic
 pygments==2.20.0
     # via rich
-pyiceberg==0.11.1
-    # via storage3
 pyjwt==2.13.0
     # via
     #   -r requirements.modal.lean.in
     #   firebase-admin
     #   supabase-auth
 pyparsing==3.3.2
-    # via
-    #   matplotlib
-    #   pyiceberg
-pyroaring==1.1.0
-    # via pyiceberg
+    # via matplotlib
 pysocks==1.7.1
     # via requests
 python-dateutil==2.9.0.post0
@@ -481,7 +467,6 @@ python-dateutil==2.9.0.post0
     #   botocore
     #   matplotlib
     #   pandas
-    #   strictyaml
 python-dotenv==1.2.2
     # via
     #   -r requirements.modal.lean.in
@@ -494,7 +479,7 @@ pyyaml==6.0.3
     #   albumentations
     #   ultralytics
     #   uvicorn
-realtime==2.28.3
+realtime==2.31.0
     # via supabase
 redis==8.0.1
     # via -r requirements.modal.lean.in
@@ -511,7 +496,6 @@ requests==2.34.2
     #   google-cloud-storage
     #   google-genai
     #   insightface
-    #   pyiceberg
     #   requests-oauthlib
     #   tensorflow
     #   ultralytics
@@ -524,7 +508,6 @@ rich==14.3.4
     #   curl-cffi
     #   keras
     #   modal
-    #   pyiceberg
     #   typer
 s3transfer==0.19.0
     # via boto3
@@ -567,19 +550,17 @@ starlette==1.3.1
     # via
     #   fastapi
     #   sse-starlette
-storage3==2.28.3
+storage3==2.31.0
     # via supabase
 strenum==0.4.15
     # via supabase-functions
-strictyaml==1.7.3
-    # via pyiceberg
 stringzilla==4.6.2
     # via albucore
-supabase==2.28.3
+supabase==2.31.0
     # via -r requirements.modal.lean.in
-supabase-auth==2.28.3
+supabase-auth==2.31.0
     # via supabase
-supabase-functions==2.28.3
+supabase-functions==2.31.0
     # via supabase
 sympy==1.13.1
     # via
@@ -593,7 +574,6 @@ tenacity==9.1.4
     # via
     #   -r requirements.modal.lean.in
     #   google-genai
-    #   pyiceberg
 tensorflow==2.21.0
     # via
     #   deepface
@@ -672,7 +652,7 @@ urllib3==2.7.0
     #   botocore
     #   requests
     #   sentry-sdk
-uvicorn==0.49.0
+uvicorn==0.52.4
     # via -r requirements.modal.lean.in
 uvloop==0.22.1
     # via uvicorn
@@ -706,5 +686,3 @@ yarl==1.24.2
     #   storage3
     #   supabase
     #   supabase-functions
-zstandard==0.25.0
-    # via pyiceberg
