@@ -33,7 +33,9 @@ def _base_env(tmp_path: Path) -> dict[str, str]:
         if key
         not in {
             "APP_ENV",
+            "CI",
             "ENVIRONMENT",
+            "GITHUB_ACTIONS",
             "PYTHON_ENV",
             "REDIS_URL",
             "TRR_BACKEND_RELOAD",

@@ -336,16 +336,26 @@ def test_runtime_direct_psycopg_connectors_are_all_preview_guarded() -> None:
     backend_root = Path(pg.__file__).resolve().parents[1]
     calls: list[ast.Call] = []
 
+    def _is_psycopg_connect_callable(value: ast.expr) -> bool:
+        if (
+            isinstance(value, ast.Attribute)
+            and isinstance(value.value, ast.Name)
+            and value.value.id == "psycopg2"
+            and value.attr == "connect"
+        ):
+            return True
+        return (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == "cast"
+            and len(value.args) == 2
+            and _is_psycopg_connect_callable(value.args[1])
+        )
+
     for source_path in sorted(backend_root.rglob("*.py")):
         tree = ast.parse(source_path.read_text(encoding="utf-8"))
         calls.extend(
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id == "psycopg2"
-            and node.func.attr == "connect"
+            node for node in ast.walk(tree) if isinstance(node, ast.Call) and _is_psycopg_connect_callable(node.func)
         )
 
     assert len(calls) == 5

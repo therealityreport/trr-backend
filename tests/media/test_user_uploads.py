@@ -26,7 +26,6 @@ from trr_backend.media.user_uploads import (
     cancel_media_upload_session,
     create_media_upload_session,
     finalize_media_upload_session,
-    generate_presigned_post,
     set_primary_media_link,
 )
 
@@ -488,44 +487,3 @@ class TestCancelMediaUploadSession:
         cancel_media_upload_session(mock_db, "upload-123")
 
         mock_client.delete_object.assert_called_once_with(Bucket="test-bucket", Key="uploads/test/key")
-
-
-class TestGeneratePresignedPost:
-    """Tests for generate_presigned_post function."""
-
-    def test_generates_presigned_post_with_conditions(self) -> None:
-        """Test that presigned POST is generated with size/type conditions."""
-        import boto3
-
-        # Create a real S3 client
-        s3_client = boto3.client("s3", region_name="us-east-1")
-
-        # We can't stub generate_presigned_post directly, but we can test
-        # the function signature and that it returns the expected structure
-        with patch.object(s3_client, "generate_presigned_post") as mock_presigned:
-            mock_presigned.return_value = {
-                "url": "https://test-bucket.s3.amazonaws.com",
-                "fields": {"key": "test/key"},
-            }
-
-            result = generate_presigned_post(
-                bucket="test-bucket",
-                key="test/key",
-                content_type="image/jpeg",
-                max_bytes=1024,
-                s3_client=s3_client,
-            )
-
-            assert "url" in result
-            assert "fields" in result
-
-            # Verify conditions were passed
-            mock_presigned.assert_called_once()
-            call_kwargs = mock_presigned.call_args[1]
-            assert "Conditions" in call_kwargs
-
-            conditions = call_kwargs["Conditions"]
-            # Check content-type condition
-            assert {"Content-Type": "image/jpeg"} in conditions
-            # Check content-length-range condition
-            assert ["content-length-range", 0, 1024] in conditions

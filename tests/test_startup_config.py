@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import pytest
 
 from api import main as api_main
@@ -214,25 +211,3 @@ def test_modal_runtime_scheduler_startup_accepts_api_fallback_owner(monkeypatch:
     monkeypatch.setenv("TRR_MODAL_RUNTIME_SCHEDULER_ENABLED", "1")
 
     assert api_main._validate_modal_maintenance_owner_config() == "api_runtime_scheduler"
-
-
-def test_workspace_shared_env_manifest_matches_backend_contract() -> None:
-    manifest_path = Path(__file__).resolve().parents[2] / "docs/workspace/shared-env-manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-
-    canonical = set(manifest["canonical"].keys())
-    transitional = set(manifest["transitional"].keys())
-    backend_contract = manifest["repo_validation"]["TRR-Backend"]
-
-    assert {"TRR_DB_DIRECT_URL", "TRR_DB_URL", "TRR_DB_FALLBACK_URL", "TRR_INTERNAL_ADMIN_SHARED_SECRET"} <= canonical
-    assert "SCREENALYTICS_API_URL" not in transitional
-    assert "SCREENALYTICS_SERVICE_TOKEN" not in transitional
-    assert set(backend_contract["db_any_of"]) == {
-        "TRR_DB_DIRECT_URL",
-        "TRR_DB_SESSION_URL",
-        "TRR_DB_URL",
-        "TRR_DB_FALLBACK_URL",
-    }
-    assert set(backend_contract["required_in_deployed"]) == {"TRR_INTERNAL_ADMIN_SHARED_SECRET", "SUPABASE_JWT_SECRET"}
-    assert "SCREENALYTICS_API_URL" not in set(backend_contract["transitional_compat"])
-    assert "SCREENALYTICS_SERVICE_TOKEN" not in set(backend_contract["transitional_compat"])

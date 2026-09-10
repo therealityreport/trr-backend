@@ -19,9 +19,11 @@ def _clear_caches():
 
 @pytest.fixture(autouse=True)
 def _set_auth_envs(monkeypatch):
-    """Set required auth envs so tests don't fail on auth validation."""
+    """Set non-lane startup requirements so each test isolates lane validation."""
     monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "test-secret")
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-jwt-secret")
+    monkeypatch.setenv("TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED", "1")
+    monkeypatch.setenv("TRR_MODAL_RUNTIME_SCHEDULER_ENABLED", "0")
 
 
 @pytest.fixture()

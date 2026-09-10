@@ -357,6 +357,10 @@ def test_oversized_avatar_download_is_marked_non_retryable(monkeypatch: pytest.M
 
 def test_invalid_avatar_url_is_marked_unsupported(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(mod.social_repo, "_avatar_registry_lookup", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        "trr_backend.media.s3_mirror.get_s3_client",
+        lambda: (_ for _ in ()).throw(AssertionError("invalid avatar URL should not initialize R2")),
+    )
 
     upsert_calls: list[dict[str, object]] = []
     monkeypatch.setattr(mod.social_repo, "_upsert_avatar_registry_entry", lambda **kwargs: upsert_calls.append(kwargs))
@@ -397,6 +401,10 @@ def test_cached_unsupported_invalid_avatar_url_is_skipped(monkeypatch: pytest.Mo
             "failure_reason": "invalid_source_url",
             "last_checked_at": fixed_now,
         },
+    )
+    monkeypatch.setattr(
+        "trr_backend.media.s3_mirror.get_s3_client",
+        lambda: (_ for _ in ()).throw(AssertionError("cached unsupported avatar should not initialize R2")),
     )
 
     upsert_calls: list[dict[str, object]] = []
