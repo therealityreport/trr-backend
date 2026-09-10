@@ -18457,16 +18457,8 @@ def _mirror_instagram_profile_pics_for_post(
             "profile_pic_mirror_error": None,
         }
 
-    try:
-        s3_client = get_s3_client()
-        bucket = get_s3_bucket()
-    except Exception as exc:
-        return {
-            "hosted_owner_profile_pic_url": None,
-            "hosted_tagged_profile_pics": {},
-            "profile_pic_mirror_status": "failed",
-            "profile_pic_mirror_error": f"s3_setup_failed:{exc}",
-        }
+    s3_client: Any | None = None
+    bucket: str | None = None
 
     errors: list[str] = []
     hosted_map: dict[str, str] = dict(cached_hosted_map)
@@ -18519,6 +18511,9 @@ def _mirror_instagram_profile_pics_for_post(
             logger.debug("Skipping invalid profile pic URL for %s: %s", username, source_url)
             continue
         try:
+            if s3_client is None or bucket is None:
+                s3_client = get_s3_client()
+                bucket = get_s3_bucket()
             temp_path, content_type, sha256 = _download_avatar_to_tempfile(
                 source_url,
                 platform="instagram",

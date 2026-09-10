@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from scripts.socials.youtube import scrape
@@ -7,7 +8,10 @@ from scripts.socials.youtube import scrape
 
 def test_resolve_download_dir_defaults_outside_repo(monkeypatch) -> None:
     monkeypatch.delenv("TRR_WORKSPACE_CACHE_ROOT", raising=False)
-    expected = Path.home() / "Library" / "Caches" / "TRR" / "youtube-downloads" / "bravo"
+    cache_root = (
+        Path.home() / "Library" / "Caches" / "TRR" if sys.platform == "darwin" else Path.home() / ".cache" / "trr"
+    )
+    expected = cache_root / "youtube-downloads" / "bravo"
     assert scrape.resolve_download_dir(None, "bravo") == expected
 
 

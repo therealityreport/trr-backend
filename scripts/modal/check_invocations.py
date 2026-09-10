@@ -213,6 +213,26 @@ def _relative(path: Path, workspace_root: Path) -> str:
     return path.resolve().relative_to(workspace_root.resolve()).as_posix()
 
 
+def _is_backend_checkout(path: Path) -> bool:
+    """Return whether ``path`` is a standalone checkout of trr-backend."""
+    return (path / "scripts").is_dir() and (path / "trr_backend").is_dir()
+
+
+def _scan_layout(workspace_root: Path) -> tuple[Path, tuple[str, ...], str]:
+    """Resolve physical scan paths while retaining workspace allowlist keys."""
+    resolved_workspace = workspace_root.resolve()
+    if (resolved_workspace / "TRR-Backend").is_dir():
+        return resolved_workspace, SCAN_ROOTS, ""
+
+    if _is_backend_checkout(resolved_workspace):
+        return resolved_workspace, ("scripts", "api", "trr_backend"), "TRR-Backend"
+
+    if resolved_workspace == REPO_ROOT.parent.resolve() and _is_backend_checkout(REPO_ROOT):
+        return REPO_ROOT, ("scripts", "api", "trr_backend"), "TRR-Backend"
+
+    return resolved_workspace, SCAN_ROOTS, ""
+
+
 def _scan_python(path: Path, workspace_root: Path) -> list[Invocation]:
     text = path.read_text(encoding="utf-8")
     tree = ast.parse(text, filename=str(path))
@@ -262,23 +282,24 @@ def _scan_shell(path: Path, workspace_root: Path) -> list[Invocation]:
 
 
 def scan_invocations(workspace_root: Path = WORKSPACE_ROOT) -> list[Invocation]:
+    scan_root, scan_roots, path_prefix = _scan_layout(workspace_root)
     candidates: set[Path] = set()
-    for relative_root in SCAN_ROOTS:
-        root = workspace_root / relative_root
+    for relative_root in scan_roots:
+        root = scan_root / relative_root
         if not root.is_dir():
             continue
         for path in root.rglob("*"):
             if not path.is_file():
                 continue
-            relative_parts = path.relative_to(workspace_root).parts
+            relative_parts = path.relative_to(scan_root).parts
             if any(part in EXCLUDED_PARTS for part in relative_parts):
                 continue
             if path.suffix in {".py", ".sh", ".bash", ".zsh", ".mk"} or path.name == "Makefile":
                 candidates.add(path)
     for makefile in (
-        workspace_root / "Makefile",
-        workspace_root / "TRR-Backend" / "Makefile",
-        workspace_root / "TRR-APP" / "Makefile",
+        scan_root / "Makefile",
+        scan_root / "TRR-Backend" / "Makefile",
+        scan_root / "TRR-APP" / "Makefile",
     ):
         if makefile.is_file():
             candidates.add(makefile)
@@ -286,9 +307,20 @@ def scan_invocations(workspace_root: Path = WORKSPACE_ROOT) -> list[Invocation]:
     invocations: list[Invocation] = []
     for path in sorted(candidates):
         if path.suffix == ".py":
-            invocations.extend(_scan_python(path, workspace_root))
+            invocations.extend(_scan_python(path, scan_root))
         else:
-            invocations.extend(_scan_shell(path, workspace_root))
+            invocations.extend(_scan_shell(path, scan_root))
+    if path_prefix:
+        invocations = [
+            Invocation(
+                path=f"{path_prefix}/{item.path}",
+                line=item.line,
+                function=item.function,
+                operation=item.operation,
+                column=item.column,
+            )
+            for item in invocations
+        ]
     return sorted(set(invocations))
 
 

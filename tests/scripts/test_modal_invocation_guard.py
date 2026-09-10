@@ -18,6 +18,27 @@ def test_checked_in_modal_mutation_calls_are_explicitly_allowlisted() -> None:
     assert violations == []
 
 
+def test_standalone_backend_checkout_uses_workspace_allowlist_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend_root = tmp_path / "trr-backend"
+    script = backend_root / "scripts" / "deploy.py"
+    script.parent.mkdir(parents=True)
+    (backend_root / "trr_backend").mkdir()
+    script.write_text(
+        "def deploy():\n    return ['python', '-m', 'modal', 'deploy', '-m', 'trr_backend.modal_jobs']\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(guard, "REPO_ROOT", backend_root)
+
+    invocations = guard.scan_invocations(backend_root.parent)
+
+    assert [(item.path, item.function, item.operation) for item in invocations] == [
+        ("TRR-Backend/scripts/deploy.py", "deploy", "deploy")
+    ]
+
+
 def test_new_modal_deploy_call_fails_static_guard(tmp_path: Path) -> None:
     workspace = tmp_path
     script = workspace / "TRR-Backend" / "scripts" / "new_deploy.py"
