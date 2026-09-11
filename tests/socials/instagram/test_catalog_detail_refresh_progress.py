@@ -539,9 +539,7 @@ def test_durable_detail_checkpoint_against_isolated_postgres(monkeypatch: pytest
 
         gallery_payload = Scraper().fetch_post_info(code)
         assert gallery_payload is not None
-        parsed = Scraper()._parse_post_node(
-            gallery_payload["items"][0], ScrapeConfig(username=account, hashtags=[])
-        )
+        parsed = Scraper()._parse_post_node(gallery_payload["items"][0], ScrapeConfig(username=account, hashtags=[]))
         one(
             """update social.instagram_account_catalog_posts set raw_data = %s::jsonb
             where source_id = %s returning id""",
