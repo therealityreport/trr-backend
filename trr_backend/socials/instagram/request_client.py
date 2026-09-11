@@ -31,6 +31,7 @@ class InstagramRequestFailure(RuntimeError):  # noqa: N818
         destination = urlsplit(redirect_target or "")
         self.redirect_target = (destination.hostname or "") + destination.path if redirect_target else None
         self.retry_after_seconds = retry_after_seconds
+        self.next_attempt_at: datetime | None = None
 
 
 class InstagramRequestClient:

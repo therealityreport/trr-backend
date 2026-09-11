@@ -162,7 +162,7 @@ class DetailTransport:
                 if not error and self.probe_token:
                     cooldown = None
                 if error and cooldown:
-                    setattr(error, "next_attempt_at", cooldown)
+                    error.next_attempt_at = cooldown
                 cur.execute(
                     """update social.instagram_detail_request_lanes set blocked = %s,
                     last_error_code = %s, consecutive_failures = %s, cooldown_until = %s,

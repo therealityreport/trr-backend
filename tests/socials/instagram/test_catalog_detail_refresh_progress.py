@@ -939,7 +939,8 @@ def test_detail_transport_shared_limits_against_isolated_postgres(monkeypatch, s
         assert len(sent) == len(attempts) == count
         if scenario == "rate_limit":
             assert last_error is not None
-            next_attempt_at = getattr(last_error, "next_attempt_at")
+            next_attempt_at = last_error.next_attempt_at
+            assert next_attempt_at is not None
             assert 115 <= (next_attempt_at - datetime.now(UTC)).total_seconds() <= 120
 
 
