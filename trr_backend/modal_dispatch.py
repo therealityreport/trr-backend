@@ -894,11 +894,13 @@ def dispatch_show_season_media_watch_worker(
     )
 
 
-def dispatch_social_job(*, job_id: str, stage: str | None = None, priority_recovery: bool = False) -> dict[str, Any]:
+def dispatch_social_job(
+    *, job_id: str, stage: str | None = None, priority_recovery: bool = False, dispatch_token: str | None = None
+) -> dict[str, Any]:
     return _spawn_named_modal_function(
         function_name=modal_social_job_function_name_for_stage(stage, priority_recovery=priority_recovery),
         log_label="social comment recovery" if priority_recovery else "social ingest",
-        kwargs={"job_id": job_id},
+        kwargs={"job_id": job_id, **({"dispatch_token": dispatch_token} if dispatch_token else {})},
         dispatcher_name="social",
         supported_platforms=list(SOCIAL_SUPPORTED_PLATFORMS),
     )

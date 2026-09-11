@@ -11,6 +11,13 @@ from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
+from trr_backend.db.deadline import (
+    Deadline,
+    DeadlineExceeded,
+    bounded_timeout,
+    check_deadline,
+    deadline_scope,
+)
 from trr_backend.socials.instagram.media_completion import build_media_completion_payload
 from trr_backend.socials.instagram.snapshot_completion import (
     AD_FLAGS_PART,
@@ -704,8 +711,14 @@ def _probe_instagram_posts_endpoint_for_launch(*, account_handle: str) -> dict[s
             await fetcher.aclose()
 
     try:
-        return asyncio.run(_probe())
+
+        async def _bounded_probe() -> dict[str, Any]:
+            async with asyncio.timeout(bounded_timeout(100)):
+                return await _probe()
+
+        return asyncio.run(_bounded_probe())
     except Exception as exc:  # noqa: BLE001
+        check_deadline()
         error_code = str(getattr(exc, "error_code", "") or "").strip().lower()
         if error_code in {
             "instagram_posts_warmup_auth_failed",
@@ -757,7 +770,7 @@ def _ensure_instagram_posts_auth_ready_for_launch(*, account_handle: str) -> dic
     repair_result = refresh_platform_cookies_interactive(
         "instagram",
         headless=True,
-        timeout_seconds=300,
+        timeout_seconds=bounded_timeout(300),
         account_handle=account_handle,
     )
     repair_payload = _metadata_dict(repair_result)
@@ -789,6 +802,70 @@ def _ensure_instagram_posts_auth_ready_for_launch(*, account_handle: str) -> dic
         probe=second_probe,
         repair_result=repair_payload,
     )
+
+
+def _ensure_instagram_detail_auth_ready_for_launch(*, account_handle: str) -> dict[str, Any]:
+    """Validate the actual detail endpoint with no credential repair or rotation."""
+    from trr_backend.db import pg
+    from trr_backend.socials.instagram.catalog_ingest import _build_shared_instagram_scraper
+    from trr_backend.socials.instagram.detail_transport import DetailTransport
+
+    if not _instagram_posts_launch_auth_check_enabled():
+        return _posts_launch_auth_metadata()
+    row = pg.fetch_one(
+        """select source_id from social.instagram_account_catalog_posts
+        where lower(ltrim(trim(source_account), '@')) = %s and source_id ~ '^[A-Za-z0-9_-]+$'
+        order by posted_at desc nulls last, source_id limit 1""",
+        [account_handle],
+    )
+    if not row:
+        return _posts_launch_auth_metadata(
+            probe={
+                "mode": "detail_endpoint",
+                "status": "no_target",
+                "reason": "no_valid_catalog_target",
+                "request_count": 0,
+            }
+        )
+    transport = None
+    try:
+        scraper = _build_shared_instagram_scraper(detail_transport=True, browser_account_id=account_handle)
+        if not scraper._request_cookies().get("sessionid"):
+            raise RuntimeError("sessionid_missing")
+        transport = DetailTransport(
+            scraper=scraper,
+            check_cancelled=check_deadline,
+            on_request=lambda _first: None,
+            deadline=time_module.monotonic() + min(30, bounded_timeout(30)),
+        )
+        payload = transport.fetch(str(row["source_id"]))
+        if not payload.get("items"):
+            raise RuntimeError("detail_response_missing")
+        return _posts_launch_auth_metadata(
+            probe={
+                "mode": "detail_endpoint",
+                "status": "valid",
+                "reason": "detail_endpoint_validated",
+                "request_count": transport.request_count,
+                "transport": transport.evidence,
+            }
+        )
+    except Exception as exc:
+        reason = str(getattr(exc, "error_code", "") or "detail_preflight_failed")
+        if str(exc) in {"sessionid_missing", "detail_response_missing"}:
+            reason = str(exc)
+        return _posts_launch_auth_metadata(
+            status="failed",
+            reason=reason,
+            probe={
+                "mode": "detail_endpoint",
+                "status": "fetch_blocked",
+                "reason": reason,
+                "retryable": bool(getattr(exc, "retryable", False)),
+                "request_count": transport.request_count if transport else 0,
+                "transport": transport.evidence if transport else [],
+            },
+        )
 
 
 def _blocked_instagram_posts_launch_payload(
@@ -1779,8 +1856,7 @@ class CatalogLaunchTimeout(Exception):  # noqa: N818
 
     Recoverable by design: callers leave the run in launch_state="finalizing" so the
     stale-finalizing recovery sweep re-drives it on a fresh worker. The underlying
-    worker thread cannot be force-killed and is abandoned; its DB work stays bounded by
-    the connection's statement_timeout.
+    worker stops and releases its connections before this exception reaches callers.
     """
 
     def __init__(self, *, timeout_seconds: float) -> None:
@@ -1800,11 +1876,12 @@ def _catalog_launch_group_lock_key(launch_group_id: str) -> int:
 def _catalog_launch_group_transaction_lock(launch_group_id: str):
     """Try one transaction advisory lock for the full launch-owner lifetime."""
 
-    with pg.db_connection(label="catalog-launch-group-owner") as conn:
+    with pg.db_connection(label="catalog-launch-group-owner", pool_name="catalog_launch") as conn:
         with pg.db_cursor(conn=conn, label="catalog-launch-group-owner") as cur:
             row = pg.fetch_one_with_cursor(
                 cur,
-                "select pg_try_advisory_xact_lock(%s) as locked",
+                "select pg_try_advisory_xact_lock(%s) as locked, "
+                "set_config('idle_in_transaction_session_timeout', '0', true)",
                 [_catalog_launch_group_lock_key(launch_group_id)],
             )
         yield bool((row or {}).get("locked"))
@@ -1819,6 +1896,14 @@ def _catalog_launch_parent_snapshot(run_id: str) -> dict[str, Any]:
         "launch_state": str(config.get("launch_state") or "").strip().lower() or None,
         "launch_group_id": str(config.get("launch_group_id") or "").strip() or None,
     }
+
+
+def _catalog_existing_launch_jobs(run_id: str) -> list[dict[str, Any]]:
+    return pg.fetch_all(
+        "select id::text as id, status, job_type, platform, config, metadata "
+        "from social.scrape_jobs where run_id = %s::uuid",
+        [run_id],
+    )
 
 
 def _catalog_launch_parent_cancelled(run_id: str) -> bool:
@@ -1885,6 +1970,7 @@ def _cas_catalog_launch_state(
     from_states: Sequence[str],
     to_state: str,
     metadata_updates: Mapping[str, Any] | None = None,
+    expected_attempt_id: str | None = None,
 ) -> dict[str, Any]:
     updates = {"launch_state": to_state, **dict(metadata_updates or {})}
     row = pg.fetch_one(
@@ -1894,10 +1980,18 @@ def _cas_catalog_launch_state(
         where id = %s::uuid
           and coalesce(config->>'launch_group_id', '') = %s
           and lower(coalesce(config->>'launch_state', 'reserved')) = any(%s::text[])
-          and lower(coalesce(status, '')) not in ('cancelled', 'cancelling')
+          and lower(coalesce(status, '')) not in ('cancelled', 'cancelling', 'failed', 'completed')
+          and (%s::text is null or config->>'launch_finalizing_attempt_id' = %s)
         returning id::text as id, id::text as run_id, status, config, summary
         """,
-        [_json_dumps(updates), run_id, launch_group_id, [str(state).strip().lower() for state in from_states]],
+        [
+            _json_dumps(updates),
+            run_id,
+            launch_group_id,
+            [str(state).strip().lower() for state in from_states],
+            expected_attempt_id,
+            expected_attempt_id,
+        ],
     )
     return dict(row or {})
 
@@ -1925,23 +2019,30 @@ def _catalog_finalize_launch_timeout_seconds() -> float:
 
 
 def _run_catalog_launch_with_timeout(fn: Any, *, timeout_seconds: float) -> Any:
-    """Run the (synchronous) catalog launch under an umbrella timeout.
-
-    On timeout, raise CatalogLaunchTimeout and ABANDON the worker thread without waiting:
-    the launch may be wedged on a slow probe, and blocking here would defeat the timeout
-    and keep the recovery advisory lock held. ``shutdown(wait=False)`` never blocks; the
-    abandoned thread's DB work is bounded by the connection statement_timeout.
-    """
+    """Cancel owned work at the deadline and join it before callers can clean up."""
     if not timeout_seconds or timeout_seconds <= 0:
         return fn()
+    deadline = Deadline(timeout_seconds)
+
+    def _run() -> Any:
+        with deadline_scope(deadline):
+            result = fn()
+            check_deadline()
+            return result
+
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="catalog-finalize-launch")
-    future = executor.submit(fn)
+    future = executor.submit(_run)
     try:
         return future.result(timeout=timeout_seconds)
-    except concurrent.futures.TimeoutError as exc:
-        raise CatalogLaunchTimeout(timeout_seconds=timeout_seconds) from exc
+    except Exception as exc:
+        try:
+            deadline.remaining()
+        except DeadlineExceeded:
+            deadline.cancel()
+            raise CatalogLaunchTimeout(timeout_seconds=timeout_seconds) from exc
+        raise
     finally:
-        executor.shutdown(wait=False)
+        executor.shutdown(wait=True)
 
 
 def finalize_social_account_catalog_backfill_launch(
@@ -1974,6 +2075,7 @@ def finalize_social_account_catalog_backfill_launch(
     normalized_launch_group_id = str(launch_group_id or initial_parent.get("launch_group_id") or "").strip()
     if not normalized_launch_group_id:
         raise ValueError("Catalog launch group is missing.")
+    attempt_id = str(uuid4())
 
     def _finalize_once() -> dict[str, Any]:
         with _catalog_launch_group_transaction_lock(normalized_launch_group_id) as acquired:
@@ -1984,6 +2086,23 @@ def finalize_social_account_catalog_backfill_launch(
                 return _catalog_launch_parent_result(parent)
             if str(parent.get("launch_state") or "") in {"ready", "completed_no_work"}:
                 return _catalog_launch_parent_result(parent)
+            existing_jobs = _catalog_existing_launch_jobs(run_id)
+            if existing_jobs:
+                from trr_backend.socials.social_season_analytics_impl import (
+                    _repair_finalizing_catalog_launch_after_jobs,
+                )
+
+                repaired = _repair_finalizing_catalog_launch_after_jobs(
+                    run_row=parent,
+                    job_rows=existing_jobs,
+                    platform=normalized_platform,
+                    account_handle=normalized_account,
+                    owns_launch_group=True,
+                )
+                return {
+                    **_catalog_launch_parent_result(_catalog_launch_parent_snapshot(run_id)),
+                    "launch_recovery_incomplete": not bool(repaired),
+                }
 
             transitioned = _cas_catalog_launch_state(
                 run_id=run_id,
@@ -1993,6 +2112,7 @@ def finalize_social_account_catalog_backfill_launch(
                 metadata_updates={
                     "launch_task_resolution_pending": True,
                     "launch_finalizing_started_at": _iso(_now_utc()),
+                    "launch_finalizing_attempt_id": attempt_id,
                     **({"enable_cap4_canary": True} if enable_cap4_canary else {}),
                 },
             )
@@ -2003,6 +2123,7 @@ def finalize_social_account_catalog_backfill_launch(
                 "launch_social_account_catalog_backfill",
                 launch_social_account_catalog_backfill,
             )
+            check_deadline()
             result = _launch_callable(
                 normalized_platform,
                 normalized_account,
@@ -2028,6 +2149,7 @@ def finalize_social_account_catalog_backfill_launch(
                 )
                 or None,
             )
+            check_deadline()
             cancelled = _cancel_launch_group_if_parent_cancelled(
                 run_id=run_id,
                 platform=normalized_platform,
@@ -2040,6 +2162,7 @@ def finalize_social_account_catalog_backfill_launch(
                 launch_group_id=normalized_launch_group_id,
                 from_states=("finalizing",),
                 to_state="ready",
+                expected_attempt_id=attempt_id,
                 metadata_updates={
                     "launch_task_resolution_pending": False,
                     "launch_completed_at": _iso(_now_utc()),
@@ -2069,8 +2192,12 @@ def finalize_social_account_catalog_backfill_launch(
         # stale-finalizing recovery sweep re-drives it on a fresh worker. Record only a
         # lightweight, observable marker. launch_finalizing_started_at is untouched, so
         # the 120s staleness clock keeps counting from this attempt.
-        _merge_catalog_run_config(
+        _cas_catalog_launch_state(
             run_id=run_id,
+            launch_group_id=normalized_launch_group_id,
+            from_states=("finalizing",),
+            to_state="finalizing",
+            expected_attempt_id=attempt_id,
             metadata_updates={
                 "launch_finalize_timeout": True,
                 "launch_finalize_timeout_at": _iso(_now_utc()),
@@ -2085,7 +2212,10 @@ def finalize_social_account_catalog_backfill_launch(
             run_id,
             exc.timeout_seconds,
         )
-        return _catalog_launch_parent_result(_catalog_launch_parent_snapshot(run_id), owner_active=True)
+        return {
+            **_catalog_launch_parent_result(_catalog_launch_parent_snapshot(run_id)),
+            "launch_finalize_timeout": True,
+        }
     except Exception as exc:  # noqa: BLE001
         if not _catalog_launch_parent_cancelled(run_id):
             _record_social_account_catalog_launch_failure(
@@ -2464,12 +2594,7 @@ def launch_social_account_catalog_backfill(
             and not effective_force_catalog_rediscovery
         )
         if use_fast_existing_posts_launch_state:
-            materialized_posts = _materialized_social_account_total_posts(
-                "instagram",
-                normalized_account,
-                date_start=normalized_date_start,
-                date_end=normalized_date_end,
-            )
+            materialized_posts = _shared_catalog_total_posts("instagram", normalized_account, launch_planning=True)
             coverage = {
                 "platform": "instagram",
                 "account_handle": normalized_account,
@@ -2489,6 +2614,7 @@ def launch_social_account_catalog_backfill(
                 normalized_account,
                 date_start=normalized_date_start,
                 date_end=normalized_date_end,
+                launch_planning=True,
             )
         coverage_ms = round((time_module.perf_counter() - coverage_started_at) * 1000, 1)
         requires_catalog_bootstrap = bool(coverage.get("bootstrap_required"))
@@ -2710,7 +2836,11 @@ def launch_social_account_catalog_backfill(
     posts_auth_metadata: dict[str, Any] = {}
     public_posts_auth_metadata: dict[str, Any] = {}
     if catalog_selected:
-        posts_auth_metadata = _ensure_instagram_posts_auth_ready_for_launch(account_handle=normalized_account)
+        posts_auth_metadata = (
+            _ensure_instagram_detail_auth_ready_for_launch(account_handle=normalized_account)
+            if normalized_platform == "instagram" and "post_details" in effective_selected_tasks
+            else _ensure_instagram_posts_auth_ready_for_launch(account_handle=normalized_account)
+        )
         public_posts_auth_metadata = _public_posts_launch_auth_metadata(posts_auth_metadata)
         if public_posts_auth_metadata.get("auth_repair_status") == "failed":
             return _blocked_instagram_posts_launch_payload(

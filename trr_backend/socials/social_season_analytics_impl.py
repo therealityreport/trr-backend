@@ -47,6 +47,7 @@ import requests
 from psycopg2 import errors as psycopg_errors
 
 from trr_backend.db import pg
+from trr_backend.db.deadline import bounded_timeout, check_deadline
 from trr_backend.job_plane import (
     execution_backend_canonical,
     execution_metadata,
@@ -3543,14 +3544,16 @@ def _invoke_modal_auth_probe_with_timeout(handle: Any, *args: Any, timeout_secon
     # One retry on timeout absorbs Modal cold-start spikes while keeping the
     # worst case bounded at ~2x timeout_seconds.
     for attempt in range(2):
+        check_deadline()
         function_call = handle.spawn(*args, **kwargs)
         try:
-            return function_call.get(timeout=timeout_seconds)
+            return function_call.get(timeout=bounded_timeout(timeout_seconds))
         except (TimeoutError, FuturesTimeoutError):
             try:
                 function_call.cancel()
             except Exception:  # noqa: BLE001
                 logger.debug("Failed to cancel timed-out Modal auth probe", exc_info=True)
+            check_deadline()
             if attempt == 0:
                 logger.warning(
                     "Modal auth probe timed out after %.1fs; retrying once",
@@ -5571,17 +5574,22 @@ def _merge_catalog_run_config(
     run_id: str,
     metadata_updates: Mapping[str, Any],
     conn: Any | None = None,
+    expected_launch_state: str | None = None,
 ) -> dict[str, Any]:
     query = """
         update social.scrape_runs
         set config = coalesce(config, '{}'::jsonb) || %s::jsonb
         where id = %s::uuid
+          and (%s::text is null or (
+            config->>'launch_state' = %s
+            and lower(coalesce(status, '')) not in ('cancelled', 'cancelling', 'failed')
+          ))
         returning
           id::text as id,
           status,
           config
         """
-    params = [_json_dumps(_metadata_dict(metadata_updates)), run_id]
+    params = [_json_dumps(_metadata_dict(metadata_updates)), run_id, expected_launch_state, expected_launch_state]
     if conn is not None:
         with pg.db_cursor(conn=conn, label="merge_catalog_run_config") as cur:
             row = pg.fetch_one_with_cursor(cur, query, params)
@@ -12896,6 +12904,10 @@ def _refresh_remote_modal_invocation_state(
         }
 
     inspection = inspect_modal_function_call(call_id)
+    if _metadata_dict(job.get("config")).get("detail_contract_version") == 1:
+        # A provider lookup can outlive its generation. Its result is evidence,
+        # not authority to overwrite the current dispatch metadata.
+        return inspection
     inspection_status = str(inspection.get("status") or "").strip().lower() or "unknown"
     checked_at = _coerce_dt(inspection.get("checked_at"))
     requested_at = _coerce_dt(dispatch.get("dispatch_requested_at"))
@@ -12950,6 +12962,10 @@ def _update_job_config(job_id: str, *, config_updates: Mapping[str, Any] | None 
 def _mark_claimed_modal_dispatch_running(claimed_job: Mapping[str, Any] | None) -> None:
     if not isinstance(claimed_job, Mapping):
         return
+    if _metadata_dict(claimed_job.get("config")).get("detail_contract_version") == 1:
+        # The atomic job claim already persisted running state. Keep the
+        # independent reservation until its bounded worker finishes.
+        return
     job_id = str(claimed_job.get("id") or "").strip()
     if not job_id:
         return
@@ -12990,7 +13006,7 @@ def _claimed_media_runtime_versions() -> tuple[str, str]:
     return _json_dumps(media_runtime), _json_dumps(comment_media_runtime)
 
 
-def _claim_job_by_id(*, job_id: str, worker_id: str) -> dict[str, Any] | None:
+def _claim_job_by_id(*, job_id: str, worker_id: str, dispatch_token: str | None = None) -> dict[str, Any] | None:
     media_runtime_json, comment_media_runtime_json = _claimed_media_runtime_versions()
     return pg.fetch_one(
         """
@@ -13036,6 +13052,8 @@ def _claim_job_by_id(*, job_id: str, worker_id: str) -> dict[str, Any] | None:
             else j.metadata
           end
         where j.id = %s::uuid
+          and (coalesce(j.config->>'detail_contract_version', '') <> '1'
+            or (j.detail_dispatch_token = %s and j.detail_dispatch_expires_at > now()))
           and j.status in ('queued', 'pending', 'retrying')
           and j.available_at <= now()
           and not (
@@ -13104,7 +13122,9 @@ def _claim_job_by_id(*, job_id: str, worker_id: str) -> dict[str, Any] | None:
           max_attempts,
           source_scope,
           season_id::text as season_id,
-          last_error_code
+          last_error_code,
+          detail_dispatch_token,
+          detail_dispatch_generation
         """,
         [
             worker_id,
@@ -13117,6 +13137,7 @@ def _claim_job_by_id(*, job_id: str, worker_id: str) -> dict[str, Any] | None:
             comment_media_runtime_json,
             comment_media_runtime_json,
             job_id,
+            dispatch_token,
         ],
     )
 
@@ -13269,6 +13290,8 @@ def _finish_job(
     last_error_class: str | None = None,
     next_available_at: datetime | None = None,
     expected_worker_id: str | None = None,
+    expected_dispatch_token: str | None = None,
+    defer_followups: bool = False,
 ) -> None:
     is_terminal = status in {"completed", "failed", "cancelled"}
     completed_expr = "now()" if is_terminal else "completed_at"
@@ -13320,6 +13343,19 @@ def _finish_job(
             from prior
             where social.scrape_jobs.id = prior.id
               and (
+                coalesce(social.scrape_jobs.config->>'detail_contract_version', '') <> '1'
+                or (
+                  social.scrape_jobs.worker_id = %s::text
+                  and social.scrape_jobs.detail_dispatch_token = %s::text
+                  and (%s::text <> 'completed' or (
+                    social.scrape_jobs.detail_completion_receipt->>'worker_id' = social.scrape_jobs.worker_id
+                    and social.scrape_jobs.detail_completion_receipt->>'dispatch_generation'
+                      = social.scrape_jobs.detail_dispatch_generation::text
+                    and social.scrape_jobs.detail_completion_receipt->>'status' = 'completed'
+                  ))
+                )
+              )
+              and (
                 %s::text is null
                 or (
                   prior.prior_status = 'running'
@@ -13351,6 +13387,9 @@ def _finish_job(
                     last_error_class,
                     next_available_at,
                     status,
+                    status,
+                    expected_worker_id,
+                    expected_dispatch_token,
                     status,
                     expected_worker_id,
                     expected_worker_id,
@@ -13411,6 +13450,8 @@ def _finish_job(
                 )
             else:
                 raise
+    if defer_followups:
+        return
     if is_terminal:
         _clear_worker_heartbeat_for_job(
             job_id=job_id,
@@ -14145,6 +14186,18 @@ def recover_stale_running_jobs(
     stale_after_seconds: int | None = None,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
+    from trr_backend.socials.control_plane.instagram_detail_targets import recover_expired
+
+    detail_recovered = (
+        recover_expired(
+            importlib.import_module(__name__),
+            run_id=run_id,
+            account=_normalize_account_handle(account_handle) if account_handle else None,
+            limit=limit,
+        )
+        if platform in (None, "instagram") and stage in (None, SHARED_ACCOUNT_POSTS_STAGE)
+        else []
+    )
     normalized_account_filter = (
         _normalize_account_handle(account_handle) or str(account_handle or "").strip().lower().lstrip("@") or None
     )
@@ -14196,6 +14249,7 @@ def recover_stale_running_jobs(
         SELECT EXISTS(
             SELECT 1 FROM social.scrape_jobs j
             WHERE j.status in ('running', 'cancelling')
+              AND coalesce(j.config->>'detail_contract_version', '') <> '1'
               AND (
                 coalesce(j.heartbeat_at, j.started_at, j.claimed_at, j.created_at)
                   < now() - (({stale_seconds_expr}) * interval '1 second')
@@ -14254,7 +14308,7 @@ def recover_stale_running_jobs(
         ],
     )
     if not (has_stale and has_stale.get("has_stale")):
-        return []
+        return detail_recovered
 
     recovered_rows = pg.fetch_all(
         f"""
@@ -14384,6 +14438,7 @@ def recover_stale_running_jobs(
             end as comments_recovery_target_source_ids
           from social.scrape_jobs j
           where j.status in ('running', 'cancelling')
+            and coalesce(j.config->>'detail_contract_version', '') <> '1'
             and (
               coalesce(j.heartbeat_at, j.started_at, j.claimed_at, j.created_at) <
                 now() - (({stale_seconds_expr}) * interval '1 second')
@@ -14648,7 +14703,7 @@ def recover_stale_running_jobs(
         ):
             repair_instagram_canonical_metrics_for_run(stale_run_id)
         _finalize_run_status(stale_run_id, force_recompute=True)
-    return recovered_rows
+    return [*detail_recovered, *recovered_rows]
 
 
 def recover_stale_unclaimed_dispatched_jobs(
@@ -21203,6 +21258,7 @@ def _pg_upsert_many(
     conn: Any | None = None,
     include_inserted_flag: bool = False,
     coalesce_preserve_cols: Sequence[str] | None = None,
+    returning_columns: Sequence[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Batch upsert rows into social.{table} using execute_values."""
     if not payloads:
@@ -21237,7 +21293,9 @@ def _pg_upsert_many(
     col_list = ", ".join(columns)
     update_sql = _build_upsert_update_clause(table, updates, coalesce_preserve_cols)
     conflict_list = ", ".join(conflict_cols)
-    returning_sql = "*, (xmax = 0) as __trr_inserted" if include_inserted_flag else "*"
+    returning_sql = ", ".join(returning_columns) if returning_columns else "*"
+    if include_inserted_flag:
+        returning_sql += ", (xmax = 0) as __trr_inserted"
     sql = f"""
         INSERT INTO social.{table} ({col_list})
         VALUES %s
@@ -21468,6 +21526,8 @@ def _sync_instagram_canonical_post_entities(
     raw_data: Mapping[str, Any],
     conn: Any | None,
 ) -> None:
+    from trr_backend.socials.control_plane.instagram_detail_targets import current_target
+
     rows: list[dict[str, Any]] = []
 
     def add_entity(entity_type: str, key: Any, entity_payload: Mapping[str, Any] | None = None) -> None:
@@ -21514,6 +21574,8 @@ def _sync_instagram_canonical_post_entities(
             conn=conn,
         )
     except Exception:
+        if current_target.get() is not None:
+            raise
         logger.debug("[instagram] Failed syncing canonical post entities", exc_info=True)
 
 
@@ -21524,6 +21586,8 @@ def _sync_instagram_canonical_post_media_assets(
     raw_data: Mapping[str, Any],
     conn: Any | None,
 ) -> None:
+    from trr_backend.socials.control_plane.instagram_detail_targets import current_target
+
     media_urls = _normalize_unique_terms(_as_text_list(payload.get("media_urls")))
     hosted_media_urls = _normalize_unique_terms(_as_text_list(payload.get("hosted_media_urls")))
     source_thumbnail_url = str(payload.get("thumbnail_url") or "").strip() or None
@@ -21574,6 +21638,8 @@ def _sync_instagram_canonical_post_media_assets(
             conn=conn,
         )
     except Exception:
+        if current_target.get() is not None:
+            raise
         logger.debug("[instagram] Failed syncing canonical post media assets", exc_info=True)
 
 
@@ -22196,18 +22262,13 @@ def recover_orphaned_instagram_frontier_leases_for_run(
     return summary
 
 
-def _sync_instagram_canonical_post(
+def _instagram_canonical_post_payload(
     *,
-    legacy_row: Mapping[str, Any] | None,
+    legacy_row: Mapping[str, Any],
     payload: Mapping[str, Any],
     post: Any,
-    conn: Any | None,
-) -> dict[str, Any] | None:
-    if not legacy_row or not _instagram_canonical_post_tables_ready(conn=conn):
-        return None
+) -> dict[str, Any]:
     shortcode = str(payload.get("shortcode") or "").strip()
-    if not shortcode:
-        return None
     raw_data = _metadata_dict(payload.get("raw_data"))
     owner_handle = str(payload.get("username") or payload.get("source_account") or "").strip().lstrip("@") or None
     owner_handle_norm = owner_handle.lower() if owner_handle else None
@@ -22224,7 +22285,7 @@ def _sync_instagram_canonical_post(
         legacy_row.get("shares"),
     )
     view_count = _max_normalized_non_negative_int(payload.get("views"), legacy_row.get("views"))
-    canonical_payload = {
+    return {
         "platform": "instagram",
         "source_id": shortcode,
         "owner_handle": owner_handle,
@@ -22241,6 +22302,23 @@ def _sync_instagram_canonical_post(
         "last_seen_at": _now_utc(),
         "last_scraped_at": payload.get("scraped_at"),
     }
+
+
+def _sync_instagram_canonical_post(
+    *,
+    legacy_row: Mapping[str, Any] | None,
+    payload: Mapping[str, Any],
+    post: Any,
+    conn: Any | None,
+) -> dict[str, Any] | None:
+    from trr_backend.socials.control_plane.instagram_detail_targets import current_target
+
+    detail_target = current_target.get()
+    shortcode = str(payload.get("shortcode") or "").strip()
+    if not legacy_row or not shortcode or not _instagram_canonical_post_tables_ready(conn=conn):
+        return None
+    raw_data = _metadata_dict(payload.get("raw_data"))
+    canonical_payload = _instagram_canonical_post_payload(legacy_row=legacy_row, payload=payload, post=post)
     try:
         adapted = _adapt_payload_json_values(canonical_payload)
         columns = list(adapted.keys())
@@ -22276,6 +22354,8 @@ def _sync_instagram_canonical_post(
                 [adapted[column] for column in columns],
             )
     except Exception:
+        if detail_target is not None:
+            raise
         logger.debug("[instagram] Failed syncing canonical social_posts row", exc_info=True)
         return None
     canonical_post_id = str((canonical_row or {}).get("id") or "").strip()
@@ -22298,6 +22378,8 @@ def _sync_instagram_canonical_post(
             conn=conn,
         )
     except Exception:
+        if detail_target is not None:
+            raise
         logger.debug("[instagram] Failed syncing canonical legacy ref", exc_info=True)
 
     try:
@@ -22312,7 +22394,9 @@ def _sync_instagram_canonical_post(
                   source_pk,
                   source_url,
                   raw_payload,
-                  normalized_payload
+                  normalized_payload,
+                  detail_run_id,
+                  detail_source_id
                 )
                 values (
                   'instagram',
@@ -22321,8 +22405,11 @@ def _sync_instagram_canonical_post(
                   %s,
                   %s,
                   %s::jsonb,
-                  %s::jsonb
+                  %s::jsonb,
+                  %s::uuid,
+                  %s
                 )
+                on conflict (detail_run_id, detail_source_id) where detail_run_id is not null do nothing
                 returning id::text
                 """,
                 [
@@ -22331,9 +22418,13 @@ def _sync_instagram_canonical_post(
                     canonical_payload.get("canonical_url"),
                     _json_dumps(raw_data),
                     _json_dumps({key: value for key, value in canonical_payload.items() if key != "platform"}),
+                    detail_target.get("run_id") if detail_target else None,
+                    detail_target.get("source_id") if detail_target else None,
                 ],
             )
     except Exception:
+        if detail_target is not None:
+            raise
         logger.debug("[instagram] Failed inserting canonical observation", exc_info=True)
 
     _sync_instagram_canonical_post_entities(
@@ -22350,6 +22441,137 @@ def _sync_instagram_canonical_post(
         conn=conn,
     )
     return canonical_row
+
+
+def _sync_instagram_canonical_posts(
+    records: list[tuple[Mapping[str, Any], Mapping[str, Any], Any]],
+    *,
+    conn: Any,
+    detail_targets: Mapping[str, Mapping[str, Any]] | None = None,
+) -> None:
+    """Persist a bounded legacy batch's canonical rows and full observations.
+
+    Durable records carry explicit per-target observation keys.
+    This helper shares the caller's transaction; errors must roll back the batch.
+    """
+    from trr_backend.socials.control_plane.instagram_detail_targets import current_target, writing_target
+
+    target = current_target.get()
+    if target is not None and detail_targets is None:
+        # A durable target's observation key must never be lost through a batch
+        # entry point. Its normal worker path already writes one target at a time.
+        if len(records) != 1 or str(records[0][1].get("shortcode")) != str(target["source_id"]):
+            raise ValueError("A durable Instagram target cannot share a canonical write batch")
+        row, payload, post = records[0]
+        if not _sync_instagram_canonical_post(legacy_row=row, payload=payload, post=post, conn=conn):
+            raise RuntimeError("Required Post Details canonical persistence is unavailable")
+        return
+    if detail_targets is not None and (
+        len(records) != len(detail_targets)
+        or {str(payload.get("shortcode")) for _row, payload, _post in records} != set(detail_targets)
+    ):
+        raise ValueError("Canonical detail batch identities do not match targets")
+    if not records or not _instagram_canonical_post_tables_ready(conn=conn):
+        if detail_targets:
+            raise RuntimeError("Required Post Details canonical tables are unavailable")
+        return
+    canonical_payloads = [
+        _instagram_canonical_post_payload(legacy_row=row, payload=payload, post=post) for row, payload, post in records
+    ]
+    columns = list(canonical_payloads[0])
+    updates = [
+        f"{column} = coalesce(excluded.{column}, social.social_posts.{column})"
+        for column in (
+            "owner_handle",
+            "owner_handle_norm",
+            "owner_id",
+            "canonical_url",
+            "body",
+            "media_type",
+            "posted_at",
+        )
+    ]
+    updates.extend(
+        _canonical_catalog_metric_update_sql(column)
+        for column in ("like_count", "comment_count", "share_count", "view_count")
+    )
+    updates.extend(
+        [
+            "last_seen_at = greatest(social.social_posts.last_seen_at, excluded.last_seen_at)",
+            "last_scraped_at = greatest(social.social_posts.last_scraped_at, excluded.last_scraped_at)",
+            "updated_at = now()",
+        ]
+    )
+    rows = pg.execute_values_returning(
+        f"""insert into social.social_posts ({", ".join(columns)}) values %s
+        on conflict (platform, source_id) do update set {", ".join(updates)}
+        returning id::text, source_id""",
+        [tuple(payload[column] for column in columns) for payload in canonical_payloads],
+        conn=conn,
+    )
+    ids = {row["source_id"]: row["id"] for row in rows}
+    if detail_targets is not None and (set(ids) != set(detail_targets) or len(rows) != len(detail_targets)):
+        raise RuntimeError("Required Post Details canonical rows are incomplete")
+    refs, observations = [], []
+    for (legacy_row, payload, post), canonical in zip(records, canonical_payloads, strict=True):
+        post_id = ids[canonical["source_id"]]
+        legacy_pk = str(legacy_row["id"])
+        refs.append(
+            {
+                "platform": "instagram",
+                "post_id": post_id,
+                "legacy_schema": "social",
+                "legacy_table": "instagram_posts",
+                "legacy_pk": legacy_pk,
+                "legacy_source_id": canonical["source_id"],
+            }
+        )
+        raw_data = _metadata_dict(payload.get("raw_data"))
+        record_target = detail_targets.get(canonical["source_id"]) if detail_targets is not None else None
+        observations.append(
+            (
+                "instagram",
+                post_id,
+                "instagram_posts",
+                legacy_pk,
+                canonical["canonical_url"],
+                _json_dumps(raw_data),
+                _json_dumps({key: value for key, value in canonical.items() if key != "platform"}),
+                record_target["run_id"] if record_target else None,
+                record_target["source_id"] if record_target else None,
+            )
+        )
+        with writing_target(record_target) if record_target else nullcontext():
+            _sync_instagram_canonical_post_entities(
+                canonical_post_id=post_id,
+                payload=payload,
+                post=post,
+                raw_data=raw_data,
+                conn=conn,
+            )
+            _sync_instagram_canonical_post_media_assets(
+                canonical_post_id=post_id,
+                payload=payload,
+                raw_data=raw_data,
+                conn=conn,
+            )
+    _pg_upsert_many(
+        "social_post_legacy_refs",
+        refs,
+        conflict_col=["platform", "legacy_table", "legacy_pk"],
+        conn=conn,
+        returning_columns=["post_id"],
+    )
+    pg.execute_values_returning(
+        """insert into social.social_post_observations
+        (platform, post_id, source_table, source_pk, source_url, raw_payload, normalized_payload,
+         detail_run_id, detail_source_id)
+        values %s
+        on conflict (detail_run_id, detail_source_id) where detail_run_id is not null do nothing
+        returning id::text""",
+        observations,
+        conn=conn,
+    )
 
 
 def _upsert_instagram_post(*args: Any, **kwargs: Any) -> Any:
@@ -34052,12 +34274,21 @@ def _shared_catalog_total_posts(
     account_handle: str,
     *,
     statuses: list[str] | None = None,
+    launch_planning: bool = False,
     conn: Any | None = None,
 ) -> int:
     table, _, _ = _shared_catalog_base_query_parts(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     params: list[Any] = [normalized_account]
-    where_clauses = [_shared_catalog_account_match_sql(platform, alias="p")]
+    # Planning needs a stored-source estimate, not the exhaustive Instagram
+    # owner/coauthor JSON scan used by profile targeting. This indexed subset
+    # must never be used as proof that discovery or materialization is complete.
+    account_match = (
+        "lower(p.source_account) = %s"
+        if launch_planning and platform == "instagram"
+        else _shared_catalog_account_match_sql(platform, alias="p")
+    )
+    where_clauses = [account_match]
     if statuses:
         where_clauses.append("p.assignment_status = any(%s)")
         params.append(statuses)
@@ -34084,13 +34315,22 @@ def _shared_catalog_total_posts_for_window(
     date_start: datetime | None = None,
     date_end: datetime | None = None,
     statuses: list[str] | None = None,
+    launch_planning: bool = False,
 ) -> int:
     table, _, posted_at_column = _shared_catalog_base_query_parts(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     start_dt = _coerce_dt(date_start)
     end_dt = _coerce_dt(date_end)
     params: list[Any] = [normalized_account]
-    where_clauses = [_shared_catalog_account_match_sql(platform, alias="p")]
+    # Planning needs a stored-source estimate, not the exhaustive Instagram
+    # owner/coauthor JSON scan used by profile targeting. This indexed subset
+    # must never be used as proof that discovery or materialization is complete.
+    account_match = (
+        "lower(p.source_account) = %s"
+        if launch_planning and platform == "instagram"
+        else _shared_catalog_account_match_sql(platform, alias="p")
+    )
+    where_clauses = [account_match]
     if statuses:
         where_clauses.append("p.assignment_status = any(%s)")
         params.append(statuses)
@@ -35835,6 +36075,45 @@ def _repair_finalizing_catalog_launch_after_jobs(
     platform: str,
     account_handle: str,
     conn: Any | None = None,
+    owns_launch_group: bool = False,
+) -> dict[str, Any] | None:
+    from trr_backend.socials.pipelines.account_catalog.launch import _catalog_launch_group_transaction_lock
+
+    config = _metadata_dict(run_row.get("config"))
+    group_id = str(config.get("launch_group_id") or "").strip()
+    if not group_id or not job_rows:
+        return None
+    with nullcontext(True) if owns_launch_group else _catalog_launch_group_transaction_lock(group_id) as acquired:
+        if not acquired:
+            return None
+        current = _load_catalog_run_row_by_id(str(run_row.get("run_id") or run_row.get("id")), conn=conn)
+        current_config = _metadata_dict(current.get("config"))
+        if str(current_config.get("launch_group_id") or "") != group_id:
+            return None
+        if str(current.get("status") or "").lower() in {"cancelled", "cancelling", "failed"}:
+            return None
+        state = str(current_config.get("launch_state") or "").lower()
+        if state != "ready":
+            complete_ids = set(_as_text_list(current_config.get("catalog_launch_job_ids")))
+            actual_ids = {str(row.get("id") or row.get("job_id") or "") for row in job_rows}
+            if not complete_ids or not complete_ids.issubset(actual_ids):
+                return None
+        return _repair_finalizing_catalog_launch_after_jobs_owned(
+            run_row=current,
+            job_rows=job_rows,
+            platform=platform,
+            account_handle=account_handle,
+            conn=conn,
+        )
+
+
+def _repair_finalizing_catalog_launch_after_jobs_owned(
+    *,
+    run_row: Mapping[str, Any],
+    job_rows: Sequence[Mapping[str, Any]],
+    platform: str,
+    account_handle: str,
+    conn: Any | None = None,
 ) -> dict[str, Any] | None:
     if not job_rows:
         return None
@@ -35881,8 +36160,17 @@ def _repair_finalizing_catalog_launch_after_jobs(
             if run_config.get("comments_enable_media_followups") is not None
             else "media" in effective_selected_tasks
         )
+        # A bounded existing-post launch must enumerate the whole requested
+        # window. Streaming only sees rows stamped by this backfill run.
+        bounded_comments_window = _catalog_backfill_has_bounded_window(
+            date_start=_coerce_dt(run_config.get("date_start")),
+            date_end=_coerce_dt(run_config.get("date_end")),
+        )
         use_streaming_comments = bool(
-            normalized_platform == "instagram" and not bool(run_config.get("allow_local_dev_inline_bypass"))
+            normalized_platform == "instagram"
+            and not bool(run_config.get("allow_local_dev_inline_bypass"))
+            and str(run_config.get("execution_preference") or "auto") != "prefer_local_inline"
+            and not bounded_comments_window
         )
         if use_streaming_comments:
             metadata_updates.update(
@@ -35914,11 +36202,16 @@ def _repair_finalizing_catalog_launch_after_jobs(
         else:
             deferred_comments_followup = {
                 "state": "pending",
+                # Lifecycle must reuse a child created before parent attachment.
+                "launch_recovered_at": _iso(_now_utc()),
                 "platform": normalized_platform,
                 "account_handle": normalized_account,
                 "source_scope": source_scope,
                 "refresh_policy": "stale_or_missing",
                 "target_filter": "incomplete" if normalized_platform == "instagram" else None,
+                "date_start": run_config.get("date_start"),
+                "date_end": run_config.get("date_end"),
+                "comments_worker_count": _normalize_non_negative_int(run_config.get("comments_worker_count")) or None,
                 "comments_enable_media_followups": comments_enable_media_followups,
                 "allow_local_dev_inline_bypass": bool(run_config.get("allow_local_dev_inline_bypass")),
                 "launch_group_id": launch_group_id,
@@ -35927,6 +36220,7 @@ def _repair_finalizing_catalog_launch_after_jobs(
                 "created_by_runtime_version": _metadata_dict(run_config.get("created_by_runtime_version"))
                 or dict(_resolve_runtime_version_stamp()),
             }
+            metadata_updates["comments_streaming_enabled"] = False
             metadata_updates["deferred_comments_followup"] = deferred_comments_followup
             attached_followups["comments"] = _build_attached_comments_followup(
                 run_id=None,
@@ -35943,8 +36237,15 @@ def _repair_finalizing_catalog_launch_after_jobs(
     if attached_followups:
         metadata_updates["attached_followups"] = attached_followups
 
-    merged = _merge_catalog_run_config(run_id=run_id, metadata_updates=metadata_updates, conn=conn)
+    merged = _merge_catalog_run_config(
+        run_id=run_id,
+        metadata_updates=metadata_updates,
+        conn=conn,
+        expected_launch_state=launch_state,
+    )
     merged_config = _metadata_dict(merged.get("config"))
+    if not merged_config:
+        return None
     logger.info(
         (
             "[catalog-launch] finalizing_metadata_repaired platform=%s account=%s run_id=%s "
@@ -43656,6 +43957,12 @@ def _run_shared_analytics_refresh_stage(
 
 
 def _execute_shared_claimed_job(job: Mapping[str, Any], *, worker_id: str | None = None) -> dict[str, Any]:
+    if (job.get("config") or {}).get("detail_contract_version") == 1:
+        from trr_backend.socials.control_plane.instagram_detail_targets import execute_job
+
+        if not worker_id:
+            raise ValueError("Durable Post Details requires a worker identity")
+        return execute_job(importlib.import_module(__name__), job, worker_id=worker_id)
     job_id = str(job.get("id") or "").strip()
     run_id = str(job.get("run_id") or "").strip()
     config = dict(job.get("config") or {})
@@ -45381,6 +45688,7 @@ def _claim_next_jobs(
             on rpif.run_id = j.run_id::text
            and rpif.platform = j.platform
           where j.status in ('queued', 'pending', 'retrying')
+            and coalesce(j.config->>'detail_contract_version', '') <> '1'
             and j.available_at <= now()
             and {_job_posts_auth_cooldown_sql_exclusion("j")}
             and (%s::uuid is null or j.run_id = %s::uuid)
@@ -47108,6 +47416,16 @@ def ingest_shared_accounts(
     effective_details_refresh_skip_detail_fetch = (
         bool(details_refresh_skip_detail_fetch) if details_refresh_skip_detail_fetch is not None else False
     )
+    if (
+        details_refresh_only
+        and not effective_details_refresh_skip_detail_fetch
+        and "instagram" in normalized_platforms
+        and not _env_truthy("SOCIAL_INSTAGRAM_DETAIL_TARGETS_ENABLED", default=False)
+    ):
+        raise SocialIngestValidationError(
+            "INSTAGRAM_DETAIL_LAUNCHES_DISABLED",
+            "Post Details launches are paused until the durable worker contract is enabled.",
+        )
     effective_details_refresh_force_detail_fetch = (
         bool(details_refresh_force_detail_fetch) if details_refresh_force_detail_fetch is not None else False
     )
@@ -47205,11 +47523,13 @@ def ingest_shared_accounts(
         ):
             force_tiktok_local_inline_source_keys.add(source_key)
         if normalized_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE:
-            catalog_total_posts = _shared_catalog_total_posts(platform, account_handle)
+            catalog_total_posts = _shared_catalog_total_posts(
+                platform, account_handle, launch_planning=platform == "instagram"
+            )
             allow_live_total_refresh = not details_refresh_only
-            if platform == "instagram" and bounded_window:
+            if platform == "instagram":
                 # This value is only an estimate used for launch planning. For
-                # bounded Instagram backfills, stored catalog/history totals are
+                # Instagram backfills, stored catalog/history totals are
                 # enough to choose the frontier lane, while the profile total query
                 # joins against assignment tables and can hit statement_timeout on
                 # high-volume profiles during launch finalization.
@@ -47220,9 +47540,11 @@ def ingest_shared_accounts(
                         account_handle,
                         date_start=bounded_start,
                         date_end=bounded_end,
+                        launch_planning=True,
                     )
-                    or catalog_total_posts
-                )
+                    if bounded_window
+                    else catalog_total_posts
+                ) or catalog_total_posts
             else:
                 materialized_total_posts = _social_account_profile_total_posts(platform, account_handle)
             expected_total_posts = _best_known_social_account_total_posts(
@@ -47467,122 +47789,215 @@ def ingest_shared_accounts(
         ),
     )
 
-    if normalized_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE and catalog_source_shards:
-        sources_with_shards: list[dict[str, Any]] = []
-        max_shard_depth = 0
-        for row in sorted_sources:
-            platform = _normalize_platform_name(row.get("platform"))
-            account_handle = (
-                _normalize_account_handle(row.get("account_handle")) or str(row.get("account_handle") or "").strip()
-            )
-            if not platform or not account_handle:
-                continue
-            source_shards = list(catalog_source_shards.get((platform, account_handle)) or [])
-            if not source_shards:
-                continue
-            max_shard_depth = max(max_shard_depth, len(source_shards))
-            sources_with_shards.append(
-                {
-                    "row": row,
-                    "platform": platform,
-                    "account_handle": account_handle,
-                    "priority": max(1, int(row.get("scrape_priority") or 100)),
-                    "shards": source_shards,
-                }
-            )
-
-        for row in sorted_sources:
-            platform = _normalize_platform_name(row.get("platform"))
-            account_handle = (
-                _normalize_account_handle(row.get("account_handle")) or str(row.get("account_handle") or "").strip()
-            )
-            if not platform or not account_handle or (platform, account_handle) not in bounded_frontier_source_keys:
-                continue
-            job_id = _enqueue_shared_discovery_job(
-                run_id=run_id,
-                platform=platform,
-                source_scope=source_scope,
-                account_handle=account_handle,
-                shared_account_source_id=row.get("id"),
-                pipeline_ingest_mode=normalized_ingest_mode,
-                runner_count=CATALOG_BACKFILL_FULL_HISTORY_RUNNER_COUNT,
-                expected_total_posts=_shared_account_expected_total_posts_from_config(
-                    {"expected_total_posts_by_account": expected_total_posts_by_account},
-                    platform=platform,
-                    account_handle=account_handle,
-                ),
-                runner_strategy=CATALOG_FULL_HISTORY_FRONTIER_STRATEGY,
-                partition_strategy=CATALOG_FULL_HISTORY_FRONTIER_STRATEGY,
-                required_worker_lane=None,
-                required_execution_backend=(
-                    "modal"
-                    if (
-                        not allow_local_dev_inline_bypass
-                        and _shared_account_catalog_requires_modal_executor(
-                            platform=platform,
-                            pipeline_ingest_mode=normalized_ingest_mode,
-                        )
-                    )
-                    else None
-                ),
-                allow_local_dev_inline_bypass=bool(allow_local_dev_inline_bypass),
-                resume_frontier_cursor=resume_frontier_cursor,
-                resume_frontier_snapshot=resume_frontier_snapshot,
-                date_start=date_start,
-                date_end=date_end,
-                catalog_action=normalized_catalog_action,
-                catalog_action_scope=normalized_catalog_action_scope,
-                selected_tasks=normalized_selected_tasks_for_config,
-                effective_selected_tasks=normalized_effective_tasks_for_config,
-                details_refresh_skip_detail_fetch=effective_details_refresh_skip_detail_fetch,
-                details_refresh_force_detail_fetch=effective_details_refresh_force_detail_fetch,
-                comments_worker_count=normalized_comments_worker_count,
-                details_refresh_skip_media_followups=effective_details_refresh_skip_media_followups,
-                tiktok_comments_in_posts_stage=bool(platform == "tiktok" and tiktok_comments_in_posts_stage),
-                tiktok_direct_comment_api_override=bool(platform == "tiktok" and tiktok_direct_comment_api_override),
-                twitter_comments_in_posts_stage=bool(platform == "twitter" and twitter_comments_in_posts_stage),
-                initiated_by=initiated_by,
-                worker_id=inline_worker_id,
-                priority=max(1, int(row.get("scrape_priority") or 100)),
-            )
-            job_ids.append(job_id)
-            discovery_jobs_created = True
-
-        for shard_depth in range(max_shard_depth):
-            for source in sources_with_shards:
-                source_shards = cast("list[IngestTimeShard]", source["shards"])
-                if shard_depth >= len(source_shards):
+    atomic_catalog_batch = bool(
+        normalized_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE and existing_run_id
+    )
+    with pg.transaction() if atomic_catalog_batch else nullcontext():
+        if normalized_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE and catalog_source_shards:
+            sources_with_shards: list[dict[str, Any]] = []
+            max_shard_depth = 0
+            for row in sorted_sources:
+                platform = _normalize_platform_name(row.get("platform"))
+                account_handle = (
+                    _normalize_account_handle(row.get("account_handle")) or str(row.get("account_handle") or "").strip()
+                )
+                if not platform or not account_handle:
                     continue
-                shard = source_shards[shard_depth]
-                platform = cast("str", source["platform"])
-                account_handle = cast("str", source["account_handle"])
-                row = cast("dict[str, Any]", source["row"])
-                base_priority = cast("int", source["priority"])
+                source_shards = list(catalog_source_shards.get((platform, account_handle)) or [])
+                if not source_shards:
+                    continue
+                max_shard_depth = max(max_shard_depth, len(source_shards))
+                sources_with_shards.append(
+                    {
+                        "row": row,
+                        "platform": platform,
+                        "account_handle": account_handle,
+                        "priority": max(1, int(row.get("scrape_priority") or 100)),
+                        "shards": source_shards,
+                    }
+                )
+
+            for row in sorted_sources:
+                platform = _normalize_platform_name(row.get("platform"))
+                account_handle = (
+                    _normalize_account_handle(row.get("account_handle")) or str(row.get("account_handle") or "").strip()
+                )
+                if not platform or not account_handle or (platform, account_handle) not in bounded_frontier_source_keys:
+                    continue
+                job_id = _enqueue_shared_discovery_job(
+                    run_id=run_id,
+                    platform=platform,
+                    source_scope=source_scope,
+                    account_handle=account_handle,
+                    shared_account_source_id=row.get("id"),
+                    pipeline_ingest_mode=normalized_ingest_mode,
+                    runner_count=CATALOG_BACKFILL_FULL_HISTORY_RUNNER_COUNT,
+                    expected_total_posts=_shared_account_expected_total_posts_from_config(
+                        {"expected_total_posts_by_account": expected_total_posts_by_account},
+                        platform=platform,
+                        account_handle=account_handle,
+                    ),
+                    runner_strategy=CATALOG_FULL_HISTORY_FRONTIER_STRATEGY,
+                    partition_strategy=CATALOG_FULL_HISTORY_FRONTIER_STRATEGY,
+                    required_worker_lane=None,
+                    required_execution_backend=(
+                        "modal"
+                        if (
+                            not allow_local_dev_inline_bypass
+                            and _shared_account_catalog_requires_modal_executor(
+                                platform=platform,
+                                pipeline_ingest_mode=normalized_ingest_mode,
+                            )
+                        )
+                        else None
+                    ),
+                    allow_local_dev_inline_bypass=bool(allow_local_dev_inline_bypass),
+                    resume_frontier_cursor=resume_frontier_cursor,
+                    resume_frontier_snapshot=resume_frontier_snapshot,
+                    date_start=date_start,
+                    date_end=date_end,
+                    catalog_action=normalized_catalog_action,
+                    catalog_action_scope=normalized_catalog_action_scope,
+                    selected_tasks=normalized_selected_tasks_for_config,
+                    effective_selected_tasks=normalized_effective_tasks_for_config,
+                    details_refresh_skip_detail_fetch=effective_details_refresh_skip_detail_fetch,
+                    details_refresh_force_detail_fetch=effective_details_refresh_force_detail_fetch,
+                    comments_worker_count=normalized_comments_worker_count,
+                    details_refresh_skip_media_followups=effective_details_refresh_skip_media_followups,
+                    tiktok_comments_in_posts_stage=bool(platform == "tiktok" and tiktok_comments_in_posts_stage),
+                    tiktok_direct_comment_api_override=bool(
+                        platform == "tiktok" and tiktok_direct_comment_api_override
+                    ),
+                    twitter_comments_in_posts_stage=bool(platform == "twitter" and twitter_comments_in_posts_stage),
+                    initiated_by=initiated_by,
+                    worker_id=inline_worker_id,
+                    priority=max(1, int(row.get("scrape_priority") or 100)),
+                )
+                job_ids.append(job_id)
+                discovery_jobs_created = True
+
+            for shard_depth in range(max_shard_depth):
+                for source in sources_with_shards:
+                    source_shards = cast("list[IngestTimeShard]", source["shards"])
+                    if shard_depth >= len(source_shards):
+                        continue
+                    shard = source_shards[shard_depth]
+                    platform = cast("str", source["platform"])
+                    account_handle = cast("str", source["account_handle"])
+                    row = cast("dict[str, Any]", source["row"])
+                    base_priority = cast("int", source["priority"])
+                    platform_comment_anchor_ids = sorted(normalized_comment_anchor_source_ids.get(platform) or [])
+                    platform_comment_anchor_config = (
+                        {"comment_anchor_source_ids": {platform: platform_comment_anchor_ids}}
+                        if platform_comment_anchor_ids
+                        else {}
+                    )
+                    shared_posts_stage = _shared_account_posts_stage_for_platform(platform)
+                    base_shard_config = {
+                        "stage": shared_posts_stage,
+                        "shared_account_stage": SHARED_ACCOUNT_POSTS_STAGE,
+                        "platform": platform,
+                        "source_scope": source_scope,
+                        "account": account_handle,
+                        "date_start": _iso(shard.window_start),
+                        "date_end": _iso(shard.window_end),
+                        "window_start": _iso(shard.window_start),
+                        "window_end": _iso(shard.window_end),
+                        "shard_index": shard.shard_index,
+                        "shard_total": len(source_shards),
+                        "runner_lane": shard.runner_lane,
+                        "runner_strategy": catalog_runner_strategy,
+                        "runner_count": catalog_runner_count,
+                        "shared_account_source_id": row.get("id"),
+                        "ingest_mode": "details_refresh" if details_refresh_only else None,
+                        "max_posts_per_target": 0,
+                        "pipeline_ingest_mode": normalized_ingest_mode,
+                        "catalog_followups_disabled": catalog_followups_disabled,
+                        "details_refresh_skip_detail_fetch": effective_details_refresh_skip_detail_fetch,
+                        "details_refresh_force_detail_fetch": effective_details_refresh_force_detail_fetch,
+                        "details_refresh_worker_count": detail_refresh_shard_count
+                        if detail_refresh_shard_count > 1
+                        else None,
+                        "comments_worker_count": normalized_comments_worker_count,
+                        "details_refresh_skip_media_followups": effective_details_refresh_skip_media_followups,
+                        "tiktok_comments_in_posts_stage": bool(platform == "tiktok" and tiktok_comments_in_posts_stage),
+                        "tiktok_direct_comment_api_override": bool(
+                            platform == "tiktok" and tiktok_direct_comment_api_override
+                        ),
+                        "twitter_comments_in_posts_stage": bool(
+                            platform == "twitter" and twitter_comments_in_posts_stage
+                        ),
+                        "youtube_comments_in_posts_stage": bool(
+                            platform == "youtube" and "comments" in normalized_effective_tasks_for_config
+                        ),
+                        **platform_comment_anchor_config,
+                        **catalog_task_config,
+                        "launch_group_id": str(launch_group_id or "").strip() or None,
+                        "required_execution_backend": (
+                            "modal"
+                            if (
+                                not allow_local_dev_inline_bypass
+                                and _shared_account_catalog_requires_modal_executor(
+                                    platform=platform,
+                                    pipeline_ingest_mode=normalized_ingest_mode,
+                                )
+                            )
+                            else None
+                        ),
+                        "allow_local_dev_inline_bypass": bool(allow_local_dev_inline_bypass),
+                        "catalog_action": normalized_catalog_action,
+                        "catalog_action_scope": normalized_catalog_action_scope,
+                        "expected_total_posts": _shared_account_expected_total_posts_from_config(
+                            {"expected_total_posts_by_account": expected_total_posts_by_account},
+                            platform=platform,
+                            account_handle=account_handle,
+                        ),
+                    }
+                    for surface_index, shard_config in enumerate(
+                        _expand_youtube_surface_job_configs(platform, base_shard_config)
+                    ):
+                        job_id = _create_job(
+                            None,
+                            run_id=run_id,
+                            platform=platform,
+                            source_scope=source_scope,
+                            job_type=SHARED_ACCOUNT_POSTS_JOB_TYPE,
+                            stage=shared_posts_stage,
+                            config=shard_config,
+                            initiated_by=initiated_by,
+                            status=initial_job_status,
+                            priority=max(1, base_priority + shard_depth + surface_index),
+                            worker_id=inline_worker_id,
+                            preclaim=bool(inline_worker_id),
+                            track_run_counters=False,
+                        )
+                        job_ids.append(job_id)
+        else:
+            for row in sorted_sources:
+                platform = _normalize_platform_name(row.get("platform"))
+                account_handle = (
+                    _normalize_account_handle(row.get("account_handle")) or str(row.get("account_handle") or "").strip()
+                )
+                if not platform or not account_handle:
+                    continue
                 platform_comment_anchor_ids = sorted(normalized_comment_anchor_source_ids.get(platform) or [])
                 platform_comment_anchor_config = (
                     {"comment_anchor_source_ids": {platform: platform_comment_anchor_ids}}
                     if platform_comment_anchor_ids
                     else {}
                 )
+                force_tiktok_local_inline_direct = (platform, account_handle) in force_tiktok_local_inline_source_keys
                 shared_posts_stage = _shared_account_posts_stage_for_platform(platform)
-                base_shard_config = {
+                job_config = {
                     "stage": shared_posts_stage,
                     "shared_account_stage": SHARED_ACCOUNT_POSTS_STAGE,
                     "platform": platform,
                     "source_scope": source_scope,
                     "account": account_handle,
-                    "date_start": _iso(shard.window_start),
-                    "date_end": _iso(shard.window_end),
-                    "window_start": _iso(shard.window_start),
-                    "window_end": _iso(shard.window_end),
-                    "shard_index": shard.shard_index,
-                    "shard_total": len(source_shards),
-                    "runner_lane": shard.runner_lane,
-                    "runner_strategy": catalog_runner_strategy,
-                    "runner_count": catalog_runner_count,
+                    "date_start": _iso(date_start),
+                    "date_end": _iso(date_end),
                     "shared_account_source_id": row.get("id"),
                     "ingest_mode": "details_refresh" if details_refresh_only else None,
-                    "max_posts_per_target": 0,
                     "pipeline_ingest_mode": normalized_ingest_mode,
                     "catalog_followups_disabled": catalog_followups_disabled,
                     "details_refresh_skip_detail_fetch": effective_details_refresh_skip_detail_fetch,
@@ -47623,235 +48038,173 @@ def ingest_shared_accounts(
                         account_handle=account_handle,
                     ),
                 }
-                for surface_index, shard_config in enumerate(
-                    _expand_youtube_surface_job_configs(platform, base_shard_config)
+                if normalized_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE:
+                    job_config["max_posts_per_target"] = 0
+                    if details_refresh_only and platform == "instagram":
+                        job_config["completion_target_posts"] = _normalize_non_negative_int(
+                            catalog_total_posts_by_account.get(
+                                _shared_account_expected_total_posts_key(platform, account_handle)
+                            )
+                        )
+                        if not effective_details_refresh_skip_detail_fetch and _env_truthy(
+                            "SOCIAL_INSTAGRAM_DETAIL_TARGETS_ENABLED",
+                            default=False,
+                        ):
+                            from trr_backend.socials.control_plane.instagram_detail_targets import freeze_manifest
+
+                            with pg.transaction() as manifest_conn:
+                                job_config["detail_manifest"] = freeze_manifest(
+                                    run_id,
+                                    account_handle,
+                                    job_config,
+                                    conn=manifest_conn,
+                                )
+                            job_config["detail_contract_version"] = 1
+                if (
+                    normalized_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE
+                    and details_refresh_only
+                    and effective_details_refresh_force_detail_fetch
+                    and platform == "instagram"
+                    and detail_refresh_shard_count > 1
                 ):
-                    job_id = _create_job(
-                        None,
-                        run_id=run_id,
-                        platform=platform,
-                        source_scope=source_scope,
-                        job_type=SHARED_ACCOUNT_POSTS_JOB_TYPE,
-                        stage=shared_posts_stage,
-                        config=shard_config,
-                        initiated_by=initiated_by,
-                        status=initial_job_status,
-                        priority=max(1, base_priority + shard_depth + surface_index),
-                        worker_id=inline_worker_id,
-                        preclaim=bool(inline_worker_id),
-                        track_run_counters=False,
-                    )
-                    job_ids.append(job_id)
-    else:
-        for row in sorted_sources:
-            platform = _normalize_platform_name(row.get("platform"))
-            account_handle = (
-                _normalize_account_handle(row.get("account_handle")) or str(row.get("account_handle") or "").strip()
-            )
-            if not platform or not account_handle:
-                continue
-            platform_comment_anchor_ids = sorted(normalized_comment_anchor_source_ids.get(platform) or [])
-            platform_comment_anchor_config = (
-                {"comment_anchor_source_ids": {platform: platform_comment_anchor_ids}}
-                if platform_comment_anchor_ids
-                else {}
-            )
-            force_tiktok_local_inline_direct = (platform, account_handle) in force_tiktok_local_inline_source_keys
-            shared_posts_stage = _shared_account_posts_stage_for_platform(platform)
-            job_config = {
-                "stage": shared_posts_stage,
-                "shared_account_stage": SHARED_ACCOUNT_POSTS_STAGE,
-                "platform": platform,
-                "source_scope": source_scope,
-                "account": account_handle,
-                "date_start": _iso(date_start),
-                "date_end": _iso(date_end),
-                "shared_account_source_id": row.get("id"),
-                "ingest_mode": "details_refresh" if details_refresh_only else None,
-                "pipeline_ingest_mode": normalized_ingest_mode,
-                "catalog_followups_disabled": catalog_followups_disabled,
-                "details_refresh_skip_detail_fetch": effective_details_refresh_skip_detail_fetch,
-                "details_refresh_force_detail_fetch": effective_details_refresh_force_detail_fetch,
-                "details_refresh_worker_count": detail_refresh_shard_count if detail_refresh_shard_count > 1 else None,
-                "comments_worker_count": normalized_comments_worker_count,
-                "details_refresh_skip_media_followups": effective_details_refresh_skip_media_followups,
-                "tiktok_comments_in_posts_stage": bool(platform == "tiktok" and tiktok_comments_in_posts_stage),
-                "tiktok_direct_comment_api_override": bool(platform == "tiktok" and tiktok_direct_comment_api_override),
-                "twitter_comments_in_posts_stage": bool(platform == "twitter" and twitter_comments_in_posts_stage),
-                "youtube_comments_in_posts_stage": bool(
-                    platform == "youtube" and "comments" in normalized_effective_tasks_for_config
-                ),
-                **platform_comment_anchor_config,
-                **catalog_task_config,
-                "launch_group_id": str(launch_group_id or "").strip() or None,
-                "required_execution_backend": (
-                    "modal"
-                    if (
-                        not allow_local_dev_inline_bypass
-                        and _shared_account_catalog_requires_modal_executor(
+                    scheduler_lanes = _catalog_backfill_run_scheduler_lanes(detail_refresh_shard_count)
+                    for shard_index in range(detail_refresh_shard_count):
+                        runner_lane = scheduler_lanes[shard_index]
+                        shard_config = {
+                            **job_config,
+                            "details_refresh_shard_index": shard_index,
+                            "details_refresh_shard_count": detail_refresh_shard_count,
+                            "runner_lane": runner_lane,
+                            "required_worker_lane": runner_lane.lower(),
+                            "runner_strategy": "parallel_detail_refresh",
+                            "runner_count": detail_refresh_shard_count,
+                            "partition_strategy": "details_refresh_shards",
+                        }
+                        job_id = _create_job(
+                            None,
+                            run_id=run_id,
+                            platform=platform,
+                            source_scope=source_scope,
+                            job_type=SHARED_ACCOUNT_POSTS_JOB_TYPE,
+                            stage=shared_posts_stage,
+                            config=shard_config,
+                            initiated_by=initiated_by,
+                            status=initial_job_status,
+                            priority=max(1, int(row.get("scrape_priority") or 100) + shard_index),
+                            worker_id=inline_worker_id,
+                            preclaim=bool(inline_worker_id),
+                            track_run_counters=False,
+                        )
+                        job_ids.append(job_id)
+                    continue
+                if force_tiktok_local_inline_direct:
+                    job_config["runner_strategy"] = "single_runner_fallback"
+                    job_config["runner_count"] = 1
+                    job_config["partition_strategy"] = None
+                    job_config["required_execution_backend"] = None
+                bounded_frontier_direct = (platform, account_handle) in bounded_frontier_source_keys
+                if (
+                    normalized_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE
+                    and (full_history_partition_enabled or bounded_frontier_direct)
+                    and not force_tiktok_local_inline_direct
+                    and (
+                        _shared_account_catalog_frontier_supported(
                             platform=platform,
                             pipeline_ingest_mode=normalized_ingest_mode,
+                            bounded_window=bounded_window,
                         )
+                        or _catalog_full_history_partition_supported(platform)
                     )
-                    else None
-                ),
-                "allow_local_dev_inline_bypass": bool(allow_local_dev_inline_bypass),
-                "catalog_action": normalized_catalog_action,
-                "catalog_action_scope": normalized_catalog_action_scope,
-                "expected_total_posts": _shared_account_expected_total_posts_from_config(
-                    {"expected_total_posts_by_account": expected_total_posts_by_account},
-                    platform=platform,
-                    account_handle=account_handle,
-                ),
-            }
-            if normalized_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE:
-                job_config["max_posts_per_target"] = 0
-                if details_refresh_only and platform == "instagram":
-                    job_config["completion_target_posts"] = _normalize_non_negative_int(
-                        catalog_total_posts_by_account.get(
-                            _shared_account_expected_total_posts_key(platform, account_handle)
-                        )
-                    )
-            if (
-                normalized_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE
-                and details_refresh_only
-                and effective_details_refresh_force_detail_fetch
-                and platform == "instagram"
-                and detail_refresh_shard_count > 1
-            ):
-                scheduler_lanes = _catalog_backfill_run_scheduler_lanes(detail_refresh_shard_count)
-                for shard_index in range(detail_refresh_shard_count):
-                    runner_lane = scheduler_lanes[shard_index]
-                    shard_config = {
-                        **job_config,
-                        "details_refresh_shard_index": shard_index,
-                        "details_refresh_shard_count": detail_refresh_shard_count,
-                        "runner_lane": runner_lane,
-                        "required_worker_lane": runner_lane.lower(),
-                        "runner_strategy": "parallel_detail_refresh",
-                        "runner_count": detail_refresh_shard_count,
-                        "partition_strategy": "details_refresh_shards",
-                    }
-                    job_id = _create_job(
-                        None,
-                        run_id=run_id,
-                        platform=platform,
-                        source_scope=source_scope,
-                        job_type=SHARED_ACCOUNT_POSTS_JOB_TYPE,
-                        stage=shared_posts_stage,
-                        config=shard_config,
-                        initiated_by=initiated_by,
-                        status=initial_job_status,
-                        priority=max(1, int(row.get("scrape_priority") or 100) + shard_index),
-                        worker_id=inline_worker_id,
-                        preclaim=bool(inline_worker_id),
-                        track_run_counters=False,
-                    )
-                    job_ids.append(job_id)
-                continue
-            if force_tiktok_local_inline_direct:
-                job_config["runner_strategy"] = "single_runner_fallback"
-                job_config["runner_count"] = 1
-                job_config["partition_strategy"] = None
-                job_config["required_execution_backend"] = None
-            bounded_frontier_direct = (platform, account_handle) in bounded_frontier_source_keys
-            if (
-                normalized_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE
-                and (full_history_partition_enabled or bounded_frontier_direct)
-                and not force_tiktok_local_inline_direct
-                and (
-                    _shared_account_catalog_frontier_supported(
+                ):
+                    use_frontier_strategy = _shared_account_prefers_frontier_strategy(
                         platform=platform,
                         pipeline_ingest_mode=normalized_ingest_mode,
                         bounded_window=bounded_window,
+                        resume_frontier_requested=resume_frontier_requested,
+                        expected_total_posts=expected_total_posts_by_account.get(
+                            _shared_account_expected_total_posts_key(platform, account_handle)
+                        ),
+                        catalog_total_posts=catalog_total_posts_by_account.get(
+                            _shared_account_expected_total_posts_key(platform, account_handle)
+                        ),
                     )
-                    or _catalog_full_history_partition_supported(platform)
-                )
-            ):
-                use_frontier_strategy = _shared_account_prefers_frontier_strategy(
-                    platform=platform,
-                    pipeline_ingest_mode=normalized_ingest_mode,
-                    bounded_window=bounded_window,
-                    resume_frontier_requested=resume_frontier_requested,
-                    expected_total_posts=expected_total_posts_by_account.get(
-                        _shared_account_expected_total_posts_key(platform, account_handle)
-                    ),
-                    catalog_total_posts=catalog_total_posts_by_account.get(
-                        _shared_account_expected_total_posts_key(platform, account_handle)
-                    ),
-                )
-                job_id = _enqueue_shared_discovery_job(
-                    run_id=run_id,
-                    platform=platform,
-                    source_scope=source_scope,
-                    account_handle=account_handle,
-                    shared_account_source_id=row.get("id"),
-                    pipeline_ingest_mode=normalized_ingest_mode,
-                    runner_count=catalog_runner_count,
-                    expected_total_posts=_shared_account_expected_total_posts_from_config(
-                        {"expected_total_posts_by_account": expected_total_posts_by_account},
-                        platform=platform,
-                        account_handle=account_handle,
-                    ),
-                    runner_strategy=(
-                        CATALOG_FULL_HISTORY_FRONTIER_STRATEGY
-                        if use_frontier_strategy
-                        else "full_history_cursor_breakpoints"
-                    ),
-                    partition_strategy=(
-                        CATALOG_FULL_HISTORY_FRONTIER_STRATEGY
-                        if use_frontier_strategy
-                        else CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY
-                    ),
-                    required_worker_lane=job_config.get("required_worker_lane"),
-                    required_execution_backend=job_config.get("required_execution_backend"),
-                    allow_local_dev_inline_bypass=bool(job_config.get("allow_local_dev_inline_bypass")),
-                    resume_frontier_cursor=resume_frontier_cursor,
-                    resume_frontier_snapshot=resume_frontier_snapshot,
-                    date_start=date_start,
-                    date_end=date_end,
-                    catalog_action=normalized_catalog_action,
-                    catalog_action_scope=normalized_catalog_action_scope,
-                    selected_tasks=normalized_selected_tasks_for_config,
-                    effective_selected_tasks=normalized_effective_tasks_for_config,
-                    details_refresh_skip_detail_fetch=effective_details_refresh_skip_detail_fetch,
-                    details_refresh_force_detail_fetch=effective_details_refresh_force_detail_fetch,
-                    comments_worker_count=normalized_comments_worker_count,
-                    details_refresh_skip_media_followups=effective_details_refresh_skip_media_followups,
-                    tiktok_comments_in_posts_stage=bool(platform == "tiktok" and tiktok_comments_in_posts_stage),
-                    tiktok_direct_comment_api_override=bool(
-                        platform == "tiktok" and tiktok_direct_comment_api_override
-                    ),
-                    twitter_comments_in_posts_stage=bool(platform == "twitter" and twitter_comments_in_posts_stage),
-                    initiated_by=initiated_by,
-                    worker_id=inline_worker_id,
-                    priority=max(1, int(row.get("scrape_priority") or 100)),
-                )
-                discovery_jobs_created = True
-            else:
-                for surface_index, expanded_job_config in enumerate(
-                    _expand_youtube_surface_job_configs(platform, job_config)
-                ):
-                    job_id = _create_job(
-                        None,
+                    job_id = _enqueue_shared_discovery_job(
                         run_id=run_id,
                         platform=platform,
                         source_scope=source_scope,
-                        job_type=SHARED_ACCOUNT_POSTS_JOB_TYPE,
-                        stage=shared_posts_stage,
-                        config=expanded_job_config,
+                        account_handle=account_handle,
+                        shared_account_source_id=row.get("id"),
+                        pipeline_ingest_mode=normalized_ingest_mode,
+                        runner_count=catalog_runner_count,
+                        expected_total_posts=_shared_account_expected_total_posts_from_config(
+                            {"expected_total_posts_by_account": expected_total_posts_by_account},
+                            platform=platform,
+                            account_handle=account_handle,
+                        ),
+                        runner_strategy=(
+                            CATALOG_FULL_HISTORY_FRONTIER_STRATEGY
+                            if use_frontier_strategy
+                            else "full_history_cursor_breakpoints"
+                        ),
+                        partition_strategy=(
+                            CATALOG_FULL_HISTORY_FRONTIER_STRATEGY
+                            if use_frontier_strategy
+                            else CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY
+                        ),
+                        required_worker_lane=job_config.get("required_worker_lane"),
+                        required_execution_backend=job_config.get("required_execution_backend"),
+                        allow_local_dev_inline_bypass=bool(job_config.get("allow_local_dev_inline_bypass")),
+                        resume_frontier_cursor=resume_frontier_cursor,
+                        resume_frontier_snapshot=resume_frontier_snapshot,
+                        date_start=date_start,
+                        date_end=date_end,
+                        catalog_action=normalized_catalog_action,
+                        catalog_action_scope=normalized_catalog_action_scope,
+                        selected_tasks=normalized_selected_tasks_for_config,
+                        effective_selected_tasks=normalized_effective_tasks_for_config,
+                        details_refresh_skip_detail_fetch=effective_details_refresh_skip_detail_fetch,
+                        details_refresh_force_detail_fetch=effective_details_refresh_force_detail_fetch,
+                        comments_worker_count=normalized_comments_worker_count,
+                        details_refresh_skip_media_followups=effective_details_refresh_skip_media_followups,
+                        tiktok_comments_in_posts_stage=bool(platform == "tiktok" and tiktok_comments_in_posts_stage),
+                        tiktok_direct_comment_api_override=bool(
+                            platform == "tiktok" and tiktok_direct_comment_api_override
+                        ),
+                        twitter_comments_in_posts_stage=bool(platform == "twitter" and twitter_comments_in_posts_stage),
                         initiated_by=initiated_by,
-                        status=initial_job_status,
-                        priority=max(1, int(row.get("scrape_priority") or 100) + surface_index),
                         worker_id=inline_worker_id,
-                        preclaim=bool(inline_worker_id),
-                        track_run_counters=False,
+                        priority=max(1, int(row.get("scrape_priority") or 100)),
                     )
-                    job_ids.append(job_id)
-                continue
-            job_ids.append(job_id)
-    if not job_ids:
-        raise SocialIngestValidationError("NO_SHARED_ACCOUNT_SOURCES", "No shared account jobs were created")
+                    discovery_jobs_created = True
+                else:
+                    for surface_index, expanded_job_config in enumerate(
+                        _expand_youtube_surface_job_configs(platform, job_config)
+                    ):
+                        job_id = _create_job(
+                            None,
+                            run_id=run_id,
+                            platform=platform,
+                            source_scope=source_scope,
+                            job_type=SHARED_ACCOUNT_POSTS_JOB_TYPE,
+                            stage=shared_posts_stage,
+                            config=expanded_job_config,
+                            initiated_by=initiated_by,
+                            status=initial_job_status,
+                            priority=max(1, int(row.get("scrape_priority") or 100) + surface_index),
+                            worker_id=inline_worker_id,
+                            preclaim=bool(inline_worker_id),
+                            track_run_counters=False,
+                        )
+                        job_ids.append(job_id)
+                    continue
+                job_ids.append(job_id)
+        if not job_ids:
+            raise SocialIngestValidationError("NO_SHARED_ACCOUNT_SOURCES", "No shared account jobs were created")
+        if atomic_catalog_batch:
+            _merge_catalog_run_config(
+                run_id=run_id,
+                metadata_updates={"catalog_launch_job_ids": list(job_ids)},
+            )
     if _run_counter_columns_ready():
         with pg.db_connection() as conn:
             summary = _persist_run_counters_and_summary(
@@ -50754,6 +51107,21 @@ def _build_terminal_catalog_run_progress_payload(
         or payload["selected_tasks"]
     )
     payload["details_refresh_force_detail_fetch"] = bool(run_config.get("details_refresh_force_detail_fetch"))
+    if run_config.get("detail_manifests"):
+        from trr_backend.socials.control_plane.instagram_detail_targets import snapshot
+
+        payload["detail_contract_version"] = 1
+        payload["detail_manifests"] = run_config["detail_manifests"]
+        payload["detail_outcomes"] = snapshot(str(run_row["id"]))
+        payload["detail_resume_eligible"] = bool(payload["detail_outcomes"]["resumable"]) and not any(
+            (row.get("config") or {}).get("detail_contract_version") == 1
+            and row.get("status") in {"queued", "pending", "retrying", "running", "cancelling"}
+            for row in job_rows
+        )
+    else:
+        payload["detail_contract_version"] = None
+        payload["detail_outcomes"] = None
+        payload["detail_resume_eligible"] = False
     payload["details_refresh_shard_count"] = (
         _normalize_non_negative_int(run_config.get("details_refresh_shard_count")) or None
     )
@@ -65205,6 +65573,7 @@ def _instagram_materialization_state(
     *,
     date_start: datetime | None = None,
     date_end: datetime | None = None,
+    launch_planning: bool = False,
 ) -> dict[str, Any]:
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     bounded_window = _catalog_backfill_has_bounded_window(date_start=date_start, date_end=date_end)
@@ -65214,20 +65583,29 @@ def _instagram_materialization_state(
             normalized_account,
             date_start=date_start,
             date_end=date_end,
+            launch_planning=launch_planning,
         )
         if bounded_window
-        else _shared_catalog_total_posts("instagram", normalized_account)
+        else _shared_catalog_total_posts("instagram", normalized_account, launch_planning=launch_planning)
     )
-    materialized_posts = _materialized_social_account_total_posts(
-        "instagram",
-        normalized_account,
-        date_start=date_start,
-        date_end=date_end,
+    materialized_posts = (
+        catalog_posts
+        if launch_planning
+        else _materialized_social_account_total_posts(
+            "instagram",
+            normalized_account,
+            date_start=date_start,
+            date_end=date_end,
+        )
     )
-    detail_gap_counts = _instagram_materialized_detail_gap_counts(
-        normalized_account,
-        date_start=date_start,
-        date_end=date_end,
+    detail_gap_counts = (
+        {}
+        if launch_planning
+        else _instagram_materialized_detail_gap_counts(
+            normalized_account,
+            date_start=date_start,
+            date_end=date_end,
+        )
     )
     posts_needing_detail_refresh = _normalize_non_negative_int(detail_gap_counts.get("posts_needing_detail_refresh"))
     expected_total_posts = 0
@@ -65238,6 +65616,7 @@ def _instagram_materialization_state(
                 normalized_account,
                 materialized_total_posts=materialized_posts,
                 catalog_total_posts=catalog_posts,
+                allow_live_refresh=not launch_planning,
             )
         except Exception:  # noqa: BLE001
             logger.exception(
@@ -65251,7 +65630,8 @@ def _instagram_materialization_state(
         max(completion_target_posts - materialized_posts, 0) if completion_target_posts > 0 else 0
     )
     details_complete = (
-        catalog_posts > 0
+        not launch_planning
+        and catalog_posts > 0
         and missing_catalog_posts <= 0
         and missing_materialized_posts <= 0
         and materialized_posts >= catalog_posts
@@ -65697,7 +66077,15 @@ def _catalog_launch_recovery_lock(platform: str, account_handle: str):
     with pg.db_connection(label=lock_label, pool_name="social_control") as lock_conn:
         try:
             with pg.db_cursor(conn=lock_conn, label=lock_label) as cur:
-                lock_row = pg.fetch_one_with_cursor(cur, "select pg_try_advisory_lock(%s) as locked", [lock_key]) or {}
+                lock_row = (
+                    pg.fetch_one_with_cursor(
+                        cur,
+                        "select pg_try_advisory_lock(%s) as locked, "
+                        "set_config('idle_in_transaction_session_timeout', '0', true)",
+                        [lock_key],
+                    )
+                    or {}
+                )
             locked = bool(lock_row.get("locked"))
             yield locked, lock_conn if locked else None
         finally:
@@ -65757,8 +66145,8 @@ def recover_pending_social_account_catalog_launch(
                 conn=lock_conn,
             )
             return {
-                "recovered": False,
-                "reason": "jobs_already_exist",
+                "recovered": bool(repaired_config),
+                "reason": "finalized" if repaired_config else "jobs_already_exist",
                 "run_id": normalized_run_id,
                 "job_count": len(job_rows),
                 "repaired": bool(repaired_config),
@@ -65813,9 +66201,24 @@ def recover_pending_social_account_catalog_launch(
             normalized_account,
             **finalize_kwargs,
         )
+    result_state = str(result.get("launch_state") or "").strip().lower()
+    result_status = str(result.get("status") or "").strip().lower()
+    recovered = (
+        result_state in {"ready", "completed_no_work"}
+        and result_status not in {"failed", "cancelled", "cancelling"}
+        and not result.get("finalizer_owner_active")
+        and not result.get("launch_finalize_timeout")
+    )
+    reason = "finalized" if recovered else "finalize_unresolved"
+    if result_status in {"cancelled", "cancelling"} or result_state in {"cancelled", "cancelling"}:
+        reason = "cancelled"
+    elif result.get("finalizer_owner_active"):
+        reason = "finalize_in_progress"
+    elif result.get("launch_finalize_timeout"):
+        reason = "finalize_timeout"
     return {
-        "recovered": True,
-        "reason": "finalized",
+        "recovered": recovered,
+        "reason": reason,
         "run_id": normalized_run_id,
         "result": result,
     }

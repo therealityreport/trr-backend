@@ -2005,6 +2005,71 @@ def test_post_social_account_catalog_backfill_prefers_modal_when_available_even_
     mocked_finalize.assert_called_once()
 
 
+def test_post_social_account_catalog_retry_targets_resumes_exact_detail_manifest(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    run_id = str(uuid4())
+    expected = {
+        "run_id": run_id,
+        "manifest_identity": "manifest-v1-abc",
+        "resumed": True,
+        "detail_contract_version": 1,
+    }
+
+    with patch(
+        "api.routers.socials.catalog_operations._resume_instagram_detail_manifest",
+        return_value=expected,
+    ) as mocked_resume:
+        response = client.post(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/retry-targets",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "run_id": run_id,
+                "manifest_identity": "manifest-v1-abc",
+                "source_scope": "network",
+                "dispatch_immediately": True,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    mocked_resume.assert_called_once_with(
+        run_id=run_id,
+        account_handle="bravotv",
+        manifest_identity="manifest-v1-abc",
+        source_scope="network",
+        dispatch_immediately=True,
+    )
+
+
+def test_post_social_account_catalog_retry_targets_preserves_comment_retry_contract(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    retry_targets = [{"source_id": "ABC123", "reason": "missing_comments"}]
+
+    with patch(
+        "trr_backend.socials.pipelines.comments.instagram.enqueue_instagram_completion_retry_targets",
+        return_value={"queued": 1},
+    ) as mocked_enqueue:
+        response = client.post(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/retry-targets",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"retry_targets": retry_targets, "dispatch_immediately": False},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"queued": 1}
+    assert mocked_enqueue.call_args.kwargs["retry_targets"] == retry_targets
+    assert mocked_enqueue.call_args.kwargs["run_id"] is None
+    assert mocked_enqueue.call_args.kwargs["dispatch_immediately"] is False
+
+
 def test_post_social_account_catalog_backfill_prefer_local_inline_forces_inline_when_available(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

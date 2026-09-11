@@ -6,6 +6,7 @@ import importlib
 import os
 import subprocess
 import sys
+import textwrap
 import types
 from typing import Any
 
@@ -604,6 +605,9 @@ def test_social_comments_concurrency_limit_reads_comments_env(monkeypatch: pytes
 def test_execute_social_job_closes_db_pool_after_success(monkeypatch: pytest.MonkeyPatch) -> None:
     from trr_backend.db import pg
     from trr_backend.socials import control_plane
+    from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
+
+    register_social_control_plane_providers()
 
     close_calls: list[str] = []
 
@@ -625,6 +629,9 @@ def test_execute_social_job_closes_db_pool_after_success(monkeypatch: pytest.Mon
 def test_execute_social_job_closes_db_pool_after_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     from trr_backend.db import pg
     from trr_backend.socials import control_plane
+    from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
+
+    register_social_control_plane_providers()
 
     close_calls: list[str] = []
 
@@ -695,16 +702,14 @@ def test_sweep_social_dispatch_queue_closes_db_pool_after_success(monkeypatch: p
     from trr_backend.db import pg
 
     close_calls: list[str] = []
-    monkeypatch.setitem(
-        sys.modules,
-        "trr_backend.socials.control_plane",
-        types.SimpleNamespace(
-            recover_and_dispatch_due_social_jobs=lambda: {
-                "status": "completed",
-                "recovered": 2,
-                "dispatched": 1,
-            },
-        ),
+    from trr_backend.socials import control_plane
+    from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
+
+    register_social_control_plane_providers()
+    monkeypatch.setattr(
+        control_plane,
+        "recover_and_dispatch_due_social_jobs",
+        lambda: {"status": "completed", "recovered": 2, "dispatched": 1},
     )
     monkeypatch.setattr(
         modal_jobs,
@@ -733,16 +738,14 @@ def test_sweep_social_dispatch_queue_invokes_pending_launch_recovery(monkeypatch
     from trr_backend.db import pg
 
     recovery_calls: list[str] = []
-    monkeypatch.setitem(
-        sys.modules,
-        "trr_backend.socials.control_plane",
-        types.SimpleNamespace(
-            recover_and_dispatch_due_social_jobs=lambda: {
-                "status": "completed",
-                "recovered": 0,
-                "dispatched": 0,
-            },
-        ),
+    from trr_backend.socials import control_plane
+    from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
+
+    register_social_control_plane_providers()
+    monkeypatch.setattr(
+        control_plane,
+        "recover_and_dispatch_due_social_jobs",
+        lambda: {"status": "completed", "recovered": 0, "dispatched": 0},
     )
     monkeypatch.setattr(
         modal_jobs,
@@ -767,17 +770,14 @@ def test_sweep_social_dispatch_queue_pending_launch_recovery_error_does_not_fail
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from trr_backend.db import pg
+    from trr_backend.socials import control_plane
+    from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
 
-    monkeypatch.setitem(
-        sys.modules,
-        "trr_backend.socials.control_plane",
-        types.SimpleNamespace(
-            recover_and_dispatch_due_social_jobs=lambda: {
-                "status": "completed",
-                "recovered": 3,
-                "dispatched": 2,
-            },
-        ),
+    register_social_control_plane_providers()
+    monkeypatch.setattr(
+        control_plane,
+        "recover_and_dispatch_due_social_jobs",
+        lambda: {"status": "completed", "recovered": 3, "dispatched": 2},
     )
 
     def _boom() -> dict[str, object]:
@@ -1254,18 +1254,17 @@ def test_heartbeat_remote_executors_reports_social_auth_capabilities(
     def _fake_record_dispatcher_heartbeat(**kwargs):
         recorded.append(kwargs)
 
-    monkeypatch.setitem(
-        sys.modules,
-        "trr_backend.modal_dispatch",
-        types.SimpleNamespace(_record_dispatcher_heartbeat=_fake_record_dispatcher_heartbeat),
-    )
-    monkeypatch.setitem(
-        sys.modules,
-        "trr_backend.socials.control_plane",
-        types.SimpleNamespace(
-            is_queue_enabled=lambda: True,
-            get_worker_auth_capabilities=lambda: {"instagram_authenticated": True, "twitter_authenticated": False},
-        ),
+    from trr_backend import modal_dispatch
+    from trr_backend.socials import control_plane
+    from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
+
+    register_social_control_plane_providers()
+    monkeypatch.setattr(modal_dispatch, "_record_dispatcher_heartbeat", _fake_record_dispatcher_heartbeat)
+    monkeypatch.setattr(control_plane, "is_queue_enabled", lambda: True)
+    monkeypatch.setattr(
+        control_plane,
+        "get_worker_auth_capabilities",
+        lambda: {"instagram_authenticated": True, "twitter_authenticated": False},
     )
     monkeypatch.setattr(pg, "close_pool", lambda: close_calls.append("closed"))
     monkeypatch.setattr(
@@ -1726,3 +1725,161 @@ def test_modal_preview_read_only_decorator_env_is_absent_by_default(
     canary_options = reloaded.probe_browser_image_runtime._modal_function_options
     assert "env" not in canary_options
     assert "secrets" not in canary_options
+
+
+@pytest.mark.parametrize(
+    "entrypoint",
+    ["probe_social_remote_auth", "_execute_social_job", "sweep_social_dispatch_queue", "heartbeat_remote_executors"],
+)
+def test_social_entrypoint_publishes_real_providers_in_fresh_process(entrypoint: str) -> None:
+    script = textwrap.dedent(
+        """
+        import builtins
+        import socket
+        import sys
+        import types
+
+        def deny_external_access(*args, **kwargs):
+            raise AssertionError("Fresh-process provider test attempted external access")
+
+        socket.create_connection = deny_external_access
+        socket.socket.connect = deny_external_access
+        socket.socket.connect_ex = deny_external_access
+        from trr_backend import modal_jobs
+
+        impl_name = "trr_backend.socials.social_season_analytics_impl"
+        assert impl_name not in sys.modules, "modal_jobs eagerly loaded the social implementation"
+        assert "api.main" not in sys.modules
+        provider_names = (
+            "queue_status", "run_lifecycle", "dispatch_runtime", "dispatch",
+            "recovery", "runtime", "shared_accounts",
+        )
+        accesses = []
+        recorded = []
+        closed = []
+        original_import = builtins.__import__
+
+        def assert_real_providers_ready():
+            assert impl_name in sys.modules, "entrypoint skipped the social bootstrap"
+            namespace = vars(sys.modules[impl_name])
+            for name in provider_names:
+                leaf = sys.modules["trr_backend.socials.control_plane." + name]
+                if name == "queue_status":
+                    assert leaf._LEGACY_NAMESPACE is namespace
+                else:
+                    assert leaf._PROVIDER.state == "READY", name
+                    assert leaf._PROVIDER.require() is namespace, name
+
+        def observe_control_plane_import(name, globals=None, locals=None, fromlist=(), level=0):
+            is_entrypoint_access = (
+                name == "trr_backend.socials.control_plane"
+                and (globals or {}).get("__name__") == "trr_backend.modal_jobs"
+            )
+            if is_entrypoint_access:
+                # Check before resolving the facade or substituting operational calls.
+                assert_real_providers_ready()
+                accesses.append(tuple(fromlist))
+            module = original_import(name, globals, locals, fromlist, level)
+            if is_entrypoint_access:
+                assert isinstance(module, types.ModuleType)
+                module.probe_remote_auth_health = lambda platform: {"ready": True, "platform": platform}
+                module.claim_and_process_social_job = lambda **kw: {"claimed": True, "job": {"id": kw["job_id"]}}
+                module.recover_and_dispatch_due_social_jobs = lambda: {
+                    "status": "completed", "recovered": 0, "dispatched": 0,
+                }
+                module.is_queue_enabled = lambda: True
+                module.get_worker_auth_capabilities = lambda: {"instagram_authenticated": True}
+            return module
+
+        from trr_backend.db import pg
+        from trr_backend import modal_dispatch
+        pg.close_pool = lambda: closed.append(True)
+        modal_dispatch._record_dispatcher_heartbeat = lambda **kw: recorded.append(kw)
+        modal_jobs._validate_modal_maintenance_owner_config = lambda: "modal_singleton_cron"
+        modal_jobs._poll_due_show_season_media_watches_impl = lambda: {"status": "completed"}
+        modal_jobs._recover_stale_pending_social_catalog_launches = lambda: {"recovered": 0}
+        assert impl_name not in sys.modules, "test setup preinitialized social providers"
+        builtins.__import__ = observe_control_plane_import
+        entrypoint = sys.argv[1]
+        if entrypoint == "_execute_social_job":
+            result = modal_jobs._execute_social_job("job-test", worker_prefix="test")
+            assert result["claimed"] is True and closed
+        elif entrypoint == "probe_social_remote_auth":
+            assert modal_jobs.probe_social_remote_auth.local("instagram")["ready"] is True
+        elif entrypoint == "sweep_social_dispatch_queue":
+            assert modal_jobs.sweep_social_dispatch_queue.local()["status"] == "completed"
+            assert closed
+        else:
+            assert modal_jobs.heartbeat_remote_executors.local()["ok"] is True
+            social = next(row for row in recorded if row["dispatcher_name"] == "social")
+            assert social["metadata_updates"]["auth_capabilities"] == {"instagram_authenticated": True}
+            assert closed
+        assert len(accesses) == 1, accesses
+        assert_real_providers_ready()
+        print("providers-ready-before-access")
+        """
+    )
+    env = os.environ.copy()
+    env.update(TRR_TEST_DISABLE_DOTENV="1", TRR_MODAL_ENABLED="0", APP_ENV="test")
+    completed = subprocess.run(
+        [sys.executable, "-c", script, entrypoint],
+        cwd=modal_jobs._BACKEND_ROOT,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "providers-ready-before-access" in completed.stdout
+
+
+def test_social_provider_probe_is_state_free_and_repeatable_in_fresh_process() -> None:
+    script = textwrap.dedent(
+        """
+        import socket
+        import sys
+
+        def deny_external_access(*args, **kwargs):
+            raise AssertionError("Provider probe attempted external state access")
+
+        socket.create_connection = deny_external_access
+        socket.socket.connect = deny_external_access
+        socket.socket.connect_ex = deny_external_access
+        from trr_backend import modal_jobs
+        from trr_backend.socials import control_plane_bootstrap as bootstrap
+        impl_name = "trr_backend.socials.social_season_analytics_impl"
+        assert impl_name not in sys.modules
+        from trr_backend.db import pg
+        from trr_backend import modal_dispatch
+        for name in ("fetch_one", "fetch_all", "execute", "db_connection", "db_cursor"):
+            if hasattr(pg, name):
+                setattr(pg, name, deny_external_access)
+        modal_dispatch._record_dispatcher_heartbeat = deny_external_access
+        first = modal_jobs.probe_social_control_plane_providers.local()
+        namespace = vars(sys.modules[impl_name])
+        assert first == {
+            "ready": True, "state_free": True,
+            "providers": list(bootstrap.SOCIAL_CONTROL_PLANE_PROVIDER_NAMES),
+        }
+        for name in bootstrap.SOCIAL_CONTROL_PLANE_PROVIDER_NAMES:
+            leaf = sys.modules["trr_backend.socials.control_plane." + name]
+            leaf._configure_legacy_provider = deny_external_access
+        assert modal_jobs.probe_social_control_plane_providers.local() == first
+        assert vars(sys.modules[impl_name]) is namespace
+        print("state-free-repeatable")
+        """
+    )
+    env = os.environ.copy()
+    env.update(TRR_TEST_DISABLE_DOTENV="1", TRR_MODAL_ENABLED="0", APP_ENV="test")
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=modal_jobs._BACKEND_ROOT,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "state-free-repeatable" in completed.stdout

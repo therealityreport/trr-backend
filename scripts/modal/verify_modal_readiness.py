@@ -28,6 +28,18 @@ DEFAULT_ADMIN_RUNTIME_PROBE_FUNCTION = "probe_admin_operation_runtime"
 DEFAULT_GOOGLE_NEWS_RUNTIME_PROBE_FUNCTION = "probe_google_news_runtime"
 DEFAULT_VISION_RUNTIME_PROBE_FUNCTION = "probe_admin_vision_runtime"
 DEFAULT_SOCIALBLADE_RUNTIME_PROBE_FUNCTION = "probe_socialblade_runtime"
+DEFAULT_SOCIAL_CONTROL_PLANE_PROVIDER_PROBE_FUNCTION = "probe_social_control_plane_providers"
+# Keep readiness bound to the deployed probe contract instead of importing the
+# local bootstrap implementation that the probe is meant to verify.
+EXPECTED_SOCIAL_CONTROL_PLANE_PROVIDER_NAMES = (
+    "queue_status",
+    "run_lifecycle",
+    "dispatch_runtime",
+    "dispatch",
+    "recovery",
+    "runtime",
+    "shared_accounts",
+)
 BROWSER_SESSION_INVALIDATED_REASON = "browser_session_invalidated"
 DEFAULT_MODAL_LOOKUP_TIMEOUT_SECONDS = 30
 DEFAULT_INSTAGRAM_COMMENTS_AUTH_RATE_LIMIT_COOLDOWN_SECONDS = 300
@@ -325,6 +337,7 @@ def expected_function_names() -> tuple[str, ...]:
         or DEFAULT_SOCIALBLADE_RUNTIME_PROBE_FUNCTION,
         str(os.getenv("TRR_MODAL_BROWSER_IMAGE_RUNTIME_PROBE_FUNCTION") or "probe_browser_image_runtime").strip()
         or "probe_browser_image_runtime",
+        DEFAULT_SOCIAL_CONTROL_PLANE_PROVIDER_PROBE_FUNCTION,
         str(os.getenv("TRR_MODAL_SOCIAL_AUTH_PROBE_FUNCTION") or DEFAULT_SOCIAL_AUTH_PROBE_FUNCTION).strip()
         or DEFAULT_SOCIAL_AUTH_PROBE_FUNCTION,
         str(
@@ -686,6 +699,111 @@ def invoke_runtime_probe(
     return normalized
 
 
+def invoke_social_control_plane_provider_probe(
+    *,
+    function_handle: Any,
+    timeout_seconds: int = DEFAULT_REMOTE_PROBE_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    try:
+        payload = invoke_modal_function_with_timeout(
+            function_handle,
+            timeout_seconds=timeout_seconds,
+        )
+    except RemoteProbeTimeoutError:
+        timeout_payload = remote_probe_timeout_payload(
+            phase="social_control_plane_provider_probe",
+            timeout_seconds=timeout_seconds,
+        )
+        timeout_payload.update({"state_free": False, "providers": []})
+        return timeout_payload
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ready": False,
+            "state_free": False,
+            "providers": [],
+            "reason": "probe_invocation_failed",
+            "detail": {
+                "phase": "social_control_plane_provider_probe",
+                "exception_class": type(exc).__name__,
+                "message": str(exc)[:240],
+            },
+        }
+
+    if not isinstance(payload, dict):
+        return {
+            "ready": False,
+            "state_free": False,
+            "providers": [],
+            "reason": "probe_payload_invalid",
+            "detail": {
+                "phase": "social_control_plane_provider_probe",
+                "message": f"Expected dict payload, got {type(payload).__name__}",
+            },
+        }
+
+    normalized = dict(payload)
+    required_fields = {"ready", "state_free", "providers"}
+    missing_fields = sorted(required_fields.difference(normalized))
+    if missing_fields:
+        normalized.setdefault("state_free", False)
+        normalized.setdefault("providers", [])
+        normalized.update(
+            {
+                "ready": False,
+                "reason": "probe_payload_incomplete",
+                "detail": {
+                    "phase": "social_control_plane_provider_probe",
+                    "missing_fields": missing_fields,
+                },
+            }
+        )
+        return normalized
+
+    providers = normalized.get("providers")
+    if (
+        not isinstance(normalized.get("ready"), bool)
+        or not isinstance(normalized.get("state_free"), bool)
+        or not isinstance(providers, list)
+        or any(not isinstance(provider, str) for provider in providers)
+    ):
+        observed_providers = providers
+        normalized.update(
+            {
+                "ready": False,
+                "state_free": False,
+                "providers": [],
+                "reason": "probe_payload_invalid",
+                "detail": {
+                    "phase": "social_control_plane_provider_probe",
+                    "message": "Expected ready/state_free booleans and a string provider list",
+                    "observed_providers": observed_providers,
+                },
+            }
+        )
+        return normalized
+
+    if not normalized["ready"]:
+        normalized.setdefault("reason", "provider_probe_not_ready")
+        return normalized
+    if not normalized["state_free"]:
+        normalized["ready"] = False
+        normalized.setdefault("reason", "provider_probe_stateful")
+        return normalized
+    if tuple(providers) != EXPECTED_SOCIAL_CONTROL_PLANE_PROVIDER_NAMES:
+        normalized.update(
+            {
+                "ready": False,
+                "reason": "provider_probe_incomplete",
+                "detail": {
+                    "phase": "social_control_plane_provider_probe",
+                    "expected_providers": list(EXPECTED_SOCIAL_CONTROL_PLANE_PROVIDER_NAMES),
+                    "observed_providers": list(providers),
+                },
+            }
+        )
+    return normalized
+
+
 def modal_lookup_failure_summary(
     *,
     app_name: str,
@@ -727,6 +845,7 @@ def modal_lookup_failure_summary(
         "instagram_posts_auth_probe": None,
         "instagram_comments_auth_probe": None,
         "getty_remote_probe": None,
+        "social_control_plane_provider_probe": None,
         "runtime_probes": [],
         "blocking_probe_failures": [reason],
         "advisory_probe_failures": [],
@@ -760,6 +879,7 @@ def verify_modal_readiness(
     remote_probe_timeout_seconds: int = DEFAULT_REMOTE_PROBE_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     remote_probe_timeout_seconds = max(1, int(remote_probe_timeout_seconds or DEFAULT_REMOTE_PROBE_TIMEOUT_SECONDS))
+    function_names = tuple(dict.fromkeys((*function_names, DEFAULT_SOCIAL_CONTROL_PLANE_PROVIDER_PROBE_FUNCTION)))
     social_jobs_are_enabled = social_jobs_enabled()
     try:
         secret_names = list_secret_names(modal_environment=modal_environment)
@@ -1037,6 +1157,20 @@ def verify_modal_readiness(
                     }
                 )
 
+    provider_probe_handle = app_function_handles.get(DEFAULT_SOCIAL_CONTROL_PLANE_PROVIDER_PROBE_FUNCTION)
+    if provider_probe_handle is None or DEFAULT_SOCIAL_CONTROL_PLANE_PROVIDER_PROBE_FUNCTION in missing_functions:
+        social_control_plane_provider_probe = {
+            "ready": False,
+            "state_free": False,
+            "providers": [],
+            "reason": "probe_function_unavailable",
+        }
+    else:
+        social_control_plane_provider_probe = invoke_social_control_plane_provider_probe(
+            function_handle=provider_probe_handle,
+            timeout_seconds=remote_probe_timeout_seconds,
+        )
+
     runtime_probes: list[dict[str, Any]] = []
     if probe_core_workers:
         for worker_family, probe_function_name in core_worker_runtime_probe_functions().items():
@@ -1086,6 +1220,13 @@ def verify_modal_readiness(
         advisory_probe_failures.append(
             str(getty_remote_probe.get("reason") or "getty_remote_probe_failed").strip() or "getty_remote_probe_failed"
         )
+    if not bool(social_control_plane_provider_probe.get("ready")):
+        blocking_probe_failures.append(
+            str(
+                social_control_plane_provider_probe.get("reason") or "social_control_plane_provider_probe_failed"
+            ).strip()
+            or "social_control_plane_provider_probe_failed"
+        )
     for runtime_probe in runtime_probes:
         if not bool(runtime_probe.get("healthy")):
             worker_family = str(runtime_probe.get("worker_family") or "worker").strip()
@@ -1124,6 +1265,7 @@ def verify_modal_readiness(
         "instagram_posts_auth_probe": instagram_posts_auth_probe,
         "instagram_comments_auth_probe": instagram_comments_auth_probe,
         "getty_remote_probe": getty_remote_probe,
+        "social_control_plane_provider_probe": social_control_plane_provider_probe,
         "runtime_probes": runtime_probes,
         "blocking_probe_failures": blocking_probe_failures,
         "advisory_probe_failures": advisory_probe_failures,
@@ -1181,6 +1323,18 @@ def _print_text_summary(summary: dict[str, Any]) -> None:
         probe = summary["getty_remote_probe"]
         probe_reason = f" ({probe.get('reason')})" if probe.get("reason") else ""
         print(f"  Getty remote probe: {'ready' if probe.get('ready') else 'not ready'}{probe_reason}")
+    if summary.get("social_control_plane_provider_probe"):
+        probe = summary["social_control_plane_provider_probe"]
+        probe_reason = f" ({probe.get('reason')})" if probe.get("reason") else ""
+        status = "ready" if probe.get("ready") and probe.get("state_free") else "not ready"
+        provider_names = probe.get("providers")
+        providers = (
+            ", ".join(provider_names)
+            if isinstance(provider_names, list) and all(isinstance(name, str) for name in provider_names)
+            else "<invalid>"
+        ) or "<none>"
+        print(f"  Social control-plane provider probe: {status}{probe_reason}")
+        print(f"    - Providers: {providers}")
     if summary.get("runtime_probes"):
         print("  Runtime probes:")
         for probe in summary["runtime_probes"]:

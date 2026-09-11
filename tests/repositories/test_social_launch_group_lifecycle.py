@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import threading
-import time
 from contextlib import contextmanager
 from typing import Any
 
 import pytest
 
 from trr_backend.socials.control_plane import shared_accounts
+from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
 from trr_backend.socials.pipelines.account_catalog import launch, progress
+
+register_social_control_plane_providers()
 
 
 def test_launch_owner_uses_transaction_advisory_lock(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -37,11 +39,12 @@ def test_launch_owner_uses_transaction_advisory_lock(monkeypatch: pytest.MonkeyP
         assert acquired is True
 
     assert "pg_try_advisory_xact_lock" in captured["query"]
-    assert captured["connection_kwargs"] == {"label": "catalog-launch-group-owner"}
+    assert captured["connection_kwargs"] == {"label": "catalog-launch-group-owner", "pool_name": "catalog_launch"}
 
 
 def _patch_finalizer_state(monkeypatch: pytest.MonkeyPatch, state: dict[str, Any]) -> None:
     monkeypatch.setattr(launch, "_sync_core_overrides", lambda: None)
+    monkeypatch.setattr(launch, "_catalog_existing_launch_jobs", lambda _run_id: [])
     monkeypatch.setattr(
         launch,
         "_catalog_launch_parent_snapshot",
@@ -55,6 +58,7 @@ def _patch_finalizer_state(monkeypatch: pytest.MonkeyPatch, state: dict[str, Any
                 "launch_state": state["launch_state"],
                 "launch_group_id": "group-1",
                 "selected_tasks": ["post_details", "comments", "media"],
+                "launch_finalizing_attempt_id": state.get("attempt_id"),
             },
         },
     )
@@ -64,9 +68,14 @@ def _patch_finalizer_state(monkeypatch: pytest.MonkeyPatch, state: dict[str, Any
         lambda _run_id: state["status"] == "cancelled" or state["launch_state"] == "cancelled",
     )
 
-    def _cas(*, from_states, to_state, **_kwargs):
-        if state["status"] == "cancelled" or state["launch_state"] not in set(from_states):
+    def _cas(*, from_states, to_state, expected_attempt_id=None, metadata_updates=None, **_kwargs):
+        if state["status"] in {"cancelled", "failed", "completed"} or state["launch_state"] not in set(from_states):
             return {}
+        if expected_attempt_id is not None and state.get("attempt_id") != expected_attempt_id:
+            return {}
+        updates = dict(metadata_updates or {})
+        state["attempt_id"] = updates.get("launch_finalizing_attempt_id", state.get("attempt_id"))
+        state.update(updates)
         state["launch_state"] = to_state
         return {"id": "run-1", "status": state["status"], "config": {"launch_state": to_state}}
 
@@ -92,6 +101,7 @@ def test_finalize_timeout_keeps_single_owner_until_original_finishes(
     owner_guard = threading.Lock()
     release = threading.Event()
     finished = threading.Event()
+    entered = threading.Event()
     launch_calls = 0
     _patch_finalizer_state(monkeypatch, state)
 
@@ -112,7 +122,12 @@ def test_finalize_timeout_keeps_single_owner_until_original_finishes(
     def _slow_launch(*_args, **_kwargs):
         nonlocal launch_calls
         launch_calls += 1
-        release.wait(timeout=2)
+        entered.set()
+        assert release.wait(timeout=2)
+        # Cross the deadline while still owning the lock.
+        from trr_backend.db.deadline import current_deadline
+
+        current_deadline().cancelled.wait(timeout=1)
         finished.set()
         return {"run_id": "run-1"}
 
@@ -120,24 +135,32 @@ def test_finalize_timeout_keeps_single_owner_until_original_finishes(
     monkeypatch.setattr(launch, "_room_callable", lambda *_args: _slow_launch)
     monkeypatch.setattr(launch, "_catalog_finalize_launch_timeout_seconds", lambda: 0.01)
 
-    first = launch.finalize_social_account_catalog_backfill_launch(
-        "instagram", "bravotv", run_id="run-1", launch_group_id="group-1"
+    results = []
+    first_thread = threading.Thread(
+        target=lambda: results.append(
+            launch.finalize_social_account_catalog_backfill_launch(
+                "instagram", "bravotv", run_id="run-1", launch_group_id="group-1"
+            )
+        )
     )
+    first_thread.start()
+    # The timeout must not return while the original launch is still cleaning up.
+    assert entered.wait(timeout=1)
     second = launch.finalize_social_account_catalog_backfill_launch(
         "instagram", "bravotv", run_id="run-1", launch_group_id="group-1"
     )
-
-    assert first["launch_state"] == "finalizing"
     assert second["finalizer_owner_active"] is True
     assert launch_calls == 1
-
+    assert first_thread.is_alive()
+    assert not results
     release.set()
-    assert finished.wait(timeout=2)
-    for _ in range(100):
-        if state["launch_state"] == "ready":
-            break
-        time.sleep(0.01)
-    assert state["launch_state"] == "ready"
+    first_thread.join(timeout=2)
+    assert finished.is_set()
+    assert not first_thread.is_alive()
+    assert not owner_active
+    assert results[0]["launch_state"] == "finalizing"
+    assert results[0]["launch_finalize_timeout"] is True
+    assert results[0]["finalizer_owner_active"] is False
 
 
 def test_finalize_does_not_attach_ready_after_parent_cancel(
@@ -259,3 +282,33 @@ def test_all_parts_status_waits_for_every_selected_lane() -> None:
     assert pending["all_parts_completed"] is False
     assert complete["all_parts_status"] == "completed"
     assert complete["all_parts_completed"] is True
+
+
+@pytest.mark.parametrize("replacement", ["new_attempt", "cancelled", "failed"])
+def test_finalize_timeout_preserves_newer_attempt_and_terminal_state(monkeypatch, replacement):
+    from trr_backend.db.deadline import current_deadline
+
+    state = {"status": "queued", "launch_state": "reserved"}
+    _patch_finalizer_state(monkeypatch, state)
+
+    @contextmanager
+    def owner(_group):
+        yield True
+
+    def expires(*_args, **_kwargs):
+        assert current_deadline().cancelled.wait(1)
+        if replacement == "new_attempt":
+            state["attempt_id"] = "new-owner"
+        else:
+            state.update(status=replacement, launch_state=replacement)
+        return {}
+
+    monkeypatch.setattr(launch, "_catalog_launch_group_transaction_lock", owner)
+    monkeypatch.setattr(launch, "_room_callable", lambda *_args: expires)
+    monkeypatch.setattr(launch, "_catalog_finalize_launch_timeout_seconds", lambda: 0.01)
+    result = launch.finalize_social_account_catalog_backfill_launch(
+        "instagram", "bravotv", run_id="run-1", launch_group_id="group-1"
+    )
+    assert "launch_finalize_timeout" not in state
+    assert result["launch_state"] == ("finalizing" if replacement == "new_attempt" else replacement)
+    assert state["attempt_id"] == "new-owner" if replacement == "new_attempt" else state["status"] == replacement

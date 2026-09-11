@@ -369,7 +369,10 @@ def reconcile_terminal_modal_running_jobs(
           error_message,
           last_error_code,
           config,
-          metadata
+          metadata,
+          detail_dispatch_token,
+          detail_dispatch_generation,
+          detail_completion_receipt
         from social.scrape_jobs
         where status = 'running'
           and (%s::uuid is null or run_id = %s::uuid)
@@ -391,7 +394,6 @@ def reconcile_terminal_modal_running_jobs(
         job_id = str(row.get("id") or "").strip()
         if not job_id:
             continue
-        stage = legacy._job_stage_from_row(row)
         last_activity = legacy._coerce_dt(
             row.get("heartbeat_at") or row.get("started_at") or row.get("claimed_at") or row.get("created_at")
         )
@@ -405,6 +407,15 @@ def reconcile_terminal_modal_running_jobs(
             continue
         inspection = legacy._refresh_remote_modal_invocation_state(row, lease_expires_at=None)
         inspection_status = str(inspection.get("status") or "").strip().lower()
+        if (row.get("config") or {}).get("detail_contract_version") == 1:
+            from trr_backend.socials.control_plane.instagram_detail_targets import reconcile_provider_failure
+
+            if reconcile_provider_failure(legacy, row, inspection):
+                reconciled_rows.append({"id": job_id, "run_id": row.get("run_id"), "status": "failed"})
+            # Successful transport, including claimed=false, is never a receipt.
+            # The worker stores the authoritative receipt and job transition
+            # atomically; there is no successful orphan to synthesize here.
+            continue
         if inspection_status != "completed":
             if (
                 inspection_status
@@ -419,40 +430,8 @@ def reconcile_terminal_modal_running_jobs(
                 if frontier_result is not None:
                     reconciled_rows.append(frontier_result)
             continue
-        metadata_updates = dict(row.get("metadata") or {})
-        metadata_updates["dispatch"] = {
-            **dispatch,
-            "remote_invocation_status": "completed",
-            "remote_invocation_checked_at": inspection.get("checked_at") or legacy._iso(now_utc),
-            "remote_task_id": str(inspection.get("task_id") or "").strip() or None,
-            "remote_blocked_reason": str(inspection.get("reason") or "").strip() or None,
-        }
-        activity = dict(metadata_updates.get("activity") or {})
-        activity.setdefault("phase", f"{stage}_end")
-        activity["last_progress_at"] = legacy._iso(now_utc)
-        metadata_updates["activity"] = activity
-        metadata_updates["terminal_modal_reconciliation"] = {
-            "source": "reconcile_terminal_modal_running_jobs",
-            "function_call_id": remote_invocation_id,
-            "remote_status": inspection_status,
-            "reason": "modal_call_completed_but_db_job_still_running",
-            "reconciled_at": legacy._iso(now_utc),
-        }
-        legacy._finish_job(
-            job_id,
-            status="completed",
-            items_found=legacy._normalize_non_negative_int(row.get("items_found")),
-            metadata=metadata_updates,
-        )
-        reconciled_rows.append(
-            {
-                "id": job_id,
-                "run_id": str(row.get("run_id") or "").strip() or None,
-                "platform": str(row.get("platform") or "").strip() or None,
-                "status": "completed",
-                "remote_invocation_id": remote_invocation_id,
-            }
-        )
+        # Receipt-absent legacy jobs remain unverified. Saved activity counters
+        # cannot establish that this provider invocation owned their work.
     return reconciled_rows
 
 
@@ -723,6 +702,10 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
         if legacy._job_required_lane_blocks_modal_dispatch(job_config, platform=platform):
             continue
         existing_remote_invocation_id = str(job_dispatch.get("remote_invocation_id") or "").strip()
+        if job_config.get("detail_contract_version") == 1:
+            # The durable reservation owns this decision, including uncertain
+            # spawn outcomes. Do not clear its owner based on provider unknown.
+            existing_remote_invocation_id = ""
         terminal_remote_invocation = False
         if existing_remote_invocation_id:
             refreshed_lease_expires_at = legacy._now_utc() + timedelta(
@@ -798,7 +781,11 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
                     "remote_invocation_checked_at": inspection.get("checked_at"),
                     "remote_blocked_reason": str(inspection.get("reason") or "").strip() or None,
                 }
-        if not terminal_remote_invocation and legacy._dispatch_request_is_fresh(job):
+        if (
+            job_config.get("detail_contract_version") != 1
+            and not terminal_remote_invocation
+            and legacy._dispatch_request_is_fresh(job)
+        ):
             continue
         if (
             running_by_stage.get(capacity_stage, 0) >= legacy._modal_dispatch_stage_global_cap(stage)
@@ -858,6 +845,27 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
 
         job_id = str(job.get("id") or "").strip()
         if not job_id:
+            continue
+        if int(job_config.get("detail_contract_version") or 0) == 1:
+            from trr_backend.socials.control_plane import instagram_detail_targets as targets
+
+            reservation = targets.reserve_dispatch(job_id)
+            if reservation is None:
+                continue
+            dispatch_attempts += 1
+            result = legacy.dispatch_social_job(
+                job_id=job_id,
+                stage=stage,
+                dispatch_token=reservation["token"],
+            )
+            targets.bind_dispatch(job_id, reservation["token"], result)
+            if result.get("dispatched"):
+                dispatched_job_ids.append(job_id)
+                running_by_stage[capacity_stage] = running_by_stage.get(capacity_stage, 0) + 1
+                running_by_stage_platform[(capacity_stage, platform)] = (
+                    running_by_stage_platform.get((capacity_stage, platform), 0) + 1
+                )
+                running_by_run[job_run_id] = running_by_run.get(job_run_id, 0) + 1
             continue
         dispatch_attempts += 1
         dispatch_attempt_count = legacy._dispatch_metadata_attempt_count(job_dispatch) + 1
@@ -1021,8 +1029,12 @@ def _mark_claimed_runs_running(jobs: list[dict[str, Any]]) -> None:
         legacy._set_run_status(run_id, "running")
 
 
-def claim_and_process_social_job(*, job_id: str, worker_id: str) -> dict[str, Any]:
-    claimed = legacy._claim_job_by_id(job_id=job_id, worker_id=worker_id)
+def claim_and_process_social_job(*, job_id: str, worker_id: str, dispatch_token: str | None = None) -> dict[str, Any]:
+    claimed = legacy._claim_job_by_id(
+        job_id=job_id,
+        worker_id=worker_id,
+        **({"dispatch_token": dispatch_token} if dispatch_token else {}),
+    )
     if not claimed:
         return {
             "job_id": job_id,

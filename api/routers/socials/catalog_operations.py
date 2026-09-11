@@ -99,6 +99,7 @@ class CatalogReviewResolveRequest(BaseModel):
 
 class SocialAccountCompletionRetryTargetsRequest(BaseModel):
     run_id: UUID | None = None
+    manifest_identity: str | None = Field(default=None, min_length=1, max_length=128)
     retry_targets: dict[str, list[dict[str, Any]]] | list[dict[str, Any]] = Field(default_factory=dict)
     source_scope: str = Field(default="network", max_length=64)
     # Mirrors ``_shared.InstagramCommentsLoadStrategy``; spelled inline because
@@ -120,6 +121,28 @@ def _to_optional_request_header_value(value: str | None) -> str | None:
         return None
     normalized = str(value).strip()
     return normalized or None
+
+
+def _resume_instagram_detail_manifest(
+    *,
+    run_id: str,
+    account_handle: str,
+    manifest_identity: str,
+    source_scope: str,
+    dispatch_immediately: bool,
+) -> dict[str, Any]:
+    from trr_backend.socials.control_plane.dispatch_runtime import dispatch_due_social_jobs
+    from trr_backend.socials.control_plane.instagram_detail_targets import resume_manifest
+
+    result = resume_manifest(
+        run_id=run_id,
+        account_handle=account_handle,
+        manifest_identity=manifest_identity,
+        source_scope=source_scope,
+    )
+    if dispatch_immediately and result.get("resumed"):
+        result["dispatch"] = dispatch_due_social_jobs(run_id=run_id)
+    return result
 
 
 def _start_social_catalog_gap_analysis_operation(
@@ -185,6 +208,48 @@ async def post_social_account_catalog_retry_targets_route(
                 "message": "Completion retry targets are Instagram-only.",
             },
         )
+    if payload.manifest_identity is not None:
+        if payload.run_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "SOCIAL_INSTAGRAM_DETAIL_RESUME_RUN_REQUIRED",
+                    "message": "run_id is required when resuming a Post Details manifest.",
+                },
+            )
+        if payload.retry_targets:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "SOCIAL_INSTAGRAM_DETAIL_RESUME_TARGETS_CONFLICT",
+                    "message": "Post Details manifest resume cannot be combined with comment or media retry targets.",
+                },
+            )
+        if payload.dry_run:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "SOCIAL_INSTAGRAM_DETAIL_RESUME_DRY_RUN_UNSUPPORTED",
+                    "message": "Post Details manifest resume does not support dry_run.",
+                },
+            )
+        try:
+            return await run_in_threadpool(
+                _resume_instagram_detail_manifest,
+                run_id=str(payload.run_id),
+                account_handle=account_handle,
+                manifest_identity=payload.manifest_identity,
+                source_scope=payload.source_scope,
+                dispatch_immediately=payload.dispatch_immediately,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "SOCIAL_INSTAGRAM_DETAIL_RESUME_INVALID",
+                    "message": str(exc),
+                },
+            ) from exc
     try:
         return await run_in_threadpool(
             enqueue_instagram_completion_retry_targets,

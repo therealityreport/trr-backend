@@ -6,6 +6,9 @@ from typing import Any
 import pytest
 
 from trr_backend.socials.control_plane import dispatch_runtime
+from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
+
+register_social_control_plane_providers()
 
 
 def test_dispatch_runtime_skips_same_active_shared_account(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -451,7 +454,7 @@ def test_dispatch_runtime_stamps_remote_function_name(
     assert dispatch_writes[-1]["remote_function_name"] == "trr-backend-jobs.run_social_job"
 
 
-def test_reconcile_terminal_modal_running_jobs_completes_successful_stale_call(
+def test_reconcile_terminal_modal_running_jobs_keeps_receipt_absent_success_unverified(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     legacy = dispatch_runtime.legacy
@@ -519,22 +522,9 @@ def test_reconcile_terminal_modal_running_jobs_completes_successful_stale_call(
 
     result = dispatch_runtime.reconcile_terminal_modal_running_jobs(run_id="run-catalog", limit=10)
 
-    assert result == [
-        {
-            "id": "job-terminal-success",
-            "run_id": "run-catalog",
-            "platform": "instagram",
-            "status": "completed",
-            "remote_invocation_id": "fc-success",
-        }
-    ]
+    assert result == []
     assert refreshed and refreshed[0]["lease_expires_at"] is None
-    assert finished[0]["status"] == "completed"
-    assert finished[0]["items_found"] == 66
-    metadata = finished[0]["metadata"]
-    assert metadata["dispatch"]["remote_invocation_status"] == "completed"
-    assert metadata["terminal_modal_reconciliation"]["function_call_id"] == "fc-success"
-    assert metadata["terminal_modal_reconciliation"]["reason"] == "modal_call_completed_but_db_job_still_running"
+    assert finished == []
 
 
 def test_reconcile_terminal_modal_running_jobs_requeues_unfinished_frontier_after_failed_call(

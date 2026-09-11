@@ -29,6 +29,14 @@ class _LegacyProviderProxy:
 _LEGACY_PROVIDER = _LegacyProviderProxy()
 
 
+def _require_provider_ready() -> dict[str, Any]:
+    """Return the completed provider namespace or fail closed before publication."""
+    namespace = _LEGACY_NAMESPACE
+    if namespace is None:
+        raise RuntimeError("QUEUE_STATUS_PROVIDER_UNCONFIGURED: provider publication has not completed")
+    return namespace
+
+
 def _configure_legacy_provider(namespace: dict[str, Any]) -> None:
     """Bind the exact live monolith namespace used by compatibility patches."""
 

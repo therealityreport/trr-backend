@@ -1418,3 +1418,110 @@ def test_build_pool_for_non_session_urls_keeps_default_pool_size(monkeypatch: py
     assert "-c idle_in_transaction_session_timeout=60000" in options
     assert "-c statement_timeout=30000" in options
     assert captured.get("connect_timeout") == 10
+
+
+def test_deadline_cancels_only_owned_query_and_returns_all_reserved_connections(monkeypatch):
+    import threading
+
+    from trr_backend.db.deadline import current_deadline
+    from trr_backend.socials import social_season_analytics_impl as social_core
+    from trr_backend.socials.pipelines.account_catalog import launch
+
+    pools = {name: _FakeThreadedPool() for name in ("default", "social_control", "catalog_launch")}
+    release = threading.Event()
+    done = threading.Event()
+    cancelled = []
+    for name, pool in pools.items():
+
+        def cancel(name=name):
+            cancelled.append(name)
+            if name == "default":
+                release.set()
+
+        monkeypatch.setattr(pool.connection, "cancel", cancel, raising=False)
+    monkeypatch.setattr(pg, "_get_pool", lambda pool_name="default": pools[pool_name])
+
+    def blocked_query():
+        try:
+            with launch._catalog_launch_group_transaction_lock("deadline-test") as acquired:
+                assert acquired
+                with pg.db_read_connection(label="blocked-query"):
+                    assert release.wait(2)
+                    current_deadline().remaining()
+        finally:
+            done.set()
+
+    with social_core._catalog_launch_recovery_lock("instagram", "deadline-test") as (acquired, _conn):
+        assert acquired
+        with pytest.raises(launch.CatalogLaunchTimeout):
+            launch._run_catalog_launch_with_timeout(blocked_query, timeout_seconds=0.05)
+        assert done.is_set()
+        assert pools["social_control"].putconn_calls == 0
+        assert pools["catalog_launch"].putconn_calls == 1
+        assert pools["default"].putconn_calls == 1
+    assert pools["social_control"].putconn_calls == 1
+    assert "social_control" not in cancelled
+    assert "default" in cancelled
+    assert all(not pool._used for pool in pools.values())
+    for pool in pools.values():
+        # One slot per reserved pool suffices; the query pool never needs a third.
+        assert pool.getconn_calls == 1
+
+
+def test_expired_deadline_does_not_retry_or_cancel_returned_connections(monkeypatch):
+    from trr_backend.db.deadline import Deadline, DeadlineExceeded, deadline_scope
+
+    pool = _FakePool()
+    cancelled = []
+    monkeypatch.setattr(pool.connection, "cancel", lambda: cancelled.append(True), raising=False)
+    monkeypatch.setattr(pg, "_get_pool", lambda pool_name="default": pool)
+    deadline = Deadline(10)
+    with deadline_scope(deadline):
+        with pg.db_read_connection():
+            pass
+        deadline.cancel()
+        with pytest.raises(DeadlineExceeded):
+            pg.fetch_one("select 1")
+    assert not cancelled
+    assert pool.getconn_calls == pool.putconn_calls == 1
+
+
+def test_catalog_launch_pool_reserves_one_slot_separate_from_account_recovery(monkeypatch):
+    monkeypatch.setenv("TRR_DB_POOL_MAXCONN", "2")
+    url = "postgresql://db.example.com/postgres"
+    query = pg._resolve_pool_sizing(url)
+    launch = pg._resolve_pool_sizing(url, pool_name="catalog_launch")
+    assert query["maxconn"] == 2
+    assert launch["minconn"] == launch["maxconn"] == 1
+    assert pg._pool_size_env_names("catalog_launch") != pg._pool_size_env_names("social_control")
+
+
+@pytest.mark.parametrize("abort", [False, True])
+def test_atomic_batch_reuses_default_checkout_without_inner_commits(monkeypatch, abort):
+    pool = _FakePool()
+    lock_pool = _FakePool()
+    monkeypatch.setattr(pg, "_get_pool", lambda pool_name="default": pool if pool_name == "default" else lock_pool)
+
+    try:
+        with pg.transaction() as outer:
+            with pg.db_connection() as first:
+                assert first is outer
+                pg.fetch_one("insert first job")
+            with pg.db_read_connection() as reader:
+                assert reader is outer
+                assert reader.autocommit is False
+                pg.fetch_one("select jobs")
+            with pg.db_connection(pool_name="catalog_launch") as owner:
+                assert owner is not outer
+            with pg.db_connection() as second:
+                assert second is outer
+                pg.fetch_one("insert second job and completion marker")
+            assert pool.getconn_calls == 1
+            assert pool.connection.commit_calls == pool.putconn_calls == 0
+            if abort:
+                raise TimeoutError("deadline during batch")
+    except TimeoutError:
+        assert abort
+    assert pool.getconn_calls == pool.putconn_calls == 1
+    assert pool.connection.commit_calls == (0 if abort else 1)
+    assert lock_pool.getconn_calls == lock_pool.putconn_calls == 1

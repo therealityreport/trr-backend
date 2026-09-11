@@ -199,6 +199,7 @@ def test_fetch_permalink_media_item_supports_wrapped_data_sjs_payload() -> None:
 
     class _FakeResponse:
         text = html
+        status_code = 200
 
         def raise_for_status(self) -> None:
             return None
