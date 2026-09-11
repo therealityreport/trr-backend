@@ -7,6 +7,7 @@ import os
 import time
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
+from contextvars import ContextVar
 from threading import Lock
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 from urllib.parse import urlparse
@@ -19,7 +20,8 @@ from psycopg2.extensions import (
     TRANSACTION_STATUS_INTRANS,
     TRANSACTION_STATUS_UNKNOWN,
 )
-from psycopg2.extras import RealDictCursor, execute_values
+from psycopg2.extras import RealDictCursor as _RealDictCursor
+from psycopg2.extras import execute_values
 from psycopg2.pool import PoolError, ThreadedConnectionPool
 
 from trr_backend.db.connection import (
@@ -30,6 +32,7 @@ from trr_backend.db.connection import (
     resolve_database_url_candidate_details,
     resolve_session_database_url_candidate_details,
 )
+from trr_backend.db.deadline import check_deadline, current_deadline
 from trr_backend.db.session_capacity import probe_fresh_session_capacity as _probe_fresh_session_capacity
 from trr_backend.observability import (
     record_postgres_pool_acquire_duration,
@@ -73,9 +76,26 @@ _retired_pools: dict[tuple[str, int], ThreadedConnectionPool] = {}
 _checkout_sequence = 0
 _checkout_lock = Lock()
 _checked_out_connections: dict[int, dict[str, Any]] = {}
+_transaction_connection: ContextVar[Any | None] = ContextVar("pg_transaction_connection", default=None)
 
 T = TypeVar("T")
 logger = logging.getLogger(__name__)
+
+
+class RealDictCursor(_RealDictCursor):
+    """Apply the remaining attempt budget immediately before each SQL statement."""
+
+    def execute(self, query, vars=None):
+        deadline = current_deadline()
+        if deadline is not None:
+            timeout_ms = max(1, int(deadline.remaining() * 1000))
+            configured_ms = _env_int("TRR_DB_STATEMENT_TIMEOUT_MS", DEFAULT_STATEMENT_TIMEOUT_MS)
+            super().execute(
+                "select set_config('statement_timeout', %s, %s)",
+                [str(min(timeout_ms, configured_ms)), not self.connection.autocommit],
+            )
+            check_deadline()
+        return super().execute(query, vars)
 
 
 class DatabaseServiceUnavailableError(RuntimeError):
@@ -102,6 +122,8 @@ def _pool_size_env_names(pool_name: str) -> tuple[str, str]:
         return "TRR_SOCIAL_PROFILE_DB_POOL_MINCONN", "TRR_SOCIAL_PROFILE_DB_POOL_MAXCONN"
     if pool_name == "social_control":
         return "TRR_SOCIAL_CONTROL_DB_POOL_MINCONN", "TRR_SOCIAL_CONTROL_DB_POOL_MAXCONN"
+    if pool_name == "catalog_launch":
+        return "TRR_CATALOG_LAUNCH_DB_POOL_MINCONN", "TRR_CATALOG_LAUNCH_DB_POOL_MAXCONN"
     if pool_name == "session_control":
         return "TRR_SESSION_CONTROL_DB_POOL_MINCONN", "TRR_SESSION_CONTROL_DB_POOL_MAXCONN"
     if pool_name == "social_progress":
@@ -112,7 +134,15 @@ def _pool_size_env_names(pool_name: str) -> tuple[str, str]:
 
 
 def _known_pool_names() -> tuple[str, ...]:
-    return ("default", "social_profile", "social_control", "social_progress", "health", "session_control")
+    return (
+        "default",
+        "social_profile",
+        "social_control",
+        "social_progress",
+        "health",
+        "session_control",
+        "catalog_launch",
+    )
 
 
 def _database_candidates_for_pool(pool_name: str) -> tuple[dict[str, str | int | None], ...]:
@@ -390,11 +420,11 @@ def _resolve_pool_sizing(
     modal_runtime = _is_modal_container_runtime()
     local_or_dev_runtime = _is_local_or_dev_runtime()
     modal_session_pooler_maxconn = _modal_session_pooler_maxconn(pool_name)
-    if pool_name == "session_control":
+    if pool_name in {"session_control", "catalog_launch"}:
         minconn = 1
         maxconn = 1
-        minconn_source = "fixed:session_control"
-        maxconn_source = "fixed:session_control"
+        minconn_source = f"fixed:{pool_name}"
+        maxconn_source = f"fixed:{pool_name}"
     if session_pooler and modal_runtime and not trr_local_dev and maxconn > modal_session_pooler_maxconn:
         maxconn = modal_session_pooler_maxconn
         maxconn_source = "clamped:modal_session_pooler_ceiling"
@@ -1046,6 +1076,7 @@ def current_pool_dsn(*, pool_name: str = "default") -> str | None:
 
 
 def _should_retry_query(error: Exception, *, attempt: int) -> bool:
+    check_deadline()
     max_attempts = _env_int(
         "TRR_DB_TRANSIENT_QUERY_ATTEMPTS",
         DEFAULT_QUERY_TRANSIENT_ATTEMPTS,
@@ -1062,6 +1093,7 @@ def _run_with_transient_retry(operation: Callable[[], T]) -> T:
     )
     last_error: Exception | None = None
     for attempt in range(max_attempts):
+        check_deadline()
         try:
             return operation()
         except Exception as error:
@@ -1083,8 +1115,10 @@ def _get_connection_with_retry(
     last_error: Exception | None = None
 
     for attempt in range(2):
+        check_deadline()
         pool = _get_pool(pool_name=pool_name)
         for acquire_attempt in range(acquire_attempts):
+            check_deadline()
             acquire_started_at = time.perf_counter()
             logger.debug(
                 "[db-pool] acquire_start label=%s attempt=%s acquire_attempt=%s in_use=%s available=%s",
@@ -1148,16 +1182,41 @@ def _get_connection_with_retry(
 
 
 @contextmanager
+def transaction():
+    """Make nested default-pool helpers share one atomic write transaction."""
+    existing = _transaction_connection.get()
+    if existing is not None:
+        yield existing
+        return
+    with db_connection(label="catalog-job-batch") as conn:
+        token = _transaction_connection.set(conn)
+        try:
+            yield conn
+        finally:
+            _transaction_connection.reset(token)
+
+
+@contextmanager
 def db_connection(*, label: str = "write", pool_name: str = "default"):
+    existing = _transaction_connection.get() if pool_name == "default" else None
+    if existing is not None:
+        check_deadline()
+        yield existing
+        check_deadline()
+        return
     pool, conn, checkout_id = _get_connection_with_retry(label=label, pool_name=pool_name)
+    deadline = current_deadline()
     discard_connection = False
     try:
+        if deadline is not None:
+            deadline.register(conn)
         # Pin search_path for the duration of this transaction so pooled connections
         # cannot inherit a prior caller's SET search_path. psycopg2 starts the
         # transaction implicitly with this first statement.
         with conn.cursor() as _cur:
             _cur.execute(f"SET LOCAL search_path = {DEFAULT_WRITE_SEARCH_PATH}")
         yield conn
+        check_deadline()
         conn.commit()
     except Exception as error:
         if _is_statement_timeout_error(error):
@@ -1175,8 +1234,11 @@ def db_connection(*, label: str = "write", pool_name: str = "default"):
                 pass
         raise
     finally:
+        if deadline is not None:
+            deadline.unregister(conn)
         should_close = (
-            discard_connection
+            deadline is not None
+            or discard_connection
             or _close_pool_connection_after_return()
             or _is_connection_closed(conn)
             or not _ensure_connection_idle(
@@ -1203,11 +1265,19 @@ def db_connection(*, label: str = "write", pool_name: str = "default"):
 
 @contextmanager
 def db_read_connection(*, label: str = "read", pool_name: str = "default"):
+    existing = _transaction_connection.get() if pool_name == "default" else None
+    if existing is not None:
+        check_deadline()
+        yield existing
+        return
     pool, conn, checkout_id = _get_connection_with_retry(label=label, pool_name=pool_name)
+    deadline = current_deadline()
     previous_autocommit = getattr(conn, "autocommit", False)
     autocommit_restore_failed = False
     discard_connection = False
     try:
+        if deadline is not None:
+            deadline.register(conn)
         if not previous_autocommit:
             conn.autocommit = True
         yield conn
@@ -1222,6 +1292,8 @@ def db_read_connection(*, label: str = "read", pool_name: str = "default"):
         discard_connection = _is_transient_transport_error(error) or isinstance(error, TimeoutError)
         raise
     finally:
+        if deadline is not None:
+            deadline.unregister(conn)
         try:
             if not discard_connection and not previous_autocommit and not _is_connection_closed(conn):
                 conn.autocommit = previous_autocommit
@@ -1235,7 +1307,8 @@ def db_read_connection(*, label: str = "read", pool_name: str = "default"):
             else:
                 logger.exception("[db-pool] autocommit_restore_failed label=%s", label)
         should_close = (
-            discard_connection
+            deadline is not None
+            or discard_connection
             or _close_pool_connection_after_return()
             or autocommit_restore_failed
             or _is_connection_closed(conn)

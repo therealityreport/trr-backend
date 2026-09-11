@@ -425,6 +425,7 @@ class InstagramPost:
     audio_url: str | None = None
     video_duration: float | None = None
     child_posts_data: list[dict[str, Any]] = field(default_factory=list)
+    detail_snapshot: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -2958,7 +2959,49 @@ class InstagramScraper:
             audio_url=extras.get("audio_url"),
             video_duration=extras.get("video_duration"),
             child_posts_data=self._extract_child_posts_data(node),
+            detail_snapshot={
+                "version": 1,
+                "source": "instagram_response",
+                "observed_at": datetime.now(UTC).isoformat(),
+                "coverage_version": 2,
+                "media_complete": bool(media_urls)
+                and (
+                    post_type != "carousel"
+                    or bool(node.get("carousel_media") or (node.get("edge_sidecar_to_children") or {}).get("edges"))
+                ),
+                # Caption is optional; a complete response may omit it.
+                "caption_present": True,
+                "likes_present": self._detail_metric_valid(
+                    node, ("like_count", "likesCount", "edge_liked_by", "edge_media_preview_like")
+                ),
+                "comments_present": self._detail_metric_valid(
+                    node, ("comment_count", "commentsCount", "edge_media_to_comment")
+                ),
+                "media_count": max(
+                    len(node.get("carousel_media") or (node.get("edge_sidecar_to_children") or {}).get("edges") or []),
+                    self._coerce_int(node.get("carousel_media_count"), 0),
+                    len(media_urls),
+                ),
+            },
         )
+
+    @staticmethod
+    def _detail_metric_valid(node: dict, keys: tuple[str, ...]) -> bool:
+        """Require an observed nonnegative integer, preserving legitimate zero."""
+        for key in keys:
+            if key not in node:
+                continue
+            value = node[key]
+            if key.startswith("edge_"):
+                if not isinstance(value, dict):
+                    return False
+                value = value.get("count")
+            if isinstance(value, bool) or value is None:
+                return False
+            if isinstance(value, int):
+                return value >= 0
+            return isinstance(value, str) and value.isascii() and value.isdigit()
+        return False
 
     def fetch_profile_info(
         self,

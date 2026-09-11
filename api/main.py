@@ -34,7 +34,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 import trr_backend.observability as _observability_module
-import trr_backend.socials.social_season_analytics_impl as _social_analytics_provider
 from api.auth import InternalAdminUser
 from api.realtime.broker import broker_runtime_status, init_broker, shutdown_broker
 from trr_backend.db import pg
@@ -66,8 +65,6 @@ from trr_backend.security.jwt import (
 from trr_backend.socials.read_models.account_profile.common import instagram_comment_rollup_health
 
 CONTENT_TYPE_LATEST: str = _observability_module.CONTENT_TYPE_LATEST
-
-del _social_analytics_provider
 
 configure_runtime_observability(service_name="trr-backend-api")
 
@@ -620,6 +617,10 @@ async def observability_middleware(request: Request, call_next):
 
 
 # Include routers
+from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers  # noqa: E402
+
+register_social_control_plane_providers()
+
 from trr_backend.pipeline.admin_operation_bootstrap import register_admin_operation_providers  # noqa: E402
 
 register_admin_operation_providers()

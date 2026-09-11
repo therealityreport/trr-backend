@@ -125,7 +125,7 @@ def test_single_post_dual_write_opens_managed_transaction_for_patched_upsert(
     monkeypatch.setattr(catalog, "_instagram_post_payload", _fake_payload)
     monkeypatch.setattr(catalog._core, "_pg_upsert", _fake_upsert)
     monkeypatch.setattr(catalog._payload_sidecars, "upsert_post_payloads", _fake_sidecar_upsert)
-    monkeypatch.setattr(catalog._core, "_sync_instagram_canonical_post", lambda **_kwargs: None)
+    monkeypatch.setattr(catalog._core, "_sync_instagram_canonical_posts", lambda _records, **_kwargs: None)
 
     row = catalog._upsert_instagram_post(
         None,
@@ -237,7 +237,11 @@ def test_post_batch_dual_writes_sidecars_in_same_transaction_without_n_plus_one(
 
     monkeypatch.setattr(catalog, "_instagram_post_payload", _fake_payload)
     monkeypatch.setattr(catalog._core, "_pg_upsert_many", _fake_upsert_many)
-    monkeypatch.setattr(catalog._core, "_sync_instagram_canonical_post", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        catalog._core,
+        "_sync_instagram_canonical_posts",
+        lambda records, **kwargs: captured.update(canonical_records=records, canonical_conn=kwargs["conn"]),
+    )
     monkeypatch.setattr(catalog._payload_sidecars, "upsert_post_payloads", _fake_sidecar_upsert)
 
     rows = catalog._batch_upsert_instagram_posts(
@@ -248,4 +252,6 @@ def test_post_batch_dual_writes_sidecars_in_same_transaction_without_n_plus_one(
         conn=fake_conn,
     )
     assert len(rows) == 2
+    assert captured.pop("canonical_conn") is fake_conn
+    assert [record[1]["shortcode"] for record in captured.pop("canonical_records")] == ["A", "B"]
     assert captured == {"sidecar_calls": 1, "payload_count": 2, "conn": fake_conn}

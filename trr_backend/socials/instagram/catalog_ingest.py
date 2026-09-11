@@ -33,6 +33,9 @@ if TYPE_CHECKING:
     CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY: str
     PLATFORM_CATALOG_POST_TABLES: dict[str, str]
     SHARED_ACCOUNT_EXECUTION_LOCK_UNAVAILABLE_ERROR_CODE: str
+    SHARED_ACCOUNT_POSTS_CANCELLED_ERROR_CODE: str
+    SHARED_ACCOUNT_POSTS_STAGE: str
+    SHARED_ACCOUNT_STAGE_CANCELLED_ERROR_CODE: str
     logger: logging.Logger
 
     class SharedStageRuntimeError(RuntimeError):
@@ -255,6 +258,12 @@ if TYPE_CHECKING:
     ) -> tuple[list[dict[str, Any]], list[str], dict[str, int]]: ...
 
     def _parse_instagram_time(value: Any) -> datetime | None: ...
+
+    def _json_dumps(value: Any) -> str: ...
+
+    def _raise_if_shared_account_stage_cancelled(*args: Any, **kwargs: Any) -> None: ...
+
+    def _touch_job_heartbeat(job_id: str, *, worker_id: str | None = None) -> bool: ...
 
 
 _IMPORTED_CORE_NAMES: set[str] = set()
@@ -975,6 +984,8 @@ def _upsert_instagram_post(
     post: Any,
     conn: Any | None = None,
 ) -> dict[str, Any] | None:
+    from trr_backend.socials.control_plane.instagram_detail_targets import current_target
+
     _sync_core_overrides()
     with _payload_sidecars.payload_write_transaction(
         conn,
@@ -993,8 +1004,26 @@ def _upsert_instagram_post(
         sidecar = _payload_sidecars.post_sidecar_payload(legacy_row=row or {}, payload=payload)
         if sidecar is not None:
             _payload_sidecars.upsert_post_payloads([sidecar], conn=tx_conn)
-        _sync_instagram_canonical_post(legacy_row=row, payload=payload, post=post, conn=tx_conn)
+        canonical = _sync_instagram_canonical_post(legacy_row=row, payload=payload, post=post, conn=tx_conn)
+        if current_target.get() is not None and (not row or sidecar is None or not canonical):
+            raise RuntimeError("Required Post Details persistence is unavailable")
         return row
+
+
+def _instagram_payload_batches(records: list[tuple[dict[str, Any], Any]]):
+    """Bound SQL payloads without dropping raw observations or splitting a row."""
+    batch, batch_bytes = [], 0
+    for record in records:
+        size = len(_json_dumps(record[0]).encode("utf-8"))
+        if size > 4 * 1024 * 1024:
+            raise ValueError("Instagram persistence payload exceeds 4 MiB")
+        if batch and (len(batch) >= _INSTAGRAM_POST_BATCH_SIZE or batch_bytes + size > 4 * 1024 * 1024):
+            yield batch
+            batch, batch_bytes = [], 0
+        batch.append(record)
+        batch_bytes += size
+    if batch:
+        yield batch
 
 
 def _batch_upsert_instagram_posts(
@@ -1004,6 +1033,7 @@ def _batch_upsert_instagram_posts(
     account: str,
     posts: list[Any],
     conn: Any | None = None,
+    detail_targets: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Batch upsert legacy social.instagram_posts rows and sync canonical rows."""
     _sync_core_overrides()
@@ -1015,11 +1045,17 @@ def _batch_upsert_instagram_posts(
         existing_by_shortcode: dict[str, dict[str, Any]] = {}
         local_payload_builder = _LOCAL_ROOM_FUNCTIONS.get("_instagram_post_payload", _instagram_post_payload)
         if payload_builder is local_payload_builder:
-            existing_by_shortcode = _payload_sidecars.fetch_post_preservation_rows(
-                [str(getattr(post, "shortcode", "") or "") for post in posts],
-                conn=tx_conn,
-            )
-        records: list[tuple[dict[str, Any], Any]] = []
+            for index in range(0, len(posts), _INSTAGRAM_POST_BATCH_SIZE):
+                existing_by_shortcode.update(
+                    _payload_sidecars.fetch_post_preservation_rows(
+                        [
+                            str(getattr(post, "shortcode", "") or "")
+                            for post in posts[index : index + _INSTAGRAM_POST_BATCH_SIZE]
+                        ],
+                        conn=tx_conn,
+                    )
+                )
+        records_by_key: dict[str, tuple[dict[str, Any], Any]] = {}
         for post in posts:
             builder_kwargs: dict[str, Any] = {
                 "job_id": job_id,
@@ -1032,16 +1068,23 @@ def _batch_upsert_instagram_posts(
                 builder_kwargs["existing_row"] = existing_by_shortcode.get(shortcode, {})
             payload = payload_builder(context, **builder_kwargs)
             if payload is not None:
-                records.append((payload, post))
+                key = str(payload["shortcode"])
+                previous = records_by_key.get(key)
+                if previous is not None:
+                    payload = {**previous[0], **payload}
+                records_by_key[key] = (payload, post)
+                existing_by_shortcode[key] = {**existing_by_shortcode.get(key, {}), **payload}
+        records = list(records_by_key.values())
+        if detail_targets is not None and set(records_by_key) != set(detail_targets):
+            raise RuntimeError("Buffered detail payload identities do not match their targets")
         if not records:
             return []
 
         rows: list[dict[str, Any]] = []
-        for index in range(0, len(records), _INSTAGRAM_POST_BATCH_SIZE):
-            chunk = records[index : index + _INSTAGRAM_POST_BATCH_SIZE]
+        for chunk in _instagram_payload_batches(records):
             records_by_columns: dict[tuple[str, ...], list[tuple[dict[str, Any], Any]]] = {}
             for payload, post in chunk:
-                records_by_columns.setdefault(tuple(payload.keys()), []).append((payload, post))
+                records_by_columns.setdefault(tuple(sorted(payload)), []).append((payload, post))
 
             for grouped_records in records_by_columns.values():
                 payloads = [payload for payload, _post in grouped_records]
@@ -1050,6 +1093,7 @@ def _batch_upsert_instagram_posts(
                     str(payload.get("shortcode") or "").strip(): (payload, post) for payload, post in grouped_records
                 }
                 sidecars: list[dict[str, Any]] = []
+                canonical_records: list[tuple[Mapping[str, Any], Mapping[str, Any], Any]] = []
                 for row in grouped_rows:
                     shortcode = str((row or {}).get("shortcode") or "").strip()
                     record = records_by_shortcode.get(shortcode)
@@ -1058,9 +1102,25 @@ def _batch_upsert_instagram_posts(
                         sidecar = _payload_sidecars.post_sidecar_payload(legacy_row=row or {}, payload=payload)
                         if sidecar is not None:
                             sidecars.append(sidecar)
-                        _sync_instagram_canonical_post(legacy_row=row, payload=payload, post=post, conn=tx_conn)
+                        canonical_records.append((row, payload, post))
                     rows.append(row)
-                _payload_sidecars.upsert_post_payloads(sidecars, conn=tx_conn)
+                sidecar_rows = _payload_sidecars.upsert_post_payloads(sidecars, conn=tx_conn)
+                if detail_targets is not None:
+                    expected = set(records_by_shortcode)
+                    if (
+                        {str(row.get("shortcode")) for row in grouped_rows} != expected
+                        or len(grouped_rows) != len(expected)
+                        or {str(row.get("post_id")) for row in sidecar_rows}
+                        != {str(row.get("id")) for row in grouped_rows}
+                    ):
+                        raise RuntimeError("Required buffered detail persistence is incomplete")
+                    _core._sync_instagram_canonical_posts(
+                        canonical_records,
+                        conn=tx_conn,
+                        detail_targets={key: detail_targets[key] for key in expected},
+                    )
+                else:
+                    _core._sync_instagram_canonical_posts(canonical_records, conn=tx_conn)
         return rows
 
 
@@ -1195,10 +1255,16 @@ def _batch_upsert_shared_catalog_instagram_posts(
             "_shared_catalog_instagram_post_payload", _shared_catalog_instagram_post_payload
         )
         if payload_builder is local_payload_builder and tx_conn is not None:
-            existing_by_source_id = _payload_sidecars.fetch_catalog_preservation_rows(
-                [str(getattr(post, "shortcode", "") or "") for post in posts],
-                conn=tx_conn,
-            )
+            for index in range(0, len(posts), _INSTAGRAM_POST_BATCH_SIZE):
+                existing_by_source_id.update(
+                    _payload_sidecars.fetch_catalog_preservation_rows(
+                        [
+                            str(getattr(post, "shortcode", "") or "")
+                            for post in posts[index : index + _INSTAGRAM_POST_BATCH_SIZE]
+                        ],
+                        conn=tx_conn,
+                    )
+                )
         payloads: list[dict[str, Any]] = []
         for post in posts:
             builder_kwargs: dict[str, Any] = {
@@ -1215,11 +1281,11 @@ def _batch_upsert_shared_catalog_instagram_posts(
         if not payloads:
             return []
         rows: list[dict[str, Any]] = []
-        for index in range(0, len(payloads), _INSTAGRAM_POST_BATCH_SIZE):
-            chunk = payloads[index : index + _INSTAGRAM_POST_BATCH_SIZE]
+        for batch in _instagram_payload_batches([(payload, None) for payload in payloads]):
+            chunk = [payload for payload, _ in batch]
             payloads_by_columns: dict[tuple[str, ...], list[dict[str, Any]]] = {}
             for payload in chunk:
-                payloads_by_columns.setdefault(tuple(payload.keys()), []).append(payload)
+                payloads_by_columns.setdefault(tuple(sorted(payload)), []).append(payload)
             for grouped_payloads in payloads_by_columns.values():
                 grouped_rows = _pg_upsert_many(
                     PLATFORM_CATALOG_POST_TABLES["instagram"],
@@ -1273,8 +1339,23 @@ def _build_instagram_scraper_with_auth_fallback(
     )
 
 
-def _build_shared_instagram_scraper(*, authenticated: bool = False, browser_account_id: str | None = None):
+def _build_shared_instagram_scraper(
+    *, authenticated: bool = False, browser_account_id: str | None = None, detail_transport: bool = False
+):
     from trr_backend.socials.instagram import InstagramScraper
+
+    if detail_transport:
+        from trr_backend.socials.instagram.auth_resolver import resolve_instagram_auth_session
+
+        session = resolve_instagram_auth_session(
+            browser_account_id=browser_account_id,
+            caller_context="instagram_details",
+            require_validation=False,
+            allow_repair=False,
+        )
+        scraper = InstagramScraper(cookies=session.cookies, browser_account_id=session.session_account_id)
+        scraper.attach_auth_session(session)
+        return scraper
 
     if authenticated:
         return _build_instagram_scraper_with_auth_fallback(
@@ -2279,17 +2360,13 @@ def _instagram_detail_metadata_is_stale(
     now_utc: Any,
     stale_metadata_age: timedelta,
 ) -> bool:
-    observed_at = (
-        _coerce_dt(row.get("metadata_scraped_at"))
-        or _coerce_dt(row.get("scraped_at"))
-        or _coerce_dt(row.get("updated_at"))
-    )
+    observed_at = _coerce_dt(row.get("metadata_scraped_at"))
     if observed_at is None:
-        return False
+        return True
     try:
         return now_utc - observed_at > stale_metadata_age
     except TypeError:
-        return False
+        return True
 
 
 def classify_instagram_detail_refresh_need(
@@ -2340,6 +2417,11 @@ def classify_instagram_detail_refresh_need(
         now_utc=now_utc,
         stale_metadata_age=stale_metadata_age,
     )
+    media_count = len(_as_text_list(row.get("media_urls")))
+    expected_media_count = int(row.get("media_count") or row.get("carousel_media_count") or 0)
+    incomplete_carousel = expected_media_count > media_count
+    known_edit = bool(row.get("metadata_invalidated") or row.get("known_edit"))
+    policy_changed = row.get("detail_field_policy_version") not in (None, 1)
 
     reasons: list[str] = []
     if skip_detail_fetch:
@@ -2356,6 +2438,10 @@ def classify_instagram_detail_refresh_need(
             reasons.append("missing_required_permalink_metadata")
         if metadata_stale:
             reasons.append("stale_metadata")
+        if incomplete_carousel:
+            reasons.append("incomplete_carousel")
+        if known_edit or policy_changed:
+            reasons.append("metadata_invalidated")
         fetch_needed = bool(reasons)
 
     satisfaction_source = "none"
@@ -2376,6 +2462,344 @@ def classify_instagram_detail_refresh_need(
     }
 
 
+def _instagram_detail_snapshot_is_complete(data: Mapping[str, Any], *, policy_version: int) -> bool:
+    proof = data.get("detail_snapshot")
+    if not isinstance(proof, dict):
+        return False
+    count = proof.get("media_count")
+    return bool(
+        proof.get("version") == policy_version
+        and proof.get("coverage_version") == 2
+        and proof.get("source") == "instagram_response"
+        and all(
+            proof.get(field) is True
+            for field in ("caption_present", "likes_present", "comments_present", "media_complete")
+        )
+        and type(count) is int
+        and count > 0
+        and len(_as_text_list(data.get("media_urls"))) >= count
+        and _coerce_dt(proof.get("observed_at")) is not None
+    )
+
+
+def run_durable_instagram_details(job: Mapping[str, Any], *, worker_id: str) -> dict[str, Any]:
+    """Execute a bounded chunk; targets are the only source of success counts.
+
+    Fetches never run with a database connection checked out.
+    """
+    _sync_core_overrides()
+    from types import SimpleNamespace
+
+    from trr_backend.socials.control_plane import instagram_detail_targets as targets
+    from trr_backend.socials.instagram import ScrapeConfig
+    from trr_backend.socials.instagram.detail_transport import AUTH_ERRORS, DetailDeferred, DetailTransport
+
+    config = dict(job.get("config") or {})
+    manifest = dict(config.get("detail_manifest") or {})
+    account = str(manifest.get("account") or "")
+    run_id, job_id = str(job["run_id"]), str(job["id"])
+    token = str(job.get("detail_dispatch_token") or "")
+    if not account or not manifest.get("identity") or not token:
+        raise ValueError("Missing durable Post Details ownership or manifest")
+    initial_outcomes = targets.snapshot(run_id, account=account)
+    if not initial_outcomes["total"]:
+        return initial_outcomes
+    started = time_module.monotonic()
+    soft_seconds = min(600, max(90, int(config.get("details_chunk_seconds") or 600)))
+    target_limit = min(50, max(1, int(config.get("details_chunk_targets") or 50)))
+    scraper = _build_shared_instagram_scraper(detail_transport=True, browser_account_id=account)
+    if not scraper._request_cookies().get("sessionid") and not config.get("allow_public_transport_fallback"):
+        raise SharedStageRuntimeError(
+            "Instagram detail authentication is unavailable",
+            error_code="sessionid_missing",
+            retryable=False,
+        )
+    scrape_config = ScrapeConfig(username=account, hashtags=[], delay_seconds=0)
+    processed = 0
+    pending: list[dict[str, Any]] = []
+    batch_limit = min(50, max(1, int(config.get("details_refresh_write_batch_size") or 10)))
+    pending_bytes = 0
+
+    def check_cancelled() -> None:
+        _raise_if_shared_account_stage_cancelled(
+            run_id=run_id,
+            job_id=job_id,
+            stage=SHARED_ACCOUNT_POSTS_STAGE,
+            platform="instagram",
+            account_handle=account,
+            phase="details_refresh",
+        )
+
+    def queue_result(target, post, *, state, fetched_at=None) -> None:
+        nonlocal pending_bytes
+        size = len(_json_dumps(post.to_dict()).encode("utf-8"))
+        if size > 4 * 1024 * 1024:
+            raise ValueError("Instagram persistence payload exceeds 4 MiB")
+        pending.append({"target": target, "post": post, "state": state, "fetched_at": fetched_at})
+        pending_bytes += size
+
+    def flush_pending() -> None:
+        nonlocal pending_bytes
+        if not pending:
+            return
+        from trr_backend.db.deadline import Deadline, deadline_scope
+
+        check_cancelled()
+        batch = list(pending)
+        try:
+            # There is no network work in this transaction. The lease checks
+            # lock/fence all results before any legacy/sidecar/canonical write.
+            with deadline_scope(Deadline(30)):
+                with pg.db_connection(label="instagram_detail_checkpoint") as conn:
+                    targets.assert_owner(job_id, token, worker_id, conn=conn)
+                    targets.checkpoint_many(batch, conn=conn)
+                    rows = _batch_upsert_instagram_posts(
+                        None,
+                        job_id=job_id,
+                        account=account,
+                        posts=[item["post"] for item in batch],
+                        conn=conn,
+                        detail_targets={item["target"]["source_id"]: item["target"] for item in batch},
+                    )
+                    seen = set()
+                    if not config.get("details_refresh_skip_media_followups"):
+                        for row in rows:
+                            if row["id"] not in seen and _platform_post_needs_media_mirror("instagram", row, conn=conn):
+                                _enqueue_instagram_media_mirror_job(
+                                    None,
+                                    run_id=run_id,
+                                    source_scope=str(config.get("source_scope") or "network"),
+                                    account=account,
+                                    post_row=row,
+                                    week_index=None,
+                                    parent_job_id=job_id,
+                                    conn=conn,
+                                )
+                            seen.add(row["id"])
+                    check_cancelled()
+        except targets.LostDetailOwnershipError:
+            raise
+        except Exception:
+            # A lost acknowledgement is not permission to replay observations.
+            # This query is outside the expired/failed write transaction.
+            outcomes = targets.committed_outcomes([item["target"] for item in batch])
+            if set(outcomes) != {item["target"]["source_id"] for item in batch}:
+                raise
+        pending.clear()
+        pending_bytes = 0
+
+    while processed < target_limit and time_module.monotonic() - started + 30 + 60 < soft_seconds:
+        check_cancelled()
+        if pending and (
+            len(pending) >= batch_limit
+            or pending_bytes >= 4 * 1024 * 1024
+            or any(
+                (lease_expires_at := _coerce_dt(item["target"]["lease_expires_at"])) is None
+                or lease_expires_at <= _now_utc() + timedelta(seconds=60)
+                for item in pending
+            )
+        ):
+            # Reserve a full next request (30s) and bounded flush (30s).
+            # Each individual payload is capped; buffered raw data stays <8 MiB.
+            flush_pending()
+        target = targets.claim_target(run_id, account, job_id, token, worker_id)
+        if target is None:
+            break
+        processed += 1
+        target_started = time_module.monotonic()
+        transport = None
+        try:
+            existing = (
+                pg.fetch_one(
+                    """select p.*, coalesce(s.raw_data, p.raw_data) as raw_data,
+                coalesce(s.raw_data, p.raw_data)->'view_metrics'->>'observed_at' as view_metrics_observed_at
+                from social.instagram_posts p left join social.instagram_post_payloads s on s.post_id = p.id
+                where p.shortcode = %s""",
+                    [target["source_id"]],
+                )
+                or {}
+            )
+            # Only snapshots produced from a complete response by our parser
+            # qualify. Legacy gallery rows have no provenance and remain stale.
+            gallery = (
+                pg.fetch_one(
+                    """select coalesce(s.raw_data, c.raw_data) as raw_data
+                from social.instagram_account_catalog_posts c
+                left join social.instagram_account_catalog_post_payloads s on s.catalog_post_id = c.id
+                where c.source_id = %s and lower(ltrim(trim(c.source_account), '@')) = %s limit 1""",
+                    [target["source_id"], account],
+                )
+                or {}
+            )
+            gallery_data = gallery.get("raw_data") or {}
+            proof = gallery_data.get("detail_snapshot") or {}
+            gallery_at = _coerce_dt(proof.get("observed_at"))
+            gallery_complete = (
+                _instagram_detail_snapshot_is_complete(
+                    gallery_data, policy_version=manifest.get("field_policy_version", 1)
+                )
+                and gallery_data.get("shortcode") == target["source_id"]
+                and gallery_at is not None
+            )
+            existing_at = _coerce_dt(existing.get("metadata_scraped_at"))
+            known_edit = bool(
+                gallery_complete
+                and existing
+                and gallery_at is not None
+                and (existing_at is None or gallery_at > existing_at)
+                and (
+                    str(gallery_data.get("caption") or "") != str(existing.get("caption") or "")
+                    or gallery_data.get("media_urls") != existing.get("media_urls")
+                )
+            )
+            if known_edit:
+                existing["known_edit"] = True
+            gallery_fresh = bool(
+                gallery_complete
+                and gallery_at is not None
+                and 0
+                <= (_now_utc() - gallery_at).total_seconds()
+                < min(int(manifest["metadata_ttl_days"]) * 86400, int(manifest["metrics_ttl_hours"]) * 3600)
+            )
+            if gallery_fresh and not manifest.get("force") and not known_edit:
+                parsed_gallery = SimpleNamespace(
+                    **{
+                        **gallery_data,
+                        "metadata_scraped_at": gallery_at,
+                        "metadata_source": "gallery_snapshot",
+                        "to_dict": lambda data=gallery_data: dict(data),
+                    }
+                )
+                queue_result(target, parsed_gallery, state="cached_satisfied")
+                continue
+            classification = classify_instagram_detail_refresh_need(
+                existing,
+                selected_tasks=manifest.get("selected_tasks"),
+                force_network_detail_fetch=bool(manifest.get("force")),
+                require_fresh_metadata=True,
+                stale_metadata_age=timedelta(days=int(manifest["metadata_ttl_days"])),
+            )
+            metric_at = _coerce_dt(existing.get("view_metrics_observed_at"))
+            cached = (
+                bool(existing)
+                and _instagram_detail_snapshot_is_complete(
+                    {**(existing.get("raw_data") or {}), "media_urls": existing.get("media_urls")},
+                    policy_version=manifest.get("field_policy_version", 1),
+                )
+                and not classification["fetch_needed"]
+                and metric_at is not None
+                and (_now_utc() - metric_at < timedelta(hours=int(manifest["metrics_ttl_hours"])))
+            )
+            if cached:
+                with pg.db_connection(label="instagram_detail_cached") as conn:
+                    targets.assert_owner(job_id, token, worker_id, conn=conn)
+                    targets.checkpoint(target, state="cached_satisfied", conn=conn)
+                    if not config.get("details_refresh_skip_media_followups") and _platform_post_needs_media_mirror(
+                        "instagram", existing, conn=conn
+                    ):
+                        _enqueue_instagram_media_mirror_job(
+                            None,
+                            run_id=run_id,
+                            source_scope=str(config.get("source_scope") or "network"),
+                            account=account,
+                            post_row=existing,
+                            week_index=None,
+                            parent_job_id=job_id,
+                            conn=conn,
+                        )
+                continue
+            check_cancelled()
+            if int(target.get("attempt_count") or 0) >= 3:
+                with pg.db_connection(label="instagram_detail_attempt_limit") as conn:
+                    targets.assert_owner(job_id, token, worker_id, conn=conn)
+                    targets.checkpoint(target, state="failed", error_code="attempt_limit", conn=conn)
+                continue
+
+            def on_request(first_request: bool, target=target) -> None:
+                with pg.db_connection(label="instagram_detail_attempt") as conn:
+                    targets.assert_owner(job_id, token, worker_id, conn=conn)
+                    if not targets.record_attempt(target, conn=conn, first_request=first_request):
+                        raise targets.LostDetailOwnershipError(str(target["source_id"]))
+
+            transport = DetailTransport(
+                scraper=scraper, check_cancelled=check_cancelled, on_request=on_request, deadline=target_started + 30
+            )
+            parsed: Any = None
+
+            def validate_detail(payload, source_id=target["source_id"]):
+                nonlocal parsed
+                node = _extract_instagram_post_detail_node(payload)
+                parsed = scraper._parse_post_node(node, scrape_config) if node else None  # noqa: SLF001
+                if not parsed:
+                    raise ValueError("detail_response_missing")
+                proof = parsed.detail_snapshot
+                if (
+                    str(parsed.shortcode) != source_id
+                    or not all(
+                        proof.get(field) is True for field in ("likes_present", "comments_present", "media_complete")
+                    )
+                    or len(parsed.media_urls) < proof["media_count"]
+                ):
+                    raise ValueError("partial_required_fields")
+
+            transport.fetch(
+                target["source_id"],
+                allow_public_fallback=bool(config.get("allow_public_transport_fallback")),
+                validate=validate_detail,
+            )
+            transport.check_deadline()
+            fetched_at = _now_utc()
+            parsed.metadata_source = "api_permalink"
+            _mark_instagram_metadata_attempt(post=parsed, now_utc=fetched_at, success=True)
+            check_cancelled()
+            queue_result(target, parsed, state="committed", fetched_at=fetched_at)
+        except targets.LostDetailOwnershipError:
+            raise
+        except Exception as exc:
+            if str(getattr(exc, "error_code", "")) in {
+                SHARED_ACCOUNT_STAGE_CANCELLED_ERROR_CODE,
+                SHARED_ACCOUNT_POSTS_CANCELLED_ERROR_CODE,
+            }:
+                raise
+            # A lost commit acknowledgement must be reconciled before replay.
+            if targets.committed_outcome(target) is None:
+                error_code = str(getattr(exc, "error_code", "") or "detail_attempt_failed")
+                if isinstance(exc, ValueError) and str(exc) in {"partial_required_fields", "detail_response_missing"}:
+                    error_code = str(exc)
+                attempts = int(target.get("attempt_count") or 0) + int(bool(transport and transport.request_count))
+                next_attempt_at = getattr(exc, "next_attempt_at", None) or _now_utc() + timedelta(minutes=1)
+                with pg.db_connection(label="instagram_detail_attempt_failure") as conn:
+                    targets.assert_owner(job_id, token, worker_id, conn=conn)
+                    targets.checkpoint(
+                        target,
+                        state="failed" if attempts >= 3 else "retry_wait",
+                        error_code=error_code,
+                        next_attempt_at=next_attempt_at,
+                        conn=conn,
+                    )
+                if error_code in AUTH_ERRORS or isinstance(exc, DetailDeferred):
+                    break
+        finally:
+            # Timings contain no provider payload or credentials.
+            targets._one(
+                """update social.instagram_detail_run_targets set phase_elapsed_ms = %s::jsonb,
+                error_summary = coalesce(%s, error_summary)
+                where run_id = %s::uuid and source_id = %s and lease_owner = %s and lease_generation = %s
+                returning source_id""",
+                [
+                    _json_dumps({"total": int((time_module.monotonic() - target_started) * 1000)}),
+                    _json_dumps(transport.evidence[-1])[:512] if transport and transport.evidence else None,
+                    run_id,
+                    target["source_id"],
+                    token,
+                    target["lease_generation"],
+                ],
+            )
+        _touch_job_heartbeat(job_id, worker_id=worker_id)
+    flush_pending()
+    return targets.snapshot(run_id, account=account)
+
+
 def _scrape_shared_instagram_post_details_refresh(
     *,
     run_id: str | None,
@@ -2393,8 +2817,8 @@ def _scrape_shared_instagram_post_details_refresh(
         "_shared_instagram_frontier_auth_validation",
         _shared_instagram_frontier_auth_validation,
     )
-    upsert_instagram_post = _room_callable("_upsert_instagram_post", _upsert_instagram_post)
     selected_tasks_raw = config.get("selected_tasks") or config.get("effective_selected_tasks") or []
+    batch_upsert_instagram_posts = _room_callable("_batch_upsert_instagram_posts", _batch_upsert_instagram_posts)
     if isinstance(selected_tasks_raw, str):
         selected_tasks = [task.strip() for task in selected_tasks_raw.split(",") if task.strip()]
     else:
@@ -2592,17 +3016,28 @@ def _scrape_shared_instagram_post_details_refresh(
         if not force and len(pending_writes) < write_batch_size:
             return
         batch = list(pending_writes)
-        pending_writes.clear()
-        details_refresh_write_batches += 1
-        details_refresh_rows_per_batch.append(len(batch))
+        committed_rows = []
+        batch_seen = set(media_mirror_job_post_ids_seen)
+        batch_enqueued = batch_deduped = batch_errors = 0
         batch_enqueue_attempted = False
         with pg.db_connection(label="instagram_details_refresh_batch") as details_conn:
+            parsed_posts = [item["parsed_post"] for item in batch if item.get("parsed_post") is not None]
+            written_by_shortcode = (
+                {
+                    str(row.get("shortcode") or ""): row
+                    for row in batch_upsert_instagram_posts(
+                        None, job_id=job_id, account=account_handle, posts=parsed_posts, conn=details_conn
+                    )
+                }
+                if parsed_posts
+                else {}
+            )
             for item in batch:
                 existing_row = dict(item["existing_row"])
                 post_db_id = str(item["post_db_id"] or "")
                 parsed_post = item.get("parsed_post")
                 refreshed_row = existing_row
-                if item.get("write_metrics"):
+                if item.get("write_metrics") and parsed_post is None:
                     _refresh_instagram_post_metrics_only(
                         post_db_id=post_db_id,
                         likes=int(item["likes"] or 0),
@@ -2619,23 +3054,14 @@ def _scrape_shared_instagram_post_details_refresh(
                         "views": item.get("views"),
                     }
                 if parsed_post is not None:
-                    upserted = (
-                        upsert_instagram_post(
-                            None,
-                            job_id=job_id,
-                            account=account_handle,
-                            post=parsed_post,
-                            conn=details_conn,
-                        )
-                        or refreshed_row
-                    )
+                    upserted = written_by_shortcode.get(str(parsed_post.shortcode), refreshed_row)
                     refreshed_row = dict(upserted or refreshed_row)
                 if media_followups_enabled and refreshed_row:
                     followup_post_id = str(refreshed_row.get("id") or post_db_id or "").strip()
-                    if followup_post_id in media_mirror_job_post_ids_seen:
-                        media_mirror_jobs_deduped += 1
+                    if followup_post_id in batch_seen:
+                        batch_deduped += 1
                     elif followup_post_id:
-                        media_mirror_job_post_ids_seen.add(followup_post_id)
+                        batch_seen.add(followup_post_id)
                         try:
                             needs_media_followup = skip_detail_fetch or _platform_post_needs_media_mirror(
                                 "instagram",
@@ -2655,14 +3081,22 @@ def _scrape_shared_instagram_post_details_refresh(
                                     conn=details_conn,
                                 )
                                 if mirror_job_id:
-                                    media_mirror_jobs_enqueued += 1
+                                    batch_enqueued += 1
                         except Exception:  # noqa: BLE001
-                            media_mirror_job_enqueue_errors += 1
+                            batch_errors += 1
                             logger.exception(
                                 "[instagram] Failed to enqueue shared-account media mirror job for post=%s",
                                 followup_post_id,
                             )
-                refreshed_rows.append(dict(refreshed_row))
+                committed_rows.append(dict(refreshed_row))
+        del pending_writes[: len(batch)]
+        refreshed_rows.extend(committed_rows)
+        media_mirror_job_post_ids_seen.update(batch_seen)
+        media_mirror_jobs_enqueued += batch_enqueued
+        media_mirror_jobs_deduped += batch_deduped
+        media_mirror_job_enqueue_errors += batch_errors
+        details_refresh_write_batches += 1
+        details_refresh_rows_per_batch.append(len(batch))
         if batch_enqueue_attempted:
             media_mirror_enqueue_batches += 1
 

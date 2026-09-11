@@ -668,6 +668,7 @@ def resolve_instagram_auth_session(
     caller_context: str | None = None,
     require_validation: bool = True,
     browser_session_manager: AccountBrowserSessionManager | None = None,
+    allow_repair: bool = True,
 ) -> InstagramAuthSession:
     session_account_id, normalized_caller_context = _normalize_session_account_id(browser_account_id)
     caller_context = str(caller_context or normalized_caller_context or "").strip() or None
@@ -722,7 +723,7 @@ def resolve_instagram_auth_session(
         selected = _select_best_candidate(candidates)
         cookies = dict(selected.cookies)
         repaired_from_browser_session = False
-        if browser_candidate is not None and selected.source != "runtime_override":
+        if allow_repair and browser_candidate is not None and selected.source != "runtime_override":
             cookies, repaired_from_browser_session = _merge_missing_fields(cookies, browser_candidate.cookies)
             if repaired_from_browser_session and selected.source != "browser_session":
                 selected = _CookieCandidate(
@@ -744,7 +745,7 @@ def resolve_instagram_auth_session(
         if selected.source == "repo_default_cookie_file" and not _is_local_environment():
             logger.warning("Instagram auth resolver fell through to repo default cookie file in non-local environment")
 
-        if validation_category == "structural_invalid" and browser_candidate is not None:
+        if allow_repair and validation_category == "structural_invalid" and browser_candidate is not None:
             repaired_cookies, repaired = _merge_missing_fields(cookies, browser_candidate.cookies)
             if repaired:
                 cookies = repaired_cookies
@@ -756,7 +757,7 @@ def resolve_instagram_auth_session(
                     require_validation=require_validation,
                 )
 
-        if require_validation and not validated and validation_category not in {"validation_skipped"}:
+        if allow_repair and require_validation and not validated and validation_category not in {"validation_skipped"}:
             if browser_candidate is not None and selected.source != "browser_session":
                 validated_browser, reason_browser, category_browser, stale_ok_browser = _validate_cookies_via_graphql(
                     browser_candidate.cookies,
@@ -815,7 +816,7 @@ def resolve_instagram_auth_session(
                     )
 
         promoted_from_browser = False
-        if browser_candidate is not None and cookies and cookies == browser_candidate.cookies:
+        if allow_repair and browser_candidate is not None and cookies and cookies == browser_candidate.cookies:
             promoted_from_browser = _promote_browser_session_to_canonical_file(
                 cookies,
                 cookie_file_path=cookie_file_path,

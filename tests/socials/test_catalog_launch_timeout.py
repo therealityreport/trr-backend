@@ -11,7 +11,10 @@ import threading
 
 import pytest
 
+from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
 from trr_backend.socials.pipelines.account_catalog import launch as catalog_launch
+
+register_social_control_plane_providers()
 
 
 def test_run_catalog_launch_with_timeout_passes_through_fast_calls() -> None:
@@ -30,20 +33,32 @@ def test_run_catalog_launch_with_timeout_runs_inline_when_disabled() -> None:
 
 
 def test_run_catalog_launch_with_timeout_raises_recoverable_timeout() -> None:
+    from trr_backend.db.deadline import current_deadline
+
     release = threading.Event()
+    finished = threading.Event()
+
+    class OwnedConnection:
+        def cancel(self):
+            release.set()
+
+    conn = OwnedConnection()
 
     def _block() -> str:
-        # Wait on an event we only set in teardown so the abandoned worker thread exits
-        # promptly instead of lingering until interpreter shutdown.
-        release.wait(timeout=5)
-        return "never"
+        deadline = current_deadline()
+        assert deadline is not None
+        deadline.register(conn)
+        try:
+            assert release.wait(timeout=2), "deadline did not cancel the owned connection"
+            return "must not become a successful result"
+        finally:
+            deadline.unregister(conn)
+            finished.set()
 
-    try:
-        with pytest.raises(catalog_launch.CatalogLaunchTimeout) as excinfo:
-            catalog_launch._run_catalog_launch_with_timeout(_block, timeout_seconds=0.1)  # noqa: SLF001
-        assert excinfo.value.timeout_seconds == 0.1
-    finally:
-        release.set()
+    with pytest.raises(catalog_launch.CatalogLaunchTimeout) as excinfo:
+        catalog_launch._run_catalog_launch_with_timeout(_block, timeout_seconds=0.1)
+    assert excinfo.value.timeout_seconds == 0.1
+    assert finished.is_set()
 
 
 def test_catalog_finalize_launch_timeout_seconds_default_and_overrides(

@@ -506,7 +506,10 @@ def fetch_permalink_media_item(
     timeout: tuple[int, int] = (10, 45),
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
+    transport: Any = None,
 ) -> dict[str, Any] | None:
+    from trr_backend.socials.instagram.request_client import InstagramRequestClient, InstagramRequestFailure
+
     shortcode, preferred_route = _extract_shortcode_and_route(shortcode_or_url)
     if not shortcode:
         return None
@@ -518,18 +521,32 @@ def fetch_permalink_media_item(
     for route in routes:
         url = f"https://www.instagram.com/{route}/{shortcode}/"
         try:
-            response = client.get(url, headers=req_headers, cookies=(cookies or None), timeout=timeout)
-            response.raise_for_status()
+            if transport is not None:
+                body = transport.request(url, text=True)
+            else:
+                body = InstagramRequestClient(session=client).get_text(
+                    url, query_type="permalink", headers=req_headers, cookies=cookies or {}, timeout=timeout
+                )
             had_success_response = True
+        except InstagramRequestFailure as exc:
+            # A route-specific 404 may try the next legacy permalink route;
+            # it is never evidence of permanent source unavailability.
+            if transport is None and exc.status_code == 404:
+                continue
+            raise
         except requests.RequestException as exc:
             last_request_error = exc
             continue
 
-        payloads = _iter_data_sjs_payloads(response.text or "")
+        payloads = _iter_data_sjs_payloads(body or "")
         for payload in payloads:
+            if transport is not None:
+                transport.check_deadline()
             found = _find_shortcode_media_item(payload)
             if found is not None:
                 return found
+        if transport is not None:
+            break
 
     if not had_success_response and last_request_error is not None:
         raise last_request_error

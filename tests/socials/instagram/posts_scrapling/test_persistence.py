@@ -443,6 +443,7 @@ def test_batch_upsert_instagram_posts_chunks_and_syncs_canonical(monkeypatch: py
             self.shortcode = shortcode
 
     posts = [_Post(f"post-{index}") for index in range(205)]
+    posts.append(_Post("post-1"))  # A repeated shortcode must not duplicate a SQL conflict target or observation.
     batch_sizes: list[int] = []
     synced_shortcodes: list[str] = []
 
@@ -461,13 +462,13 @@ def test_batch_upsert_instagram_posts_chunks_and_syncs_canonical(monkeypatch: py
         batch_sizes.append(len(payloads))
         return [{"id": f"id-{payload['shortcode']}", "shortcode": payload["shortcode"]} for payload in payloads]
 
-    def _fake_sync(*, legacy_row, payload, post, conn):  # noqa: ANN001
-        del legacy_row, post, conn
-        synced_shortcodes.append(str(payload["shortcode"]))
+    def _fake_sync(records, *, conn):  # noqa: ANN001
+        del conn
+        synced_shortcodes.extend(str(payload["shortcode"]) for _row, payload, _post in records)
 
     monkeypatch.setattr(catalog_ingest, "_instagram_post_payload", _fake_payload)
     monkeypatch.setattr(core, "_pg_upsert_many", _fake_upsert_many)
-    monkeypatch.setattr(core, "_sync_instagram_canonical_post", _fake_sync)
+    monkeypatch.setattr(core, "_sync_instagram_canonical_posts", _fake_sync)
 
     rows = catalog_ingest._batch_upsert_instagram_posts(
         None,

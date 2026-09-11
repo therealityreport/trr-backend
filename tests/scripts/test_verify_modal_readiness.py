@@ -75,6 +75,16 @@ class _SpawnTimeoutFunctionHandle(_StubFunctionHandle):
         return self.call
 
 
+def _ready_control_plane_provider_probe_handle() -> _StubFunctionHandle:
+    return _StubFunctionHandle(
+        remote_payload={
+            "ready": True,
+            "state_free": True,
+            "providers": list(cli.EXPECTED_SOCIAL_CONTROL_PLANE_PROVIDER_NAMES),
+        }
+    )
+
+
 def test_expected_function_names_includes_runtime_probes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("TRR_MODAL_REDDIT_RUNTIME_PROBE_FUNCTION", raising=False)
     monkeypatch.delenv("TRR_MODAL_SOCIAL_AUTH_PROBE_FUNCTION", raising=False)
@@ -94,6 +104,7 @@ def test_expected_function_names_includes_runtime_probes(monkeypatch: pytest.Mon
     assert "probe_google_news_runtime" in function_names
     assert "probe_admin_vision_runtime" in function_names
     assert "probe_socialblade_runtime" in function_names
+    assert "probe_social_control_plane_providers" in function_names
     assert "probe_social_remote_auth" in function_names
     assert "probe_instagram_posts_auth" in function_names
     assert "probe_instagram_comments_auth" in function_names
@@ -186,7 +197,178 @@ def test_verify_modal_readiness_returns_structured_lookup_timeout(
             "resolved": False,
             "error": "modal_lookup_timeout",
         },
+        {
+            "name": "probe_social_control_plane_providers",
+            "resolved": False,
+            "error": "modal_lookup_timeout",
+        },
     ]
+
+
+def _verify_control_plane_provider_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    provider_handle: _StubFunctionHandle,
+    modal_environment: str = "main",
+    lookup_calls: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "false")
+    monkeypatch.setattr(
+        cli,
+        "list_secret_names",
+        lambda *, modal_environment="": {"trr-backend-runtime", "trr-social-auth"},
+    )
+    monkeypatch.setattr(cli, "list_app_descriptions", lambda *, modal_environment="": {"trr-backend-jobs"})
+
+    def get_app_function_handles(*, app_name: str, modal_environment: str = "") -> dict[str, Any]:
+        if lookup_calls is not None:
+            lookup_calls.append({"app_name": app_name, "modal_environment": modal_environment})
+        return {
+            "serve_backend_api": _StubFunctionHandle(web_url="https://workspace--trr-backend-api.modal.run"),
+            "probe_social_control_plane_providers": provider_handle,
+        }
+
+    monkeypatch.setattr(cli, "get_app_function_handles", get_app_function_handles)
+    return cli.verify_modal_readiness(
+        app_name="trr-backend-jobs",
+        runtime_secret_name="trr-backend-runtime",
+        social_secret_name="trr-social-auth",
+        function_names=("serve_backend_api",),
+        modal_environment=modal_environment,
+        remote_probe_timeout_seconds=1,
+    )
+
+
+def test_verify_modal_readiness_runs_control_plane_provider_probe_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+    lookup_calls: list[dict[str, str]] = []
+    handle = _RecordingFunctionHandle(
+        remote_payload={
+            "ready": True,
+            "state_free": True,
+            "providers": list(cli.EXPECTED_SOCIAL_CONTROL_PLANE_PROVIDER_NAMES),
+        },
+        calls=calls,
+    )
+
+    summary = _verify_control_plane_provider_probe(
+        monkeypatch,
+        provider_handle=handle,
+        modal_environment="main",
+        lookup_calls=lookup_calls,
+    )
+
+    assert summary["ok"] is True
+    assert summary["modal_environment"] == "main"
+    assert summary["social_control_plane_provider_probe"] == {
+        "ready": True,
+        "state_free": True,
+        "providers": list(cli.EXPECTED_SOCIAL_CONTROL_PLANE_PROVIDER_NAMES),
+    }
+    assert calls == [{"args": (), "kwargs": {}}]
+    assert lookup_calls == [{"app_name": "trr-backend-jobs", "modal_environment": "main"}]
+    assert summary["function_results"][-1] == {
+        "name": "probe_social_control_plane_providers",
+        "resolved": True,
+        "error": None,
+    }
+
+
+def test_verify_modal_readiness_blocks_when_control_plane_provider_probe_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "false")
+    monkeypatch.setattr(
+        cli,
+        "list_secret_names",
+        lambda *, modal_environment="": {"trr-backend-runtime", "trr-social-auth"},
+    )
+    monkeypatch.setattr(cli, "list_app_descriptions", lambda *, modal_environment="": {"trr-backend-jobs"})
+    monkeypatch.setattr(
+        cli,
+        "get_app_function_handles",
+        lambda *, app_name, modal_environment="": {
+            "serve_backend_api": _StubFunctionHandle(web_url="https://workspace--trr-backend-api.modal.run"),
+        },
+    )
+
+    summary = cli.verify_modal_readiness(
+        app_name="trr-backend-jobs",
+        runtime_secret_name="trr-backend-runtime",
+        social_secret_name="trr-social-auth",
+        function_names=("serve_backend_api",),
+    )
+
+    assert summary["ok"] is False
+    assert summary["missing_functions"] == ["probe_social_control_plane_providers"]
+    assert summary["social_control_plane_provider_probe"]["reason"] == "probe_function_unavailable"
+    assert summary["blocking_probe_failures"] == ["probe_function_unavailable"]
+
+
+@pytest.mark.parametrize(
+    ("provider_handle", "expected_reason"),
+    [
+        (_StubFunctionHandle(remote_error="provider probe exploded"), "probe_invocation_failed"),
+        (_StubFunctionHandle(remote_payload={"ready": True, "state_free": True}), "probe_payload_incomplete"),
+        (
+            _StubFunctionHandle(remote_payload={"ready": True, "state_free": True, "providers": [1]}),
+            "probe_payload_invalid",
+        ),
+        (
+            _StubFunctionHandle(
+                remote_payload={
+                    "ready": True,
+                    "state_free": True,
+                    "providers": list(cli.EXPECTED_SOCIAL_CONTROL_PLANE_PROVIDER_NAMES[:-1]),
+                }
+            ),
+            "provider_probe_incomplete",
+        ),
+    ],
+)
+def test_verify_modal_readiness_blocks_invalid_control_plane_provider_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_handle: _StubFunctionHandle,
+    expected_reason: str,
+) -> None:
+    summary = _verify_control_plane_provider_probe(monkeypatch, provider_handle=provider_handle)
+
+    assert summary["ok"] is False
+    assert summary["social_control_plane_provider_probe"]["ready"] is False
+    assert summary["social_control_plane_provider_probe"]["reason"] == expected_reason
+    assert summary["blocking_probe_failures"] == [expected_reason]
+
+
+def test_verify_modal_readiness_times_out_control_plane_provider_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handle = _SpawnTimeoutFunctionHandle()
+
+    summary = _verify_control_plane_provider_probe(monkeypatch, provider_handle=handle)
+
+    assert summary["ok"] is False
+    assert summary["social_control_plane_provider_probe"]["reason"] == "probe_timeout"
+    assert summary["blocking_probe_failures"] == ["probe_timeout"]
+    assert handle.call.cancelled is True
+
+
+def test_text_summary_handles_malformed_control_plane_provider_list(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    summary = _verify_control_plane_provider_probe(
+        monkeypatch,
+        provider_handle=_ready_control_plane_provider_probe_handle(),
+    )
+    summary["social_control_plane_provider_probe"]["providers"] = [1]
+
+    cli._print_text_summary(summary)
+
+    output = capsys.readouterr().out
+    assert "Social control-plane provider probe: ready" in output
+    assert "Providers: <invalid>" in output
 
 
 def test_verify_modal_readiness_passes_when_all_resources_exist(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -201,6 +383,7 @@ def test_verify_modal_readiness_passes_when_all_resources_exist(monkeypatch: pyt
         "get_app_function_handles",
         lambda *, app_name, modal_environment="": {
             "serve_backend_api": _StubFunctionHandle(web_url="https://workspace--trr-backend-api.modal.run"),
+            "probe_social_control_plane_providers": _ready_control_plane_provider_probe_handle(),
             "run_admin_operation": _StubFunctionHandle(),
             "run_social_job": _StubFunctionHandle(),
             "run_social_posts_job": _StubFunctionHandle(),
@@ -369,6 +552,7 @@ def test_verify_modal_readiness_passes_strict_instagram_comments_auth(monkeypatc
         "get_app_function_handles",
         lambda *, app_name, modal_environment="": {
             "serve_backend_api": _StubFunctionHandle(web_url="https://workspace--trr-backend-api.modal.run"),
+            "probe_social_control_plane_providers": _ready_control_plane_provider_probe_handle(),
             "run_social_job": _StubFunctionHandle(),
             "run_social_posts_job": _StubFunctionHandle(),
             "run_social_media_job": _StubFunctionHandle(),
@@ -435,6 +619,7 @@ def test_verify_modal_readiness_blocks_retryable_transport_in_strict_instagram_c
         "get_app_function_handles",
         lambda *, app_name, modal_environment="": {
             "serve_backend_api": _StubFunctionHandle(web_url="https://workspace--trr-backend-api.modal.run"),
+            "probe_social_control_plane_providers": _ready_control_plane_provider_probe_handle(),
             "run_social_job": _StubFunctionHandle(),
             "run_social_posts_job": _StubFunctionHandle(),
             "run_social_media_job": _StubFunctionHandle(),
@@ -502,6 +687,7 @@ def test_verify_modal_readiness_blocks_failed_core_runtime_probe(monkeypatch: py
         "get_app_function_handles",
         lambda *, app_name, modal_environment="": {
             "serve_backend_api": _StubFunctionHandle(web_url="https://workspace--trr-backend-api.modal.run"),
+            "probe_social_control_plane_providers": _ready_control_plane_provider_probe_handle(),
             "probe_admin_operation_runtime": _StubFunctionHandle(
                 remote_payload={"worker_family": "admin_operations", "healthy": True, "reason": "ok"}
             ),
@@ -554,6 +740,7 @@ def test_verify_modal_readiness_accepts_tiktok_remote_auth_probe(monkeypatch: py
         "get_app_function_handles",
         lambda *, app_name, modal_environment="": {
             "serve_backend_api": _StubFunctionHandle(web_url="https://workspace--trr-backend-api.modal.run"),
+            "probe_social_control_plane_providers": _ready_control_plane_provider_probe_handle(),
             "run_admin_operation": _StubFunctionHandle(),
             "run_social_job": _StubFunctionHandle(),
             "run_social_posts_job": _StubFunctionHandle(),
@@ -661,6 +848,7 @@ def test_verify_modal_readiness_reports_missing_secret_and_function(monkeypatch:
         "get_app_function_handles",
         lambda *, app_name, modal_environment="": {
             "serve_backend_api": _StubFunctionHandle(web_url=None),
+            "probe_social_control_plane_providers": _ready_control_plane_provider_probe_handle(),
             "run_admin_operation": _StubFunctionHandle(),
             "probe_social_remote_auth": _StubFunctionHandle(
                 remote_payload={"platform": "instagram", "ready": False, "reason": "checkpoint_required"}
@@ -719,6 +907,7 @@ def test_verify_modal_readiness_reports_missing_social_comments_function(monkeyp
         "get_app_function_handles",
         lambda *, app_name, modal_environment="": {
             "serve_backend_api": _StubFunctionHandle(web_url="https://workspace--trr-backend-api.modal.run"),
+            "probe_social_control_plane_providers": _ready_control_plane_provider_probe_handle(),
             "run_social_job": _StubFunctionHandle(),
             "run_social_posts_job": _StubFunctionHandle(),
             "run_social_media_job": _StubFunctionHandle(),
@@ -766,6 +955,7 @@ def test_verify_modal_readiness_requires_missing_social_comments_function_even_i
         "get_app_function_handles",
         lambda *, app_name, modal_environment="": {
             "serve_backend_api": _StubFunctionHandle(web_url="https://workspace--trr-backend-api.modal.run"),
+            "probe_social_control_plane_providers": _ready_control_plane_provider_probe_handle(),
             "run_social_job": _StubFunctionHandle(),
             "run_social_posts_job": _StubFunctionHandle(),
             "run_social_media_job": _StubFunctionHandle(),
@@ -869,6 +1059,7 @@ def test_verify_modal_readiness_ignores_missing_social_comments_function_when_qu
         "get_app_function_handles",
         lambda *, app_name, modal_environment="": {
             "serve_backend_api": _StubFunctionHandle(web_url="https://workspace--trr-backend-api.modal.run"),
+            "probe_social_control_plane_providers": _ready_control_plane_provider_probe_handle(),
             "run_admin_operation": _StubFunctionHandle(),
             "probe_social_remote_auth": _StubFunctionHandle(
                 remote_payload={"platform": "instagram", "ready": True, "reason": None}
@@ -922,7 +1113,7 @@ def test_verify_modal_readiness_handles_missing_modal_helpers(
     assert summary["ok"] is False
     assert summary["app_found"] is True
     assert summary["app_lookup_error"] == "Modal Function helpers are unavailable"
-    assert summary["missing_functions"] == ["serve_backend_api"]
+    assert summary["missing_functions"] == ["serve_backend_api", "probe_social_control_plane_providers"]
     assert summary["remote_auth_probe"] == {
         "platform": "instagram",
         "ready": False,
@@ -949,6 +1140,7 @@ def test_verify_modal_readiness_reports_remote_probe_failure(
         "get_app_function_handles",
         lambda *, app_name, modal_environment="": {
             "serve_backend_api": _StubFunctionHandle(web_url="https://workspace--trr-backend-api.modal.run"),
+            "probe_social_control_plane_providers": _ready_control_plane_provider_probe_handle(),
             "probe_social_remote_auth": _StubFunctionHandle(remote_error="remote auth probe exploded"),
         },
     )
@@ -981,6 +1173,7 @@ def test_verify_modal_readiness_times_out_slow_remote_auth_probe(monkeypatch: py
         "get_app_function_handles",
         lambda *, app_name, modal_environment="": {
             "serve_backend_api": _StubFunctionHandle(web_url="https://workspace--trr-backend-api.modal.run"),
+            "probe_social_control_plane_providers": _ready_control_plane_provider_probe_handle(),
             "probe_social_remote_auth": _SlowFunctionHandle(),
         },
     )
@@ -1035,6 +1228,7 @@ def test_verify_modal_readiness_keeps_core_ready_when_only_getty_probe_is_blocke
         "get_app_function_handles",
         lambda *, app_name, modal_environment="": {
             "serve_backend_api": _StubFunctionHandle(web_url="https://workspace--trr-backend-api.modal.run"),
+            "probe_social_control_plane_providers": _ready_control_plane_provider_probe_handle(),
             "probe_getty_remote_access": _StubFunctionHandle(
                 remote_payload={"platform": "getty", "ready": False, "reason": "challenge_page"}
             ),
@@ -1075,6 +1269,7 @@ def test_verify_modal_readiness_comments_retryable_transport_failure_is_advisory
         "get_app_function_handles",
         lambda *, app_name, modal_environment="": {
             "serve_backend_api": _StubFunctionHandle(web_url="https://workspace--trr-backend-api.modal.run"),
+            "probe_social_control_plane_providers": _ready_control_plane_provider_probe_handle(),
             "probe_instagram_comments_auth": _StubFunctionHandle(
                 remote_payload={
                     "platform": "instagram",
@@ -1123,6 +1318,7 @@ def test_verify_modal_readiness_blocks_comments_html_challenge_with_rendered_fal
         "get_app_function_handles",
         lambda *, app_name, modal_environment="": {
             "serve_backend_api": _StubFunctionHandle(web_url="https://workspace--trr-backend-api.modal.run"),
+            "probe_social_control_plane_providers": _ready_control_plane_provider_probe_handle(),
             "probe_instagram_comments_auth": _StubFunctionHandle(
                 remote_payload={
                     "platform": "instagram",
@@ -1168,6 +1364,7 @@ def test_verify_modal_readiness_blocks_comments_html_challenge_when_rendered_fal
         "get_app_function_handles",
         lambda *, app_name, modal_environment="": {
             "serve_backend_api": _StubFunctionHandle(web_url="https://workspace--trr-backend-api.modal.run"),
+            "probe_social_control_plane_providers": _ready_control_plane_provider_probe_handle(),
             "probe_instagram_comments_auth": _StubFunctionHandle(
                 remote_payload={
                     "platform": "instagram",
@@ -1212,6 +1409,7 @@ def test_verify_modal_readiness_blocks_browser_session_invalidation_even_with_re
         "get_app_function_handles",
         lambda *, app_name, modal_environment="": {
             "serve_backend_api": _StubFunctionHandle(web_url="https://workspace--trr-backend-api.modal.run"),
+            "probe_social_control_plane_providers": _ready_control_plane_provider_probe_handle(),
             "probe_instagram_comments_auth": _StubFunctionHandle(
                 remote_payload={
                     "platform": "instagram",

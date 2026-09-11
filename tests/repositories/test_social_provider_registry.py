@@ -194,3 +194,27 @@ def test_legacy_patch_bridge_preserves_local_callable_and_refreshes_cached_alias
 
     namespace["read_value"] = lambda: "patched"
     assert leaf["read_value"]() == "patched"
+
+
+@pytest.mark.parametrize(
+    "provider_name",
+    ["queue_status", "run_lifecycle", "dispatch_runtime", "dispatch", "recovery", "runtime", "shared_accounts"],
+)
+@pytest.mark.parametrize("failure", ["unconfigured", "mismatched"])
+def test_control_plane_bootstrap_rejects_incomplete_publication(
+    monkeypatch: pytest.MonkeyPatch, provider_name: str, failure: str
+) -> None:
+    from importlib import import_module
+
+    from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
+
+    register_social_control_plane_providers()
+    leaf = import_module(f"trr_backend.socials.control_plane.{provider_name}")
+    if provider_name == "queue_status":
+        monkeypatch.setattr(leaf, "_LEGACY_NAMESPACE", None if failure == "unconfigured" else {})
+    elif failure == "unconfigured":
+        monkeypatch.setattr(leaf._PROVIDER, "_state", "UNCONFIGURED")
+    else:
+        monkeypatch.setattr(leaf._PROVIDER, "_namespace", {})
+    with pytest.raises(RuntimeError):
+        register_social_control_plane_providers()

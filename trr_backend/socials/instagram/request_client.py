@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 import requests
 
@@ -17,13 +20,18 @@ class InstagramRequestFailure(RuntimeError):  # noqa: N818
         retryable: bool,
         response_text: str | None = None,
         redirect_target: str | None = None,
+        retry_after_seconds: float | None = None,
     ) -> None:
         super().__init__(error_code)
         self.error_code = error_code
         self.status_code = status_code
         self.retryable = retryable
-        self.response_text = response_text
-        self.redirect_target = redirect_target
+        # Provider bodies and query strings may contain credentials or identifiers.
+        self.response_text = None
+        destination = urlsplit(redirect_target or "")
+        self.redirect_target = (destination.hostname or "") + destination.path if redirect_target else None
+        self.retry_after_seconds = retry_after_seconds
+        self.next_attempt_at: datetime | None = None
 
 
 class InstagramRequestClient:
@@ -73,11 +81,20 @@ class InstagramRequestClient:
                 )
 
         if response.status_code == 429:
+            retry_after = str(headers.get("Retry-After") or headers.get("retry-after") or "")
+            try:
+                retry_seconds = max(0.0, float(retry_after))
+            except ValueError:
+                try:
+                    retry_seconds = max(0.0, (parsedate_to_datetime(retry_after) - datetime.now(UTC)).total_seconds())
+                except (TypeError, ValueError, OverflowError):
+                    retry_seconds = None
             raise InstagramRequestFailure(
                 "rate_limited",
                 status_code=429,
                 retryable=True,
                 response_text=body_text,
+                retry_after_seconds=retry_seconds,
             )
 
         if response.status_code == 401:
@@ -116,11 +133,17 @@ class InstagramRequestClient:
                     response_text=body_text,
                 )
 
+        if 300 <= response.status_code < 400:
+            code = self._html_auth_failure_code(location) or "endpoint_redirect"
+            raise InstagramRequestFailure(
+                code, status_code=response.status_code, retryable=False, redirect_target=location
+            )
+
         if response.status_code >= 400:
             raise InstagramRequestFailure(
                 "request_failed",
                 status_code=response.status_code,
-                retryable=True,
+                retryable=response.status_code >= 500 or response.status_code == 408,
                 response_text=body_text,
             )
 
@@ -148,7 +171,20 @@ class InstagramRequestClient:
             allow_redirects=False,
         )
         self._classify_response(response)
-        return response.json()
+        return self._json(response)
+
+    @staticmethod
+    def _json(response: requests.Response) -> dict[str, Any]:
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise InstagramRequestFailure("parse_error", status_code=response.status_code, retryable=True) from exc
+        if not isinstance(payload, dict):
+            raise InstagramRequestFailure("parse_error", status_code=response.status_code, retryable=True)
+        message = str(payload.get("message") or "").strip().lower()
+        if message in AUTH_FATAL_MESSAGES:
+            raise InstagramRequestFailure(message, status_code=response.status_code, retryable=False)
+        return payload
 
     def post_form_json(
         self,
@@ -174,7 +210,7 @@ class InstagramRequestClient:
             allow_redirects=False,
         )
         self._classify_response(response)
-        return response.json()
+        return self._json(response)
 
     def get_text(
         self,

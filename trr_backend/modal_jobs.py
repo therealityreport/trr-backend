@@ -306,6 +306,8 @@ _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "TRR_SOCIAL_PROFILE_DB_POOL_MAXCONN": "1",
     "TRR_SOCIAL_CONTROL_DB_POOL_MINCONN": "1",
     "TRR_SOCIAL_CONTROL_DB_POOL_MAXCONN": "1",
+    "TRR_CATALOG_LAUNCH_DB_POOL_MINCONN": "1",
+    "TRR_CATALOG_LAUNCH_DB_POOL_MAXCONN": "1",
     "TRR_SOCIAL_PROGRESS_DB_POOL_MINCONN": "1",
     "TRR_SOCIAL_PROGRESS_DB_POOL_MAXCONN": "1",
     "TRR_HEALTH_DB_POOL_MINCONN": "1",
@@ -574,6 +576,7 @@ _FUNCTION_IMAGE_BINDINGS: Final[dict[str, object]] = {
     "run_socialblade_scrape": _browser_image,
     "probe_socialblade_runtime": _browser_image,
     "probe_browser_image_runtime": _browser_image,
+    "probe_social_control_plane_providers": _image,
     "heartbeat_remote_executors": _image,
     "sync_nbcumv_official_images": _image,
     "purge_stale_social_worker_heartbeats": _image,
@@ -1358,9 +1361,33 @@ def probe_reddit_refresh_runtime() -> dict[str, object]:
     timeout=5 * 60,
 )
 def probe_social_remote_auth(platform: str) -> dict[str, object]:
+    from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
+
+    register_social_control_plane_providers()
     from trr_backend.socials.control_plane import probe_remote_auth_health
 
     return probe_remote_auth_health(platform)
+
+
+@app.function(
+    name="probe_social_control_plane_providers",
+    image=_FUNCTION_IMAGE_BINDINGS["probe_social_control_plane_providers"],
+    secrets=_secrets,
+    retries=0,
+    timeout=5 * 60,
+)
+def probe_social_control_plane_providers() -> dict[str, object]:
+    from trr_backend.socials.control_plane_bootstrap import (
+        SOCIAL_CONTROL_PLANE_PROVIDER_NAMES,
+        register_social_control_plane_providers,
+    )
+
+    register_social_control_plane_providers()
+    return {
+        "ready": True,
+        "state_free": True,
+        "providers": list(SOCIAL_CONTROL_PLANE_PROVIDER_NAMES),
+    }
 
 
 @app.function(
@@ -1601,12 +1628,19 @@ def probe_getty_remote_access() -> dict[str, object]:
     return _probe_getty_remote_access()
 
 
-def _execute_social_job(job_id: str, *, worker_prefix: str) -> dict[str, object]:
+def _execute_social_job(job_id: str, *, worker_prefix: str, dispatch_token: str | None = None) -> dict[str, object]:
+    from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
+
+    register_social_control_plane_providers()
     from trr_backend.socials.control_plane import claim_and_process_social_job
 
     worker_id = f"{worker_prefix}:{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
     try:
-        result = claim_and_process_social_job(job_id=job_id, worker_id=worker_id)
+        result = claim_and_process_social_job(
+            job_id=job_id,
+            worker_id=worker_id,
+            **({"dispatch_token": dispatch_token} if dispatch_token else {}),
+        )
         return {
             "job_id": job_id,
             "claimed": bool(result.get("claimed")),
@@ -1627,8 +1661,8 @@ def _execute_social_job(job_id: str, *, worker_prefix: str) -> dict[str, object]
     timeout=2 * 60 * 60,
     max_containers=_SOCIAL_CONCURRENCY_LIMIT,
 )
-def run_social_posts_job(job_id: str) -> dict[str, object]:
-    return _execute_social_job(job_id, worker_prefix="modal:social-posts")
+def run_social_posts_job(job_id: str, dispatch_token: str | None = None) -> dict[str, object]:
+    return _execute_social_job(job_id, worker_prefix="modal:social-posts", dispatch_token=dispatch_token)
 
 
 @app.function(
@@ -1677,15 +1711,15 @@ def run_social_comments_recovery_job(job_id: str) -> dict[str, object]:
     timeout=2 * 60 * 60,
     max_containers=_SOCIAL_CONCURRENCY_LIMIT,
 )
-def run_social_job(job_id: str) -> dict[str, object]:
-    return _execute_social_job(job_id, worker_prefix="modal:social")
+def run_social_job(job_id: str, dispatch_token: str | None = None) -> dict[str, object]:
+    return _execute_social_job(job_id, worker_prefix="modal:social", dispatch_token=dispatch_token)
 
 
 def _recover_stale_pending_social_catalog_launches(
     *,
     limit: int = _SOCIAL_PENDING_LAUNCH_RECOVERY_LIMIT,
 ) -> dict[str, object]:
-    """Finalize catalog launches stuck in launch_state=pending/finalizing with no jobs.
+    """Recover pending/finalizing launches with no jobs or a completed initial batch.
 
     Catalog launches reserve a durable run row first and finalize on a non-durable
     daemon thread; if the backend dies in between, the run stays queued forever unless
@@ -1711,7 +1745,10 @@ def _recover_stale_pending_social_catalog_launches(
             or lower(coalesce(r.config->>'launch_task_resolution_pending', 'false')) = 'true'
           )
           and r.created_at <= now() - make_interval(secs => %s)
-          and not exists (select 1 from social.scrape_jobs j where j.run_id = r.id)
+          and (
+            not exists (select 1 from social.scrape_jobs j where j.run_id = r.id)
+            or jsonb_typeof(r.config->'catalog_launch_job_ids') = 'array'
+          )
         order by r.created_at asc
         limit %s
         """,
@@ -1760,6 +1797,9 @@ def _recover_stale_pending_social_catalog_launches(
 )
 def sweep_social_dispatch_queue() -> dict[str, object]:
     _validate_modal_maintenance_owner_config()
+    from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
+
+    register_social_control_plane_providers()
     from trr_backend.socials.control_plane import recover_and_dispatch_due_social_jobs
 
     started_at = _worker_started(
@@ -1880,6 +1920,9 @@ def sync_nbcumv_official_images() -> dict[str, object]:
 )
 def heartbeat_remote_executors(heartbeat_source: str = "backend_runtime_scheduler") -> dict[str, object]:
     _validate_modal_maintenance_owner_config()
+    from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
+
+    register_social_control_plane_providers()
     try:
         _poll_due_show_season_media_watches_impl()
     except Exception:
