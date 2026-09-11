@@ -93,6 +93,8 @@ class DetailTransport:
                     from social.instagram_detail_request_lanes where identity_key = %s for update""",
                     [self.identity_key],
                 )
+                if row is None:
+                    raise RuntimeError("Instagram detail request lane was not created")
                 now = row["current_time"]
                 cooldown = row.get("cooldown_until")
                 if row["blocked"]:
@@ -138,6 +140,8 @@ class DetailTransport:
                     from social.instagram_detail_request_lanes where identity_key = %s for update""",
                     [self.identity_key],
                 )
+                if row is None:
+                    raise RuntimeError("Instagram detail request lane disappeared")
                 # A late result cannot clear another probe or a newer failure.
                 if row.get("probe_token") != self.probe_token:
                     return
@@ -158,7 +162,7 @@ class DetailTransport:
                 if not error and self.probe_token:
                     cooldown = None
                 if error and cooldown:
-                    error.next_attempt_at = cooldown
+                    setattr(error, "next_attempt_at", cooldown)
                 cur.execute(
                     """update social.instagram_detail_request_lanes set blocked = %s,
                     last_error_code = %s, consecutive_failures = %s, cooldown_until = %s,

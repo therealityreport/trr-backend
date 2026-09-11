@@ -99,6 +99,7 @@ if TYPE_CHECKING:
     _resolve_runtime_version_stamp: Callable[..., Any] = _type_only_callable
     _set_run_status: Callable[..., Any] = _type_only_callable
     _shared_account_catalog_requires_modal_executor: Callable[..., Any] = _type_only_callable
+    _shared_catalog_total_posts: Callable[..., Any] = _type_only_callable
     _tiktok_catalog_comment_override_enabled: Callable[..., Any] = _type_only_callable
     assert_worker_available_when_queue_enabled: Callable[..., Any] = _type_only_callable
     ingest_shared_accounts: Callable[..., Any] = _type_only_callable

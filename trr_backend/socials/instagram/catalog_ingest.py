@@ -33,6 +33,9 @@ if TYPE_CHECKING:
     CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY: str
     PLATFORM_CATALOG_POST_TABLES: dict[str, str]
     SHARED_ACCOUNT_EXECUTION_LOCK_UNAVAILABLE_ERROR_CODE: str
+    SHARED_ACCOUNT_POSTS_CANCELLED_ERROR_CODE: str
+    SHARED_ACCOUNT_POSTS_STAGE: str
+    SHARED_ACCOUNT_STAGE_CANCELLED_ERROR_CODE: str
     logger: logging.Logger
 
     class SharedStageRuntimeError(RuntimeError):
@@ -255,6 +258,12 @@ if TYPE_CHECKING:
     ) -> tuple[list[dict[str, Any]], list[str], dict[str, int]]: ...
 
     def _parse_instagram_time(value: Any) -> datetime | None: ...
+
+    def _json_dumps(value: Any) -> str: ...
+
+    def _raise_if_shared_account_stage_cancelled(*args: Any, **kwargs: Any) -> None: ...
+
+    def _touch_job_heartbeat(job_id: str, *, worker_id: str | None = None) -> bool: ...
 
 
 _IMPORTED_CORE_NAMES: set[str] = set()
@@ -2584,8 +2593,11 @@ def run_durable_instagram_details(job: Mapping[str, Any], *, worker_id: str) -> 
         if pending and (
             len(pending) >= batch_limit
             or pending_bytes >= 4 * 1024 * 1024
-            or min(_coerce_dt(item["target"]["lease_expires_at"]) for item in pending)
-            <= _now_utc() + timedelta(seconds=60)
+            or any(
+                (lease_expires_at := _coerce_dt(item["target"]["lease_expires_at"])) is None
+                or lease_expires_at <= _now_utc() + timedelta(seconds=60)
+                for item in pending
+            )
         ):
             # Reserve a full next request (30s) and bounded flush (30s).
             # Each individual payload is capped; buffered raw data stays <8 MiB.
@@ -2633,6 +2645,7 @@ def run_durable_instagram_details(job: Mapping[str, Any], *, worker_id: str) -> 
             known_edit = bool(
                 gallery_complete
                 and existing
+                and gallery_at is not None
                 and (existing_at is None or gallery_at > existing_at)
                 and (
                     str(gallery_data.get("caption") or "") != str(existing.get("caption") or "")
@@ -2643,6 +2656,7 @@ def run_durable_instagram_details(job: Mapping[str, Any], *, worker_id: str) -> 
                 existing["known_edit"] = True
             gallery_fresh = bool(
                 gallery_complete
+                and gallery_at is not None
                 and 0
                 <= (_now_utc() - gallery_at).total_seconds()
                 < min(int(manifest["metadata_ttl_days"]) * 86400, int(manifest["metrics_ttl_hours"]) * 3600)
@@ -2710,7 +2724,7 @@ def run_durable_instagram_details(job: Mapping[str, Any], *, worker_id: str) -> 
             transport = DetailTransport(
                 scraper=scraper, check_cancelled=check_cancelled, on_request=on_request, deadline=target_started + 30
             )
-            parsed = None
+            parsed: Any = None
 
             def validate_detail(payload, source_id=target["source_id"]):
                 nonlocal parsed

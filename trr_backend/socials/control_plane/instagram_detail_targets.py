@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
@@ -295,7 +295,7 @@ def record_attempt(target: Mapping[str, Any], *, conn: Any, first_request: bool 
     )
 
 
-def checkpoint_many(results: list[Mapping[str, Any]], *, conn: Any) -> None:
+def checkpoint_many(results: Sequence[Mapping[str, Any]], *, conn: Any) -> None:
     """Fence every buffered success before data writes in the same transaction.
 
     The caller holds assert_owner's dispatch lock. Any missing or stale target
@@ -349,7 +349,7 @@ def checkpoint_many(results: list[Mapping[str, Any]], *, conn: Any) -> None:
         raise LostDetailOwnershipError("Buffered detail target lease changed")
 
 
-def committed_outcomes(targets: list[Mapping[str, Any]]) -> dict[str, str]:
+def committed_outcomes(targets: Sequence[Mapping[str, Any]]) -> dict[str, str]:
     """Resolve an entire uncertain write batch in one generation-scoped query."""
     if not targets:
         return {}

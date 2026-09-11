@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -295,13 +295,17 @@ def test_durable_detail_checkpoint_against_isolated_postgres(monkeypatch: pytest
     assert binding.get("user") == "trr_detail_test" and binding.get("dbname") == "postgres"
     with psycopg2.connect(dsn) as identity_conn, identity_conn.cursor() as cur:
         cur.execute("show data_directory")
-        assert cur.fetchone()[0] == binding["host"] + "/data"
+        data_directory_row = cur.fetchone()
+        assert data_directory_row is not None
+        assert data_directory_row[0] == binding["host"] + "/data"
         if scenario == "bulk":
             cur.execute(
                 "select current_setting('shared_preload_libraries'), "
                 "exists(select 1 from pg_available_extensions where name='pg_stat_statements')"
             )
-            preload, extension_available = cur.fetchone()
+            extension_row = cur.fetchone()
+            assert extension_row is not None
+            preload, extension_available = extension_row
             if not extension_available:
                 pytest.skip("bulk SQL-call comparison requires the pg_stat_statements extension on isolated Postgres")
             if not any(
@@ -341,9 +345,11 @@ def test_durable_detail_checkpoint_against_isolated_postgres(monkeypatch: pytest
             conn.close()
             active_connections -= 1
 
-    def one(sql, params=None, **kwargs):
+    def one(sql, params=None, **kwargs) -> dict[str, Any]:
         with pg.db_cursor(conn=kwargs.get("conn")) as cur:
-            return pg.fetch_one_with_cursor(cur, sql, params or [])
+            row = pg.fetch_one_with_cursor(cur, sql, params or [])
+            assert row is not None
+            return row
 
     monkeypatch.setattr(pg, "db_connection", connection)
     monkeypatch.setattr(pg, "fetch_one", one)
@@ -378,13 +384,13 @@ def test_durable_detail_checkpoint_against_isolated_postgres(monkeypatch: pytest
         def __init__(self):
             from requests import Session
 
-            self.session = Session()
+            self.session = cast(Any, Session())
             self.session.get = self.get
 
         def _request_cookies(self):
             return {"sessionid": account, "ds_user_id": account}
 
-        def _get_headers(self, _url):
+        def _get_headers(self, referer=None):
             return {}
 
         def _shortcode_to_media_id(self, shortcode):
@@ -402,8 +408,8 @@ def test_durable_detail_checkpoint_against_isolated_postgres(monkeypatch: pytest
                 json=lambda: payload,
             )
 
-        def fetch_post_info(self, code, **_kwargs):
-            requests.append(code)
+        def fetch_post_info(self, shortcode, delay=2.0):
+            requests.append(shortcode)
             if scenario == "bulk_lease" and len(requests) > 1:
                 assert (
                     one(
@@ -421,7 +427,7 @@ def test_durable_detail_checkpoint_against_isolated_postgres(monkeypatch: pytest
             if scenario in {"failed", "attempt_cap"}:
                 return None
             node = {
-                "code": code,
+                "code": shortcode,
                 "pk": "1234567890",
                 "taken_at": 1788220800,
                 "media_type": 1,
@@ -504,7 +510,7 @@ def test_durable_detail_checkpoint_against_isolated_postgres(monkeypatch: pytest
             if scenario in {"cached", "legacy_cached", "incomplete_cached", "known_edit"}
             else old_success
         )
-        raw_data = {"view_metrics": {"observed_at": successful_at.isoformat()}}
+        raw_data: dict[str, Any] = {"view_metrics": {"observed_at": successful_at.isoformat()}}
         if scenario in {"cached", "incomplete_cached"}:
             raw_data["detail_snapshot"] = {
                 "version": 1,
@@ -531,8 +537,10 @@ def test_durable_detail_checkpoint_against_isolated_postgres(monkeypatch: pytest
     if scenario in {"gallery", "known_edit"}:
         from trr_backend.socials.instagram import ScrapeConfig
 
+        gallery_payload = Scraper().fetch_post_info(code)
+        assert gallery_payload is not None
         parsed = Scraper()._parse_post_node(
-            Scraper().fetch_post_info(code)["items"][0], ScrapeConfig(username=account, hashtags=[])
+            gallery_payload["items"][0], ScrapeConfig(username=account, hashtags=[])
         )
         one(
             """update social.instagram_account_catalog_posts set raw_data = %s::jsonb
@@ -572,9 +580,11 @@ def test_durable_detail_checkpoint_against_isolated_postgres(monkeypatch: pytest
         [job_id, run_id, json.dumps(config)],
     )
     reservation = targets.reserve_dispatch(job_id)
+    assert reservation is not None
     if scenario == "provider":
         assert targets.bind_dispatch(job_id, reservation["token"], {"dispatched": True, "call_id": "probe-" + job_id})
     claimed = core._claim_job_by_id(job_id=job_id, worker_id="probe-worker", dispatch_token=reservation["token"])
+    assert claimed is not None
     if scenario == "bulk_lease":
         claim_target = targets.claim_target
         monkeypatch.setattr(
@@ -590,14 +600,13 @@ def test_durable_detail_checkpoint_against_isolated_postgres(monkeypatch: pytest
         monkeypatch.setattr(
             core, "_load_current_job_row", lambda job: one("select * from social.scrape_jobs where id=%s::uuid", [job])
         )
-        assert (
-            dispatch_runtime.claim_and_process_social_job(
-                job_id=job_id,
-                worker_id="duplicate",
-                dispatch_token=reservation["token"],
-            )["claimed"]
-            is False
+        duplicate_claim = dispatch_runtime.claim_and_process_social_job(
+            job_id=job_id,
+            worker_id="duplicate",
+            dispatch_token=reservation["token"],
         )
+        assert duplicate_claim is not None
+        assert duplicate_claim["claimed"] is False
         for status in ("unknown", "completed"):
             assert not targets.reconcile_provider_failure(core, claimed, {"status": status})
             assert one("select status from social.scrape_jobs where id=%s::uuid", [job_id])["status"] == "running"
@@ -611,6 +620,7 @@ def test_durable_detail_checkpoint_against_isolated_postgres(monkeypatch: pytest
         return
     if scenario == "unavailable":
         target = targets.claim_target(run_id, account, job_id, reservation["token"], "probe-worker")
+        assert target is not None
         with connection() as conn:
             with pytest.raises(ValueError, match="explicit healthy authenticated"):
                 targets.checkpoint(target, state="source_unavailable", conn=conn)
@@ -727,7 +737,9 @@ def test_durable_detail_checkpoint_against_isolated_postgres(monkeypatch: pytest
         assert targets.recover_expired(core, run_id=run_id)
         one("update social.scrape_jobs set available_at=now() where id=%s::uuid returning id", [job_id])
         second = targets.reserve_dispatch(job_id)
+        assert second is not None
         claimed = core._claim_job_by_id(job_id=job_id, worker_id="probe-worker", dispatch_token=second["token"])
+        assert claimed is not None
         result = catalog.run_durable_instagram_details(claimed, worker_id="probe-worker")
         assert requests == codes
     receipt = targets.finish_chunk(core, claimed, "probe-worker")
@@ -810,7 +822,9 @@ def test_detail_transport_shared_limits_against_isolated_postgres(monkeypatch, s
     assert binding.get("user") == "trr_detail_test" and binding.get("dbname") == "postgres"
     with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("show data_directory")
-        assert cur.fetchone()[0] == binding["host"] + "/data"
+        data_directory_row = cur.fetchone()
+        assert data_directory_row is not None
+        assert data_directory_row[0] == binding["host"] + "/data"
 
     @contextmanager
     def connection(**_kwargs):
@@ -821,7 +835,7 @@ def test_detail_transport_shared_limits_against_isolated_postgres(monkeypatch, s
     identity = uuid.uuid4().hex
     sent, attempts = [], []
     entered, release = Event(), Event()
-    session = requests.Session()
+    session = cast(Any, requests.Session())
 
     def send(url, **kwargs):
         assert kwargs["allow_redirects"] is False
@@ -916,15 +930,19 @@ def test_detail_transport_shared_limits_against_isolated_postgres(monkeypatch, s
         assert len(sent) == 2 and attempts == [True, False]
     else:
         count = 3 if scenario == "breaker" else 1
+        last_error: InstagramRequestFailure | None = None
         for _ in range(count):
             with pytest.raises(InstagramRequestFailure):
                 transport().fetch("CONTROLLED")
         for _ in range(3):
             with pytest.raises(DetailDeferred) as exc:
                 transport().fetch("CONTROLLED", allow_public_fallback=True)
+            last_error = exc.value
         assert len(sent) == len(attempts) == count
         if scenario == "rate_limit":
-            assert 115 <= (exc.value.next_attempt_at - datetime.now(UTC)).total_seconds() <= 120
+            assert last_error is not None
+            next_attempt_at = getattr(last_error, "next_attempt_at")
+            assert 115 <= (next_attempt_at - datetime.now(UTC)).total_seconds() <= 120
 
 
 @pytest.mark.parametrize(

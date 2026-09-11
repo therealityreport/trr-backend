@@ -46,6 +46,7 @@ def test_run_catalog_launch_with_timeout_raises_recoverable_timeout() -> None:
 
     def _block() -> str:
         deadline = current_deadline()
+        assert deadline is not None
         deadline.register(conn)
         try:
             assert release.wait(timeout=2), "deadline did not cancel the owned connection"

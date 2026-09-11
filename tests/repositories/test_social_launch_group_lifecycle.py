@@ -127,7 +127,9 @@ def test_finalize_timeout_keeps_single_owner_until_original_finishes(
         # Cross the deadline while still owning the lock.
         from trr_backend.db.deadline import current_deadline
 
-        current_deadline().cancelled.wait(timeout=1)
+        deadline = current_deadline()
+        assert deadline is not None
+        deadline.cancelled.wait(timeout=1)
         finished.set()
         return {"run_id": "run-1"}
 
@@ -296,7 +298,9 @@ def test_finalize_timeout_preserves_newer_attempt_and_terminal_state(monkeypatch
         yield True
 
     def expires(*_args, **_kwargs):
-        assert current_deadline().cancelled.wait(1)
+        deadline = current_deadline()
+        assert deadline is not None
+        assert deadline.cancelled.wait(1)
         if replacement == "new_attempt":
             state["attempt_id"] = "new-owner"
         else:

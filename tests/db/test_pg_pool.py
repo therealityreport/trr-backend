@@ -1447,7 +1447,9 @@ def test_deadline_cancels_only_owned_query_and_returns_all_reserved_connections(
                 assert acquired
                 with pg.db_read_connection(label="blocked-query"):
                     assert release.wait(2)
-                    current_deadline().remaining()
+                    deadline = current_deadline()
+                    assert deadline is not None
+                    deadline.remaining()
         finally:
             done.set()
 
