@@ -1,0 +1,37 @@
+{
+  "main": "3bcdc39253392f94134c93b846927fbbc84e6133",
+  "files": [
+    {
+      "path": "docs/codex/plans/2026-05-05-trr-backend-architecture-improvement.md",
+      "sha256": "628ce2fa03c10deda548f05b54cacdb1ec9041274e124fa9f104455e90239729",
+      "bytes": 13880,
+      "flags": {},
+      "destination": "plans/archive/codex-2026-05/2026-05-05-trr-backend-architecture-improvement.md",
+      "visibility": "tracked source moved to Git-visible archive; no formerly private material exposed"
+    },
+    {
+      "path": "docs/codex/plans/2026-05-05-threads-twitter-facebook-architecture-parity.md",
+      "sha256": "f346cb1fa950659eb2a9a505d5ca9219d0aa2a8c2fa62bf099c44e482aaa0a56",
+      "bytes": 21907,
+      "flags": {},
+      "destination": "plans/archive/codex-2026-05/2026-05-05-threads-twitter-facebook-architecture-parity.md",
+      "visibility": "tracked source moved to Git-visible archive; no formerly private material exposed"
+    },
+    {
+      "path": "docs/codex/plans/2026-05-05-tiktok-youtube-architecture-parity.md",
+      "sha256": "1cff298a67a7d7d277d5cd303dded1f40949743b6421416dea4a6f10db2c3c12",
+      "bytes": 16881,
+      "flags": {},
+      "destination": "plans/archive/codex-2026-05/2026-05-05-tiktok-youtube-architecture-parity.md",
+      "visibility": "tracked source moved to Git-visible archive; no formerly private material exposed"
+    },
+    {
+      "path": "docs/codex/plans/2026-05-03-instagram-social-scraper-readiness.md",
+      "sha256": "362dff9d645e88a3fb1a5b22310aa56375ee0751a9c1ee3646618facfe194739",
+      "bytes": 5153,
+      "flags": {},
+      "destination": "plans/archive/codex-2026-05/2026-05-03-instagram-social-scraper-readiness.md",
+      "visibility": "tracked source moved to Git-visible archive; no formerly private material exposed"
+    }
+  ]
+}

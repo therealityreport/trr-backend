@@ -1,14 +1,9 @@
-# Cross-Collab (TRR-Backend)
+# Cross-collab history (TRR-Backend)
 
-This folder contains cross-repo collaboration task notes for the TRR workspace.
+Existing TASK folders are read-only historical records. The TASK-folder workflow and its scaffolder are retired.
 
-Canonical workflow (lifecycle + templates):
-- TRR workspace root: `../docs/cross-collab/WORKFLOW.md` (local path when using the workspace checkout)
+- [Cross-repo coordination](../../../docs/cross-collab/WORKFLOW.md)
+- [Handoff workflow](../../../docs/ai/HANDOFF_WORKFLOW.md)
+- [Active plans and archive](../../../plans/)
 
-Notes:
-- `TASK1`–`TASK3` were created before WORKFLOW v1 and may not match current templates.
-- `TASK4+` follow WORKFLOW v1 conventions.
-
-Active/pending:
-- `TASK2` (Show-Level SYNC Facebank Seeds) is not yet implemented.
-
+For new work, use `docs/ai/local-status/` in the relevant scope and workspace `plans/`. Historical pending notes do not authorize implementation; revalidate them against current source and intent.
