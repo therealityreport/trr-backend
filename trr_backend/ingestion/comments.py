@@ -1,0 +1,535 @@
+"""Native comment pages, offline replay, and fenced incremental persistence.
+
+The source callback owns transport and credentials. Its observer runs before any
+transport DTO parsing; only sealed, allowlisted evidence enters this module.
+A page receipt is progress, never proof that an entire post was observed.
+"""
+
+from __future__ import annotations
+
+import json
+from collections import Counter
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any, Protocol
+from uuid import uuid4
+
+from psycopg2.extras import RealDictCursor
+
+from trr_backend.ingestion.canonical import normalize_comment_source, write_comments
+from trr_backend.ingestion.domain import Conflict, LostOwnership, Outcome, Stage, stable_json, utc_timestamp
+from trr_backend.ingestion.evidence import Evidence
+from trr_backend.ingestion.persistence import Store
+from trr_backend.socials.instagram.post_normalizer import InstagramComment
+
+COMMENT_PARSER_VERSION = "instagram-comments-v1"
+_CONNECTIONS = (
+    "edge_media_to_parent_comment",
+    "edge_media_to_comment",
+    "xdt_api__v1__media__media_id__comments__connection",
+    "xdt_api__v1__media__media_id__comments__parent_comment_id__child_comments__connection",
+)
+_UNAVAILABLE = frozenset({"deleted", "comments_disabled", "restricted", "media_unavailable"})
+
+
+class CommentSourceError(ValueError):
+    """Evidence cannot safely prove a comment page."""
+
+
+@dataclass(frozen=True)
+class CommentPage:
+    observed_at: datetime
+    comments: tuple[InstagramComment, ...]
+    source_payloads: tuple[dict[str, Any], ...]
+    parent_comment_id: str | None
+    next_cursor: str | None
+    exhausted: bool
+    expected_count: int | None
+    unavailable_reason: str | None = None
+    cursor_param: str | None = None
+    started_from_root: bool = False
+
+
+@dataclass(frozen=True)
+class CommentFetchSummary:
+    expected_count: int | None = None
+    fetch_failed: bool = False
+    auth_failed: bool = False
+    retryable: bool = False
+    top_level_checkpoint: dict[str, Any] | None = None
+    reply_checkpoints: tuple[dict[str, Any], ...] = ()
+    full_observation: bool = False
+
+
+class CommentSource(Protocol):
+    def __call__(
+        self,
+        *,
+        shortcode: str,
+        checkpoint: dict[str, Any],
+        source_observer: Callable[[str, Mapping[str, Any]], None],
+        pre_source_request: Callable[[], None],
+    ) -> CommentFetchSummary: ...
+
+
+def _count(value: Any) -> int | None:
+    return value if type(value) is int and value >= 0 else None
+
+
+def _find_connection(payload: Mapping[str, Any]) -> tuple[str, Mapping[str, Any]] | None:
+    for key in _CONNECTIONS:
+        if isinstance(payload.get(key), dict):
+            return key, payload[key]
+    for key in ("data", "graphql", "shortcode_media", "xdt_shortcode_media", "media"):
+        child = payload.get(key)
+        if isinstance(child, dict):
+            found = _find_connection(child)
+            if found is not None:
+                return found
+    return None
+
+
+def _node(source: Any, parent: str | None = None) -> dict[str, Any]:
+    if not isinstance(source, dict):
+        raise CommentSourceError("Comment node is not an object")
+    if source.get("source_snapshot_type", "full_comments_scrape") != "full_comments_scrape":
+        raise CommentSourceError("Comment samples cannot become full-comments observations")
+    result = dict(source)
+    if source.get("created_at") is None and source.get("created_at_utc") is not None:
+        result["created_at"] = source["created_at_utc"]
+    liked = source.get("edge_liked_by")
+    if not any(key in source for key in ("comment_like_count", "like_count", "likes")) and isinstance(liked, dict):
+        if _count(liked.get("count")) is not None:
+            result["comment_like_count"] = liked["count"]
+    identity = source.get("comment_id") or source.get("id") or source.get("pk")
+    if not isinstance(identity, (str, int)) or isinstance(identity, bool) or not str(identity):
+        raise CommentSourceError("Native comment identity is missing")
+    if parent:
+        existing = source.get("parent_comment_id") or source.get("parent_comment_external_id")
+        if existing and str(existing) != parent:
+            raise CommentSourceError("Native reply has conflicting parents")
+        result["parent_comment_id"] = parent
+    children = source.get("replies", source.get("child_comments", source.get("preview_child_comments", [])))
+    thread = source.get("edge_threaded_comments")
+    if isinstance(thread, dict):
+        edges = thread.get("edges")
+        if not isinstance(edges, list) or any(not isinstance(edge, dict) or "node" not in edge for edge in edges):
+            raise CommentSourceError("Native reply connection is malformed")
+        children = [edge["node"] for edge in edges]
+        if _count(thread.get("count")) is not None:
+            result["child_comment_count"] = thread["count"]
+    if not isinstance(children, list):
+        raise CommentSourceError("Native reply list is malformed")
+    result["replies"] = [_node(child, str(identity)) for child in children]
+    # The supported native Instagram reply topology is one parent level. An
+    # explicit reply endpoint/embedded child node is a leaf unless source
+    # content itself supplies another child count or connection.
+    if parent and not any(
+        key in result for key in ("child_comment_count", "reply_count", "replies_count", "edge_threaded_comments")
+    ):
+        result["child_comment_count"] = 0
+    result.pop("child_comments", None)
+    result["source_snapshot_type"] = "full_comments_scrape"
+    return result
+
+
+def parse_comment_evidence(
+    evidence: Evidence, *, pinned: bool = False, parser_version: str = COMMENT_PARSER_VERSION
+) -> CommentPage:
+    """Normalize retained REST/GraphQL pages without any source access.
+
+    Keep native attachment/user fields and graph edges in raw_data; provide the
+    explicit reply list required by the independent canonical writer alongside.
+    """
+    if parser_version != COMMENT_PARSER_VERSION:
+        raise CommentSourceError("Requested comment parser version is unavailable")
+    payload = evidence.read(pinned=pinned)
+    parent = payload.get("parent_comment_id") or payload.get("parent_comment_pk")
+    parent = str(parent) if parent is not None else None
+    if payload.get("comments_disabled") is True:
+        return CommentPage(evidence.captured_at, (), (), parent, None, False, None, "comments_disabled")
+    found = _find_connection(payload)
+    if found is not None:
+        name, connection = found
+        if "parent_comment_id__child_comments" in name and not parent:
+            raise CommentSourceError("Native child connection requires its parent identity")
+        edges = connection.get("edges")
+        if not isinstance(edges, list) or any(not isinstance(edge, dict) or "node" not in edge for edge in edges):
+            raise CommentSourceError("Native comment connection is malformed")
+        nodes = [edge["node"] for edge in edges]
+        page_info = connection.get("page_info") or {}
+        more = page_info.get("has_next_page")
+        cursor = page_info.get("end_cursor") if more is not False else None
+        cursor_param = "after" if cursor else None
+        expected = _count(connection.get("count"))
+    elif any(isinstance(payload.get(key), list) for key in ("comments", "child_comments", "replies")):
+        if not parent and any(key in payload for key in ("child_comments", "replies")):
+            raise CommentSourceError("Native child page requires its parent identity")
+        nodes = payload.get("comments", payload.get("child_comments", payload.get("replies")))
+        if parent:
+            more = payload.get("has_more_tail_child_comments")
+            if payload.get("has_more_head_child_comments") is True:
+                more = True
+            cursor_keys = (("next_min_child_cursor", "min_id"), ("next_max_child_cursor", "max_id"))
+        else:
+            more = payload.get("has_more_comments")
+            if payload.get("has_more_headload_comments") is True:
+                more = True
+            cursor_keys = (
+                ("cached_comments_cursor", "cached_comments_cursor"),
+                ("tao_cursor", "tao_cursor"),
+                ("next_max_id", "max_id"),
+                ("next_min_id", "min_id"),
+                ("bifilter_token", "bifilter_token"),
+            )
+            if payload.get("has_more_headload_comments") is True and payload.get("has_more_comments") is not True:
+                cursor_keys = (cursor_keys[3], cursor_keys[2], cursor_keys[0], cursor_keys[1], cursor_keys[4])
+        cursor, cursor_param = next(
+            ((payload[key], param) for key, param in cursor_keys if payload.get(key)), (None, None)
+        )
+        expected = _count(payload.get("comment_count"))
+    else:
+        raise CommentSourceError("Unsupported native comment evidence (DOM is not a native page)")
+    if more is not None and type(more) is not bool:
+        raise CommentSourceError("Native pagination flag is not boolean")
+    if cursor is not None and not isinstance(cursor, (str, int)):
+        raise CommentSourceError("Native cursor is malformed")
+    sources = tuple(_node(node, parent) for node in nodes)
+    comments = tuple(normalize_comment_source(node) for node in sources)
+    identities: dict[str, str | None] = {}
+
+    def validate(comment: InstagramComment) -> None:
+        if comment.comment_id in identities:
+            raise CommentSourceError("Duplicate native comment identity within a page")
+        identities[comment.comment_id] = comment.parent_comment_id
+        for reply in comment.replies:
+            validate(reply)
+
+    for comment in comments:
+        validate(comment)
+    # GraphQL retains its final edge cursor even on an exhausted connection.
+    exhausted = more is False and not cursor
+    if exhausted:
+        cursor_param = None
+    return CommentPage(
+        evidence.captured_at,
+        comments,
+        sources,
+        parent,
+        str(cursor) if cursor else None,
+        exhausted,
+        expected,
+        cursor_param=cursor_param,
+        started_from_root=isinstance(payload.get("cursor_payload"), dict)
+        and payload["cursor_payload"].get("source") == "root",
+    )
+
+
+def _progress(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
+    state = checkpoint.get("comment_pages") or {}
+    if not isinstance(state, dict) or state.get("version", 1) != 1:
+        raise CommentSourceError("Unsupported comment checkpoint version")
+    # Canonical JSON copy prevents fetch callbacks from mutating durable state.
+    return json.loads(stable_json(state or {"version": 1, "observed": {}, "lanes": {}, "expected": None}))
+
+
+def _advance(state: dict[str, Any], page: CommentPage, *, scan_started_at: datetime) -> None:
+    if page.started_from_root and not page.parent_comment_id and "__top__" in state["lanes"]:
+        # A deliberate root restart begins a fresh observation manifest. Earlier
+        # canonical rows and immutable page receipts remain durable; they cannot
+        # count as fresh coverage or prevent the new scan's missing lifecycle.
+        state.update(observed={}, lanes={}, expected=None)
+    if not page.parent_comment_id and "__top__" not in state["lanes"]:
+        state["scan_started_at"] = utc_timestamp(scan_started_at)
+
+    def advance_lane(key: str, cursor: str | None, exhausted: bool, param: str | None) -> None:
+        lane = state["lanes"].setdefault(key, {"cursors": [], "exhausted": False, "repeated": False})
+        seen = lane.setdefault("cursor_keys", [])
+        if cursor:
+            cursor_key = f"{param}:{cursor}"
+            if cursor_key in seen:
+                lane["repeated"] = True
+            else:
+                seen.append(cursor_key)
+                lane["cursors"].append(cursor)
+        lane["cursor_param"] = param
+        lane["exhausted"] = exhausted
+
+    advance_lane(page.parent_comment_id or "__top__", page.next_cursor, page.exhausted, page.cursor_param)
+    if page.started_from_root and not page.parent_comment_id:
+        state["lanes"]["__top__"]["started_from_root"] = True
+    if page.expected_count is not None and not page.parent_comment_id:
+        state["expected"] = page.expected_count
+
+    def visit(comment: InstagramComment, source: dict[str, Any]) -> None:
+        thread = source.get("edge_threaded_comments")
+        if isinstance(thread, dict):
+            info = thread.get("page_info") or {}
+            exhausted = info.get("has_next_page") is False
+            cursor = info.get("end_cursor") if not exhausted else None
+            advance_lane(comment.comment_id, str(cursor) if cursor else None, exhausted, "after" if cursor else None)
+        previous = state["observed"].get(comment.comment_id)
+        parent = comment.parent_comment_id
+        if previous and previous["parent"] != parent:
+            raise CommentSourceError("One post-scoped comment changed parent")
+        expected = _count(source.get("child_comment_count", source.get("reply_count", source.get("replies_count"))))
+        state["observed"][comment.comment_id] = {
+            "parent": parent,
+            "expected_replies": expected if expected is not None else (previous or {}).get("expected_replies"),
+        }
+        for child, raw in zip(comment.replies, source["replies"], strict=True):
+            visit(child, raw)
+
+    for comment, source in zip(page.comments, page.source_payloads, strict=True):
+        visit(comment, source)
+
+
+def _valid_source_summary(summary: CommentFetchSummary) -> bool:
+    return not (
+        summary.fetch_failed
+        or summary.auth_failed
+        or summary.retryable
+        or summary.top_level_checkpoint
+        or summary.reply_checkpoints
+    )
+
+
+def _scan_cutoff(state: Mapping[str, Any], *, captured_at: datetime) -> datetime | None:
+    value = state.get("scan_started_at")
+    if not isinstance(value, str):
+        return None
+    try:
+        started = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if started.utcoffset() is None or started > captured_at:
+        return None
+    return started.astimezone(UTC)
+
+
+def _complete(state: dict[str, Any], summary: CommentFetchSummary) -> bool:
+    if not summary.full_observation or not _valid_source_summary(summary):
+        return False
+    expected = summary.expected_count if summary.expected_count is not None else state["expected"]
+    if _count(expected) is None or len(state["observed"]) < expected:
+        return False
+    top = state["lanes"].get("__top__", {})
+    if not top.get("exhausted") or any(lane.get("repeated") for lane in state["lanes"].values()):
+        return False
+    child_counts = Counter(item["parent"] for item in state["observed"].values())
+    for identity, observed in state["observed"].items():
+        # Explicit native reply leaves have zero children; parent counts stay unknown
+        # unless the captured page actually supplies them.
+        count = observed["expected_replies"]
+        if count is None:
+            return False
+        if child_counts[identity] < count:
+            return False
+        lane = state["lanes"].get(identity)
+        if lane is not None and not lane.get("exhausted"):
+            return False
+    return True
+
+
+class CommentActivity:
+    def __init__(
+        self,
+        store: Store,
+        fetch_source: CommentSource | None = None,
+        *,
+        writer: Callable = write_comments,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ):
+        self.store, self.fetch_source, self.writer, self.clock = store, fetch_source, writer, clock
+
+    def execute(
+        self,
+        *,
+        run_id: str,
+        account: str,
+        generation: int,
+        target_key: str,
+        owner_token: str,
+        post_id: str,
+        checkpoint: dict[str, Any] | None = None,
+        fetch: CommentSource | None = None,
+        metadata_writes_enabled: bool = True,
+        assignment: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if not post_id:
+            raise ValueError("A canonical parent post must be loaded before source requests")
+        source = fetch or self.fetch_source
+        if source is None:
+            raise ValueError("An explicit comment source callback is required")
+        owned = {
+            "run_id": run_id,
+            "account": account,
+            "generation": generation,
+            "stage": Stage.COMMENTS,
+            "target_key": target_key,
+            "owner_token": owner_token,
+        }
+        target = self.store.acquire(**owned)
+        current_checkpoint = dict(target["checkpoint"])
+        if checkpoint is not None and checkpoint != current_checkpoint:
+            raise Conflict("Supplied checkpoint differs from durable comment progress")
+        with self.store.transaction() as conn, conn.cursor() as cur:
+            cur.execute("select shortcode from social.instagram_posts where id=%s", (post_id,))
+            post = cur.fetchone()
+            if not post or post[0] != target_key:
+                raise Conflict("Canonical parent post does not match the comment target shortcode")
+        attempt_started_at = datetime.fromisoformat(utc_timestamp(self.clock()))
+        state = _progress(current_checkpoint)
+        retained: tuple[str, Evidence, CommentPage] | None = None
+
+        def observe(kind: str, payload: Mapping[str, Any]) -> None:
+            nonlocal current_checkpoint, state, retained
+            if kind not in {"comments_api", "graphql_comments", "graphql_replies", "graphql_preview"}:
+                raise CommentSourceError("Unsupported source comment page kind")
+            evidence = Evidence.capture(
+                source_identity=f"instagram:comments:{target_key}:{kind}",
+                captured_at=self.clock(),
+                parser_version=COMMENT_PARSER_VERSION,
+                payload=dict(payload),
+            )
+            evidence_id = self.store.retain_evidence(**owned, evidence=evidence)
+            # Preview samples remain retained but cannot become full-comments rows.
+            if kind == "graphql_preview":
+                return
+            page = parse_comment_evidence(evidence, pinned=True)
+            updated = _progress({"comment_pages": state})
+            _advance(updated, page, scan_started_at=attempt_started_at)
+            next_checkpoint = {**current_checkpoint, "comment_pages": updated}
+            self._persist_page(
+                owned,
+                post_id=post_id,
+                evidence=evidence,
+                evidence_id=evidence_id,
+                page=page,
+                expected_checkpoint=current_checkpoint,
+                checkpoint=next_checkpoint,
+                metadata_writes_enabled=metadata_writes_enabled,
+                assignment=assignment,
+            )
+            current_checkpoint, state = next_checkpoint, updated
+            retained = (evidence_id, evidence, page)
+
+        summary = source(
+            shortcode=target_key,
+            checkpoint=json.loads(stable_json(current_checkpoint)),
+            source_observer=observe,
+            pre_source_request=lambda: self.store.check_owner(**owned, record_request=True),
+        )
+        if not isinstance(summary, CommentFetchSummary):
+            raise TypeError("Comment source must return a typed CommentFetchSummary")
+        if retained is None:
+            return {"outcome": Outcome.UNRESOLVED.value, "checkpoint": current_checkpoint, "complete": False}
+        evidence_id, evidence, page = retained
+        if not _valid_source_summary(summary):
+            return {"outcome": Outcome.UNRESOLVED.value, "checkpoint": current_checkpoint, "complete": False}
+        if page.unavailable_reason in _UNAVAILABLE and not state["observed"]:
+            receipt = self.store.commit_target(
+                **owned,
+                observed_at=evidence.captured_at,
+                evidence_id=evidence_id,
+                outcome=Outcome.UNAVAILABLE,
+                write_canonical=lambda conn: {"post_id": post_id, "reason": page.unavailable_reason},
+            )
+            return {"outcome": Outcome.UNAVAILABLE.value, "checkpoint": current_checkpoint, "receipt": receipt}
+        scan_cutoff = _scan_cutoff(state, captured_at=evidence.captured_at)
+        if scan_cutoff is None or not _complete(state, summary):
+            return {"outcome": Outcome.UNRESOLVED.value, "checkpoint": current_checkpoint, "complete": False}
+
+        def finish(conn):
+            # Only a proved full observation may advance missing-comment state.
+            # The root request start is the missing-row cutoff. Rows observed
+            # during pagination are protected even if the last page is newer.
+            with conn.cursor() as cur:
+                cur.execute(
+                    """update social.instagram_comments set is_missing=true,missing_at=%s
+                    where post_id=%s and not (comment_id=any(%s)) and scraped_at<=%s
+                    and not is_missing""",
+                    (evidence.captured_at, post_id, list(state["observed"]), scan_cutoff),
+                )
+            return {"post_id": post_id, "observed_comment_ids": sorted(state["observed"])}
+
+        receipt = self.store.commit_target(
+            **owned,
+            observed_at=evidence.captured_at,
+            evidence_id=evidence_id,
+            write_canonical=finish,
+        )
+        return {
+            "outcome": Outcome.COMMITTED.value,
+            "checkpoint": current_checkpoint,
+            "complete": True,
+            "receipt": receipt,
+        }
+
+    def _persist_page(
+        self,
+        owned: dict[str, Any],
+        *,
+        post_id: str,
+        evidence: Evidence,
+        evidence_id: str,
+        page: CommentPage,
+        expected_checkpoint: dict[str, Any],
+        checkpoint: dict[str, Any],
+        metadata_writes_enabled: bool,
+        assignment: Mapping[str, Any] | None,
+    ) -> None:
+        """Canonical page, receipt and checkpoint share Store's lock/fence order."""
+        with self.store.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            run = self.store._run(cur, owned["run_id"], owned["account"])
+            if run["generation"] != owned["generation"] or run["state"] not in {"queued", "running"}:
+                raise LostOwnership("Comment page belongs to a superseded execution")
+            cur.execute(
+                """select * from social.instagram_ingestion_targets
+                where run_id=%s and stage='comments' and target_key=%s and owner_token=%s
+                and owner_started_at is not null and owner_expires_at>clock_timestamp()
+                and outcome='unresolved' for update""",
+                (owned["run_id"], owned["target_key"], owned["owner_token"]),
+            )
+            target = cur.fetchone()
+            if not target:
+                raise LostOwnership("Comment page writer lost target ownership")
+            if target["checkpoint"] != expected_checkpoint:
+                raise Conflict("Comment checkpoint advanced concurrently")
+            identity = self.writer(
+                conn,
+                run_id=owned["run_id"],
+                account=owned["account"],
+                post_id=post_id,
+                observed_at=evidence.captured_at,
+                comments=page.comments,
+                source_payloads=page.source_payloads,
+                metadata_writes_enabled=metadata_writes_enabled,
+                assignment=assignment,
+            )
+            cur.execute(
+                """insert into social.instagram_ingestion_comment_pages
+                (page_id,run_id,stage,target_key,owner_generation,evidence_id,observed_at,content_hash,
+                 parent_comment_id,next_cursor,exhausted,canonical_identity,checkpoint)
+                values(%s,%s,'comments',%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb)""",
+                (
+                    str(uuid4()),
+                    owned["run_id"],
+                    owned["target_key"],
+                    target["owner_generation"],
+                    evidence_id,
+                    evidence.captured_at,
+                    evidence.content_hash,
+                    page.parent_comment_id,
+                    page.next_cursor,
+                    page.exhausted,
+                    stable_json(identity),
+                    stable_json(checkpoint),
+                ),
+            )
+            cur.execute(
+                """update social.instagram_ingestion_targets set checkpoint=%s::jsonb
+                where run_id=%s and stage='comments' and target_key=%s""",
+                (stable_json(checkpoint), owned["run_id"], owned["target_key"]),
+            )

@@ -1,0 +1,9 @@
+{
+  "source_sha256": "939a0d2e2ee558ccd5ef8f75ab842f76be227d13e3ff6538419f4b8df23550c8",
+  "source": "scripts/ingestion_engine_eval/dbos_partitioned.py",
+  "command": "python scripts/ingestion_engine_eval/dbos_partitioned.py --runtime-dir /tmp/trr-dbos-partition-cancel-6f437318 --cancel-continuation-only",
+  "result": "PASS:50receipts retained,cursor0,no successor,cancelled dispatcher excluded",
+  "earlier_1000_source_sha256": "358eee16bfbee37d81b16f9129b9c7b4677ab2b0f2533af7c6db35c972a8f3fe",
+  "earlier_1000_evidence_unchanged": true,
+  "validation_scope": "Only changed cancellation path rerun; no 1000-target rerun claimed"
+}

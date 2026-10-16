@@ -1664,7 +1664,18 @@ def _execute_social_job(job_id: str, *, worker_prefix: str, dispatch_token: str 
     timeout=2 * 60 * 60,
     max_containers=_SOCIAL_CONCURRENCY_LIMIT,
 )
-def run_social_posts_job(job_id: str, dispatch_token: str | None = None) -> dict[str, object]:
+def run_social_posts_job(
+    job_id: str | None = None,
+    dispatch_token: str | None = None,
+    *,
+    ingestion_reservation: dict[str, object] | None = None,
+) -> dict[str, object]:
+    if ingestion_reservation is not None:
+        if job_id is not None or dispatch_token is not None:
+            raise ValueError("Legacy job and ingestion reservation are mutually exclusive")
+        return _execute_ingestion_reservation(ingestion_reservation, stages={"listing", "post_details"})
+    if not job_id:
+        raise ValueError("Legacy social post job identity is required")
     return _execute_social_job(job_id, worker_prefix="modal:social-posts", dispatch_token=dispatch_token)
 
 
@@ -1677,7 +1688,17 @@ def run_social_posts_job(job_id: str, dispatch_token: str | None = None) -> dict
     timeout=2 * 60 * 60,
     max_containers=_SOCIAL_MEDIA_CONCURRENCY_LIMIT,
 )
-def run_social_media_job(job_id: str) -> dict[str, object]:
+def run_social_media_job(
+    job_id: str | None = None,
+    *,
+    ingestion_reservation: dict[str, object] | None = None,
+) -> dict[str, object]:
+    if ingestion_reservation is not None:
+        if job_id is not None:
+            raise ValueError("Legacy job and ingestion reservation are mutually exclusive")
+        return _execute_ingestion_reservation(ingestion_reservation, stages={"media"})
+    if not job_id:
+        raise ValueError("Legacy social media job identity is required")
     return _execute_social_job(job_id, worker_prefix="modal:social-media")
 
 
@@ -1690,7 +1711,17 @@ def run_social_media_job(job_id: str) -> dict[str, object]:
     timeout=2 * 60 * 60,
     max_containers=_SOCIAL_COMMENTS_CONCURRENCY_LIMIT,
 )
-def run_social_comments_job(job_id: str) -> dict[str, object]:
+def run_social_comments_job(
+    job_id: str | None = None,
+    *,
+    ingestion_reservation: dict[str, object] | None = None,
+) -> dict[str, object]:
+    if ingestion_reservation is not None:
+        if job_id is not None:
+            raise ValueError("Legacy job and ingestion reservation are mutually exclusive")
+        return _execute_ingestion_reservation(ingestion_reservation, stages={"comments"})
+    if not job_id:
+        raise ValueError("Legacy social comments job identity is required")
     return _execute_social_job(job_id, worker_prefix="modal:social-comments")
 
 
@@ -1790,6 +1821,18 @@ def _recover_stale_pending_social_catalog_launches(
     }
 
 
+def _execute_ingestion_reservation(reservation: dict[str, object], *, stages: set[str]) -> dict[str, object]:
+    from trr_backend.ingestion.runtime import activity_reservation, run_ingestion_activity
+
+    safe = activity_reservation(reservation)
+    if safe["stage"] not in stages:
+        raise ValueError("Ingestion stage does not match this Modal worker lane")
+    try:
+        return run_ingestion_activity(safe)
+    finally:
+        _close_db_pools_after_worker("instagram_ingestion")
+
+
 @app.function(
     image=_image,
     secrets=_secrets,
@@ -1800,41 +1843,59 @@ def _recover_stale_pending_social_catalog_launches(
 )
 def sweep_social_dispatch_queue() -> dict[str, object]:
     _validate_modal_maintenance_owner_config()
-    from trr_backend.socials import social_season_analytics_impl as social_provider
-    from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
-
-    register_social_control_plane_providers(social_provider.__dict__)
-    from trr_backend.socials.control_plane import recover_and_dispatch_due_social_jobs
-
-    started_at = _worker_started(
-        "social_recovery",
-        function_name="sweep_social_dispatch_queue",
-    )
+    result = None
     try:
-        result = recover_and_dispatch_due_social_jobs()
-        try:
-            launch_recovery = _recover_stale_pending_social_catalog_launches()
-        except Exception:  # noqa: BLE001 - recovery is best-effort; never fail the sweep
-            logger.warning(
-                "sweep_social_dispatch_queue: pending catalog launch recovery sweep failed",
-                exc_info=True,
-            )
-            launch_recovery = {"status": "error"}
-        result["pending_launch_recovery"] = launch_recovery
-        _worker_finished(
+        from trr_backend.socials import social_season_analytics_impl as social_provider
+        from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
+
+        register_social_control_plane_providers(social_provider.__dict__)
+        from trr_backend.socials.control_plane import recover_and_dispatch_due_social_jobs
+
+        started_at = _worker_started(
             "social_recovery",
-            started_at,
-            result_status=str(result.get("status") or "completed"),
-            recovered=result.get("recovered"),
-            dispatched=result.get("dispatched"),
-            pending_launches_recovered=launch_recovery.get("recovered"),
+            function_name="sweep_social_dispatch_queue",
         )
-        return result
-    except Exception as exc:
-        _worker_failed("social_recovery", started_at, failure_class=type(exc).__name__)
-        raise
+        try:
+            result = recover_and_dispatch_due_social_jobs()
+            try:
+                launch_recovery = _recover_stale_pending_social_catalog_launches()
+            except Exception:  # noqa: BLE001 - recovery is best-effort; never fail the sweep
+                logger.warning(
+                    "sweep_social_dispatch_queue: pending catalog launch recovery sweep failed",
+                    exc_info=True,
+                )
+                launch_recovery = {"status": "error"}
+            result["pending_launch_recovery"] = launch_recovery
+            _worker_finished(
+                "social_recovery",
+                started_at,
+                result_status=str(result.get("status") or "completed"),
+                recovered=result.get("recovered"),
+                dispatched=result.get("dispatched"),
+                pending_launches_recovered=launch_recovery.get("recovered"),
+            )
+            return result
+        except Exception as exc:
+            _worker_failed("social_recovery", started_at, failure_class=type(exc).__name__)
+            raise
     finally:
         _close_db_pools_after_worker("social_recovery")
+        # Dispatch legacy recovery first. Wake v2 even when legacy import,
+        # bootstrap, or recovery fails; the bounded helper reaps its process.
+        try:
+            from trr_backend.ingestion.runtime import run_ingestion_coordinator
+
+            ingestion_coordinator = run_ingestion_coordinator()
+        except Exception as exc:  # noqa: BLE001 - never mask the legacy result/error
+            ingestion_coordinator = {"status": "error", "failure_class": type(exc).__name__}
+        if ingestion_coordinator.get("status") != "disabled":
+            if result is not None:
+                result["instagram_ingestion_coordinator"] = ingestion_coordinator
+            logger.info(
+                "sweep_social_dispatch_queue: ingestion coordinator status=%s failure_class=%s",
+                ingestion_coordinator.get("status"),
+                ingestion_coordinator.get("failure_class"),
+            )
 
 
 @app.function(

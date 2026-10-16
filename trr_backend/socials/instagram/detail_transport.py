@@ -45,8 +45,12 @@ class DetailTransport:
         on_request: Callable[[bool], None],
         deadline: float,
         cooldown_seconds: float | None = None,
+        source_payload_observer: Callable[[str, dict[str, Any]], None] | None = None,
+        transaction: Callable | None = None,
     ) -> None:
         self.scraper = scraper
+        self.source_payload_observer = source_payload_observer
+        self.transaction = transaction
         # Hidden adapter retries would escape both the request budget and cap.
         for adapter in scraper.session.adapters.values():
             adapter.max_retries = Retry(total=0, redirect=0)
@@ -80,7 +84,9 @@ class DetailTransport:
 
     def _reserve(self) -> None:
         self.check_deadline()
-        with pg.db_connection(label="instagram_detail_request_reserve") as conn:
+        with (
+            self.transaction() if self.transaction else pg.db_connection(label="instagram_detail_request_reserve")
+        ) as conn:
             with pg.db_cursor(conn=conn) as cur:
                 cur.execute(
                     """insert into social.instagram_detail_request_lanes(identity_key)
@@ -132,7 +138,9 @@ class DetailTransport:
                 )
 
     def _outcome(self, error: InstagramRequestFailure | None) -> None:
-        with pg.db_connection(label="instagram_detail_request_outcome") as conn:
+        with (
+            self.transaction() if self.transaction else pg.db_connection(label="instagram_detail_request_outcome")
+        ) as conn:
             with pg.db_cursor(conn=conn) as cur:
                 row = pg.fetch_one_with_cursor(
                     cur,
@@ -208,6 +216,9 @@ class DetailTransport:
                     "sender": sender,
                 }
                 result = self.client.get_text(url, **kwargs) if text else self.client.get_json(url, params={}, **kwargs)
+                observer = getattr(self, "source_payload_observer", None)
+                if observer is not None and isinstance(result, dict):
+                    observer("details", result)
                 self.check_deadline()
             except (InstagramRequestFailure, requests.RequestException) as exc:
                 error = (

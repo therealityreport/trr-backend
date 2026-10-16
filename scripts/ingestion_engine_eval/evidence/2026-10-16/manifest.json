@@ -1,0 +1,15 @@
+{
+  "git_head": "59ccb5f4fcd63ca804aca7deea3958c4cc3c9816",
+  "dirty_source": "uncommitted evaluation files; unrelated existing edits preserved",
+  "source_sha256": {
+    "scripts/ingestion_engine_eval/store.py": "98dd9bb72d0dca706a85e958e7629567915a9c107c09c2e43e00f078d3215af9",
+    "scripts/ingestion_engine_eval/run.py": "ce093dcd76a8759e085c45e3c1f6f756573b9d8bdb8ba1cc0ffc30dbd4f1d0b0",
+    "scripts/ingestion_engine_eval/temporal_pinning.py": "17d2ae889597df32072186b56cb231ff708875b8f9e1f110cca365449c827fdb",
+    "scripts/ingestion_engine_eval/temporal_worker.py": "5195475568d5dbc157a674af42808e778f72a8f32cd28651279adee368f9662f",
+    "scripts/ingestion_engine_eval/dbos_worker.py": "3e61d01ad869221ec1eafd335e39cf84720b1d4658a55aeb948e007f11ff680e",
+    "tests/ingestion_engine_eval/test_fenced_adapter.py": "f715099cfaded44dc22f32487afeebd56af19c0b96eadb239e3ba8d8d69c0f99"
+  },
+  "pytest": "4 passed in 1.25s; isolated real Postgres; --confcutdir=tests/ingestion_engine_eval",
+  "ruff": "check and format --check pass",
+  "source_changes_during_measurement": "formatting/import sorting, added output history metadata and independent case selectors; business adapter semantics unchanged"
+}

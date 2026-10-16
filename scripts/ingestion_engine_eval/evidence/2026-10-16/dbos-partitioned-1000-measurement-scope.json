@@ -1,0 +1,9 @@
+{
+  "source_measurement": "dbos-partitioned-1000.json",
+  "metric": "postgres_statement_calls",
+  "value": 20817,
+  "excluded": "pg_stat_activity session-sampler SELECTs only",
+  "included": "checkpoint polling, snapshot, outbox scans, counter reads, application SQL, DBOS metadata and other observer queries",
+  "interpretation": "harness-total observed statement calls with one exclusion; not isolated engine cost",
+  "numeric_measurement_unchanged": true
+}

@@ -16,12 +16,13 @@ import hashlib
 import html as html_lib
 import json
 import logging
+import math
 import os
 import re
 import tempfile
 import time
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -2969,7 +2970,15 @@ class InstagramCommentsScraplingFetcher:
         proxy_config: CommentsProxyConfig | None = None,
         headless: bool | None = None,
         timeout_ms: int = 45_000,
+        source_payload_observer: Callable[[str, Mapping[str, Any]], None] | None = None,
+        before_source_request: Callable[[str], None] | None = None,
+        source_failure_observer: Callable[[str, float | None], None] | None = None,
+        consume_credentials_only: bool = False,
     ) -> None:
+        self._source_payload_observer = source_payload_observer
+        self._before_source_request = before_source_request
+        self._source_failure_observer = source_failure_observer
+        self._consume_credentials_only = consume_credentials_only
         self._cookies = list(cookies or [])
         self._raw_cookies = raw_cookies if isinstance(raw_cookies, dict) else dict(raw_cookies or {})
         self._browser_account_id = str(browser_account_id or "").strip() or None
@@ -2978,7 +2987,11 @@ class InstagramCommentsScraplingFetcher:
         self._api_proxy_url = proxy_config.api_proxy_url if proxy_config else None
         self._headless = headless if headless is not None else _env_truthy("SOCIAL_INSTAGRAM_COMMENTS_HEADLESS", True)
         self._timeout_ms = max(5_000, int(timeout_ms))
-        self._parser = InstagramScraper(cookies=self._raw_cookies, browser_account_id=self._browser_account_id)
+        self._parser = InstagramScraper(
+            cookies=self._raw_cookies,
+            browser_account_id=self._browser_account_id,
+            attach_auth_session=not consume_credentials_only,
+        )
         self._request_count = 0
         self._bytes_total = 0
         self._bytes_by_host: dict[str, int] = {}
@@ -3450,6 +3463,9 @@ class InstagramCommentsScraplingFetcher:
                 ) from exc
         text = _response_text(response)
         if _status_code(response) in {401, 403} or _document_auth_failure_text(text):
+            observer = getattr(self, "_source_failure_observer", None)
+            if observer is not None:
+                observer("source_auth_failed", None)
             self._record_challenge_response(
                 response,
                 reason="warmup_auth_challenge",
@@ -5331,6 +5347,7 @@ class InstagramCommentsScraplingFetcher:
         shortcode: str,
         post_url: str,
     ) -> list[InstagramComment]:
+        self._before_source("rendered_comments")
         click_limit = _resolve_positive_int_env(
             "SOCIAL_INSTAGRAM_COMMENTS_HIDDEN_CLICK_LIMIT",
             _HIDDEN_COMMENTS_CLICK_LIMIT_DEFAULT,
@@ -5445,6 +5462,7 @@ class InstagramCommentsScraplingFetcher:
         target_count: int | None,
         max_comments: int,
     ) -> tuple[list[InstagramComment], dict[str, Any]]:
+        self._before_source("rendered_comments")
         click_limit = _resolve_positive_int_env(
             "SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_RENDERED_CLICK_LIMIT",
             _SINGLE_SESSION_RENDERED_CLICK_LIMIT_DEFAULT,
@@ -5978,6 +5996,7 @@ class InstagramCommentsScraplingFetcher:
             if not isinstance(payload, Mapping):
                 attempt["reason"] = "graphql_preview_unexpected_payload"
                 continue
+            self._observe_source_payload("graphql_preview", payload)
             comments, metadata = _extract_graphql_preview_comments(
                 payload,
                 shortcode=normalized_shortcode,
@@ -6093,11 +6112,13 @@ class InstagramCommentsScraplingFetcher:
                 return [], {"reason": "graphql_relay_deadline_exceeded", **attempt_metadata}
             self._request_count += 1
             try:
+                self._before_source("relay_bootstrap")
                 page_response = await client.get(post_url, headers=dict(page_headers))
             except TRANSPORT_EXC_TYPES as exc:
                 reason = _transport_failure_reason(exc)
                 self._record_retry_reason(reason)
                 return [], {"reason": reason, **attempt_metadata}
+            self._observe_source_failure(page_response)
             self._sync_response_cookies(page_response)
 
             status_code = _status_code(page_response)
@@ -6291,6 +6312,7 @@ class InstagramCommentsScraplingFetcher:
                         variables["after"] = cursor
                     self._request_count += 1
                     try:
+                        self._before_source("graphql_comments")
                         response = await client.post(
                             _POST_ACTION_GRAPHQL_URL,
                             data={
@@ -6307,6 +6329,7 @@ class InstagramCommentsScraplingFetcher:
                         attempt["reason"] = reason
                         break
 
+                    self._observe_source_failure(response)
                     status_code = _status_code(response)
                     if status_code >= 400 or 300 <= status_code < 400:
                         attempt["http_status"] = status_code
@@ -6344,6 +6367,7 @@ class InstagramCommentsScraplingFetcher:
                         attempt["error"] = payload.get("error") or payload.get("errors")
                         break
 
+                    self._observe_source_payload("graphql_comments", payload)
                     page_comments, page_metadata = _extract_graphql_connection_comments(
                         payload,
                         shortcode=normalized_shortcode,
@@ -6712,6 +6736,7 @@ class InstagramCommentsScraplingFetcher:
 
                     self._request_count += 1
                     try:
+                        self._before_source("graphql_replies")
                         response = await public_client.post(
                             _POST_ACTION_GRAPHQL_URL,
                             data={
@@ -6732,6 +6757,7 @@ class InstagramCommentsScraplingFetcher:
                         stop_reason = reason
                         break
 
+                    self._observe_source_failure(response)
                     status_code = _status_code(response)
                     if status_code >= 400 or 300 <= status_code < 400:
                         if await _retry_child_relay_soft_failure("graphql_child_relay_http_error", response):
@@ -6769,6 +6795,7 @@ class InstagramCommentsScraplingFetcher:
                         stop_reason = str(metadata.get("reason") or "graphql_child_relay_error_payload")
                         break
 
+                    self._observe_source_payload("graphql_replies", {**payload, "parent_comment_id": parent_comment_id})
                     page_comments, page_metadata = _extract_graphql_child_connection_comments(
                         payload,
                         shortcode=shortcode,
@@ -6849,6 +6876,7 @@ class InstagramCommentsScraplingFetcher:
         target_metadata: Mapping[str, Any] | None = None,
         source_snapshot_type: str = "rendered_coauthor_comments",
     ) -> list[InstagramComment]:
+        self._before_source("rendered_comments")
         click_limit = _resolve_positive_int_env(
             "SOCIAL_INSTAGRAM_COMMENTS_COAUTHOR_STATUS_ONLY_CLICK_LIMIT",
             _COAUTHOR_STATUS_ONLY_CLICK_LIMIT_DEFAULT,
@@ -7739,6 +7767,7 @@ class InstagramCommentsScraplingFetcher:
                 await self._rebuild_http_client_unlocked()
             if not await self._pace_api_requests(deadline=deadline):
                 raise _PaginationDeadlineExceededError
+            self._before_source("comments_api")
             self._request_count += 1
             normalized_method = str(method or "").strip().upper()
             if normalized_method == "GET":
@@ -7747,6 +7776,7 @@ class InstagramCommentsScraplingFetcher:
                 response = await self._http_client.post(url, **request_kwargs)  # type: ignore[union-attr]
             else:  # pragma: no cover - guarded by static call sites.
                 raise ValueError(f"Unsupported shared http client method: {method!r}")
+            self._observe_source_failure(response)
             self._sync_response_cookies(response)
             self._record_response_bytes(response)
             return response
@@ -7765,6 +7795,7 @@ class InstagramCommentsScraplingFetcher:
         Strips API-specific headers (x-ig-app-id, x-requested-with, sec-fetch-*)
         that don't belong on document navigation.
         """
+        self._before_source("browser_warmup")
         self._request_count += 1
         all_headers = self._parser.get_headers(referer)
         nav_headers = self._strip_accept_encoding_header(
@@ -7784,6 +7815,7 @@ class InstagramCommentsScraplingFetcher:
             retry_delay=1.0,
             **instagram_scrapling_network_kwargs(policy=self._network_policy),
         )
+        self._observe_source_failure(response)
         self._record_response_bytes(response)
         return response
 
@@ -7933,6 +7965,7 @@ class InstagramCommentsScraplingFetcher:
         headers: Mapping[str, Any],
         deadline: float | None = None,
     ) -> httpx.Response:
+        self._before_source("browser_api_evaluate")
         remaining = _deadline_remaining_seconds(deadline)
         if remaining is not None and remaining <= 0:
             raise _PaginationDeadlineExceededError
@@ -7999,10 +8032,12 @@ class InstagramCommentsScraplingFetcher:
         self._record_response_bytes(container_response)
         self._sync_response_cookies(container_response)
         result_payload = self._extract_browser_evaluated_fetch_payload(container_response)
-        return self._browser_evaluated_fetch_response(
+        response = self._browser_evaluated_fetch_response(
             result_payload=result_payload,
             request_url=request_url,
         )
+        self._observe_source_failure(response)
+        return response
 
     async def _fetch_api_with_browser(
         self,
@@ -8020,6 +8055,7 @@ class InstagramCommentsScraplingFetcher:
         transport/browser-context signals. This fallback keeps the same cookie
         jar and proxy plane but asks Patchright/Scrapling to make the request.
         """
+        self._before_source("browser_api")
         clean_params = {key: value for key, value in (params or {}).items() if value is not None}
         request_url = url
         if clean_params:
@@ -8062,6 +8098,7 @@ class InstagramCommentsScraplingFetcher:
                 headers=self._browser_fetch_headers(headers),
                 deadline=deadline,
             )
+        self._observe_source_failure(response)
         self._sync_response_cookies(response)
         await self._rebuild_http_client()
         return response
@@ -8263,6 +8300,55 @@ class InstagramCommentsScraplingFetcher:
         self._record_lane_diagnostic("transport_failure", reason=reason, metadata=compact)
         return compact
 
+    def _observe_source_failure(self, response: Any) -> None:
+        """Optional safe rejection boundary, before legacy retries or fallback.
+
+        Pass only fixed classification and numeric Retry-After, never response
+        content, headers, URLs, or credentials. Default callers are unchanged.
+        """
+        observer = getattr(self, "_source_failure_observer", None)
+        if observer is None:
+            return
+        status = _status_code(response)
+        location = _safe_location(response) if 300 <= status < 400 else ""
+        response_path = urlparse(str(getattr(response, "url", "") or "")).path
+        auth_failed = status in {401, 403} or any(
+            token in location or response_path.startswith(token)
+            for token in ("/accounts/login", "/challenge", "/checkpoint")
+        )
+        text = _response_text(response)
+        if not auth_failed and text.lstrip().startswith("{"):
+            try:
+                payload = json.loads(text)
+            except (ValueError, TypeError):
+                payload = None
+            if isinstance(payload, dict) and payload.get("status") == "fail":
+                message = " ".join(str(payload.get(key) or "") for key in ("message", "error_type"))
+                auth_failed = _auth_failure_text(message) or "unauthorized" in message.lower()
+        if status == 429:
+            retry_after = self._retry_after_seconds(response)
+            if retry_after is not None and not math.isfinite(retry_after):
+                retry_after = None
+            observer("rate_limited", retry_after)
+        elif auth_failed:
+            observer("source_auth_failed", None)
+
+    def _before_source(self, kind: str) -> None:
+        callback = getattr(self, "_before_source_request", None)
+        if callback is not None:
+            callback(kind)
+
+    def _observe_source_payload(self, kind: str, payload: Mapping[str, Any]) -> None:
+        """Optional raw content boundary, before parsing; no headers or cookies.
+
+        The ingestion adapter sanitizes and retains this payload. Exceptions
+        propagate so a failed evidence write cannot silently yield canonical data.
+        Existing callers leave the observer unset and retain their old behavior.
+        """
+        observer = getattr(self, "_source_payload_observer", None)
+        if observer is not None:
+            observer(kind, payload)
+
     def _decode_json_response_result(
         self,
         response: Any,
@@ -8413,6 +8499,12 @@ class InstagramCommentsScraplingFetcher:
                     "diagnostic_metadata": diagnostic_metadata,
                 }
 
+        if isinstance(payload, Mapping):
+            observed_payload = payload
+            parts = urlparse(str(request_url or "")).path.strip("/").split("/")
+            if len(parts) >= 3 and parts[-1] == "child_comments" and parts[-3] == "comments":
+                observed_payload = dict(payload, parent_comment_id=parts[-2])
+            self._observe_source_payload("comments_api", observed_payload)
         return {
             "failed": False,
             "auth_failed": auth_failed,

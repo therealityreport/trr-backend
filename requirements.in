@@ -20,6 +20,8 @@ firebase-admin>=6.5.0
 
 # Postgres/core schema helpers (used by sync + schema docs)
 psycopg2-binary>=2.9.9
+dbos==3.3.0
+psycopg[binary]==3.3.6
 PyJWT>=2.15.0,<3
 
 # Media mirroring

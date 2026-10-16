@@ -20,10 +20,12 @@ import fcntl
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import tempfile
 import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, cast
 from urllib.parse import urlparse
@@ -853,7 +855,15 @@ class InstagramPostsScraplingFetcher:
         allow_requests_recovery: bool = True,
         identity_provider: Any | None = None,
         auth_state: str | None = None,
+        before_source_request: Callable[[str], None] | None = None,
+        source_payload_observer: Callable[[str, Mapping[str, Any]], None] | None = None,
+        source_failure_observer: Callable[[str, float | None], None] | None = None,
+        consume_credentials_only: bool = False,
     ) -> None:
+        self._before_source_request = before_source_request
+        self._source_payload_observer = source_payload_observer
+        self._source_failure_observer = source_failure_observer
+        self._consume_credentials_only = consume_credentials_only
         self._auth_state = _normalize_auth_state(auth_state)
         self._anonymous_mode = self._auth_state in {"anonymous", "public"}
         self._cookies = [] if self._anonymous_mode else list(cookies or [])
@@ -1117,6 +1127,9 @@ class InstagramPostsScraplingFetcher:
             )
         terminal_redirect = path_class in {"login", "checkpoint", "home"}
         if status_code in {401, 403} or _auth_failure_text(text) or terminal_redirect:
+            observer = getattr(self, "_source_failure_observer", None)
+            if observer is not None:
+                observer("source_auth_failed", None)
             self._record_warmup_failure(
                 error_code="instagram_posts_warmup_auth_failed",
                 origin_class=origin_class,
@@ -1284,6 +1297,11 @@ class InstagramPostsScraplingFetcher:
         )
 
     def _activate_requests_fallback(self, reason: str) -> bool:
+        # The legacy fallback can substitute ambient credentials and has sends
+        # outside the explicit source hooks. Durable activities use the observed
+        # browser/httpx path until a fully observed fallback is supplied.
+        if getattr(self, "_consume_credentials_only", False):
+            return False
         if not _requests_fallback_enabled():
             return False
         if not str(self._raw_cookies.get("sessionid") or "").strip():
@@ -1794,6 +1812,8 @@ class InstagramPostsScraplingFetcher:
         no-op for the cookies but still swaps the proxy and rebuilds the client,
         and returns False so the caller knows no real identity advance happened.
         """
+        if getattr(self, "_consume_credentials_only", False):
+            return False
         rotated_identity = False
         if self._identity_provider is not None:
             try:
@@ -1844,6 +1864,39 @@ class InstagramPostsScraplingFetcher:
     # Transport: browser (warmup only)
     # -------------------------------------------------------------------
 
+    def _observe_source_failure(self, response: Any) -> None:
+        """Optional safe rejection boundary, before legacy retries or fallback.
+
+        Pass only fixed classification and numeric Retry-After, never response
+        content, headers, URLs, or credentials. Default callers are unchanged.
+        """
+        observer = getattr(self, "_source_failure_observer", None)
+        if observer is None:
+            return
+        status = _status_code(response)
+        location = _safe_location(response) if 300 <= status < 400 else ""
+        response_path = urlparse(str(getattr(response, "url", "") or "")).path
+        auth_failed = status in {401, 403} or any(
+            token in location or response_path.startswith(token)
+            for token in ("/accounts/login", "/challenge", "/checkpoint")
+        )
+        text = _response_text(response)
+        if not auth_failed and text.lstrip().startswith("{"):
+            try:
+                payload = json.loads(text)
+            except (ValueError, TypeError):
+                payload = None
+            if isinstance(payload, dict) and payload.get("status") == "fail":
+                message = " ".join(str(payload.get(key) or "") for key in ("message", "error_type"))
+                auth_failed = _auth_failure_text(message) or "unauthorized" in message.lower()
+        if status == 429:
+            retry_after = self._retry_after_seconds(response)
+            if retry_after is not None and not math.isfinite(retry_after):
+                retry_after = None
+            observer("rate_limited", retry_after)
+        elif auth_failed:
+            observer("source_auth_failed", None)
+
     async def _fetch_page(
         self,
         url: str,
@@ -1854,6 +1907,9 @@ class InstagramPostsScraplingFetcher:
         Emits a document request with stripped-down nav headers so that the
         profile HTML comes back with the runtime tokens intact.
         """
+        observer = getattr(self, "_before_source_request", None)
+        if observer is not None:
+            observer("browser_warmup")
         self._request_count += 1
         fetch_kwargs = {
             **self._scrapling_fetcher_options.kwargs,
@@ -1872,6 +1928,7 @@ class InstagramPostsScraplingFetcher:
             url,
             **fetch_kwargs,
         )
+        self._observe_source_failure(response)
         self._record_response_bytes(response)
         return response
 
@@ -1890,8 +1947,12 @@ class InstagramPostsScraplingFetcher:
         if self._http_client is None:
             await self._rebuild_http_client()
         await self._pace_api_requests()
+        observer = getattr(self, "_before_source_request", None)
+        if observer is not None:
+            observer("graphql")
         self._request_count += 1
         response = await self._http_client.post(url, data=data, headers=headers)  # type: ignore[union-attr]
+        self._observe_source_failure(response)
         self._record_proxy_response(response)
         self._sync_response_cookies(response)
         return response
@@ -2174,6 +2235,10 @@ class InstagramPostsScraplingFetcher:
                         "retryable": False,
                         "payload": None,
                     }
+
+            observer = getattr(self, "_source_payload_observer", None)
+            if observer is not None and isinstance(payload, dict):
+                observer("listing", payload)
 
             # Check IG API-level status.
             if isinstance(payload, dict):

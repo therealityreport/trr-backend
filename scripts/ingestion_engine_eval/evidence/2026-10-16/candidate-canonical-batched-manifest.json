@@ -1,0 +1,15 @@
+{
+  "source": "scripts/ingestion_engine_eval/legacy_resource_baseline.py",
+  "source_sha256": "2e81066aaac83f079d03ec27b7999380958aeb58bef31365d56034525e14e035",
+  "canonical_source_sha256": "3dc4d313424316be7c234411741070d4a58e9f88c11755e1750a860140cb66b9",
+  "retained_legacy_calls": 603,
+  "candidate_calls_each_of_three_trials": 633,
+  "call_delta_percent": 4.975124378109452,
+  "checked_parity": "PASS after comparing both sides with JSON timestamps",
+  "full_pipeline_resource_gate": "UNVERIFIED; narrow sink only",
+  "legacy_not_rerun": true,
+  "earlier_evidence_unchanged": true,
+  "cleanup": {
+    "postgres_stopped": true
+  }
+}

@@ -1,0 +1,43 @@
+[
+  {
+    "engine": "dbos",
+    "case": "partial_cancel_preserves_outcomes_and_attempts",
+    "status": "PASS",
+    "evidence": {
+      "mode": "native_resume",
+      "targets": 3,
+      "dispatches": 3,
+      "receipts": 3,
+      "attempts": 5
+    },
+    "postgres_statement_calls": 928,
+    "sampled_peak_postgres_sessions": 11,
+    "seconds": 9.085
+  },
+  {
+    "engine": "temporal",
+    "case": "partial_cancel_preserves_outcomes_and_attempts",
+    "status": "PASS",
+    "evidence": {
+      "mode": "history_reset_new_run",
+      "targets": 3,
+      "dispatches": 3,
+      "receipts": 3,
+      "attempts": 5
+    },
+    "postgres_statement_calls": 169,
+    "sampled_peak_postgres_sessions": 1,
+    "seconds": 6.28
+  },
+  {
+    "engine": "temporal",
+    "case": "server_restart_history",
+    "status": "PASS",
+    "evidence": {
+      "exit": 0
+    },
+    "postgres_statement_calls": 2,
+    "sampled_peak_postgres_sessions": 0,
+    "seconds": 5.236
+  }
+]

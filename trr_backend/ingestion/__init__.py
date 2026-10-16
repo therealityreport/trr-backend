@@ -1,15 +1,4 @@
-"""
-Ingestion helpers for importing data into TRR.
-"""
-
-from trr_backend.ingestion.shows_from_lists import (
-    CandidateShow,
-    ImdbListItem,
-    TmdbListItem,
-    merge_candidate_shows,
-    merge_candidates,
-    parse_imdb_list_url,
-)
+"""Ingestion helpers, with legacy show-import exports loaded on demand."""
 
 __all__ = [
     "CandidateShow",
@@ -19,3 +8,11 @@ __all__ = [
     "merge_candidate_shows",
     "parse_imdb_list_url",
 ]
+
+
+def __getattr__(name):
+    if name not in __all__:
+        raise AttributeError(name)
+    from trr_backend.ingestion import shows_from_lists
+
+    return getattr(shows_from_lists, name)

@@ -474,6 +474,9 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting up TRR Backend API...")
     _validate_startup_config()
+    from trr_backend.ingestion.composition import build_api
+
+    app.state.instagram_ingestion = build_api()
     await asyncio.to_thread(_prewarm_database_pool)
     preview_read_only = _preview_read_only_enabled()
     if preview_read_only:
@@ -682,6 +685,7 @@ from api.routers.v2 import core_show_reads as core_show_reads_v2  # noqa: E402
 from api.routers.v2 import covered_shows as covered_shows_v2  # noqa: E402
 from api.routers.v2 import external_ids as external_ids_v2  # noqa: E402
 from api.routers.v2 import identities as identities_v2  # noqa: E402
+from api.routers.v2 import instagram_ingestion as instagram_ingestion_v2  # noqa: E402
 from api.routers.v2 import networks_streaming as networks_streaming_v2  # noqa: E402
 from api.routers.v2 import person_media as person_media_v2  # noqa: E402
 from api.routers.v2 import recent_people as recent_people_v2  # noqa: E402
@@ -740,6 +744,7 @@ app.include_router(admin_people_reads_v2.router, prefix="/api/v2")
 app.include_router(admin_flashback_v2.router, prefix="/api/v2")
 app.include_router(admin_reddit_reads_v2.router, prefix="/api/v2")
 app.include_router(admin_social_catalog_runs_v2.router, prefix="/api/v2")
+app.include_router(instagram_ingestion_v2.router, prefix="/api/v2")
 app.include_router(admin_social_shared_sources_v2.router, prefix="/api/v2")
 app.include_router(admin_show_person_writes_v2.router, prefix="/api/v2")
 app.include_router(admin_typography_v2.router, prefix="/api/v2")

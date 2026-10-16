@@ -1,0 +1,66 @@
+[
+  {
+    "engine": "dbos",
+    "case": "cancel_resume",
+    "status": "PASS",
+    "evidence": {
+      "mode": "native_resume",
+      "terminal_engine_status_before_resume": "CANCELLED",
+      "targets": 3,
+      "dispatches": 3,
+      "receipts": 3,
+      "attempts": 3
+    },
+    "postgres_statement_calls": 959,
+    "sampled_peak_postgres_sessions": 11,
+    "seconds": 8.568
+  },
+  {
+    "engine": "dbos",
+    "case": "partial_cancel_preserves_outcomes_and_attempts",
+    "status": "PASS",
+    "evidence": {
+      "mode": "native_resume",
+      "terminal_engine_status_before_resume": "CANCELLED",
+      "targets": 3,
+      "dispatches": 3,
+      "receipts": 3,
+      "attempts": 5
+    },
+    "postgres_statement_calls": 585,
+    "sampled_peak_postgres_sessions": 12,
+    "seconds": 8.603
+  },
+  {
+    "engine": "temporal",
+    "case": "cancel_resume",
+    "status": "PASS",
+    "evidence": {
+      "mode": "history_reset_new_run",
+      "terminal_engine_status_before_resume": "CANCELED",
+      "targets": 3,
+      "dispatches": 3,
+      "receipts": 3,
+      "attempts": 3
+    },
+    "postgres_statement_calls": 104,
+    "sampled_peak_postgres_sessions": 1,
+    "seconds": 5.211
+  },
+  {
+    "engine": "temporal",
+    "case": "partial_cancel_preserves_outcomes_and_attempts",
+    "status": "PASS",
+    "evidence": {
+      "mode": "history_reset_new_run",
+      "terminal_engine_status_before_resume": "CANCELED",
+      "targets": 3,
+      "dispatches": 3,
+      "receipts": 3,
+      "attempts": 5
+    },
+    "postgres_statement_calls": 130,
+    "sampled_peak_postgres_sessions": 1,
+    "seconds": 5.398
+  }
+]

@@ -228,6 +228,26 @@ def get_instagram_db_session_capacity(
                 conn=conn,
                 pool_name="social_control",
             )
+            if os.getenv("TRR_INSTAGRAM_INGESTION_SCHEMA_READY", "").strip().lower() in {"1", "true", "yes", "on"}:
+                # The singleton new coordinator and legacy dispatchers share the
+                # existing physical functions. Count reservations, including an
+                # ambiguous send whose acknowledgement is still unresolved.
+                leases = pg.fetch_all(
+                    """select distinct owner_token::text as owner_token from (
+                      select owner_token from social.instagram_ingestion_targets
+                      where stage in ('listing','post_details','comments')
+                        and outcome='unresolved' and owner_token is not null
+                        and (owner_expires_at is null or owner_expires_at>clock_timestamp())
+                      union
+                      select d.owner_token from social.instagram_ingestion_dispatches d
+                      join social.instagram_ingestion_targets t using(run_id,stage,target_key)
+                      where d.stage in ('listing','post_details','comments')
+                        and d.state='sending' and t.outcome='unresolved'
+                    ) occupied""",
+                    conn=conn,
+                    pool_name="social_control",
+                )
+                active_db_job_ids.extend("ingestion:" + str(row["owner_token"]) for row in leases)
             inspections: dict[str, dict[str, Any]] = {}
             for row in rows:
                 call_id = str(row.get("remote_invocation_id") or "").strip()

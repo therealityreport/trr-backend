@@ -1,0 +1,2882 @@
+[
+  {
+    "shortcode": "Bench0000",
+    "pk": "100001",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  {
+    "shortcode": "Bench0001",
+    "pk": "100002",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  {
+    "shortcode": "Bench0002",
+    "pk": "100003",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  {
+    "shortcode": "Bench0003",
+    "pk": "100004",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  {
+    "shortcode": "Bench0004",
+    "pk": "100005",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  {
+    "shortcode": "Bench0005",
+    "pk": "100006",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  {
+    "shortcode": "Bench0006",
+    "pk": "100007",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  {
+    "shortcode": "Bench0007",
+    "pk": "100008",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  {
+    "shortcode": "Bench0008",
+    "pk": "100009",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  {
+    "shortcode": "Bench0009",
+    "pk": "100010",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  {
+    "shortcode": "Bench0010",
+    "pk": "100011",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  {
+    "shortcode": "Bench0011",
+    "pk": "100012",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  {
+    "shortcode": "Bench0012",
+    "pk": "100013",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  {
+    "shortcode": "Bench0013",
+    "pk": "100014",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  {
+    "shortcode": "Bench0014",
+    "pk": "100015",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  {
+    "shortcode": "Bench0015",
+    "pk": "100016",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  {
+    "shortcode": "Bench0016",
+    "pk": "100017",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  {
+    "shortcode": "Bench0017",
+    "pk": "100018",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  {
+    "shortcode": "Bench0018",
+    "pk": "100019",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  {
+    "shortcode": "Bench0019",
+    "pk": "100020",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  {
+    "shortcode": "Bench0020",
+    "pk": "100021",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  {
+    "shortcode": "Bench0021",
+    "pk": "100022",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  {
+    "shortcode": "Bench0022",
+    "pk": "100023",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  {
+    "shortcode": "Bench0023",
+    "pk": "100024",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  {
+    "shortcode": "Bench0024",
+    "pk": "100025",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  {
+    "shortcode": "Bench0025",
+    "pk": "100026",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  {
+    "shortcode": "Bench0026",
+    "pk": "100027",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  {
+    "shortcode": "Bench0027",
+    "pk": "100028",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  {
+    "shortcode": "Bench0028",
+    "pk": "100029",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  {
+    "shortcode": "Bench0029",
+    "pk": "100030",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  }
+]

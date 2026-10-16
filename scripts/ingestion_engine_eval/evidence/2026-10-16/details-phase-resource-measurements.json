@@ -1,0 +1,164 @@
+[
+  {
+    "path": "legacy",
+    "repetition": 0,
+    "seconds": 1.8085816249949858,
+    "statement_calls": 1302,
+    "canonical_post_summary": [
+      12,
+      144,
+      48
+    ],
+    "committed_targets": 12,
+    "source_requests": 12,
+    "peak_checked_out_sessions": 2,
+    "sampled_peak_worker_sessions": 2,
+    "connections_opened": 339,
+    "python_execute_categories": {
+      "legacy_target__one": 66,
+      "legacy__raise_if_shared_account_stage_cancelled": 226,
+      "legacy_canonical_or_execution": 129,
+      "shared_request_gate": 60,
+      "legacy__touch_job_heartbeat": 25,
+      "legacy_target_checkpoint_many": 2
+    }
+  },
+  {
+    "path": "candidate",
+    "repetition": 0,
+    "seconds": 1.6159336670243647,
+    "statement_calls": 1341,
+    "canonical_post_summary": [
+      12,
+      144,
+      48
+    ],
+    "committed_targets": 12,
+    "source_requests": 12,
+    "peak_checked_out_sessions": 2,
+    "sampled_peak_worker_sessions": 2,
+    "connections_opened": 219,
+    "python_execute_categories": {
+      "candidate__row": 510,
+      "scheduler_decision": 13,
+      "scheduler__bind_decision": 12,
+      "scheduler_transition": 24,
+      "candidate_acquire": 12,
+      "shared_request_gate": 60,
+      "candidate_check_owner": 12,
+      "evidence_transaction": 12,
+      "canonical": 216,
+      "receipt_transaction": 24,
+      "scheduler_complete_partition": 3,
+      "other": 2
+    }
+  },
+  {
+    "path": "candidate",
+    "repetition": 1,
+    "seconds": 1.455835875007324,
+    "statement_calls": 1341,
+    "canonical_post_summary": [
+      12,
+      144,
+      48
+    ],
+    "committed_targets": 12,
+    "source_requests": 12,
+    "peak_checked_out_sessions": 2,
+    "sampled_peak_worker_sessions": 2,
+    "connections_opened": 219,
+    "python_execute_categories": {
+      "candidate__row": 510,
+      "scheduler_decision": 13,
+      "scheduler__bind_decision": 12,
+      "scheduler_transition": 24,
+      "candidate_acquire": 12,
+      "shared_request_gate": 60,
+      "candidate_check_owner": 12,
+      "evidence_transaction": 12,
+      "canonical": 216,
+      "receipt_transaction": 24,
+      "scheduler_complete_partition": 3,
+      "other": 2
+    }
+  },
+  {
+    "path": "legacy",
+    "repetition": 1,
+    "seconds": 1.7182090830174275,
+    "statement_calls": 1187,
+    "canonical_post_summary": [
+      12,
+      144,
+      48
+    ],
+    "committed_targets": 12,
+    "source_requests": 12,
+    "peak_checked_out_sessions": 2,
+    "sampled_peak_worker_sessions": 2,
+    "connections_opened": 339,
+    "python_execute_categories": {
+      "legacy_target__one": 66,
+      "legacy__raise_if_shared_account_stage_cancelled": 226,
+      "legacy_canonical_or_execution": 72,
+      "shared_request_gate": 60,
+      "legacy__touch_job_heartbeat": 24,
+      "legacy_target_checkpoint_many": 2
+    }
+  },
+  {
+    "path": "legacy",
+    "repetition": 2,
+    "seconds": 1.6346249580092262,
+    "statement_calls": 1187,
+    "canonical_post_summary": [
+      12,
+      144,
+      48
+    ],
+    "committed_targets": 12,
+    "source_requests": 12,
+    "peak_checked_out_sessions": 2,
+    "sampled_peak_worker_sessions": 2,
+    "connections_opened": 339,
+    "python_execute_categories": {
+      "legacy_target__one": 66,
+      "legacy__raise_if_shared_account_stage_cancelled": 226,
+      "legacy_canonical_or_execution": 72,
+      "shared_request_gate": 60,
+      "legacy__touch_job_heartbeat": 24,
+      "legacy_target_checkpoint_many": 2
+    }
+  },
+  {
+    "path": "candidate",
+    "repetition": 2,
+    "seconds": 1.380866291001439,
+    "statement_calls": 1341,
+    "canonical_post_summary": [
+      12,
+      144,
+      48
+    ],
+    "committed_targets": 12,
+    "source_requests": 12,
+    "peak_checked_out_sessions": 2,
+    "sampled_peak_worker_sessions": 2,
+    "connections_opened": 219,
+    "python_execute_categories": {
+      "candidate__row": 510,
+      "scheduler_decision": 13,
+      "scheduler__bind_decision": 12,
+      "scheduler_transition": 24,
+      "candidate_acquire": 12,
+      "shared_request_gate": 60,
+      "candidate_check_owner": 12,
+      "evidence_transaction": 12,
+      "canonical": 216,
+      "receipt_transaction": 24,
+      "scheduler_complete_partition": 3,
+      "other": 2
+    }
+  }
+]

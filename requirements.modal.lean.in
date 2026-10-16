@@ -15,6 +15,8 @@ tenacity>=8.2.0
 google-genai>=1.0.0
 firebase-admin>=6.5.0
 psycopg2-binary>=2.9.9
+dbos==3.3.0
+psycopg[binary]==3.3.6
 PyJWT>=2.15.0,<3
 boto3>=1.35.0
 Pillow>=12.3.0

@@ -1,0 +1,332 @@
+"""Private PostgreSQL policy tests; no credentials, browser or source network."""
+
+import hashlib
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from uuid import uuid4
+
+import pytest
+from psycopg2.extras import RealDictCursor
+
+from tests.ingestion.test_persistence import database as database_fixture
+from trr_backend.ingestion.domain import LostOwnership
+from trr_backend.ingestion.identity_policy import IdentityDeferred, SourceRequestGate
+
+database = database_fixture
+
+
+@pytest.fixture(scope="module")
+def lanes(database):
+    _, transaction = database
+    with transaction() as conn, conn.cursor() as cur:
+        cur.execute(
+            (
+                Path(__file__).parents[2] / "supabase/migrations/20260911121000_instagram_detail_request_lanes.sql"
+            ).read_text()
+        )
+    return transaction
+
+
+def gate(transaction, *, subject=None, session="synthetic-session", **kwargs):
+    return SourceRequestGate(
+        cookies={"ds_user_id": subject or uuid4().hex, "sessionid": session},
+        transaction=transaction,
+        check_cancelled=kwargs.pop("check_cancelled", lambda: None),
+        deadline=kwargs.pop("deadline", time.monotonic() + 300),
+        **kwargs,
+    )
+
+
+def row(transaction, lane):
+    with transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("select * from social.instagram_detail_request_lanes where identity_key=%s", (lane.identity_key,))
+        return dict(cur.fetchone() or {})
+
+
+def change(transaction, lane, statement, *values):
+    with transaction() as conn, conn.cursor() as cur:
+        cur.execute(
+            "update social.instagram_detail_request_lanes set " + statement + " where identity_key=%s",
+            (*values, lane.identity_key),
+        )
+
+
+def cooled_gate(transaction, *, subject=None):
+    lane = gate(transaction, subject=subject)
+    lane.before_request()
+    change(transaction, lane, "cooldown_until=clock_timestamp()-interval '1 second'")
+    return lane
+
+
+def test_hashing_matches_maintained_identity_and_never_retains_cookie_values(lanes):
+    lane = gate(lanes, subject="synthetic-user-id", session="synthetic-private-session")
+    assert lane.identity_key == hashlib.sha256(b"synthetic-user-id").hexdigest()
+    assert lane.credential_fingerprint == hashlib.sha256(b"synthetic-private-session").hexdigest()
+    assert "synthetic-private-session" not in repr(lane)
+    assert "synthetic-user-id" not in repr(vars(lane))
+    fallback = SourceRequestGate(
+        cookies={"sessionid": "synthetic-private-session"},
+        transaction=lanes,
+        check_cancelled=lambda: None,
+        deadline=time.monotonic() + 30,
+    )
+    assert fallback.identity_key == lane.credential_fingerprint
+
+
+@pytest.mark.parametrize("cancel_at", [1, 2, 3])
+def test_cancel_before_reservation_and_inside_transaction_never_counts(lanes, cancel_at):
+    count = 0
+
+    def cancelled():
+        nonlocal count
+        count += 1
+        if count >= cancel_at:
+            raise LostOwnership("fixture cancellation")
+
+    lane = gate(lanes, check_cancelled=cancelled)
+    with pytest.raises(LostOwnership):
+        lane.before_request()
+    assert row(lanes, lane) == {}
+    assert lane.request_count == 0
+
+
+def test_shared_window_allows_exactly_180_and_prunes_expired_times(lanes):
+    lane = gate(lanes)
+    lane.before_request()
+    now = datetime.now(UTC)
+    change(lanes, lane, "request_times=%s", [now] * 179)
+    lane.before_request()
+    competing = gate(lanes, subject="unused")
+    competing.identity_key = lane.identity_key
+    with pytest.raises(IdentityDeferred) as deferred:
+        competing.before_request()
+    assert deferred.value.failure.code == "identity_budget"
+    assert len(row(lanes, lane)["request_times"]) == 180
+    change(lanes, lane, "request_times=%s", [now - timedelta(seconds=661)] * 180)
+    lane.before_request()
+    assert len(row(lanes, lane)["request_times"]) == 1
+
+
+def test_simultaneous_reservations_share_one_atomic_rate_budget(lanes):
+    subject = uuid4().hex
+    first = gate(lanes, subject=subject)
+    first.before_request()
+    change(lanes, first, "request_times=%s", [datetime.now(UTC)] * 179)
+    gates = [gate(lanes, subject=subject) for _ in range(8)]
+
+    def reserve(lane):
+        try:
+            lane.before_request()
+            return "admitted"
+        except IdentityDeferred as error:
+            return error.error_code
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        outcomes = list(executor.map(reserve, gates))
+    assert outcomes.count("admitted") == 1
+    assert outcomes.count("identity_budget") == 7
+    assert len(row(lanes, first)["request_times"]) == 180
+
+
+def test_concurrent_ordinary_failures_keep_maintained_three_failure_circuit(lanes):
+    subject = uuid4().hex
+    gates = [gate(lanes, subject=subject) for _ in range(3)]
+    for lane in gates:
+        lane.before_request()
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        failures = list(executor.map(lambda lane: lane.finish_failure("network_error"), gates))
+    state = row(lanes, gates[0])
+    assert state["failure_generation"] == state["consecutive_failures"] == 3
+    assert state["cooldown_until"] is not None
+    assert any(failure.retry_at is not None for failure in failures)
+
+
+def test_auth_block_is_fingerprint_bound_and_explicit_replacement_gets_one_probe(lanes):
+    subject = uuid4().hex
+    old = gate(lanes, subject=subject, session="old-session")
+    old.before_request()
+    failure = old.finish_failure("unauthorized")
+    assert failure.identity_blocked
+    unchanged = gate(lanes, subject=subject, session="old-session")
+    with pytest.raises(IdentityDeferred) as deferred:
+        unchanged.before_request()
+    assert deferred.value.failure.identity_blocked
+    replacement = gate(lanes, subject=subject, session="new-session")
+    permit = replacement.before_request()
+    assert permit.probe_token
+    competitor = gate(lanes, subject=subject, session="new-session")
+    with pytest.raises(IdentityDeferred, match="identity_probe_pending"):
+        competitor.before_request()
+    assert replacement.finish_success(permit)
+    assert not row(lanes, replacement)["blocked"]
+    assert row(lanes, replacement)["blocked_fingerprint"] is None
+
+
+def test_failed_replacement_blocks_new_fingerprint_instead_of_retrying_it(lanes):
+    subject = uuid4().hex
+    old = gate(lanes, subject=subject, session="old-session")
+    old.before_request()
+    old.finish_failure("forbidden")
+    replacement = gate(lanes, subject=subject, session="new-session")
+    replacement.before_request()
+    replacement.finish_failure("unauthorized")
+    assert row(lanes, replacement)["blocked_fingerprint"] == replacement.credential_fingerprint
+    with pytest.raises(IdentityDeferred) as blocked:
+        gate(lanes, subject=subject, session="new-session").before_request()
+    assert blocked.value.failure.identity_blocked
+
+
+def test_owned_probe_allows_multiple_requests_until_explicit_target_finish(lanes):
+    subject = uuid4().hex
+    lane = cooled_gate(lanes, subject=subject)
+    first = lane.before_request()
+    assert first.probe_token
+    assert lane.record_success(first)
+    second = lane.before_request()
+    assert second.probe_token == first.probe_token
+    assert lane.record_success(second)
+    with pytest.raises(IdentityDeferred, match="identity_probe_pending"):
+        gate(lanes, subject=subject).before_request()
+    assert lane.finish_success(second)
+    assert row(lanes, lane)["probe_token"] is None
+    assert row(lanes, lane)["cooldown_until"] is None
+    gate(lanes, subject=subject).before_request()
+
+
+def test_cooldown_rejects_before_count_and_rate_limit_retry_after_is_preserved(lanes):
+    subject = uuid4().hex
+    lane = gate(lanes, subject=subject)
+    lane.before_request()
+    start = datetime.now(UTC)
+    failure = lane.finish_failure("rate_limited", retry_after_seconds=120)
+    assert failure.retry_at >= start + timedelta(seconds=120)
+    with pytest.raises(IdentityDeferred) as deferred:
+        gate(lanes, subject=subject).before_request()
+    assert deferred.value.failure.code == "identity_cooldown"
+    assert len(row(lanes, lane)["request_times"]) == 1
+
+
+def test_abandoned_probe_expires_and_old_result_cannot_clear_replacement(lanes):
+    subject = uuid4().hex
+    old = cooled_gate(lanes, subject=subject)
+    old_permit = old.before_request()
+    change(lanes, old, "probe_expires_at=clock_timestamp()-interval '1 second'")
+    replacement = gate(lanes, subject=subject)
+    new_permit = replacement.before_request()
+    assert new_permit.probe_token != old_permit.probe_token
+    assert old.finish_success(old_permit) is False
+    assert row(lanes, old)["probe_token"] == new_permit.probe_token
+    generation = row(lanes, old)["failure_generation"]
+    assert old.record_failure("forbidden", permit=old_permit).code == "identity_gate_already_finished"
+    assert row(lanes, old)["failure_generation"] == generation
+
+
+def test_expired_probe_failure_has_no_authority_over_current_state(lanes):
+    subject = uuid4().hex
+    old = cooled_gate(lanes, subject=subject)
+    old_permit = old.before_request()
+    change(lanes, old, "probe_expires_at=clock_timestamp()-interval '1 second'")
+    replacement = gate(lanes, subject=subject)
+    new_permit = replacement.before_request()
+    failure = old.finish_failure("unauthorized", permit=old_permit)
+    state = row(lanes, old)
+    assert failure.code == "identity_probe_lost"
+    assert not state["blocked"] and state["failure_generation"] == 0
+    assert state["probe_token"] == new_permit.probe_token
+
+
+def test_late_success_does_not_clear_a_newer_failure_generation(lanes):
+    subject = uuid4().hex
+    early, failed = gate(lanes, subject=subject), gate(lanes, subject=subject)
+    permit = early.before_request()
+    failed.before_request()
+    failed.finish_failure("unauthorized")
+    assert early.finish_success(permit) is False
+    state = row(lanes, early)
+    assert state["blocked"] and state["last_error_code"] == "unauthorized"
+    assert state["failure_generation"] == 1
+
+
+def test_duplicate_failure_is_counted_once_and_cleanup_releases_only_owned_probe(lanes):
+    lane = cooled_gate(lanes)
+    permit = lane.before_request()
+    first = lane.record_failure("rate_limited", permit=permit)
+    second = lane.record_failure("rate_limited", permit=permit)
+    assert first == second
+    assert row(lanes, lane)["failure_generation"] == 1
+    assert row(lanes, lane)["probe_token"] == permit.probe_token
+    assert lane.finish_failure() == first
+    assert row(lanes, lane)["probe_token"] is None
+    assert row(lanes, lane)["cooldown_until"] == first.retry_at
+
+
+def test_deadline_and_cancel_checks_precede_each_count(lanes):
+    lane = gate(lanes, deadline=10, monotonic=lambda: 10)
+    with pytest.raises(IdentityDeferred, match="target_deadline"):
+        lane.before_request()
+    assert row(lanes, lane) == {}
+
+
+def test_sql_lock_is_released_before_source_operation_and_unknown_errors_are_safe(lanes):
+    lane = gate(lanes)
+    lane.before_request()
+    with lanes() as conn, conn.cursor() as cur:
+        cur.execute("set local lock_timeout='100ms'")
+        cur.execute(
+            "select identity_key from social.instagram_detail_request_lanes where identity_key=%s for update",
+            (lane.identity_key,),
+        )
+    failure = lane.finish_failure("https://private.example/?sessionid=secret")
+    assert failure.code == "request_failed"
+    assert row(lanes, lane)["last_error_code"] == "request_failed"
+
+
+def test_independent_auth_alias_preserves_legacy_shared_block_vocabulary(lanes):
+    lane = gate(lanes)
+    lane.before_request()
+    failure = lane.finish_failure("source_auth_failed")
+    assert failure.code == "unauthorized" and failure.identity_blocked
+    assert row(lanes, lane)["blocked_fingerprint"] == lane.credential_fingerprint
+
+
+def test_existing_detail_transport_and_gate_share_the_same_fence(lanes, monkeypatch):
+    import requests
+
+    from trr_backend.socials.instagram import detail_transport
+    from trr_backend.socials.instagram.request_client import InstagramRequestFailure
+
+    subject = uuid4().hex
+    cookies = {"ds_user_id": subject, "sessionid": "synthetic-session"}
+
+    class Scraper:
+        session = requests.Session()
+
+        def _request_cookies(self):
+            return cookies
+
+    monkeypatch.setattr(detail_transport.pg, "db_connection", lambda **kwargs: lanes())
+    legacy = detail_transport.DetailTransport(
+        scraper=Scraper(), check_cancelled=lambda: None, on_request=lambda _: None, deadline=time.monotonic() + 300
+    )
+    try:
+        legacy._reserve()
+        shared = gate(lanes, subject=subject)
+        permit = shared.before_request()
+        assert legacy.identity_key == shared.identity_key
+        assert len(row(lanes, shared)["request_times"]) == 2
+        legacy._outcome(InstagramRequestFailure("unauthorized", status_code=401, retryable=False))
+        assert shared.finish_success(permit) is False
+        with pytest.raises(IdentityDeferred) as error:
+            gate(lanes, subject=subject).before_request()
+        assert error.value.failure.identity_blocked
+    finally:
+        legacy.scraper.session.close()
+
+
+def test_huge_retry_after_fails_closed_without_raw_time_overflow(lanes):
+    lane = gate(lanes)
+    lane.before_request()
+    failure = lane.finish_failure("rate_limited", retry_after_seconds=1e300)
+    assert failure.retry_at == datetime.max.replace(tzinfo=UTC)

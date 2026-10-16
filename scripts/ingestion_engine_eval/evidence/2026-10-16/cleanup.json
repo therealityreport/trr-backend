@@ -1,0 +1,25 @@
+{
+  "trr-engine-eval-evidence-6f437318": {
+    "children_stopped": true,
+    "postgres_stopped": true,
+    "temporal_shutdown_called": true
+  },
+  "trr-engine-eval-evidence-utf8-6f437318": {
+    "children_stopped": true,
+    "postgres_stopped": true,
+    "temporal_shutdown_called": true
+  },
+  "trr-engine-eval-large-6f437318": {
+    "children_stopped": true,
+    "postgres_stopped": true,
+    "temporal_shutdown_called": true
+  },
+  "trr-engine-eval-partial-6f437318": {
+    "children_stopped": true,
+    "postgres_stopped": true,
+    "temporal_shutdown_called": true
+  },
+  "trr-engine-eval-native-pinning-6f437318": {
+    "temporal_shutdown_called": true
+  }
+}

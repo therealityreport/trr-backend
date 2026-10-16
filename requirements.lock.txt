@@ -80,6 +80,7 @@ charset-normalizer==3.4.7
 click==8.4.2
     # via
     #   browserforge
+    #   dbos
     #   modal
     #   scrapling
     #   uvicorn
@@ -87,6 +88,8 @@ colorama==0.4.6
     # via crawlee
 crawlee==1.7.3
     # via -r requirements.in
+croniter==6.2.4
+    # via dbos
 cryptography==50.0.2
     # via
     #   -r requirements.in
@@ -100,6 +103,8 @@ curl-cffi==0.15.0
     # via
     #   -r requirements.in
     #   scrapling
+dbos==3.3.0
+    # via -r requirements.in
 defusedxml==0.7.1
     # via cairosvg
 deprecation==2.1.0
@@ -168,6 +173,7 @@ greenlet==3.5.3
     # via
     #   patchright
     #   playwright
+    #   sqlalchemy
 grpcio==1.81.1
     # via
     #   google-api-core
@@ -308,6 +314,12 @@ protobuf==6.33.6
     #   proto-plus
 psutil==7.2.2
     # via crawlee
+psycopg==3.3.6
+    # via
+    #   -r requirements.in
+    #   dbos
+psycopg-binary==3.3.6
+    # via psycopg
 psycopg2-binary==2.9.12
     # via -r requirements.in
 pyasn1==0.6.4
@@ -355,7 +367,10 @@ pyjwt==2.15.1
 pytest==9.1.1
     # via -r requirements.in
 python-dateutil==2.9.0.post0
-    # via botocore
+    # via
+    #   botocore
+    #   croniter
+    #   dbos
 python-dotenv==1.2.2
     # via
     #   -r requirements.in
@@ -366,7 +381,9 @@ python-multipart==0.0.32
     #   -r requirements.in
     #   mcp
 pyyaml==6.0.3
-    # via uvicorn
+    # via
+    #   dbos
+    #   uvicorn
 realtime==2.31.0
     # via supabase
 redis==8.0.1
@@ -419,6 +436,8 @@ soupsieve==2.10
     # via
     #   -r requirements.in
     #   beautifulsoup4
+sqlalchemy==2.1.4
+    # via dbos
 sse-starlette==3.4.5
     # via
     #   -r requirements.in
@@ -477,12 +496,14 @@ typing-extensions==4.16.0
     #   grpcio
     #   mcp
     #   modal
+    #   psycopg
     #   pydantic
     #   pydantic-core
     #   pyee
     #   realtime
     #   referencing
     #   scrapling
+    #   sqlalchemy
     #   starlette
     #   synchronicity
     #   typing-inspection

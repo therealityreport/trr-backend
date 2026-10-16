@@ -1,0 +1,3575 @@
+[
+  {
+    "path": "candidate",
+    "repetition": 0,
+    "seconds": 0.6771737500093877,
+    "statement_calls": 633,
+    "statement_calls_per_committed_target": 21.1,
+    "sampled_peak_worker_sessions": 1,
+    "committed_targets": 30,
+    "rows": {
+      "instagram_posts": [
+        {
+          "shortcode": "Bench0000",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0001",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0002",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0003",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0004",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0005",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0006",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0007",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0008",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0009",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0010",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0011",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0012",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0013",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0014",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0015",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0016",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0017",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0018",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0019",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0020",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0021",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0022",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0023",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0024",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0025",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0026",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0027",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0028",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0029",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        }
+      ],
+      "instagram_account_catalog_posts": [
+        {
+          "source_id": "Bench0000",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0001",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0002",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0003",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0004",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0005",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0006",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0007",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0008",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0009",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0010",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0011",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0012",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0013",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0014",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0015",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0016",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0017",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0018",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0019",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0020",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0021",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0022",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0023",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0024",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0025",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0026",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0027",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0028",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0029",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        }
+      ],
+      "social_posts": [
+        {
+          "source_id": "Bench0000",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0001",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0002",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0003",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0004",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0005",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0006",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0007",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0008",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0009",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0010",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0011",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0012",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0013",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0014",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0015",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0016",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0017",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0018",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0019",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0020",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0021",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0022",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0023",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0024",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0025",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0026",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0027",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0028",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0029",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        }
+      ],
+      "social_post_observations_count": 60,
+      "social_post_legacy_refs_count": 60,
+      "social_post_entities_count": 150,
+      "social_post_media_assets_count": 60
+    }
+  },
+  {
+    "path": "candidate",
+    "repetition": 1,
+    "seconds": 0.593248457997106,
+    "statement_calls": 633,
+    "statement_calls_per_committed_target": 21.1,
+    "sampled_peak_worker_sessions": 1,
+    "committed_targets": 30,
+    "rows": {
+      "instagram_posts": [
+        {
+          "shortcode": "Bench0000",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0001",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0002",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0003",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0004",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0005",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0006",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0007",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0008",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0009",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0010",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0011",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0012",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0013",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0014",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0015",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0016",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0017",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0018",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0019",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0020",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0021",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0022",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0023",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0024",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0025",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0026",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0027",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0028",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0029",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        }
+      ],
+      "instagram_account_catalog_posts": [
+        {
+          "source_id": "Bench0000",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0001",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0002",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0003",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0004",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0005",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0006",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0007",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0008",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0009",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0010",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0011",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0012",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0013",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0014",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0015",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0016",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0017",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0018",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0019",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0020",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0021",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0022",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0023",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0024",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0025",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0026",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0027",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0028",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0029",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        }
+      ],
+      "social_posts": [
+        {
+          "source_id": "Bench0000",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0001",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0002",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0003",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0004",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0005",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0006",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0007",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0008",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0009",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0010",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0011",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0012",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0013",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0014",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0015",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0016",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0017",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0018",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0019",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0020",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0021",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0022",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0023",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0024",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0025",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0026",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0027",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0028",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0029",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        }
+      ],
+      "social_post_observations_count": 60,
+      "social_post_legacy_refs_count": 60,
+      "social_post_entities_count": 150,
+      "social_post_media_assets_count": 60
+    }
+  },
+  {
+    "path": "candidate",
+    "repetition": 2,
+    "seconds": 0.501478458987549,
+    "statement_calls": 633,
+    "statement_calls_per_committed_target": 21.1,
+    "sampled_peak_worker_sessions": 1,
+    "committed_targets": 30,
+    "rows": {
+      "instagram_posts": [
+        {
+          "shortcode": "Bench0000",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0001",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0002",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0003",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0004",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0005",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0006",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0007",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0008",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0009",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0010",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0011",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0012",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0013",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0014",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0015",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0016",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0017",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0018",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0019",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0020",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0021",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0022",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0023",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0024",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0025",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0026",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0027",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0028",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "shortcode": "Bench0029",
+          "username": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        }
+      ],
+      "instagram_account_catalog_posts": [
+        {
+          "source_id": "Bench0000",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0001",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0002",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0003",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0004",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0005",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0006",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0007",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0008",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0009",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0010",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0011",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0012",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0013",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0014",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0015",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0016",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0017",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0018",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0019",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0020",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0021",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0022",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0023",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0024",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0025",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0026",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0027",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0028",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0029",
+          "source_account": "fixture_account",
+          "caption": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "media_urls": [
+            "https://cdn.example/slide1.jpg",
+            "https://cdn.example/slide2.mp4"
+          ],
+          "likes": 12,
+          "comments_count": 4,
+          "views": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        }
+      ],
+      "social_posts": [
+        {
+          "source_id": "Bench0000",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0001",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0002",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0003",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0004",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0005",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0006",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0007",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0008",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0009",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0010",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0011",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0012",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0013",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0014",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0015",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0016",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0017",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0018",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0019",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0020",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0021",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0022",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0023",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0024",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0025",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0026",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0027",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0028",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        },
+        {
+          "source_id": "Bench0029",
+          "owner_handle": "fixture_account",
+          "body": "A #Premiere with @cast_member",
+          "media_type": "carousel",
+          "like_count": 12,
+          "comment_count": 4,
+          "share_count": 6,
+          "view_count": 101,
+          "posted_at": "2026-10-15 08:00:00-04:00"
+        }
+      ],
+      "social_post_observations_count": 60,
+      "social_post_legacy_refs_count": 60,
+      "social_post_entities_count": 150,
+      "social_post_media_assets_count": 60
+    }
+  }
+]

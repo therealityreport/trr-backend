@@ -1,0 +1,131 @@
+[
+  {
+    "engine": "dbos",
+    "case": "before_dispatch_sigkill_and_duplicate",
+    "status": "FAIL",
+    "error": "worker exited before before_dispatch: 1",
+    "seconds": 0.749
+  },
+  {
+    "engine": "dbos",
+    "case": "after_dispatch_sigkill_and_duplicate",
+    "status": "FAIL",
+    "error": "worker exited before after_dispatch: 1",
+    "seconds": 0.65
+  },
+  {
+    "engine": "dbos",
+    "case": "after_commit_sigkill_and_duplicate",
+    "status": "FAIL",
+    "error": "worker exited before after_commit: 1",
+    "seconds": 0.539
+  },
+  {
+    "engine": "dbos",
+    "case": "stale_owner_fence",
+    "status": "FAIL",
+    "error": "exit 1; evidence 004-dbos-start-dbos-fencing.log: ^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/sqlalchemy/event/attr.py\", line 500, in _exec_w_sync_on_first_run\n    self(*args, **kw)\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/sqlalchemy/event/attr.py\", line 514, in __call__\n    fn(*args, **kw)\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py\", line 2119, in go\n    return once_fn(*arg, **kw)\n           ^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/sqlalchemy/engine/create.py\", line 751, in first_connect\n    dialect.initialize(c)\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/sqlalchemy/dialects/postgresql/psycopg.py\", line 470, in initialize\n    super().initialize(connection)\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/sqlalchemy/dialects/postgresql/base.py\", line 3775, in initialize\n    super().initialize(connection)\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/sqlalchemy/engine/default.py\", line 760, in initialize\n    self.server_version_info = self._get_server_version_info(\n                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/sqlalchemy/dialects/postgresql/base.py\", line 4073, in _get_server_version_info\n    m = re.match(\n        ^^^^^^^^^\n  File \"/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/lib/python3.11/re/__init__.py\", line 166, in match\n    return _compile(pattern, flags).match(string)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nTypeError: cannot use a string pattern on a bytes-like object\n",
+    "seconds": 0.515
+  },
+  {
+    "engine": "dbos",
+    "case": "durable_cooldown_restart",
+    "status": "FAIL",
+    "error": "worker exited before timer_started: 1",
+    "seconds": 1.013
+  },
+  {
+    "engine": "dbos",
+    "case": "cancel_resume",
+    "status": "FAIL",
+    "error": "worker exited before timer_started: 1",
+    "seconds": 0.786
+  },
+  {
+    "engine": "dbos",
+    "case": "version_recovery",
+    "status": "FAIL",
+    "error": "worker exited before before_dispatch: 1",
+    "seconds": 0.668
+  },
+  {
+    "engine": "dbos",
+    "case": "bounded_fixture",
+    "status": "FAIL",
+    "error": "exit 1; evidence 008-dbos-start-dbos-bounded.log: ^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/sqlalchemy/event/attr.py\", line 500, in _exec_w_sync_on_first_run\n    self(*args, **kw)\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/sqlalchemy/event/attr.py\", line 514, in __call__\n    fn(*args, **kw)\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py\", line 2119, in go\n    return once_fn(*arg, **kw)\n           ^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/sqlalchemy/engine/create.py\", line 751, in first_connect\n    dialect.initialize(c)\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/sqlalchemy/dialects/postgresql/psycopg.py\", line 470, in initialize\n    super().initialize(connection)\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/sqlalchemy/dialects/postgresql/base.py\", line 3775, in initialize\n    super().initialize(connection)\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/sqlalchemy/engine/default.py\", line 760, in initialize\n    self.server_version_info = self._get_server_version_info(\n                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/sqlalchemy/dialects/postgresql/base.py\", line 4073, in _get_server_version_info\n    m = re.match(\n        ^^^^^^^^^\n  File \"/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/lib/python3.11/re/__init__.py\", line 166, in match\n    return _compile(pattern, flags).match(string)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nTypeError: cannot use a string pattern on a bytes-like object\n",
+    "seconds": 0.746
+  },
+  {
+    "engine": "temporal",
+    "case": "before_dispatch_sigkill_and_duplicate",
+    "status": "FAIL",
+    "error": "exit 1; evidence 011-temporal-duplicate-temporal-before_dispatch.log: workflow.py\", line 244, in result\n    results = await self._data_converter.decode_wrapper(\n              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_data_converter.py\", line 168, in decode_wrapper\n    return await self.decode(payloads.payloads, type_hints)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_data_converter.py\", line 146, in decode\n    return self._get_internal_payload_converter().from_payloads(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_payload_converter.py\", line 649, in from_payloads\n    values = self._inner_payload_converter.from_payloads(\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_payload_converter.py\", line 376, in from_payloads\n    values.append(converter.from_payload(payload, type_hint))\n                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_payload_converter.py\", line 807, in from_payload\n    obj = value_to_type(type_hint, obj, self._custom_type_converters)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_payload_converter.py\", line 878, in value_to_type\n    raise TypeError(f\"Expected value to be str, was {type(value)}\")\nTypeError: Expected value to be str, was <class 'list'>\n",
+    "seconds": 16.971
+  },
+  {
+    "engine": "temporal",
+    "case": "after_dispatch_sigkill_and_duplicate",
+    "status": "FAIL",
+    "error": "exit 1; evidence 014-temporal-duplicate-temporal-after_dispatch.log: workflow.py\", line 244, in result\n    results = await self._data_converter.decode_wrapper(\n              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_data_converter.py\", line 168, in decode_wrapper\n    return await self.decode(payloads.payloads, type_hints)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_data_converter.py\", line 146, in decode\n    return self._get_internal_payload_converter().from_payloads(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_payload_converter.py\", line 649, in from_payloads\n    values = self._inner_payload_converter.from_payloads(\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_payload_converter.py\", line 376, in from_payloads\n    values.append(converter.from_payload(payload, type_hint))\n                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_payload_converter.py\", line 807, in from_payload\n    obj = value_to_type(type_hint, obj, self._custom_type_converters)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_payload_converter.py\", line 878, in value_to_type\n    raise TypeError(f\"Expected value to be str, was {type(value)}\")\nTypeError: Expected value to be str, was <class 'list'>\n",
+    "seconds": 16.572
+  },
+  {
+    "engine": "temporal",
+    "case": "after_commit_sigkill_and_duplicate",
+    "status": "FAIL",
+    "error": "exit 1; evidence 017-temporal-duplicate-temporal-after_commit.log: workflow.py\", line 244, in result\n    results = await self._data_converter.decode_wrapper(\n              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_data_converter.py\", line 168, in decode_wrapper\n    return await self.decode(payloads.payloads, type_hints)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_data_converter.py\", line 146, in decode\n    return self._get_internal_payload_converter().from_payloads(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_payload_converter.py\", line 649, in from_payloads\n    values = self._inner_payload_converter.from_payloads(\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_payload_converter.py\", line 376, in from_payloads\n    values.append(converter.from_payload(payload, type_hint))\n                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_payload_converter.py\", line 807, in from_payload\n    obj = value_to_type(type_hint, obj, self._custom_type_converters)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_payload_converter.py\", line 878, in value_to_type\n    raise TypeError(f\"Expected value to be str, was {type(value)}\")\nTypeError: Expected value to be str, was <class 'list'>\n",
+    "seconds": 16.675
+  },
+  {
+    "engine": "temporal",
+    "case": "stale_owner_fence",
+    "status": "FAIL",
+    "error": "exit 1; evidence 018-temporal-start-temporal-fencing.log: workflow.py\", line 244, in result\n    results = await self._data_converter.decode_wrapper(\n              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_data_converter.py\", line 168, in decode_wrapper\n    return await self.decode(payloads.payloads, type_hints)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_data_converter.py\", line 146, in decode\n    return self._get_internal_payload_converter().from_payloads(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_payload_converter.py\", line 649, in from_payloads\n    values = self._inner_payload_converter.from_payloads(\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_payload_converter.py\", line 376, in from_payloads\n    values.append(converter.from_payload(payload, type_hint))\n                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_payload_converter.py\", line 807, in from_payload\n    obj = value_to_type(type_hint, obj, self._custom_type_converters)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_payload_converter.py\", line 878, in value_to_type\n    raise TypeError(f\"Expected value to be str, was {type(value)}\")\nTypeError: Expected value to be str, was <class 'list'>\n",
+    "seconds": 0.637
+  },
+  {
+    "engine": "temporal",
+    "case": "durable_cooldown_restart",
+    "status": "PASS",
+    "evidence": {
+      "targets": 3,
+      "dispatches": 3,
+      "receipts": 3,
+      "attempts": 3
+    },
+    "seconds": 15.506
+  },
+  {
+    "engine": "temporal",
+    "case": "cancel_resume",
+    "status": "PASS",
+    "evidence": {
+      "mode": "history_reset_new_run",
+      "targets": 3,
+      "dispatches": 3,
+      "receipts": 3,
+      "attempts": 3
+    },
+    "seconds": 5.271
+  },
+  {
+    "engine": "temporal",
+    "case": "version_recovery",
+    "status": "PASS",
+    "evidence": {
+      "guard": "explicit version-specific task queue; deployment pinning unverified",
+      "targets": 3,
+      "dispatches": 3,
+      "receipts": 3,
+      "attempts": 4
+    },
+    "seconds": 15.244
+  },
+  {
+    "engine": "temporal",
+    "case": "bounded_fixture",
+    "status": "FAIL",
+    "error": "exit 1; evidence 027-temporal-start-temporal-bounded.log: workflow.py\", line 244, in result\n    results = await self._data_converter.decode_wrapper(\n              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_data_converter.py\", line 168, in decode_wrapper\n    return await self.decode(payloads.payloads, type_hints)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_data_converter.py\", line 146, in decode\n    return self._get_internal_payload_converter().from_payloads(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_payload_converter.py\", line 649, in from_payloads\n    values = self._inner_payload_converter.from_payloads(\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_payload_converter.py\", line 376, in from_payloads\n    values.append(converter.from_payload(payload, type_hint))\n                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_payload_converter.py\", line 807, in from_payload\n    obj = value_to_type(type_hint, obj, self._custom_type_converters)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/tmp/trr-engine-eval-6f437318-venv/lib/python3.11/site-packages/temporalio/converter/_payload_converter.py\", line 878, in value_to_type\n    raise TypeError(f\"Expected value to be str, was {type(value)}\")\nTypeError: Expected value to be str, was <class 'list'>\n",
+    "seconds": 6.438
+  }
+]

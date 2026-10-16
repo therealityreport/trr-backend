@@ -1,0 +1,63 @@
+{
+  "status": "PASS",
+  "dbos": "3.3.0",
+  "system_pool_size": 1,
+  "max_overflow": 0,
+  "executor_thread_limit": 2,
+  "stable_executor_id": "instagram-coordinator-slot-0",
+  "sample_interval_ms": 20,
+  "sampled_peak_sessions_excluding_observer": 4,
+  "sampled_peak_sessions_by_class": {
+    "eval-adapter": 1,
+    "eval-lease": 1,
+    "eval-dbos": 2
+  },
+  "max_effective_coordinators": 1,
+  "local_runtime_role": {
+    "name": "eval_runtime",
+    "superuser": false,
+    "schema_usage": true,
+    "schema_create": false
+  },
+  "bootstrap": "DBOS.migrate with separate privileged role and two-connection pool",
+  "cases": [
+    {
+      "case": "cooldown_timeout",
+      "status": "PASS",
+      "at_timeout_boundary": {
+        "targets": 3,
+        "dispatches": 0,
+        "receipts": 0,
+        "attempts": 0
+      },
+      "after_replacement": {
+        "targets": 3,
+        "dispatches": 3,
+        "receipts": 3,
+        "attempts": 3
+      },
+      "rival_exit": 17,
+      "timeout_exit": 124,
+      "seconds": 8.985
+    },
+    {
+      "case": "after_receipt_timeout",
+      "status": "PASS",
+      "at_timeout_boundary": {
+        "targets": 3,
+        "dispatches": 1,
+        "receipts": 1,
+        "attempts": 1
+      },
+      "after_replacement": {
+        "targets": 3,
+        "dispatches": 3,
+        "receipts": 3,
+        "attempts": 4
+      },
+      "rival_exit": 17,
+      "timeout_exit": 124,
+      "seconds": 6.896
+    }
+  ]
+}
