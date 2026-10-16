@@ -27,6 +27,7 @@ import tempfile
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from typing import Any, cast
 from urllib.parse import urlparse
 
@@ -154,6 +155,107 @@ _AUTHENTICATED_COOKIE_NAMES = frozenset({"sessionid", "ds_user_id"})
 def _auth_failure_text(text: str) -> bool:
     normalized = str(text or "").strip().lower()
     return any(token in normalized for token in ("login", "checkpoint", "challenge", "accounts/login"))
+
+
+class _WarmupAuthForms(HTMLParser):
+    """Inspect actual auth controls, never script strings or document copy."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.ignored_depth = 0
+        self.forms: list[dict[str, Any]] = []
+        self.auth_path: str | None = None
+
+    @staticmethod
+    def action_path(value: str) -> str | None:
+        try:
+            parsed = urlparse(value)
+        except ValueError:
+            return None
+        if parsed.scheme and parsed.scheme not in {"http", "https"}:
+            return None
+        if parsed.netloc and (parsed.hostname or "").lower() not in {"instagram.com", "www.instagram.com"}:
+            return None
+        path = "/" + parsed.path.lower().lstrip("/")
+        if path == "/accounts/login" or path.startswith("/accounts/login/"):
+            return "login"
+        if any(path == root or path.startswith(root + "/") for root in ("/challenge", "/checkpoint")):
+            return "checkpoint"
+        return None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in {"script", "style", "template", "noscript"}:
+            self.ignored_depth += 1
+        if self.ignored_depth:
+            return
+        data = dict(attrs)
+        if tag == "form":
+            self.forms.append(
+                {
+                    "path": self.action_path(data.get("action") or ""),
+                    "username": False,
+                    "password": False,
+                    "control": False,
+                }
+            )
+        elif tag in {"input", "button"} and self.forms:
+            form = self.forms[-1]
+            form["control"] = True
+            form["username"] |= tag == "input" and (data.get("name") or "").lower() == "username"
+            form["password"] |= tag == "input" and (
+                (data.get("type") or "").lower() == "password" or (data.get("name") or "").lower() == "password"
+            )
+        elif tag == "meta" and (data.get("http-equiv") or "").lower() == "refresh":
+            match = re.fullmatch(
+                r"\s*\d+(?:\.\d+)?\s*;\s*url\s*=\s*['\"]?([^'\"]+)['\"]?\s*", data.get("content") or "", re.I
+            )
+            if match and (path := self.action_path(match.group(1).strip())):
+                self.auth_path = path
+
+    def _finish_form(self, form: dict[str, Any]) -> None:
+        if form["path"] == "login" and form["username"] and form["password"]:
+            self.auth_path = self.auth_path or "login"
+        elif form["path"] == "checkpoint" and form["control"]:
+            self.auth_path = "checkpoint"
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"script", "style", "template", "noscript"}:
+            self.ignored_depth = max(0, self.ignored_depth - 1)
+        elif not self.ignored_depth and tag == "form" and self.forms:
+            self._finish_form(self.forms.pop())
+
+
+def _warmup_body_auth_path(text: str) -> str | None:
+    """Warmup-only structured evidence; shared GraphQL heuristics stay intact."""
+    if str(text or "").lstrip().startswith("{"):
+        try:
+            payload = json.loads(text)
+        except (ValueError, TypeError):
+            payload = None
+        if isinstance(payload, dict) and payload.get("status") == "fail":
+            codes = {payload.get(key) for key in ("message", "error_type") if isinstance(payload.get(key), str)}
+            if codes & {"checkpoint_required", "challenge_required"}:
+                return "checkpoint"
+            if codes & {
+                "login_required",
+                "unauthorized",
+                "forbidden",
+                "redirect_login",
+                "feedback_required",
+                "consent_required",
+                "sentry_block",
+            }:
+                return "login"
+        return None
+    parser = _WarmupAuthForms()
+    try:
+        parser.feed(str(text or ""))
+        parser.close()
+    except (ValueError, AssertionError):
+        return None
+    for form in parser.forms:
+        parser._finish_form(form)
+    return parser.auth_path
 
 
 def _is_redirect_loop_exception(exc: BaseException) -> bool:
@@ -858,11 +960,13 @@ class InstagramPostsScraplingFetcher:
         before_source_request: Callable[[str], None] | None = None,
         source_payload_observer: Callable[[str, Mapping[str, Any]], None] | None = None,
         source_failure_observer: Callable[[str, float | None], None] | None = None,
+        source_diagnostic_observer: Callable[[dict[str, Any]], None] | None = None,
         consume_credentials_only: bool = False,
     ) -> None:
         self._before_source_request = before_source_request
         self._source_payload_observer = source_payload_observer
         self._source_failure_observer = source_failure_observer
+        self._source_diagnostic_observer = source_diagnostic_observer
         self._consume_credentials_only = consume_credentials_only
         self._auth_state = _normalize_auth_state(auth_state)
         self._anonymous_mode = self._auth_state in {"anonymous", "public"}
@@ -1119,14 +1223,25 @@ class InstagramPostsScraplingFetcher:
         status_code = _status_code(response)
         location = _safe_location(response) if 300 <= status_code < 400 else ""
         _, location_path_class = _safe_url_classes(f"https://www.instagram.com{location}") if location else ("", "")
+        body_auth_path = _warmup_body_auth_path(text)
         if location_path_class in {"login", "checkpoint", "home"}:
             path_class = location_path_class
-        elif _auth_failure_text(text):
-            path_class = (
-                "checkpoint" if any(token in text.lower() for token in ("checkpoint", "challenge")) else "login"
-            )
+        elif path_class not in {"login", "checkpoint", "home"} and body_auth_path:
+            path_class = body_auth_path
         terminal_redirect = path_class in {"login", "checkpoint", "home"}
-        if status_code in {401, 403} or _auth_failure_text(text) or terminal_redirect:
+        self._emit_source_diagnostic(
+            response,
+            phase="browser_warmup",
+            event="warmup_classification",
+            classification_path_class=path_class,
+            auth_body_marker=body_auth_path is not None,
+            classification=(
+                "auth_rejected"
+                if status_code in {401, 403} or body_auth_path is not None or terminal_redirect
+                else "not_rejected"
+            ),
+        )
+        if status_code in {401, 403} or body_auth_path is not None or terminal_redirect:
             observer = getattr(self, "_source_failure_observer", None)
             if observer is not None:
                 observer("source_auth_failed", None)
@@ -1864,7 +1979,53 @@ class InstagramPostsScraplingFetcher:
     # Transport: browser (warmup only)
     # -------------------------------------------------------------------
 
-    def _observe_source_failure(self, response: Any) -> None:
+    def _emit_source_diagnostic(
+        self,
+        response: Any,
+        *,
+        phase: str,
+        event: str = "transport_response",
+        classification: str = "unclassified",
+        auth_body_marker: bool | None = None,
+        classification_path_class: str | None = None,
+    ) -> None:
+        """Optional fixed metadata only; observation cannot change the result."""
+        observer = getattr(self, "_source_diagnostic_observer", None)
+        if observer is None:
+            return
+        try:
+            origin, path = _safe_url_classes(getattr(response, "url", None))
+            status = _status_code(response)
+            location = _safe_location(response) if 300 <= status < 400 else ""
+            _, location_path = _safe_url_classes(f"https://www.instagram.com{location}") if location else ("", "none")
+            diagnostic = {
+                "phase": phase if phase in {"browser_warmup", "graphql"} else "unknown",
+                "event": event if event in {"transport_response", "warmup_classification"} else "unknown",
+                "http_status": status if type(status) is int and 100 <= status <= 599 else None,
+                "origin_class": origin,
+                "path_class": path,
+                "classification_path_class": (
+                    classification_path_class
+                    if classification_path_class in {"home", "login", "checkpoint", "profile", "other", "unknown"}
+                    else None
+                ),
+                "location_path_class": location_path,
+                "classification": (
+                    classification if classification in {"unclassified", "auth_rejected", "not_rejected"} else "unknown"
+                ),
+                "auth_body_marker": auth_body_marker if type(auth_body_marker) is bool else None,
+            }
+            try:
+                observer(diagnostic)
+            except BaseException:
+                # This observation hook is not a cancellation/transport guard.
+                # Even an aborting callback cannot replace the source outcome.
+                pass
+        except Exception:
+            # Do not expose callback exceptions, response objects, or secrets.
+            pass
+
+    def _observe_source_failure(self, response: Any, *, warmup: bool = False) -> None:
         """Optional safe rejection boundary, before legacy retries or fallback.
 
         Pass only fixed classification and numeric Retry-After, never response
@@ -1874,6 +2035,10 @@ class InstagramPostsScraplingFetcher:
         if observer is None:
             return
         status = _status_code(response)
+        if warmup and status != 429:
+            # Warmup owns the structured auth decision after the document is
+            # returned. Notify once there, before any GraphQL request/fallback.
+            return
         location = _safe_location(response) if 300 <= status < 400 else ""
         response_path = urlparse(str(getattr(response, "url", "") or "")).path
         auth_failed = status in {401, 403} or any(
@@ -1928,7 +2093,8 @@ class InstagramPostsScraplingFetcher:
             url,
             **fetch_kwargs,
         )
-        self._observe_source_failure(response)
+        self._emit_source_diagnostic(response, phase="browser_warmup")
+        self._observe_source_failure(response, warmup=True)
         self._record_response_bytes(response)
         return response
 
@@ -1952,6 +2118,7 @@ class InstagramPostsScraplingFetcher:
             observer("graphql")
         self._request_count += 1
         response = await self._http_client.post(url, data=data, headers=headers)  # type: ignore[union-attr]
+        self._emit_source_diagnostic(response, phase="graphql")
         self._observe_source_failure(response)
         self._record_proxy_response(response)
         self._sync_response_cookies(response)

@@ -140,6 +140,67 @@ def noop():
     pass
 
 
+def test_exact_source_reuse_downloads_once_and_preserves_distinct_manifest_roles():
+    client = Storage()
+    downloaded = []
+
+    def opener(client, url, **kwargs):
+        downloaded.append(url)
+        return Response()
+
+    result = mirror_snapshot(snapshot(), storage(client, opener=opener), check=noop, request=noop)
+    manifest = result.post_fields["asset_manifest"]
+    cover, media = manifest["originals"]["cover"], manifest["originals"]["media"][0]
+    assert downloaded == [SOURCE]
+    assert len(client.writes) == len(client.objects) == 11  # One original and ten display variants.
+    assert result.post_fields["hosted_media_urls"] == [result.post_fields["hosted_thumbnail_url"]]
+    assert cover is not media and cover["storage_key"] == media["storage_key"]
+    assert (cover["source_role"], cover["variant_key"]) == ("cover", "cover_original")
+    assert (media["source_role"], media["variant_key"]) == ("media", "media_original_01")
+    assert cover["sha256"] == media["sha256"] and len(manifest["display_variants"]) == 10
+
+
+def test_distinct_source_urls_with_identical_bytes_keep_separate_objects():
+    client = Storage()
+    other = SOURCE + "&oe=different-delivery"
+    downloaded = []
+
+    def opener(client, url, **kwargs):
+        downloaded.append(url)
+        return Response()
+
+    result = mirror_snapshot(snapshot(media_urls=(other,)), storage(client, opener=opener), check=noop, request=noop)
+    originals = result.post_fields["asset_manifest"]["originals"]
+    cover, media = originals["cover"], originals["media"]
+    assert downloaded == [SOURCE, other]
+    assert cover["sha256"] == media[0]["sha256"]
+    assert cover["storage_key"] != media[0]["storage_key"]
+    assert len(client.writes) == 12
+
+
+@pytest.mark.parametrize("shared_key", [False, True])
+def test_exact_source_reuse_respects_preserved_role_storage_identity(shared_key):
+    client = Storage()
+    cover_key = "legacy/cover-original.png"
+    media_key = cover_key if shared_key else "legacy/media-01.png"
+    source = snapshot(
+        existing_manifest={"originals": {"cover": {"storage_key": cover_key}, "media": [{"storage_key": media_key}]}}
+    )
+    downloaded = []
+
+    def opener(client, url, **kwargs):
+        downloaded.append(url)
+        return Response()
+
+    result = mirror_snapshot(source, storage(client, opener=opener), check=noop, request=noop)
+    originals = result.post_fields["asset_manifest"]["originals"]
+    assert originals["cover"]["storage_key"] == cover_key
+    assert originals["media"][0]["storage_key"] == media_key
+    assert downloaded == [SOURCE] * (1 if shared_key else 2)
+    assert cover_key in client.objects and media_key in client.objects
+    assert len(client.writes) == (11 if shared_key else 12)
+
+
 def test_cached_avatar_proof_reuses_hosted_identity_without_cdn_or_storage_write():
     origin = "https://scontent.cdninstagram.com/old-queryless-avatar.png"
     hosted = "https://media.example/social/instagram/profiles/owner/fixed.png"
@@ -171,7 +232,7 @@ def test_cached_avatar_proof_reuses_hosted_identity_without_cdn_or_storage_write
             "observed_at": original.isoformat(),
         },
     )
-    assert origin not in downloaded and len(downloaded) == 2
+    assert origin not in downloaded and downloaded == [SOURCE]
     assert all("/profiles/" not in key for key in client.writes)
 
 
@@ -206,7 +267,8 @@ def test_existing_keys_comment_hash_avatar_paths_and_signed_url_redaction():
     result = mirror_snapshot(source, storage(client), check=noop, request=noop)
     root = f"social/instagram/{source.show_id}/2/week-3"
     assert root + "/MediaFixture/cover-original.png" in client.objects
-    assert root + "/MediaFixture/media-01.png" in client.objects
+    assert root + "/MediaFixture/media-01.png" not in client.objects
+    assert result.post_fields["hosted_media_urls"] == [result.post_fields["hosted_thumbnail_url"]]
     assert root + "/" + comment.storage_source_key + "/media-01.png" in client.objects
     assert f"social/instagram/profile-pics/owner/{hashlib.sha256(image_bytes()).hexdigest()}.png" in client.objects
     assert result.comment_fields["comment1"]["hosted_author_profile_pic_url"]
@@ -227,7 +289,7 @@ def test_real_cover_variants_and_repeated_storage_writes_are_idempotent():
     count = len(client.writes)
     second = mirror_snapshot(source, service, check=noop, request=noop)
     assert first.post_fields == second.post_fields
-    assert len(client.writes) == count == 12
+    assert len(client.writes) == count == 11
     variants = first.post_fields["asset_manifest"]["display_variants"]
     assert variants["poster_card_webp"]["width"] == 720
     assert variants["poster_card_webp"]["height"] == 960
@@ -729,7 +791,7 @@ def test_partial_variant_failure_retains_objects_for_safe_retry():
     retained = len(client.objects)
     assert retained == 11
     mirror_snapshot(source, storage(client), check=noop, request=noop)
-    assert len(client.objects) == len(client.writes) == retained + 1
+    assert len(client.objects) == len(client.writes) == retained
 
 
 def test_conditional_race_cannot_replace_another_workers_object():

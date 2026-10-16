@@ -456,6 +456,146 @@ def test_sync_response_cookies_updates_direct_request_state(_mock_scrapling):
     assert fetcher._raw_cookies["ds_user_id"] == "2"
 
 
+@pytest.mark.parametrize(
+    "body,rejected",
+    [
+        ("<html>profile</html>", False),
+        ('<form action="/accounts/login/"><input name="username"><input type="password"></form>', True),
+        ('<script>var login = "private-token"</script>', False),
+    ],
+)
+@pytest.mark.parametrize("callback_fails", [None, RuntimeError, SystemExit])
+def test_safe_diagnostic_preserves_warmup_classification_and_single_operation(
+    _mock_scrapling, monkeypatch, body, rejected, callback_fails
+):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import (
+        InstagramPostsScraplingFetcher,
+        InstagramPostsWarmupError,
+    )
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_SHARED_WARMUP_ENABLED", "0")
+    events, requests = [], []
+
+    def observe(value):
+        events.append(value)
+        if callback_fails:
+            raise callback_fails("private callback text must not escape")
+
+    fetcher = InstagramPostsScraplingFetcher(
+        cookies=[],
+        raw_cookies={"sessionid": "private-token"},
+        browser_account_id="test",
+        consume_credentials_only=True,
+        allow_requests_recovery=False,
+        before_source_request=requests.append,
+        source_diagnostic_observer=observe,
+    )
+    response = SimpleNamespace(
+        status_code=200,
+        text=body,
+        cookies={},
+        headers={},
+        url="https://www.instagram.com/bravotv/?secret=private-token",
+    )
+    fetcher._fetcher.async_fetch = AsyncMock(return_value=response)
+    fetcher._fetch_graphql = AsyncMock()
+    if rejected:
+        with pytest.raises(InstagramPostsWarmupError) as error:
+            asyncio.run(fetcher.warmup("bravotv"))
+        assert error.value.error_code == "instagram_posts_warmup_auth_failed"
+    else:
+        asyncio.run(fetcher.warmup("bravotv"))
+    assert requests == ["browser_warmup"] and fetcher._request_count == 1
+    assert fetcher._fetcher.async_fetch.await_count == 1
+    assert fetcher._fetcher.async_fetch.await_args.kwargs["retries"] == 1
+    fetcher._fetch_graphql.assert_not_awaited()
+    assert len(events) == 2
+    assert events[-1] == {
+        "phase": "browser_warmup",
+        "event": "warmup_classification",
+        "http_status": 200,
+        "origin_class": "instagram",
+        "path_class": "profile",
+        "classification_path_class": "login" if rejected else "profile",
+        "location_path_class": "none",
+        "classification": "auth_rejected" if rejected else "not_rejected",
+        "auth_body_marker": rejected,
+    }
+    serialized = json.dumps(events)
+    assert all(secret not in serialized for secret in ("private-token", "bravotv", "https:", "secret=", "<script>"))
+
+
+def test_safe_diagnostic_restricts_values_and_contains_callback_failure(_mock_scrapling):
+    from types import SimpleNamespace
+
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsScraplingFetcher
+
+    events = []
+    fetcher = InstagramPostsScraplingFetcher(
+        cookies=[], raw_cookies={}, browser_account_id=None, source_diagnostic_observer=events.append
+    )
+    response = SimpleNamespace(status_code=999, url="https://private.invalid/secret/value?token=secret", headers={})
+    fetcher._emit_source_diagnostic(
+        response,
+        phase="private-token",
+        event="private-token",
+        classification="private-token",
+        auth_body_marker="secret",
+        classification_path_class="private-token",
+    )
+    assert events == [
+        {
+            "phase": "unknown",
+            "event": "unknown",
+            "http_status": None,
+            "origin_class": "external",
+            "path_class": "other",
+            "classification_path_class": None,
+            "location_path_class": "none",
+            "classification": "unknown",
+            "auth_body_marker": None,
+        }
+    ]
+    assert fetcher._request_count == 0
+
+
+def test_safe_diagnostic_reports_graphql_response_before_auth_observer(_mock_scrapling):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsScraplingFetcher
+
+    events = []
+    fetcher = InstagramPostsScraplingFetcher(
+        cookies=[],
+        raw_cookies={},
+        browser_account_id=None,
+        source_diagnostic_observer=lambda value: events.append(value),
+        source_failure_observer=lambda code, retry_after: events.append(code),
+    )
+    response = SimpleNamespace(
+        status_code=401,
+        url="https://www.instagram.com/graphql/query/?token=private-token",
+        headers={},
+        cookies={},
+        text="private-token",
+    )
+    fetcher._http_client = SimpleNamespace(post=AsyncMock(return_value=response))
+    fetcher._pace_api_requests = AsyncMock()
+    assert (
+        asyncio.run(fetcher._fetch_graphql("https://www.instagram.com/graphql/query/", data={}, headers={})) is response
+    )
+    assert events[0]["phase"] == "graphql" and events[0]["http_status"] == 401
+    assert events[1] == "source_auth_failed"
+    assert fetcher._request_count == 1 and fetcher._http_client.post.await_count == 1
+    assert "private-token" not in json.dumps(events)
+
+
 def test_warmup_emits_structured_log_success(_mock_scrapling, caplog):
     """After a successful warmup, an info log with event=warmup_success should fire."""
     import asyncio
@@ -501,7 +641,7 @@ def test_warmup_raises_auth_error_code(_mock_scrapling):
     )
     fake_resp = MagicMock()
     fake_resp.status_code = 200
-    fake_resp.text = _fixture_text("auth_failure.html")
+    fake_resp.text = '<form action="/accounts/login/"><input name="username"><input type="password"></form>'
     fake_resp.cookies = {}
     fetcher._fetcher.async_fetch = AsyncMock(return_value=fake_resp)
 
@@ -510,6 +650,147 @@ def test_warmup_raises_auth_error_code(_mock_scrapling):
 
     assert exc_info.value.error_code == "instagram_posts_warmup_auth_failed"
     assert exc_info.value.retryable is False
+
+
+@pytest.mark.parametrize(
+    "body,body_path",
+    [
+        ('<form action="/accounts/login/"><input name="username"><input name="password"></form>', "login"),
+        (
+            '<form action="https://www.instagram.com/accounts/login/ajax/">'
+            '<input name="username"><input type="password"></form>',
+            "login",
+        ),
+        ('<form action="/challenge/123/"><input name="security_code"><button>Continue</button></form>', "checkpoint"),
+        ('<form action="https://www.instagram.com/checkpoint/"><button>Confirm</button></form>', "checkpoint"),
+        ('<meta http-equiv="refresh" content="0;url=/challenge/123/">', "checkpoint"),
+        ('{"status":"fail","message":"login_required"}', "login"),
+        ('{"status":"fail","error_type":"challenge_required"}', "checkpoint"),
+        ('<script>const login = "checkpoint challenge";</script><style>.login {color:red}</style>', None),
+        (
+            '<script>const template = \'<form action="/accounts/login/">'
+            '<input name="username"><input type="password"></form>\';</script>',
+            None,
+        ),
+        (
+            '<a href="/accounts/login/">Log in</a><p>Bio: the challenge checkpoint</p><img src="/assets/login.png">',
+            None,
+        ),
+        ('<form action="/search/"><input name="username"><input type="password"></form>', None),
+        (
+            '<form action="https://external.invalid/accounts/login/">'
+            '<input name="username"><input type="password"></form>',
+            None,
+        ),
+        ('<form action="/accounts/login/"><input name="username"></form><form><input type="password"></form>', None),
+        ('<form action="/accounts/login-research/"><input name="username"><input type="password"></form>', None),
+        (
+            '<template><form action="/accounts/login/">'
+            '<input name="username"><input type="password"></form></template>',
+            None,
+        ),
+        ('{"status":"ok","message":"login_required"}', None),
+        ('{"status":"fail","message":"caption about login and a challenge"}', None),
+        ('{"data":{"caption":"login_required","status":"fail"}}', None),
+    ],
+)
+def test_warmup_structured_auth_documents_ignore_incidental_copy(_mock_scrapling, monkeypatch, body, body_path):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import (
+        InstagramPostsScraplingFetcher,
+        InstagramPostsWarmupError,
+    )
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_SHARED_WARMUP_ENABLED", "0")
+    events, failures, requests = [], [], []
+    fetcher = InstagramPostsScraplingFetcher(
+        cookies=[],
+        raw_cookies={"sessionid": "synthetic"},
+        browser_account_id="test",
+        consume_credentials_only=True,
+        allow_requests_recovery=False,
+        before_source_request=requests.append,
+        source_failure_observer=lambda *args: failures.append(args),
+        source_diagnostic_observer=events.append,
+    )
+    response = SimpleNamespace(
+        status_code=200, text=body, cookies={}, headers={}, url="https://www.instagram.com/bravotv/"
+    )
+    fetcher._fetcher.async_fetch = AsyncMock(return_value=response)
+    fetcher._fetch_graphql = AsyncMock()
+    fetcher._activate_requests_fallback = MagicMock(return_value=False)
+    if body_path:
+        with pytest.raises(InstagramPostsWarmupError):
+            asyncio.run(fetcher.warmup("bravotv"))
+    else:
+        asyncio.run(fetcher.warmup("bravotv"))
+    assert requests == ["browser_warmup"] and fetcher._request_count == 1
+    assert failures == ([("source_auth_failed", None)] if body_path else [])
+    assert events[-1]["path_class"] == "profile"
+    assert events[-1]["classification_path_class"] == (body_path or "profile")
+    assert events[-1]["auth_body_marker"] == bool(body_path)
+    assert len(events) == 2
+    fetcher._fetch_graphql.assert_not_awaited()
+    fetcher._activate_requests_fallback.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "status,url,location,path",
+    [
+        (401, "https://www.instagram.com/bravotv/", "", "profile"),
+        (403, "https://www.instagram.com/bravotv/", "", "profile"),
+        (200, "https://www.instagram.com/accounts/login/", "", "login"),
+        (200, "https://www.instagram.com/checkpoint/", "", "checkpoint"),
+        (200, "https://www.instagram.com/challenge/", "", "checkpoint"),
+        (200, "https://www.instagram.com/", "", "home"),
+        (302, "https://www.instagram.com/bravotv/", "/accounts/login/?next=/bravotv/", "login"),
+        (
+            302,
+            "https://www.instagram.com/bravotv/",
+            "https://www.instagram.com/challenge/123/?secret=value",
+            "checkpoint",
+        ),
+        (302, "https://www.instagram.com/bravotv/", "https://www.instagram.com/", "home"),
+    ],
+)
+def test_warmup_retains_http_and_relative_absolute_redirect_stops(
+    _mock_scrapling, monkeypatch, status, url, location, path
+):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import (
+        InstagramPostsScraplingFetcher,
+        InstagramPostsWarmupError,
+    )
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_SHARED_WARMUP_ENABLED", "0")
+    failures = []
+    fetcher = InstagramPostsScraplingFetcher(
+        cookies=[],
+        raw_cookies={"sessionid": "synthetic"},
+        browser_account_id="test",
+        consume_credentials_only=True,
+        allow_requests_recovery=False,
+        source_failure_observer=lambda *args: failures.append(args),
+    )
+    fetcher._fetcher.async_fetch = AsyncMock(
+        return_value=SimpleNamespace(
+            status_code=status, url=url, headers={"location": location}, text="<html>profile</html>", cookies={}
+        )
+    )
+    fetcher._fetch_graphql = AsyncMock()
+    with pytest.raises(InstagramPostsWarmupError) as error:
+        asyncio.run(fetcher.warmup("bravotv"))
+    assert error.value.error_code == "instagram_posts_warmup_auth_failed"
+    assert failures == [("source_auth_failed", None)]
+    assert fetcher._request_count == 1
+    assert fetcher.runtime_metadata["warmup_failure"]["final_path_class"] == path
+    fetcher._fetch_graphql.assert_not_awaited()
 
 
 def test_warmup_transport_error_activates_requests_fallback(_mock_scrapling, monkeypatch):

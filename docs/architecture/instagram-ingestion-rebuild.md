@@ -38,9 +38,9 @@ and canonical data. Other platforms and active legacy runs stay on their owner.
 | A | Current behavior matrix and sanitized fixture baselines | Legacy callable map and retained native fixtures established; unassigned media and avatar parity added |
 | B | Matched real-engine failure harness; hosting/recovery/version feasibility | DBOS selected for implementation after local comparison, bounded-executor and 50-target partition tests; production topology verification remains a release gate |
 | C | Domain/provider/replay parity and import boundaries | Canonical, listing, comments, media, runtime integration and hosted-result replay extension implemented and reviewed; local checks pass |
-| D | Real persistence crash, ownership, cancellation and recovery tests | Local PostgreSQL/DBOS failure matrix passes. Live cancellation preserved run/targets/budgets; live resume and partial recovery remain pending |
-| E | Backend schema/client parity and browser operator flow | API/client and fixture-backed browser journeys pass. App 964e9ce remote production build and authenticated checks pass; normal TRR browser shows the run, cancellation and persistence across reload. Live resume remains pending |
-| F | Deployment identity/readiness, bounded canary, 10 runs and 24h observation | Target identity/readiness and bounded idle lifecycle pass. First canary cancelled for a pre-request control-pool defect; reviewed repair deployment next. Successful runs, aggregate resource acceptance and 24h observation remain pending |
+| D | Real persistence crash, ownership, cancellation and recovery tests | Local PostgreSQL/DBOS failure matrix passes. Live cancel/resume preserved run, targets and budgets; successful partial recovery remains pending |
+| E | Backend schema/client parity and browser operator flow | API/client and fixture-backed browser journeys pass. App 964e9ce remote production build and authenticated checks pass; normal TRR browser verifies run display, cancel, reload and resume while new launches are disabled |
+| F | Deployment identity/readiness, bounded canary, 10 runs and 24h observation | Target identity/readiness and bounded idle lifecycle pass. Canary generation 3 is blocked after one source operation. Warmup classification repair is reviewed; deployed session verification, successful runs, aggregate resource acceptance and 24h observation remain pending |
 
 Engine selection: DBOS 3.3.0 is the implementation candidate. Real local engine
 comparison, version-aware recovery, bounded single-executor replacement and
@@ -495,3 +495,56 @@ two listing attempts. The previous app deployment remains READY for rollback.
 The next backend deployment will keep coordinator/workers enabled but disable new
 launch routing, to verify rollback semantics through resume of this same pinned run.
 No accounting or successful-ingestion claim follows from the accepted launch.
+
+Backend `17f978d1` subsequently deployed to verified workspace `admin-56995`,
+environment `main`, app `trr-backend-jobs`, with new launches disabled and the
+coordinator enabled. Readiness, HTTP 200 health and all 43 expected deployed source
+hashes passed. The production UI displayed the disabled-launch message and retained
+Resume Run for the cancelled run. Resuming through that normal browser control
+preserved the intent and counts and advanced the same run to generation 3.
+
+The next listing attempt reached the source boundary: three cumulative attempts,
+one recorded request, then `blocked` with safe code `unauthorized`. No evidence or
+canonical result was committed, and no lease remained. This verifies the repaired
+connection path and retained-run recovery routing, but does not establish successful
+ingestion. New launches remain disabled; the blocked run is preserved.
+
+The existing TRR Chrome session displayed a healthy Instagram feed. Validation of
+that profile's extracted cookies through the repository's GraphQL validator failed
+with `instagram_graphql_initial_request_failed`. Cookie values were kept in memory;
+no cookie file or Modal secret was updated. Browser success does not establish API
+session validity. The failure phase and response classification remain under
+investigation before another source attempt or credential transfer.
+
+The complete matched four-stage resource comparison is in progress against frozen
+backend `17f978d1`, using actual legacy orchestration and DBOS paths with external
+I/O fixtures. Runtime inspection established effective default pool min/max 1/2,
+named control min/max 1/1 and close-after-return enabled. Local direct PostgreSQL
+results will be labelled separately from deployed session-pooler behavior. No full
+resource acceptance, ten-run gate or healthy 24-hour observation is claimed yet.
+
+The safe local warmup probe reproduced a classification false positive at
+2026-10-16T11:23:27Z: HTTP 200, actual final route `profile`, but classified as
+`checkpoint` because auth words occurred in script/style content. There were no
+matching text nodes outside scripts/styles and no username/password input pair.
+The probe used a frozen diagnostic-only fetcher, made one browser warmup operation,
+and did not run GraphQL, write credentials or touch the database. The first two
+local attempts stopped before a response because the required Patchright browser
+executable was missing; installing its matching Chromium resolved that separate
+local prerequisite. These local facts do not prove the deployed cookie's validity.
+
+Full-stage resource inspection also found an exact-URL reuse difference: when the
+source thumbnail and media URL are identical, the candidate stored two original
+objects while legacy reused the cover object. The media array itself still had
+one entry; the duplicate object was the separately hosted thumbnail. A narrow
+per-snapshot reuse fix passed 11 affected tests and independent review. It keeps
+separate role metadata and preserves conflicting existing storage keys. Original
+frozen measurements are retained; current-candidate measurements remain pending.
+
+The warmup repair passed 53 focused tests and independent review. It requires
+structured authentication evidence while retaining HTTP 401/403 and terminal
+route guards. A second local source check at 2026-10-16T11:27:38Z returned HTTP 200
+at the profile route and passed warmup with the repaired classifier, despite the
+same incidental script words. It made one browser operation, no GraphQL call and
+no credential/database write. Deployed current-credential verification remains
+required before any correction of the retained identity/target blocks or resume.

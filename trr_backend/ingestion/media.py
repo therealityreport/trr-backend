@@ -563,16 +563,27 @@ def mirror_snapshot(
         preserved_variants=preserved,
     )
     cover.update(source_role="cover", variant_key="cover_original", generated_at=stamp)
+    # Match maintained within-post reuse for the exact source URL. A signed
+    # query or a different path can identify different bytes; neither is
+    # normalized here. Existing role keys always take precedence over reuse.
+    hosted_by_source_url = {snapshot.thumbnail_url.strip(): cover}
     originals = []
     for position, url in enumerate(snapshot.media_urls, 1):
-        entry, _ = storage.host(
-            url,
-            root=post_root,
-            name=f"media-{position:02d}",
-            check=check,
-            request=request,
-            preserved_key=preserved.get(f"media_original_{position:02d}"),
-        )
+        preserved_key = preserved.get(f"media_original_{position:02d}")
+        shared = hosted_by_source_url.get(url.strip())
+        if shared is not None and (preserved_key is None or preserved_key == shared["storage_key"]):
+            check()
+            entry = dict(shared)  # Cover and media retain independent role metadata.
+        else:
+            entry, _ = storage.host(
+                url,
+                root=post_root,
+                name=f"media-{position:02d}",
+                check=check,
+                request=request,
+                preserved_key=preserved_key,
+            )
+            hosted_by_source_url.setdefault(url.strip(), entry)
         entry.update(source_role="media", variant_key=f"media_original_{position:02d}", generated_at=stamp)
         originals.append(entry)
     for variant in variants.values():
