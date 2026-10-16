@@ -1661,3 +1661,10 @@ Sixteen focused app tests, source and fixture type checks, lint and deterministi
 contract checks passed. Production app delivery/live UI proof remains pending.
 A separate newly found GIF-only DTO omission is being repaired; full public
 commenter-profile enrichment is under design. These are not claimed deployed.
+
+The GIF-only transport repair is source-verified: explicit supported GIF, image,
+video and sticker attachments now keep otherwise empty-text comments in the DTO
+and fresh reply hydration. Empty placeholders, author-only URLs and unsafe URL
+schemes remain rejected. Twelve focused cases passed, including native observer
+through DTO and interrupted reply pagination. Parent diff review found no issue.
+Comment media still requires separate hosted-file verification after cooldown.

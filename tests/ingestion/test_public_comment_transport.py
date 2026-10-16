@@ -32,6 +32,99 @@ TOP = "xdt_api__v1__media__media_id__comments__connection"
 CHILD = "xdt_api__v1__media__media_id__comments__parent_comment_id__child_comments__connection"
 
 
+@pytest.mark.parametrize(
+    "attachment",
+    [
+        {"giphy_media_info": {"id": "fixture-gif", "images": {"fixed_height": {"url": "https://media.example/g.gif"}}}},
+        {"attachment": {"image_versions2": {"candidates": [{"url": "https://media.example/image.jpg"}]}}},
+        {"comment_media": {"video_versions": [{"url": "https://media.example/video.mp4"}]}},
+        {"sticker": {"image_url": "https://media.example/sticker.webp"}},
+    ],
+)
+def test_native_media_only_dto_accepts_supported_attachment_urls(attachment):
+    native = {**actual_parent_shape("media-parent"), "text": "", **attachment}
+    dto = maintained._graphql_comment_to_instagram_comment(native, shortcode="fixture", post_url="fixture")
+    assert dto is not None and dto.text == "" and len(dto.media_urls) == 1
+    assert dto.media_urls[0].startswith("https://media.example/")
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {},
+        {"giphy_media_info": {"id": "fixture-gif"}},
+        {"giphy_media_info": {"images": {"fixed_height": {"url": "javascript:placeholder"}}}},
+        {"attachment": {"url": "https://[malformed"}},
+        {"url": "https://media.example/untyped"},
+        {"user": {"username": "fixture", "profile_pic_url": "https://media.example/avatar.jpg"}},
+    ],
+)
+def test_empty_native_placeholder_or_author_url_is_not_media_comment(extra):
+    native = {**actual_parent_shape("empty"), "text": "", **extra}
+    assert maintained._graphql_comment_to_instagram_comment(native, shortcode="fixture", post_url="fixture") is None
+
+
+@pytest.mark.parametrize("finish_tail", [False, True])
+def test_retained_shape_gif_parent_observer_dto_and_fresh_reply_hydration(monkeypatch, finish_tail):
+    """Real decoder/fetcher: the retained empty-text GIF must own a fresh child lane."""
+    gif_url = "https://media.example/retained-shape.gif"
+    native = {
+        **actual_parent_shape("gif-parent"),
+        "text": "",
+        "giphy_media_info": {"id": "fixture-gif", "images": {"fixed_height": {"url": gif_url}}},
+    }
+    state = {"version": 1, "observed": {}, "lanes": {}, "expected": None}
+    retained, dtos, calls = [], [], []
+    convert = maintained._graphql_comment_to_instagram_comment
+
+    def record_dto(*args, **kwargs):
+        dto = convert(*args, **kwargs)
+        if dto is not None:
+            dtos.append(dto)
+        return dto
+
+    monkeypatch.setattr(maintained, "_graphql_comment_to_instagram_comment", record_dto)
+
+    def observe(kind, payload):
+        evidence = existing.evidence(payload)
+        retained.append(evidence)
+        _advance(state, parse_comment_evidence(evidence, pinned=True), scan_started_at=OBSERVED)
+
+    def handler(request):
+        if request.method == "GET":
+            calls.append("bootstrap")
+            return bootstrap()
+        _, variables = body(request)
+        parent, cursor = variables.get("parent_comment_id"), variables.get("after")
+        calls.append((parent, cursor))
+        if parent is None:
+            return httpx.Response(200, json=page([native]))
+        assert parent == "gif-parent"
+        gif = next(dto for dto in dtos if dto.comment_id == parent)
+        assert gif.text == "" and gif.media_urls == [gif_url] and gif.giphy_media_info == native["giphy_media_info"]
+        if cursor is None:
+            return httpx.Response(200, json=page([node("reply")], child=True, more=True, after="reply-tail"))
+        assert cursor == "reply-tail"
+        # Both expected rows are present, but native reply pagination is unfinished.
+        assert not _complete(state, CommentFetchSummary(expected_count=2, full_observation=True))
+        if not finish_tail:
+            raise RuntimeError("fixture interrupted GIF reply tail")
+        return httpx.Response(200, json=page([], child=True))
+
+    fetch, _ = source(monkeypatch, handler, expected=2)
+    args = {"shortcode": "fixture", "checkpoint": {}, "source_observer": observe, "pre_source_request": lambda: None}
+    if finish_tail:
+        summary = fetch(**args)
+        assert _complete(state, summary)
+    else:
+        with pytest.raises(RuntimeError, match="fixture interrupted GIF reply tail"):
+            fetch(**args)
+        assert not _complete(state, CommentFetchSummary(expected_count=2, full_observation=True))
+    assert calls == ["bootstrap", (None, None), ("gif-parent", None), ("gif-parent", "reply-tail")]
+    parsed_parent = parse_comment_evidence(retained[0], pinned=True).comments[0]
+    assert parsed_parent.text == "" and parsed_parent.raw_data["giphy_media_info"] == native["giphy_media_info"]
+
+
 def node(identity, count=0, **extra):
     return {
         "pk": identity,

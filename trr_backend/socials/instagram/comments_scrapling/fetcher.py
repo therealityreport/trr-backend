@@ -998,6 +998,56 @@ def _graphql_comment_reply_edges(node: Mapping[str, Any]) -> list[Mapping[str, A
     return out
 
 
+def _graphql_comment_media_urls(node: Mapping[str, Any]) -> list[str]:
+    """Read explicit native attachments, without treating author/other URLs as media."""
+    containers = """
+        media comment_media commentMedia comment_gif commentGif media_versions attachment attachments content preview
+        image images image_versions2 candidates video_versions carousel_media sticker stickers sticker_asset
+        stickerAsset static_sticker staticSticker gift gifts gift_media giftMedia gif gif_media gifMedia
+        giphy_media_info giphyMediaInfo
+        tenor_media_info tenorMediaInfo visual_media visualMedia animated_media animatedMedia original downsized
+        fixed_height fixedHeight fixed_width fixedWidth clip
+    """.split()
+    url_keys = """
+        url uri display_url displayUrl video_url videoUrl image_url imageUrl thumbnail_url thumbnailUrl
+        media_url mediaUrl
+        animated_image_url animatedImageUrl fixed_height_url fixedHeightUrl fixed_width_url fixedWidthUrl webp src
+    """.split()
+    urls: list[str] = []
+
+    def append(value: Any) -> None:
+        if not isinstance(value, str):
+            return
+        value = value.strip()
+        try:
+            parsed = urlparse(value)
+        except ValueError:
+            return
+        if parsed.scheme in {"http", "https"} and parsed.netloc and value not in urls:
+            urls.append(value)
+
+    def collect(value: Any) -> None:
+        if isinstance(value, list):
+            for item in value:
+                collect(item)
+        elif isinstance(value, Mapping):
+            for key in url_keys:
+                append(value.get(key))
+            for key in containers:
+                collect(value.get(key))
+
+    for key in ("media_urls", "mediaUrls"):
+        values = node.get(key)
+        if isinstance(values, list):
+            for value in values:
+                append(value)
+    for key in ("media_url", "mediaUrl"):
+        append(node.get(key))
+    for key in containers:
+        collect(node.get(key))
+    return urls
+
+
 def _graphql_comment_to_instagram_comment(
     node: Mapping[str, Any],
     *,
@@ -1062,7 +1112,8 @@ def _graphql_comment_to_instagram_comment(
             return {str(key): str(raw_value) for key, raw_value in value.items() if key and raw_value is not None}
 
     is_covered = coerce_bool(first_present("is_covered", "isCovered", "covered"), False)
-    if not comment_id or not username or (not text and not is_covered):
+    media_urls = _graphql_comment_media_urls(node)
+    if not comment_id or not username or (not text and not is_covered and not media_urls):
         return None
 
     created_at = _graphql_comment_timestamp(node)
@@ -1125,6 +1176,7 @@ def _graphql_comment_to_instagram_comment(
         reply_count=reply_count if reply_count is not None else len(replies),
         reply_depth=max(0, int(reply_depth or 0)),
         replies=replies,
+        media_urls=media_urls,
         owner_full_name=str(owner.get("full_name") or owner.get("fullName") or "").strip() or None,
         owner_profile_pic_url=str(owner.get("profile_pic_url") or owner.get("profilePicUrl") or "").strip() or None,
         owner_profile_pic_url_hd=str(owner.get("profile_pic_url_hd") or owner.get("profilePicUrlHd") or "").strip()
