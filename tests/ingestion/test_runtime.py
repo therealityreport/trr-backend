@@ -2,6 +2,7 @@
 
 import builtins
 import importlib
+import json
 import os
 import signal
 import subprocess
@@ -11,6 +12,14 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 from trr_backend.ingestion import runtime
+
+PUBLIC_DIAGNOSTIC = {
+    "event": "instagram_public_request_failed",
+    "error_code": "forbidden",
+    "status": 403,
+    "method": "GET",
+    "endpoint_category": "profile_bootstrap",
+}
 
 
 def test_disabled_runtime_imports_no_engine_composition_or_connection(monkeypatch):
@@ -236,6 +245,119 @@ print(json.dumps({'outcome':'committed','stage':'comments','owner_token':'must-n
     }
     assert runtime.run_ingestion_activity(reservation) == {"outcome": "committed", "stage": "comments"}
     assert children[0].poll() == 0
+
+
+@pytest.mark.parametrize("with_diagnostic", [True, False])
+def test_public_diagnostic_crosses_real_transport_worker_main_and_runtime(monkeypatch, caplog, with_diagnostic):
+    monkeypatch.setenv(runtime.COORDINATOR_ENABLED, "true")
+    actual_popen = subprocess.Popen
+    script = """
+import sys,time,requests
+from types import SimpleNamespace
+from trr_backend.db import pg
+from trr_backend.ingestion import worker
+from trr_backend.ingestion.domain import Failure
+from trr_backend.ingestion.public_diagnostics import record_public_diagnostic,current_public_diagnostic
+from trr_backend.ingestion.public_transport import ObservedPublicSession,_CallbackAbort
+pg.close_pool=lambda:None
+record_public_diagnostic(DIAGNOSTIC)
+def execute(reservation,**kwargs):
+    sys.stderr.write("private-stderr-sentinel")
+    if not ENABLED:
+        return {"outcome":"committed","stage":reservation["stage"],"payload":"private-output-sentinel"}
+    sent=[]
+    class Gate:
+        def before_request(self):return 1
+        def record_failure(self,*args,**kwargs):return Failure("public_access_backoff")
+    class Session:
+        def __init__(self):
+            self.cookies=requests.cookies.RequestsCookieJar()
+            self.headers,self.adapters,self.proxies={},{},{}
+        def mount(self,key,value):self.adapters[key]=value
+        def request(self,*args,**kwargs):
+            sent.append(1)
+            response=requests.Response()
+            response.status_code=403
+            response._content=b"private-body-sentinel"
+            response.headers.update({"content-type":"text/html","set-cookie":"private-cookie-sentinel"})
+            return response
+        def close(self):pass
+    counts=[]
+    session=ObservedPublicSession(session=Session(),gate=Gate(),deadline=time.monotonic()+30,
+        check_cancelled=lambda:None,on_request=lambda:counts.append(1),
+        on_payload=lambda _:None,on_failure=lambda _:None)
+    try:
+        session.get("https://www.instagram.com/private-account-sentinel/?token=private-query-sentinel")
+    except _CallbackAbort as error:
+        assert len(sent)==len(counts)==1
+        return {"outcome":"unresolved","stage":reservation["stage"],"code":error.error.failure.code}
+    finally:session.close()
+    raise AssertionError("synthetic403 did not fail")
+worker.execute_reservation=execute
+code=worker.main()
+assert current_public_diagnostic() is None
+raise SystemExit(code)
+""".replace("DIAGNOSTIC", repr(dict(PUBLIC_DIAGNOSTIC, error_code="rate_limited"))).replace(
+        "ENABLED", repr(with_diagnostic)
+    )
+
+    def spawn(argv, **kwargs):
+        assert argv == [sys.executable, "-m", "trr_backend.ingestion.worker"]
+        assert kwargs["stderr"] == subprocess.DEVNULL and kwargs["stdout"] == subprocess.PIPE
+        return actual_popen([sys.executable, "-c", script], **kwargs)
+
+    monkeypatch.setattr(runtime.subprocess, "Popen", spawn)
+    reservation = {
+        "run_id": "run",
+        "account": "account",
+        "generation": 1,
+        "stage": "listing",
+        "target_key": "page:root",
+        "owner_token": "private-owner-sentinel",
+    }
+    expected = (
+        {
+            "outcome": "unresolved",
+            "stage": "listing",
+            "code": "public_access_backoff",
+            "public_diagnostic": PUBLIC_DIAGNOSTIC,
+        }
+        if with_diagnostic
+        else {"outcome": "committed", "stage": "listing"}
+    )
+    assert runtime.run_ingestion_activity(reservation) == expected
+    records = [record for record in caplog.records if record.name == "trr_backend.ingestion.runtime"]
+    assert [json.loads(record.getMessage()) for record in records] == ([PUBLIC_DIAGNOSTIC] if with_diagnostic else [])
+    assert "sentinel" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        dict(PUBLIC_DIAGNOSTIC, url="https://private-url-sentinel"),
+        dict(PUBLIC_DIAGNOSTIC, status=True),
+        dict(PUBLIC_DIAGNOSTIC, error_code="private-error-sentinel"),
+    ],
+)
+def test_runtime_revalidates_and_discards_malicious_child_diagnostic(monkeypatch, caplog, bad):
+    monkeypatch.setenv(runtime.COORDINATOR_ENABLED, "true")
+    actual_popen = subprocess.Popen
+    output = {"outcome": "committed", "stage": "listing", "public_diagnostic": bad}
+    script = "import json,sys;json.load(sys.stdin);print(json.dumps(" + repr(output) + "))"
+    monkeypatch.setattr(
+        runtime.subprocess, "Popen", lambda _argv, **kw: actual_popen([sys.executable, "-c", script], **kw)
+    )
+    reservation = {
+        "run_id": "run",
+        "account": "account",
+        "generation": 1,
+        "stage": "listing",
+        "target_key": "page:root",
+        "owner_token": "private-owner-sentinel",
+    }
+    assert runtime.run_ingestion_activity(reservation) == {"outcome": "committed", "stage": "listing"}
+    assert "sentinel" not in caplog.text
+    assert not [record for record in caplog.records if record.name == "trr_backend.ingestion.runtime"]
 
 
 @pytest.mark.parametrize(

@@ -21,30 +21,12 @@ from trr_backend.ingestion.domain import Failure, LostOwnership
 from trr_backend.ingestion.identity_policy import IdentityDeferred
 from trr_backend.ingestion.post_transport import SourceFailure, _CallbackAbort, _guard
 from trr_backend.ingestion.providers import InvalidSourceError
+from trr_backend.ingestion.public_diagnostics import ERROR_CODES, record_public_diagnostic
 from trr_backend.socials.instagram.credential_guard import CredentialIdentityMismatch, PublicCookieIdentity
 from trr_backend.socials.instagram.public_response import PublicRequestClient, parse_public_retry_after
 from trr_backend.socials.instagram.request_client import InstagramRequestFailure
 
 LOGGER = logging.getLogger(__name__)
-_LOGGED_ERRORS = frozenset(
-    {
-        "network_error",
-        "unauthorized",
-        "forbidden",
-        "rate_limited",
-        "redirect_login",
-        "login_required",
-        "challenge_required",
-        "checkpoint_required",
-        "feedback_required",
-        "consent_required",
-        "sentry_block",
-        "endpoint_redirect",
-        "request_failed",
-        "parse_error",
-        "public_access_backoff",
-    }
-)
 
 
 def _log_public_failure(*, error_code, status, method, path):
@@ -61,12 +43,13 @@ def _log_public_failure(*, error_code, status, method, path):
         endpoint = "other"
     event = {
         "event": "instagram_public_request_failed",
-        "error_code": error_code if isinstance(error_code, str) and error_code in _LOGGED_ERRORS else "request_failed",
+        "error_code": error_code if isinstance(error_code, str) and error_code in ERROR_CODES else "request_failed",
         "status": status if type(status) is int and 100 <= status <= 599 else 0,
         "method": method.upper() if isinstance(method, str) and method.upper() in {"GET", "POST"} else "OTHER",
         "endpoint_category": endpoint,
     }
     try:
+        record_public_diagnostic(event)
         LOGGER.warning(json.dumps(event, sort_keys=True))
     except Exception:
         # Observability cannot replace the existing counted failure/cooldown.

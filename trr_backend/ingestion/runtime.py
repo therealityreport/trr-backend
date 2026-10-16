@@ -93,7 +93,8 @@ def run_ingestion_activity(reservation: Mapping[str, Any]) -> dict[str, Any]:
     """Run the new worker within its lease, sharing existing Modal function caps.
 
     Only JSON stdin carries the owner token. Output is bounded and projected to
-    outcome/identities; source payloads, logs and stderr never leave this helper.
+    outcome/identities plus one validated public failure diagnostic. Source
+    payloads, raw logs and stderr never leave this helper.
     """
     if not coordinator_enabled():
         return {"outcome": "fenced", "code": "ingestion_disabled"}
@@ -158,6 +159,11 @@ def run_ingestion_activity(reservation: Mapping[str, Any]) -> dict[str, Any]:
         code = result.get("code")
         if isinstance(code, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,79}", code):
             summary["code"] = code
+        from trr_backend.ingestion.public_diagnostics import publish_public_diagnostic
+
+        diagnostic = publish_public_diagnostic(result.get("public_diagnostic"))
+        if diagnostic is not None:
+            summary["public_diagnostic"] = diagnostic
         return summary
     finally:
         _reap_process_group(child)

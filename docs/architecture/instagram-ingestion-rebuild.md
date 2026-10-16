@@ -1468,3 +1468,29 @@ metered whole-app cost before credits, covering deployments and mixed work;
 it is not per-canary cost or a matched region comparison. Evidence:
 public-canary-observation-1601.json and modal-billing-15-16utc.json. No stage or
 acceptance gate changed; the next scheduled source attempt remains pending.
+
+### Public response diagnostic channel repair — 2026-10-16 16:20 UTC
+
+The second public attempt at 16:09 UTC made one request and again recorded
+public_access_backoff. Totals are two attempts/two requests, no evidence or
+completed listing page; next attempt is 16:24:17 UTC. The old run remains held.
+The expected diagnostic was absent because run_ingestion_activity deliberately
+starts worker.main with stderr=DEVNULL. The first logging-only change therefore
+did not establish deployed observability; its passing logger tests missed that
+subprocess boundary. No additional source requests were made to diagnose this.
+
+The repair passes one fixed-field diagnostic through the existing bounded JSON
+result, validates it independently at worker and runtime boundaries, and keeps
+raw stderr discarded. Source requests, cooldowns, ownership and persistence are
+unchanged. A source-only comparison found no missing maintained bootstrap
+headers, anonymous cookie handling or GraphQL context. Fresh per-activity
+sessions differ from legacy pagination reuse but do not explain the first
+bootstrap rejection without response evidence. No protocol workaround is justified
+by the two normalized failures alone.
+
+Fourteen affected cases passed in 1.79 seconds, including a real subprocess path
+from synthetic HTTP 403 through ObservedPublicSession, worker.main and runtime.
+They verify no-diagnostic output parity, rejection of malicious child fields,
+fixed-type allowlists, first-event bounds and reset/copy isolation. Ruff, AST and
+diff checks passed; parent reviewed the complete six-file change with no findings.
+Existing unchanged transport evidence was reused. Runtime rollout is next.

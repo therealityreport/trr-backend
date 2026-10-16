@@ -213,8 +213,10 @@ def execute_reservation(reservation: dict[str, Any], *, deadline_callback: Calla
 
 def main() -> int:
     from trr_backend.db import pg
+    from trr_backend.ingestion.public_diagnostics import current_public_diagnostic, reset_public_diagnostic
     from trr_backend.ingestion.runtime import activity_reservation
 
+    reset_public_diagnostic()
     timer = None
 
     def deadline(expires_at):
@@ -234,6 +236,9 @@ def main() -> int:
             raise ValueError("Reservation exceeds input bound")
         result = execute_reservation(activity_reservation(json.loads(raw)), deadline_callback=deadline)
         safe = {key: result[key] for key in ("outcome", "stage", "code") if key in result}
+        diagnostic = current_public_diagnostic()
+        if diagnostic is not None:
+            safe["public_diagnostic"] = diagnostic
         print(json.dumps(safe))
         return 0
     except Exception:
@@ -242,6 +247,7 @@ def main() -> int:
         print(json.dumps({"outcome": "unresolved", "code": "worker_failed"}))
         return 1
     finally:
+        reset_public_diagnostic()
         if timer:
             timer.cancel()
         pg.close_pool()
