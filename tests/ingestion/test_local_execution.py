@@ -39,7 +39,7 @@ def database(base_database):
     with tx() as conn, conn.cursor() as cur:
         for migration in (
             "20261016070100_instagram_ingestion_workflows.sql",
-            "20261016180000_instagram_ingestion_execution_placement.sql",
+            "20261016173915_instagram_ingestion_execution_placement.sql",
             "20260911121000_instagram_detail_request_lanes.sql",
         ):
             cur.execute((ROOT / "supabase/migrations" / migration).read_text())

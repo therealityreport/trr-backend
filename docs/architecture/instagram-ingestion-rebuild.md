@@ -1638,3 +1638,26 @@ and fixes-only review. Comment fixes passed 10 affected cases and fixes-only
 review: any positive conflicting reply-count alias remains unsupported, and
 strict public absent/null counts are not synthesized as zero. Existing unchanged
 checks were reused. App contract/control alignment is in progress.
+
+### Guarded placement deployed — 2026-10-16 17:40 UTC
+
+Source `2ce08802` deployed to admin-56995/main/trr-backend-jobs as Modal v72,
+tag `ig-public-local-20261016-2ce08802`. Health and explicit-main readiness passed.
+All six inspected current containers matched 55 relevant source hashes, loaded
+origins and the configured public launch profile. No source request was used by
+those deployment checks. Unrelated dirty checkout changes remain preserved;
+provider commit metadata consequently carries its dirty marker.
+
+After that verification, the additive placement migration applied to trr-core
+(vwxfvzutyufrkhfgoeaa) as provider version `20261016173915`. Local migration filename
+and its test reference were aligned with that recorded version without changing
+SQL bytes (SHA256 c3e3497a862bb09ee115289c65f07a13779e79a8d4d783f5d308cf5854498ad1).
+Both existing runs still read cancelled with original generation/intent hashes
+and default placement modal. No run was resumed by this migration.
+
+The app placement controls and matching generated contract are committed as
+`773eab6`: local resume/retry controls are hidden, cancellation remains available.
+Sixteen focused app tests, source and fixture type checks, lint and deterministic
+contract checks passed. Production app delivery/live UI proof remains pending.
+A separate newly found GIF-only DTO omission is being repaired; full public
+commenter-profile enrichment is under design. These are not claimed deployed.
