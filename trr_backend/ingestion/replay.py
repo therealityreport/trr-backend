@@ -20,6 +20,7 @@ from trr_backend.ingestion.evidence import Evidence, sanitize_payload
 from trr_backend.ingestion.listing import ROOT_FIELD, parse_listing_page
 from trr_backend.ingestion.providers import PARSER_VERSION, InvalidSourceError, ParsedSource, parse_evidence
 from trr_backend.ingestion.queries import Queries
+from trr_backend.socials.instagram.graphql_response import PROVENANCE_KEY, classify_graphql_response
 
 if TYPE_CHECKING:
     from trr_backend.ingestion.media import MediaResult
@@ -460,6 +461,14 @@ def _listing(evidence: Evidence, *, account: str, target_key: str, parser_versio
     payload = evidence.read(pinned=pinned)
     data = payload.get("data")
     if not isinstance(data, dict) or ROOT_FIELD not in data:
+        if (
+            PROVENANCE_KEY in payload
+            or payload.get("errors")
+            or payload.get("error")
+            or payload.get("status") not in (None, "ok")
+        ):
+            if not classify_graphql_response(payload).accepted:
+                raise InvalidSourceError("Listing source reported an unsuccessful response")
         # Earlier retained single-post listing observations remain replayable;
         # their own shortcode, rather than a page cursor, identifies the target.
         parsed = parse_evidence(
@@ -471,7 +480,8 @@ def _listing(evidence: Evidence, *, account: str, target_key: str, parser_versio
             pinned=pinned,
         )
         return ListingReplay(evidence.captured_at, (parsed,), None, None)
-    if payload.get("status") is not None and payload.get("status") != "ok":
+    decision = classify_graphql_response(payload)
+    if not decision.accepted and decision.reason not in {"graphql_empty_connection", "graphql_invalid_connection"}:
         raise InvalidSourceError("Listing source reported an unsuccessful response")
     page = parse_listing_page(payload)
     posts = []

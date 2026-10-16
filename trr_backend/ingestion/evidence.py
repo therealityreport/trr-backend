@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
 from trr_backend.ingestion.domain import ReplayUnavailable, fingerprint, stable_json, utc_timestamp
+from trr_backend.socials.instagram.graphql_response import PROVENANCE_KEY, project_graphql_provenance
 
 SCHEMA_VERSION = 1
 MAX_PAYLOAD_BYTES = 4 * 1024 * 1024
@@ -260,6 +261,9 @@ def sanitize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("Evidence must be a source content object")
     result = project(payload)
+    provenance = project_graphql_provenance(payload)
+    if provenance is not None:
+        result[PROVENANCE_KEY] = provenance
     if len(stable_json(result).encode()) > MAX_PAYLOAD_BYTES:
         raise ValueError("Evidence exceeds 4 MiB")
     return result

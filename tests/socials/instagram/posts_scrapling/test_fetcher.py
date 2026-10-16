@@ -17,6 +17,42 @@ def _fixture_text(name: str) -> str:
     return (_FIXTURE_DIR / name).read_text(encoding="utf-8")
 
 
+def _document_context_html(tokens: list[str], *, nested: bool = True) -> str:
+    definitions = [["DTSGInitialData", [], {"token": token}, 123] for token in tokens]
+    box = {"define": definitions}
+    if nested:
+        box["require"] = [
+            [
+                "Nested",
+                "call",
+                None,
+                [
+                    {
+                        "data": {
+                            "__bbox": {
+                                "define": [["DTSGInitialData", [], {"token": "nested-secret"}, 456]],
+                            }
+                        }
+                    }
+                ],
+            ]
+        ]
+    root = {
+        "require": [
+            [
+                "UnspecifiedWrapper",
+                "method",
+                {"not_null": True},
+                [{"__bbox": box}, {"extra_argument": True}],
+                "extra_element",
+            ]
+        ],
+        "haste_session": "document-hs",
+        "hsi": "900",
+    }
+    return '<script type="application/json" data-sjs>' + json.dumps(root, separators=(",", ":")) + "</script>"
+
+
 @pytest.fixture
 def _mock_scrapling(monkeypatch):
     """Prevent real Scrapling import."""
@@ -140,6 +176,60 @@ def test_extract_page_tokens_missing_values():
 
     tokens = _extract_page_tokens("<html><body>nothing here</body></html>")
     assert tokens == {}
+
+
+def test_document_context_selects_unique_direct_definition_without_wrapper_assumptions():
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import _extract_page_tokens
+
+    tokens = _extract_page_tokens(_document_context_html(["direct-secret"]))
+    assert tokens["fb_dtsg"] == "direct-secret"
+    assert tokens["__hs"] == "document-hs" and tokens["hsi"] == "900"
+    assert "nested-secret" not in tokens.values()
+
+
+@pytest.mark.parametrize(
+    "tokens",
+    [
+        [],
+        ["one", "two"],
+        ["same", "same"],
+        [""],
+        ["placeholder"],
+        [" bad "],
+        pytest.param(["\ud800"], id="json-escaped-surrogate"),
+    ],
+)
+def test_document_context_missing_or_ambiguous_dtsg_remains_optional(tokens):
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import _extract_page_tokens
+
+    result = _extract_page_tokens(_document_context_html(tokens))
+    assert "fb_dtsg" not in result
+    assert result["__hs"] == "document-hs" and result["hsi"] == "900"
+
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        '<script type="application/json" data-sjs>{broken</script>',
+        _document_context_html(["one"]) + _document_context_html(["two"]),
+        _document_context_html(["one"]).replace("data-sjs", "data-other"),
+        _document_context_html(["one"]).replace('"token":"one"', '"token":null'),
+        _document_context_html(["one"]).replace('["DTSGInitialData",[],', '["DTSGInitialData",["dependency"],'),
+        "\ud800",
+    ],
+)
+def test_document_context_malformed_or_non_document_scope_never_guesses(html):
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import _extract_document_dtsg
+
+    assert _extract_document_dtsg(html) is None
+
+
+@pytest.mark.parametrize("bound,value", [("_DOCUMENT_CONTEXT_MAX_BYTES", 8), ("_DOCUMENT_CONTEXT_MAX_ITEMS", 1)])
+def test_document_context_input_limits_omit_token(monkeypatch, bound, value):
+    from trr_backend.socials.instagram.posts_scrapling import fetcher as module
+
+    monkeypatch.setattr(module, bound, value)
+    assert module._extract_document_dtsg(_document_context_html(["one"])) is None
 
 
 def test_advisory_api_pacing_uses_session_control_pool(monkeypatch):
@@ -292,7 +382,7 @@ def test_build_graphql_headers():
     assert headers["x-csrftoken"] == "csrf_val"
     assert headers["x-fb-lsd"] == "lsd_val"
     assert headers["x-bloks-version-id"] == "bloks_val"
-    assert headers["x-fb-friendly-name"] == "PolarisProfilePostsQuery"
+    assert headers["x-fb-friendly-name"] == "PolarisProfilePostsTabContentQuery_connection"
     assert headers["x-root-field-name"] == "xdt_api__v1__feed__user_timeline_graphql_connection"
     assert headers["x-requested-with"] == "XMLHttpRequest"
     assert headers["referer"] == "https://www.instagram.com/testuser/"
@@ -311,14 +401,89 @@ def test_build_graphql_form_data():
         doc_id="25645538101792896",
     )
     assert data["doc_id"] == "25645538101792896"
-    assert data["fb_api_req_friendly_name"] == "PolarisProfilePostsQuery"
+    assert data["fb_api_req_friendly_name"] == "PolarisProfilePostsTabContentQuery_connection"
     variables = json.loads(data["variables"])
     assert variables["username"] == "testuser"
     assert variables["first"] == 33
     assert variables["after"] is None
-    assert variables["__relay_internal__pv__PolarisImmersiveFeedChainingEnabledrelayprovider"] is True
-    assert variables["__relay_internal__pv__PolarisAIGMAccountLabelEnabledrelayprovider"] is False
+    assert variables["include_multi_captions"] is True
+    assert variables["__relay_internal__pv__PolarisMultiCaptionCarouselEnabledrelayprovider"] is True
+    assert variables["__relay_internal__pv__PolarisShortDramaEnabledrelayprovider"] is True
+    assert variables["__relay_internal__pv__PolarisThreadsStyleCommentsEnabledrelayprovider"] is False
+    assert variables["__relay_internal__pv__PolarisReelsRecoDebugOverlayEnabledrelayprovider"] is False
+    assert "__relay_internal__pv__PolarisImmersiveFeedChainingEnabledrelayprovider" not in variables
+    assert "__relay_internal__pv__PolarisAIGMAccountLabelEnabledrelayprovider" not in variables
+    assert set(variables) == {
+        "after",
+        "before",
+        "data",
+        "first",
+        "last",
+        "username",
+        "include_multi_captions",
+        "__relay_internal__pv__PolarisMultiCaptionCarouselEnabledrelayprovider",
+        "__relay_internal__pv__PolarisShortDramaEnabledrelayprovider",
+        "__relay_internal__pv__PolarisThreadsStyleCommentsEnabledrelayprovider",
+        "__relay_internal__pv__PolarisReelsRecoDebugOverlayEnabledrelayprovider",
+    }
     assert data["lsd"] == "lsd_val"
+    assert data["av"] == "123" and data["__user"] == "0"
+    assert "fb_dtsg" not in data and "jazoest" not in data
+
+
+@pytest.mark.parametrize(
+    "direction,cursor", [("forward", None), ("forward", "next-cursor"), ("reverse", "previous-cursor")]
+)
+def test_document_context_form_preserves_viewer_and_cursor_with_dtsg_checksum(direction, cursor):
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import _build_graphql_form_data, _extract_page_tokens
+
+    tokens = _extract_page_tokens(_document_context_html(["direct-secret"]))
+    tokens.update({"lsd": "unrelated-lsd", "__spin_r": "123", "__spin_b": "trunk", "__spin_t": "456"})
+    data = _build_graphql_form_data(
+        username="bravotv",
+        cursor=cursor,
+        page_size=10,
+        viewer_id="viewer",
+        page_tokens=tokens,
+        doc_id="unchanged-doc",
+        direction=direction,
+    )
+    assert data["av"] == "viewer" and data["__user"] == "0"
+    assert data["fb_dtsg"] == "direct-secret"
+    assert data["jazoest"] == "2" + str(sum(map(ord, "direct-secret")))
+    assert data["__hs"] == "document-hs" and data["__hsi"] == "900" and "hsi" not in data
+    assert all(data[key] == tokens[key] for key in ("lsd", "__spin_r", "__spin_b", "__spin_t"))
+    variables = json.loads(data["variables"])
+    assert variables["after"] == (cursor if direction == "forward" else None)
+    assert variables["before"] == (cursor if direction == "reverse" else None)
+    assert variables["first"] == (10 if direction == "forward" else None)
+    assert variables["last"] == (10 if direction == "reverse" else None)
+    assert data["doc_id"] == "unchanged-doc" and "dpr" not in data
+
+
+@pytest.mark.parametrize(
+    "override,expected",
+    [
+        (None, ("39229011733413759",)),
+        ("", ("39229011733413759",)),
+        ("bad,not-a-document", ("39229011733413759",)),
+        (" 123,456,123,bad ", ("123", "456")),
+    ],
+)
+def test_connection_contract_default_and_explicit_override_do_not_change_legacy_constants(
+    _mock_scrapling, monkeypatch, override, expected
+):
+    from trr_backend.socials.instagram import constants
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsScraplingFetcher
+
+    legacy_ids, legacy_name = constants.PROFILE_POSTS_DOC_IDS, constants.PROFILE_POSTS_FRIENDLY_NAME
+    if override is None:
+        monkeypatch.delenv("SOCIAL_INSTAGRAM_PROFILE_POSTS_DOC_IDS", raising=False)
+    else:
+        monkeypatch.setenv("SOCIAL_INSTAGRAM_PROFILE_POSTS_DOC_IDS", override)
+    fetcher = InstagramPostsScraplingFetcher(cookies=[], raw_cookies={}, browser_account_id=None)
+    assert fetcher._doc_ids_configured == expected
+    assert constants.PROFILE_POSTS_DOC_IDS == legacy_ids and constants.PROFILE_POSTS_FRIENDLY_NAME == legacy_name
 
 
 def test_result_dataclass():
@@ -633,6 +798,237 @@ def _native_graphql_page():
             }
         },
     }
+
+
+@pytest.mark.parametrize("errors,rejected", [([], False), ([{"message": "source query rejected"}], True)])
+def test_document_context_normal_parser_uses_error_truth_and_one_request(_mock_scrapling, errors, rejected):
+    import asyncio
+
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import _extract_page_tokens
+
+    payload = _native_graphql_page()
+    payload["errors"] = errors
+    fetcher, events = _guarded_graphql_fetcher(_mock_scrapling, "for(;;);" + json.dumps(payload))
+    fetcher._page_tokens = _extract_page_tokens(_document_context_html(["direct-secret"]))
+    operations = []
+    fetcher._before_source_request = operations.append
+    result = asyncio.run(fetcher.fetch_posts_page("bravotv"))
+    assert result.fetch_failed is rejected and result.auth_failed is False
+    assert len(result.posts) == (0 if rejected else 1)
+    assert result.fetch_reason == ("graphql_error" if rejected else None)
+    assert events == [("retained", payload)]
+    assert operations == ["graphql"] and fetcher._request_count == fetcher._http_client.post.await_count == 1
+    form = fetcher._http_client.post.await_args.kwargs["data"]
+    assert form["fb_dtsg"] == "direct-secret" and form["__user"] == "0"
+    assert "hsi" not in form and form["__hsi"] == "900"
+
+
+def _optional_location_error(index=0):
+    return {
+        "severity": "ERROR",
+        "message": "A server field error occurred",
+        "path": [
+            "xdt_api__v1__feed__user_timeline_graphql_connection",
+            "edges",
+            index,
+            "node",
+            "location",
+            "profile_pic_url",
+        ],
+    }
+
+
+def test_connection_contract_two_pages_accept_only_ancillary_error_after_retaining_source(_mock_scrapling, monkeypatch):
+    import asyncio
+
+    import httpx
+
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_PROFILE_POSTS_DOC_IDS", raising=False)
+    first = _native_graphql_page()
+    second = _native_graphql_page()
+    first["errors"] = [_optional_location_error()]
+    second["errors"] = [_optional_location_error()]
+    root = "xdt_api__v1__feed__user_timeline_graphql_connection"
+    first["data"][root]["page_info"] = {"has_next_page": True, "end_cursor": "next-page"}
+    for page in (first, second):
+        page["data"][root]["edges"][0]["node"]["location"] = {"id": "place", "profile_pic_url": None}
+    fetcher, events = _guarded_graphql_fetcher(_mock_scrapling, "")
+    fetcher._doc_ids_configured = ("39229011733413759",)
+    fetcher._http_client.post.side_effect = [
+        httpx.Response(
+            200,
+            text="for(;;);" + json.dumps(page),
+            request=httpx.Request("POST", "https://www.instagram.com/graphql/query"),
+        )
+        for page in (first, second)
+    ]
+    operations = []
+    fetcher._before_source_request = operations.append
+
+    async def execute():
+        initial = await fetcher.fetch_posts_page("bravotv")
+        following = await fetcher.fetch_posts_page("bravotv", cursor=initial.end_cursor)
+        return initial, following
+
+    initial, following = asyncio.run(execute())
+    assert not initial.fetch_failed and initial.has_next_page and initial.end_cursor == "next-page"
+    assert not following.fetch_failed and not following.has_next_page
+    assert events == [("retained", first), ("retained", second)]
+    assert operations == ["graphql", "graphql"] and fetcher._request_count == 2
+    calls = fetcher._http_client.post.await_args_list
+    assert len(calls) == 2
+    for call in calls:
+        assert call.kwargs["data"]["doc_id"] == "39229011733413759"
+        assert call.kwargs["headers"]["x-fb-friendly-name"] == call.kwargs["data"]["fb_api_req_friendly_name"]
+        assert call.kwargs["data"]["fb_api_req_friendly_name"] == "PolarisProfilePostsTabContentQuery_connection"
+    assert json.loads(calls[0].kwargs["data"]["variables"])["after"] is None
+    assert json.loads(calls[1].kwargs["data"]["variables"])["after"] == "next-page"
+
+
+@pytest.mark.parametrize(
+    "variant", ["unknown_path", "pathless", "boolean_index", "missing_node", "auth", "nested_auth", "nested_rate"]
+)
+def test_connection_contract_partial_data_does_not_hide_legitimate_failure(_mock_scrapling, variant):
+    import asyncio
+
+    payload = _native_graphql_page()
+    payload["errors"] = [_optional_location_error()]
+    root = "xdt_api__v1__feed__user_timeline_graphql_connection"
+    if variant == "unknown_path":
+        payload["errors"][0]["path"][-1] = "name"
+    elif variant == "pathless":
+        payload["errors"][0].pop("path")
+    elif variant == "boolean_index":
+        payload["errors"][0]["path"][2] = False
+    elif variant == "missing_node":
+        payload["data"][root]["edges"][0]["node"] = None
+    elif variant == "nested_auth":
+        payload["errors"][0]["message"] = "login_required"
+    elif variant == "nested_rate":
+        payload["errors"][0]["extensions"] = {"code": "rate_limited"}
+    else:
+        payload["status"] = "fail"
+        payload["message"] = "login_required"
+    fetcher, events = _guarded_graphql_fetcher(_mock_scrapling, "for(;;);" + json.dumps(payload))
+    result = asyncio.run(fetcher.fetch_posts_page("bravotv"))
+    assert result.fetch_failed and result.posts == []
+    assert result.auth_failed is (variant in {"auth", "nested_auth"})
+    assert events[0] == ("retained", payload)
+    expected_failures = (
+        [("failure", "source_auth_failed")]
+        if variant in {"auth", "nested_auth"}
+        else [("failure", "rate_limited")]
+        if variant == "nested_rate"
+        else []
+    )
+    assert events[1:] == expected_failures
+    assert fetcher._request_count == fetcher._http_client.post.await_count == 1
+
+
+def test_connection_contract_reverse_partial_error_requires_reverse_pagination_proof(_mock_scrapling):
+    import asyncio
+
+    payload = _native_graphql_page()
+    payload["errors"] = [_optional_location_error()]
+    root = "xdt_api__v1__feed__user_timeline_graphql_connection"
+    payload["data"][root]["page_info"] = {"has_previous_page": False, "start_cursor": None}
+    fetcher, events = _guarded_graphql_fetcher(_mock_scrapling, "for(;;);" + json.dumps(payload))
+    result = asyncio.run(fetcher.fetch_posts_page("bravotv", cursor="before-cursor", direction="reverse"))
+    assert not result.fetch_failed and len(result.posts) == 1
+    assert events == [("retained", payload)]
+    variables = json.loads(fetcher._http_client.post.await_args.kwargs["data"]["variables"])
+    assert variables["before"] == "before-cursor" and variables["after"] is None
+    assert variables["first"] is None and variables["last"] == fetcher._page_size
+    assert fetcher._request_count == 1
+
+
+@pytest.mark.parametrize("container", ["error", "extensions"])
+@pytest.mark.parametrize(
+    "marker,auth,callback",
+    [
+        ({"permission_denied": True}, True, "source_auth_failed"),
+        ({"rate_limited": True}, False, "rate_limited"),
+        ({"error": 1357001}, True, "source_auth_failed"),
+    ],
+)
+def test_nested_machine_failure_retained_before_one_callback_and_request(
+    _mock_scrapling, container, marker, auth, callback
+):
+    import asyncio
+
+    payload = _native_graphql_page()
+    error = _optional_location_error()
+    if container == "extensions":
+        error["extensions"] = marker
+    else:
+        error.update(marker)
+    payload["errors"] = [error]
+    fetcher, events = _guarded_graphql_fetcher(_mock_scrapling, "for(;;);" + json.dumps(payload))
+    operations = []
+    fetcher._before_source_request = operations.append
+
+    result = asyncio.run(fetcher.fetch_posts_page("bravotv"))
+
+    assert result.fetch_failed and result.posts == [] and result.auth_failed is auth
+    assert events == [("retained", payload), ("failure", callback)]
+    assert operations == ["graphql"]
+    assert result.request_count == fetcher._request_count == fetcher._http_client.post.await_count == 1
+
+
+@pytest.mark.parametrize("auth_state", ["authenticated", "public"])
+@pytest.mark.parametrize(
+    "tokens", [[], ["ambiguous-a", "ambiguous-b"], pytest.param(["\ud800"], id="json-escaped-surrogate")]
+)
+def test_document_context_absent_dtsg_preserves_warmup_and_request_budget(
+    _mock_scrapling, monkeypatch, auth_state, tokens
+):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    import httpx
+
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsScraplingFetcher
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_SHARED_WARMUP_ENABLED", "0")
+    operations = []
+    fetcher = InstagramPostsScraplingFetcher(
+        cookies=[],
+        raw_cookies={"sessionid": "fixture", "ds_user_id": "viewer"},
+        browser_account_id="test",
+        auth_state=auth_state,
+        consume_credentials_only=True,
+        allow_requests_recovery=False,
+        before_source_request=operations.append,
+    )
+    fetcher._fetcher.async_fetch = AsyncMock(
+        return_value=SimpleNamespace(
+            status_code=200,
+            text=_document_context_html(tokens),
+            cookies={},
+            headers={},
+            url="https://www.instagram.com/bravotv/",
+        )
+    )
+    response = httpx.Response(
+        200, json=_native_graphql_page(), request=httpx.Request("POST", "https://www.instagram.com/graphql/query")
+    )
+    fetcher._http_client = SimpleNamespace(post=AsyncMock(return_value=response))
+    fetcher._rebuild_http_client = AsyncMock()
+    fetcher._pace_api_requests = AsyncMock()
+    fetcher._doc_ids_configured = ("fixture-doc",)
+
+    async def execute():
+        await fetcher.warmup("bravotv")
+        return await fetcher.fetch_posts_page("bravotv")
+
+    result = asyncio.run(execute())
+    assert not result.fetch_failed and len(result.posts) == 1
+    assert operations == ["browser_warmup", "graphql"] and result.request_count == 2
+    assert fetcher._fetcher.async_fetch.await_count == fetcher._http_client.post.await_count == 1
+    form = fetcher._http_client.post.await_args.kwargs["data"]
+    assert "fb_dtsg" not in form and "jazoest" not in form
+    assert form["av"] == ("0" if auth_state == "public" else "viewer") and form["__user"] == "0"
 
 
 @pytest.mark.parametrize("prefix", ["", "for (;;);", "for(;;);", "\ufeff \nfor(;;);\n"])
@@ -1193,6 +1589,67 @@ def test_shared_warmup_pool_reuses_tokens_without_second_browser_fetch(_mock_scr
     assert second.runtime_metadata["warmup_pool"]["hit"] is True
     assert set(second.runtime_metadata["page_tokens_found"]) == {"bloks_version", "lsd"}
     assert second._raw_cookies["csrftoken"] == "fresh-csrf"
+
+
+def test_document_context_pool_snapshot_and_fresh_warmup_keep_token_handoff_private(
+    _mock_scrapling, monkeypatch, caplog
+):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from trr_backend.socials.instagram.posts_scrapling import fetcher as module
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_SHARED_WARMUP_ENABLED", "1")
+    module._POSTS_WARMUP_POOL.clear()
+
+    def construct():
+        return module.InstagramPostsScraplingFetcher(
+            cookies=[],
+            raw_cookies={"sessionid": "private-session", "ds_user_id": "1"},
+            browser_account_id="handoff",
+        )
+
+    first, pooled, snapshot = construct(), construct(), construct()
+    response = SimpleNamespace(
+        status_code=200,
+        text=_document_context_html(["private-direct-dtsg"]),
+        cookies={"csrftoken": "private-fresh-csrf"},
+        headers={},
+        url="https://www.instagram.com/bravotv/",
+    )
+    first._fetcher = SimpleNamespace(async_fetch=AsyncMock(return_value=response))
+    pooled._fetcher = SimpleNamespace(async_fetch=AsyncMock(side_effect=AssertionError("pool should avoid source")))
+    snapshot._fetcher = SimpleNamespace(
+        async_fetch=AsyncMock(side_effect=AssertionError("snapshot should avoid source"))
+    )
+
+    async def execute():
+        try:
+            await first.warmup("bravotv")
+            await pooled.warmup("bravotv")
+            await snapshot.apply_warmup_snapshot(first.warmup_snapshot())
+            for handed_off in (pooled, snapshot):
+                assert handed_off._page_tokens == first._page_tokens
+                assert handed_off._page_tokens["fb_dtsg"] == "private-direct-dtsg"
+                assert handed_off._raw_cookies["csrftoken"] == "private-fresh-csrf"
+                assert handed_off._request_count == 0
+            monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_SHARED_WARMUP_ENABLED", "0")
+            response.text = _document_context_html(["ambiguous-a", "ambiguous-b"])
+            await first.warmup("bravotv")
+            assert "fb_dtsg" not in first._page_tokens
+            assert first._request_count == 2
+        finally:
+            await first.aclose()
+            await pooled.aclose()
+            await snapshot.aclose()
+            module._POSTS_WARMUP_POOL.clear()
+
+    asyncio.run(execute())
+    serialized = repr([first.runtime_metadata, pooled.runtime_metadata, snapshot.runtime_metadata]) + caplog.text
+    assert all(secret not in serialized for secret in ("private-direct-dtsg", "private-session", "private-fresh-csrf"))
+    pooled._fetcher.async_fetch.assert_not_awaited()
+    snapshot._fetcher.async_fetch.assert_not_awaited()
 
 
 def test_doc_id_pin_tries_successful_id_first_after_initial_fallback(_mock_scrapling, monkeypatch):

@@ -59,13 +59,12 @@ from trr_backend.socials._scrapling_http_utils import (
 )
 from trr_backend.socials.instagram.constants import (
     GRAPHQL_URL,
-    PROFILE_POSTS_DOC_IDS,
     PROFILE_POSTS_FAST_PAGE_SIZE,
-    PROFILE_POSTS_FRIENDLY_NAME,
     PROFILE_POSTS_PAGE_SIZE,
     PROFILE_POSTS_ROOT_FIELD_NAME,
     WEB_X_ASBD_ID,
 )
+from trr_backend.socials.instagram.graphql_response import classify_graphql_response
 from trr_backend.socials.instagram.network_policy import (
     default_instagram_network_policy,
     instagram_scrapling_network_kwargs,
@@ -90,7 +89,8 @@ logger = logging.getLogger("socials.instagram.posts_scrapling.fetcher")
 # ---------------------------------------------------------------------------
 
 _IG_APP_ID = "936619743392459"
-_FRIENDLY_NAME = PROFILE_POSTS_FRIENDLY_NAME
+_FRIENDLY_NAME = "PolarisProfilePostsTabContentQuery_connection"
+_CONNECTION_DOC_ID_DEFAULT = "39229011733413759"
 _ROOT_FIELD_NAME = PROFILE_POSTS_ROOT_FIELD_NAME
 _POSTS_REQUEST_DELAY_DEFAULT = 0.15
 _USER_AGENT = (
@@ -125,6 +125,9 @@ _SPIN_R_RE = re.compile(r'"__spin_r":(?P<token>\d+)')
 _SPIN_B_RE = re.compile(r'"__spin_b":"(?P<token>[^"]+)"')
 _SPIN_T_RE = re.compile(r'"__spin_t":(?P<token>\d+)')
 _HSI_RE = re.compile(r'"hsi":"?(?P<token>\d+)"?')
+_HS_RE = re.compile(r'"(?:haste_session|__hs)":"(?P<token>[^"]+)"')
+_DOCUMENT_CONTEXT_MAX_BYTES = 16 * 1024 * 1024
+_DOCUMENT_CONTEXT_MAX_ITEMS = 100_000
 _REDIRECT_LOOP_RE = re.compile(
     r"(?:exceeded\s+\d+\s+redirects|too[ _-]+many[ _-]+redirects|max(?:imum)?[ _-]+redirects)",
     re.IGNORECASE,
@@ -807,12 +810,105 @@ class InstagramPostsWarmupError(RuntimeError):
         self.retryable = retryable
 
 
+class _DocumentJsonScripts(HTMLParser):
+    """Collect document ServerJS JSON without executing scripts or loaders."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.scripts: list[str] = []
+        self.active: list[str] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        if (
+            tag == "script"
+            and str(attributes.get("type") or "").lower() == "application/json"
+            and "data-sjs" in attributes
+        ):
+            self.active = []
+
+    def handle_data(self, data: str) -> None:
+        if self.active is not None:
+            self.active.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "script" and self.active is not None:
+            self.scripts.append("".join(self.active))
+            self.active = None
+
+
+def _extract_document_dtsg(html: str) -> str | None:
+    """Select one direct document definition, excluding nested request data.
+
+    The observed path is root.require[i][3][0].__bbox.define[j]. Wrapper
+    names and unrelated argument fields do not establish selection. Duplicate,
+    malformed or oversized context stays absent rather than guessing a token.
+    """
+    try:
+        if len(html) > _DOCUMENT_CONTEXT_MAX_BYTES or len(html.encode("utf-8")) > _DOCUMENT_CONTEXT_MAX_BYTES:
+            return None
+        parser = _DocumentJsonScripts()
+        parser.feed(html)
+        parser.close()
+        definitions: list[list[Any]] = []
+        visited = 0
+        for script in parser.scripts:
+            root = json.loads(script)
+            if not isinstance(root, dict) or not isinstance(root.get("require"), list):
+                continue
+            for invocation in root["require"]:
+                visited += 1
+                if visited > _DOCUMENT_CONTEXT_MAX_ITEMS:
+                    return None
+                if not (
+                    isinstance(invocation, list)
+                    and len(invocation) >= 4
+                    and isinstance(invocation[3], list)
+                    and invocation[3]
+                    and isinstance(invocation[3][0], dict)
+                ):
+                    continue
+                box = invocation[3][0].get("__bbox")
+                if not isinstance(box, dict) or not isinstance(box.get("define"), list):
+                    continue
+                for definition in box["define"]:
+                    visited += 1
+                    if visited > _DOCUMENT_CONTEXT_MAX_ITEMS:
+                        return None
+                    if isinstance(definition, list) and definition and definition[0] == "DTSGInitialData":
+                        definitions.append(definition)
+                        if len(definitions) > 1:
+                            return None
+    except (ValueError, RecursionError, UnicodeError):
+        return None
+    if len(definitions) != 1:
+        return None
+    definition = definitions[0]
+    if len(definition) < 3 or definition[1] != [] or not isinstance(definition[2], dict):
+        return None
+    token = definition[2].get("token")
+    if (
+        not isinstance(token, str)
+        or not token
+        or token != token.strip()
+        or len(token) > 4096
+        or token.lower() in {"0", "null", "undefined", "none", "token", "placeholder", "na", "n/a"}
+    ):
+        return None
+    try:
+        token.encode("utf-8")
+    except UnicodeError:
+        return None
+    return token
+
+
 def _extract_page_tokens(html: str) -> dict[str, str]:
-    """Extract LSD / bloks_version / spin_r / spin_b / spin_t / hsi from profile HTML.
+    """Extract optional GraphQL context from this profile document.
 
     Returns keys matching the form-data field names used by Instagram's web
     client: ``lsd``, ``bloks_version``, ``__spin_r``, ``__spin_b``, ``__spin_t``,
-    ``hsi``. Missing tokens are simply absent from the result.
+    ``hsi`` (mapped to wire ``__hsi``), ``__hs`` and ``fb_dtsg``. Missing or
+    ambiguous document DTSG is absent; it is never an authentication verdict.
     """
     tokens: dict[str, str] = {}
     if not html:
@@ -854,6 +950,16 @@ def _extract_page_tokens(html: str) -> dict[str, str]:
         if token:
             tokens["hsi"] = token
 
+    hs_match = _HS_RE.search(html)
+    if hs_match:
+        token = str(hs_match.group("token") or "").strip()
+        if token:
+            tokens["__hs"] = token
+
+    dtsg = _extract_document_dtsg(html)
+    if dtsg:
+        tokens["fb_dtsg"] = dtsg
+
     return tokens
 
 
@@ -881,7 +987,7 @@ def _build_graphql_headers(
     """Build headers for the GraphQL POST.
 
     Self-contained — does not import from scraper.py. Mirrors the header set
-    the Instagram web client sends for the PolarisProfilePostsQuery.
+    the Instagram web client sends for the profile-post connection operation.
     """
     headers: dict[str, str] = {
         "accept": "*/*",
@@ -924,9 +1030,9 @@ def _build_graphql_form_data(
     """Build the x-www-form-urlencoded payload for the GraphQL posts POST.
 
     Shape mirrors what the Instagram web client sends for the
-    PolarisProfilePostsQuery operation. Runtime tokens
-    (``lsd``, ``__spin_r``, ``__spin_b``, ``__spin_t``, ``hsi``) are merged in
-    only when present.
+    PolarisProfilePostsTabContentQuery_connection operation. Runtime tokens
+    are merged only when present. ``jazoest`` is derived from this document's
+    selected DTSG, never from LSD or an unrelated nested definition.
     """
     reverse = str(direction or "").strip().lower() == "reverse"
     variables = {
@@ -942,13 +1048,16 @@ def _build_graphql_form_data(
         "first": None if reverse else page_size,
         "last": page_size if reverse else None,
         "username": username,
-        "__relay_internal__pv__PolarisImmersiveFeedChainingEnabledrelayprovider": True,
-        "__relay_internal__pv__PolarisAIGMAccountLabelEnabledrelayprovider": False,
+        "include_multi_captions": True,
+        "__relay_internal__pv__PolarisMultiCaptionCarouselEnabledrelayprovider": True,
+        "__relay_internal__pv__PolarisShortDramaEnabledrelayprovider": True,
+        "__relay_internal__pv__PolarisThreadsStyleCommentsEnabledrelayprovider": False,
+        "__relay_internal__pv__PolarisReelsRecoDebugOverlayEnabledrelayprovider": False,
     }
     data: dict[str, str] = {
         "av": viewer_id,
         "__d": "www",
-        "__user": viewer_id,
+        "__user": "0",
         "__a": "1",
         "__req": "1",
         "__comet_req": "7",
@@ -958,11 +1067,27 @@ def _build_graphql_form_data(
         "server_timestamps": "true",
         "doc_id": doc_id,
     }
-    for key in ("lsd", "__spin_r", "__spin_b", "__spin_t", "hsi"):
+    for key in ("lsd", "__spin_r", "__spin_b", "__spin_t", "__hs", "fb_dtsg"):
         value = str(page_tokens.get(key) or "").strip()
         if value:
             data[key] = value
+    hsi = str(page_tokens.get("hsi") or "").strip()
+    if hsi:
+        data["__hsi"] = hsi
+    if data.get("fb_dtsg"):
+        data["jazoest"] = f"2{sum(ord(char) for char in data['fb_dtsg'])}"
     return data
+
+
+def _connection_doc_ids() -> tuple[str, ...]:
+    """Keep the supported explicit override on this connection variable contract.
+
+    Shared legacy constants retain their own operation/IDs. Empty or invalid
+    overrides use only the current connection default, never obsolete IDs.
+    """
+    raw = str(os.getenv("SOCIAL_INSTAGRAM_PROFILE_POSTS_DOC_IDS") or "")
+    chosen = tuple(dict.fromkeys(value.strip() for value in raw.split(",") if value.strip().isdigit()))
+    return chosen or (_CONNECTION_DOC_ID_DEFAULT,)
 
 
 def _requests_fallback_enabled() -> bool:
@@ -1100,7 +1225,7 @@ class InstagramPostsScraplingFetcher:
         # tried this run and which one ultimately succeeded. Operators can
         # cross-reference http_400 / non_json_response spikes with rotation
         # events and decide when to update SOCIAL_INSTAGRAM_PROFILE_POSTS_DOC_IDS.
-        self._doc_ids_configured: tuple[str, ...] = tuple(PROFILE_POSTS_DOC_IDS)
+        self._doc_ids_configured: tuple[str, ...] = _connection_doc_ids()
         self._doc_ids_attempted: list[str] = []
         self._doc_id_used: str | None = None
         self._doc_id_attempt_counts: dict[str, int] = {}
@@ -1681,7 +1806,7 @@ class InstagramPostsScraplingFetcher:
     ) -> InstagramPostsFetchResult:
         """Fetch a single page of posts via GraphQL.
 
-        Iterates through ``PROFILE_POSTS_DOC_IDS`` until one returns a populated
+        Iterates through the configured connection document IDs until one returns a populated
         ``xdt_api__v1__feed__user_timeline_graphql_connection``. Returns on
         first success; on full exhaustion returns a failure result carrying
         the last observed reason.
@@ -1728,6 +1853,7 @@ class InstagramPostsScraplingFetcher:
                 referer=referer,
                 data=data,
                 headers=headers,
+                reverse=normalized_direction == "reverse",
             )
             payload = response.get("payload")
             current_reason = response.get("reason")
@@ -2351,6 +2477,7 @@ class InstagramPostsScraplingFetcher:
         referer: str,
         data: dict[str, str],
         headers: dict[str, str],
+        reverse: bool = False,
     ) -> dict[str, Any]:
         """JSON fetch via httpx POST with bounded exponential backoff on
         transient failures (429 / 5xx / transport timeout).
@@ -2472,31 +2599,31 @@ class InstagramPostsScraplingFetcher:
                 observer("listing", payload)
 
             auth_code = _posts_graphql_auth_code(payload)
-            if auth_code:
+            decision = classify_graphql_response(payload, reverse=reverse)
+            if auth_code or decision.auth_failed:
                 rejected = getattr(self, "_source_failure_observer", None)
                 if rejected is not None:
                     rejected("source_auth_failed", None)
+            elif decision.reason == "rate_limited":
+                rejected = getattr(self, "_source_failure_observer", None)
+                if rejected is not None:
+                    rejected("rate_limited", None)
 
-            if payload.get("error") or payload.get("errors"):
+            # Preserve no-error connection validation/doc fallback in the page
+            # parser. Error-bearing responses require the shared strict policy
+            # before any node can be treated as successful source data.
+            if not decision.accepted and (
+                payload.get("error")
+                or payload.get("errors")
+                or decision.reason not in {"graphql_empty_connection", "graphql_invalid_connection"}
+            ):
                 return {
                     "failed": True,
-                    "auth_failed": auth_code is not None,
-                    "reason": auth_code or "graphql_error",
+                    "auth_failed": auth_code is not None or decision.auth_failed,
+                    "reason": decision.reason or auth_code or "graphql_error",
                     "retryable": False,
                     "payload": payload,
                 }
-
-            # Check IG API-level status.
-            if isinstance(payload, dict):
-                status_value = str(payload.get("status") or "").strip().lower()
-                if status_value and status_value != "ok":
-                    return {
-                        "failed": True,
-                        "auth_failed": auth_code is not None,
-                        "reason": status_value if status_value in {"fail", "error"} else "api_status_fail",
-                        "retryable": False,
-                        "payload": payload,
-                    }
 
             return {
                 "failed": False,

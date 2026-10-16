@@ -18,8 +18,7 @@ from trr_backend.ingestion.domain import Conflict, LostOwnership, RunIntent, Sta
 from trr_backend.ingestion.evidence import Evidence
 from trr_backend.ingestion.persistence import Store, _row
 from trr_backend.ingestion.providers import PARSER_VERSION, InvalidSourceError
-
-ROOT_FIELD = "xdt_api__v1__feed__user_timeline_graphql_connection"
+from trr_backend.socials.instagram.graphql_response import ROOT_FIELD, classify_graphql_response
 
 
 @dataclass(frozen=True)
@@ -50,6 +49,9 @@ def parse_listing_page(payload: dict[str, Any]) -> ListingPage:
         raise InvalidSourceError("Listing cursor must be a nonempty string or null")
     if info["has_next_page"] and end_cursor is None:
         raise InvalidSourceError("More listing pages require a cursor")
+    decision = classify_graphql_response(payload)
+    if not decision.accepted:
+        raise InvalidSourceError("Listing source response is unresolved: " + str(decision.reason))
     return ListingPage(tuple(posts), info["has_next_page"], end_cursor)
 
 
@@ -156,7 +158,8 @@ class ListingActivity:
         if returned.content_hash not in retained:
             raise InvalidSourceError("Listing response was not retained before parsing")
         evidence, evidence_id = retained[returned.content_hash]
-        if payload.get("errors") or (payload.get("status") is not None and payload.get("status") != "ok"):
+        decision = classify_graphql_response(payload)
+        if not decision.accepted and decision.reason not in {"graphql_empty_connection", "graphql_invalid_connection"}:
             raise InvalidSourceError("Listing source reported an unsuccessful response")
         page = parse_listing_page(evidence.read(pinned=True))
         if cursor is not None and page.end_cursor == cursor:

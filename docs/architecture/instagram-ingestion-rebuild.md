@@ -688,3 +688,74 @@ fallback applied. No database or credential writes occurred. Its envelope check
 recorded error-key presence, not nonempty errors, so normal parser acceptance is
 still pending. The accepted production-fix design preserves optional-context
 behavior, existing request/retry/auth policy, query IDs, and fresh-token handoffs.
+
+
+### Current Scrapling query contract and response evidence (2026-10-16)
+
+The maintained posts transport remains Scrapling/Patchright profile warmup followed
+by HTTP GraphQL using that warmup's cookies and runtime context. The durable
+`ScraplingListingSource` already uses this path. The separate legacy browser
+fallback is not a drop-in replacement: it persists account storage, contains an
+older initial-query contract, and does not expose the per-operation ownership and
+source-evidence hooks required by the durable adapter. Its mocked fallback-success
+tests are not current live pagination evidence. This does not invalidate historical
+successes through that strategy.
+
+Native TRR browser inspection and bounded local diagnostics identified the complete
+current connection operation `PolarisProfilePostsTabContentQuery_connection`,
+document `39229011733413759`. Its variables include the existing pagination fields,
+`include_multi_captions`, and four provider flags: MultiCaption and ShortDrama true,
+ThreadsStyleComments and ReelsRecoDebug false. A diagnostic missing the final two
+flags failed; the complete observed contract with a null initial cursor returned
+12 edges and valid pagination at 2026-10-16T12:49:32Z. This is current-contract
+compatibility evidence, not a proof of arbitrary future document stability.
+
+The initial native operation and complete connection diagnostic each contained
+one error at an edge's `node.location.profile_pic_url`, with severity `ERROR`.
+That field is not used by the canonical post/location normalizer. A candidate
+shared response policy is being implemented for live fetching, listing acceptance,
+and retained-evidence replay. Only that exact optional path may be accepted after
+connection, node, index, pagination and operational-error checks. Unknown, mixed,
+pathless, authentication and rate-limit errors remain rejected. Retained provenance
+will contain bounded typed classifications and paths, never arbitrary error text,
+request tokens or stack traces. The affected fetcher, response-policy and evidence checks passed; existing
+top-level authentication classification and stable failure reasons were preserved.
+
+The signed-in TRR Chrome session differs from the deployed Instagram account.
+No credentials, identity blocks, target blocks or launch flags were changed during
+these diagnostics. Replacing the shared deployed cookie environment would affect
+other Instagram consumers and requires an explicit identity/scope decision. The
+current source changes do not establish deployed authentication recovery or a
+healthy canary; normal completion, partial recovery and ten runs/24 hours remain
+open.
+
+
+At 2026-10-16T13:06:13Z, normal candidate transport validation passed with one
+Scrapling warmup and two unmodified `fetch_posts_page` calls. Each page returned
+33 posts using the existing configured page size, the next cursor advanced, and
+both responses passed evidence capture/read, strict listing parsing and offline
+listing replay with 33 posts each. All three source operations returned HTTP 200.
+The probe used five frozen source hashes and made no database or credential writes.
+This proves two-page behavior in one fetcher context and replay of those pages;
+independent worker contexts, production authentication and canonical commits remain
+separate live-canary gates. Independent combined review and disabled deployment
+remain pending this entry.
+
+
+The combined review found one blocker: explicit permission/auth/rate primitive
+flags on an error or its extensions could bypass the ancillary-field policy.
+The shared primitive classifier now runs before optional-field acceptance at all
+three levels. Actual boolean true is required for boolean identity verdicts;
+malformed markers reject generically. New negative cases preserve rejection through
+sanitization, evidence read, listing parsing and replay. The repair passed 33 new
+policy/provenance cases and 13 fetcher callback/top-level compatibility cases.
+Fixes-only independent review found no remaining findings. Previous passing checks
+were reused for unchanged behavior.
+
+At 2026-10-16T13:15:16Z, one warmup and one normal GraphQL page passed with the
+final policy hash `64b48a660a5475f3d709560721e7d9a937e2c89435646f36e5bfc7c9d5935b7a`.
+The response contained 33 posts and valid next-page metadata, with no fetch/auth
+failure. This bounded final-policy check made no database or credential writes.
+The earlier two-page/replay result remains the pagination evidence. Disabled
+deployment and actual worker source verification are the next gates; the shared
+production authentication identity decision remains unresolved.
