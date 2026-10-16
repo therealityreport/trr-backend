@@ -37,7 +37,9 @@ ACCOUNT, CODE = "public_pipeline", "AAAABC"
 CDN, HOSTED = "https://scontent.cdninstagram.com", "https://media.example/"
 
 
-def test_public_composed_pipeline_commits_native_parent_reply_post_and_avatar_media(pipeline_database, monkeypatch):
+def test_public_composed_pipeline_commits_native_parent_reply_post_and_avatar_media(
+    pipeline_database, monkeypatch, profile_mode=False
+):
     store, transaction = pipeline_database
     source_calls, downloads = [], []
     sessions, async_clients = [], []
@@ -115,13 +117,26 @@ def test_public_composed_pipeline_commits_native_parent_reply_post_and_avatar_me
             elif request.method == "GET" and path == f"/p/{CODE}/":
                 value, content_type = html(detail), "text/html"
             elif request.method == "GET" and path == "/api/v1/users/web_profile_info/":
-                assert request.url.endswith("?username=replier")
+                username = request.url.rsplit("?username=", 1)[-1]
+                assert username in ({"reader", "replier"} if profile_mode else {"replier"})
                 value, content_type = (
                     json.dumps(
                         {
                             "status": "ok",
                             "data": {
-                                "user": {"username": "replier", "profile_pic_url_hd": CDN + "/replier.png?sig=private"}
+                                "user": {
+                                    "id": "101" if username == "reader" else "102",
+                                    "username": username,
+                                    "profile_pic_url_hd": CDN + "/" + username + ".png?sig=private",
+                                    "full_name": username.title(),
+                                    "biography": "Public metadata",
+                                    "follower_count": 0,
+                                    "is_verified": False,
+                                    "edge_owner_to_timeline_media": {
+                                        "count": 7,
+                                        "edges": [{"id": "excluded-author-post"}],
+                                    },
+                                }
                             },
                         }
                     ),
@@ -219,11 +234,12 @@ def test_public_composed_pipeline_commits_native_parent_reply_post_and_avatar_me
 
     monkeypatch.setattr(media, "MediaStorage", lambda **kw: original_storage(**kw, opener=download))
     with transaction() as conn, conn.cursor() as cur:
-        cur.execute(
-            (
-                Path(__file__).parents[2] / "supabase/migrations/20260911121000_instagram_detail_request_lanes.sql"
-            ).read_text()
-        )
+        if not profile_mode:  # The profile schema fixture already includes this shared gate table.
+            cur.execute(
+                (
+                    Path(__file__).parents[2] / "supabase/migrations/20260911121000_instagram_detail_request_lanes.sql"
+                ).read_text()
+            )
         cur.execute("insert into core.shows values(%s)", (show_id,))
         cur.execute("insert into core.seasons(id,show_id,season_number) values(%s,%s,3)", (season_id, show_id))
         cur.execute(
@@ -237,7 +253,7 @@ def test_public_composed_pipeline_commits_native_parent_reply_post_and_avatar_me
         store,
         Queries(transaction),
         engine="dbos",
-        workflow_version="public-pipeline-v1",
+        workflow_version=composition.WORKFLOW_VERSION if profile_mode else "public-pipeline-v1",
         enabled=True,
         capacity=lambda *_: None,
         source_profile=SourceProfile.for_mode("public"),
@@ -258,14 +274,14 @@ def test_public_composed_pipeline_commits_native_parent_reply_post_and_avatar_me
 
     partition = store.seed(dict(command.model_dump(mode="json"), account=ACCOUNT))
     scheduler = Scheduler(store, admit=lambda _: True, dispatch=dispatch, reconcile=lambda _: forbidden())
-    for ordinal in range(10):
+    for ordinal in range(20):
         result = scheduler.tick(partition, ordinal)
         assert all(item["outcome"] == "committed" for item in outcomes), outcomes
         if result.get("stop"):
             assert result["stop"] == "completed"
             store.complete_partition(partition, continue_run=False, stop_state="completed")
             break
-        assert result == {"ready": True}, result
+        assert result == {"ready": True} or (profile_mode and result == {"sleep": 0.01}), result
     else:
         pytest.fail("public pipeline did not complete in bounded scheduling steps")
 
@@ -274,15 +290,18 @@ def test_public_composed_pipeline_commits_native_parent_reply_post_and_avatar_me
     assert persisted["intent"]["source_profile"]["access_mode"] == "public"
     progress = SimpleNamespace(**{**persisted, "stages": [SimpleNamespace(**stage) for stage in persisted["stages"]]})
     assert progress.complete and progress.state == "completed" and progress.generation == 1
-    assert {
-        stage.stage: (stage.total, stage.committed, stage.unresolved) for stage in progress.stages
-    } == dict.fromkeys(("listing", "post_details", "comments", "media"), (1, 1, 0))
+    assert {stage.stage: (stage.total, stage.committed, stage.unresolved) for stage in progress.stages} == {
+        **dict.fromkeys(("listing", "post_details", "comments"), (1, 1, 0)),
+        "media": (3, 3, 0) if profile_mode else (1, 1, 0),
+    }
     assert all(stage.complete and stage.discovery_complete and stage.sealed_at for stage in progress.stages)
-    assert Counter(item["stage"] for item in outcomes) == dict.fromkeys(
-        ("listing", "post_details", "comments", "media"), 1
-    )
+    assert Counter(item["stage"] for item in outcomes) == {
+        **dict.fromkeys(("listing", "post_details", "comments"), 1),
+        "media": 3 if profile_mode else 1,
+    }
+
     receipts = rows(database, "select * from social.instagram_ingestion_receipts where run_id=%s", (run_id,))
-    assert len(receipts) == 4
+    assert len(receipts) == (6 if profile_mode else 4)
     assert rows(
         database,
         "select count(*) as count from social.instagram_ingestion_targets where run_id=%s and outcome='unresolved'",
@@ -293,9 +312,11 @@ def test_public_composed_pipeline_commits_native_parent_reply_post_and_avatar_me
         "post_details": 1,
         "comments": 3,
     }
-    assert len(source_calls) == 7  # Two listing, one detail, three Relay and one missing-avatar lookup.
+    assert len(source_calls) == (
+        9 if profile_mode else 7
+    )  # Two listing, one detail, three Relay and one missing-avatar lookup.
     assert next(stage.requests for stage in progress.stages if stage.stage == "media") == (
-        1 + len(downloads) + sum(client.calls.values())
+        (3 if profile_mode else 1) + len(downloads) + sum(client.calls.values())
     )
     assert len(downloads) == 4 and len(client.objects) == 14 and client.closes == 1
     assert all(session.closed for session in sessions if session.sent)
@@ -322,13 +343,19 @@ def test_public_composed_pipeline_commits_native_parent_reply_post_and_avatar_me
         (CODE,),
     )
     assert len(canonical) == 1
-    assert all(item["canonical_identity"]["post_id"] == post_id for item in receipts if item["stage"] != "listing")
+    assert all(
+        item["canonical_identity"]["post_id"] == post_id
+        for item in receipts
+        if item["stage"] != "listing" and not item["target_key"].startswith("profile:")
+    )
     detail_receipt = next(item for item in receipts if item["stage"] == "post_details")
     assert detail_receipt["canonical_identity"]["canonical_post_id"] == str(canonical[0]["id"])
     assets = rows(database, "select * from social.social_post_media_assets where post_id=%s", (canonical[0]["id"],))
     assert len(assets) == 1 and assets[0]["hosted_url"] == post["hosted_media_urls"][0]
     evidence = rows(database, "select * from social.instagram_ingestion_evidence where run_id=%s", (run_id,))
-    assert len(evidence) == 7  # Listing, detail, two pages, comment summary, avatar and media inventory.
+    assert len(evidence) == (
+        9 if profile_mode else 7
+    )  # Listing, detail, two pages, comment summary, avatar and media inventory.
     assert all("private" not in item["payload"] and "ephemeral-fixture-lsd" not in item["payload"] for item in evidence)
     detail_evidence = next(item for item in evidence if item["stage"] == "post_details")
     assert post["scraped_at"] == detail_evidence["captured_at"]
@@ -349,3 +376,24 @@ def test_public_composed_pipeline_commits_native_parent_reply_post_and_avatar_me
     # Public routing is internal frozen metadata; the operator API keeps its
     # existing strict contract while this full intent remains in persistence.
     assert api.progress(ACCOUNT, command.run_id).complete is True
+
+    if profile_mode:
+        profiles = rows(database, "select * from social.instagram_profiles order by profile_id")
+        assert [(p["profile_id"], p["username"], p["followers_count"], p["is_verified"]) for p in profiles] == [
+            ("101", "reader", 0, False),
+            ("102", "replier", 0, False),
+        ]
+        profile_receipts = [r for r in receipts if r["target_key"].startswith("profile:")]
+        assert len(profile_receipts) == 2
+        for profile in profiles:
+            proof = profile["raw_data"]["ingestion_public_profile"]
+            matching = next(
+                r for r in profile_receipts if r["canonical_identity"]["instagram_profile_id"] == profile["profile_id"]
+            )
+            assert proof["collection_complete"] and matching["observed_at"] == profile["last_scraped_at"]
+            assert proof["coverage"]["follows_count"] == "unknown" and profile["follows_count"] is None
+            assert profile["hosted_profile_pic_url"].startswith(HOSTED)
+            retained = next(e for e in evidence if str(e["evidence_id"]) == proof["evidence_id"])
+            assert matching["observed_at"] == retained["captured_at"]
+            assert "excluded-author-post" not in retained["payload"] and "edges" not in retained["payload"]
+        assert len(downloads) == 4  # Both profiles reused exact post-media avatar byte proofs.

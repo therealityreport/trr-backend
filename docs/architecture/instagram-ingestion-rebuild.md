@@ -39,8 +39,8 @@ and canonical data. Other platforms and active legacy runs stay on their owner.
 | B | Matched real-engine failure harness; hosting/recovery/version feasibility | DBOS selected for implementation after local comparison, bounded-executor and 50-target partition tests; production topology verification remains a release gate |
 | C | Domain/provider/replay parity and import boundaries | Canonical, listing, comments, media, runtime integration and hosted-result replay extension implemented and reviewed; local checks pass |
 | D | Real persistence crash, ownership, cancellation and recovery tests | Local PostgreSQL/DBOS failure matrix passes. Live cancel/resume preserved run, targets and budgets; successful partial recovery remains pending |
-| E | Backend schema/client parity and browser operator flow | API/client and fixture-backed browser journeys pass. App 964e9ce remote production build and authenticated checks pass; normal TRR browser verifies run display, cancel, reload and resume while new launches are disabled |
-| F | Deployment identity/readiness, bounded canary, 10 runs and 24h observation | v71/c0d167c5 remains deployed. Public canary is cancelled generation 2; old authenticated run remains held generation 9. User explicitly requires public access without login. A bounded local anonymous diagnostic parsed 33 posts in two requests; cloud bootstrap returned HTTP 302 login redirect. Listing detail-proof and guarded local execution repairs are in progress. Full pipeline, representative-run and 24-hour gates remain open |
+| E | Backend schema/client parity and browser operator flow | API/client and fixture-backed browser journeys pass. App 773eab6 is promoted and authenticated checks pass; normal TRR browser verifies local placement controls and current durable counts. Earlier cancel/reload/resume evidence remains valid for unchanged modal controls. |
+| F | Deployment identity/readiness, bounded canary, 10 runs and 24h observation | d24b16fb is deployed and verified. Public local canary committed one listing page and created 33 downstream targets per stage, then cancelled generation 4 with all manifests unsealed. Old authenticated run remains held generation 9. Profile-v2 implementation and complete replies/media/profile verification remain pending. Full pipeline, representative-run and 24-hour gates remain open. |
 
 Engine selection: DBOS 3.3.0 is the implementation candidate. Real local engine
 comparison, version-aware recovery, bounded single-executor replacement and
@@ -1668,3 +1668,140 @@ and fresh reply hydration. Empty placeholders, author-only URLs and unsafe URL
 schemes remain rejected. Twelve focused cases passed, including native observer
 through DTO and interrupted reply pagination. Parent diff review found no issue.
 Comment media still requires separate hosted-file verification after cooldown.
+
+### Public local execution and app acceptance — 2026-10-16 17:55 UTC
+
+Backend d24b16fb (GIF-only attachments and canonical comment permalink fallback)
+was deployed with tag ig-comment-media-20261016-d24b16fb. Health, explicit-main
+readiness and 55 relevant hashes in five current containers passed. Provider
+version number has not yet been independently recorded for that tag.
+
+App 773eab6 is now promoted to trr-app.vercel.app, deployment
+ dpl_3xUuchVT3jtTRYe9b6xKX7SiSpLW. Exact TRR project/team/source and READY state
+passed. Authenticated capability and progress reads returned 200. Native Chrome
+in the verified TRR profile displayed the durable run, committed listing count,
+33 pending targets per downstream stage, cancelled generation 4, and the local
+resume/retry instruction with no cloud resume/retry controls. The unrelated
+legacy account-summary panel reported temporarily unavailable; durable progress
+loaded correctly. Receipt: workspace output/releases/instagram-ingestion-app-773eab6.
+Rollback remains the previous READY 964e9ce deployment.
+
+The first immutable local-driver attempt returned Conflict while the shared
+coordinator lease was held; the run remained cancelled generation 2/modal. After
+waiting for lease release, the same reviewed release acquired the lease and
+committed one public listing page. No cookie, login or alternate provider was
+used. It created 33 post-details, 33 comments and 33 media targets and preserved
+the next listing cursor. The bounded finally-cancel left public run bcc7411d
+cancelled generation 4, placement local, workflow instagram-ingestion-v1, original
+intent hash unchanged, all manifests unsealed and no target owners. Listing
+cumulative accounting is four attempts/five requests including earlier failures;
+these are not counts for only the successful local attempt.
+Evidence: local-public-driver-second-result.json and
+local-public-after-first-page.json under .artifacts/ingestion-rollout.
+
+Do not resume the old v1 run automatically while profile enrichment is being
+integrated. Parent will verify/deploy v2, then explicitly adopt this exact cancelled
+local run through the guarded version-adoption operation. Do not rewrite intent,
+generation or historical evidence. Both existing runs remain preserved. The old
+authenticated run is still held and must not be resumed.
+
+The authorized profile feature is in progress: public native-identity-bound
+profiles, deduplicated media-stage profile targets from observed comment pages,
+source-time-safe persistence, and a generation-fenced media discovery finalizer.
+No relationship graph or profile timeline collection is included. Optional public
+fields remain unknown when absent. Avatar version-cache batch passed 97 tests,
+plus three affected checks after the final later-slot adjustment; it is source-only
+and awaits the integrated review/deployment. Full replies, hosted comment media,
+full commenter profiles, representative-run acceptance and 24-hour observation
+remain open. One listing page does not establish full pipeline completion.
+
+Provider history read at 17:57:57 UTC confirms the d24b16fb deployment is v73,
+tag ig-comment-media-20261016-d24b16fb, deployed 17:44:52 UTC. Provider CLI revision
+is d24b16f*; runtime file hashes supply the separate source-content proof.
+Latest complete-hour whole-app metered cost before credits: 15–16 UTC $0.04138597
+(unchanged after refresh), 16–17 UTC $0.02860791: CPU $0.02088748, memory
+$0.00542487, network egress $0.00229556. The total for those two hours is
+$0.06999388. This includes all trr-backend-jobs work and cannot establish the
+public canary cost or a matched US East cost/speed improvement. The in-progress
+17–18 hour was excluded. Evidence: modal-billing-complete-hours-20261016T175757Z.json
+and modal-deployment-history-d24b16fb-20261016T175757Z.json in the rollout artifacts.
+
+### Public child-reply diagnostic — 2026-10-16 18:00 UTC
+
+A reviewed immutable-d24 diagnostic reconstructed the 42 retained parent lanes
+with top pagination exhausted and no top refetch. All native reply counts are
+unknown; the selected first pending parent was not claimed to have replies.
+The public permalink bootstrap returned HTTP 200. The sole child GraphQL POST
+also returned HTTP 200 but the maintained native failure classifier reported
+rate_limited. Exactly two sends were admitted, no native child page was produced,
+and zero replies were retrieved. The shared public gate now retains cooldown
+until 18:14:57.189139 UTC. Do not repeat this unchanged request after two native
+child-rate-limit observations; diagnose source classification/request shape first.
+No cookies, proxies, source-control bypasses, run/canonical writes or new provider
+were used. Existing public run remains deliberately cancelled/local generation4.
+Artifact public-local-child-only-d24b16fb-20261016T175954Z-result.json records bounded
+response metadata; checkpoint timestamps reconstructed from old scan start are
+explicitly diagnostic-only and must not be committed canonically.
+
+The canonical legacy profile snapshot independently returned HTTP504 after60.23s
+with UPSTREAM_TIMEOUT; a single bounded request confirmed the timeout. Its null
+summary fallback displays zero counters, not evidence of deleted data. That
+legacy app route/page is unchanged from964e9ce to773eab6; the durable v2 progress
+request and new local controls loaded correctly. Narrow read-only backend cause
+diagnosis continues without repeating the expensive GET. Receipt is workspace
+output/releases/instagram-ingestion-app-773eab6/canonical-legacy-summary-diagnostic.json.
+
+### Profile-v2 candidate checks — 2026-10-16 18:12 UTC
+
+The connected public-v2 fixture completed all four stages through production
+composition/scheduler/activities and real isolated PostgreSQL. Native parent/reply
+and two profile responses were simulated at HTTP; object storage was simulated.
+The MEDIA stage settled three targets, two profiles preserved unknown coverage
+and original source timestamps, and avatar reuse held downloads to four. This is
+source/integration proof only, not live Instagram profile or reply coverage.
+
+Independent review accepted the frozen avatar-cache and version-adoption batches
+without findings. Reviewed checks were reused: 97 media/snapshot cases plus three
+final affected cases; 25 adoption cases plus one retained-history case. No live
+adoption has occurred. The remaining profile/inventory/shared integration batch
+still requires final focused checks and review. Adoption is forward-only to v2;
+before applying it, retain a verified immutable v2 executor archive. Reverting the
+cloud deployment to d24 alone would not resume a v2-pinned run. Preserve paused
+run state and use compatible code or a reviewed forward repair for recovery.
+
+A bounded comparison of the two slow legacy summary predicates found zero match
+differences on 128 rows per table when repeated whole-row JSON serialization was
+replaced with explicit identity columns/raw_data. Sample times improved from
+144.24 to49.53ms (catalog) and269.92 to53.67ms (posts), with73 and80 matches.
+These sample results do not establish full-endpoint latency. The scoped source
+repair is authorized for only catalog_totals and lite_header_stats; other
+predicate callers remain unchanged. No schema/index addition or app build is
+needed. Source checks/review and one post-deployment endpoint check remain.
+
+The frozen profile/integration batch has34 distinct passing focused cases:
+17profile,7inventory,1connectedv2pipeline,1version-familybudget,1legacypublicpipeline,
+and7affectedlisting/workflow/local checks. Static checks passed. Independent
+review found one P2: malformed non-object receipt/page canonical_identity or
+inventory state can escape as AttributeError instead of the fixed unresolved
+proof diagnostic. The complete repair batch is limited to strict object guards
+and malformed-proof fixtures; fixes-only review must close it before deployment.
+All other reviewed profile/cache/version/budget behavior had no findings.
+
+Parent independently reviewed the three-file legacy projection batch and verified
+all frozen hashes; no findings. The complete diff changes only the optional
+native-column helper and two Instagram summary call sites, preserving default
+SQL and other platforms. Reused eight focused repository tests and two isolated
+PostgreSQL tests covering192synthetic semantic comparisons; no production query
+was needed for those tests. Full deployed latency remains unverified.
+
+### Profile-v2 release acceptance — 2026-10-16
+
+The sole P2 malformed-proof finding is closed. Strict object guards, including
+savepoint-contained SQL validation, passed 22 new malformed-proof cases and
+three affected existing cases. Fixes-only independent review found no remaining
+issues. All profile, avatar, adoption, and summary projection batches are accepted
+for release. Prior passing evidence is reused for unchanged inputs. Deployment,
+immutable v2 recovery archive, guarded adoption, and live coverage remain separate
+gates; the public run remains cancelled at generation 4 until those prerequisites
+are verified. No successful live reply/profile coverage or ten-run/24-hour gate
+is claimed by source acceptance.

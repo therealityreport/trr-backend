@@ -599,3 +599,46 @@ def test_load_media_complete_cache_needs_no_profile_credentials_or_source(monkey
     assert reads == [
         {"run_id": "run", "account": "bravotv", "generation": 1, "target_key": "post", "check_cancelled": callback}
     ]
+
+
+def test_v2_canary_budget_includes_prior_known_versions_and_preserves_held_total(base_database):
+    from trr_backend.ingestion.persistence import Store
+
+    store, tx = base_database
+    first = Store(tx).start(
+        RunIntent(account="bravotv"),
+        idempotency_key=str(uuid4()),
+        engine="dbos",
+        workflow_version="instagram-ingestion-v1",
+        initiated_by="fixture",
+    )
+    sql(
+        tx,
+        "update social.instagram_ingestion_runs set state='cancelled',execution_hold_reason='source_blocked' "
+        "where run_id=%s",
+        (first["run_id"],),
+    )
+    policy = composition.CanaryPolicy(frozenset({"bravotv"}), 2)
+    with tx() as conn, conn.cursor() as cur:
+        policy.counts(cur, including_current=False)  # Held v1 consumes total, not active slot.
+    second = Store(tx).start(
+        RunIntent(account="bravotv"),
+        idempotency_key=str(uuid4()),
+        engine="dbos",
+        workflow_version="instagram-ingestion-v2",
+        initiated_by="fixture",
+    )
+    with tx() as conn, conn.cursor() as cur:
+        policy.counts(cur, including_current=True)
+    with pytest.raises(Conflict, match="total run budget"), tx() as conn, conn.cursor() as cur:
+        policy.counts(cur, including_current=False)
+    # An arbitrary exact-version policy neither includes nor resets these rows.
+    exact = composition.CanaryPolicy(frozenset({"bravotv"}), 1, "isolated-policy-" + str(uuid4()))
+    with tx() as conn, conn.cursor() as cur:
+        exact.counts(cur, including_current=False)
+    # Preserve fixture journals while excluding these rows from later family counts.
+    sql(
+        tx,
+        "update social.instagram_ingestion_runs set workflow_version=%s where run_id=any(%s::uuid[])",
+        ("completed-fixture-" + str(uuid4()), [first["run_id"], second["run_id"]]),
+    )

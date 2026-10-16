@@ -370,6 +370,51 @@ class Store:
             )
             return result
 
+    @staticmethod
+    def _expire_drained_dispatches(cur, run, expected_generation):
+        """Shared cancelled-run owner/drain proof for explicit operator commands.
+
+        Caller holds the exact run lock and validates its cancelled generation.
+        The journal expiry and caller's transition must share this transaction.
+        """
+        run_id = str(run["run_id"])
+        active = _row(
+            cur,
+            """select target_key from social.instagram_ingestion_targets
+            where run_id=%s and (owner_expires_at>clock_timestamp() or
+            (outcome='unresolved' and owner_token is not null and owner_expires_at is null)) limit 1""",
+            (run_id,),
+        )
+        uncertain = _row(
+            cur,
+            """select d.owner_token from social.instagram_ingestion_dispatches d
+            join social.instagram_ingestion_targets t using(run_id,stage,target_key)
+            where d.run_id=%s and t.outcome='unresolved'
+            and not exists(select 1 from social.instagram_ingestion_receipts x
+                where x.run_id=d.run_id and x.owner_token=d.owner_token)
+            and d.state in ('sending','accepted')
+            and (d.generation>=%s or greatest(d.updated_at,%s)>
+                clock_timestamp()-interval '600 seconds') limit 1""",
+            (run_id, expected_generation, run["updated_at"]),
+        )
+        if active or uncertain:
+            raise Conflict("Run still has a live or uncertain execution owner")
+        # The same cancelled-generation/drain proof that permits placement
+        # also resolves old send ambiguity for Admission. Keep the journal
+        # identities and counters; never manufacture a receipt or completion.
+        cur.execute(
+            """update social.instagram_ingestion_dispatches d set state='expired',
+                updated_at=clock_timestamp()
+            from social.instagram_ingestion_targets t
+            where d.run_id=%s and d.generation<%s and d.state in ('sending','accepted')
+                and t.run_id=d.run_id and t.stage=d.stage and t.target_key=d.target_key
+                and t.outcome='unresolved'
+                and greatest(d.updated_at,%s)<=clock_timestamp()-interval '600 seconds'
+                and not exists(select 1 from social.instagram_ingestion_receipts x
+                    where x.run_id=d.run_id and x.owner_token=d.owner_token)""",
+            (run_id, expected_generation, run["updated_at"]),
+        )
+
     def set_execution_placement(
         self,
         run_id: str,
@@ -432,42 +477,7 @@ class Store:
                 raise Conflict("Placement requires the exact cancelled run, intent and prior placement")
             if intent.effective_source_profile.access_mode != "public" or run.get("execution_hold_reason"):
                 raise Conflict("Placement requires an unheld explicitly public run")
-            active = _row(
-                cur,
-                """select target_key from social.instagram_ingestion_targets
-                where run_id=%s and (owner_expires_at>clock_timestamp() or
-                (outcome='unresolved' and owner_token is not null and owner_expires_at is null)) limit 1""",
-                (run_id,),
-            )
-            uncertain = _row(
-                cur,
-                """select d.owner_token from social.instagram_ingestion_dispatches d
-                join social.instagram_ingestion_targets t using(run_id,stage,target_key)
-                where d.run_id=%s and t.outcome='unresolved'
-                and not exists(select 1 from social.instagram_ingestion_receipts x
-                    where x.run_id=d.run_id and x.owner_token=d.owner_token)
-                and d.state in ('sending','accepted')
-                and (d.generation>=%s or greatest(d.updated_at,%s)>
-                    clock_timestamp()-interval '600 seconds') limit 1""",
-                (run_id, expected_generation, run["updated_at"]),
-            )
-            if active or uncertain:
-                raise Conflict("Run still has a live or uncertain execution owner")
-            # The same cancelled-generation/drain proof that permits placement
-            # also resolves old send ambiguity for Admission. Keep the journal
-            # identities and counters; never manufacture a receipt or completion.
-            cur.execute(
-                """update social.instagram_ingestion_dispatches d set state='expired',
-                    updated_at=clock_timestamp()
-                from social.instagram_ingestion_targets t
-                where d.run_id=%s and d.generation<%s and d.state in ('sending','accepted')
-                    and t.run_id=d.run_id and t.stage=d.stage and t.target_key=d.target_key
-                    and t.outcome='unresolved'
-                    and greatest(d.updated_at,%s)<=clock_timestamp()-interval '600 seconds'
-                    and not exists(select 1 from social.instagram_ingestion_receipts x
-                        where x.run_id=d.run_id and x.owner_token=d.owner_token)""",
-                (run_id, expected_generation, run["updated_at"]),
-            )
+            self._expire_drained_dispatches(cur, run, expected_generation)
             cur.execute(
                 """update social.instagram_ingestion_runs set execution_placement=%s,
                 updated_at=clock_timestamp() where run_id=%s""",

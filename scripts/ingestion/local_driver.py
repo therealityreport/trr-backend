@@ -57,10 +57,11 @@ class LocalRequest:
             raise ValueError("Time limit must be 1 to 600 seconds")
 
 
-def validate_run(store, request):
+def validate_run(store, request, *, expected_workflow_version=None):
     """No mutation; exact scope/version/generation before placement and resume."""
     from trr_backend.ingestion.composition import WORKFLOW_VERSION
 
+    expected_workflow_version = expected_workflow_version or WORKFLOW_VERSION
     with store.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
         run = store._run(cur, request.run_id, "bravotv")
     intent = RunIntent.from_payload(run["intent"])
@@ -73,7 +74,7 @@ def validate_run(store, request):
         or intent.effective_source_profile.access_mode != "public"
         or run.get("execution_hold_reason")
         or run["engine"] != "dbos"
-        or run["workflow_version"] != WORKFLOW_VERSION
+        or run["workflow_version"] != expected_workflow_version
         or intent.account != "bravotv"
         or intent.action != "backfill"
         or intent.scope != "bounded_window"

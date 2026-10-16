@@ -114,6 +114,16 @@ class WorkflowStore(Store):
                     and t.stage=m.stage and outcome='unresolved')) order by {PHASE_ORDER} limit 1""",
                 (item["run_id"],),
             )
+            inventory = None
+            if phase and phase["stage"] == "media" and not phase["discovery_complete"]:
+                from trr_backend.ingestion.domain import RunIntent
+                from trr_backend.ingestion.profile_inventory import advance
+                from trr_backend.ingestion.profiles import requested
+
+                if requested(RunIntent.from_payload(run["intent"]), run["workflow_version"]):
+                    inventory = advance(cur, run)
+                    if inventory.get("sealed"):
+                        phase["discovery_complete"] = True
             selection = run.get("execution_selection")
             selection_keys = None
             selection_settled = False
@@ -148,7 +158,11 @@ class WorkflowStore(Store):
                 )
                 selection_settled = selected["unresolved"] == 0
             result: dict[str, Any] = {"kind": "complete"}
-            if selection_settled:
+            if inventory and inventory.get("blocked"):
+                result = {"kind": "blocked", "control_failure": inventory["blocked"]}
+            elif inventory and not inventory.get("sealed"):
+                result = {"kind": "wait", "seconds": 0.01}
+            elif selection_settled:
                 # Explicit retry never falls through into unrelated original work.
                 result = {"kind": "blocked" if full_phase else "complete"}
             elif phase:

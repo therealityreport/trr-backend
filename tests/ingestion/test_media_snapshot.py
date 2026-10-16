@@ -673,7 +673,7 @@ def test_older_post_reuses_newer_matching_owner_proof_without_avatar_download(sn
 
 
 @pytest.mark.parametrize("status", ["mirrored", "pending", "unsupported"])
-def test_newer_conflicting_owner_registry_cannot_replace_explicit_source(snapshot_database, status):
+def test_newer_different_owner_version_does_not_invalidate_explicit_source(snapshot_database, status):
     owned, ids, _, _ = seed(snapshot_database, comments=0)
     _, tx = snapshot_database
     handle = "conflict_" + uuid4().hex[:12]
@@ -692,8 +692,10 @@ def test_newer_conflicting_owner_registry_cannot_replace_explicit_source(snapsho
                 OBSERVED + timedelta(minutes=1),
             ),
         )
-    with pytest.raises(MediaIncomplete, match="avatar_source_newer"):
-        load(snapshot_database, owned)
+    snapshot = load(snapshot_database, owned)
+    avatar = next(item for item in snapshot.avatars if item.username == handle)
+    assert avatar.source_url == SOURCE and avatar.observed_at == OBSERVED
+    assert avatar.cached_hosted_url is avatar.cached_sha256 is None
     assert_no_snapshot_source_requests(snapshot_database, owned)
 
 
@@ -838,3 +840,109 @@ def test_existing_manifest_root_precedes_new_shared_context(snapshot_database):
         )
     snapshot = load(snapshot_database, owned)
     assert (snapshot.show_id, snapshot.season_number, snapshot.week_index) == (historical_show, 0, None)
+
+
+@pytest.mark.parametrize("proof_offset_minutes", [-1, 1])
+def test_comment_exact_old_version_reuses_proof_despite_newer_profile_image(snapshot_database, proof_offset_minutes):
+    from tests.ingestion.test_media import Response, storage
+    from trr_backend.ingestion.media import MediaActivity
+
+    store, tx = snapshot_database
+    owned, ids, comments, _ = seed(snapshot_database, comments=1)
+    handle = "commentver_" + uuid4().hex[:12]
+    old_source = "https://scontent.cdninstagram.com/retained-comment-version.png?oh=old-delivery"
+    old_reference = old_source.split("?")[0]
+    new_reference = "https://scontent.cdninstagram.com/new-profile-version.png"
+    old_hosted = "https://media.example/profiles/retained-comment-version.png"
+    new_hosted = "https://media.example/profiles/new-profile-version.png"
+    slot_time = OBSERVED + timedelta(minutes=2)
+    proof_time = slot_time + timedelta(minutes=proof_offset_minutes)
+    newer_time = slot_time + timedelta(minutes=2)
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            """update social.instagram_comments set username=%s,author_profile_pic_url=%s,
+            author_profile_pic_url_hd=null where id=%s""",
+            (handle, old_source, comments[0][0]),
+        )
+        cur.execute(
+            """insert into social.avatar_registry(platform,account_handle,source_url,status,hosted_url,
+            content_hash,last_checked_at) values('instagram',%s,%s,'mirrored',%s,%s,%s),
+            ('instagram',%s,%s,'mirrored',%s,%s,%s)""",
+            (
+                handle,
+                old_reference,
+                old_hosted,
+                "a" * 64,
+                proof_time,
+                handle,
+                new_reference,
+                new_hosted,
+                "b" * 64,
+                newer_time,
+            ),
+        )
+    source = load(snapshot_database, owned, include_comment_avatars=True)
+    avatar = next(item for item in source.avatars if item.role == "comment")
+    assert source.observed_at == OBSERVED and source.comments[0].observed_at == slot_time
+    assert avatar.source_url == old_source and avatar.observed_at == proof_time
+    assert (avatar.cached_hosted_url, avatar.cached_sha256) == (old_hosted, "a" * 64)
+    requested = []
+
+    def opener(client, url, **kwargs):
+        requested.append(url)
+        return Response()
+
+    token = str(store.reserve(**owned)["owner_token"])
+    receipt = MediaActivity(store, storage=storage(opener=opener)).execute(
+        **owned, owner_token=token, load=lambda **callbacks: source
+    )
+    assert receipt["outcome"] == "committed" and receipt["observed_at"] == OBSERVED
+    assert old_source not in requested and new_reference not in requested
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            """select hosted_author_profile_pic_url,scraped_at from social.instagram_comments
+            where id=%s""",
+            (comments[0][0],),
+        )
+        assert cur.fetchone() == (old_hosted, slot_time)
+        cur.execute(
+            """select source_url,hosted_url,content_hash,last_checked_at from social.avatar_registry
+            where account_handle=%s order by last_checked_at""",
+            (handle,),
+        )
+        assert cur.fetchall() == [
+            (old_reference, old_hosted, "a" * 64, proof_time),
+            (new_reference, new_hosted, "b" * 64, newer_time),
+        ]
+
+
+def test_signed_exact_version_newer_incomplete_proof_does_not_fall_back_to_other_version(snapshot_database):
+    owned, ids, _, _ = seed(snapshot_database, comments=0)
+    _, tx = snapshot_database
+    handle = "signedver_" + uuid4().hex[:12]
+    reference = SOURCE.split("?")[0]
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute("update social.instagram_posts set owner_username=%s where id=%s", (handle, ids["post_id"]))
+        cur.execute(
+            """insert into social.avatar_registry(platform,account_handle,source_url,status,hosted_url,
+            content_hash,last_checked_at) values('instagram',%s,%s,'mirrored',%s,%s,%s),
+            ('instagram',%s,%s,'pending',null,null,%s),('instagram',%s,%s,'mirrored',%s,%s,%s)""",
+            (
+                handle,
+                reference,
+                "https://media.example/profiles/old.png",
+                "a" * 64,
+                OBSERVED,
+                handle,
+                reference + "?oh=new-observation",
+                OBSERVED + timedelta(minutes=1),
+                handle,
+                "https://scontent.cdninstagram.com/different.png",
+                "https://media.example/profiles/new.png",
+                "b" * 64,
+                OBSERVED + timedelta(minutes=2),
+            ),
+        )
+    with pytest.raises(MediaIncomplete, match="avatar_source_newer"):
+        load(snapshot_database, owned)
+    assert_no_snapshot_source_requests(snapshot_database, owned)

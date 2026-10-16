@@ -356,10 +356,24 @@ class ListingActivity:
                     (run_id, target_key, evidence.content_hash),
                 )
                 if discovery_complete:
+                    from trr_backend.ingestion.profiles import requested
+
+                    profile_work = requested(intent, run["workflow_version"])
+                    sealed_stages = [
+                        Stage.LISTING.value,
+                        *(stage.value for stage in intent.selected_tasks if stage != Stage.MEDIA or not profile_work),
+                    ]
+                    if profile_work:
+                        cur.execute(
+                            """update social.instagram_ingestion_manifests set cursor_state=
+                            cursor_state || '{"commenter_profiles":{"version":1,"state":"enumerating"}}'::jsonb
+                            where run_id=%s and stage='media' and not discovery_complete""",
+                            (run_id,),
+                        )
                     cur.execute(
                         """update social.instagram_ingestion_manifests set discovery_complete=true,
                         sealed_at=clock_timestamp() where run_id=%s and stage=any(%s)""",
-                        (run_id, [Stage.LISTING.value, *(stage.value for stage in intent.selected_tasks)]),
+                        (run_id, sealed_stages),
                     )
                 return {
                     "page_id": target_key,

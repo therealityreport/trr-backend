@@ -16,7 +16,7 @@ from trr_backend.ingestion.domain import Conflict, RunIntent, SourceProfile
 from trr_backend.ingestion.persistence import Store
 from trr_backend.ingestion.queries import Queries
 
-WORKFLOW_VERSION = "instagram-ingestion-v1"
+WORKFLOW_VERSION = "instagram-ingestion-v2"
 
 
 def enabled(name: str) -> bool:
@@ -77,8 +77,13 @@ class CanaryPolicy:
             """select count(*) filter(where account=any(%s)) as total,
             count(*) filter(where state in ('queued','running','blocked','failed','cancelled')
                 and not (state='cancelled' and execution_hold_reason is not null)) as active
-            from social.instagram_ingestion_runs where workflow_version=%s""",
-            (sorted(self.accounts), self.workflow_version),
+            from social.instagram_ingestion_runs where workflow_version=any(%s)""",
+            (
+                sorted(self.accounts),
+                ["instagram-ingestion-v1", "instagram-ingestion-v2"]
+                if self.workflow_version == "instagram-ingestion-v2"
+                else [self.workflow_version],
+            ),
         )
         row = cur.fetchone()
         # A paused/cancelled run can resume; it occupies the single canary run
@@ -435,6 +440,26 @@ def _comments(context, owned):
     return _gate_source(source, context, owned, credentials, failure_code="comment_fetch_failed")
 
 
+def _profile_provider(context, owned):
+    from trr_backend.ingestion.avatar_transport import AvatarProfileSource
+    from trr_backend.ingestion.identity_policy import SourceRequestGate
+
+    if _source_profile(context).access_mode != "public":
+        raise Conflict("Commenter profiles require an explicitly public run")
+    store = _worker_store(context)
+    remaining = (context["target"]["owner_expires_at"] - datetime.now(UTC)).total_seconds() - 2
+    deadline = time.monotonic() + max(0, min(590, remaining))
+    gate = SourceRequestGate(
+        cookies={},
+        public_only=True,
+        transaction=store.transaction,
+        check_cancelled=lambda: store.check_owner(**owned),
+        check_cancelled_in_transaction=lambda conn: store.check_owner(**owned, connection=conn),
+        deadline=deadline,
+    )
+    return AvatarProfileSource(cookies={}, deadline=deadline, public_only=True), gate
+
+
 def _media_storage(context, owned):
     import boto3
     from botocore.config import Config
@@ -539,6 +564,7 @@ def build_worker(*, execution_placement="modal"):
         listing_source=_listing,
         detail_source=_details,
         comment_source=_comments,
+        profile_source=_profile_provider,
         media_storage=_media_storage,
         detail_cache=lambda context, owned: DetailCache(Queries().read_connection).lookup(
             owned["run_id"], owned["account"], target_key=owned["target_key"]

@@ -66,7 +66,7 @@ def sql(database, statement, args=()):
         return cur.fetchall() if cur.description else None
 
 
-def fixture_run(database, *, profile="public"):
+def fixture_run(database, *, profile="public", workflow_version=WORKFLOW_VERSION):
     store, _, _ = database
     intent = RunIntent(
         account="bravotv",
@@ -80,7 +80,7 @@ def fixture_run(database, *, profile="public"):
         intent,
         idempotency_key=str(uuid4()),
         engine="dbos",
-        workflow_version=WORKFLOW_VERSION,
+        workflow_version=workflow_version,
         initiated_by="offline-test",
     )
     store.discover(

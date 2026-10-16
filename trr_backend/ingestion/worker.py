@@ -53,6 +53,7 @@ class Worker:
         media_loader: Callable,
         media_storage: Callable,
         detail_cache: Callable | None = None,
+        profile_source: Callable | None = None,
     ):
         self.store = store
         self.listing_source = listing_source
@@ -61,6 +62,7 @@ class Worker:
         self.media_loader = media_loader
         self.media_storage = media_storage
         self.detail_cache = detail_cache
+        self.profile_source = profile_source
 
     def cached_detail(self, context: dict[str, Any], owned: dict[str, Any]) -> dict[str, Any] | None:
         """Settle eligible existing data without inventing a new source capture."""
@@ -160,6 +162,16 @@ class Worker:
                     post_id=str(context["post"]["id"]),
                     checkpoint=context["target"]["checkpoint"],
                     fetch=lambda **kw: fetch(self.comment_source, **kw),
+                )
+            elif owned["target_key"].startswith("profile:"):
+                from trr_backend.ingestion.profiles import ProfileActivity
+
+                if self.profile_source is None:
+                    raise ValueError("Compatible profile source is unavailable")
+                result = ProfileActivity(self.store).execute(
+                    **args,
+                    provider=lambda: self.profile_source(context, owned),
+                    storage=lambda: self.media_storage(context, owned),
                 )
             else:
                 storage = self.media_storage(context, owned)

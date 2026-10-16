@@ -27,6 +27,7 @@ from trr_backend.ingestion.media import (
     MediaStorage,
     legacy_comment_source_key,
     mirror_snapshot,
+    write_avatar_version,
     write_media,
 )
 from trr_backend.media.social_image_variants import SocialDisplayVariant
@@ -818,8 +819,16 @@ def test_newer_canonical_asset_fences_old_media_snapshot(media_database):
         assert cur.fetchone()[0] == []
 
 
-@pytest.mark.parametrize("newer_source", [None, "https://scontent.cdninstagram.com/new-avatar.png"])
-def test_newer_handle_observation_fences_cached_avatar_and_rolls_back_prior_post_writes(media_database, newer_source):
+@pytest.mark.parametrize(
+    "newer_source",
+    [
+        "https://scontent.cdninstagram.com/old-avatar.png?oh=new-proof",
+        "https://scontent.cdninstagram.com/old-avatar.png#new-proof",
+    ],
+)
+def test_newer_same_version_observation_fences_cached_avatar_and_rolls_back_prior_post_writes(
+    media_database, newer_source
+):
     _, tx = media_database
     owned, token, source = launch_media(media_database)
     handle = "guard_" + uuid4().hex[:12]
@@ -988,3 +997,103 @@ def test_rate_limit_exposes_typed_durable_retry_without_immediate_retry():
     assert failure.value.failure.retry_at >= before + timedelta(seconds=120)
     assert not failure.value.failure.source_unavailable
     assert calls == [1]
+
+
+def test_versioned_avatar_writer_preserves_newer_different_image_and_exact_proof_time(media_database):
+    _, tx = media_database
+    handle = "versions_" + uuid4().hex[:12]
+    old_source = "https://scontent.cdninstagram.com/old-retained.png"
+    new_source = "https://scontent.cdninstagram.com/new-current.png"
+    old_hosted = "https://media.example/profiles/old-retained.png"
+    new_hosted = "https://media.example/profiles/new-current.png"
+    newer = OBSERVED + timedelta(hours=1)
+    with tx() as conn:
+        write_avatar_version(
+            conn,
+            username=handle,
+            source_url=new_source,
+            hosted_url=new_hosted,
+            content_hash="b" * 64,
+            observed_at=newer,
+        )
+        proof = write_avatar_version(
+            conn,
+            username=handle,
+            source_url=old_source,
+            hosted_url=old_hosted,
+            content_hash="a" * 64,
+            observed_at=OBSERVED,
+        )
+        assert proof["observed_at"] == OBSERVED
+        # Same bytes prove an immutable existing version; an older consumer
+        # cannot relabel the retained proof or the latest profile version.
+        reused = write_avatar_version(
+            conn,
+            username=handle,
+            source_url=new_source,
+            hosted_url=new_hosted,
+            content_hash="b" * 64,
+            observed_at=OBSERVED,
+        )
+        assert reused["observed_at"] == newer
+        with conn.cursor() as cur:
+            cur.execute(
+                """select source_url,hosted_url,content_hash,last_checked_at from social.avatar_registry
+                where account_handle=%s order by last_checked_at""",
+                (handle,),
+            )
+            assert cur.fetchall() == [
+                (old_source, old_hosted, "a" * 64, OBSERVED),
+                (new_source, new_hosted, "b" * 64, newer),
+            ]
+
+
+@pytest.mark.parametrize("signed", [False, True])
+def test_avatar_writer_rejects_newer_same_version_conflicting_hash(media_database, signed):
+    _, tx = media_database
+    handle = "hashguard_" + uuid4().hex[:12]
+    reference = "https://scontent.cdninstagram.com/same-version.png"
+    newer = OBSERVED + timedelta(hours=1)
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            """insert into social.avatar_registry(platform,account_handle,source_url,status,
+            hosted_url,content_hash,last_checked_at) values('instagram',%s,%s,'mirrored',%s,%s,%s)""",
+            (
+                handle,
+                reference + ("?oh=legacy" if signed else ""),
+                "https://media.example/profiles/new-bytes.png",
+                "b" * 64,
+                newer,
+            ),
+        )
+    with pytest.raises(OlderObservation):
+        with tx() as conn:
+            write_avatar_version(
+                conn,
+                username=handle,
+                source_url=reference,
+                hosted_url="https://media.example/profiles/old-bytes.png",
+                content_hash="a" * 64,
+                observed_at=OBSERVED,
+            )
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            "select hosted_url,content_hash,last_checked_at from social.avatar_registry where account_handle=%s",
+            (handle,),
+        )
+        assert cur.fetchall() == [("https://media.example/profiles/new-bytes.png", "b" * 64, newer)]
+
+
+def test_cancelled_media_cannot_publish_avatar_version_proof(media_database):
+    store, tx = media_database
+    owned, token, source = launch_media(media_database)
+    handle = "cancelledver_" + uuid4().hex[:12]
+    source = replace(source, avatars=(AvatarSource(handle, SOURCE, "owner", observed_at=OBSERVED),))
+    store.control(owned["run_id"], owned["account"], action="cancel", idempotency_key=str(uuid4()))
+    with pytest.raises(LostOwnership):
+        execute(media_database, owned, token, source)
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute("select count(*) from social.avatar_registry where account_handle=%s", (handle,))
+        assert cur.fetchone()[0] == 0
+        cur.execute("select count(*) from social.instagram_ingestion_receipts where run_id=%s", (owned["run_id"],))
+        assert cur.fetchone()[0] == 0

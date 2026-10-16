@@ -744,6 +744,92 @@ def _media_observation_guard(observed_at: datetime, payload: Mapping[str, Any]) 
         raise OlderObservation("Media snapshot predates stored media source observation")
 
 
+def write_avatar_version(
+    conn: Any,
+    *,
+    username: str,
+    source_url: str,
+    hosted_url: str,
+    content_hash: str,
+    observed_at: datetime,
+) -> dict[str, Any]:
+    """Persist hosted proof for one handle and source image version atomically.
+
+    The caller owns its business fence, native identity binding and transaction.
+    A different current profile image never invalidates a retained older version.
+    This helper does not update profiles, source slots, or their observation time.
+    """
+    if conn is None or conn.autocommit:
+        raise CanonicalWriteError("Avatar write requires an explicit transaction")
+    if not isinstance(username, str) or not re.fullmatch(r"[A-Za-z0-9._]{1,30}", username):
+        raise CanonicalWriteError("Avatar handle identity is invalid")
+    username = username.lower()
+    if not isinstance(observed_at, datetime) or observed_at.utcoffset() is None:
+        raise CanonicalWriteError("Original avatar observation is required")
+    if (
+        not isinstance(source_url, str)
+        or not source_url
+        or source_reference(source_url) != source_url
+        or not isinstance(hosted_url, str)
+        or not hosted_url
+        or source_reference(hosted_url) != hosted_url
+        or not isinstance(content_hash, str)
+        or not re.fullmatch(r"[a-f0-9]{64}", content_hash)
+    ):
+        raise CanonicalWriteError("Complete avatar version proof is required")
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("select pg_advisory_xact_lock(hashtextextended(%s,0))", ("instagram:avatar:" + username,))
+        # Old registry rows may retain signed URL variants of this same public
+        # path. Compare all matching versions before writing its canonical key.
+        cur.execute(
+            """select * from social.avatar_registry where platform='instagram' and account_handle=%s
+            and source_url is not null order by last_checked_at desc nulls last,
+            coalesce(status='mirrored' and nullif(hosted_url,'') is not null
+              and content_hash ~ '^[a-f0-9]{64}$',false) desc,id desc for update""",
+            (username,),
+        )
+        old = {}
+        for row in cur.fetchall():
+            try:
+                matches = source_reference(row["source_url"]) == source_url
+            except (TypeError, ValueError, MediaIncomplete):
+                continue
+            if matches:
+                old = dict(row)
+                break
+        if (
+            old.get("status") == "mirrored"
+            and old.get("content_hash") == content_hash
+            and old.get("hosted_url") == hosted_url
+            and old.get("last_checked_at") is not None
+        ):
+            # Reuse the actual retained proof; do not relabel it with a caller's
+            # earlier slot time or manufacture a later source observation.
+            return {
+                "username": username,
+                "source_url": source_url,
+                "hosted_url": hosted_url,
+                "content_hash": content_hash,
+                "observed_at": old["last_checked_at"],
+            }
+        _newer(observed_at, old)
+        cur.execute(
+            """insert into social.avatar_registry(platform,account_handle,source_url,content_hash,hosted_url,
+            status,failure_reason,last_checked_at,updated_at) values('instagram',%s,%s,%s,%s,'mirrored',null,%s,%s)
+            on conflict(platform,account_handle,source_url) do update set content_hash=excluded.content_hash,
+            hosted_url=excluded.hosted_url,status='mirrored',failure_reason=null,
+            last_checked_at=excluded.last_checked_at,updated_at=excluded.updated_at""",
+            (username, source_url, content_hash, hosted_url, observed_at, observed_at),
+        )
+    return {
+        "username": username,
+        "source_url": source_url,
+        "hosted_url": hosted_url,
+        "content_hash": content_hash,
+        "observed_at": observed_at,
+    }
+
+
 def write_media(
     conn: Any, *, run_id: str, account: str, target_key: str, observed_at: datetime, result: MediaResult
 ) -> dict[str, Any]:
@@ -868,46 +954,14 @@ def write_media(
         )
         _update(conn, "instagram_comments", comment.row_id, changes)
     for avatar in sorted(result.avatars, key=lambda item: (item["username"], item["source_url"])):
-        avatar_observed_at = datetime.fromisoformat(avatar["observed_at"])
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                "select pg_advisory_xact_lock(hashtextextended(%s,0))", ("instagram:avatar:" + avatar["username"],)
-            )
-            # Source identity can change URLs or become explicitly unavailable.
-            # Matching old bytes at one URL cannot authorize stale inventory to
-            # propagate after a newer observation of this handle was recorded.
-            cur.execute(
-                """select last_checked_at from social.avatar_registry
-                where platform='instagram' and account_handle=%s
-                order by last_checked_at desc nulls last limit 1 for update""",
-                (avatar["username"],),
-            )
-            _newer(avatar_observed_at, cur.fetchone() or {})
-        old = _locked(
+        write_avatar_version(
             conn,
-            "avatar_registry",
-            {"platform": "instagram", "account_handle": avatar["username"], "source_url": avatar["source_url"]},
+            username=avatar["username"],
+            source_url=avatar["source_url"],
+            hosted_url=avatar["hosted_url"],
+            content_hash=avatar["sha256"],
+            observed_at=datetime.fromisoformat(avatar["observed_at"]),
         )
-        if old.get("content_hash") == avatar["sha256"] and old.get("hosted_url") == avatar["hosted_url"]:
-            # Identical current cache proof needs no freshness write.
-            continue
-        _newer(avatar_observed_at, old)
-        with conn.cursor() as cur:
-            cur.execute(
-                """insert into social.avatar_registry(platform,account_handle,source_url,content_hash,hosted_url,
-                status,failure_reason,last_checked_at,updated_at) values('instagram',%s,%s,%s,%s,'mirrored',null,%s,%s)
-                on conflict(platform,account_handle,source_url) do update set content_hash=excluded.content_hash,
-                hosted_url=excluded.hosted_url,status='mirrored',failure_reason=null,
-                last_checked_at=excluded.last_checked_at,updated_at=excluded.updated_at""",
-                (
-                    avatar["username"],
-                    avatar["source_url"],
-                    avatar["sha256"],
-                    avatar["hosted_url"],
-                    avatar_observed_at,
-                    avatar_observed_at,
-                ),
-            )
     return identities
 
 

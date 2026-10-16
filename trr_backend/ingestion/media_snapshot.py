@@ -386,9 +386,10 @@ class MediaSnapshotLoader:
                 )
         handles = {handle for handle, *_ in slots}
         registry = {}
+        versions = {}
         if handles:
             cur.execute(
-                """select distinct on(account_handle) * from social.avatar_registry
+                """select * from social.avatar_registry
                 where platform='instagram' and account_handle=any(%s)
                 and last_checked_at is not null
                 order by account_handle,last_checked_at desc,
@@ -396,11 +397,22 @@ class MediaSnapshotLoader:
                   and content_hash ~ '^[a-f0-9]{64}$',false) desc,id desc""",
                 (sorted(handles),),
             )
-            registry = {row["account_handle"]: dict(row) for row in cur.fetchall()}
+            for row in cur.fetchall():
+                handle = row["account_handle"]
+                registry.setdefault(handle, dict(row))
+                if row.get("source_url"):
+                    try:
+                        reference = source_reference(row["source_url"])
+                    except (TypeError, ValueError, MediaIncomplete):
+                        continue  # Invalid legacy references cannot prove a version.
+                    versions.setdefault((handle, reference), dict(row))
         avatars, unavailable, unresolved = [], set(), set()
         for handle, role, comment_id, stamp, person in slots:
             url = _profile_url(person)
-            fallback = registry.get(handle)
+            # A retained explicit slot names a particular source image version.
+            # The newest profile image is a fallback only when that slot has no
+            # source URL; a later different image cannot invalidate old comments.
+            fallback = versions.get((handle, source_reference(url))) if url else registry.get(handle)
             if url and fallback:
                 registry_time = _time(fallback["last_checked_at"])
                 hosted = fallback.get("hosted_url")
@@ -413,17 +425,17 @@ class MediaSnapshotLoader:
                     and fallback.get("source_url")
                     and source_reference(fallback["source_url"]) == source_reference(url)
                 )
-                if cached and registry_time >= stamp:
-                    # This avatar has its own retained observation. Do not
-                    # relabel the post or overwrite the registry with its older
-                    # capture merely because another post uses the same image.
+                if cached:
+                    # This exact image version has retained byte proof. Keep
+                    # that proof's own observation time whether the owning slot
+                    # is earlier or later; URL presence alone is never proof.
                     avatars.append(
                         AvatarSource(handle, url, role, comment_id, registry_time, hosted, fallback["content_hash"])
                     )
                     continue
                 if registry_time > stamp:
-                    # A newer conflicting or unproved identity cannot authorize
-                    # propagation of the older explicit source or cached bytes.
+                    # A newer unproved observation of this SAME image version
+                    # cannot authorize propagation of stale cached bytes.
                     raise MediaIncomplete("avatar_source_newer")
             if not url:
                 if fallback and fallback.get("status") == "unsupported":

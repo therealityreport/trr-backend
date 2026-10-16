@@ -189,6 +189,14 @@ hosted_author_profile_pic_url
 """.split()
 )
 
+# Public commenter-profile projection: scalar metadata/counts only. The profile
+# projector excludes timeline edges, relationships and all viewer/session state.
+CONTENT_KEYS |= frozenset(
+    """
+biography followers_count follows_count posts_count profile_projection_version profile_invalid_fields
+""".split()
+)
+
 URL_KEYS = frozenset(
     {"url", "src", "display_url", "thumbnail_src", "video_url", "profile_pic_url", "profile_pic_url_hd"}
 )
