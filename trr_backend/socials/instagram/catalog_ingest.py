@@ -263,9 +263,7 @@ if TYPE_CHECKING:
 
     def _raise_if_shared_account_stage_cancelled(*args: Any, **kwargs: Any) -> None: ...
 
-    def _touch_job_heartbeat(
-        job_id: str, *, worker_id: str | None = None, claim_token: str | None = None
-    ) -> bool: ...
+    def _touch_job_heartbeat(job_id: str, *, worker_id: str | None = None, claim_token: str | None = None) -> bool: ...
 
 
 _IMPORTED_CORE_NAMES: set[str] = set()

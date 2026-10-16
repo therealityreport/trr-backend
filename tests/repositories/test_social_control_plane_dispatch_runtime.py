@@ -463,7 +463,6 @@ def test_dispatch_runtime_stamps_remote_function_name(
             "function_name": "trr-backend-jobs.run_social_job",
         }
 
-
     monkeypatch.setattr(legacy, "is_queue_enabled", lambda: True)
     monkeypatch.setattr(legacy, "is_modal_remote_executor_enabled", lambda: True)
     monkeypatch.setattr(legacy, "_run_pause_after_current_requested", lambda _run_id: False)
@@ -475,6 +474,7 @@ def test_dispatch_runtime_stamps_remote_function_name(
     monkeypatch.setattr(legacy, "_current_modal_dispatch_running_counts", lambda: ({}, {}, {}, {}, {}))
     monkeypatch.setattr(legacy, "_modal_comment_recovery_priority_override_slots", lambda: 0)
     monkeypatch.setattr(legacy, "_job_blocked_by_posts_auth_cooldown", lambda _job: None)
+
     def touch_metadata(_job_id: str, **kwargs: Any) -> bool:
         dispatch_writes.append(kwargs)
         dispatch_state.update({key: value for key, value in kwargs.items() if key != "expected_job_snapshot"})
@@ -488,7 +488,8 @@ def test_dispatch_runtime_stamps_remote_function_name(
         lambda *_args, **_kwargs: {
             "id": "current",
             "metadata": {"dispatch": {"lease_expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat()}}
-            if reservation_case == "own_lease" else {"dispatch": dict(dispatch_state)},
+            if reservation_case == "own_lease"
+            else {"dispatch": dict(dispatch_state)},
         },
     )
     monkeypatch.setattr(legacy, "_comments_auth_fallback_claim_scope", capacity_scope)

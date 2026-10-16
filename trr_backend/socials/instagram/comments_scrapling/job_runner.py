@@ -2928,7 +2928,9 @@ def _completion_recovery_handoff_metadata(
         result = _metadata_dict(deferred.get(result_key))
         enqueue_result = _metadata_dict(_metadata_dict(result.get("enqueue")).get("result"))
         for candidates in (
-            result.get("created_job_ids"), result.get("created_target_job_ids"), enqueue_result.get("job_ids")
+            result.get("created_job_ids"),
+            result.get("created_target_job_ids"),
+            enqueue_result.get("job_ids"),
         ):
             child_ids.update(str(value or "").strip() for value in candidates or [] if str(value or "").strip())
     if not residual_ids or not residual_ids.issubset(deliberate_ids) or not child_ids:

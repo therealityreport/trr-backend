@@ -809,9 +809,7 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                 else:
                     stop_reason = None
 
-                with lifecycle.job_claim_write_scope(
-                    job_id, claim_token=claim_token, worker_id=worker_id
-                ) as current:
+                with lifecycle.job_claim_write_scope(job_id, claim_token=claim_token, worker_id=worker_id) as current:
                     if not current:
                         raise RuntimeError("Job claim lost before checkpoint or auth observation")
                     pagination_state = repo.persist_instagram_profile_pagination_state(
@@ -1029,7 +1027,9 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                             posts_seen=reverse_posts_fetched,
                             posts_upserted=reverse_posts_upserted,
                             doc_id_used=str(reverse_fetcher.runtime_metadata.get("doc_id_used") or "").strip() or None,
-                            doc_ids_attempted=_posts_pagination_doc_ids_attempted(dict(reverse_fetcher.runtime_metadata)),
+                            doc_ids_attempted=_posts_pagination_doc_ids_attempted(
+                                dict(reverse_fetcher.runtime_metadata)
+                            ),
                             proxy_fingerprint=_posts_runtime_proxy_fingerprint(dict(reverse_fetcher.runtime_metadata)),
                             proxy_session_key=reverse_proxy_session_key,
                             stop_reason=reverse_stop_reason,
@@ -1353,9 +1353,7 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                 stop_reason = _posts_pagination_stop_reason(result)
                 if not stop_reason and (not result.has_next_page or not result.end_cursor):
                     stop_reason = "completed"
-                with lifecycle.job_claim_write_scope(
-                    job_id, claim_token=claim_token, worker_id=worker_id
-                ) as current:
+                with lifecycle.job_claim_write_scope(job_id, claim_token=claim_token, worker_id=worker_id) as current:
                     if not current:
                         raise RuntimeError("Job claim lost before checkpoint or auth observation")
                     pagination_state = repo.persist_instagram_profile_pagination_state(

@@ -115,7 +115,8 @@ def _find_chrome_profile(profile_name: str) -> Path:
 def _extract_cookies(profile_path: Path) -> dict[str, str]:
     """Extract instagram.com cookies from a Chrome profile's cookie DB."""
     try:
-        from pycookiecheat import chrome_cookies
+        # Optional operator-only dependency, absent from the server runtime.
+        from pycookiecheat import chrome_cookies  # pyright: ignore[reportMissingImports]
     except ImportError as exc:
         raise CookieExtractionDependencyError() from exc
 

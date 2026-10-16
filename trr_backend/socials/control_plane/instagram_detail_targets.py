@@ -499,7 +499,6 @@ def execute_job(
     worker_id: str,
     detail_executor: DurableDetailExecutor,
 ) -> dict[str, Any]:
-
     error_code = None
     cancelled = False
     stopped = False

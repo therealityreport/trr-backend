@@ -796,8 +796,15 @@ def download_image(
         merged["referer"] = referer or "https://real-housewives.fandom.com/"
     try:
         resp = safe_requests_get(
-            requests, source_url, policy=_PUBLIC_MEDIA_POLICY, headers=merged, timeout=(5, 30),
-            stream=True, max_bytes=max_bytes_limit, total_timeout=60, body_timeout=45,
+            requests,
+            source_url,
+            policy=_PUBLIC_MEDIA_POLICY,
+            headers=merged,
+            timeout=(5, 30),
+            stream=True,
+            max_bytes=max_bytes_limit,
+            total_timeout=60,
+            body_timeout=45,
         )
     except UnsafeMediaUrlError as exc:
         raise RuntimeError(_media_url_error_reason(exc)) from None
@@ -1331,8 +1338,13 @@ def mirror_url_to_s3(
                 data_parts.append(chunk)
     except UnsafeMediaUrlError as exc:
         return MirrorResult(
-            source_url=source_url, hosted_url=None, hosted_key=None, sha256=None,
-            content_type=content_type, size_bytes=size_bytes or None, status="failed",
+            source_url=source_url,
+            hosted_url=None,
+            hosted_key=None,
+            sha256=None,
+            content_type=content_type,
+            size_bytes=size_bytes or None,
+            status="failed",
             error=_media_url_error_reason(exc),
         )
     except requests.exceptions.Timeout:

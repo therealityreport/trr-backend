@@ -16,7 +16,7 @@ import sys
 import threading
 import time
 from datetime import UTC, datetime
-from typing import cast
+from typing import Any, cast
 
 from trr_backend.db import pg
 from trr_backend.repositories.social_sync_orchestrator import tick_sync_orchestrator
@@ -456,6 +456,7 @@ def _execute_run_with_caps(
                         break
             if not job:
                 break
+            job = cast(dict[str, Any], job)
             run_state = pg.fetch_one("select status from social.scrape_runs where id = %s", [run_id]) or {}
             if str(run_state.get("status") or "").strip().lower() == "cancelled":
                 cancellation_accepted = social_repo._finish_job(

@@ -406,7 +406,7 @@ def recover_dispatch_blocked_no_progress_jobs(*, limit: int = 100) -> list[dict[
             job_id,
             expected_status=str(full_row.get("status") or ""),
             expected_claim_token=legacy._metadata_dict(full_row.get("config")).get("claim_token"),
-                expected_dispatch_snapshot=dict(dispatch),
+            expected_dispatch_snapshot=dict(dispatch),
             status="failed",
             items_found=legacy._normalize_non_negative_int(full_row.get("items_found")),
             error_message=str(dispatch.get("last_dispatch_error") or "Modal dispatch blocked"),
@@ -681,7 +681,7 @@ def recover_stale_unclaimed_dispatched_jobs(
             job_id,
             expected_status=str(row.get("status") or ""),
             expected_claim_token=legacy._metadata_dict(row.get("config")).get("claim_token"),
-                expected_dispatch_snapshot=dict(dispatch),
+            expected_dispatch_snapshot=dict(dispatch),
             status="retrying",
             items_found=legacy._normalize_non_negative_int(row.get("items_found")),
             error_message=recovery_error,
@@ -823,8 +823,10 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
             continue
         auth_child = str(job_config.get("comments_auth_fallback") or "").lower() == "true"
         auth_reservation_expiry = legacy._coerce_dt(job_dispatch.get("lease_expires_at"))
-        if auth_child and job_dispatch.get("lease_expires_at") and (
-            auth_reservation_expiry is None or auth_reservation_expiry > legacy._now_utc()
+        if (
+            auth_child
+            and job_dispatch.get("lease_expires_at")
+            and (auth_reservation_expiry is None or auth_reservation_expiry > legacy._now_utc())
         ):
             continue
         existing_remote_invocation_id = str(job_dispatch.get("remote_invocation_id") or "").strip()
@@ -1012,15 +1014,14 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
         )
         auth_child = str(job_config.get("comments_auth_fallback") or "").lower() == "true"
         reservation_id = str(uuid4()) if auth_child else None
+        reservation_kwargs: dict[str, Any] = {"dispatch_reservation_id": reservation_id} if reservation_id else {}
         expected_reservation = (dispatch_attempt_count, lease_expires_at, reservation_id) if reservation_id else None
         capacity_scope = legacy._comments_auth_fallback_claim_scope(job_id) if auth_child else nullcontext(True)
         with capacity_scope as capacity_available:
             if not capacity_available:
                 continue
             if auth_child:
-                reserved = legacy.pg.fetch_one(
-                    "select metadata from social.scrape_jobs where id = %s::uuid", [job_id]
-                )
+                reserved = legacy.pg.fetch_one("select metadata from social.scrape_jobs where id = %s::uuid", [job_id])
                 current_dispatch = legacy._job_dispatch_metadata(reserved or {})
                 if legacy._dispatch_metadata_attempt_count(current_dispatch) != dispatch_attempt_count - 1:
                     continue
@@ -1033,7 +1034,7 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
                 dispatch_backend="modal",
                 dispatch_requested_at=legacy._now_utc(),
                 dispatch_attempt_count=dispatch_attempt_count,
-                **({"dispatch_reservation_id": reservation_id} if reservation_id else {}),
+                **reservation_kwargs,
                 lease_expires_at=lease_expires_at,
                 last_dispatch_error=None,
                 last_dispatch_error_code=None,

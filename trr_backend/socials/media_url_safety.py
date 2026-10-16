@@ -7,11 +7,11 @@ import math
 import socket
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -258,6 +258,7 @@ class _PinnedAdapter(HTTPAdapter):
 
         class _PinnedConnection:
             def _new_conn(self) -> socket.socket:
+                connection = cast(HTTPConnection, self)
                 remaining = owner.deadline - time.monotonic()
                 if remaining <= 0:
                     raise ConnectTimeoutError(self, "media_request_timeout")
@@ -266,17 +267,17 @@ class _PinnedAdapter(HTTPAdapter):
                 owner.connections.append(self)
                 self._media_socket = sock
                 try:
-                    sock.settimeout(min(float(self.timeout), remaining))
-                    for option in self.socket_options or ():
+                    sock.settimeout(min(float(cast(float, connection.timeout)), remaining))
+                    for option in connection.socket_options or ():
                         sock.setsockopt(*option)
-                    if self.source_address:
-                        sock.bind(self.source_address)
+                    if connection.source_address:
+                        sock.bind(connection.source_address)
                     # No second resolver lookup. TLS still uses self.host, the URL hostname.
-                    sock.connect((str(ip), self.port))
+                    sock.connect((str(ip), connection.port))
                     remaining = owner.deadline - time.monotonic()
                     if remaining <= 0:
                         raise TimeoutError("media_request_timeout")
-                    sock.settimeout(min(float(self.timeout), remaining))
+                    sock.settimeout(min(float(cast(float, connection.timeout)), remaining))
                     # TLS wrapping detaches the original socket before the
                     # handshake finishes. An independent descriptor keeps a
                     # hard abort path to the same TCP stream through that gap.
@@ -287,7 +288,7 @@ class _PinnedAdapter(HTTPAdapter):
                     raise ConnectTimeoutError(self, "media_request_timeout") from exc
                 except OSError as exc:
                     sock.close()
-                    raise NewConnectionError(self, "media_connection_failed") from exc
+                    raise NewConnectionError(connection, "media_connection_failed") from exc
 
         class _HttpConnection(_PinnedConnection, HTTPConnection):
             pass
@@ -300,10 +301,10 @@ class _PinnedAdapter(HTTPAdapter):
                 self._media_socket = self.sock
 
         class _HttpPool(HTTPConnectionPool):
-            ConnectionCls = _HttpConnection
+            ConnectionCls = cast(Any, _HttpConnection)
 
         class _HttpsPool(HTTPSConnectionPool):
-            ConnectionCls = _HttpsConnection
+            ConnectionCls = cast(Any, _HttpsConnection)
 
         super().init_poolmanager(*args, **kwargs)
         # Assign an instance-local mapping; never mutate urllib3's shared registry.
@@ -389,7 +390,7 @@ def _send_pinned_request(
     timer.daemon = True
     timer.start()
     original_close = response.close
-    original_iter = response.iter_content
+    original_iter = cast(Callable[..., Iterator[bytes | str]], response.iter_content)
 
     def close() -> None:
         timer.cancel()
@@ -419,7 +420,7 @@ def _send_pinned_request(
             close()
 
     response.close = close
-    response.iter_content = iter_content
+    response.iter_content = cast(Any, iter_content)
     content_length = response.headers.get("Content-Length")
     if content_length and content_length.isdecimal() and int(content_length) > max_bytes:
         close()

@@ -30937,7 +30937,7 @@ def test_touch_job_dispatch_metadata_does_not_refresh_worker_heartbeat(
     captured_params: list[list[Any]] = []
     stale = False
 
-    def _fake_fetch_one(sql: str, params: list[Any]) -> dict[str, Any]:
+    def _fake_fetch_one(sql: str, params: list[Any]) -> dict[str, Any] | None:
         captured_params.append(list(params))
         captured_sql.append(" ".join(sql.split()).lower())
         if sql.lstrip().lower().startswith("select metadata"):

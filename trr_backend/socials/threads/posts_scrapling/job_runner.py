@@ -480,9 +480,7 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
 
             if result.auth_failed and not result.posts:
                 error_code = str(result.fetch_reason or "threads_posts_auth_failed").strip()
-                with lifecycle.job_claim_write_scope(
-                    job_id, claim_token=claim_token, worker_id=worker_id
-                ) as current:
+                with lifecycle.job_claim_write_scope(job_id, claim_token=claim_token, worker_id=worker_id) as current:
                     if not current:
                         raise RuntimeError("Job claim lost before checkpoint or auth observation")
                     cooldown = auth_cooldown.record_auth_block("threads", account_handle, error_code)

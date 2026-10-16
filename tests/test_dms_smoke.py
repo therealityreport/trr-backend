@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from contextlib import nullcontext
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -339,7 +340,7 @@ class TestMessages:
         """Send message succeeds with valid auth."""
         app.dependency_overrides[auth.require_user] = lambda: MOCK_USER
 
-        mock_sent = MOCK_MESSAGE.copy()
+        mock_sent: dict[str, Any] = MOCK_MESSAGE.copy()
         mock_sent["body"] = "Hello!"
         mock_sent["sender_id"] = MOCK_USER["id"]
         mock_sent["created_at"] = datetime(2025, 1, 1, tzinfo=UTC)

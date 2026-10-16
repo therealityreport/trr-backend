@@ -260,14 +260,16 @@ def test_comments_concurrency_one_preserves_serial_fetch_then_persist_order(
 
         monkeypatch.setattr(fetcher, "fetch_comments_for_shortcode", incomplete_fetch)
         monkeypatch.setattr(
-            jr, "_filter_retryable_incomplete_targets_against_current_db",
+            jr,
+            "_filter_retryable_incomplete_targets_against_current_db",
             lambda **_kwargs: (["A"], {"A": "public_blocked"}, []),
         )
         monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {"A": 100})
         monkeypatch.setattr(jr, "_auto_public_recovery_enabled", lambda _config: capture_case != "auth_handoff")
         monkeypatch.setattr(jr, "_select_auto_auth_fallback_targets", lambda **_kwargs: ["A"])
         monkeypatch.setattr(
-            jr, "_completion_residual_gap_targets_from_health",
+            jr,
+            "_completion_residual_gap_targets_from_health",
             lambda **_kwargs: [{"shortcode": "A", "parent_capture_gap": 5}]
             + ([{"shortcode": "B", "parent_capture_gap": 5}] if capture_case == "uncovered" else []),
         )
@@ -275,17 +277,20 @@ def test_comments_concurrency_one_preserves_serial_fetch_then_persist_order(
         def enqueue(**_kwargs: Any) -> dict[str, Any]:
             queued.append("child-A")
             return {
-                "run_id": "run-1", "created_target_job_count": 1,
-                "created_job_ids": ["child-A"], "enqueue": {"performed": True},
+                "run_id": "run-1",
+                "created_target_job_count": 1,
+                "created_job_ids": ["child-A"],
+                "enqueue": {"performed": True},
             }
 
         monkeypatch.setattr(jr, "_enqueue_auto_public_recovery_targets", enqueue)
         monkeypatch.setattr(jr, "_enqueue_auto_auth_fallback_targets", enqueue)
         monkeypatch.setattr(
-            jr.pg, "fetch_all",
-            lambda sql, *_args, **_kwargs: [] if capture_case == "terminal_child" or "id = any" not in sql else [
-                {"id": "child-A", "config": {"target_source_ids": ["A"], "comments_public_recovery": True}}
-            ],
+            jr.pg,
+            "fetch_all",
+            lambda sql, *_args, **_kwargs: []
+            if capture_case == "terminal_child" or "id = any" not in sql
+            else [{"id": "child-A", "config": {"target_source_ids": ["A"], "comments_public_recovery": True}}],
         )
         monkeypatch.setattr(jr, "_ramp_public_comments_worker_cap", lambda **_kwargs: None)
         monkeypatch.setattr(jr, "_dispatch_due_social_jobs", lambda **_kwargs: {"dispatched_job_ids": []})
