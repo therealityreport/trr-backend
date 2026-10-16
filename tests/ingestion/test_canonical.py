@@ -332,6 +332,45 @@ def test_comment_tree_post_scope_ranked_merge_and_lifecycle(database):
             )
 
 
+def test_comment_permalink_uses_loaded_post_and_preserves_supplied_current_links(database):
+    raw = copy.deepcopy(CAPTURE["comment"])
+    raw.pop("comment_url")
+    raw["post_shortcode"] = "UntrustedSourceShortcode"
+    with database() as conn:
+        ids = post(conn, source={**CAPTURE["post"], "shortcode": "LoadedPermalinkPost"})
+        run_id = str(uuid4())
+        with conn.cursor() as cur:
+            cur.execute("insert into social.scrape_runs values(%s)", (run_id,))
+
+        def write(source, hours):
+            write_comments(
+                conn,
+                run_id=run_id,
+                account="fixture_account",
+                observed_at=OBSERVED + timedelta(hours=hours),
+                post_id=ids["post_id"],
+                comments=[normalize_comment_source(source)],
+                source_payloads=[source],
+            )
+
+        write(raw, 0)
+        parent = load(conn, "instagram_comments", post_id=ids["post_id"], comment_id="comment1")
+        reply = load(conn, "instagram_comments", post_id=ids["post_id"], comment_id="reply1")
+        assert parent["comment_url"] == "https://www.instagram.com/p/LoadedPermalinkPost/c/comment1/"
+        assert reply["comment_url"] == "https://www.instagram.com/p/LoadedPermalinkPost/c/reply1/"
+        assert reply["parent_comment_id"] == parent["id"] and reply["post_id"] == parent["post_id"]
+
+        supplied = copy.deepcopy(raw)
+        supplied["comment_url"] = "https://www.instagram.com/p/SuppliedPost/c/comment1/"
+        supplied["replies"][0]["comment_url"] = "https://www.instagram.com/p/SuppliedPost/c/reply1/"
+        write(supplied, 1)
+        write(raw, 2)
+        for source in (supplied, supplied["replies"][0]):
+            row = load(conn, "instagram_comments", post_id=ids["post_id"], comment_id=source["comment_id"])
+            assert row["comment_url"] == source["comment_url"]
+            assert row["scraped_at"] == OBSERVED + timedelta(hours=2)
+
+
 def test_inline_comments_fail_closed_and_connection_is_explicit(database):
     raw = {**CAPTURE["comment"], "source_snapshot_type": "listing_inline_sample"}
     with database() as conn:

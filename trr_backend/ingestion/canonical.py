@@ -1086,6 +1086,8 @@ def write_comments(
             payload["parent_comment_id"] = parent_db_id
             payload.update(assignment or {})
             payload = _merge(existing, payload)
+            if not payload.get("comment_url") and post.get("shortcode"):
+                payload["comment_url"] = f"https://www.instagram.com/p/{post['shortcode']}/c/{key}/"
             if not metadata_writes_enabled:
                 for column in _COMMENT_METADATA:
                     payload.pop(column, None)
