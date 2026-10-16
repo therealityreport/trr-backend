@@ -504,6 +504,10 @@ class PublicRelayCommentSource:
         def observe(kind, payload):
             def retain():
                 failure = comment_page_failure(payload)
+                if failure is not None:
+                    from trr_backend.ingestion.public_diagnostics import record_public_comment_failure_basis
+
+                    record_public_comment_failure_basis(payload, public_only=True)
                 header_delay = parse_public_retry_after(payload.get("retry_after"))
                 delay = (
                     max(value for value in (header_delay, failure[1]) if value is not None)
