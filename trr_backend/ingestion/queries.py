@@ -56,6 +56,7 @@ class Queries:
             raise LookupError("Instagram run not found for this account")
         result = dict(row)
         result.pop("execution_selection", None)
+        execution_hold = result.pop("execution_hold_reason", None)
         result["run_id"] = str(result["run_id"])
         stages = result.pop("stages") or []
         counts = {}
@@ -77,7 +78,7 @@ class Queries:
             stage["complete"] = stage_counts.complete
         result["stages"] = stages
         result["complete"] = run_complete(RunIntent.from_payload(result["intent"]), counts)
-        result["allowed_actions"] = self._actions(result["state"], result["complete"])
+        result["allowed_actions"] = [] if execution_hold else self._actions(result["state"], result["complete"])
         return result
 
     @staticmethod

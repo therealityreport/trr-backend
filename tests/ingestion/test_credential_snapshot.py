@@ -107,7 +107,7 @@ def test_all_rebuilt_lane_factories_receive_pinned_identity_and_details_use_expl
         monkeypatch.setattr(module, name, lambda _name=name, **kwargs: captured.setdefault(_name, kwargs))
     monkeypatch.setattr(composition, "_gate_source", lambda source, *args, **kwargs: source)
     owned = {"account": "bravotv", "target_key": "ABC"}
-    context = {"post": {"comments_count": 0}}
+    context = {"run": {"intent": {"account": "bravotv"}}, "post": {"comments_count": 0}}
     composition._listing(context, owned)
     composition._details(context, owned)
     composition._comments(context, owned)
@@ -160,7 +160,9 @@ def test_media_storage_composes_lazy_target_bound_refresh_without_credentials_or
         "owner_token": "private",
     }
     expires = datetime.now(UTC) + timedelta(minutes=5)
-    storage = composition._media_storage({"target": {"owner_expires_at": expires}}, owned)
+    storage = composition._media_storage(
+        {"run": {"intent": {"account": "bravotv"}}, "target": {"owner_expires_at": expires}}, owned
+    )
     assert storage.client is client and isinstance(storage.refresh, MediaRefresh)
     assert storage.refresh.owned == owned and storage.refresh.owner_expires_at == expires
     assert storage.refresh._snapshot is None and storage.refresh._credentials_snapshot is None

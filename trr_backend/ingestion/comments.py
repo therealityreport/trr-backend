@@ -50,6 +50,7 @@ class CommentPage:
     unavailable_reason: str | None = None
     cursor_param: str | None = None
     started_from_root: bool = False
+    cursor_provenance: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -222,6 +223,11 @@ def _node(source: Any, parent: str | None = None) -> dict[str, Any]:
     if source.get("source_snapshot_type", "full_comments_scrape") != "full_comments_scrape":
         raise CommentSourceError("Comment samples cannot become full-comments observations")
     result = dict(source)
+    if "child_comment_count" not in result:
+        for alias in ("childCommentCount", "repliesCount"):
+            if _count(source.get(alias)) is not None:
+                result["child_comment_count"] = source[alias]
+                break
     if source.get("created_at") is None and source.get("created_at_utc") is not None:
         result["created_at"] = source["created_at_utc"]
     liked = source.get("edge_liked_by")
@@ -275,6 +281,40 @@ def parse_comment_evidence(
         raise CommentSourceError("Native comment page contains failed request metadata")
     if payload.get("source_snapshot_type") == "native_rest_list_v1":
         payload = _native_list_page(payload)
+    provenance = payload.get("cursor_payload")
+    if isinstance(provenance, dict) and provenance.get("adapter_family") not in (None, "instagram_public_relay"):
+        raise CommentSourceError("Native comment evidence uses an unsupported adapter family")
+    if isinstance(provenance, dict) and provenance.get("adapter_family") == "instagram_public_relay":
+        required = {
+            "adapter_family",
+            "adapter_version",
+            "source",
+            "relay_doc_id",
+            "relay_friendly_name",
+            "sort_order",
+            "page_size",
+        }
+        if (
+            not required.issubset(provenance)
+            or type(provenance["adapter_version"]) is not int
+            or provenance["adapter_version"] != 1
+            or provenance["source"] not in {"root", "resume"}
+            or any(
+                not isinstance(provenance[key], str) or not provenance[key]
+                for key in ("relay_doc_id", "relay_friendly_name", "sort_order")
+            )
+            or type(provenance["page_size"]) is not int
+            or not 1 <= provenance["page_size"] <= 50
+            or (
+                provenance.get("request_cursor") is not None
+                and (not isinstance(provenance["request_cursor"], str) or not provenance["request_cursor"])
+            )
+            or (provenance["source"] == "resume") != (provenance.get("request_cursor") is not None)
+        ):
+            raise CommentSourceError("Public Relay page has invalid cursor provenance")
+        provenance = dict(provenance)
+    else:
+        provenance = None
     parent = payload.get("parent_comment_id") or payload.get("parent_comment_pk")
     parent = str(parent) if parent is not None else None
     if payload.get("comments_disabled") is True:
@@ -353,6 +393,7 @@ def parse_comment_evidence(
         cursor_param=cursor_param,
         started_from_root=isinstance(payload.get("cursor_payload"), dict)
         and payload["cursor_payload"].get("source") == "root",
+        cursor_provenance=provenance,
     )
 
 
@@ -408,6 +449,36 @@ def _progress(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _advance(state: dict[str, Any], page: CommentPage, *, scan_started_at: datetime) -> None:
+    provenance = page.cursor_provenance
+    if provenance is not None:
+        if state.get("adapter_family") not in (None, "instagram_public_relay") or (
+            state["lanes"] and state.get("adapter_family") is None
+        ):
+            raise CommentSourceError("Comment cursor adapter family changed")
+        state["adapter_family"] = "instagram_public_relay"
+        state["adapter_version"] = 1
+        lane_key = page.parent_comment_id or "__top__"
+        previous_lane = state["lanes"].get(lane_key) or {}
+        request_cursor = provenance.get("request_cursor")
+        if request_cursor:
+            previous_cursors = previous_lane.get("cursors") or []
+            if (
+                previous_lane.get("exhausted")
+                or not previous_cursors
+                or previous_cursors[-1] != request_cursor
+                or any(
+                    previous_lane.get(key) != provenance[key]
+                    for key in ("relay_doc_id", "relay_friendly_name", "sort_order", "page_size")
+                )
+            ):
+                raise CommentSourceError("Public Relay continuation does not match its durable query lane")
+        elif page.parent_comment_id:
+            # An embedded child cursor has no proved child-query identity. A
+            # child root request establishes that binding without replacing the
+            # top scan or treating retained inventory as a fresh observation.
+            state["lanes"].pop(lane_key, None)
+    elif state.get("adapter_family") == "instagram_public_relay":
+        raise CommentSourceError("Public Relay page lacks its cursor provenance")
     if page.started_from_root and not page.parent_comment_id and "__top__" in state["lanes"]:
         # A deliberate root restart begins a fresh observation manifest. Earlier
         # canonical rows and immutable page receipts remain durable; they cannot
@@ -430,6 +501,14 @@ def _advance(state: dict[str, Any], page: CommentPage, *, scan_started_at: datet
         lane["exhausted"] = exhausted
 
     advance_lane(page.parent_comment_id or "__top__", page.next_cursor, page.exhausted, page.cursor_param)
+    if provenance is not None:
+        lane = state["lanes"][page.parent_comment_id or "__top__"]
+        lane.update(
+            {key: provenance[key] for key in ("relay_doc_id", "relay_friendly_name", "sort_order", "page_size")}
+        )
+        if page.parent_comment_id and page.expected_count is not None and page.parent_comment_id in state["observed"]:
+            parent = state["observed"][page.parent_comment_id]
+            parent["expected_replies"] = max(parent.get("expected_replies") or 0, page.expected_count)
     if page.started_from_root and not page.parent_comment_id:
         state["lanes"]["__top__"]["started_from_root"] = True
     if page.expected_count is not None and not page.parent_comment_id:

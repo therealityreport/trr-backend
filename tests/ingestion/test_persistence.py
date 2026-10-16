@@ -81,6 +81,12 @@ def database(tmp_path_factory):
                     / "supabase/migrations/20261016070000_instagram_ingestion_foundation.sql"
                 ).read_text()
             )
+            cur.execute(
+                (
+                    Path(__file__).resolve().parents[2]
+                    / "supabase/migrations/20261016153330_instagram_ingestion_run_holds.sql"
+                ).read_text()
+            )
         yield Store(transaction), transaction
     finally:
         subprocess.run(

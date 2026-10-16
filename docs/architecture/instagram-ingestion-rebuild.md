@@ -1229,3 +1229,167 @@ New-run routing stays disabled. The previous v66 code and unchanged cookie value
 remain rollback material; never remove additive schema or transfer this run's
 engine/version. Deployment, readiness, source/identity proofs and command receipt
 are preserved in `.artifacts/ingestion-rollout/`.
+
+### Public-first routing regression hold — supersedes generation-8 continuation
+
+The user's follow-up recalled the earlier no-login implementation. Current source
+and Git history confirm that the legacy posts runner defaults to public_first,
+the comments runner defaults to public_first/public_relay, and public_probe.py
+uses empty cookies for listing, permalink details and comments with replies.
+The initial durable composition in ac4f95be bypassed those mode branches and
+required validated cookies; 9e2349e2 tightened that requirement to an explicit
+identity. This is a rebuild routing regression, not evidence that Instagram
+universally requires login. Prior sampled public progress does not prove all-stage,
+full-account completeness; retain truthful stage-specific completion checks.
+
+The supported cancel action returned 202 at 15:03:06Z, preserving this SAME run
+as cancelled generation 9. Read-only state at 15:03:17Z shows 66 committed listing
+pages, 2,178 targets for each downstream stage, 66 receipts/evidence records,
+one saved unresolved next page, zero active owners, and zero downstream attempts
+or requests. DO NOT resume the authenticated canary automatically. Public-mode
+restoration design is in progress; preserve authenticated cursors and budgets,
+and establish adapter/version compatibility before any source-mode transition.
+No public source probe, cookie/proxy action, or mode-switch code change has yet
+been performed for this correction. Helpers are design/read-only only.
+
+Parent recommendation in response to 'which one should we use?': native public-first
+is the default, durable orchestration remains, and authenticated mode is a separate
+explicit option for a demonstrated gap. Do not silently fall back from public mode
+to account cookies. Apify's own public documentation describes logged-out data and
+comments/replies; it does not establish complete TRR coverage or authorize a paid
+provider integration. Await the settled restoration contract before implementation.
+
+### Public restoration implementation — authenticated run remains paused
+
+The parent settled the repair contract and released implementation within the
+original ingestion-rebuild scope. New launches freeze a source profile containing
+access mode, exact listing/detail/comment families, contract version and adapter
+version. API composition resolves the maintained public-first default once at
+launch. Workers use the frozen profile. Unknown configuration fails closed.
+Historical untagged runs retain authenticated interpretation and byte-equivalent
+intent serialization/digests; their cursors cannot become public cursors.
+
+The parent implemented the immutable intent/command seam. Its 43 focused domain,
+command and new profile cases passed using isolated PostgreSQL. This includes
+idempotent launch replay after policy changes, invalid/mixed profile rejection,
+and preserved historical payload/digest behavior. Transport integration is still
+in progress: API owner handles public listing/details/media refresh, comments owner
+handles durable Relay parent/child resume, and workflow owner handles public-access
+cooldown without creating an authenticated-account block. No live source requests,
+new canary, deployment, credential change, or authenticated-run resume occurred.
+
+Public requests share the existing anonymous pressure lane and unchanged caps.
+Every explicit source operation must be gated and observed. Public adapters start
+without credentials and reject authenticated cookies before subsequent sends;
+attempt-local anonymous state remains ephemeral. Server Retry-After is preserved,
+including fail-closed overflow behavior. Previously blocked anonymous rows remain
+blocked pending explicit reconciliation; this repair does not reset them.
+
+Actual Modal usage for the exact app during 14:00–15:00 UTC was $0.06690604 before
+credits/allowances: CPU $0.03424182, memory $0.00650723, network egress $0.02615699.
+The 13:00–14:00 baseline was $0.02987936. These are whole-app hourly measurements,
+not isolated canary costs: the 14:00 hour spans the prior region, US East rollout,
+pauses, repair deployment and other app activity. They do not establish a causal
+region cost increase or end-to-end performance result. Original provider response
+is retained in .artifacts/ingestion-rollout/modal-billing-trial-14-15utc.json.
+
+The public gate batch passed 53 isolated PostgreSQL cases. It preserves the
+shared 180-request/660-second cap, immediate public-access cooldown, existing
+blocks, cancellation and probe fencing. A later shorter public failure cannot
+shorten an earlier server Retry-After. Authenticated defaults remain unchanged.
+
+A single provider billing refresh at 15:12:20 UTC confirmed both completed hours.
+The provider's reported totals are $0.02987935 (13 UTC) and $0.06690603 (14 UTC),
+each $0.00000001 below the separately summed displayed resources due to rounding.
+The exact provider total difference is $0.03702668; no per-canary allocation or
+causal region comparison is claimed. Explicit admin-56995 profile and live
+Workspace.name were checked; the unrelated global active profile was unchanged.
+Evidence: .artifacts/ingestion-rollout/modal-billing-complete-hours-20261016T151220Z.json.
+
+Read-only live preparation at 15:12:46 UTC verified the bound trr-core project,
+found no existing anonymous request-lane row, and confirmed the preserved
+historical run is cancelled at generation 9. No reconciliation, source request,
+or state mutation was performed. Evidence is retained in
+.artifacts/ingestion-rollout/public-lane-readiness-151246.json.
+
+Prepared .artifacts/ingestion-rollout/verify-public-runtime.py for the later
+source/runtime gate. It verifies deployed source hashes and the public frozen
+contract without reading a credential snapshot. Only local compilation has run;
+this is preparation, not deployed-runtime proof.
+
+### Connected public pipeline and rollout hold prerequisite
+
+The connected isolated-PostgreSQL public case passed through
+composition.build_worker with maintained listing, permalink, Relay and profile
+parsers, real durable/canonical/media processing, mocked HTTP sends and fake
+object storage. It committed and sealed all four stages with zero unresolved
+items, four target receipts, seven evidence rows, a parent/reply pair, three
+avatars and fourteen stored objects. Seven source HTTP operations and four media
+downloads were counted. Frozen public routing held despite an authenticated
+process setting. This is fixture integration evidence, not live completeness.
+
+That case found a strict nested API-intent mismatch. CommandService now validates
+the full internal intent and projects only source_profile out of progress/recent
+responses. Stored intent, hashes and internal worker/query routing are unchanged;
+the existing API schema and generated client remain valid. Two focused public/auth
+projection cases and the connected case passed after the repair.
+
+The existing one-canary guard correctly counts the cancelled authenticated run as
+resumable, so it still blocks a separate public launch. A separate additive hold
+batch is now being implemented: a nullable execution hold on an already-cancelled
+run, a database constraint preventing held runs from becoming runnable, explicit
+resume/retry rejection, no executable progress actions, and exclusion of held
+cancelled rows only from the active count. Held rows still consume total budget.
+The exact existing run, generation, intent, attempts, cursors and evidence remain
+preserved. No hold has been applied and no new run has been launched.
+
+After a public run exists, rollback must disable new routing and safely pause
+work while retaining profile-compatible API/workers. The old v67 source cannot
+parse new public intent; do not claim it is a complete code rollback for those
+runs. The hold database constraint independently prevents older code from
+reactivating the preserved authenticated run. Keep additive schema and hold data.
+
+The durable-hold batch passed independent review with no findings. Its 23 focused
+PostgreSQL cases establish state preservation, idempotence, typed progress,
+one-run counting and the old-SQL constraint boundary. The additive migration
+20261016070400_instagram_ingestion_run_holds.sql (SHA256
+7c0a1f8220cfb56189b1fe796c5c88ef5122a633eacb01d305a0022474dbf32a)
+was applied through the verified repo-scoped Supabase MCP to trr-core. The provider
+recorded version 20261016153330, name instagram_ingestion_run_holds; this generated
+provider version differs from the local source filename and is recorded explicitly.
+Post-apply inspection confirmed the nullable text column and held-implies-cancelled
+constraint, zero held runs, and the existing canary still cancelled at generation
+9 with a null hold. No run hold or new launch has occurred. Receipt:
+.artifacts/ingestion-rollout/run-hold-migration-receipt.json.
+
+The new local migration was then renamed to the provider's exact recorded version:
+20261016153330_instagram_ingestion_run_holds.sql. The isolated fixture path was
+updated accordingly. SQL bytes and the reviewed SHA256 are unchanged; no migration
+was reapplied. This keeps future migration discovery aligned with provider history.
+
+### Public repair review closeout
+
+The first consolidated review found four transport gaps: broad HTML login-word
+classification, an incompatible environment-selected Relay client, dropped server
+Retry-After values on public-access failures, and an untyped Relay cookie-identity
+rejection that delayed shared backoff. The owners repaired the complete batch.
+Targeted evidence passed: 82 public response/listing/detail/avatar cases, and 54
+public Relay cases including nine real-gate boundary cases. The fixes-only review
+closed those four findings.
+
+That review found one new parser edge: negative numeric Retry-After was clamped
+to zero. The parent reassessed the conversion contract rather than starting a
+third broad review cycle. Numeric delays must be nonnegative; negative numbers
+and negative numeric overflow now return invalid/None, preserving the gate's
+900-second default. A valid expired HTTP date remains zero. Twenty targeted
+parser and real parser-to-gate cases passed, including a 403 negative-header
+response that enters 900-second backoff and prevents the next request. Ruff
+passed after correcting one new test import-order finding. This closes the sole
+remaining source-review issue; unchanged earlier evidence was reused.
+
+The existing deployed API returned HTTP 200 after the additive hold migration,
+with the original run still cancelled at generation 9, 66 committed listing
+pages, 2,178 unresolved targets in each downstream stage and zero downstream
+attempts/requests. Its intent hash and last-update time remain unchanged.
+No public run or actual hold has yet been applied. Source acceptance is separate
+from the pending deployed-source proof, actual hold and new public canary.

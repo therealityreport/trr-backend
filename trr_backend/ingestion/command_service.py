@@ -24,7 +24,15 @@ from api.schemas.v2.instagram_ingestion import (
     InstagramReplayV2,
     InstagramRetryTargetsV2,
 )
-from trr_backend.ingestion.domain import Conflict, IngestionError, RunIntent, Stage, fingerprint, utc_timestamp
+from trr_backend.ingestion.domain import (
+    Conflict,
+    IngestionError,
+    RunIntent,
+    SourceProfile,
+    Stage,
+    fingerprint,
+    utc_timestamp,
+)
 from trr_backend.ingestion.persistence import Store
 from trr_backend.ingestion.queries import Queries
 
@@ -67,6 +75,17 @@ def _command(value: dict[str, Any]) -> InstagramIngestionCommandV2:
     )
 
 
+def _api_run(value: dict[str, Any]) -> dict[str, Any]:
+    """Keep internal transport selection out of the existing operator contract.
+
+    Validate the complete frozen intent first. The stored hash continues to
+    identify that complete intent; this projection never changes stored state.
+    """
+    intent = RunIntent.from_payload(value["intent"]).payload()
+    intent.pop("source_profile", None)
+    return {**value, "intent": intent}
+
+
 class CommandService:
     def __init__(
         self,
@@ -84,6 +103,7 @@ class CommandService:
         worker_compatible: Callable[[dict[str, Any]], bool] | None = None,
         replay_command: ReplayCommand | None = None,
         replay_apply_enabled: bool = False,
+        source_profile: SourceProfile | None = None,
     ):
         if engine not in {"dbos", "temporal"} or not workflow_version.strip():
             raise ValueError("An explicit engine and workflow version are required")
@@ -102,6 +122,9 @@ class CommandService:
         self.worker_compatible = worker_compatible
         self.replay_command = replay_command
         self.replay_apply_enabled = replay_apply_enabled
+        if source_profile is not None and not isinstance(source_profile, SourceProfile):
+            raise ValueError("Source profile must be an immutable SourceProfile")
+        self.source_profile = source_profile
 
     def capabilities(self, handle: str) -> InstagramIngestionCapabilitiesV2:
         ready = self.enabled and self.capacity is not None
@@ -179,6 +202,7 @@ class CommandService:
             listing_max_attempts=self.listing_max_attempts,
             comments_max_attempts=self.comments_max_attempts,
             media_max_attempts=3,
+            source_profile=self.source_profile,
         )
 
         def initialize(conn, run_id):
@@ -203,7 +227,7 @@ class CommandService:
         )
 
     def progress(self, handle: str, run_id: UUID) -> InstagramIngestionProgressV2:
-        value = self.queries.progress(str(run_id), _account(handle))
+        value = _api_run(self.queries.progress(str(run_id), _account(handle)))
         return InstagramIngestionProgressV2.model_validate(
             {key: value[key] for key in InstagramIngestionProgressV2.model_fields if key in value}
         )
@@ -211,7 +235,10 @@ class CommandService:
     def recent(self, handle: str, *, source_scope: str, limit: int) -> InstagramRecentRunsV2:
         query = InstagramRecentRunsQueryV2(source_scope=source_scope, limit=limit)
         return InstagramRecentRunsV2(
-            runs=self.queries.recent(_account(handle), source_scope=query.source_scope, limit=query.limit)
+            runs=[
+                _api_run(run)
+                for run in self.queries.recent(_account(handle), source_scope=query.source_scope, limit=query.limit)
+            ]
         )
 
     def _compatible(self, handle: str, run_id: UUID) -> None:

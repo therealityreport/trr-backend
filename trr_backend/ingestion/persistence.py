@@ -202,6 +202,8 @@ class Store:
                     raise Conflict("Idempotency key already belongs to a different command")
                 return previous["result"]
             run = self._run(cur, run_id, account)
+            if action in {"resume", "retry_targets"} and run.get("execution_hold_reason"):
+                raise Conflict("Run execution is held; its original work remains preserved")
             if run["state"] == "completed":
                 raise Conflict("Completed run cannot be cancelled or resumed")
             if action in {"resume", "retry_targets"} and run["state"] not in {"cancelled", "failed", "blocked"}:
@@ -250,6 +252,86 @@ class Store:
             }
             if action in {"resume", "retry_targets"}:
                 result["execution_id"] = self._outbox(cur, run_id, generation, run["workflow_version"])
+            cur.execute(
+                """insert into social.instagram_ingestion_commands
+                (account,idempotency_key,command_hash,run_id,result) values(%s,%s,%s,%s,%s::jsonb)""",
+                (account, idempotency_key, command_hash, run_id, stable_json(result)),
+            )
+            return result
+
+    def hold_cancelled_run(
+        self,
+        run_id: str,
+        account: str,
+        expected_generation: int,
+        reason: str,
+        idempotency_key: str,
+        initiated_by: str,
+    ) -> dict[str, Any]:
+        """Internal operator hold; no release, resume or history conversion.
+
+        Cancellation must precede this command. Its generation fence remains
+        unchanged, and the additive database constraint also fences older APIs.
+        """
+        if type(expected_generation) is not int or expected_generation < 1:
+            raise ValueError("Hold requires an exact positive generation")
+        if not isinstance(reason, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,79}", reason):
+            raise ValueError("Hold requires a bounded fixed reason code")
+        if not isinstance(initiated_by, str) or not initiated_by.strip() or len(initiated_by) > 200:
+            raise ValueError("Hold requires a bounded operator identity")
+        if not idempotency_key or len(idempotency_key) > 200:
+            raise ValueError("Idempotency key must contain 1 to 200 characters")
+        command_hash = fingerprint(
+            {
+                "command": "hold_cancelled_run",
+                "run_id": run_id,
+                "expected_generation": expected_generation,
+                "reason": reason,
+                "initiated_by": initiated_by,
+            }
+        )
+        with self.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "select pg_advisory_xact_lock(hashtextextended(%s,0))",
+                (f"instagram-command:{account}:{idempotency_key}",),
+            )
+            previous = _row(
+                cur,
+                """select command_hash,result from social.instagram_ingestion_commands
+                where account=%s and idempotency_key=%s""",
+                (account, idempotency_key),
+            )
+            if previous:
+                if previous["command_hash"] != command_hash:
+                    raise Conflict("Idempotency key already belongs to a different command")
+                return previous["result"]
+            run = self._run(cur, run_id, account)
+            if run["state"] != "cancelled" or run["generation"] != expected_generation:
+                raise Conflict("Hold requires the exact cancelled run generation")
+            if run.get("execution_hold_reason") not in {None, reason}:
+                raise Conflict("Run already has a different execution hold")
+            active = _row(
+                cur,
+                """select target_key from social.instagram_ingestion_targets where run_id=%s
+                and (owner_expires_at>clock_timestamp() or (outcome='unresolved'
+                    and owner_token is not null and owner_expires_at is null)) limit 1""",
+                (run_id,),
+            )
+            if active:
+                raise Conflict("Run still has an active or uncertain target owner")
+            cur.execute(
+                "update social.instagram_ingestion_runs set execution_hold_reason=%s where run_id=%s",
+                (reason, run_id),
+            )
+            result = {
+                "run_id": run_id,
+                "state": run["state"],
+                "generation": run["generation"],
+                "engine": run["engine"],
+                "workflow_version": run["workflow_version"],
+                "execution_hold_reason": reason,
+                "initiated_by": initiated_by,
+            }
             cur.execute(
                 """insert into social.instagram_ingestion_commands
                 (account,idempotency_key,command_hash,run_id,result) values(%s,%s,%s,%s,%s::jsonb)""",

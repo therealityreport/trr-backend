@@ -59,6 +59,52 @@ def fingerprint(value: Any) -> str:
 
 
 @dataclass(frozen=True)
+class SourceProfile:
+    """Frozen transport contract; cursors cannot move between source families."""
+
+    access_mode: str
+    listing_family: str
+    details_family: str
+    comments_family: str
+    source_contract_version: int = 1
+    adapter_version: int = 1
+
+    def __post_init__(self) -> None:
+        families = {
+            "public": ("instagram_profile_graphql_public", "instagram_permalink_public", "instagram_public_relay"),
+            "authenticated": (
+                "instagram_posts_authenticated",
+                "instagram_detail_authenticated",
+                "instagram_comments_rest",
+            ),
+        }
+        if (
+            self.access_mode not in families
+            or (self.listing_family, self.details_family, self.comments_family) != families[self.access_mode]
+            or type(self.source_contract_version) is not int
+            or self.source_contract_version != 1
+            or type(self.adapter_version) is not int
+            or self.adapter_version != 1
+        ):
+            raise ValueError("Unsupported frozen Instagram source profile")
+
+    @classmethod
+    def for_mode(cls, access_mode: str) -> SourceProfile:
+        if access_mode == "public":
+            return cls(
+                access_mode, "instagram_profile_graphql_public", "instagram_permalink_public", "instagram_public_relay"
+            )
+        if access_mode == "authenticated":
+            return cls(
+                access_mode,
+                "instagram_posts_authenticated",
+                "instagram_detail_authenticated",
+                "instagram_comments_rest",
+            )
+        raise ValueError("Unsupported Instagram access mode")
+
+
+@dataclass(frozen=True)
 class RunIntent:
     account: str
     action: str = "backfill"
@@ -78,8 +124,11 @@ class RunIntent:
     listing_max_attempts: int = 12
     comments_max_attempts: int = 12
     media_max_attempts: int = 3
+    source_profile: SourceProfile | None = None
 
     def __post_init__(self) -> None:
+        if self.source_profile is not None and not isinstance(self.source_profile, SourceProfile):
+            raise ValueError("Source profile must be an immutable SourceProfile")
         account = self.account.strip().lstrip("@").lower()
         if not re.fullmatch(r"[a-z0-9._]{1,30}", account):
             raise ValueError("Invalid Instagram account handle")
@@ -116,12 +165,20 @@ class RunIntent:
 
     def payload(self) -> dict[str, Any]:
         result = asdict(self)
+        # Untagged v1 runs used authenticated adapters. Preserve their exact
+        # serialization and digest; a new default must not rewrite old intent.
+        if self.source_profile is None:
+            result.pop("source_profile")
         result["platform"] = "instagram"
         result["selected_tasks"] = [task.value for task in self.selected_tasks]
         for field in ("date_start", "date_end"):
             value = getattr(self, field)
             result[field] = utc_timestamp(value) if value else None
         return result
+
+    @property
+    def effective_source_profile(self) -> SourceProfile:
+        return self.source_profile or SourceProfile.for_mode("authenticated")
 
     @property
     def digest(self) -> str:
@@ -137,6 +194,10 @@ class RunIntent:
                 data[key] = datetime.fromisoformat(data[key].replace("Z", "+00:00"))
         if "selected_tasks" in data:
             data["selected_tasks"] = tuple(Stage(task) for task in data["selected_tasks"])
+        if "source_profile" in data:
+            if not isinstance(data["source_profile"], dict):
+                raise ValueError("Invalid frozen Instagram source profile")
+            data["source_profile"] = SourceProfile(**data["source_profile"])
         return cls(**data)
 
 

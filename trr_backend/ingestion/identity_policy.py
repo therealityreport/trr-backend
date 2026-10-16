@@ -43,6 +43,7 @@ _SAFE_ERRORS = (
         "comment_fetch_failed",
         "source_evidence_missing",
         "source_incomplete",
+        "public_access_backoff",
     }
 )
 
@@ -71,6 +72,7 @@ class SourceRequestGate:
         transaction: Callable,
         check_cancelled: Callable[[], None],
         deadline: float,
+        public_only: bool = False,
         check_cancelled_in_transaction: Callable[[Any], None] | None = None,
         cooldown_seconds: float = 900,
         probe_seconds: float = 35,
@@ -80,11 +82,16 @@ class SourceRequestGate:
             raise ValueError("Identity policy deadlines must be finite")
         if cooldown_seconds < 1 or probe_seconds < 1:
             raise ValueError("Identity policy leases must be positive")
+        if type(public_only) is not bool:
+            raise ValueError("Identity public-only mode must be explicit")
+        if public_only and any(str(key).strip().lower() in {"sessionid", "ds_user_id"} for key in cookies):
+            raise ValueError("Public identity cannot contain authentication cookies")
         # Match DetailTransport exactly; the caller already chose this explicit
         # credential snapshot. Do not retain cookies, resolve identities or repair.
-        identity = str(cookies.get("ds_user_id") or cookies.get("sessionid") or "public")
+        identity = "public" if public_only else str(cookies.get("ds_user_id") or cookies.get("sessionid") or "public")
         self.identity_key = hashlib.sha256(identity.encode()).hexdigest()
         self.credential_fingerprint = hashlib.sha256(str(cookies.get("sessionid") or "public").encode()).hexdigest()
+        self.public_only = public_only
         self.transaction, self.check_cancelled = transaction, check_cancelled
         self.check_cancelled_in_transaction = check_cancelled_in_transaction
         self.deadline, self.cooldown_seconds, self.probe_seconds = deadline, cooldown_seconds, probe_seconds
@@ -149,7 +156,11 @@ class SourceRequestGate:
         with self._locked(create=True, remaining=remaining) as (cur, row, now):
             self._remaining(connection=cur.connection)
             cooldown = row.get("cooldown_until")
-            replacement = bool(row["blocked"] and row.get("blocked_fingerprint") != self.credential_fingerprint)
+            replacement = bool(
+                not self.public_only
+                and row["blocked"]
+                and row.get("blocked_fingerprint") != self.credential_fingerprint
+            )
             if row["blocked"] and not replacement:
                 code = row.get("last_error_code")
                 raise IdentityDeferred(
@@ -273,9 +284,13 @@ class SourceRequestGate:
         # The independent listing/comments adapters expose this typed alias.
         # Normalize it to the maintained auth vocabulary so legacy detail
         # consumers sharing this row also classify the block correctly.
-        if code == "source_auth_failed":
+        if self.public_only and code in AUTH_ERRORS | AUTH_FATAL_MESSAGES | {"source_auth_failed"}:
+            code = "public_access_backoff"
+        elif code == "source_auth_failed":
             code = "unauthorized"
-        code = code if code in _SAFE_ERRORS else "request_failed"
+        code = (
+            code if code in _SAFE_ERRORS and (self.public_only or code != "public_access_backoff") else "request_failed"
+        )
         if self._finished:
             return self._last_failure or Failure("identity_gate_already_finished")
         previous = self._failures.get(permit.request_number)
@@ -293,14 +308,24 @@ class SourceRequestGate:
                 )
             else:
                 failures = int(row["consecutive_failures"]) + 1 if code == row.get("last_error_code") else 1
-                blocked = bool(row["blocked"]) or code in AUTH_ERRORS
-                opens = code == "rate_limited" or failures >= 3 or permit.probe_token is not None
+                blocked = bool(row["blocked"]) or (not self.public_only and code in AUTH_ERRORS)
+                opens = (
+                    code in {"rate_limited", "public_access_backoff"} or failures >= 3 or permit.probe_token is not None
+                )
                 try:
                     cooldown = now + timedelta(seconds=delay) if opens else row.get("cooldown_until")
                 except OverflowError:
                     # A malformed/unbounded Retry-After can defer safely, but
                     # cannot become a raw exception or reopen the source lane.
                     cooldown = datetime.max.replace(tzinfo=UTC)
+                if (
+                    self.public_only
+                    and row.get("cooldown_until")
+                    and (cooldown is None or row["cooldown_until"] > cooldown)
+                ):
+                    # A concurrent/late public failure cannot shorten a server
+                    # delay already recorded by another admitted request.
+                    cooldown = row["cooldown_until"]
                 failure = Failure(code, retry_at=cooldown, identity_blocked=blocked)
                 cur.execute(
                     """update social.instagram_detail_request_lanes set blocked=%s,last_error_code=%s,

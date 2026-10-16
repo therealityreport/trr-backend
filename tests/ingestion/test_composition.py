@@ -196,7 +196,7 @@ def test_source_bindings_reuse_explicit_ownership_transaction(monkeypatch, stage
     else:
         monkeypatch.setattr(composition, "_credentials", lambda _: credentials)
         monkeypatch.setattr(post_transport, "DetailSource", lambda **kw: SimpleNamespace(**kw))
-        source = composition._details({}, dict(owned, target_key="ABC"))
+        source = composition._details({"run": {"intent": {"account": "bravotv"}}}, dict(owned, target_key="ABC"))
         callback = source.check_cancelled_in_transaction
         owned = dict(owned, target_key="ABC")
     connection = object()
@@ -505,7 +505,10 @@ def avatar_media_handoff(monkeypatch):
     monkeypatch.setattr(avatar_transport, "AvatarProfileSource", Source)
     monkeypatch.setattr(avatar_resolution, "AvatarResolutionActivity", Resolution)
     monkeypatch.setattr(identity_policy, "SourceRequestGate", gate)
-    context = {"target": {"owner_expires_at": datetime.now(UTC) + timedelta(minutes=20)}}
+    context = {
+        "run": {"intent": {"account": "bravotv"}},
+        "target": {"owner_expires_at": datetime.now(UTC) + timedelta(minutes=20)},
+    }
     return SimpleNamespace(
         state=state,
         events=events,

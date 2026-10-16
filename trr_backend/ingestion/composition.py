@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 from psycopg2.extras import RealDictCursor
 
 from trr_backend.ingestion.command_service import CommandService, ServiceUnavailableError
-from trr_backend.ingestion.domain import Conflict, RunIntent
+from trr_backend.ingestion.domain import Conflict, RunIntent, SourceProfile
 from trr_backend.ingestion.persistence import Store
 from trr_backend.ingestion.queries import Queries
 
@@ -75,7 +75,8 @@ class CanaryPolicy:
     def counts(self, cur, *, including_current):
         cur.execute(
             """select count(*) filter(where account=any(%s)) as total,
-            count(*) filter(where state in ('queued','running','blocked','failed','cancelled')) as active
+            count(*) filter(where state in ('queued','running','blocked','failed','cancelled')
+                and not (state='cancelled' and execution_hold_reason is not null)) as active
             from social.instagram_ingestion_runs where workflow_version=%s""",
             (sorted(self.accounts), self.workflow_version),
         )
@@ -185,6 +186,48 @@ def frontier(account: str, source_scope: str):
         return row["newest"] if row else None
 
 
+def _configured_source_profile():
+    from trr_backend.socials.instagram.comments_scrapling.public_mode import (
+        _AUTHENTICATED_MODE_ALIASES,
+        _PUBLIC_MODE_ALIASES,
+    )
+
+    mode = os.getenv("SOCIAL_INSTAGRAM_SCRAPE_MODE", "public_first").strip().lower()
+    if mode in _PUBLIC_MODE_ALIASES:
+        return SourceProfile.for_mode("public")
+    if mode in _AUTHENTICATED_MODE_ALIASES:
+        return SourceProfile.for_mode("authenticated")
+    raise ServiceUnavailableError("Unsupported Instagram source mode")
+
+
+def _source_profile(context):
+    return RunIntent.from_payload(context["run"]["intent"]).effective_source_profile
+
+
+def _public_source_parts(context, owned):
+    from trr_backend.ingestion.identity_policy import SourceRequestGate
+
+    store = Store()
+    remaining = (context["target"]["owner_expires_at"] - datetime.now(UTC)).total_seconds() - 2
+    deadline = time.monotonic() + max(0, min(590, remaining))
+
+    def check():
+        store.check_owner(**owned)
+
+    return {
+        "gate": SourceRequestGate(
+            cookies={},
+            transaction=store.transaction,
+            check_cancelled=check,
+            check_cancelled_in_transaction=lambda conn: store.check_owner(**owned, connection=conn),
+            deadline=deadline,
+            public_only=True,
+        ),
+        "deadline": deadline,
+        "check_cancelled": check,
+    }
+
+
 def build_api():
     # Additive schema deploy precedes installation. Default process startup has
     # no DBOS SDK, background runner, database call, or credential access.
@@ -196,8 +239,9 @@ def build_api():
     try:
         policy = CanaryPolicy.configured()
         _modal_target()
+        source_profile = _configured_source_profile()
     except ServiceUnavailableError:
-        policy = None
+        policy, source_profile = None, None
     store = CanaryStore(policy)
     queries = Queries()
     return CanaryCommandService(
@@ -212,6 +256,7 @@ def build_api():
         replay_apply_enabled=enabled("TRR_INSTAGRAM_INGESTION_REPLAY_APPLY_ENABLED"),
         listing_max_attempts=int(os.getenv("TRR_SOCIAL_SHARED_POSTS_FRONTIER_MAX_ATTEMPTS", "12")),
         comments_max_attempts=int(os.getenv("SOCIAL_INSTAGRAM_COMMENTS_MAX_ATTEMPTS", "12")),
+        source_profile=source_profile,
     )
 
 
@@ -321,7 +366,7 @@ class _GatedSource:
         return result
 
 
-def _gate_source(source, context, owned, credentials, *, failure_code):
+def _gate_source(source, context, owned, credentials, *, failure_code, public_only=False):
     from trr_backend.ingestion.identity_policy import SourceRequestGate
 
     store = Store()
@@ -333,6 +378,7 @@ def _gate_source(source, context, owned, credentials, *, failure_code):
         check_cancelled=lambda: store.check_owner(**owned),
         check_cancelled_in_transaction=lambda conn: store.check_owner(**owned, connection=conn),
         deadline=time.monotonic() + max(0, min(590, remaining)),
+        public_only=public_only,
     )
     return _GatedSource(source, gate, failure_code=failure_code)
 
@@ -340,6 +386,10 @@ def _gate_source(source, context, owned, credentials, *, failure_code):
 def _listing(context, owned):
     from trr_backend.ingestion.post_transport import ScraplingListingSource
 
+    if _source_profile(context).access_mode == "public":
+        from trr_backend.ingestion.public_transport import PublicListingSource
+
+        return PublicListingSource(account=owned["account"], **_public_source_parts(context, owned))
     credentials = _credentials(owned["account"])
     source = ScraplingListingSource(account=owned["account"], **credentials)
     return _gate_source(source, context, owned, credentials, failure_code="listing_fetch_failed")
@@ -349,6 +399,10 @@ def _details(context, owned):
     from trr_backend.ingestion.media_refresh import ExplicitDetailClient
     from trr_backend.ingestion.post_transport import DetailSource
 
+    if _source_profile(context).access_mode == "public":
+        from trr_backend.ingestion.public_transport import PublicDetailSource
+
+        return PublicDetailSource(shortcode=owned["target_key"], **_public_source_parts(context, owned))
     credentials = _credentials(owned["account"])
     store = Store()
     return DetailSource(
@@ -364,6 +418,13 @@ def _details(context, owned):
 def _comments(context, owned):
     from trr_backend.ingestion.comment_transport import ScraplingCommentSource
 
+    if _source_profile(context).access_mode == "public":
+        from trr_backend.ingestion.comment_transport import PublicRelayCommentSource
+
+        source = PublicRelayCommentSource(expected_count=context["post"]["comments_count"])
+        return _gate_source(
+            source, context, owned, {"raw_cookies": {}}, failure_code="comment_fetch_failed", public_only=True
+        )
     credentials = _credentials(owned["account"])
     source = ScraplingCommentSource(**credentials, expected_count=context["post"]["comments_count"])
     return _gate_source(source, context, owned, credentials, failure_code="comment_fetch_failed")
@@ -405,6 +466,7 @@ def _media_storage(context, owned):
             owned=owned,
             owner_expires_at=context["target"]["owner_expires_at"],
             credential_provider=lambda: _credentials(owned["account"]),
+            public_only=_source_profile(context).access_mode == "public",
         ),
     )
 
@@ -422,7 +484,8 @@ def _load_media(loader, store, context, owned, **callbacks):
         # The read-only inventory transaction has closed. Profile discovery is
         # explicit source work under the already acquired media owner.
         handles = missing.handles
-    credentials = _credentials(owned["account"])
+    public_only = _source_profile(context).access_mode == "public"
+    credentials = {"raw_cookies": {}} if public_only else _credentials(owned["account"])
     remaining = (context["target"]["owner_expires_at"] - datetime.now(UTC)).total_seconds() - 2
     deadline = time.monotonic() + max(0, min(590, remaining))
     gate = SourceRequestGate(
@@ -431,8 +494,11 @@ def _load_media(loader, store, context, owned, **callbacks):
         check_cancelled=lambda: store.check_owner(**owned),
         check_cancelled_in_transaction=lambda conn: store.check_owner(**owned, connection=conn),
         deadline=deadline,
+        public_only=public_only,
     )
-    source = AvatarProfileSource(cookies=credentials["raw_cookies"], deadline=deadline)
+    source = AvatarProfileSource(
+        cookies=credentials["raw_cookies"], deadline=deadline, **({"public_only": True} if public_only else {})
+    )
     try:
         AvatarResolutionActivity(store, gate=gate).execute(
             **binding,

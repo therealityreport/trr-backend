@@ -77,3 +77,27 @@ class PinnedCookieIdentity:
         jar.clear()
         jar.update(snapshot)
         return snapshot
+
+
+class PublicCookieIdentity:
+    """Empty supplied state; permit anonymous cookies learned in this attempt."""
+
+    _mapping = PinnedCookieIdentity._mapping
+    merge = PinnedCookieIdentity.merge
+    prepare_jar = PinnedCookieIdentity.prepare_jar
+
+    def __init__(self, cookies: Mapping[str, str]):
+        if self._mapping(cookies):
+            raise CredentialIdentityMismatch()
+
+    def __repr__(self):
+        return "PublicCookieIdentity()"
+
+    def _validate_delta(self, cookies):
+        if any(key.strip().lower() in _IDENTITY_FIELDS for key in cookies):
+            raise CredentialIdentityMismatch()
+
+    def validate_snapshot(self, cookies: Mapping[str, str]) -> dict[str, str]:
+        result = self._mapping(cookies)
+        self._validate_delta(result)
+        return result

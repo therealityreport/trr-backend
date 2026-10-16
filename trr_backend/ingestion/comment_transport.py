@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import copy
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from trr_backend.ingestion.comments import (
@@ -18,6 +19,8 @@ from trr_backend.ingestion.comments import (
     CommentSourceError,
     comment_page_failure,
 )
+from trr_backend.socials.instagram.credential_guard import CredentialIdentityMismatch
+from trr_backend.socials.instagram.public_response import parse_public_retry_after
 
 _ALLOWED_OPERATIONS = frozenset(
     {
@@ -115,6 +118,8 @@ def _resume(checkpoint: Mapping[str, Any]) -> tuple[dict[str, Any], bool]:
     pages = checkpoint.get("comment_pages") or {}
     if not isinstance(pages, Mapping):
         raise CommentSourceError("Invalid durable comment page checkpoint")
+    if pages.get("adapter_family") not in (None, "instagram_comments_rest"):
+        raise CommentSourceError("Authenticated comments cannot resume another adapter family")
     lanes = pages.get("lanes") or {}
     if not isinstance(lanes, Mapping):
         raise CommentSourceError("Invalid durable comment lane checkpoint")
@@ -373,6 +378,210 @@ class ScraplingCommentSource:
             return asyncio.run(fetch())
         except _CallbackAbort as abort:
             raise abort.error from None
+
+
+@dataclass(frozen=True)
+class PublicRelayResume:
+    top: dict[str, Any]
+    replies: dict[str, dict[str, Any]]
+    from_root: bool
+
+    @classmethod
+    def from_checkpoint(cls, checkpoint: Mapping[str, Any], parents: list[Any]) -> PublicRelayResume:
+        pages = checkpoint.get("comment_pages") or {}
+        if not isinstance(pages, Mapping):
+            raise CommentSourceError("Invalid public comment checkpoint")
+        lanes = pages.get("lanes") or {}
+        observed = pages.get("observed") or {}
+        if not isinstance(lanes, Mapping) or not isinstance(observed, Mapping):
+            raise CommentSourceError("Invalid public comment lanes")
+        if lanes and (pages.get("adapter_family") != "instagram_public_relay" or pages.get("adapter_version") != 1):
+            raise CommentSourceError("Public comments cannot reinterpret another adapter's checkpoint")
+        if checkpoint.get("top_level_checkpoint") or checkpoint.get("reply_checkpoints"):
+            raise CommentSourceError("Public comments cannot consume legacy transport cursors")
+
+        def lane_resume(lane, *, root):
+            if not isinstance(lane, Mapping):
+                raise CommentSourceError("Invalid public Relay lane")
+            if lane.get("repeated"):
+                raise CommentSourceError("Public Relay lane has a repeated cursor")
+            if not lane:
+                return {}
+            result = {"exhausted": lane.get("exhausted") is True}
+            if lane.get("relay_doc_id"):
+                for key in ("relay_doc_id", "relay_friendly_name", "sort_order", "page_size"):
+                    result[key] = lane.get(key)
+                if (
+                    any(
+                        not isinstance(result[key], str) or not result[key]
+                        for key in ("relay_doc_id", "relay_friendly_name", "sort_order")
+                    )
+                    or type(result["page_size"]) is not int
+                    or not 1 <= result["page_size"] <= 50
+                ):
+                    raise CommentSourceError("Public Relay query provenance is incomplete")
+                cursors = lane.get("cursors") or []
+                if not isinstance(cursors, list) or any(not isinstance(item, str) or not item for item in cursors):
+                    raise CommentSourceError("Public Relay cursors are invalid")
+                if not result["exhausted"]:
+                    if lane.get("cursor_param") != "after" or not cursors:
+                        raise CommentSourceError("Public Relay continuation has no proved after cursor")
+                    result.update(after=cursors[-1], seen_cursors=list(cursors))
+            elif root:
+                raise CommentSourceError("Public Relay top query provenance is absent")
+            # Embedded child cursors have no proved child query; request that
+            # parent's child root instead of borrowing the top query identity.
+            return result
+
+        top_lane = lanes.get("__top__") or {}
+        top = lane_resume(top_lane, root=True)
+        replies = {}
+        for parent in parents:
+            lane = lanes.get(parent.comment_id) or {}
+            item = lane_resume(lane, root=False)
+            expected = (observed.get(parent.comment_id) or {}).get("expected_replies")
+            pending = (
+                lane.get("exhausted") is False
+                or (expected is None and not item.get("exhausted"))
+                or (_count(expected) is not None and len(parent.replies) < expected)
+            )
+            item["pending"] = pending
+            if pending and item.get("exhausted"):
+                item = {"pending": True}
+            replies[parent.comment_id] = item
+        return cls(top, replies, not top_lane or top_lane.get("started_from_root") is True)
+
+
+class PublicRelayCommentSource:
+    """Logged-out maintained Relay only; no credential or proxy inputs."""
+
+    def __init__(
+        self,
+        *,
+        expected_count: int | None = None,
+        fetcher_factory: Callable[..., Any] = _default_factory,
+        timeout_ms: int = 45_000,
+    ):
+        if expected_count is not None and _count(expected_count) is None:
+            raise ValueError("Expected comment count must be non-negative or unknown")
+        self._expected_count, self._factory, self._timeout_ms = expected_count, fetcher_factory, timeout_ms
+
+    def __call__(
+        self,
+        *,
+        shortcode: str,
+        checkpoint: dict[str, Any],
+        resume_inventory: tuple[CommentResumeNode, ...] = (),
+        source_observer: Callable[[str, Mapping[str, Any]], None],
+        pre_source_request: Callable[[], None],
+        source_failure_observer: Callable[[str, float | None], None] | None = None,
+    ) -> CommentFetchSummary:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError("Run the synchronous comment activity outside the active event loop")
+        parents = _seed_parents(resume_inventory, shortcode)
+        resume = PublicRelayResume.from_checkpoint(checkpoint, parents)
+        expected = self._expected_count
+        if expected is None:
+            expected = _count((checkpoint.get("comment_pages") or {}).get("expected"))
+        if resume.top.get("exhausted") and not any(item.get("pending") for item in resume.replies.values()):
+            return CommentFetchSummary(expected_count=expected, full_observation=resume.from_root)
+
+        def before(kind):
+            if kind not in {"relay_bootstrap", "graphql_comments", "graphql_replies"}:
+                _guard(_unsupported, kind)
+            _guard(pre_source_request)
+
+        def observe(kind, payload):
+            def retain():
+                failure = comment_page_failure(payload)
+                header_delay = parse_public_retry_after(payload.get("retry_after"))
+                delay = (
+                    max(value for value in (header_delay, failure[1]) if value is not None)
+                    if failure and any(value is not None for value in (header_delay, failure[1]))
+                    else None
+                )
+                try:
+                    source_observer(kind, payload)
+                except CommentSourceError:
+                    if failure and source_failure_observer is not None:
+                        source_failure_observer(
+                            "public_access_backoff" if failure[0] == "source_auth_failed" else failure[0], delay
+                        )
+                    raise
+                if failure:
+                    if source_failure_observer is not None:
+                        source_failure_observer(
+                            "public_access_backoff" if failure[0] == "source_auth_failed" else failure[0], delay
+                        )
+                    raise CommentSourceError("Native public comment page contains failed request metadata")
+
+            _guard(retain)
+
+        fetcher = None
+
+        async def fetch():
+            nonlocal fetcher
+            fetcher = self._factory(
+                cookies=[],
+                raw_cookies={},
+                browser_account_id=None,
+                proxy_config=None,
+                public_only=True,
+                timeout_ms=self._timeout_ms,
+                source_payload_observer=observe,
+                before_source_request=before,
+                source_failure_observer=(
+                    lambda code, delay: _guard(
+                        source_failure_observer,
+                        "public_access_backoff" if code == "source_auth_failed" else code,
+                        delay,
+                    )
+                )
+                if source_failure_observer
+                else None,
+            )
+            failed = True
+            try:
+                result = await fetcher.fetch_comments_for_shortcode(
+                    shortcode,
+                    max_comments=0,
+                    fetch_replies=True,
+                    expected_comment_count=expected,
+                    expected_count_unknown=expected is None,
+                    load_strategy="public_relay",
+                    strict_native_exhaustion=True,
+                    public_relay_resume={"top": resume.top, "replies": resume.replies},
+                    persisted_top_level_comments=parents,
+                )
+                summary = _summary(result, expected=expected, from_root=resume.from_root, capped=False)
+                failed = False
+                return summary
+            finally:
+                try:
+                    await fetcher.aclose()
+                except Exception:
+                    if not failed:
+                        raise
+
+        try:
+            return asyncio.run(fetch())
+        except _CallbackAbort as abort:
+            raise abort.error from None
+        except CredentialIdentityMismatch:
+            # A public response cannot move this attempt into a logged-in
+            # identity. Classify the fixed violation immediately, without ever
+            # retaining cookie names/values or admitting another source send.
+            delay = getattr(fetcher, "_public_retry_after_seconds", None)
+            if source_failure_observer is not None:
+                source_failure_observer("public_access_backoff", delay)
+            from trr_backend.ingestion.domain import Failure
+            from trr_backend.ingestion.post_transport import SourceFailure
+
+            raise SourceFailure(Failure("public_access_backoff")) from None
 
 
 def _seed_parents(inventory: tuple[CommentResumeNode, ...], shortcode: str) -> list[Any]:

@@ -83,7 +83,7 @@ from trr_backend.socials.instagram.constants import (
 from trr_backend.socials.instagram.constants import (
     WEB_X_ASBD_ID as IG_WEB_X_ASBD_ID,
 )
-from trr_backend.socials.instagram.credential_guard import PinnedCookieIdentity
+from trr_backend.socials.instagram.credential_guard import PinnedCookieIdentity, PublicCookieIdentity
 from trr_backend.socials.instagram.identity_pool import (
     InstagramIdentityPool,
     InstagramIdentityPoolExhausted,
@@ -508,8 +508,17 @@ class InstagramScraper:
         browser_session_manager: AccountBrowserSessionManager | None = None,
         attach_auth_session: bool = True,
         strict_supplied_credentials: bool = False,
+        strict_public_credentials: bool = False,
     ):
-        self._credential_identity = PinnedCookieIdentity(cookies) if strict_supplied_credentials else None
+        if strict_supplied_credentials and strict_public_credentials:
+            raise ValueError("Instagram credential policies are mutually exclusive")
+        self._credential_identity = (
+            PublicCookieIdentity(cookies or {})
+            if strict_public_credentials
+            else PinnedCookieIdentity(cookies)
+            if strict_supplied_credentials
+            else None
+        )
         self.cookies = (
             self._credential_identity.validate_snapshot(cookies) if self._credential_identity else cookies or {}
         )

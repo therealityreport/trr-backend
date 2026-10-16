@@ -117,6 +117,8 @@ class MediaRefresh:
         owned,
         owner_expires_at: datetime,
         credential_provider: Callable,
+        public_only: bool = False,
+        public_detail_source_factory: Callable | None = None,
         detail_source_factory: Callable = DetailSource,
         avatar_source_factory: Callable = AvatarProfileSource,
         avatar_gate_factory: Callable = SourceRequestGate,
@@ -128,6 +130,7 @@ class MediaRefresh:
         self.owned = {key: owned[key] for key in ("run_id", "account", "generation", "target_key", "owner_token")}
         self.owned["stage"] = Stage.MEDIA
         self.owner_expires_at = owner_expires_at
+        self.public_only, self.public_detail_source_factory = public_only, public_detail_source_factory
         self.credential_provider, self.detail_source_factory, self.now = credential_provider, detail_source_factory, now
         self.avatar_source_factory, self.avatar_gate_factory = avatar_source_factory, avatar_gate_factory
         self._credentials_snapshot = None
@@ -190,6 +193,8 @@ class MediaRefresh:
         return fresh
 
     def _credentials(self):
+        if self.public_only:
+            return {"raw_cookies": {}, "browser_account_id": None}
         if self._credentials_snapshot is None:
             self._credentials_snapshot = self.credential_provider()
         return self._credentials_snapshot
@@ -211,6 +216,7 @@ class MediaRefresh:
             check_cancelled=check,
             check_cancelled_in_transaction=lambda conn: self.store.check_owner(**self.owned, connection=conn),
             deadline=deadline,
+            public_only=self.public_only,
         )
         permit, source, requests_count, success = None, None, 0, False
 
@@ -225,7 +231,11 @@ class MediaRefresh:
 
         try:
             check()
-            source = self.avatar_source_factory(cookies=credentials["raw_cookies"], deadline=deadline)
+            source = self.avatar_source_factory(
+                cookies=credentials["raw_cookies"],
+                deadline=deadline,
+                **({"public_only": True} if self.public_only else {}),
+            )
             payload = source(username=username, pre_source_request=before_request)
             if requests_count != 1 or not isinstance(payload, dict):
                 raise MediaIncomplete("avatar_refresh_request_boundary_missing")
@@ -296,53 +306,81 @@ class MediaRefresh:
             self.store.retain_evidence(**self.owned, evidence=evidence)
             retained.append(evidence)
 
-        source = self.detail_source_factory(
-            shortcode=self.owned["target_key"],
-            cookies=credentials["raw_cookies"],
-            browser_account_id=credentials["browser_account_id"],
-            deadline_seconds=min(90, remaining),
-            scraper_factory=ExplicitDetailClient,
-            transaction=self.store.transaction,
-            check_cancelled_in_transaction=lambda conn: self.store.check_owner(**self.owned, connection=conn),
-        )
-        payload = source(check_cancelled=check_cancelled, on_request=on_request, source_observer=observe)
-        candidate = Evidence.capture(
-            source_identity=f"instagram:post:{self.owned['target_key']}",
-            captured_at=self.now(),
-            parser_version=PARSER_VERSION,
-            payload=_retained_payload(payload),
-        )
-        matched = [item for item in retained if item.content_hash == candidate.content_hash]
-        if not matched:
-            observe("details", payload)
-            matched = retained[-1:]
-        try:
-            parsed = parse_evidence(
-                matched[-1],
-                account=self.owned["account"],
-                stage=Stage.DETAILS,
-                target_key=self.owned["target_key"],
-                pinned=True,
+        if self.public_only:
+            from trr_backend.ingestion.public_transport import PublicDetailSource
+
+            deadline = time.monotonic() + min(90, remaining)
+            gate = SourceRequestGate(
+                cookies={},
+                transaction=self.store.transaction,
+                check_cancelled=check_cancelled,
+                check_cancelled_in_transaction=lambda conn: self.store.check_owner(**self.owned, connection=conn),
+                deadline=deadline,
+                public_only=True,
             )
-            validate_detail(parsed)
-            if parsed.post.source_id.split("_", 1)[0] != ExplicitDetailClient._shortcode_to_media_id(
-                self.owned["target_key"]
-            ):
-                raise InvalidSourceError("Native post identity mismatch")
-            live = normalize_post_source(payload, account=self.owned["account"])
-            snapshot = self._snapshot
-            if len(live.media_urls) != snapshot.expected_media_count:
-                raise InvalidSourceError("Native media coverage changed")
-            if tuple(map(public_reference, live.media_urls)) != tuple(map(public_reference, snapshot.media_urls)):
-                raise InvalidSourceError("Native media positions changed")
-            matches = defaultdict(set)
-            for old, fresh in [
-                *zip(snapshot.media_urls, live.media_urls, strict=True),
-                (snapshot.thumbnail_url, live.thumbnail_url),
-            ]:
-                if fresh and public_reference(old) == public_reference(fresh):
-                    validate_media_url(fresh, policy=_POLICY)
-                    matches[public_reference(old)].add(fresh)
-            return {key: next(iter(urls)) for key, urls in matches.items() if len(urls) == 1}
-        except (ValueError, TypeError, AttributeError, KeyError):
-            raise MediaIncomplete("media_refresh_source_invalid") from None
+            source = (self.public_detail_source_factory or PublicDetailSource)(
+                shortcode=self.owned["target_key"],
+                gate=gate,
+                deadline=deadline,
+                check_cancelled=check_cancelled,
+            )
+        else:
+            source = self.detail_source_factory(
+                shortcode=self.owned["target_key"],
+                cookies=credentials["raw_cookies"],
+                browser_account_id=credentials["browser_account_id"],
+                deadline_seconds=min(90, remaining),
+                scraper_factory=ExplicitDetailClient,
+                transaction=self.store.transaction,
+                check_cancelled_in_transaction=lambda conn: self.store.check_owner(**self.owned, connection=conn),
+            )
+        try:
+            payload = source(check_cancelled=check_cancelled, on_request=on_request, source_observer=observe)
+            candidate = Evidence.capture(
+                source_identity=f"instagram:post:{self.owned['target_key']}",
+                captured_at=self.now(),
+                parser_version=PARSER_VERSION,
+                payload=_retained_payload(payload),
+            )
+            matched = [item for item in retained if item.content_hash == candidate.content_hash]
+            if not matched:
+                observe("details", payload)
+                matched = retained[-1:]
+            try:
+                parsed = parse_evidence(
+                    matched[-1],
+                    account=self.owned["account"],
+                    stage=Stage.DETAILS,
+                    target_key=self.owned["target_key"],
+                    pinned=True,
+                )
+                validate_detail(parsed)
+                if parsed.post.source_id.split("_", 1)[0] != ExplicitDetailClient._shortcode_to_media_id(
+                    self.owned["target_key"]
+                ):
+                    raise InvalidSourceError("Native post identity mismatch")
+                live = normalize_post_source(payload, account=self.owned["account"])
+                snapshot = self._snapshot
+                if len(live.media_urls) != snapshot.expected_media_count:
+                    raise InvalidSourceError("Native media coverage changed")
+                if tuple(map(public_reference, live.media_urls)) != tuple(map(public_reference, snapshot.media_urls)):
+                    raise InvalidSourceError("Native media positions changed")
+                matches = defaultdict(set)
+                for old, fresh in [
+                    *zip(snapshot.media_urls, live.media_urls, strict=True),
+                    (snapshot.thumbnail_url, live.thumbnail_url),
+                ]:
+                    if fresh and public_reference(old) == public_reference(fresh):
+                        validate_media_url(fresh, policy=_POLICY)
+                        matches[public_reference(old)].add(fresh)
+                result = {key: next(iter(urls)) for key, urls in matches.items() if len(urls) == 1}
+            except (ValueError, TypeError, AttributeError, KeyError):
+                raise MediaIncomplete("media_refresh_source_invalid") from None
+        except Exception as error:
+            if self.public_only:
+                source.finish_failure(error)
+            raise
+        else:
+            if self.public_only:
+                source.finish_success()
+            return result

@@ -459,3 +459,171 @@ def test_huge_retry_after_fails_closed_without_raw_time_overflow(lanes):
     lane.before_request()
     failure = lane.finish_failure("rate_limited", retry_after_seconds=1e300)
     assert failure.retry_at == datetime.max.replace(tzinfo=UTC)
+
+
+@pytest.fixture
+def public_lanes(lanes):
+    identity = hashlib.sha256(b"public").hexdigest()
+
+    def clear():
+        with lanes() as conn, conn.cursor() as cur:
+            cur.execute("delete from social.instagram_detail_request_lanes where identity_key=%s", (identity,))
+
+    clear()
+    try:
+        yield lanes
+    finally:
+        clear()
+
+
+def public_gate(transaction, **kwargs):
+    return SourceRequestGate(
+        cookies=kwargs.pop("cookies", {}),
+        public_only=True,
+        transaction=transaction,
+        check_cancelled=lambda: None,
+        deadline=time.monotonic() + 300,
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize("name", ["sessionid", "ds_user_id", "SESSIONID", " Ds_User_Id "])
+@pytest.mark.parametrize("value", ["", "synthetic-auth-value"])
+def test_public_mode_rejects_authentication_cookie_names_before_database_access(name, value):
+    with pytest.raises(ValueError, match="authentication cookies"):
+        public_gate(lambda: pytest.fail("public credential rejection accessed database"), cookies={name: value})
+
+
+def test_public_mode_uses_existing_shared_identity_and_exact_request_window(public_lanes):
+    first = public_gate(public_lanes)
+    second = public_gate(public_lanes, cookies={"csrftoken": "synthetic-public-csrf"})
+    compatible = SourceRequestGate(
+        cookies={}, transaction=public_lanes, check_cancelled=lambda: None, deadline=time.monotonic() + 300
+    )
+    expected = hashlib.sha256(b"public").hexdigest()
+    assert first.identity_key == second.identity_key == compatible.identity_key == expected
+    assert first.credential_fingerprint == second.credential_fingerprint == expected
+    assert "synthetic-public-csrf" not in repr(vars(second))
+    first.before_request()
+    compatible.before_request()
+    assert len(row(public_lanes, first)["request_times"]) == 2
+    now = datetime.now(UTC)
+    change(public_lanes, first, "request_times=%s", [now] * 179)
+    second.before_request()
+    with pytest.raises(IdentityDeferred, match="identity_budget"):
+        first.before_request()
+    assert len(row(public_lanes, first)["request_times"]) == 180
+    change(public_lanes, first, "request_times=%s", [now - timedelta(seconds=661)] * 180)
+    first.before_request()
+    assert len(row(public_lanes, first)["request_times"]) == 1
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "unauthorized",
+        "forbidden",
+        "redirect_login",
+        "login_required",
+        "checkpoint_required",
+        "challenge_required",
+        "feedback_required",
+        "consent_required",
+        "sentry_block",
+        "source_auth_failed",
+        "public_access_backoff",
+    ],
+)
+def test_public_login_wall_opens_immediate_cooldown_without_permanent_auth_block(public_lanes, code):
+    lane = public_gate(public_lanes)
+    lane.before_request()
+    started = datetime.now(UTC)
+    failure = lane.finish_failure(code)
+    assert failure.code == "public_access_backoff" and not failure.identity_blocked
+    assert started + timedelta(seconds=900) <= failure.retry_at <= datetime.now(UTC) + timedelta(seconds=900)
+    state = row(public_lanes, lane)
+    assert not state["blocked"] and state["blocked_fingerprint"] is None
+    assert state["last_error_code"] == "public_access_backoff" and state["failure_generation"] == 1
+    with pytest.raises(IdentityDeferred, match="identity_cooldown"):
+        public_gate(public_lanes).before_request()
+    assert len(row(public_lanes, lane)["request_times"]) == 1
+
+
+@pytest.mark.parametrize("retry_after", [120, float("nan"), -1, 1e300])
+def test_public_backoff_preserves_retry_after_safety_and_overflow_fail_closed(public_lanes, retry_after):
+    lane = public_gate(public_lanes)
+    lane.before_request()
+    started = datetime.now(UTC)
+    failure = lane.finish_failure("public_access_backoff", retry_after_seconds=retry_after)
+    if retry_after == 1e300:
+        assert failure.retry_at == datetime.max.replace(tzinfo=UTC)
+    else:
+        delay = 120 if retry_after == 120 else 900
+        assert started + timedelta(seconds=delay) <= failure.retry_at <= datetime.now(UTC) + timedelta(seconds=delay)
+    assert not failure.identity_blocked and not row(public_lanes, lane)["blocked"]
+
+
+@pytest.mark.parametrize(
+    "fingerprint", [None, "synthetic-historical-fingerprint", hashlib.sha256(b"public").hexdigest()]
+)
+def test_public_mode_never_repairs_an_existing_block_even_when_fingerprint_differs(public_lanes, fingerprint):
+    initial = public_gate(public_lanes)
+    initial.before_request()
+    change(
+        public_lanes,
+        initial,
+        "blocked=true,blocked_fingerprint=%s,last_error_code='unauthorized',failure_generation=9",
+        fingerprint,
+    )
+    before = row(public_lanes, initial)
+    current = public_gate(public_lanes)
+    with pytest.raises(IdentityDeferred) as error:
+        current.before_request()
+    assert error.value.failure.identity_blocked and current.request_count == 0
+    assert row(public_lanes, current) == before
+
+
+def test_public_late_success_cannot_clear_a_newer_failure_generation(public_lanes):
+    early, failed = public_gate(public_lanes), public_gate(public_lanes)
+    permit = early.before_request()
+    failed.before_request()
+    failure = failed.finish_failure("unauthorized")
+    state = row(public_lanes, failed)
+    assert not early.finish_success(permit)
+    assert row(public_lanes, failed) == state
+    assert state["cooldown_until"] == failure.retry_at and state["failure_generation"] == 1
+
+
+def test_public_late_shorter_retry_after_cannot_advance_existing_server_delay(public_lanes):
+    first, late = public_gate(public_lanes), public_gate(public_lanes)
+    first.before_request()
+    late.before_request()
+    original = first.finish_failure("public_access_backoff", retry_after_seconds=600)
+    result = late.finish_failure("unauthorized", retry_after_seconds=120)
+    assert result.retry_at == original.retry_at and not result.identity_blocked
+    state = row(public_lanes, first)
+    assert state["cooldown_until"] == original.retry_at and state["failure_generation"] == 2
+    assert not state["blocked"] and len(state["request_times"]) == 2
+
+
+def test_public_expired_probe_cannot_change_replacement_and_duplicate_failure_counts_once(public_lanes):
+    initial = public_gate(public_lanes)
+    initial.before_request()
+    initial.finish_failure("public_access_backoff")
+    change(public_lanes, initial, "cooldown_until=clock_timestamp()-interval '1 second'")
+    old = public_gate(public_lanes)
+    old_permit = old.before_request()
+    assert old_permit.probe_token
+    change(public_lanes, old, "probe_expires_at=clock_timestamp()-interval '1 second'")
+    current = public_gate(public_lanes)
+    current_permit = current.before_request()
+    assert current_permit.probe_token != old_permit.probe_token
+    assert old.finish_failure("unauthorized", permit=old_permit).code == "identity_probe_lost"
+    assert row(public_lanes, current)["probe_token"] == current_permit.probe_token
+    failure = current.record_failure("login_required", permit=current_permit)
+    assert current.record_failure("public_access_backoff", permit=current_permit) == failure
+    assert row(public_lanes, current)["failure_generation"] == 2
+    assert not row(public_lanes, current)["blocked"]
+    current.finish_failure()
+    assert row(public_lanes, current)["probe_token"] is None
+    assert row(public_lanes, current)["cooldown_until"] == failure.retry_at
