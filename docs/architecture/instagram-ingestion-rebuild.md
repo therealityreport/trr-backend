@@ -40,7 +40,7 @@ and canonical data. Other platforms and active legacy runs stay on their owner.
 | C | Domain/provider/replay parity and import boundaries | Canonical, listing, comments, media, runtime integration and hosted-result replay extension implemented and reviewed; local checks pass |
 | D | Real persistence crash, ownership, cancellation and recovery tests | Local PostgreSQL/DBOS failure matrix passes. Live cancel/resume preserved run, targets and budgets; successful partial recovery remains pending |
 | E | Backend schema/client parity and browser operator flow | API/client and fixture-backed browser journeys pass. App 964e9ce remote production build and authenticated checks pass; normal TRR browser verifies run display, cancel, reload and resume while new launches are disabled |
-| F | Deployment identity/readiness, bounded canary, 10 runs and 24h observation | v71/c0d167c5 deployed and 54-file runtime proof passes. Public canary is cancelled generation 2 after three requests; verified HTTP 302 login redirect at bootstrap prevents listing. Old authenticated run remains durably held generation 9. User access-path choice is pending; full pipeline, representative-run and 24-hour gates remain open |
+| F | Deployment identity/readiness, bounded canary, 10 runs and 24h observation | v71/c0d167c5 remains deployed. Public canary is cancelled generation 2; old authenticated run remains held generation 9. User explicitly requires public access without login. A bounded local anonymous diagnostic parsed 33 posts in two requests; cloud bootstrap returned HTTP 302 login redirect. Listing detail-proof and guarded local execution repairs are in progress. Full pipeline, representative-run and 24-hour gates remain open |
 
 Engine selection: DBOS 3.3.0 is the implementation candidate. Real local engine
 comparison, version-aware recovery, bounded single-executor replacement and
@@ -1525,3 +1525,50 @@ was performed. Full pipeline completion remains blocked on source access.
 Evidence: public-canary-attempt3.json, public-login-pause.json,
 public-login-pause-verified.json, deployed-public-channel-proof-c0d167c5.json and
 deploy-public-channel-c0d167c5.log in .artifacts/ingestion-rollout/.
+
+
+### Public-only user direction and local source comparison — 2026-10-16 17:10 UTC
+
+The user explicitly requested fixing public access without login and providing
+results. This supersedes the earlier pending access-path choice. Do not resume
+the authenticated run or add an authenticated fallback.
+
+Bounded local diagnostics used no credentials or proxy and did not write run,
+evidence, receipt or canonical tables. Source requests after the initial one-GET
+comparison used the existing shared anonymous request/cooldown gate:
+
+- Local profile bootstrap returned HTTP 200 with public runtime context.
+- The maintained public listing adapter returned 33 posts in two source requests.
+  Twelve observed sample rows were saved; pagination remained open, so this is
+  neither all 2026 posts nor a completed ingestion run.
+- The permalink returned HTTP 200 but no native media payload. A shape-only
+  inspection found 33 structured payloads and no detail/root-query media data.
+- The maintained standalone shortcode query returned HTTP 403. The shared public
+  lane recorded `public_access_backoff` and cooldown through 17:18:10 UTC. Do not
+  clear or shorten it. No further source request was sent during the cooldown.
+
+Evidence is in `.artifacts/ingestion-rollout/public-local-listing-probe-result.json`,
+`public-local-detail-result.json`, `public-local-detail-shape.json`, and
+`public-local-graphql-detail-result.json`. The latter records a callback wrapper
+class; the controlled request diagnostic identifies the underlying HTTP 403.
+The result sample CSV is `public-instagram-observed-posts.csv` (12 rows).
+
+The source repair adds the existing detail completeness validator to listing
+materialization, retaining original listing observation time and provenance.
+It does not relax freshness, hidden-metric, force or carousel checks. Eight
+focused offline tests pass. The 33 existing listing/atomicity tests also pass
+against their isolated local PostgreSQL fixture (explicit test marker required
+by the repository connection guard). Deployment and live acceptance are pending.
+
+A separate coupled change is implementing durable run-specific local placement
+and a bounded serial local driver. Placement must remain separate from frozen
+source intent, forbid cloud fallback after a local crash, and preserve shared
+admission, ownership, counters, receipts and public pacing. No placement/schema
+change has been applied to the live database. Local execution is outside Modal's
+physical function cap; shared logical admission remains required.
+
+Both existing runs remain paused. Do not resume the public run until the local
+placement guard and changed path are reviewed, deployed and verified. Comments,
+replies, media, full pipeline, ten representative runs and the 24-hour observation
+remain unverified. The earlier cloud-only failure is not proof that every public
+access path is unavailable.

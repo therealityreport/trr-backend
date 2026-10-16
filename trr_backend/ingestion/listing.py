@@ -14,12 +14,22 @@ from typing import Any
 
 from psycopg2.extras import RealDictCursor, execute_values
 
+from trr_backend.ingestion.application import validate_detail
 from trr_backend.ingestion.canonical import normalize_post_source, write_post
-from trr_backend.ingestion.domain import Conflict, LostOwnership, RunIntent, Stage, fingerprint, stable_json
+from trr_backend.ingestion.domain import (
+    Conflict,
+    LostOwnership,
+    RunIntent,
+    Stage,
+    fingerprint,
+    stable_json,
+    utc_timestamp,
+)
 from trr_backend.ingestion.evidence import Evidence
 from trr_backend.ingestion.persistence import Store, _row
-from trr_backend.ingestion.providers import PARSER_VERSION, InvalidSourceError
+from trr_backend.ingestion.providers import PARSER_VERSION, InvalidSourceError, ParsedSource
 from trr_backend.socials.instagram.graphql_response import ROOT_FIELD, classify_graphql_response
+from trr_backend.socials.instagram.post_normalizer import InstagramPost
 
 
 @dataclass(frozen=True)
@@ -106,6 +116,41 @@ def _date_start_reached(intent: RunIntent, posts: list[tuple[dict[str, Any], dat
     return len(candidates) >= 3 and all(
         later <= earlier for earlier, later in zip(candidates, candidates[1:], strict=False)
     )
+
+
+def _listing_post_source(
+    node: dict[str, Any],
+    normalized: InstagramPost,
+    *,
+    evidence: Evidence,
+    evidence_id: str,
+    run_id: str,
+    page_key: str,
+) -> dict[str, Any]:
+    """A complete native listing observation can also establish detail coverage.
+
+    Keep partial nodes as ordinary listing observations. The existing cache owns
+    TTL/force/metric visibility decisions, and its worker settles detail targets.
+    No new detail capture or detail-stage evidence is invented here.
+    """
+    source = dict(node)
+    parsed = ParsedSource(Stage.LISTING, normalized.shortcode, evidence.captured_at, source, post=normalized)
+    try:
+        proof = validate_detail(parsed)
+    except InvalidSourceError:
+        return source
+    proof["evidence_reference"] = {
+        "evidence_id": evidence_id,
+        "run_id": run_id,
+        "stage": Stage.LISTING.value,
+        "target_key": page_key,
+        "captured_at": utc_timestamp(evidence.captured_at),
+        "content_hash": evidence.content_hash,
+        "parser_version": evidence.parser_version,
+        "schema_version": evidence.schema_version,
+    }
+    source["detail_snapshot"] = proof
+    return source
 
 
 class ListingActivity:
@@ -262,7 +307,14 @@ class ListingActivity:
                             account=account,
                             observed_at=evidence.captured_at,
                             normalized=normalized,
-                            source_payload=node,
+                            source_payload=_listing_post_source(
+                                node,
+                                normalized,
+                                evidence=evidence,
+                                evidence_id=evidence_id,
+                                run_id=run_id,
+                                page_key=target_key,
+                            ),
                         )
                     )
                     for stage in intent.selected_tasks:
