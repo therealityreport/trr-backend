@@ -9,6 +9,43 @@ from psycopg2.extras import Json
 from trr_backend.repositories import cast_screentime
 
 
+@pytest.mark.parametrize("updater", [cast_screentime.update_media_upload_session, cast_screentime.update_run])
+@pytest.mark.parametrize("column", ["status = NULL --", "status, updated_at", "status\n", "schema.status"])
+def test_dynamic_update_rejects_invalid_columns_before_sql(monkeypatch, updater, column):
+    monkeypatch.setattr(
+        cast_screentime.pg, "execute_returning", lambda *_args, **_kwargs: pytest.fail("invalid key reached SQL")
+    )
+    with pytest.raises(ValueError, match="Invalid SQL identifier"):
+        updater("record-1", {"status": "pending", column: "value"})
+
+
+@pytest.mark.parametrize("updater", [cast_screentime.update_media_upload_session, cast_screentime.update_run])
+def test_dynamic_update_keeps_values_parameterized(monkeypatch, updater):
+    captured = {}
+
+    def execute(sql, params):
+        captured.update(sql=sql, params=params)
+        return [{"id": "record-1"}]
+
+    monkeypatch.setattr(cast_screentime.pg, "execute_returning", execute)
+    value = "quoted ' value; --"
+    assert updater("record-1", {"status": value, "metadata": {"ready": True}}) == {"id": "record-1"}
+    assert value not in captured["sql"]
+    assert "status = %s, metadata = %s" in captured["sql"]
+    assert captured["params"][0] == value
+    assert captured["params"][1].adapted == {"ready": True}
+    assert captured["params"][2] == "record-1"
+
+
+@pytest.mark.parametrize("updater", [cast_screentime.update_media_upload_session, cast_screentime.update_run])
+def test_dynamic_update_empty_payload_keeps_lookup(monkeypatch, updater):
+    monkeypatch.setattr(cast_screentime.pg, "fetch_one", lambda *_args: {"id": "record-1"})
+    monkeypatch.setattr(
+        cast_screentime.pg, "execute_returning", lambda *_args, **_kwargs: pytest.fail("empty payload wrote SQL")
+    )
+    assert updater("record-1", {}) == {"id": "record-1"}
+
+
 def test_json_wrap_sanitizes_decimal_and_uuid_values():
     payload = {
         "screen_time_seconds": Decimal("2.0"),
