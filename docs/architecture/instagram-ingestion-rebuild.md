@@ -1159,3 +1159,73 @@ Final limited review confirms all five findings closed at source level, includin
 the six browser-identity regressions. Parent accepts this candidate for a scoped
 commit and one updated resource measurement. Live completion and post-deploy
 credential/source proof remain separate gates; the canary is still paused.
+
+### Updated fixed-fixture measurement and bounded rollout decision
+
+Exact commit `9e2349e2786db583c6811903663437af9e7fec47` passed one updated
+candidate measurement with the reviewed compatibility harness. All 38 activities
+committed; common fields, role bytes/dimensions, 147 physical objects, three
+avatar references and no-orphan assertions passed. Adjusted SQL was 12,462
+through business completion and 12,798 through full lifecycle, versus the prior
+candidate's 15,872 and 18,222. Peak sampled sessions stayed five; all 40 pool
+receipts preserved the same caps. SQL errors and final workload sessions were
+zero, and private Postgres stopped. The unchanged legacy evidence remains
+6,089 / 6,102 statements with peak two sessions.
+
+Business completion was 74.5535 seconds and full lifecycle 89.1523 seconds,
+versus prior candidate 57.7754 / 86.8038 and legacy 69.6436 / 70.0430. New business
+time is about 7.05% above the frozen legacy baseline; full lifecycle is about
+27.28% above legacy and 2.71% above the previously accepted candidate. Against the
+prior candidate, 13.9871 of the 16.7781 added completion seconds were inside
+native dispatches: fixture/import +8.2041, activity +3.7104 and wrapper/subprocess
++2.0726. Measured child-start gaps added only 1.6287 seconds. These historical
+single trials cannot separate host load from code effects. The main loop changed
+from 0.1 to 1.0 seconds; the separate lease monitor remains 0.25 seconds. No claim
+of faster local completion or causal attribution to that poll change is made.
+
+Statement deltas reconcile by category with no new unexplained query/session
+increase. Completion reduction of 3,410 comprises transaction/session -2,657,
+owner/accounting -154, coordinator polls -826, registry +12 and known SDK shapes
++215. Full reduction of 5,424 comprises -3,978, -154, -1,266, +12 and -38 in the
+same categories. Network counter remains 427: 40 Instagram, 60 CDN, 147 PUT and
+180 HEAD. This fixture demonstrates no avatar network reduction; no such saving
+is claimed. Registry proof freshness remains strict.
+
+Parent accepts the new measurement for the existing bounded canary under the
+frozen-baseline tolerance and previously accepted durable/session/lifecycle
+overhead, with timing uncertainty retained. This is not wider rollout or a
+production speed/cost claim. US East deployment keeps launch disabled and must
+pass fresh 50-file source, credential and worker checks before generation-7
+canary resume. Actual provider billing, live all-stage completion and the ten-run/
+24-hour expansion gate remain pending. Evidence and category equations are in
+`.artifacts/ingestion-engine-eval-full-17f978d/optimized-candidate-report.md`.
+
+### v67 deployment and generation-8 resume
+
+Modal `admin-56995/main/trr-backend-jobs` deployed v67 at 14:54:07Z with tag
+`ig-recovery-20261016-9e2349e2`; provider revision is `9e2349e*` because unrelated
+working-tree changes remain present. The exact 50-file ingestion manifest matches
+fresh containers. Deployment finished in 13.445 seconds; the cold-start API health
+check returned 200 on attempt one. Targeted readiness reports core ready and ready,
+with no missing secret/function and a ready control-plane provider probe.
+
+Actual posts worker `ta-01M52KC482SMZPWV1D11EGCX7R` was started with an incomplete
+reservation and rejected it at the input boundary before source/database work.
+Its subsequent read-only proof verified all 50 hashes, loaded-module origins,
+Patchright availability, US East placement, valid livestnation snapshot/identity
+guard, and flags launch=0, coordinator=1, replay-apply=0. Other unconstrained app
+functions can still run in other regions; this is not an all-app placement claim.
+The readback helper gained only an optional container-ID filter to avoid repeating
+unchanged proofs. This smoke proves startup/input rejection and configuration,
+not live Instagram authentication or successful downstream completion.
+
+The supported resume API returned HTTP 202 for the SAME canary
+`31fc35b1-654e-4306-8d71-ca02c8bb770a`, generation 8, queued, DBOS
+`instagram-ingestion-v1`, using new stable idempotency key
+`instagram-ingestion-20261016-pinned-identity-repair-resume-01`.
+The generation-7 review hold is now resolved; normal coordinator recovery may
+continue this run. Preserve all saved listing pages, targets, cursors and budgets.
+New-run routing stays disabled. The previous v66 code and unchanged cookie value
+remain rollback material; never remove additive schema or transfer this run's
+engine/version. Deployment, readiness, source/identity proofs and command receipt
+are preserved in `.artifacts/ingestion-rollout/`.
