@@ -1458,3 +1458,13 @@ Next action: observe the scheduled attempt after 16:09:08 UTC and inspect only
 its controlled instagram_public_request_failed diagnostic if it fails. Preserve
 the cooldown and budgets. Retrieve the completed 15:00–16:00 UTC billing hour
 once available, reporting missing provider data as unavailable rather than zero.
+
+Observation at 16:01:48 UTC: public run remains generation 1 with one attempt,
+one request, no owner and the unchanged 16:09:08 UTC cooldown. The old run is
+still held at cancelled generation 9. No source request was made by this check.
+The completed 15:00–16:00 UTC Modal app-hour report was available: total
+$0.04138597, CPU $0.02613144, memory $0.00616577, egress $0.00908876. This is
+metered whole-app cost before credits, covering deployments and mixed work;
+it is not per-canary cost or a matched region comparison. Evidence:
+public-canary-observation-1601.json and modal-billing-15-16utc.json. No stage or
+acceptance gate changed; the next scheduled source attempt remains pending.
