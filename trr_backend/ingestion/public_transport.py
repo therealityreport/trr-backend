@@ -7,6 +7,8 @@ and durable request counter. Anonymous runtime cookies live only in this attempt
 
 from __future__ import annotations
 
+import json
+import logging
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -22,6 +24,53 @@ from trr_backend.ingestion.providers import InvalidSourceError
 from trr_backend.socials.instagram.credential_guard import CredentialIdentityMismatch, PublicCookieIdentity
 from trr_backend.socials.instagram.public_response import PublicRequestClient, parse_public_retry_after
 from trr_backend.socials.instagram.request_client import InstagramRequestFailure
+
+LOGGER = logging.getLogger(__name__)
+_LOGGED_ERRORS = frozenset(
+    {
+        "network_error",
+        "unauthorized",
+        "forbidden",
+        "rate_limited",
+        "redirect_login",
+        "login_required",
+        "challenge_required",
+        "checkpoint_required",
+        "feedback_required",
+        "consent_required",
+        "sentry_block",
+        "endpoint_redirect",
+        "request_failed",
+        "parse_error",
+        "public_access_backoff",
+    }
+)
+
+
+def _log_public_failure(*, error_code, status, method, path):
+    # Paths are inspected only to select a fixed category. Never attach the
+    # path, account, query, response or exception object to a LogRecord.
+    segments = path.strip("/").split("/")
+    if path.rstrip("/") in {"/graphql/query", "/api/graphql"}:
+        endpoint = "graphql"
+    elif len(segments) == 2 and segments[0] in {"p", "reel", "reels", "tv"}:
+        endpoint = "permalink"
+    elif path == "/" or len(segments) == 1:
+        endpoint = "profile_bootstrap"
+    else:
+        endpoint = "other"
+    event = {
+        "event": "instagram_public_request_failed",
+        "error_code": error_code if isinstance(error_code, str) and error_code in _LOGGED_ERRORS else "request_failed",
+        "status": status if type(status) is int and 100 <= status <= 599 else 0,
+        "method": method.upper() if isinstance(method, str) and method.upper() in {"GET", "POST"} else "OTHER",
+        "endpoint_category": endpoint,
+    }
+    try:
+        LOGGER.warning(json.dumps(event, sort_keys=True))
+    except Exception:
+        # Observability cannot replace the existing counted failure/cooldown.
+        pass
 
 
 class ObservedPublicSession:
@@ -105,6 +154,7 @@ class ObservedPublicSession:
             try:
                 response = self.inner.request(method, url, **kwargs)
             except requests.RequestException:
+                _log_public_failure(error_code="network_error", status=0, method=method, path=target.path)
                 failure = self.gate.record_failure("network_error", permit=permit)
                 self.on_failure(failure)
                 raise SourceFailure(failure) from None
@@ -127,6 +177,12 @@ class ObservedPublicSession:
                 # Requests/httpx response jars cannot introduce a logged-in identity.
                 self.raw_cookies = self.guard.prepare_jar(self.cookies, self.raw_cookies)
             except (InstagramRequestFailure, CredentialIdentityMismatch) as error:
+                _log_public_failure(
+                    error_code=getattr(error, "error_code", "public_access_backoff"),
+                    status=response.status_code,
+                    method=method,
+                    path=target.path,
+                )
                 failure = self.gate.record_failure(
                     getattr(error, "error_code", "public_access_backoff"),
                     retry_after_seconds=parse_public_retry_after(response.headers.get("retry-after")),

@@ -410,3 +410,73 @@ def test_public_auth_failure_preserves_http_date_retry_after(monkeypatch, stage)
         (listing_call if stage == "listing" else detail_call)(case)
     failure = next(item for item in case.events if isinstance(item, tuple) and item[0] == "failure")
     assert failure[3] == pytest.approx(7200, abs=2)
+
+
+@pytest.mark.parametrize(
+    "method,path,category",
+    [
+        ("GET", "/private-account-sentinel/", "profile_bootstrap"),
+        ("POST", "/graphql/query", "graphql"),
+        ("GET", "/p/private-shortcode-sentinel/", "permalink"),
+    ],
+)
+def test_public_403_log_is_structured_and_excludes_source_secrets(caplog, method, path, category):
+    events, failures = [], []
+    session = SequenceSession(
+        events,
+        [
+            {
+                "status": 403,
+                "body": "private-body-sentinel",
+                "headers": {
+                    "content-type": "text/html",
+                    "retry-after": "37",
+                    "set-cookie": "sessionid=private-cookie-sentinel",
+                    "location": "https://www.instagram.com/accounts/login/?token=private-redirect-sentinel",
+                    "x-private": "private-header-sentinel",
+                },
+            }
+        ],
+    )
+    wrapped = ObservedPublicSession(
+        session=session,
+        gate=Gate(events),
+        deadline=time.monotonic() + 120,
+        check_cancelled=lambda: None,
+        on_request=lambda: events.append("count"),
+        on_payload=lambda _: pytest.fail("HTML must not be retained"),
+        on_failure=failures.append,
+    )
+    try:
+        with pytest.raises(_CallbackAbort) as caught:
+            wrapped.request(method, "https://www.instagram.com" + path + "?token=private-query-sentinel")
+        assert isinstance(caught.value.error, SourceFailure) and str(caught.value.error) == "forbidden"
+        records = [record for record in caplog.records if record.name == "trr_backend.ingestion.public_transport"]
+        assert len(records) == 1 and records[0].levelname == "WARNING"
+        assert json.loads(records[0].getMessage()) == {
+            "event": "instagram_public_request_failed",
+            "error_code": "forbidden",
+            "status": 403,
+            "method": method,
+            "endpoint_category": category,
+        }
+        assert "sentinel" not in caplog.text and "https://" not in caplog.text
+        assert ("failure", "forbidden", 1, 37.0) in events
+        assert len(failures) == len(session.sent) == events.count("count") == 1
+    finally:
+        wrapped.close()
+    assert session.closed
+
+
+def test_log_handler_failure_cannot_replace_existing_public_failure_or_accounting(monkeypatch):
+    from trr_backend.ingestion import public_transport
+
+    def broken_logger(*args, **kwargs):
+        raise RuntimeError("private-logger-error-sentinel")
+
+    monkeypatch.setattr(public_transport.LOGGER, "warning", broken_logger)
+    case = source_case(PublicDetailSource, [rejected_response("forbidden", "37")], shortcode="AAAABC")
+    with pytest.raises(SourceFailure, match="forbidden"):
+        detail_call(case)
+    assert ("failure", "forbidden", 1, 37.0) in case.events
+    assert len(case.session.sent) == case.events.count("count") == 1 and case.session.closed

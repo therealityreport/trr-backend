@@ -40,7 +40,7 @@ and canonical data. Other platforms and active legacy runs stay on their owner.
 | C | Domain/provider/replay parity and import boundaries | Canonical, listing, comments, media, runtime integration and hosted-result replay extension implemented and reviewed; local checks pass |
 | D | Real persistence crash, ownership, cancellation and recovery tests | Local PostgreSQL/DBOS failure matrix passes. Live cancel/resume preserved run, targets and budgets; successful partial recovery remains pending |
 | E | Backend schema/client parity and browser operator flow | API/client and fixture-backed browser journeys pass. App 964e9ce remote production build and authenticated checks pass; normal TRR browser verifies run display, cancel, reload and resume while new launches are disabled |
-| F | Deployment identity/readiness, bounded canary, 10 runs and 24h observation | US East v66 identity/readiness passes. Canary generation 7 is intentionally paused with 33 listing pages and 1,089 targets per downstream stage preserved while the reviewed identity/comments repair batch is completed. The matched local resource comparison is accepted with explained overhead; revised measurements, full live completion, actual trial billing, ten representative runs and 24h observation remain pending |
+| F | Deployment identity/readiness, bounded canary, 10 runs and 24h observation | Public source 1b648130 is deployed with verified source identity/readiness; US East posts-worker proof passes. Old authenticated run is durably held at generation 9. Public canary bcc7411d-085d-4efc-be77-7d8e87303eb6 is running at generation 1, with first request deferred by public-access backoff until 16:09 UTC. Actual hourly app billing and limited latency observations are recorded; full pipeline completion, representative-run and 24-hour gates remain open |
 
 Engine selection: DBOS 3.3.0 is the implementation candidate. Real local engine
 comparison, version-aware recovery, bounded single-executor replacement and
@@ -1393,3 +1393,56 @@ pages, 2,178 unresolved targets in each downstream stage and zero downstream
 attempts/requests. Its intent hash and last-update time remain unchanged.
 No public run or actual hold has yet been applied. Source acceptance is separate
 from the pending deployed-source proof, actual hold and new public canary.
+
+### Public deployment and preserved-run hold — 2026-10-16 15:52 UTC
+
+Source commit 1b648130 was deployed to admin-56995/main/trr-backend-jobs as
+v68, tag ig-public-20261016-1b648130. Deployment readiness and health passed.
+All 53 expected source hashes and loaded module origins matched; the actual
+posts worker also matched, with US East placement and Patchright available.
+Unrelated dirty source was preserved and is identified by the deployment's dirty
+revision marker. No push was performed.
+
+The reviewed transactional hold was applied to authenticated run
+31fc35b1-654e-4306-8d71-ca02c8bb770a at 15:47:03 UTC with reason
+public_transport_rebuild_preserved. State remains cancelled at generation 9.
+All other run fields, intent hash, target/discovery/receipt/evidence counts and
+state digests were unchanged. API progress returned no executable actions.
+This run must remain held; its budgets and cursors are not transferred.
+
+The runtime secret enabled new-run routing only; the existing bravotv/2026
+scope, total limit of ten and single-active-run guard remain. Configuration-only
+deployment ig-public-canary-20261016-1b648130 passed readiness and health. The
+first API preflight still reported routing disabled, so no launch was sent.
+At 15:52 UTC, both current inspected containers reported flags enabled=1,
+coordinator=1, replay_apply=0, public launch profile and all 53 matching hashes.
+API preflight is being rechecked before the idempotent public launch.
+Evidence: deployed-public-post-enable-proof.json, authenticated-run-hold-receipt.json,
+public-canary-enable-flags.json, and deployment-public-canary-1b648130.json in
+.artifacts/ingestion-rollout/. Source checks and deployment do not establish
+pipeline completion; downstream live stages and sustained acceptance remain.
+
+### Public canary started — 2026-10-16 15:54 UTC
+
+Fresh API preflight returned enabled=true for bravotv, enabled=false for nbc and
+replay_apply_enabled=false. The public launch returned HTTP 202 at 15:53:59 UTC,
+run bcc7411d-085d-4efc-be77-7d8e87303eb6, generation 1. Read-only database
+inspection verified the frozen public profile and unchanged held authenticated
+run. The public run began automatically. Its first listing attempt made exactly
+one source request, received public_access_backoff, saved no source evidence and
+released ownership. Its next attempt is 16:09:08 UTC; do not reset the cooldown.
+No downstream targets or receipts exist yet. The existing 15-minute follow-up
+now tracks this public run and explicitly prohibits resuming the held run.
+
+Evidence: public-canary-launch-request.json, public-canary-launch-result.json and
+public-canary-first-state.json. The transient disabled API response during the
+rolling transition resolved without another secret change or deployment.
+
+The first source failure retained only the normalized backoff code, which does
+not distinguish HTTP rejection from a login redirect. A narrow diagnostic adds
+fixed-field warnings for status, controlled error code, method and endpoint
+category. It logs no URL, account, query, body, header, cookie or exception text.
+Four focused synthetic cases passed, including sentinel exclusion and logging
+handler failure without changed accounting. Parent reviewed the complete two-file
+diff; transport, retry, credential and cooldown behavior are unchanged. This
+diagnostic will observe the next normally scheduled attempt, not an extra probe.
