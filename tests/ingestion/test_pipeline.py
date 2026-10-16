@@ -214,7 +214,9 @@ def test_complete_pipeline_survives_lost_listing_ack_and_generation_resume(pipel
         downloads.append(args[1])
         return test_media.Response()
 
-    def storage():
+    def storage(context, owned):
+        assert owned["stage"] == "media"
+        assert context["target"]["owner_expires_at"] is not None
         return MediaStorage(
             client=client,
             bucket="pipeline",
@@ -321,7 +323,16 @@ def test_complete_pipeline_survives_lost_listing_ack_and_generation_resume(pipel
     assert next(stage.requests for stage in progress.stages if stage.stage == "media") == len(downloads) + sum(
         client.calls.values()
     )
-    assert client.closes == 2 and len(client.objects) == 29
+    # Two post originals, twenty variants, two comment images and three
+    # shared avatar identities. Exact cover/original URLs share one physical
+    # object while preserving their separate manifest roles.
+    assert client.closes == 2 and len(client.objects) == 27
+    avatar_urls = {
+        row["hosted_url"]
+        for row in rows(database, "select hosted_url from social.avatar_registry where status='mirrored'")
+    }
+    assert len(avatar_urls) == 3
+    assert all(url.removeprefix(HOSTED) in client.objects for url in avatar_urls)
     assert rows(
         database, "select count(*) as count from social.instagram_ingestion_receipts where run_id=%s", (run_id,)
     ) == [{"count": 8}]
@@ -349,9 +360,14 @@ def test_complete_pipeline_survives_lost_listing_ack_and_generation_resume(pipel
         assert post_row["caption"] == "Detail " + code and post_row["likes"] == 7
         assert str(post_row["show_id"]) == show_id and str(post_row["season_id"]) == season_id
         assert post_row["media_mirror_status"] == "mirrored"
-        expected_media = f"{HOSTED}social/instagram/{show_id}/3/week-unknown/{code}/media-01.png"
+        expected_media = f"{HOSTED}social/instagram/{show_id}/3/week-unknown/{code}/cover-original.png"
         assert post_row["hosted_media_urls"] == [expected_media]
+        assert post_row["hosted_thumbnail_url"] == expected_media
+        originals = post_row["asset_manifest"]["originals"]
+        assert originals["cover"]["source_role"] == "cover"
+        assert originals["media"][0]["source_role"] == "media"
         assert post_row["hosted_owner_profile_pic_url"].startswith(HOSTED)
+        assert post_row["hosted_owner_profile_pic_url"] in avatar_urls
         assert len(post_row["asset_manifest"]["display_variants"]) == 10
         asset = rows(
             database, "select * from social.social_post_media_assets where post_id=%s", (str(canonical["id"]),)
@@ -370,6 +386,7 @@ def test_complete_pipeline_survives_lost_listing_ack_and_generation_resume(pipel
         assert all(
             row["hosted_author_profile_pic_url"].startswith(HOSTED) and not row["is_missing"] for row in comments
         )
+        assert all(row["hosted_author_profile_pic_url"] in avatar_urls for row in comments)
         receipts = rows(
             database,
             """select stage,canonical_identity from social.instagram_ingestion_receipts

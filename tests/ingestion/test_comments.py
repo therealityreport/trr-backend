@@ -368,7 +368,7 @@ def test_resume_preserves_prior_rows_receipts_and_cursor_topology(database):
     args["owner_token"] = str(target["owner_token"])
     tail = {"comments": [], "has_more_comments": False, "comment_count": 2}
     result = CommentActivity(store, source([tail]), clock=lambda: OBSERVED + timedelta(hours=1)).execute(
-        **args, checkpoint=result["checkpoint"]
+        **args, checkpoint=target["checkpoint"]
     )
     assert result["outcome"] == "committed"
     assert result["checkpoint"]["comment_pages"]["lanes"]["__top__"]["cursors"] == ["tail1"]

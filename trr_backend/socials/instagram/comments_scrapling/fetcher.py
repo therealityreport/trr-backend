@@ -78,6 +78,7 @@ from trr_backend.socials.instagram.comments_scrapling.proxy_budget import (
     resolve_proxy_budget_config,
 )
 from trr_backend.socials.instagram.constants import COMMENT_REPLIES_URL, COMMENTS_URL, resolve_comment_sort_order
+from trr_backend.socials.instagram.credential_guard import PinnedCookieIdentity
 from trr_backend.socials.instagram.network_policy import (
     default_instagram_network_policy,
     instagram_scrapling_network_kwargs,
@@ -2980,7 +2981,18 @@ class InstagramCommentsScraplingFetcher:
         self._source_failure_observer = source_failure_observer
         self._consume_credentials_only = consume_credentials_only
         self._cookies = list(cookies or [])
-        self._raw_cookies = raw_cookies if isinstance(raw_cookies, dict) else dict(raw_cookies or {})
+        self._raw_cookies = (
+            dict(raw_cookies or {})
+            if consume_credentials_only
+            else raw_cookies
+            if isinstance(raw_cookies, dict)
+            else dict(raw_cookies or {})
+        )
+        self._credential_identity = PinnedCookieIdentity(self._raw_cookies) if consume_credentials_only else None
+        if self._credential_identity is not None:
+            for cookie in self._cookies:
+                self._credential_identity.merge(self._raw_cookies, {cookie["name"]: cookie["value"]})
+            self._cookies = _cookies_to_scrapling(self._raw_cookies)
         self._browser_account_id = str(browser_account_id or "").strip() or None
         self._proxy_config = proxy_config
         self._proxy_rotator = proxy_config.proxy_rotator if proxy_config else None
@@ -2991,6 +3003,7 @@ class InstagramCommentsScraplingFetcher:
             cookies=self._raw_cookies,
             browser_account_id=self._browser_account_id,
             attach_auth_session=not consume_credentials_only,
+            strict_supplied_credentials=consume_credentials_only,
         )
         self._request_count = 0
         self._bytes_total = 0
@@ -3513,6 +3526,8 @@ class InstagramCommentsScraplingFetcher:
         load_strategy: str = _COMMENTS_LOAD_STRATEGY_CURSOR_API,
         expected_count_unknown: bool = False,
         attempt_count: int | None = None,
+        seed_persisted_comments: bool = False,
+        pending_reply_parent_ids: tuple[str, ...] = (),
     ) -> InstagramCommentsFetchResult:
         # Bug #2: accept the degraded-expected-counts signal from the job runner
         # (set when _load_expected_comment_counts hit a transient DB error) and
@@ -3533,6 +3548,8 @@ class InstagramCommentsScraplingFetcher:
             target_metadata=target_metadata,
             load_strategy=load_strategy,
             attempt_count=attempt_count,
+            seed_persisted_comments=seed_persisted_comments,
+            pending_reply_parent_ids=pending_reply_parent_ids,
         )
         if expected_count_unknown and isinstance(result, InstagramCommentsFetchResult):
             meta = dict(result.diagnostic_metadata or {})
@@ -3557,6 +3574,8 @@ class InstagramCommentsScraplingFetcher:
         target_metadata: Mapping[str, Any] | None = None,
         load_strategy: str = _COMMENTS_LOAD_STRATEGY_CURSOR_API,
         attempt_count: int | None = None,
+        seed_persisted_comments: bool = False,
+        pending_reply_parent_ids: tuple[str, ...] = (),
     ) -> InstagramCommentsFetchResult:
         requested_load_strategy = str(load_strategy or _COMMENTS_LOAD_STRATEGY_CURSOR_API).strip().lower()
         selected_load_strategy = normalize_comments_load_strategy(load_strategy)
@@ -3739,10 +3758,12 @@ class InstagramCommentsScraplingFetcher:
                 public_block_signal=public_block_signal,
             )
 
-        comments: list[InstagramComment] = []
+        # Opt-in durable ingestion inventory is already committed evidence. It
+        # contributes unique coverage, never a new observation/source callback.
+        comments: list[InstagramComment] = list(persisted_top_level_comments or []) if seed_persisted_comments else []
         cursor: str | None = str(top_level_cursor or "").strip() or None
         cursor_param_name = _normalize_top_level_cursor_param(top_level_cursor_param)
-        comments_fetched = 0
+        comments_fetched = len(comments)
         fetch_failed = False
         auth_failed = False
         fetch_reason: str | None = None
@@ -3768,7 +3789,7 @@ class InstagramCommentsScraplingFetcher:
         pages_seen = 0
         api_rows_seen = 0
         seen_cursors: set[str] = set()
-        seen_top_level_comment_ids: set[str] = set()
+        seen_top_level_comment_ids: set[str] = {comment.comment_id for comment in comments}
         reply_lane_attempted_parent_ids: set[str] = set()
         api_top_level_complete = False
         api_top_level_reveal_candidate = False
@@ -3888,6 +3909,8 @@ class InstagramCommentsScraplingFetcher:
                 deadline=deadline,
                 reply_tail_deadline=reply_tail_deadline,
                 attempt_count=attempt_count,
+                resume_pending_lanes=seed_persisted_comments,
+                pending_parent_ids=frozenset(pending_reply_parent_ids),
             )
             result.diagnostic_metadata = {
                 **dict(result.diagnostic_metadata or {}),
@@ -4986,6 +5009,8 @@ class InstagramCommentsScraplingFetcher:
         deadline: float | None,
         reply_tail_deadline: float | None,
         attempt_count: int | None = None,
+        resume_pending_lanes: bool = False,
+        pending_parent_ids: frozenset[str] = frozenset(),
     ) -> InstagramCommentsFetchResult:
         comments: list[InstagramComment] = []
         fetch_failed = False
@@ -5019,7 +5044,11 @@ class InstagramCommentsScraplingFetcher:
             # child_comment_count)) so a parent whose child_comment_count exceeds
             # its reply_count still triggers a reply fetch on the persisted tail.
             expected_replies = expected_reply_count(comment)
-            if fetch_replies and expected_replies > observed_replies:
+            if fetch_replies and (
+                expected_replies > observed_replies
+                or (resume_pending_lanes and comment_id in reply_resume_cursors_by_parent)
+                or comment_id in pending_parent_ids
+            ):
                 reply_fetch_deadline = deadline
                 if reply_tail_deadline is not None:
                     if _deadline_remaining_seconds(reply_tail_deadline) == 0.0:
@@ -6112,6 +6141,7 @@ class InstagramCommentsScraplingFetcher:
                 return [], {"reason": "graphql_relay_deadline_exceeded", **attempt_metadata}
             self._request_count += 1
             try:
+                self._prepare_credentials(client.cookies)
                 self._before_source("relay_bootstrap")
                 page_response = await client.get(post_url, headers=dict(page_headers))
             except TRANSPORT_EXC_TYPES as exc:
@@ -6312,6 +6342,7 @@ class InstagramCommentsScraplingFetcher:
                         variables["after"] = cursor
                     self._request_count += 1
                     try:
+                        self._prepare_credentials(client.cookies)
                         self._before_source("graphql_comments")
                         response = await client.post(
                             _POST_ACTION_GRAPHQL_URL,
@@ -6736,6 +6767,7 @@ class InstagramCommentsScraplingFetcher:
 
                     self._request_count += 1
                     try:
+                        self._prepare_credentials(public_client.cookies)
                         self._before_source("graphql_replies")
                         response = await public_client.post(
                             _POST_ACTION_GRAPHQL_URL,
@@ -7711,6 +7743,21 @@ class InstagramCommentsScraplingFetcher:
         `csrftoken` / session state.
         """
         new_cookies = _extract_response_cookies(response)
+        if getattr(self, "_credential_identity", None) is not None:
+            snapshot = self._credential_identity.merge(self._raw_cookies, new_cookies)
+            self._credential_identity.validate_snapshot(self._parser.cookies)
+            jars = [self._parser.session.cookies]
+            if self._http_client is not None:
+                jars.append(self._http_client.cookies)
+            for jar in jars:
+                self._credential_identity.prepare_jar(jar, snapshot)
+            for jar in jars:
+                jar.clear()
+                jar.update(snapshot)
+            self._raw_cookies = snapshot
+            self._parser.cookies = dict(snapshot)
+            self._cookies = _cookies_to_scrapling(snapshot)
+            return
         for name, value in new_cookies.items():
             self._raw_cookies[name] = value
             if hasattr(self._parser, "cookies") and isinstance(self._parser.cookies, dict):
@@ -7720,6 +7767,22 @@ class InstagramCommentsScraplingFetcher:
                     self._parser.session.cookies.set(name, value)
                 except Exception:  # noqa: BLE001
                     pass
+
+    def _prepare_credentials(self, jar: Any = None) -> None:
+        identity = getattr(self, "_credential_identity", None)
+        if identity is None:
+            return
+        snapshot = identity.validate_snapshot(self._raw_cookies)
+        identity.validate_snapshot(self._parser.cookies)
+        snapshot = identity.prepare_jar(self._parser.session.cookies, snapshot)
+        client = self._http_client
+        if client is not None:
+            snapshot = identity.prepare_jar(client.cookies, snapshot)
+        if jar is not None:
+            snapshot = identity.prepare_jar(jar, snapshot)
+        self._raw_cookies = snapshot
+        self._parser.cookies = dict(snapshot)
+        self._cookies = _cookies_to_scrapling(snapshot)
 
     async def _rebuild_http_client(self) -> None:
         """Create or recreate the httpx client with current cookies and proxy."""
@@ -7735,6 +7798,7 @@ class InstagramCommentsScraplingFetcher:
                 await existing_client.aclose()
             except Exception:  # noqa: BLE001
                 pass
+        self._prepare_credentials()
         self._http_client = httpx.AsyncClient(
             cookies=dict(self._raw_cookies),
             timeout=httpx.Timeout(self._timeout_ms / 1000),
@@ -7887,6 +7951,7 @@ class InstagramCommentsScraplingFetcher:
         deadline: float | None = None,
     ) -> httpx.Response:
         """Plain HTTP GET via httpx. Used for comments/replies JSON API calls."""
+        self._prepare_credentials()
         headers = self._safe_httpx_headers(self._parser.get_headers(referer))
         clean_params = {k: v for k, v in (params or {}).items() if v is not None} or None
         return await self._request_shared_http_client(
@@ -7974,6 +8039,18 @@ class InstagramCommentsScraplingFetcher:
             fetch_timeout_ms = max(1_000, min(fetch_timeout_ms, int(remaining * 1_000)))
 
         async def page_action(page: Any) -> None:
+            if self._credential_identity is not None:
+                cookies = await page.context.cookies(request_url)
+                browser_snapshot = {}
+                for cookie in cookies:
+                    update = {cookie["name"]: cookie["value"]}
+                    # Validate every entry before collapsing duplicate cookie
+                    # names, including identity cookies scoped to the API path.
+                    self._credential_identity.merge(self._raw_cookies, update)
+                    browser_snapshot.update(update)
+                browser_snapshot = self._credential_identity.validate_snapshot(browser_snapshot)
+                self._raw_cookies = self._credential_identity.merge(self._raw_cookies, browser_snapshot)
+                self._prepare_credentials()
             await page.evaluate(
                 """
                 async ({ url, headers, markerId, referrer }) => {
@@ -8334,6 +8411,7 @@ class InstagramCommentsScraplingFetcher:
             observer("source_auth_failed", None)
 
     def _before_source(self, kind: str) -> None:
+        self._prepare_credentials()
         callback = getattr(self, "_before_source_request", None)
         if callback is not None:
             callback(kind)
@@ -8359,8 +8437,19 @@ class InstagramCommentsScraplingFetcher:
     ) -> dict[str, Any]:
         status_code = _status_code(response)
         text = _response_text(response)
-        browser_session_invalidated = _browser_session_invalidated_text(text)
-        auth_failed = status_code in {401, 403} or _auth_failure_text(text) or browser_session_invalidated
+        # Strict ingestion validates JSON request metadata at the native page
+        # observer. Comment text can contain these words without indicating an
+        # authentication failure. Keep document/non-JSON checks and legacy
+        # callers' existing classification unchanged.
+        inspect_body_auth = not getattr(self, "_consume_credentials_only", False) or not text.lstrip().startswith(
+            ("{", "[")
+        )
+        browser_session_invalidated = inspect_body_auth and _browser_session_invalidated_text(text)
+        auth_failed = (
+            status_code in {401, 403}
+            or (inspect_body_auth and _auth_failure_text(text))
+            or browser_session_invalidated
+        )
 
         if 300 <= status_code < 400:
             location = _safe_location(response)
@@ -8499,11 +8588,18 @@ class InstagramCommentsScraplingFetcher:
                     "diagnostic_metadata": diagnostic_metadata,
                 }
 
-        if isinstance(payload, Mapping):
-            observed_payload = payload
+        if isinstance(payload, (Mapping, list)):
+            observed_payload = (
+                payload
+                if isinstance(payload, Mapping)
+                else {
+                    "source_snapshot_type": "native_rest_list_v1",
+                    "items": payload,
+                }
+            )
             parts = urlparse(str(request_url or "")).path.strip("/").split("/")
             if len(parts) >= 3 and parts[-1] == "child_comments" and parts[-3] == "comments":
-                observed_payload = dict(payload, parent_comment_id=parts[-2])
+                observed_payload = dict(observed_payload, parent_comment_id=parts[-2])
             self._observe_source_payload("comments_api", observed_payload)
         return {
             "failed": False,

@@ -40,7 +40,7 @@ and canonical data. Other platforms and active legacy runs stay on their owner.
 | C | Domain/provider/replay parity and import boundaries | Canonical, listing, comments, media, runtime integration and hosted-result replay extension implemented and reviewed; local checks pass |
 | D | Real persistence crash, ownership, cancellation and recovery tests | Local PostgreSQL/DBOS failure matrix passes. Live cancel/resume preserved run, targets and budgets; successful partial recovery remains pending |
 | E | Backend schema/client parity and browser operator flow | API/client and fixture-backed browser journeys pass. App 964e9ce remote production build and authenticated checks pass; normal TRR browser verifies run display, cancel, reload and resume while new launches are disabled |
-| F | Deployment identity/readiness, bounded canary, 10 runs and 24h observation | Target identity/readiness and bounded idle lifecycle pass. Canary generation 3 is blocked after one source operation. Warmup classification repair is reviewed; deployed session verification, successful runs, aggregate resource acceptance and 24h observation remain pending |
+| F | Deployment identity/readiness, bounded canary, 10 runs and 24h observation | US East v66 identity/readiness passes. Canary generation 7 is intentionally paused with 33 listing pages and 1,089 targets per downstream stage preserved while the reviewed identity/comments repair batch is completed. The matched local resource comparison is accepted with explained overhead; revised measurements, full live completion, actual trial billing, ten representative runs and 24h observation remain pending |
 
 Engine selection: DBOS 3.3.0 is the implementation candidate. Real local engine
 comparison, version-aware recovery, bounded single-executor replacement and
@@ -983,3 +983,179 @@ and billing separately from rate-based estimates, measure stage throughput and
 canonical commit latency, and preserve the single-run admission/capacity policies.
 The livestnation-only identity authorization and thereality.report session/cookie
 prohibition remain unchanged.
+
+
+### US-East deployed trial and initial measurements (2026-10-16T14:23Z)
+
+Commit 77cba23c is deployed as Modal v66, tag ig-east-20261016-77cba23c,
+using explicit rolling strategy in admin-56995 / main / trr-backend-jobs
+(ap-DkLTRoSvqhbkGO7fHyHxrD). Deployment health returned 200 on attempt one;
+target-specific readiness passed. A fresh posts worker in us-east/GCP and a
+fresh lean worker in us-east/AWS matched all 45 runtime hashes. Five read-only
+SELECT 1 calls measured medians of 11.53 ms and 1.68 ms respectively. The
+previous posts worker measured 199.47 ms in AP/Azure. This is a small cross-cloud
+sample, not a matched pipeline benchmark. Unchanged app functions may still run
+elsewhere; no claim is made that every app container is in US East.
+
+The unchanged generation-6 canary advanced to seven committed listing pages and
+231 downstream targets per selected stage at 14:20:48Z. The earlier 17.5-minute
+stall was abnormal. Its DBOS partition completed all 50 decisions and created the
+next partition after the region change; replay/startup overhead is a plausible
+cause, not a proven attribution. No manual wakeup, duplicate dispatch, reset or
+new launch was used.
+
+Two pagination targets before the move recorded 189.328 and 225.678 seconds from
+source observation to receipt timestamp. The first four after the move recorded
+13.410, 12.696, 10.489 and 11.737 seconds. These are different pages within the
+same run; receipt timestamps are written inside the transaction, so these are
+recorded processing intervals rather than exact transaction-commit wall times.
+Details, comments, media and end-to-end completion remain unverified. Receipt:
+.artifacts/ingestion-rollout/listing-timing-region-trial.json.
+
+The supported Modal billing export succeeded for the exact app and environment.
+The 12:00–13:00 UTC bucket reports USD 0.02664886; 13:00–14:00 UTC reports
+USD 0.02987936 (CPU 0.02032690, memory 0.00470786, egress 0.00484460 in the
+latter). These are actual app-hour metered charges before credits/allowances,
+including unrelated functions and probes; they are not exact canary charges or
+final invoice amounts. The 14:00–15:00 UTC mixed deployment hour is not yet closed.
+The installed supported export cannot allocate cost per function or invocation.
+Protected evidence: modal-billing-baseline-12-14utc.json,
+deployed-east-source-latency-proof.json, deployment-77cba23c.json and
+readiness-77cba23c.json under .artifacts/ingestion-rollout/.
+
+The heartbeat now reflects the explicit premium approval and continued full
+pipeline work. Expansion still requires the original acceptance gates, including
+ten representative runs and 24 hours without accounting, ownership or completion
+violations. Current launch 0, coordinator 1 and replay-apply 0 remain unchanged.
+
+
+### Pipeline recovery and efficiency candidate (in review preparation)
+
+The next candidate keeps current admission, ownership, lease, retry and stage
+ordering policies. It batches downstream listing targets into one parameterized
+statement per page, changes coordinator outbox polling to one second and engine
+error reconciliation to five seconds, and leaves the 85/90-second deadlines and
+50-decision partition limit unchanged. Thirty-three isolated PostgreSQL listing
+cases and two fake-clock lifecycle cases passed. Real database blocking can still
+delay polling; these intervals are not hard latency guarantees.
+
+Comments recovery reconstructs only the current successful scan from retained
+native evidence/page receipts, drains unfinished earlier-parent replies before
+continuing the top cursor, and preserves prior observation timestamps. A
+versioned native REST-list envelope requires explicit pagination proof; bare
+lists remain unresolved. The opt-in maintained-fetcher seed leaves existing
+callers unchanged. Focused comments/adapter/resume checks passed 86 cases, two
+additional root-restart/coverage regressions passed, and six maintained-fetcher
+cursor/reply compatibility cases passed.
+
+The initial new mock-HTTP harness was invalid: six cases reached Instagram with
+synthetic or empty fixture cookies because REST rebuilt httpx.AsyncClient outside
+the patched factory. No real account credentials were resolved or extracted;
+request count was not instrumented and remains unknown. That run is failed
+harness evidence, not acceptance. Corrected direct-constructor, HTTP transport
+and browser guards now fail closed outside explicit mock transport; corrected
+checks passed.
+
+Media inventory now reconciles matching hosted avatar proof without weakening
+newer conflicting-observation guards. Streaming checks the local deadline on
+every chunk and durable ownership at most one second apart, with forced checks
+before requests, uploads and commit. A 50 MiB / 800-chunk test used nine durable
+checks plus one counted request check, detected cancellation within one second,
+and rejected a new generation after the final upload. Physical summaries count
+unique object keys while keeping role metadata distinct. Forty affected media
+cases passed, reusing 35 initial passes and rerunning only four repaired
+integration failures plus the new optional snapshot-binding case. Replay accepts
+independently recomputed physical totals or the exact historical v1 role totals;
+it rejects conflicting duplicate-key metadata and hybrid totals. Sixteen focused
+replay summary cases passed. Partial-hosting cache expansion remains deferred;
+no incomplete target is declared complete from remote object existence.
+
+A per-target expired-link refresh adapter and strict secret-backed credential
+snapshot are still being integrated. The latter removes ambient resolver/file/
+browser/identity-pool candidates from this rebuilt path. Deployment must first
+pin the existing verified livestnation native user ID in the existing social
+secret without changing cookies, then verify fresh runtime readback. No
+thereality.report session or cookie is allowed. Current live v66 remains the
+region-only baseline until this complete candidate passes consolidated review.
+
+
+Credential deployment contract: `SOCIAL_INSTAGRAM_COOKIES_JSON`,
+`TRR_INSTAGRAM_INGESTION_AUTH_USER_ID`, and
+`TRR_INSTAGRAM_INGESTION_AUTH_USERNAME` belong together in `trr-social-auth`.
+The pins name the already verified native user ID and authorized livestnation
+username; missing, malformed or mismatched snapshots fail closed. The source
+environment example contains no native ID or cookie. Secret preparation routes
+both pins to the social secret; its affected split-routing regression passed.
+This deployment uses a targeted merge of the two pins after a same-identity
+preflight, not regeneration of social credentials. Old code ignores the additive
+pins, so rollback preserves the verified cookie value.
+
+The connected two-post local pipeline passed after reconciling stale assertions
+with previously implemented exact-URL cover/original reuse: 27 physical objects,
+separate cover/media manifest roles, three actual registry avatar objects and
+matching canonical avatar references. It completed all eight selected targets
+with eight receipts and preserved lost-ack/cancel/resume behavior. This is local
+connected proof; actual canary downstream execution is still pending.
+
+
+### Consolidated review repair hold (2026-10-16T14:38Z)
+
+Independent review found three concrete defects: maintained fetchers could replace
+the supplied identity through pools/warmup snapshots/response jars; native REST
+list metadata could discard an explicit failure and permit false completion;
+and an explicitly pending reply lane with an unsupported REST cursor could skip
+requests when counts already matched. Two prerequisites also remain: preserve
+the maintained static detail headers, and validate the actual deployed cookie
+mapping with the exact hash-bound new validator before installing identity pins.
+All five are being repaired as one batch; subsequent review checks those fixes
+and any defects introduced by them, without repeating passing unrelated checks.
+
+The existing canary was intentionally paused through the supported cancel command
+at 14:37:35Z, generation 7, before downstream source execution. Read-only state at
+14:37:53Z confirms 33 committed listing pages, 1,089 target identities per selected
+downstream stage, 33 receipts/evidence records, one saved next-page target and no
+active owners. The three downstream stages have zero attempts and requests.
+Resume this SAME run only after the identity/completion repair batch is accepted,
+deployed and runtime-verified; use a new stable resume idempotency key. Do not
+reset cursors, completed outcomes, counters or budgets. This intentional hold is
+not normal completion or a new source failure. The region-only trial remains v66;
+its first-hour billing bucket will include this hold and other app activity.
+
+At 14:44:04Z the reviewed pin installer verified the exact candidate validator
+against the current v66 runtime cookie mapping and the already verified
+livestnation identity, then added only the two identity-pin keys to
+`admin-56995/main/trr-social-auth`. Cookie values were not changed. The receipt
+records successful same-account and exact-validator preflights; fresh deployed
+runtime readback remains pending. The first invocation lacked repository
+PYTHONPATH and exited before provider code; the corrected invocation succeeded.
+The canary stays paused until the source repair batch passes review and the new
+runtime is verified. Both operational scripts passed independent source review;
+post-deploy proof will cover all 45 prior paths plus five additions and check
+loaded module origins against those hashes.
+
+The repair batch now pins identity through the maintained scraper, posts and
+comments transports, raw state, response cookies, outgoing jars and browser
+requests. Legacy defaults remain unchanged; strict scraper mode disables only
+internal adapter retries/redirects that bypass the caller's identity/request
+checks. Outer counted retry, pacing and cooldown policies remain in place.
+The initial API batch passed 77 cases and found a default-referrer slash mismatch;
+its repair and affected/new checks passed 24 cases. The comments batch passed
+105 cases after narrowing strict JSON auth classification to request metadata,
+so ordinary comment text cannot become an auth failure. Classified auth/rate
+metadata still reaches failure/cooldown handling. The connected pipeline passed
+one test in 4.88 seconds after those changes.
+
+Fix-only review closed native-list failure, pending-reply and static-header
+findings, and identified one remaining edge of the original browser identity
+finding: root-URL cookie inspection missed API-path cookies and could mask a
+missing actual browser pair. The bounded repair now queries the exact request
+URL, rejects conflicting duplicate entries and requires both actual browser
+identity cookies before evaluation. Six affected browser cases passed in 0.76
+seconds. No unrelated suite or connected pipeline was repeated for this isolated
+browser path. Final inspection is limited to that remaining finding; deployment
+and canary resume still require acceptance and fresh runtime proof.
+
+Final limited review confirms all five findings closed at source level, including
+the six browser-identity regressions. Parent accepts this candidate for a scoped
+commit and one updated resource measurement. Live completion and post-deploy
+credential/source proof remain separate gates; the canary is still paused.

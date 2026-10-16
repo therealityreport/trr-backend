@@ -216,25 +216,10 @@ def build_api():
 
 
 def _credentials(account):
-    from trr_backend.socials.instagram.auth_resolver import resolve_instagram_auth_session
-    from trr_backend.socials.instagram.scrapling_session import cookies_to_scrapling
+    from trr_backend.ingestion.credential_snapshot import CredentialSnapshot
 
-    session = resolve_instagram_auth_session(
-        browser_account_id=account,
-        caller_context="instagram-ingestion",
-        require_validation=False,
-        allow_repair=False,
-    )
-    if not session.validated:
-        from trr_backend.ingestion.domain import Failure
-        from trr_backend.ingestion.post_transport import SourceFailure
-
-        raise SourceFailure(Failure("credential_snapshot_unavailable", identity_blocked=True))
-    return {
-        "cookies": cookies_to_scrapling(session.cookies),
-        "raw_cookies": dict(session.cookies),
-        "browser_account_id": session.session_account_id,
-    }
+    # The target account never selects the authenticated browser identity.
+    return CredentialSnapshot.from_environ().source_kwargs()
 
 
 class _GatedSource:
@@ -361,6 +346,7 @@ def _listing(context, owned):
 
 
 def _details(context, owned):
+    from trr_backend.ingestion.media_refresh import ExplicitDetailClient
     from trr_backend.ingestion.post_transport import DetailSource
 
     credentials = _credentials(owned["account"])
@@ -371,6 +357,7 @@ def _details(context, owned):
         browser_account_id=credentials["browser_account_id"],
         transaction=store.transaction,
         check_cancelled_in_transaction=lambda conn: store.check_owner(**owned, connection=conn),
+        scraper_factory=ExplicitDetailClient,
     )
 
 
@@ -382,11 +369,12 @@ def _comments(context, owned):
     return _gate_source(source, context, owned, credentials, failure_code="comment_fetch_failed")
 
 
-def _media_storage():
+def _media_storage(context, owned):
     import boto3
     from botocore.config import Config
 
     from trr_backend.ingestion.media import MediaStorage
+    from trr_backend.ingestion.media_refresh import MediaRefresh
     from trr_backend.media.s3_mirror import build_public_object_url, get_hosted_media_storage_config
 
     config = get_hosted_media_storage_config()
@@ -412,6 +400,12 @@ def _media_storage():
         bucket=config.bucket,
         build_hosted_url=build_public_object_url,
         prefix=config.prefix,
+        refresh=MediaRefresh(
+            store=Store(),
+            owned=owned,
+            owner_expires_at=context["target"]["owner_expires_at"],
+            credential_provider=lambda: _credentials(owned["account"]),
+        ),
     )
 
 

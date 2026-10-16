@@ -384,24 +384,48 @@ class MediaSnapshotLoader:
                         },
                     )
                 )
-        missing = {handle for handle, _, _, _, person in slots if not _profile_url(person)}
+        handles = {handle for handle, *_ in slots}
         registry = {}
-        if missing:
+        if handles:
             cur.execute(
                 """select distinct on(account_handle) * from social.avatar_registry
-                where platform='instagram' and account_handle=any(%s) and status in ('mirrored','pending','unsupported')
+                where platform='instagram' and account_handle=any(%s)
                 and last_checked_at is not null
                 order by account_handle,last_checked_at desc,
                 coalesce(status='mirrored' and nullif(hosted_url,'') is not null
                   and content_hash ~ '^[a-f0-9]{64}$',false) desc,id desc""",
-                (sorted(missing),),
+                (sorted(handles),),
             )
             registry = {row["account_handle"]: dict(row) for row in cur.fetchall()}
         avatars, unavailable, unresolved = [], set(), set()
         for handle, role, comment_id, stamp, person in slots:
             url = _profile_url(person)
+            fallback = registry.get(handle)
+            if url and fallback:
+                registry_time = _time(fallback["last_checked_at"])
+                hosted = fallback.get("hosted_url")
+                cached = (
+                    fallback.get("status") == "mirrored"
+                    and isinstance(hosted, str)
+                    and bool(hosted)
+                    and source_reference(hosted) == hosted
+                    and re.fullmatch(r"[a-f0-9]{64}", fallback.get("content_hash") or "")
+                    and fallback.get("source_url")
+                    and source_reference(fallback["source_url"]) == source_reference(url)
+                )
+                if cached and registry_time >= stamp:
+                    # This avatar has its own retained observation. Do not
+                    # relabel the post or overwrite the registry with its older
+                    # capture merely because another post uses the same image.
+                    avatars.append(
+                        AvatarSource(handle, url, role, comment_id, registry_time, hosted, fallback["content_hash"])
+                    )
+                    continue
+                if registry_time > stamp:
+                    # A newer conflicting or unproved identity cannot authorize
+                    # propagation of the older explicit source or cached bytes.
+                    raise MediaIncomplete("avatar_source_newer")
             if not url:
-                fallback = registry.get(handle)
                 if fallback and fallback.get("status") == "unsupported":
                     age = self.clock() - _time(fallback["last_checked_at"])
                     if fallback.get("failure_reason") == "profile_pic_not_available" and timedelta(
@@ -411,14 +435,20 @@ class MediaSnapshotLoader:
                         continue
                     unresolved.add(handle)
                     continue
-                if not fallback or not fallback.get("source_url"):
+                if (
+                    not fallback
+                    or fallback.get("status") not in {"mirrored", "pending"}
+                    or not fallback.get("source_url")
+                ):
                     unresolved.add(handle)
                     continue
                 url, stamp = fallback["source_url"], _time(fallback["last_checked_at"])
                 source_reference(url)
                 if (
                     fallback.get("status") == "mirrored"
-                    and fallback.get("hosted_url")
+                    and isinstance(fallback.get("hosted_url"), str)
+                    and bool(fallback["hosted_url"])
+                    and source_reference(fallback["hosted_url"]) == fallback["hosted_url"]
                     and re.fullmatch(r"[a-f0-9]{64}", fallback.get("content_hash") or "")
                 ):
                     avatars.append(

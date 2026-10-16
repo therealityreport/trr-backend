@@ -64,6 +64,7 @@ from trr_backend.socials.instagram.constants import (
     PROFILE_POSTS_ROOT_FIELD_NAME,
     WEB_X_ASBD_ID,
 )
+from trr_backend.socials.instagram.credential_guard import CredentialIdentityMismatch, PinnedCookieIdentity
 from trr_backend.socials.instagram.graphql_response import classify_graphql_response
 from trr_backend.socials.instagram.network_policy import (
     default_instagram_network_policy,
@@ -1165,6 +1166,11 @@ class InstagramPostsScraplingFetcher:
             if self._anonymous_mode
             else resolved_raw_cookies
         )
+        self._credential_identity = (
+            PinnedCookieIdentity(self._raw_cookies) if consume_credentials_only and not self._anonymous_mode else None
+        )
+        if self._credential_identity is not None:
+            self._raw_cookies = self._credential_identity.validate_snapshot(self._raw_cookies)
         self._browser_account_id = str(browser_account_id or "").strip() or None
         # A3: optional zero-arg callable returning the next pool identity as a
         # PostsRotatedIdentity (cookies, raw_cookies, browser_account_id). Injected
@@ -1443,8 +1449,8 @@ class InstagramPostsScraplingFetcher:
                 error_code="instagram_posts_warmup_auth_failed",
                 retryable=False,
             )
-        self._page_tokens = _extract_page_tokens(text)
         self._merge_warmup_cookies(response)
+        self._page_tokens = _extract_page_tokens(text)
         if (
             not self._anonymous_mode
             and not self._warmup_cookie_delta
@@ -1500,7 +1506,12 @@ class InstagramPostsScraplingFetcher:
         if not isinstance(raw_cookies, dict):
             raw_cookies = snapshot.get(_LEGACY_WARMUP_SNAPSHOT_COOKIE_STATE_KEY)
         page_tokens = snapshot.get("page_tokens")
-        if isinstance(raw_cookies, dict):
+        guard = getattr(self, "_credential_identity", None)
+        if guard is not None:
+            # A snapshot is complete identity state, not a partial cookie delta.
+            restored = guard.validate_snapshot(raw_cookies)
+            self._raw_cookies = guard.merge(self._raw_cookies, restored)
+        elif isinstance(raw_cookies, dict):
             self._raw_cookies.update({str(key): str(value) for key, value in raw_cookies.items()})
         if isinstance(page_tokens, dict):
             self._page_tokens = {str(key): str(value) for key, value in page_tokens.items() if str(value)}
@@ -1560,8 +1571,19 @@ class InstagramPostsScraplingFetcher:
             )
             return False
 
+        guard = getattr(self, "_credential_identity", None)
+        if guard is not None:
+            try:
+                restored = guard.validate_snapshot(entry.raw_cookies)
+                merged = guard.merge(self._raw_cookies, restored)
+            except CredentialIdentityMismatch:
+                _POSTS_WARMUP_POOL.pop(self._warmup_pool_key, None)
+                self._warmup_pool_metadata.update({"hit": False, "miss": True, "refresh_reason": "identity_mismatch"})
+                return False
+            self._raw_cookies = merged
+        else:
+            self._raw_cookies.update(entry.raw_cookies)
         entry.use_count += 1
-        self._raw_cookies.update(entry.raw_cookies)
         self._page_tokens = dict(entry.page_tokens)
         self._warmup_cookie_delta = {}
         await self._rebuild_http_client()
@@ -1578,6 +1600,9 @@ class InstagramPostsScraplingFetcher:
         return True
 
     def _store_warmup_pool_entry(self) -> None:
+        guard = getattr(self, "_credential_identity", None)
+        if guard is not None:
+            guard.validate_snapshot(self._raw_cookies)
         if not _warmup_pool_enabled():
             return
         _POSTS_WARMUP_POOL[self._warmup_pool_key] = _WarmupPoolEntry(
@@ -2026,8 +2051,8 @@ class InstagramPostsScraplingFetcher:
     def _merge_warmup_cookies(self, response: Any) -> None:
         """Record warmup cookie delta and sync future request headers."""
         new_cookies = _extract_response_cookies(response)
-        self._warmup_cookie_delta = dict(new_cookies)
         self._sync_response_cookies(response)
+        self._warmup_cookie_delta = dict(new_cookies)
 
     def _sync_response_cookies(self, response: Any) -> None:
         """Mirror response cookies into the header-building state.
@@ -2036,6 +2061,10 @@ class InstagramPostsScraplingFetcher:
         GraphQL headers read from `self._raw_cookies`. Keep both aligned so a
         rotated `csrftoken` or `ds_user_id` is visible on the next request.
         """
+        guard = getattr(self, "_credential_identity", None)
+        if guard is not None:
+            self._raw_cookies = guard.merge(self._raw_cookies, _extract_response_cookies(response))
+            return
         for name, value in _extract_response_cookies(response).items():
             normalized_name = str(name or "").strip().lower()
             if self._anonymous_mode and normalized_name in _AUTHENTICATED_COOKIE_NAMES:
@@ -2044,6 +2073,9 @@ class InstagramPostsScraplingFetcher:
 
     async def _rebuild_http_client(self) -> None:
         """Create or recreate the httpx client with current cookies and proxy."""
+        guard = getattr(self, "_credential_identity", None)
+        if guard is not None:
+            self._raw_cookies = guard.validate_snapshot(self._raw_cookies)
         existing_client = self._http_client
         self._http_client = None
         if existing_client is not None:
@@ -2267,6 +2299,13 @@ class InstagramPostsScraplingFetcher:
         Emits a document request with stripped-down nav headers so that the
         profile HTML comes back with the runtime tokens intact.
         """
+        guard = getattr(self, "_credential_identity", None)
+        if guard is not None:
+            self._raw_cookies = guard.validate_snapshot(self._raw_cookies)
+            self._cookies = [
+                {"name": name, "value": value, "domain": ".instagram.com", "path": "/"}
+                for name, value in self._raw_cookies.items()
+            ]
         observer = getattr(self, "_before_source_request", None)
         if observer is not None:
             observer("browser_warmup")
@@ -2308,6 +2347,22 @@ class InstagramPostsScraplingFetcher:
         if self._http_client is None:
             await self._rebuild_http_client()
         await self._pace_api_requests()
+        guard = getattr(self, "_credential_identity", None)
+        if guard is not None:
+            self._raw_cookies = guard.prepare_jar(self._http_client.cookies, self._raw_cookies)
+            forbidden = {"cookie", "authorization", "proxy-authorization"}
+            headers = {key: value for key, value in headers.items() if key.lower() not in forbidden}
+            client_headers = getattr(self._http_client, "headers", None)
+            if client_headers is not None:
+                for key in tuple(client_headers):
+                    if key.lower() in forbidden:
+                        client_headers.pop(key, None)
+            self._http_client.auth = None
+            if self._raw_cookies.get("csrftoken"):
+                headers["x-csrftoken"] = self._raw_cookies["csrftoken"]
+        elif getattr(self, "_consume_credentials_only", False) and self._anonymous_mode:
+            self._http_client.cookies.clear()
+            self._http_client.cookies.update(self._raw_cookies)
         observer = getattr(self, "_before_source_request", None)
         if observer is not None:
             observer("graphql")
@@ -2436,8 +2491,8 @@ class InstagramPostsScraplingFetcher:
         text = _response_text(recovery_response)
         if status_code >= 400 or 300 <= status_code < 400 or _auth_failure_text(text):
             return False
-        self._page_tokens = _extract_page_tokens(text)
         self._merge_warmup_cookies(recovery_response)
+        self._page_tokens = _extract_page_tokens(text)
         await self._rebuild_http_client()
         return True
 

@@ -14,6 +14,7 @@ import io
 import mimetypes
 import re
 import tempfile
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -63,6 +64,29 @@ class MediaIncomplete(ValueError):  # noqa: N818 - completion domain vocabulary
         self.code = code
         self.failure = Failure(code=code, retry_at=retry_at)
         super().__init__(code)
+
+
+class MediaOwnershipCheck:
+    """Force fences at side effects; bound body cancellation checks to one second."""
+
+    def __init__(self, durable: Callable, *, deadline: float, clock: Callable = time.monotonic):
+        self.durable, self.deadline, self.clock = durable, deadline, clock
+        self.last_checked = float("-inf")
+
+    def check_deadline(self) -> float:
+        now = self.clock()
+        if now >= self.deadline:
+            raise LostOwnership("Media execution deadline expired")
+        return now
+
+    def __call__(self) -> None:
+        self.check_deadline()
+        self.durable()
+        self.last_checked = self.check_deadline()
+
+    def body(self) -> None:
+        if self.check_deadline() - self.last_checked >= 1.0:
+            self()
 
 
 def _retry_at(value: str | None) -> datetime:
@@ -322,7 +346,7 @@ class MediaStorage:
                             raise MediaIncomplete("asset_too_large")
                         chunks, size = [], 0
                         for chunk in response.iter_content(chunk_size=64 * 1024):
-                            check()
+                            getattr(check, "body", check)()
                             size += len(chunk)
                             if size > self.max_bytes:
                                 raise MediaIncomplete("asset_too_large")
@@ -384,7 +408,7 @@ class MediaStorage:
         try:
             found, size = hashlib.sha256(), 0
             while chunk := body.read(64 * 1024):
-                check()
+                getattr(check, "body", check)()
                 size += len(chunk)
                 if size > self.max_bytes:
                     return False
@@ -588,6 +612,9 @@ def mirror_snapshot(
         originals.append(entry)
     for variant in variants.values():
         variant["generated_at"] = stamp
+    physical_originals = {item["storage_key"]: item for item in [cover, *originals]}
+    physical_variants = {item["storage_key"]: item for item in variants.values()}
+    physical_objects = {**physical_originals, **physical_variants}
     manifest = {
         "selection_policy": "best_per_role_with_cover_display_variants",
         "originals": {"cover": cover, "media": originals},
@@ -597,11 +624,11 @@ def mirror_snapshot(
         "updated_at": stamp,
         "ingestion_media": {"version": MEDIA_VERSION, "observed_at": stamp},
         "storage_summary": {
-            "original_bytes": sum(i["bytes"] for i in [cover, *originals]),
-            "variant_bytes": sum(v["bytes"] for v in variants.values()),
-            "object_count": len(originals) + 1 + len(variants),
-            "variant_count": len(variants),
-            "cdn_url_count": len(originals) + 1 + len(variants),
+            "original_bytes": sum(i["bytes"] for i in physical_originals.values()),
+            "variant_bytes": sum(v["bytes"] for v in physical_variants.values()),
+            "object_count": len(physical_objects),
+            "variant_count": len(physical_variants),
+            "cdn_url_count": len({item["url"] for item in physical_objects.values()}),
         },
     }
     post = {
@@ -885,8 +912,11 @@ def write_media(
 
 
 class MediaActivity:
-    def __init__(self, store: Store, *, storage: MediaStorage, writer: Callable = write_media):
+    def __init__(
+        self, store: Store, *, storage: MediaStorage, writer: Callable = write_media, clock: Callable = time.monotonic
+    ):
         self.store, self.storage, self.writer = store, storage, writer
+        self.clock = clock
 
     def execute(
         self,
@@ -909,12 +939,14 @@ class MediaActivity:
             "owner_token": owner_token,
             "stage": stage,
         }
-        self.store.acquire(**owned)
-
-        def check():
-            self.store.check_owner(**owned)
+        acquired = self.store.acquire(**owned)
+        remaining = (acquired["owner_expires_at"] - datetime.now(UTC)).total_seconds() - 2
+        check = MediaOwnershipCheck(
+            lambda: self.store.check_owner(**owned), deadline=self.clock() + min(590, remaining), clock=self.clock
+        )
 
         def request():
+            check.check_deadline()
             self.store.check_owner(**owned, record_request=True)
 
         check()
@@ -967,6 +999,9 @@ class MediaActivity:
             },
         )
         evidence_id = self.store.retain_evidence(**owned, evidence=evidence)
+        bind_snapshot = getattr(getattr(self.storage, "refresh", None), "bind_snapshot", None)
+        if callable(bind_snapshot):
+            bind_snapshot(snapshot)
         result = mirror_snapshot(snapshot, self.storage, check=check, request=request)
         check()
         if result.outcome == Outcome.COMMITTED:

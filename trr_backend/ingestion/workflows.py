@@ -280,12 +280,12 @@ class DBOSAdapter:
             while time.monotonic() < end:
                 if time.monotonic() >= next_error_scan:
                     self.reconcile_engine_failures()
-                    next_error_scan = time.monotonic() + 1.0
+                    next_error_scan = time.monotonic() + 5.0
                 self.scheduler.store.dispatch_pending(
                     self.submit_initial, engine="dbos", workflow_version=self.config.workflow_version
                 )
                 self.scheduler.store.dispatch_partitions(self.submit, workflow_version=self.config.workflow_version)
-                stop.wait(0.1)
+                stop.wait(1.0)
             exit_code = 0
             return "bounded"
         finally:

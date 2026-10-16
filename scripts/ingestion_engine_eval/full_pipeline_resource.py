@@ -179,6 +179,13 @@ def private_environment(dsn, source, root, profile):
         "SOCIAL_INSTAGRAM_COMMENTS_REQUEST_DELAY_SEC": "0",
         "SOCIAL_INSTAGRAM_MEDIA_MIRROR_COMMENT_AVATARS": "1",
         "SOCIAL_INSTAGRAM_DELAY_SEC": "0",
+        # Native explicit-only credential snapshot; fixed synthetic values,
+        # never inherited operator cookies or browser/profile resolution.
+        "SOCIAL_INSTAGRAM_COOKIES_JSON": json.dumps(
+            {"sessionid": "synthetic-fixture", "ds_user_id": "100", "csrftoken": "fixture"}
+        ),
+        "TRR_INSTAGRAM_INGESTION_AUTH_USER_ID": "100",
+        "TRR_INSTAGRAM_INGESTION_AUTH_USERNAME": "livestnation",
         "EVAL_SOURCE_ROOT": str(source),
         "EVAL_RUNTIME_ROOT": str(root),
         "EVAL_DATABASE_URL": dsn,
@@ -1082,6 +1089,15 @@ def assert_outputs(root, states, *, candidate):
             resolve(hosted, code, "canonical-original", source_asset=code + ".png")
         else:
             assert hosted is None and status is None, "Review changed legacy canonical media coverage"
+    if candidate:
+        # Prove cached avatar references preserve identity as well as body bytes.
+        registry_urls = {handle: url for handle, _, url in states["avatars"]}
+        assert all(row[8] == registry_urls[ACCOUNT] for row in states["posts"])
+        assert all(row[5] == registry_urls["replier" if row[2] else "reader"] for row in states["comments"])
+        assert set(objects) == {row["url"] for row in roles}, "Unreferenced physical object remains"
+    # Twelve shared cover/media originals plus120 variant keys,12 comment
+    # originals and three avatar identities. Prior avatar HEAD hits did not add
+    # physical objects, so cached registry reuse does not change this fixture.
     assert len(objects) == 147, "Physical object expectation failed; preserve native outputs and investigate"
     # Canonical hosted fields are explicitly additional candidate coverage.
     common_roles = sorted(
@@ -1093,6 +1109,7 @@ def assert_outputs(root, states, *, candidate):
         "common_roles": common_roles,
         "literal_roles": roles,
         "physical_objects": len(objects),
+        "shared_avatar_registry_urls_proven": candidate,
         "canonical_asset_delta": "candidate hosted/status populated; legacy null",
         "exact_output_parity_claimed": False,
     }

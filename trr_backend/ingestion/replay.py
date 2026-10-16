@@ -372,14 +372,44 @@ def _decode_media_result(payload: dict[str, Any]) -> MediaResult:
             manifest["storage_summary"],
             required="original_bytes variant_bytes object_count variant_count cdn_url_count",
         )
-        expected_summary = {
+        # Roles may share one immutable object. Validate shared-key metadata
+        # before deduplicating; dictionary last-wins would hide conflicting proof.
+        physical, hashes = {}, {}
+        for item in [*assets, *variants.values()]:
+            key = item["storage_key"]
+            previous = physical.get(key)
+            if previous is not None and any(
+                previous[field] != item[field]
+                for field in ("bytes", "url", "format", "content_type", "width", "height")
+            ):
+                raise InvalidSourceError("Media shared object metadata conflicts")
+            if "sha256" in item:
+                if key in hashes and hashes[key] != item["sha256"]:
+                    raise InvalidSourceError("Media shared object hash conflicts")
+                hashes[key] = item["sha256"]
+            physical.setdefault(key, item)
+        original_keys = {item["storage_key"] for item in assets}
+        variant_keys = {item["storage_key"] for item in variants.values()}
+        physical_summary = {
+            "original_bytes": sum(physical[key]["bytes"] for key in original_keys),
+            "variant_bytes": sum(physical[key]["bytes"] for key in variant_keys),
+            "object_count": len(physical),
+            "variant_count": len(variant_keys),
+            "cdn_url_count": len({item["url"] for item in physical.values()}),
+        }
+        # Preserved result-v1 evidence counted roles, even when cover/media used
+        # the same key. Accept that exact historical calculation, not hybrids.
+        legacy_summary = {
             "original_bytes": sum(item["bytes"] for item in assets),
             "variant_bytes": sum(item["bytes"] for item in variants.values()),
             "object_count": len(assets) + len(variants),
             "variant_count": len(variants),
             "cdn_url_count": len(assets) + len(variants),
         }
-        if any(type(summary[key]) is not int or summary[key] != value for key, value in expected_summary.items()):
+        if any(type(value) is not int for value in summary.values()) or summary not in (
+            physical_summary,
+            legacy_summary,
+        ):
             raise InvalidSourceError("Media object summary differs from retained outputs")
         for role, key in keys.items():
             observed = variants.get(role) or next((item for item in assets if item["variant_key"] == role), None)

@@ -12,7 +12,12 @@ import copy
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from trr_backend.ingestion.comments import CommentFetchSummary, CommentSourceError
+from trr_backend.ingestion.comments import (
+    CommentFetchSummary,
+    CommentResumeNode,
+    CommentSourceError,
+    comment_page_failure,
+)
 
 _ALLOWED_OPERATIONS = frozenset(
     {
@@ -32,6 +37,7 @@ _SUCCESS_REASONS = frozenset(
         "api_pagination_complete",
         "reply_tail_coverage_complete",
         "residual_child_lane_complete",
+        "coverage_target_met",
     }
 )
 _DIRECTIONS = frozenset({"min_id", "max_id"})
@@ -221,6 +227,7 @@ class ScraplingCommentSource:
         *,
         shortcode: str,
         checkpoint: dict[str, Any],
+        resume_inventory: tuple[CommentResumeNode, ...] = (),
         source_observer: Callable[[str, Mapping[str, Any]], None],
         pre_source_request: Callable[[], None],
         source_failure_observer: Callable[[str, float | None], None] | None = None,
@@ -233,6 +240,11 @@ class ScraplingCommentSource:
             raise RuntimeError("Run the synchronous comment activity outside the active event loop")
         resume, from_root = _resume(checkpoint)
         pages = checkpoint.get("comment_pages") or {}
+        lanes = pages.get("lanes") or {}
+        top_exhausted = (lanes.get("__top__") or {}).get("exhausted") is True
+        # Unmappable cursors deliberately restart root; old inventory cannot
+        # contribute to that new observation's source coverage.
+        seed = resume_inventory if resume["top_level_cursor"] is not None or top_exhausted else ()
         expected = self._expected_count
         if expected is None:
             expected = _count(pages.get("expected"))
@@ -256,7 +268,21 @@ class ScraplingCommentSource:
                         "source": "root" if resume["top_level_cursor"] is None else "resume",
                     }
                     first_top_page = False
-            _guard(source_observer, kind, native)
+
+            def retain_and_classify():
+                failure = comment_page_failure(native)
+                try:
+                    source_observer(kind, native)
+                except CommentSourceError:
+                    if failure and source_failure_observer is not None:
+                        source_failure_observer(*failure)
+                    raise
+                if failure:
+                    if source_failure_observer is not None:
+                        source_failure_observer(*failure)
+                    raise CommentSourceError("Native comment page contains failed request metadata")
+
+            _guard(retain_and_classify)
 
         async def fetch() -> CommentFetchSummary:
             fetcher = self._factory(
@@ -277,6 +303,48 @@ class ScraplingCommentSource:
             try:
                 if self._warmup:
                     await fetcher.warmup()
+                parents = _seed_parents(seed, shortcode)
+                observed = pages.get("observed") or {}
+                pending = [
+                    parent
+                    for parent in parents
+                    if (
+                        (lanes.get(parent.comment_id) or {}).get("exhausted") is False
+                        or (
+                            _count((observed.get(parent.comment_id) or {}).get("expected_replies")) is not None
+                            and len(parent.replies) < observed[parent.comment_id]["expected_replies"]
+                        )
+                    )
+                ]
+                if pending:
+                    reply_result = await fetcher.fetch_comments_for_shortcode(
+                        shortcode,
+                        max_comments=0,
+                        fetch_replies=True,
+                        expected_comment_count=expected,
+                        expected_count_unknown=expected is None,
+                        persisted_top_level_comments=pending,
+                        persisted_replies_by_parent={parent.comment_id: parent.replies for parent in pending},
+                        reply_resume_cursors=resume["reply_resume_cursors"],
+                        reply_resume_cursor_params=resume["reply_resume_cursor_params"],
+                        reply_only=True,
+                        seed_persisted_comments=True,
+                        pending_reply_parent_ids=tuple(parent.comment_id for parent in pending),
+                    )
+                    reply_summary = _summary(reply_result, expected=expected, from_root=from_root, capped=False)
+                    if (
+                        reply_summary.fetch_failed
+                        or reply_summary.auth_failed
+                        or reply_summary.retryable
+                        or (reply_summary.reply_checkpoints or reply_summary.top_level_checkpoint)
+                    ):
+                        failed = False
+                        return reply_summary
+                    refreshed = {parent.comment_id: parent for parent in getattr(reply_result, "comments", [])}
+                    parents = [refreshed.get(parent.comment_id, parent) for parent in parents]
+                if top_exhausted:
+                    failed = False
+                    return CommentFetchSummary(expected_count=expected, full_observation=from_root)
                 result = await fetcher.fetch_comments_for_shortcode(
                     shortcode,
                     max_comments=self._max_comments,
@@ -284,6 +352,9 @@ class ScraplingCommentSource:
                     expected_comment_count=expected,
                     expected_count_unknown=expected is None,
                     load_strategy="instagram_comments_endpoint_cursor",
+                    persisted_top_level_comments=parents or None,
+                    persisted_replies_by_parent={parent.comment_id: parent.replies for parent in parents} or None,
+                    seed_persisted_comments=bool(parents),
                     **resume,
                 )
                 summary = _summary(result, expected=expected, from_root=from_root, capped=self._max_comments > 0)
@@ -302,6 +373,45 @@ class ScraplingCommentSource:
             return asyncio.run(fetch())
         except _CallbackAbort as abort:
             raise abort.error from None
+
+
+def _seed_parents(inventory: tuple[CommentResumeNode, ...], shortcode: str) -> list[Any]:
+    if not inventory:
+        return []
+    from trr_backend.ingestion.canonical import normalize_comment_source
+    from trr_backend.socials.instagram.scraper import InstagramComment
+
+    nodes = {}
+    for retained in inventory:
+        source = retained.source_payload
+        parsed = normalize_comment_source(source)
+        if not parsed.comment_id or parsed.comment_id in nodes:
+            raise CommentSourceError("Resume inventory contains duplicate or absent identities")
+        nodes[parsed.comment_id] = InstagramComment(
+            comment_id=parsed.comment_id,
+            text=parsed.text,
+            username=parsed.username or "",
+            user_id=parsed.user_id or "",
+            created_at=parsed.created_at or 0,
+            date_time="",
+            likes=parsed.likes_count,
+            is_reply=bool(parsed.parent_comment_id),
+            parent_comment_id=parsed.parent_comment_id,
+            reply_count=parsed.replies_count,
+            child_comment_count=parsed.replies_count,
+            post_shortcode=shortcode,
+            post_url=f"https://www.instagram.com/p/{shortcode}/",
+        )
+    parents = []
+    for node in nodes.values():
+        if node.parent_comment_id:
+            parent = nodes.get(node.parent_comment_id)
+            if parent is None or parent.parent_comment_id:
+                raise CommentSourceError("Resume inventory has an unsupported or missing parent")
+            parent.replies.append(node)
+        else:
+            parents.append(node)
+    return parents
 
 
 def _unsupported(kind: str) -> None:

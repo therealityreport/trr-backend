@@ -22,6 +22,7 @@ from trr_backend.ingestion.media import (
     CommentMedia,
     MediaActivity,
     MediaIncomplete,
+    MediaOwnershipCheck,
     MediaSnapshot,
     MediaStorage,
     legacy_comment_source_key,
@@ -158,6 +159,12 @@ def test_exact_source_reuse_downloads_once_and_preserves_distinct_manifest_roles
     assert (cover["source_role"], cover["variant_key"]) == ("cover", "cover_original")
     assert (media["source_role"], media["variant_key"]) == ("media", "media_original_01")
     assert cover["sha256"] == media["sha256"] and len(manifest["display_variants"]) == 10
+    summary = manifest["storage_summary"]
+    assert summary["object_count"] == summary["cdn_url_count"] == len(client.objects) == 11
+    assert summary["original_bytes"] == cover["bytes"]
+    assert summary["variant_bytes"] == sum(
+        len(data) for key, (data, _) in client.objects.items() if key != cover["storage_key"]
+    )
 
 
 def test_distinct_source_urls_with_identical_bytes_keep_separate_objects():
@@ -199,6 +206,9 @@ def test_exact_source_reuse_respects_preserved_role_storage_identity(shared_key)
     assert downloaded == [SOURCE] * (1 if shared_key else 2)
     assert cover_key in client.objects and media_key in client.objects
     assert len(client.writes) == (11 if shared_key else 12)
+    summary = result.post_fields["asset_manifest"]["storage_summary"]
+    assert summary["object_count"] == summary["cdn_url_count"] == len(client.objects)
+    assert summary["original_bytes"] == len(image_bytes()) * (1 if shared_key else 2)
 
 
 def test_cached_avatar_proof_reuses_hosted_identity_without_cdn_or_storage_write():
@@ -615,6 +625,29 @@ def test_explicit_source_unavailable_proof_settles_without_network(media_databas
     assert receipt["outcome"] == "source_unavailable"
 
 
+def test_refresh_binds_validated_snapshot_once_before_any_download(media_database):
+    store, _ = media_database
+    owned, token, source = launch_media(media_database)
+    bound = []
+
+    class Refresh:
+        def bind_snapshot(self, value):
+            value.validate()
+            bound.append(value)
+
+        def __call__(self, **kwargs):
+            pytest.fail("Fresh source unexpectedly required URL refresh")
+
+    def opener(*args, **kwargs):
+        assert bound == [source]
+        return Response()
+
+    receipt = MediaActivity(store, storage=storage(opener=opener, refresh=Refresh())).execute(
+        **owned, owner_token=token, load=lambda **callbacks: source
+    )
+    assert receipt["outcome"] == "committed" and bound == [source]
+
+
 def test_cdn_error_retains_evidence_but_cannot_settle_media_target(media_database):
     store, tx = media_database
     owned, token, source = launch_media(media_database)
@@ -649,6 +682,119 @@ def test_expired_owner_after_upload_cannot_commit_or_continue_storage(media_data
     with tx() as conn, conn.cursor() as cur:
         cur.execute("select count(*) from social.instagram_ingestion_receipts where run_id=%s", (owned["run_id"],))
         assert cur.fetchone()[0] == 0
+
+
+class ChunkClock:
+    def __init__(self):
+        self.milliseconds = 0
+
+    def __call__(self):
+        return self.milliseconds / 1000
+
+
+def test_fifty_mib_stream_uses_bounded_durable_sql_checks(media_database):
+    store, _ = media_database
+    owned, token, _ = launch_media(media_database)
+    store.acquire(**owned, owner_token=token)
+    clock = ChunkClock()
+    durable_checks, requests_sent = [], []
+    chunk = b"\x00\x00\x00\x18ftypmp42" + b"x" * (64 * 1024 - 12)
+
+    class ChunkedResponse(Response):
+        def iter_content(self, *, chunk_size):
+            assert chunk_size == len(chunk)
+            for _ in range(800):
+                clock.milliseconds += 10
+                yield chunk
+
+    def durable():
+        durable_checks.append(clock())
+        store.check_owner(**owned, owner_token=token)
+
+    def request():
+        requests_sent.append(clock())
+        store.check_owner(**owned, owner_token=token, record_request=True)
+
+    data, content_type = storage(
+        opener=lambda *a, **kw: ChunkedResponse(headers={"Content-Type": "video/mp4"})
+    )._download(
+        "https://scontent.cdninstagram.com/video.mp4",
+        check=MediaOwnershipCheck(durable, deadline=590, clock=clock),
+        request=request,
+    )
+    assert len(data) == 50 * 1024 * 1024 and content_type == "video/mp4"
+    assert durable_checks == list(range(9))  # Initial fence plus one per second; not 800 SQL transactions.
+    assert requests_sent == [0]
+
+
+def test_stream_cancellation_is_observed_within_one_second(media_database):
+    store, _ = media_database
+    owned, token, _ = launch_media(media_database)
+    store.acquire(**owned, owner_token=token)
+    clock = ChunkClock()
+    cancelled_at = None
+
+    class CancelledResponse(Response):
+        def iter_content(self, *, chunk_size):
+            nonlocal cancelled_at
+            for position in range(800):
+                clock.milliseconds += 10
+                if position == 10:
+                    cancelled_at = clock()
+                    store.control(owned["run_id"], owned["account"], action="cancel", idempotency_key=str(uuid4()))
+                yield b"x" * chunk_size
+
+    with pytest.raises(LostOwnership):
+        storage(opener=lambda *a, **kw: CancelledResponse())._download(
+            SOURCE,
+            check=MediaOwnershipCheck(lambda: store.check_owner(**owned, owner_token=token), deadline=590, clock=clock),
+            request=noop,
+        )
+    assert cancelled_at is not None and 0 < clock() - cancelled_at <= 1
+    assert clock() == 1
+
+
+def test_stream_checks_local_deadline_on_every_chunk():
+    clock = ChunkClock()
+    durable_checks = []
+
+    class SlowResponse(Response):
+        def iter_content(self, **kwargs):
+            for _ in range(100):
+                clock.milliseconds += 10
+                yield b"x"
+
+    with pytest.raises(LostOwnership, match="deadline"):
+        storage(opener=lambda *a, **kw: SlowResponse())._download(
+            SOURCE,
+            check=MediaOwnershipCheck(lambda: durable_checks.append(clock()), deadline=0.25, clock=clock),
+            request=noop,
+        )
+    assert clock() == 0.25 and durable_checks == [0]
+
+
+def test_new_generation_after_last_upload_cannot_commit_media(media_database):
+    _, tx = media_database
+    owned, token, source = launch_media(media_database)
+    client = Storage()
+
+    def replace_generation():
+        if len(client.writes) == 11:
+            with tx() as conn, conn.cursor() as cur:
+                cur.execute(
+                    "update social.instagram_ingestion_runs set generation=generation+1 where run_id=%s",
+                    (owned["run_id"],),
+                )
+
+    client.after_put = replace_generation
+    with pytest.raises(LostOwnership):
+        execute(media_database, owned, token, source, client=client)
+    assert len(client.writes) == 11
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute("select count(*) from social.instagram_ingestion_receipts where run_id=%s", (owned["run_id"],))
+        assert cur.fetchone()[0] == 0
+        cur.execute("select hosted_media_urls from social.instagram_posts where id=%s", (source.post_id,))
+        assert cur.fetchone()[0] == []
 
 
 def test_newer_canonical_asset_fences_old_media_snapshot(media_database):

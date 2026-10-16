@@ -8,6 +8,7 @@ A page receipt is progress, never proof that an entire post was observed.
 from __future__ import annotations
 
 import json
+import math
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -62,12 +63,21 @@ class CommentFetchSummary:
     full_observation: bool = False
 
 
+@dataclass(frozen=True)
+class CommentResumeNode:
+    """Previously committed native content; never a new source observation."""
+
+    source_payload: dict[str, Any]
+    observed_at: datetime
+
+
 class CommentSource(Protocol):
     def __call__(
         self,
         *,
         shortcode: str,
         checkpoint: dict[str, Any],
+        resume_inventory: tuple[CommentResumeNode, ...],
         source_observer: Callable[[str, Mapping[str, Any]], None],
         pre_source_request: Callable[[], None],
     ) -> CommentFetchSummary: ...
@@ -75,6 +85,122 @@ class CommentSource(Protocol):
 
 def _count(value: Any) -> int | None:
     return value if type(value) is int and value >= 0 else None
+
+
+def comment_page_failure(value: Any) -> tuple[str, float | None] | None:
+    """Inspect request envelopes, never ordinary identified comment content."""
+    if isinstance(value, list):
+        failures = [failure for item in value if (failure := comment_page_failure(item)) is not None]
+        return next((item for item in failures if item[0] != "source_incomplete"), failures[0] if failures else None)
+    if not isinstance(value, Mapping):
+        return None
+    if any(value.get(key) for key in ("id", "pk", "comment_id", "text")):
+        return None
+    status = value.get("status")
+    failed = status is not None and (not isinstance(status, str) or status not in {"ok", "success"})
+    failed = failed or any(
+        value.get(key)
+        for key in (
+            "error",
+            "errors",
+            "error_type",
+            "auth_failed",
+            "login_required",
+            "require_login",
+            "checkpoint_required",
+            "challenge_required",
+            "rate_limited",
+            "feedback_required",
+        )
+    )
+    codes = [value.get(key) for key in ("status_code", "http_status")]
+    for key in ("status_code", "http_status"):
+        code = value.get(key)
+        if code is not None and (type(code) is not int or code >= 300):
+            failed = True
+    message = " ".join(
+        str(value.get(key) or "").lower()
+        for key in (
+            "message",
+            "error_message",
+            "error",
+            "errors",
+            "error_type",
+            "status",
+        )
+    )
+    auth = any(
+        value.get(key)
+        for key in ("auth_failed", "login_required", "require_login", "checkpoint_required", "challenge_required")
+    ) or any(code in (401, 403) for code in codes)
+    auth = auth or any(
+        marker in message
+        for marker in (
+            "login_required",
+            "login required",
+            "checkpoint",
+            "challenge_required",
+            "unauthorized",
+            "forbidden",
+            "authentication",
+        )
+    )
+    rate = (
+        value.get("rate_limited")
+        or value.get("feedback_required")
+        or 429 in codes
+        or any(
+            marker in message
+            for marker in (
+                "rate_limit",
+                "rate limit",
+                "too many requests",
+                "please wait",
+                "feedback_required",
+            )
+        )
+    )
+    if rate:
+        retry = value.get("retry_after")
+        try:
+            retry = float(retry) if type(retry) in (int, float) else None
+        except OverflowError:
+            retry = None
+        return "rate_limited", retry if retry is not None and math.isfinite(retry) and retry >= 0 else None
+    if auth:
+        return "source_auth_failed", None
+    if any(
+        marker in message
+        for marker in (
+            "login_required",
+            "login required",
+            "checkpoint",
+            "challenge_required",
+            "rate limit",
+            "too many requests",
+            "please wait",
+            "unauthorized",
+            "forbidden",
+            "feedback_required",
+            "authentication",
+        )
+    ):
+        failed = True
+    containers = {
+        "items",
+        "data",
+        "graphql",
+        "shortcode_media",
+        "xdt_shortcode_media",
+        "media",
+        "comments",
+        "child_comments",
+        "replies",
+        "page_info",
+        *_CONNECTIONS,
+    }
+    nested = comment_page_failure([value[key] for key in containers.intersection(value)])
+    return nested or (("source_incomplete", None) if failed else None)
 
 
 def _find_connection(payload: Mapping[str, Any]) -> tuple[str, Mapping[str, Any]] | None:
@@ -145,6 +271,10 @@ def parse_comment_evidence(
     if parser_version != COMMENT_PARSER_VERSION:
         raise CommentSourceError("Requested comment parser version is unavailable")
     payload = evidence.read(pinned=pinned)
+    if comment_page_failure(payload):
+        raise CommentSourceError("Native comment page contains failed request metadata")
+    if payload.get("source_snapshot_type") == "native_rest_list_v1":
+        payload = _native_list_page(payload)
     parent = payload.get("parent_comment_id") or payload.get("parent_comment_pk")
     parent = str(parent) if parent is not None else None
     if payload.get("comments_disabled") is True:
@@ -224,6 +354,49 @@ def parse_comment_evidence(
         started_from_root=isinstance(payload.get("cursor_payload"), dict)
         and payload["cursor_payload"].get("source") == "root",
     )
+
+
+def _native_list_page(envelope: dict[str, Any]) -> dict[str, Any]:
+    """Unwrap retained native list rows without inventing terminal metadata."""
+    if set(envelope) - {"source_snapshot_type", "items", "parent_comment_id", "cursor_payload", "status"}:
+        raise CommentSourceError("Native list envelope contains unsupported fields")
+    items = envelope.get("items")
+    if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+        raise CommentSourceError("Native list envelope requires object entries")
+    keys = {
+        "comment_count",
+        "has_more_comments",
+        "has_more_headload_comments",
+        "next_min_id",
+        "next_max_id",
+        "cached_comments_cursor",
+        "tao_cursor",
+        "bifilter_token",
+        "has_more_tail_child_comments",
+        "has_more_head_child_comments",
+        "next_min_child_cursor",
+        "next_max_child_cursor",
+    }
+    result = {key: value for key, value in envelope.items() if key in {"parent_comment_id", "cursor_payload"}}
+    rows = []
+    for item in items:
+        identity = any(item.get(key) for key in ("id", "pk", "comment_id", "text", "user", "owner"))
+        nested = "child_comments" if result.get("parent_comment_id") else "comments"
+        if nested in item:
+            if not isinstance(item[nested], list):
+                raise CommentSourceError("Native list page rows are malformed")
+            rows.extend(item[nested])
+        elif identity:
+            rows.append(item)
+        elif not keys.intersection(item):
+            raise CommentSourceError("Native list entry has neither identity nor pagination proof")
+        for key in keys.intersection(item):
+            if item[key] is not None:
+                if key in result and result[key] != item[key]:
+                    raise CommentSourceError("Native list pagination metadata conflicts")
+                result[key] = item[key]
+    result["child_comments" if result.get("parent_comment_id") else "comments"] = rows
+    return result
 
 
 def _progress(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
@@ -381,17 +554,23 @@ class CommentActivity:
                 raise Conflict("Canonical parent post does not match the comment target shortcode")
         attempt_started_at = datetime.fromisoformat(utc_timestamp(self.clock()))
         state = _progress(current_checkpoint)
-        retained: tuple[str, Evidence, CommentPage] | None = None
+        resume_inventory, retained = self._resume_inventory(owned, state)
 
         def observe(kind: str, payload: Mapping[str, Any]) -> None:
             nonlocal current_checkpoint, state, retained
             if kind not in {"comments_api", "graphql_comments", "graphql_replies", "graphql_preview"}:
                 raise CommentSourceError("Unsupported source comment page kind")
+            retained_payload = dict(payload)
+            if comment_page_failure(payload):
+                # Error messages are intentionally outside the evidence allowlist.
+                # Preserve a fixed failed-request fact so offline replay cannot
+                # discard that rejection while retaining terminal pagination.
+                retained_payload["status"] = "fail"
             evidence = Evidence.capture(
                 source_identity=f"instagram:comments:{target_key}:{kind}",
                 captured_at=self.clock(),
                 parser_version=COMMENT_PARSER_VERSION,
-                payload=dict(payload),
+                payload=retained_payload,
             )
             evidence_id = self.store.retain_evidence(**owned, evidence=evidence)
             # Preview samples remain retained but cannot become full-comments rows.
@@ -400,6 +579,8 @@ class CommentActivity:
             page = parse_comment_evidence(evidence, pinned=True)
             updated = _progress({"comment_pages": state})
             _advance(updated, page, scan_started_at=attempt_started_at)
+            if not page.parent_comment_id and (page.started_from_root or "__top__" not in state["lanes"]):
+                updated["scan_root_evidence_id"] = evidence_id
             next_checkpoint = {**current_checkpoint, "comment_pages": updated}
             self._persist_page(
                 owned,
@@ -418,6 +599,7 @@ class CommentActivity:
         summary = source(
             shortcode=target_key,
             checkpoint=json.loads(stable_json(current_checkpoint)),
+            resume_inventory=resume_inventory,
             source_observer=observe,
             pre_source_request=lambda: self.store.check_owner(**owned, record_request=True),
         )
@@ -466,6 +648,68 @@ class CommentActivity:
             "complete": True,
             "receipt": receipt,
         }
+
+    def _resume_inventory(
+        self, owned: dict[str, Any], state: dict[str, Any]
+    ) -> tuple[tuple[CommentResumeNode, ...], tuple[str, Evidence, CommentPage] | None]:
+        if not state["lanes"]:
+            return (), None
+        with self.store.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """select e.*,p.checkpoint from social.instagram_ingestion_comment_pages p
+                join social.instagram_ingestion_evidence e using(evidence_id,run_id,stage,target_key)
+                where p.run_id=%s and p.target_key=%s and p.stage='comments'
+                order by p.committed_at,p.page_id""",
+                (owned["run_id"], owned["target_key"]),
+            )
+            pages = cur.fetchall()
+        root_id = state.get("scan_root_evidence_id")
+        if root_id:
+            root_index = next((index for index, row in enumerate(pages) if str(row["evidence_id"]) == root_id), None)
+            if root_index is None:
+                raise CommentSourceError("Durable scan root lacks committed evidence")
+            pages = pages[root_index:]
+        nodes: dict[str, CommentResumeNode] = {}
+        proof = None
+        for row in pages:
+            retained = Evidence(
+                source_identity=row["source_identity"],
+                captured_at=row["captured_at"],
+                parser_version=row["parser_version"],
+                payload_json=row["payload"],
+                content_hash=row["content_hash"],
+                schema_version=row["schema_version"],
+            )
+            page = parse_comment_evidence(retained, pinned=True)
+            proof = (str(row["evidence_id"]), retained, page)
+            if page.started_from_root and not page.parent_comment_id:
+                nodes.clear()
+
+            def visit(comment: InstagramComment, raw: dict[str, Any], observed_at: datetime = page.observed_at) -> None:
+                identity = comment.comment_id
+                if identity in state["observed"]:
+                    if state["observed"][identity]["parent"] != comment.parent_comment_id:
+                        raise CommentSourceError("Retained resume inventory changed parent identity")
+                    payload = dict(raw, parent_comment_id=comment.parent_comment_id)
+                    for key in ("replies", "child_comments", "preview_child_comments", "edge_threaded_comments"):
+                        payload.pop(key, None)
+                    count = state["observed"][identity]["expected_replies"]
+                    if count is not None:
+                        payload["child_comment_count"] = count
+                    nodes[identity] = CommentResumeNode(payload, observed_at)
+                for child, source in zip(comment.replies, raw["replies"], strict=True):
+                    visit(child, source)
+
+            for comment, raw in zip(page.comments, page.source_payloads, strict=True):
+                visit(comment, raw)
+        receipt_state = _progress(pages[-1]["checkpoint"]) if pages else {}
+        if "scan_started_at" not in state:
+            # Legacy progress may lack the safe missing-row cutoff. Retain that
+            # absence: it cannot settle or mark missing without a fresh root.
+            receipt_state.pop("scan_started_at", None)
+        if set(nodes) != set(state["observed"]) or not pages or receipt_state != state:
+            raise CommentSourceError("Durable comment inventory lacks matching committed page proof")
+        return tuple(nodes[key] for key in sorted(nodes)), proof
 
     def _persist_page(
         self,

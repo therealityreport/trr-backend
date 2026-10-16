@@ -627,6 +627,92 @@ def test_mirrored_registry_pair_becomes_cached_avatar_and_skips_avatar_cdn(snaps
     assert_no_snapshot_source_requests(snapshot_database, owned)
 
 
+def test_older_post_reuses_newer_matching_owner_proof_without_avatar_download(snapshot_database):
+    from tests.ingestion.test_media import Response, storage
+    from trr_backend.ingestion.media import MediaActivity
+
+    store, tx = snapshot_database
+    handle = "ordered_" + uuid4().hex[:12]
+    avatar_url = "https://scontent.cdninstagram.com/ordered-owner.png?oh=delivery"
+    older, older_ids, _, _ = seed(snapshot_database, comments=0)
+    newer, newer_ids, _, _ = seed(snapshot_database, comments=0)
+    newer_time = OBSERVED + timedelta(minutes=1)
+    with tx() as conn, conn.cursor() as cur:
+        for ids, stamp in ((older_ids, OBSERVED), (newer_ids, newer_time)):
+            cur.execute(
+                """update social.instagram_posts set owner_username=%s,owner_profile_pic_url=%s,
+                owner_profile_pic_url_hd=null,scraped_at=%s where id=%s""",
+                (handle, avatar_url, stamp, ids["post_id"]),
+            )
+    downloaded = []
+
+    def opener(client, url, **kwargs):
+        downloaded.append(url)
+        return Response()
+
+    service = storage(opener=opener)
+
+    def settle(owned):
+        source = load(snapshot_database, owned)
+        token = str(store.reserve(**owned)["owner_token"])
+        return source, MediaActivity(store, storage=service).execute(
+            **owned, owner_token=token, load=lambda **callbacks: source
+        )
+
+    _, newer_receipt = settle(newer)
+    assert newer_receipt["outcome"] == "committed" and downloaded.count(avatar_url) == 1
+    downloaded.clear()
+    source, older_receipt = settle(older)
+    assert older_receipt["outcome"] == "committed"
+    assert older_receipt["observed_at"] == source.observed_at == OBSERVED
+    assert source.avatars[0].observed_at == newer_time and source.avatars[0].cached_hosted_url
+    assert downloaded == [SOURCE]  # Only this post's cover; its owner avatar is already hosted.
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute("select last_checked_at from social.avatar_registry where account_handle=%s", (handle,))
+        assert cur.fetchone()[0] == newer_time
+
+
+@pytest.mark.parametrize("status", ["mirrored", "pending", "unsupported"])
+def test_newer_conflicting_owner_registry_cannot_replace_explicit_source(snapshot_database, status):
+    owned, ids, _, _ = seed(snapshot_database, comments=0)
+    _, tx = snapshot_database
+    handle = "conflict_" + uuid4().hex[:12]
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute("update social.instagram_posts set owner_username=%s where id=%s", (handle, ids["post_id"]))
+        cur.execute(
+            """insert into social.avatar_registry(platform,account_handle,source_url,status,hosted_url,
+            content_hash,failure_reason,last_checked_at) values('instagram',%s,%s,%s,%s,%s,%s,%s)""",
+            (
+                handle,
+                None if status == "unsupported" else "https://scontent.cdninstagram.com/other-owner.png",
+                status,
+                "https://media.example/other-owner.png",
+                "a" * 64,
+                "profile_pic_not_available" if status == "unsupported" else None,
+                OBSERVED + timedelta(minutes=1),
+            ),
+        )
+    with pytest.raises(MediaIncomplete, match="avatar_source_newer"):
+        load(snapshot_database, owned)
+    assert_no_snapshot_source_requests(snapshot_database, owned)
+
+
+def test_newer_matching_owner_requires_complete_hosted_proof(snapshot_database):
+    owned, ids, _, _ = seed(snapshot_database, comments=0)
+    _, tx = snapshot_database
+    handle = "incomplete_" + uuid4().hex[:12]
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute("update social.instagram_posts set owner_username=%s where id=%s", (handle, ids["post_id"]))
+        cur.execute(
+            """insert into social.avatar_registry(platform,account_handle,source_url,status,hosted_url,
+            last_checked_at) values('instagram',%s,%s,'mirrored',%s,%s)""",
+            (handle, SOURCE, "https://media.example/owner.png", OBSERVED + timedelta(minutes=1)),
+        )
+    with pytest.raises(MediaIncomplete, match="avatar_source_newer"):
+        load(snapshot_database, owned)
+    assert_no_snapshot_source_requests(snapshot_database, owned)
+
+
 @pytest.mark.parametrize(
     "hosted,digest",
     [

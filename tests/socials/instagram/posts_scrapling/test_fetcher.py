@@ -652,7 +652,7 @@ def test_safe_diagnostic_preserves_warmup_classification_and_single_operation(
 
     fetcher = InstagramPostsScraplingFetcher(
         cookies=[],
-        raw_cookies={"sessionid": "private-token"},
+        raw_cookies={"sessionid": "private-token", "ds_user_id": "123"},
         browser_account_id="test",
         consume_credentials_only=True,
         allow_requests_recovery=False,
@@ -772,7 +772,7 @@ def _guarded_graphql_fetcher(_mock_scrapling, text, *, status=200):
     events = []
     fetcher = InstagramPostsScraplingFetcher(
         cookies=[],
-        raw_cookies={"sessionid": "fixture"},
+        raw_cookies={"sessionid": "fixture", "ds_user_id": "123"},
         browser_account_id="test",
         consume_credentials_only=True,
         allow_requests_recovery=False,
@@ -782,7 +782,7 @@ def _guarded_graphql_fetcher(_mock_scrapling, text, *, status=200):
     response = httpx.Response(
         status, text=text, request=httpx.Request("POST", "https://www.instagram.com/graphql/query")
     )
-    fetcher._http_client = SimpleNamespace(post=AsyncMock(return_value=response))
+    fetcher._http_client = SimpleNamespace(post=AsyncMock(return_value=response), cookies=httpx.Cookies())
     fetcher._pace_api_requests = AsyncMock()
     fetcher._doc_ids_configured = ("fixture-doc",)
     return fetcher, events
@@ -1013,7 +1013,7 @@ def test_document_context_absent_dtsg_preserves_warmup_and_request_budget(
     response = httpx.Response(
         200, json=_native_graphql_page(), request=httpx.Request("POST", "https://www.instagram.com/graphql/query")
     )
-    fetcher._http_client = SimpleNamespace(post=AsyncMock(return_value=response))
+    fetcher._http_client = SimpleNamespace(post=AsyncMock(return_value=response), cookies=httpx.Cookies())
     fetcher._rebuild_http_client = AsyncMock()
     fetcher._pace_api_requests = AsyncMock()
     fetcher._doc_ids_configured = ("fixture-doc",)
@@ -1291,7 +1291,7 @@ def test_warmup_structured_auth_documents_ignore_incidental_copy(_mock_scrapling
     events, failures, requests = [], [], []
     fetcher = InstagramPostsScraplingFetcher(
         cookies=[],
-        raw_cookies={"sessionid": "synthetic"},
+        raw_cookies={"sessionid": "synthetic", "ds_user_id": "123"},
         browser_account_id="test",
         consume_credentials_only=True,
         allow_requests_recovery=False,
@@ -1355,7 +1355,7 @@ def test_warmup_retains_http_and_relative_absolute_redirect_stops(
     failures = []
     fetcher = InstagramPostsScraplingFetcher(
         cookies=[],
-        raw_cookies={"sessionid": "synthetic"},
+        raw_cookies={"sessionid": "synthetic", "ds_user_id": "123"},
         browser_account_id="test",
         consume_credentials_only=True,
         allow_requests_recovery=False,

@@ -541,3 +541,71 @@ def test_cancel_during_boundary_fetch_fences_commit_and_resumes_same_cursor(data
         "where run_id=%s and stage='listing'",
         (run["run_id"],),
     ) == [(2, 2, {"cursor": None})]
+
+
+@pytest.mark.parametrize("fail_after_insert", [False, True])
+def test_page_bulk_targets_preserve_budgets_conflicts_and_atomic_rollback(database, monkeypatch, fail_after_insert):
+    from trr_backend.ingestion import listing
+
+    run = launch(database)
+    prefix = "BulkRollback" if fail_after_insert else "BulkCommit"
+    codes = [prefix + str(index) for index in range(33)]
+    sql(
+        database,
+        """insert into social.instagram_ingestion_targets
+        (run_id,stage,target_key,max_attempts,attempts,checkpoint,next_attempt_at)
+        values(%s,'post_details',%s,3,2,'{"retained":true}',clock_timestamp()+interval '1 hour')""",
+        (run["run_id"], codes[0]),
+    )
+    existing_query = """select max_attempts,attempts,checkpoint,next_attempt_at
+        from social.instagram_ingestion_targets where run_id=%s and stage='post_details' and target_key=%s"""
+    before = sql(database, existing_query, (run["run_id"], codes[0]))
+    batches = []
+    original = listing.execute_values
+
+    def insert(cur, statement, rows, **kwargs):
+        batches.append(list(rows))
+        assert kwargs["page_size"] == 99
+        original(cur, statement, rows, **kwargs)
+        if fail_after_insert:
+            raise RuntimeError("after downstream bulk insert")
+
+    monkeypatch.setattr(listing, "execute_values", insert)
+    payload = page([post(code, "2026-10-11T00:00:00+00:00") for code in codes], more=False, cursor=None)
+    if fail_after_insert:
+        with pytest.raises(RuntimeError, match="after downstream bulk"):
+            execute(database, run, payload)
+        assert sql(
+            database,
+            "select count(*) from social.instagram_ingestion_targets where run_id=%s and stage<>'listing'",
+            (run["run_id"],),
+        ) == [(1,)]
+        assert sql(database, "select count(*) from social.instagram_posts where shortcode=any(%s)", (codes,)) == [(0,)]
+        assert sql(
+            database, "select count(*) from social.instagram_ingestion_receipts where run_id=%s", (run["run_id"],)
+        ) == [(0,)]
+        assert sql(
+            database,
+            "select cursor_state,discovery_complete from social.instagram_ingestion_manifests "
+            "where run_id=%s and stage='listing'",
+            (run["run_id"],),
+        ) == [({}, False)]
+    else:
+        receipt, args = execute(database, run, payload)
+        assert receipt["canonical_identity"]["post_keys"] == sorted(codes)
+        assert sql(
+            database,
+            """select stage,count(*),min(max_attempts),max(max_attempts)
+            from social.instagram_ingestion_targets where run_id=%s and stage<>'listing'
+            group by stage order by stage""",
+            (run["run_id"],),
+        ) == [("comments", 33, 7, 7), ("media", 33, 3, 3), ("post_details", 33, 3, 3)]
+        duplicate = ListingActivity(database[0]).execute(**args, fetch=lambda **_: pytest.fail("duplicate fetched"))
+        assert duplicate["receipt_id"] == receipt["receipt_id"]
+    assert len(batches) == 1 and len(batches[0]) == 99
+    assert set(batches[0]) == {
+        (run["run_id"], stage, code, budget)
+        for code in codes
+        for stage, budget in (("comments", 7), ("media", 3), ("post_details", 3))
+    }
+    assert sql(database, existing_query, (run["run_id"], codes[0])) == before

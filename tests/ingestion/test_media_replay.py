@@ -75,6 +75,88 @@ def test_result_round_trip_preserves_exact_proof_and_individual_observation_time
     assert all("sha256" not in variant for variant in payload["media_result"]["asset_manifest"]["display_variants"])
 
 
+def summary_payload():
+    result = mirror_snapshot(
+        test_media.snapshot(), test_media.storage(), check=test_media.noop, request=test_media.noop
+    )
+    return serialize_media_result(result)
+
+
+@pytest.mark.parametrize("summary_kind", ["physical", "legacy"])
+@pytest.mark.parametrize("shape", ["shared_original", "distinct_original_key_same_url", "shared_variant"])
+def test_storage_summary_accepts_exact_physical_and_preserved_legacy_proof(summary_kind, shape):
+    payload = summary_payload()
+    manifest = payload["media_result"]["asset_manifest"]
+    original = manifest["originals"]["cover"]
+    byte_count = original["bytes"]
+    assert all(item["bytes"] == byte_count for item in manifest["display_variants"])
+    if shape == "distinct_original_key_same_url":
+        manifest["originals"]["media"][0]["storage_key"] = "separate/original.png"
+    elif shape == "shared_variant":
+        first = manifest["display_variants"][0]
+        shared = next(item for item in manifest["display_variants"][1:] if item["format"] == first["format"])
+        for key in ("storage_key", "url", "bytes", "content_type", "width", "height"):
+            shared[key] = first[key]
+    original_count = 2 if shape == "distinct_original_key_same_url" else 1
+    variant_count = 9 if shape == "shared_variant" else 10
+    expected = {
+        "original_bytes": byte_count * original_count,
+        "variant_bytes": byte_count * variant_count,
+        "object_count": original_count + variant_count,
+        "variant_count": variant_count,
+        # Distinct keys need not imply distinct retained URLs.
+        "cdn_url_count": 1 + variant_count,
+    }
+    if summary_kind == "legacy":
+        expected.update(
+            original_bytes=2 * byte_count,
+            variant_bytes=10 * byte_count,
+            object_count=12,
+            variant_count=10,
+            cdn_url_count=12,
+        )
+    manifest["storage_summary"] = expected
+    decoded = _decode_media_result(payload)
+    assert decoded.post_fields["asset_manifest"]["storage_summary"] == expected
+    assert decoded.snapshot.observed_at == test_media.OBSERVED
+    assert decoded.post_fields["asset_manifest"]["originals"]["cover"] == original
+
+
+@pytest.mark.parametrize("field", ["bytes", "sha256", "url", "format", "content_type", "width", "height"])
+def test_storage_summary_rejects_conflicting_shared_key_metadata_before_deduplication(field):
+    payload = summary_payload()
+    manifest = payload["media_result"]["asset_manifest"]
+    media = manifest["originals"]["media"][0]
+    replacement = {
+        "bytes": media["bytes"] + 1,
+        "sha256": "0" * 64,
+        "url": "https://media.example/conflicting.png",
+        "format": "jpeg",
+        "content_type": "image/jpeg",
+        "width": 13,
+        "height": 9,
+    }[field]
+    media[field] = replacement
+    if field == "url":
+        payload["media_result"]["post_fields"]["hosted_media_urls"][0] = replacement
+    with pytest.raises(InvalidSourceError, match="shared object"):
+        _decode_media_result(payload)
+
+
+@pytest.mark.parametrize("tamper", ["hybrid", "mismatch", "boolean"])
+def test_storage_summary_rejects_hybrid_arbitrary_and_boolean_totals(tamper):
+    payload = summary_payload()
+    summary = payload["media_result"]["asset_manifest"]["storage_summary"]
+    if tamper == "hybrid":
+        summary.update(object_count=12, cdn_url_count=12)
+    elif tamper == "mismatch":
+        summary["original_bytes"] += 1
+    else:
+        summary["object_count"] = True
+    with pytest.raises(InvalidSourceError, match="summary differs"):
+        _decode_media_result(payload)
+
+
 @pytest.mark.parametrize(
     "tamper",
     [

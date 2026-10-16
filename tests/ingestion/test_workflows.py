@@ -699,6 +699,9 @@ def test_runtime_startup_consumes_shared_deadline_and_retains_lease_until_exit(
             self.code = code
 
     events, timers, exits = [], [], []
+    calls = {name: [] for name in ("pending", "partitions", "reconcile")}
+    available_at = {"pending": 111.25, "reconcile": 113.25}
+    handled_at = {}
     clock = SimpleNamespace(now=100.0)
 
     def advance(seconds):
@@ -778,6 +781,9 @@ def test_runtime_startup_consumes_shared_deadline_and_retains_lease_until_exit(
         # original deadline minus shutdown allowance, independent of launch time.
         assert clock.now < 185.000001
         events.append(name)
+        calls[name].append(clock.now)
+        if name in available_at and clock.now >= available_at[name]:
+            handled_at.setdefault(name, clock.now)
 
     adapter = DBOSAdapter.__new__(DBOSAdapter)
     adapter.config = RuntimeConfig("postgresql://synthetic", "test-v1", runtime_role="test_runtime")
@@ -801,3 +807,15 @@ def test_runtime_startup_consumes_shared_deadline_and_retains_lease_until_exit(
     assert ("reconcile" in events) == expect_work
     assert events[-1] == "destroy" and "stop" not in events
     assert not lease.closed  # OS process exit, rather than early close, releases the lease.
+    if expect_work:
+        # New outbox work and terminal errors arriving between polls remain
+        # actionable within the approved cadence, without real sleeps.
+        assert 0 <= handled_at["pending"] - available_at["pending"] <= 1
+        assert 0 <= handled_at["reconcile"] - available_at["reconcile"] <= 5
+        assert calls["pending"] == calls["partitions"]
+        assert max(b - a for a, b in zip(calls["pending"], calls["pending"][1:], strict=False)) <= 1
+        assert max(b - a for a, b in zip(calls["reconcile"], calls["reconcile"][1:], strict=False)) <= 5
+        assert calls["reconcile"][0] == 100 + startup_seconds
+        assert calls["pending"][-1] >= 184
+        assert calls["reconcile"][-1] >= 180
+        assert len(calls["pending"]) <= 85

@@ -162,7 +162,7 @@ class Worker:
                     fetch=lambda **kw: fetch(self.comment_source, **kw),
                 )
             else:
-                storage = self.media_storage()
+                storage = self.media_storage(context, owned)
                 try:
                     result = MediaActivity(self.store, storage=storage).execute(
                         **args, load=lambda **kw: self.media_loader(context, owned, **kw)

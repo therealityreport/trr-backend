@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import RealDictCursor, execute_values
 
 from trr_backend.ingestion.canonical import normalize_post_source, write_post
 from trr_backend.ingestion.domain import Conflict, LostOwnership, RunIntent, Stage, fingerprint, stable_json
@@ -253,6 +253,7 @@ class ListingActivity:
                     if seen:
                         raise InvalidSourceError("Listing cursor was already scheduled; exhaustion is unproven")
                 identities = []
+                downstream_targets = []
                 for shortcode, (node, normalized) in sorted(selected.items()):
                     identities.append(
                         self.writer(
@@ -270,11 +271,15 @@ class ListingActivity:
                             Stage.COMMENTS: intent.comments_max_attempts,
                             Stage.MEDIA: intent.media_max_attempts,
                         }[stage]
-                        cur.execute(
-                            """insert into social.instagram_ingestion_targets
-                            (run_id,stage,target_key,max_attempts) values(%s,%s,%s,%s) on conflict do nothing""",
-                            (run_id, stage.value, shortcode, budget),
-                        )
+                        downstream_targets.append((run_id, stage.value, shortcode, budget))
+                if downstream_targets:
+                    execute_values(
+                        cur,
+                        """insert into social.instagram_ingestion_targets
+                        (run_id,stage,target_key,max_attempts) values %s on conflict do nothing""",
+                        downstream_targets,
+                        page_size=len(downstream_targets),
+                    )
                 next_target = None
                 if not discovery_complete:
                     next_target = page_target(page.end_cursor)
