@@ -759,3 +759,39 @@ failure. This bounded final-policy check made no database or credential writes.
 The earlier two-page/replay result remains the pagination evidence. Disabled
 deployment and actual worker source verification are the next gates; the shared
 production authentication identity decision remains unresolved.
+
+
+### Disabled deployment acceptance (2026-10-16T13:20Z)
+
+Commit `79f5dc8d` is deployed as Modal `v63`, tag
+`ig-ingestion-20261016-79f5dc8d-rollback`, in workspace `admin-56995`,
+environment `main`, app `trr-backend-jobs` (`ap-DkLTRoSvqhbkGO7fHyHxrD`).
+The provider reports `79f5dc8*` because unrelated pre-existing dirty files were
+preserved. The scoped 45-file deployed source manifest has no mismatches.
+The guarded deployment's cold-start API health check returned 200. Readiness
+passed with no blocking/advisory failures; all required functions and secrets
+resolved. Dispatch configuration resolves the same named social functions.
+
+Three live lean containers passed the source manifest and five pure response,
+evidence and replay checks. A fresh posts-worker bootstrap rejected an empty
+reservation before source/database work; its newly observed container
+`ta-01M52DWF6ZWZ83YTVVG9GF68SR` passed the same 45 hashes and all five checks,
+with Patchright available. The initial brief worker probe exited before inspection;
+its failed inspection remains in the evidence rather than counted as acceptance.
+The successful worker proof is
+`.artifacts/ingestion-rollout/deployed-worker-source-proof-79f5dc8d.json`.
+All inspected containers report launch=0, coordinator=1, replay-apply=0. These
+checks do not establish production authentication or successful canary completion.
+
+Rollback material remains available: provider `v62`/tag
+`ig-ingestion-20261016-6f38e07d-rollback`, committed source history and prior
+protected evidence. No credential, identity/target block or launch setting was
+changed by this deployment. To continue the canary, retain and refresh the current
+deployed Instagram identity, or obtain explicit approval to replace the shared
+`SOCIAL_INSTAGRAM_COOKIES_JSON` key in `trr-social-auth` with the verified TRR
+browser session for `thereality.report`. This key affects other Instagram consumers,
+not just bravotv. The approved plan excludes identity migration, so the latter
+requires a user decision. Any approved transfer must preserve protected rollback,
+merge only the selected key, verify a fresh worker's selected identity and normal
+source path, then perform guarded target recovery. Normal completion, partial
+recovery and the ten-run/24-hour gate remain unfinished.
