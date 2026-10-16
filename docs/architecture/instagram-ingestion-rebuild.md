@@ -1446,3 +1446,15 @@ Four focused synthetic cases passed, including sentinel exclusion and logging
 handler failure without changed accounting. Parent reviewed the complete two-file
 diff; transport, retry, credential and cooldown behavior are unchanged. This
 diagnostic will observe the next normally scheduled attempt, not an extra probe.
+
+Diagnostic commit 049f4648 was rolled out to the same verified Modal main target
+with tag ig-public-diag-20261016-049f4648. Deployment readiness and health passed.
+At 15:59 UTC, all six inspected containers matched the 53-file manifest, loaded
+module origins, public profile and enabled/coordinator/replay flags 1/1/0. This
+is deployed-source proof, not evidence of the next source attempt or a successful
+worker scrape. Current evidence is deployed-public-diag-proof-049f4648.json,
+deployment-public-diag-049f4648.json and deploy-public-diag-049f4648.log.
+Next action: observe the scheduled attempt after 16:09:08 UTC and inspect only
+its controlled instagram_public_request_failed diagnostic if it fails. Preserve
+the cooldown and budgets. Retrieve the completed 15:00–16:00 UTC billing hour
+once available, reporting missing provider data as unavailable rather than zero.
