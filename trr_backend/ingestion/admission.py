@@ -107,7 +107,8 @@ class Admission:
 
     def _snapshot(self, account: str, run_id: str | None = None) -> dict[str, Any]:
         # One SQL snapshot; no provider inspection, credential reads or repair.
-        # Uncertain legacy calls count until explicit terminal proof; malformed
+        # Preserve the established two-hour drain window after business terminal
+        # state. Current leases and unaged ambiguity remain occupied; malformed
         # lease metadata fails the whole read closed rather than disappearing.
         with self.read_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
@@ -117,6 +118,7 @@ class Admission:
                     lower(ltrim(coalesce(config->>'account',config->>'account_handle',config->>'source_account',
                       config->>'username',''),'@')) as account,
                     lower(coalesce(status,'')) as status,worker_id,claimed_at,
+                    coalesce(completed_at,heartbeat_at,started_at,claimed_at,created_at) as last_activity_at,
                     metadata->'dispatch' as dispatch
                   from social.scrape_jobs
                 ), legacy_busy as (
@@ -127,7 +129,7 @@ class Admission:
                          when raw_stage in ('posts','shared_account_discovery','shared_account_posts',
                            'post_classify','season_materialize','analytics_refresh') then raw_stage
                          else 'unknown' end as stage
-                  from legacy where
+                  from legacy where (
                     status in ('running','claimed','processing')
                     or (status not in {_TERMINAL} and (nullif(worker_id,'') is not null or claimed_at is not null))
                     or (nullif(dispatch->>'remote_invocation_id','') is not null
@@ -138,6 +140,13 @@ class Admission:
                           or nullif(dispatch->>'lease_expires_at','') is not null)
                         and (nullif(dispatch->>'lease_expires_at','') is null
                           or (dispatch->>'lease_expires_at')::timestamptz>clock_timestamp()))
+                  ) and (
+                    status not in ('completed','failed','cancelled')
+                    or last_activity_at is null
+                    or last_activity_at>=clock_timestamp()-interval '2 hours'
+                    or (nullif(dispatch->>'lease_expires_at','') is not null
+                      and (dispatch->>'lease_expires_at')::timestamptz>clock_timestamp())
+                  )
                 ), new_busy as (
                   select 'new:'||t.owner_token::text as identity,t.run_id::text,'instagram' as platform,r.account,
                     case t.stage when 'listing' then 'shared_account_discovery'

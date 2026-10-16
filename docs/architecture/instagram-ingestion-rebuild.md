@@ -387,3 +387,62 @@ in the intended TRR project/team. A fresh canonical-host-bound capability GET
 also passed HTTP 200 with both flags disabled. The prior deployment is retained
 for rollback. The nonsecret receipt is at workspace
 `output/releases/instagram-ingestion-app-c10889a/authenticated-smoke.json`.
+
+
+## Deployed lifecycle acceptance and canary enablement
+
+Backend revision `0f540896` deployed disabled as Modal v57 and passed explicit
+`main` readiness plus API health. All 42 expected runtime hashes matched an active
+container. The actual helper completed with exit 0; singleton contention passed
+and peak restricted-role connections were four, within its enforced cap.
+
+The standalone v4 probe remains `not_passed`: its immediate zero-backend-session
+cleanup condition failed. Supplementary evidence resolves that condition: all
+original backend PIDs disappeared, no advisory locks remained, all four role slots
+accepted simultaneous fresh TLS clients, and the same singleton key was acquired
+and released. Every fresh client was explicitly closed; a later observation
+confirmed zero role sessions and locks. Business and DBOS workflow state remained
+empty. Owned-process and temporary-source cleanup passed. Independent review
+supported composed acceptance, recorded separately in
+`.artifacts/ingestion-rollout/bounded-lifecycle-acceptance.json`. No provider
+retention timeout or same-backend reuse is claimed. The idle lifecycle result does
+not replace active-run, scraping, resource or 24-hour observation evidence.
+
+Only the existing launch/coordinator flags were enabled for the configured
+`bravotv` calendar-2026 canary. Replay apply remains off. The hard account/window,
+one-active-or-resumable-run and ten-total-run limits remain enforced. The first
+enabled deployment command was rejected before deployment because its tag exceeded
+Modal's 50-character limit; the corrected shorter tag is
+`ig-ingestion-20261016-0f540896-bravotv`. Deployment verification is pending.
+
+
+The corrected enabled deployment passed readiness and API health. Direct live
+capability reads returned `enabled=true` for `bravotv`, `enabled=false` for an
+out-of-canary account, and replay apply false for both. The canonical app also
+passed its authenticated enabled-capability check.
+
+The first launch attempt used stable key
+`instagram-ingestion-20261016-bravotv-2026-canary-01` and the approved UTC window
+`[2026-01-01,2027-01-01)` with all three downstream tasks. It returned HTTP 503;
+read-only verification confirmed zero new runs. Admission counted 21,792 terminal
+legacy jobs, all older than one day with no recent heartbeat, because historical
+remote status/reservation metadata remained nonterminal. Existing legacy capacity
+code limits such terminal drain ambiguity to two hours, matching the reused
+physical functions' 7,200-second timeout and zero automatic retries. A narrow
+admission repair is in progress to preserve that window and current caps, while
+retaining recent/nonterminal work, missing-time ambiguity, and explicit live leases.
+No historical jobs have been modified. The canary has not started.
+
+
+The admission correction passed 40 isolated PostgreSQL cases, formatting, lint,
+compilation and independent review. A read-only check against the actual TRR
+database using the corrected query found no occupied legacy capacity and admitted
+the listing slot (`blocked=false`, `fits_listing=true`), without modifying jobs.
+
+Native Chrome's window title verified the TRR profile. The normal production
+account page displayed the new ingestion panel and the saved 1,994-post 2026
+summary using its existing session, without credentials being extracted or a
+login flow. No run was selected. Before a browser launch, source review found
+that the existing month picker emits an inclusive final millisecond while the
+new API uses an exclusive end. An app-only new-client request conversion is being
+prepared; legacy route payloads remain unchanged.

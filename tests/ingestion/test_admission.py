@@ -24,7 +24,8 @@ def database(base_database):
         cur.execute((ROOT / "supabase/migrations/20261016070100_instagram_ingestion_workflows.sql").read_text())
         cur.execute("""create table social.scrape_jobs(id uuid primary key,run_id uuid,platform text,
             config jsonb not null default '{}',metadata jsonb not null default '{}',job_type text,
-            status text,worker_id text,claimed_at timestamptz);
+            status text,worker_id text,claimed_at timestamptz,completed_at timestamptz,
+            heartbeat_at timestamptz,started_at timestamptz,created_at timestamptz default clock_timestamp());
             create table social.account_auth_cooldown(platform text,account_handle text,cooldown_until timestamptz);
         """)
         cur.execute((ROOT / "supabase/migrations/20260911121000_instagram_detail_request_lanes.sql").read_text())
@@ -325,4 +326,88 @@ def test_read_connection_and_probe_exceptions_are_fail_closed(database):
     subject.fresh_session_probe = failed_probe
     assert not subject.admit(item)
     with pytest.raises(ServiceUnavailableError):
+        subject.validate_launch("bravotv", InstagramIngestionLaunchV2())
+
+
+_HISTORICAL_DISPATCHES = [
+    {"remote_invocation_id": "historical", "remote_invocation_status": "running"},
+    {"remote_invocation_id": "historical", "remote_invocation_status": "unknown"},
+    {"remote_invocation_id": "historical", "remote_invocation_status": "pending"},
+    {"dispatch_reservation_id": "historical", "remote_invocation_status": "unknown"},
+]
+
+
+def set_legacy_activity(database, *, hours_ago, completed=True):
+    then = datetime.now(UTC) - timedelta(hours=hours_ago)
+    sql(
+        database,
+        """update social.scrape_jobs set completed_at=%s,heartbeat_at=%s,
+        started_at=%s,claimed_at=%s,created_at=%s""",
+        (then if completed else None, then, then, then, then),
+    )
+
+
+@pytest.mark.parametrize("status", ["completed", "failed", "cancelled"])
+@pytest.mark.parametrize("dispatch", _HISTORICAL_DISPATCHES)
+def test_old_terminal_dispatch_metadata_does_not_hold_capacity_forever(database, status, dispatch):
+    metadata = {"dispatch": dispatch}
+    legacy(database, "comments", status=status, metadata=metadata)
+    set_legacy_activity(database, hours_ago=25)
+    subject, _ = admission(database, env={"SOCIAL_INSTAGRAM_DB_SESSION_WORKER_BUDGET": "1"})
+    assert subject._snapshot("bravotv")["counts"] == []
+    subject.validate_launch("bravotv", InstagramIngestionLaunchV2())
+    assert sql(database, "select status,metadata from social.scrape_jobs") == [(status, metadata)]
+
+
+@pytest.mark.parametrize("status", ["completed", "failed", "cancelled"])
+@pytest.mark.parametrize("dispatch", [_HISTORICAL_DISPATCHES[1], _HISTORICAL_DISPATCHES[3]])
+def test_recent_terminal_remote_or_reserved_ambiguity_still_consumes_capacity(database, status, dispatch):
+    legacy(database, "comments", status=status, metadata={"dispatch": dispatch})
+    set_legacy_activity(database, hours_ago=1)
+    subject, _ = admission(database, env={"SOCIAL_INSTAGRAM_DB_SESSION_WORKER_BUDGET": "1"})
+    with pytest.raises(ServiceUnavailableError, match="capacity"):
+        subject.validate_launch("bravotv", InstagramIngestionLaunchV2())
+
+
+@pytest.mark.parametrize("with_remote_id", [False, True])
+def test_explicit_future_lease_on_old_terminal_job_still_holds_capacity(database, with_remote_id):
+    dispatch = {
+        "remote_invocation_status": "unknown",
+        "dispatch_reservation_id": "reserved",
+        "lease_expires_at": (datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
+    }
+    if with_remote_id:
+        dispatch["remote_invocation_id"] = "accepted"
+    legacy(database, "comments", status="cancelled", metadata={"dispatch": dispatch})
+    set_legacy_activity(database, hours_ago=25)
+    subject, _ = admission(database, env={"SOCIAL_INSTAGRAM_DB_SESSION_WORKER_BUDGET": "1"})
+    with pytest.raises(ServiceUnavailableError, match="capacity"):
+        subject.validate_launch("bravotv", InstagramIngestionLaunchV2())
+
+
+def test_old_terminal_missing_completed_at_uses_established_timestamp_fallback(database):
+    legacy(database, "comments", status="cancelled", metadata={"dispatch": _HISTORICAL_DISPATCHES[1]})
+    set_legacy_activity(database, hours_ago=25, completed=False)
+    subject, _ = admission(database)
+    assert subject._snapshot("bravotv")["counts"] == []
+
+
+def test_terminal_ambiguity_with_all_timestamps_missing_fails_closed(database):
+    legacy(database, "comments", status="cancelled", metadata={"dispatch": _HISTORICAL_DISPATCHES[3]})
+    sql(
+        database,
+        """update social.scrape_jobs set completed_at=null,heartbeat_at=null,
+        started_at=null,claimed_at=null,created_at=null""",
+    )
+    subject, _ = admission(database, env={"SOCIAL_INSTAGRAM_DB_SESSION_WORKER_BUDGET": "1"})
+    with pytest.raises(ServiceUnavailableError, match="capacity"):
+        subject.validate_launch("bravotv", InstagramIngestionLaunchV2())
+
+
+@pytest.mark.parametrize("status", ["pending", "running", "claimed", "processing"])
+def test_old_nonterminal_remote_ambiguity_still_holds_capacity(database, status):
+    legacy(database, "comments", status=status, metadata={"dispatch": _HISTORICAL_DISPATCHES[1]})
+    set_legacy_activity(database, hours_ago=25)
+    subject, _ = admission(database, env={"SOCIAL_INSTAGRAM_DB_SESSION_WORKER_BUDGET": "1"})
+    with pytest.raises(ServiceUnavailableError, match="capacity"):
         subject.validate_launch("bravotv", InstagramIngestionLaunchV2())
