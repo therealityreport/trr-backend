@@ -258,6 +258,67 @@ def _warmup_body_auth_path(text: str) -> str | None:
     return parser.auth_path
 
 
+def _decode_posts_graphql_payload(response: Any) -> dict[str, Any] | None:
+    """Decode JSON plus the two observed/maintained for-loop guard spellings."""
+    try:
+        payload = response.json()
+    except Exception:
+        text = _response_text(response).lstrip("\ufeff \r\n\t")
+        for prefix in ("for (;;);", "for(;;);"):
+            if text.startswith(prefix):
+                text = text[len(prefix) :].lstrip()
+                break
+        try:
+            payload = json.loads(text)
+        except (ValueError, TypeError):
+            return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _posts_graphql_auth_code(payload: dict[str, Any]) -> str | None:
+    # Observed guarded Meta error envelope. This is source rejection, never a
+    # successful empty connection or evidence that posts no longer exist.
+    if type(payload.get("error")) is int and payload["error"] == 1357001:
+        return "login_required"
+    if payload.get("status") != "fail":
+        return None
+    for key in ("message", "error_type", "error_message"):
+        code = payload.get(key)
+        if isinstance(code, str) and code in {
+            "checkpoint_required",
+            "challenge_required",
+            "feedback_required",
+            "login_required",
+            "consent_required",
+            "sentry_block",
+            "unauthorized",
+            "forbidden",
+            "redirect_login",
+        }:
+            return code
+    return None
+
+
+def _valid_posts_connection(connection: Any, *, reverse: bool) -> bool:
+    """Require native node and pagination proof, without inventing post fields."""
+    if not isinstance(connection, dict):
+        return False
+    edges, info = connection.get("edges"), connection.get("page_info")
+    if not isinstance(edges, list) or not isinstance(info, dict):
+        return False
+    for edge in edges:
+        node = edge.get("node") if isinstance(edge, dict) else None
+        if not isinstance(node, dict) or not node:
+            return False
+    flag = "has_previous_page" if reverse else "has_next_page"
+    cursor = info.get("start_cursor" if reverse else "end_cursor")
+    if type(info.get(flag)) is not bool:
+        return False
+    if cursor is not None and (not isinstance(cursor, str) or not cursor.strip()):
+        return False
+    return not info[flag] or cursor is not None
+
+
 def _is_redirect_loop_exception(exc: BaseException) -> bool:
     current: BaseException | None = exc
     for _ in range(4):
@@ -1700,9 +1761,8 @@ class InstagramPostsScraplingFetcher:
                 continue
 
             payload_data = payload.get("data") if isinstance(payload, dict) else {}
-            connection = payload_data.get(_ROOT_FIELD_NAME) if isinstance(payload_data, dict) else {}
-            connection = connection or {}
-            if not connection:
+            connection = payload_data.get(_ROOT_FIELD_NAME) if isinstance(payload_data, dict) else None
+            if connection is None or connection == {}:
                 self._record_doc_id_empty(doc_id, "graphql_empty_connection")
                 if not fetch_reason:
                     fetch_reason = "graphql_empty_connection"
@@ -1712,15 +1772,20 @@ class InstagramPostsScraplingFetcher:
                 )
                 continue
 
-            edges = connection.get("edges") or []
-            page_info = connection.get("page_info") or {}
-            posts: list[dict[str, Any]] = []
-            for edge in edges:
-                if not isinstance(edge, dict):
-                    continue
-                node = edge.get("node") or {}
-                if isinstance(node, dict) and node:
-                    posts.append(node)
+            if not _valid_posts_connection(connection, reverse=normalized_direction == "reverse"):
+                self._last_doc_id_failure_reason = "graphql_invalid_connection"
+                return InstagramPostsFetchResult(
+                    posts=[],
+                    fetch_failed=True,
+                    auth_failed=False,
+                    fetch_reason="graphql_invalid_connection",
+                    request_count=self._request_count,
+                    retryable=False,
+                    direction=normalized_direction,
+                )
+            edges = connection["edges"]
+            page_info = connection["page_info"]
+            posts = [edge["node"] for edge in edges]
 
             if not posts and self._is_stale_empty_page(cursor=cursor, page_info=page_info):
                 stale_empty_seen = True
@@ -2025,7 +2090,7 @@ class InstagramPostsScraplingFetcher:
             # Do not expose callback exceptions, response objects, or secrets.
             pass
 
-    def _observe_source_failure(self, response: Any, *, warmup: bool = False) -> None:
+    def _observe_source_failure(self, response: Any, *, warmup: bool = False, graphql: bool = False) -> None:
         """Optional safe rejection boundary, before legacy retries or fallback.
 
         Pass only fixed classification and numeric Retry-After, never response
@@ -2038,6 +2103,10 @@ class InstagramPostsScraplingFetcher:
         if warmup and status != 429:
             # Warmup owns the structured auth decision after the document is
             # returned. Notify once there, before any GraphQL request/fallback.
+            return
+        if graphql and 200 <= status < 300:
+            # Retain decoded GraphQL source evidence before classifying a body
+            # rejection. HTTP/redirect/rate boundaries remain immediate.
             return
         location = _safe_location(response) if 300 <= status < 400 else ""
         response_path = urlparse(str(getattr(response, "url", "") or "")).path
@@ -2119,7 +2188,7 @@ class InstagramPostsScraplingFetcher:
         self._request_count += 1
         response = await self._http_client.post(url, data=data, headers=headers)  # type: ignore[union-attr]
         self._emit_source_diagnostic(response, phase="graphql")
-        self._observe_source_failure(response)
+        self._observe_source_failure(response, graphql=True)
         self._record_proxy_response(response)
         self._sync_response_cookies(response)
         return response
@@ -2309,7 +2378,7 @@ class InstagramPostsScraplingFetcher:
 
             status_code = _status_code(response)
             text = _response_text(response)
-            auth_failed = status_code in {401, 403} or _auth_failure_text(text)
+            auth_failed = status_code in {401, 403} or (status_code >= 400 and _warmup_body_auth_path(text) is not None)
 
             # 3xx: explicit redirect handling.
             if 300 <= status_code < 400:
@@ -2382,44 +2451,49 @@ class InstagramPostsScraplingFetcher:
             if text and text.lstrip().startswith("<"):
                 return {
                     "failed": True,
-                    "auth_failed": auth_failed or _auth_failure_text(text),
+                    "auth_failed": auth_failed or _warmup_body_auth_path(text) is not None,
                     "reason": "html_challenge_or_auth_required",
                     "retryable": False,
                     "payload": None,
                 }
 
-            # Parse JSON.
-            try:
-                payload = response.json()
-            except Exception:  # noqa: BLE001
-                try:
-                    payload = json.loads(text)
-                except Exception:  # noqa: BLE001
-                    return {
-                        "failed": True,
-                        "auth_failed": auth_failed,
-                        "reason": "non_json_response",
-                        "retryable": False,
-                        "payload": None,
-                    }
+            payload = _decode_posts_graphql_payload(response)
+            if payload is None:
+                return {
+                    "failed": True,
+                    "auth_failed": auth_failed,
+                    "reason": "non_json_response",
+                    "retryable": False,
+                    "payload": None,
+                }
 
             observer = getattr(self, "_source_payload_observer", None)
-            if observer is not None and isinstance(payload, dict):
+            if observer is not None:
                 observer("listing", payload)
+
+            auth_code = _posts_graphql_auth_code(payload)
+            if auth_code:
+                rejected = getattr(self, "_source_failure_observer", None)
+                if rejected is not None:
+                    rejected("source_auth_failed", None)
+
+            if payload.get("error") or payload.get("errors"):
+                return {
+                    "failed": True,
+                    "auth_failed": auth_code is not None,
+                    "reason": auth_code or "graphql_error",
+                    "retryable": False,
+                    "payload": payload,
+                }
 
             # Check IG API-level status.
             if isinstance(payload, dict):
                 status_value = str(payload.get("status") or "").strip().lower()
-                message = str(payload.get("message") or payload.get("error_message") or "").strip().lower()
                 if status_value and status_value != "ok":
                     return {
                         "failed": True,
-                        "auth_failed": auth_failed
-                        or any(
-                            token in f"{status_value} {message}"
-                            for token in ("login", "checkpoint", "challenge", "unauthorized")
-                        ),
-                        "reason": status_value or "api_status_fail",
+                        "auth_failed": auth_code is not None,
+                        "reason": status_value if status_value in {"fail", "error"} else "api_status_fail",
                         "retryable": False,
                         "payload": payload,
                     }

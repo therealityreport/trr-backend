@@ -596,6 +596,193 @@ def test_safe_diagnostic_reports_graphql_response_before_auth_observer(_mock_scr
     assert "private-token" not in json.dumps(events)
 
 
+def _guarded_graphql_fetcher(_mock_scrapling, text, *, status=200):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    import httpx
+
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsScraplingFetcher
+
+    events = []
+    fetcher = InstagramPostsScraplingFetcher(
+        cookies=[],
+        raw_cookies={"sessionid": "fixture"},
+        browser_account_id="test",
+        consume_credentials_only=True,
+        allow_requests_recovery=False,
+        source_payload_observer=lambda kind, payload: events.append(("retained", payload)),
+        source_failure_observer=lambda code, retry: events.append(("failure", code)),
+    )
+    response = httpx.Response(
+        status, text=text, request=httpx.Request("POST", "https://www.instagram.com/graphql/query")
+    )
+    fetcher._http_client = SimpleNamespace(post=AsyncMock(return_value=response))
+    fetcher._pace_api_requests = AsyncMock()
+    fetcher._doc_ids_configured = ("fixture-doc",)
+    return fetcher, events
+
+
+def _native_graphql_page():
+    return {
+        "status": "ok",
+        "data": {
+            "xdt_api__v1__feed__user_timeline_graphql_connection": {
+                "edges": [{"node": {"code": "fixture", "caption": "login checkpoint challenge are incidental words"}}],
+                "page_info": {"has_next_page": False, "end_cursor": None},
+            }
+        },
+    }
+
+
+@pytest.mark.parametrize("prefix", ["", "for (;;);", "for(;;);", "\ufeff \nfor(;;);\n"])
+def test_guarded_structured_graphql_success_retains_evidence_without_text_auth(_mock_scrapling, prefix):
+    import asyncio
+
+    payload = _native_graphql_page()
+    fetcher, events = _guarded_graphql_fetcher(_mock_scrapling, prefix + json.dumps(payload))
+    result = asyncio.run(fetcher.fetch_posts_page("bravotv"))
+    assert not result.fetch_failed and not result.auth_failed and len(result.posts) == 1
+    assert not result.has_next_page
+    assert events == [("retained", payload)]
+    assert fetcher._request_count == fetcher._http_client.post.await_count == 1
+
+
+@pytest.mark.parametrize("with_connection", [False, True])
+def test_guarded_graphql_1357001_retained_before_one_auth_failure(_mock_scrapling, with_connection):
+    import asyncio
+
+    payload = {"error": 1357001, "errorSummary": "Log in to continue"}
+    if with_connection:
+        payload.update(_native_graphql_page())
+    fetcher, events = _guarded_graphql_fetcher(_mock_scrapling, "for(;;);" + json.dumps(payload))
+    result = asyncio.run(fetcher.fetch_posts_page("bravotv"))
+    assert result.fetch_failed and result.auth_failed and result.posts == []
+    assert result.fetch_reason == "login_required" and not result.retryable
+    assert events == [("retained", payload), ("failure", "source_auth_failed")]
+    assert fetcher._request_count == fetcher._http_client.post.await_count == 1
+
+
+@pytest.mark.parametrize(
+    "payload,reason,auth",
+    [
+        ({"error": 42, "errorDescription": "incidental login word"}, "graphql_error", False),
+        ({"errors": [{"message": "caption mentions a challenge"}]}, "graphql_error", False),
+        ({"status": "fail", "message": "incidental login challenge word"}, "fail", False),
+        ({"status": "fail", "message": "login_required"}, "fail", True),
+        ({"status": "fail", "error_type": "checkpoint_required"}, "fail", True),
+        ({"status": "untrusted raw status text", "message": "login_required"}, "api_status_fail", False),
+        ({"status": "ok", "data": {}}, "graphql_empty_connection", False),
+    ],
+)
+def test_guarded_graphql_error_or_missing_connection_never_succeeds(_mock_scrapling, payload, reason, auth):
+    import asyncio
+
+    fetcher, events = _guarded_graphql_fetcher(_mock_scrapling, "for (;;);" + json.dumps(payload))
+    result = asyncio.run(fetcher.fetch_posts_page("bravotv"))
+    assert result.fetch_failed and result.posts == [] and result.auth_failed is auth
+    assert result.fetch_reason == reason
+    assert events[0] == ("retained", payload)
+    assert events[1:] == ([("failure", "source_auth_failed")] if auth else [])
+    assert fetcher._request_count == fetcher._http_client.post.await_count == 1
+
+
+@pytest.mark.parametrize(
+    "text", ["for(;;);not JSON login challenge", "for (;;);[1,2]", "for(;;);null", 'while(1);{"status":"ok"}']
+)
+def test_guarded_graphql_invalid_or_unrecognized_payload_stays_unresolved(_mock_scrapling, text):
+    import asyncio
+
+    fetcher, events = _guarded_graphql_fetcher(_mock_scrapling, text)
+    result = asyncio.run(fetcher.fetch_posts_page("bravotv"))
+    assert result.fetch_failed and not result.auth_failed and result.posts == []
+    assert result.fetch_reason == "non_json_response" and not result.retryable
+    assert events == []
+    assert fetcher._request_count == fetcher._http_client.post.await_count == 1
+
+
+@pytest.mark.parametrize(
+    "body,auth",
+    [
+        ('<html><script>const login = "checkpoint challenge"</script></html>', False),
+        ('<form action="/accounts/login/"><input name="username"><input type="password"></form>', True),
+    ],
+)
+def test_graphql_html_failure_needs_structured_auth_evidence(_mock_scrapling, body, auth):
+    import asyncio
+
+    fetcher, _ = _guarded_graphql_fetcher(_mock_scrapling, body)
+    result = asyncio.run(fetcher.fetch_posts_page("bravotv"))
+    assert result.fetch_failed and result.auth_failed is auth and result.posts == []
+    assert result.fetch_reason == "html_challenge_or_auth_required"
+    assert fetcher._request_count == 1
+
+
+def test_graphql_http400_exact_checkpoint_remains_auth_failure(_mock_scrapling):
+    import asyncio
+
+    fetcher, events = _guarded_graphql_fetcher(
+        _mock_scrapling, '{"status":"fail","message":"checkpoint_required"}', status=400
+    )
+    result = asyncio.run(fetcher.fetch_posts_page("bravotv"))
+    assert result.fetch_failed and result.auth_failed and result.posts == []
+    assert result.fetch_reason == "http_400"
+    assert events == [("failure", "source_auth_failed")]
+    assert fetcher._request_count == 1
+
+
+@pytest.mark.parametrize(
+    "connection",
+    [
+        [],
+        "invalid",
+        {"edges": None, "page_info": {"has_next_page": False}},
+        {"edges": {}, "page_info": {"has_next_page": False}},
+        {"edges": [{"node": None}], "page_info": {"has_next_page": False}},
+        {"edges": [None], "page_info": {"has_next_page": False}},
+        {"edges": [{"node": {}}], "page_info": {"has_next_page": False}},
+        {"edges": [{"node": "invalid"}], "page_info": {"has_next_page": False}},
+        {"edges": [{"node": {"code": "valid"}}, {"node": None}], "page_info": {"has_next_page": False}},
+        {"edges": []},
+        {"edges": [], "page_info": {}},
+        {"edges": [], "page_info": {"has_next_page": "false"}},
+        {"edges": [], "page_info": {"has_next_page": 0}},
+        {"edges": [], "page_info": {"has_next_page": True}},
+        {"edges": [], "page_info": {"has_next_page": False, "end_cursor": 23}},
+        {"edges": [], "page_info": {"has_next_page": False, "end_cursor": " "}},
+    ],
+)
+def test_guarded_malformed_connection_is_retained_and_fails_without_more_requests(_mock_scrapling, connection):
+    import asyncio
+
+    payload = {"data": {"xdt_api__v1__feed__user_timeline_graphql_connection": connection}}
+    fetcher, events = _guarded_graphql_fetcher(_mock_scrapling, "for(;;);" + json.dumps(payload))
+    fetcher._doc_ids_configured = ("first-doc", "must-not-be-requested")
+    result = asyncio.run(fetcher.fetch_posts_page("bravotv"))
+    assert result.fetch_failed and not result.auth_failed and result.posts == []
+    assert result.fetch_reason == "graphql_invalid_connection"
+    assert not result.has_next_page and not result.retryable
+    assert events == [("retained", payload)]
+    assert fetcher._request_count == fetcher._http_client.post.await_count == 1
+    assert fetcher._doc_id_used is None and not fetcher._doc_id_success_counts
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_guarded_valid_empty_connection_requires_explicit_direction_terminal(_mock_scrapling, reverse):
+    import asyncio
+
+    info = (
+        {"has_previous_page": False, "start_cursor": None} if reverse else {"has_next_page": False, "end_cursor": None}
+    )
+    payload = {"data": {"xdt_api__v1__feed__user_timeline_graphql_connection": {"edges": [], "page_info": info}}}
+    fetcher, events = _guarded_graphql_fetcher(_mock_scrapling, "for(;;);" + json.dumps(payload))
+    result = asyncio.run(fetcher.fetch_posts_page("bravotv", direction="reverse" if reverse else "forward"))
+    assert not result.fetch_failed and not result.auth_failed and result.posts == []
+    assert not result.has_next_page and result.end_cursor is None
+    assert events == [("retained", payload)]
+    assert fetcher._request_count == fetcher._http_client.post.await_count == 1
+
+
 def test_warmup_emits_structured_log_success(_mock_scrapling, caplog):
     """After a successful warmup, an info log with event=warmup_success should fire."""
     import asyncio

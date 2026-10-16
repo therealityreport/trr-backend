@@ -548,3 +548,72 @@ at the profile route and passed warmup with the repaired classifier, despite the
 same incidental script words. It made one browser operation, no GraphQL call and
 no credential/database write. Deployed current-credential verification remains
 required before any correction of the retained identity/target blocks or resume.
+
+
+Backend `595fda4b` deployed to the verified TRR `main` target with launch routing
+still disabled, coordinator enabled and replay apply disabled. Readiness and HTTP
+health passed. Fresh API containers matched all 44 expected source files. A guarded
+worker bootstrap rejected an empty reservation before database/source activity;
+the actual social worker image then matched the same 44 files and had Patchright.
+
+A bounded deployed-current-credential probe at 2026-10-16T11:32:28Z returned HTTP
+200 at the home route, which the repaired warmup classifier rejected. It made one
+warmup operation and no GraphQL request, database write or credential change.
+Local TRR Chrome cookies passed repaired profile warmup, but the bounded GraphQL
+request returned HTTP 200 with a guarded JSON error envelope: numeric error
+1357001 and a login-required signal. The normal TRR Chrome session still displayed
+the signed-in Bravo profile and current posts. These observations establish a
+request-path discrepancy, not its cause. Structured GraphQL envelope handling is
+being corrected and reviewed before any further source check.
+
+An in-memory comparison established that local TRR Chrome and the deployed
+credential resolver use different sessions and different Instagram accounts.
+No account identifiers, credentials or hashes were persisted. No secret was
+updated. Substituting those cookies would change the scraping identity and is
+outside a routine same-account refresh. Identity and target blocks remain intact;
+the retained run has not resumed again.
+
+The full-stage resource harness required reassessment after two independent
+fixture schema gaps. Those gaps were corrected, but every post, comment and avatar
+asset still used identical PNG bytes. That stress case favors legacy global hash
+reuse and is not representative of a distinct-asset workload. Its measurements
+are retained without acceptance: legacy 3,975 adjusted SQL statements, peak two
+sessions and 13.91 seconds to stage completion; candidate 15,814 statements at
+completion, peak five sessions and 55.66 seconds. Full candidate lifecycle reached
+18,386 adjusted statements and 86.83 seconds. A complete fixture-contract and
+counter audit is required before another matched pair. The resource gate, healthy
+canary completion, ten-run gate and 24-hour observation remain open.
+
+
+The guarded-JSON/error-classification repair passed 45 focused checks, three final
+HTTP/HTML guard checks and 44 affected checks after the review correction. The
+independent reviewer closed the malformed-connection finding. Decoded mappings
+reach the source observer before classification. Error 1357001 is explicitly
+rejected; generic errors, malformed nodes and missing pagination proof remain
+unresolved. Explicit valid empty terminal pages still work in both directions.
+No request or retry budget is reset by the repair.
+
+Passive native TRR Chrome DevTools inspection then observed a successful timeline
+pagination response at `/graphql/query`, HTTP 200, with the expected native
+connection and edges. It used `PolarisProfilePostsTabContentQuery_connection`,
+public document ID `39229011733413759`, and `__user=0`; none match the maintained
+query name/document fallback combination or its `__user=viewer_id` shape. Native
+form fields also included `__hsi`, `fb_dtsg` and `jazoest`. Only allowlisted shape
+facts were saved; private request/response values were discarded. The browser's
+save-login prompt was dismissed with Not now, and DevTools was closed afterward.
+These differences establish contract drift, not which difference causes rejection.
+
+A bounded local probe at 2026-10-16T11:51:11Z changed only `__user` to zero, keeping
+the reviewed fetcher and other request fields. Warmup passed; the single GraphQL
+response returned guarded numeric error 1357004 instead of 1357001, without a
+native connection or login signal. The source-operation guard prevented a second
+GraphQL request. This is diagnostic, not successful ingestion or causal proof;
+credential, identity and launch state remain unchanged.
+
+The resource review consolidated seven fixture/counter corrections: native worker
+entrypoints and matching subprocess boundaries, distinct asset bytes, native worker
+registry schema/preflight, complete field/asset assertions, persisted storage
+operations, observer-failure propagation, and frozen-source enforcement. They are
+being implemented as one batch before one reviewed representative pair. Resolved
+production pool facts remain default min/max 1/2 and control 1/1: local-development
+mode bypasses the Modal session-pooler ceiling. No pool setting was changed.
