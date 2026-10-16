@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Mapping
 from typing import Any
 
@@ -89,18 +90,38 @@ def activity_reservation(payload: Mapping[str, Any]) -> dict[str, Any]:
     return safe
 
 
-def run_ingestion_activity(reservation: Mapping[str, Any]) -> dict[str, Any]:
-    """Run the new worker within its lease, sharing existing Modal function caps.
+def run_ingestion_activity(
+    reservation: Mapping[str, Any],
+    *,
+    execution_placement: str = "modal",
+    timeout_seconds: float | None = None,
+    abort: threading.Event | None = None,
+) -> dict[str, Any]:
+    """Run the worker within its lease; Modal callers keep existing function caps.
 
+    Explicit local callers supply a serial admission owner and bounded abort;
+    they do not occupy Modal's physical function limiter.
     Only JSON stdin carries the owner token. Output is bounded and projected to
     outcome/identities plus one validated public failure diagnostic. Source
     payloads, raw logs and stderr never leave this helper.
     """
+    if execution_placement not in {"modal", "local"}:
+        raise ValueError("Unsupported ingestion execution placement")
+    if execution_placement == "modal" and (timeout_seconds is not None or abort is not None):
+        raise ValueError("Local activity bounds cannot change Modal policy")
+    timeout = ACTIVITY_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+    if not 0 < timeout <= ACTIVITY_TIMEOUT_SECONDS:
+        raise ValueError("Activity deadline exceeds the existing bound")
     if not coordinator_enabled():
         return {"outcome": "fenced", "code": "ingestion_disabled"}
     safe = activity_reservation(reservation)
+    if abort is not None and abort.is_set():
+        return {"outcome": "fenced", "stage": safe["stage"], "code": "local_execution_aborted"}
+    argv = [sys.executable, "-m", "trr_backend.ingestion.worker"]
+    if execution_placement == "local":
+        argv.extend(["--execution-placement", "local", "--expected-parent-pid", str(os.getpid())])
     child = subprocess.Popen(
-        [sys.executable, "-m", "trr_backend.ingestion.worker"],
+        argv,
         start_new_session=True,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -135,7 +156,21 @@ def run_ingestion_activity(reservation: Mapping[str, Any]) -> dict[str, Any]:
         except BrokenPipeError:
             pass
         try:
-            code = child.wait(timeout=ACTIVITY_TIMEOUT_SECONDS)
+            if execution_placement == "modal":
+                code = child.wait(timeout=timeout)
+            else:
+                end = time.monotonic() + timeout
+                while True:
+                    if abort is not None and abort.is_set():
+                        return {"outcome": "fenced", "stage": safe["stage"], "code": "local_execution_aborted"}
+                    remaining = end - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(argv, timeout)
+                    try:
+                        code = child.wait(timeout=min(0.1, remaining))
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
         except subprocess.TimeoutExpired:
             return {"outcome": "unresolved", "stage": safe["stage"], "code": "activity_timeout"}
         reader.join(timeout=5)

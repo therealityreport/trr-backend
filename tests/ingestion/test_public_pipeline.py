@@ -184,8 +184,8 @@ def test_public_composed_pipeline_commits_native_parent_reply_post_and_avatar_me
         async_clients.append(result)
         return result
 
-    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: forbidden())
-    monkeypatch.setattr(comments_fetcher, "build_comments_async_client", async_client)
+    monkeypatch.setattr(httpx, "AsyncClient", async_client)
+    monkeypatch.setattr(comments_fetcher, "build_comments_async_client", forbidden)
     fetcher_init = comments_fetcher.InstagramCommentsScraplingFetcher.__init__
 
     def fetcher_constructor(self, *args, **kwargs):
@@ -243,7 +243,10 @@ def test_public_composed_pipeline_commits_native_parent_reply_post_and_avatar_me
         source_profile=SourceProfile.for_mode("public"),
     )
     command = api.launch(
-        ACCOUNT, InstagramIngestionLaunchV2(), idempotency_key="public-pipeline", initiated_by="fixture"
+        ACCOUNT,
+        InstagramIngestionLaunchV2(force_catalog_rediscovery=True),
+        idempotency_key="public-pipeline",
+        initiated_by="fixture",
     )
     run_id = str(command.run_id)
     worker = composition.build_worker()

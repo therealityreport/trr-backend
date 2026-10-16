@@ -6535,11 +6535,8 @@ class InstagramCommentsScraplingFetcher:
                             native_node = edge["node"]
                             identity = _graphql_comment_id(native_node)
                             thread = native_node.get("edge_threaded_comments")
-                            if isinstance(thread, Mapping):
-                                more = _graphql_connection_page_info(thread).get("has_next_page")
-                                replies[identity] = {"exhausted": True} if more is False else {"pending": True}
-                            elif not any(
-                                key in native_node
+                            count_known = any(
+                                type(native_node.get(key)) is int and native_node[key] >= 0
                                 for key in (
                                     "child_comment_count",
                                     "childCommentCount",
@@ -6547,7 +6544,14 @@ class InstagramCommentsScraplingFetcher:
                                     "reply_count",
                                     "replies_count",
                                 )
-                            ):
+                            )
+                            if isinstance(thread, Mapping):
+                                more = _graphql_connection_page_info(thread).get("has_next_page")
+                                count_known = count_known or (type(thread.get("count")) is int and thread["count"] >= 0)
+                                replies[identity] = (
+                                    {"exhausted": True} if more is False and count_known else {"pending": True}
+                                )
+                            elif not count_known:
                                 replies.setdefault(identity, {"pending": True})
                     appended = _merge_unique_comments(
                         comments,

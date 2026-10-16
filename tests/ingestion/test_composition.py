@@ -2,6 +2,7 @@
 
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from types import ModuleType, SimpleNamespace
 from uuid import uuid4
@@ -300,6 +301,20 @@ def test_dispatch_uses_recorded_target_existing_lane_names_and_only_safe_fence(m
         return SimpleNamespace(spawn=lambda **kw: calls.append(kw) or SimpleNamespace(object_id="fc-safe"))
 
     monkeypatch.setattr(modal_dispatch, "get_trr_modal_function_handle", handle)
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+    @contextmanager
+    def transaction():
+        yield SimpleNamespace(cursor=lambda **_: Cursor())
+
+    store = SimpleNamespace(transaction=transaction, _execution_run=lambda *_: {"generation": 1, "state": "queued"})
+    monkeypatch.setattr(composition, "Store", lambda: store)
     reservation = {
         "run_id": "run",
         "account": "bravotv",

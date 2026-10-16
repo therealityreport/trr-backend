@@ -11,8 +11,15 @@ import pytest
 
 from tests.ingestion import test_comment_resume as resume_tests
 from tests.ingestion import test_comments as existing
-from trr_backend.ingestion.comment_transport import PublicRelayCommentSource, ScraplingCommentSource
-from trr_backend.ingestion.comments import CommentActivity, CommentSourceError, _advance, parse_comment_evidence
+from trr_backend.ingestion.comment_transport import PublicRelayCommentSource, PublicRelayResume, ScraplingCommentSource
+from trr_backend.ingestion.comments import (
+    CommentActivity,
+    CommentFetchSummary,
+    CommentSourceError,
+    _advance,
+    _complete,
+    parse_comment_evidence,
+)
 from trr_backend.ingestion.domain import Failure, LostOwnership, RunIntent, SourceProfile, Stage
 from trr_backend.ingestion.evidence import Evidence
 from trr_backend.ingestion.post_transport import SourceFailure
@@ -97,6 +104,24 @@ def bootstrap():
     return httpx.Response(
         200, text='"LSD",[],{"token":"ephemeral-fixture-lsd"}', headers={"set-cookie": "csrftoken=anonymous; Path=/"}
     )
+
+
+def actual_parent_shape(identity, count=None):
+    """Synthetic values with the exact retained public parent field shape."""
+    return {
+        "__typename": "XDTCommentDict",
+        "child_comment_count": count,
+        "comment_like_count": 0,
+        "created_at": 1772766459,
+        "giphy_media_info": None,
+        "has_translation": None,
+        "is_covered": False,
+        "is_edited": False,
+        "parent_comment_id": None,
+        "pk": identity,
+        "text": f"synthetic public comment {identity}",
+        "user": {"pk": "100", "username": "fixture"},
+    }
 
 
 def setup(database, *, seed_missing=False):
@@ -702,3 +727,331 @@ def test_public_cookie_violation_opens_real_gate_immediately_without_another_sen
             shortcode="ABC123", checkpoint={}, source_observer=lambda *args: None, pre_source_request=lambda: None
         )
     assert len(calls) == ["bootstrap", "parent", "child"].index(stage) + 1
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_retained_26_parent_shape_compares_legacy_fetch_coverage_with_strict_reply_probes(
+    database, monkeypatch, strict
+):
+    import asyncio
+
+    monkeypatch.setenv(maintained._PUBLIC_COMMENTS_ZERO_REPLY_PROBE_LIMIT_ENV, "0")
+    calls, children = [], []
+
+    def handler(request):
+        if request.method == "GET":
+            calls.append("bootstrap")
+            return bootstrap()
+        _, variables = body(request)
+        parent = variables.get("parent_comment_id")
+        if parent:
+            children.append(parent)
+            calls.append("child")
+            replies = [actual_parent_shape("r1")] if parent == "p0" else []
+            for reply in replies:
+                reply.pop("parent_comment_id")
+            return httpx.Response(200, json=page(replies, child=True))
+        calls.append("top")
+        tail = variables.get("after")
+        indexes = range(15, 26) if tail else range(15)
+        return httpx.Response(
+            200,
+            json=page([actual_parent_shape(f"p{i}") for i in indexes], more=not tail, after=None if tail else "tail"),
+        )
+
+    fetch, created = source(monkeypatch, handler, expected=26)
+    if strict:
+        store, _, args = setup(database)
+        result = CommentActivity(store, fetch, clock=lambda: OBSERVED).execute(**args)
+        state = result["checkpoint"]["comment_pages"]
+        assert result["complete"] is True, {"calls": calls, "state": state}
+        assert len(state["observed"]) == 27 and all(
+            state["observed"][f"p{i}"]["expected_replies"] is None for i in range(26)
+        )
+        assert (
+            state["observed"]["r1"]["expected_replies"] is None and state["observed"]["r1"]["native_reply_leaf"] is True
+        )
+        assert children == [f"p{i}" for i in range(26)] and len(calls) == 29
+    else:
+
+        async def legacy():
+            maintained_fetcher = fetch._factory(
+                cookies=[], raw_cookies={}, browser_account_id=None, proxy_config=None, public_only=True
+            )
+            try:
+                return await maintained_fetcher.fetch_comments_for_shortcode(
+                    "ABC123",
+                    max_comments=0,
+                    fetch_replies=True,
+                    expected_comment_count=26,
+                    load_strategy="public_relay",
+                )
+            finally:
+                await maintained_fetcher.aclose()
+
+        result = asyncio.run(legacy())
+        assert result.fetch_failed is False
+        assert len(result.comments) == 26 and children == [] and len(calls) == 3
+    assert len(created) == 1
+
+
+@pytest.mark.parametrize("count", [None, "absent", 0, False, True, -1])
+def test_public_unknown_native_counts_probe_but_explicit_zero_skips(database, monkeypatch, count):
+    store, tx, args = setup(database)
+    children = []
+
+    def handler(request):
+        if request.method == "GET":
+            return bootstrap()
+        _, variables = body(request)
+        if variables.get("parent_comment_id"):
+            children.append(variables["parent_comment_id"])
+            return httpx.Response(200, json=page([], child=True))
+        parent = actual_parent_shape("p", count)
+        if count == "absent":
+            parent.pop("child_comment_count")
+        return httpx.Response(200, json=page([parent]))
+
+    fetch, _ = source(monkeypatch, handler, expected=1)
+    if type(count) is bool or (type(count) is int and count < 0):
+        with pytest.raises(CommentSourceError, match="nonnegative integer or null"):
+            CommentActivity(store, fetch, clock=lambda: OBSERVED).execute(**args)
+        assert children == []
+        assert (
+            existing.query(
+                tx, "select * from social.instagram_ingestion_comment_pages where run_id=%s", (args["run_id"],)
+            )
+            == []
+        )
+        assert (
+            len(
+                existing.query(
+                    tx, "select * from social.instagram_ingestion_evidence where run_id=%s", (args["run_id"],)
+                )
+            )
+            == 1
+        )
+        return
+    result = CommentActivity(store, fetch, clock=lambda: OBSERVED).execute(**args)
+    explicit_zero = type(count) is int and count == 0
+    assert result["complete"] is True and children == ([] if explicit_zero else ["p"])
+    assert result["checkpoint"]["comment_pages"]["observed"]["p"]["expected_replies"] == (0 if explicit_zero else None)
+
+
+def test_unknown_parent_reply_checkpoint_resumes_only_pending_lane_and_preserves_nulls(database, monkeypatch):
+    store, tx, args = setup(database, seed_missing=True)
+    attempt, calls = 0, []
+
+    def handler(request):
+        if request.method == "GET":
+            calls.append((attempt, "bootstrap", None))
+            return bootstrap()
+        _, variables = body(request)
+        parent, cursor = variables.get("parent_comment_id"), variables.get("after")
+        calls.append((attempt, parent or "top", cursor))
+        if parent is None:
+            assert attempt == 0, "refetched exhausted top root"
+            return httpx.Response(200, json=page([actual_parent_shape("p1"), actual_parent_shape("p2")]))
+        if parent == "p1":
+            assert attempt == 0, "refetched an already proved unknown-count parent"
+            return httpx.Response(200, json=page([], child=True))
+        assert parent == "p2"
+        if cursor is None:
+            assert attempt == 0
+            reply = actual_parent_shape("r1")
+            reply.pop("parent_comment_id")
+            return httpx.Response(200, json=page([reply], child=True, more=True, after="child-tail"))
+        assert cursor == "child-tail"
+        if attempt == 0:
+            raise RuntimeError("interrupted unknown-count reply tail")
+        return httpx.Response(200, json=page([], child=True))
+
+    fetch, _ = source(monkeypatch, handler, expected=2)
+    with pytest.raises(RuntimeError, match="interrupted unknown-count"):
+        CommentActivity(store, fetch, clock=lambda: OBSERVED).execute(**args)
+    row = resume_tests.retry(database, args, cancel=True)
+    before = row["checkpoint"]["comment_pages"]
+    assert before["observed"]["p1"]["expected_replies"] is None
+    assert before["observed"]["p2"]["expected_replies"] is None
+    assert before["lanes"]["p1"]["started_from_root"] is True
+    assert before["lanes"]["p2"]["exhausted"] is False
+    attempt = 1
+    fetch, _ = source(monkeypatch, handler, expected=2)
+    result = CommentActivity(store, fetch, clock=lambda: OBSERVED + timedelta(hours=1)).execute(**args)
+    assert result["complete"] is True
+    assert [item[1:] for item in calls if item[0] == 1] == [("bootstrap", None), ("p2", "child-tail")]
+    assert result["checkpoint"]["comment_pages"]["observed"]["p2"]["expected_replies"] is None
+    assert (
+        existing.query(
+            tx,
+            "select scraped_at from social.instagram_comments where post_id=%s and comment_id='r1'",
+            (args["post_id"],),
+        )[0]["scraped_at"]
+        == OBSERVED
+    )
+
+
+def test_unknown_reply_exhaustion_requires_root_and_exact_cursor_proof():
+    def parsed(payload, *, cursor=None, parent=None):
+        return parse_comment_evidence(
+            existing.evidence(
+                maintained._durable_relay_payload(
+                    payload,
+                    cursor=cursor,
+                    doc_id="child-query" if parent else "top-query",
+                    friendly_name="fixture-query",
+                    sort_order="popular",
+                    page_size=15,
+                    parent=parent,
+                )
+            ),
+            pinned=True,
+        )
+
+    state = {"version": 1, "observed": {}, "lanes": {}, "expected": None}
+    _advance(state, parsed(page([actual_parent_shape("p")])), scan_started_at=OBSERVED)
+    summary = CommentFetchSummary(expected_count=1, full_observation=True)
+    assert not _complete(state, summary)
+    _advance(state, parsed(page([], child=True, more=True, after="right-tail"), parent="p"), scan_started_at=OBSERVED)
+    with pytest.raises(CommentSourceError, match="durable query lane"):
+        _advance(state, parsed(page([], child=True), cursor="wrong-tail", parent="p"), scan_started_at=OBSERVED)
+    assert not _complete(state, summary)
+    _advance(state, parsed(page([], child=True), cursor="right-tail", parent="p"), scan_started_at=OBSERVED)
+    assert _complete(state, summary) and state["observed"]["p"]["expected_replies"] is None
+    state["lanes"]["p"].pop("started_from_root")
+    assert not _complete(state, summary)
+    from types import SimpleNamespace
+
+    resume = PublicRelayResume.from_checkpoint({"comment_pages": state}, [SimpleNamespace(comment_id="p", replies=[])])
+    assert resume.replies["p"] == {"pending": True}
+    assert not _complete(state, CommentFetchSummary(full_observation=True))
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_public_positive_or_nested_reply_topology_never_settles(database, monkeypatch, nested):
+    store, tx, args = setup(database, seed_missing=True)
+
+    def handler(request):
+        if request.method == "GET":
+            return bootstrap()
+        _, variables = body(request)
+        if variables.get("parent_comment_id"):
+            reply = actual_parent_shape("r", 1 if not nested else 0)
+            reply.pop("parent_comment_id")
+            if nested:
+                reply["edge_threaded_comments"] = {"count": 0, "edges": [], "page_info": {"has_next_page": False}}
+            return httpx.Response(200, json=page([reply], child=True))
+        return httpx.Response(200, json=page([actual_parent_shape("p")]))
+
+    fetch, _ = source(monkeypatch, handler, expected=1)
+    result = CommentActivity(store, fetch, clock=lambda: OBSERVED).execute(**args)
+    assert result["complete"] is False
+    assert (
+        existing.query(
+            tx,
+            "select is_missing from social.instagram_comments where post_id=%s and comment_id='old'",
+            (args["post_id"],),
+        )[0]["is_missing"]
+        is False
+    )
+
+
+@pytest.mark.parametrize("positive_alias", ["reply_count", "replies_count", "childCommentCount", "repliesCount"])
+def test_public_zero_primary_with_positive_reply_alias_never_settles(database, monkeypatch, positive_alias):
+    store, tx, args = setup(database, seed_missing=True)
+
+    def handler(request):
+        if request.method == "GET":
+            return bootstrap()
+        _, variables = body(request)
+        if variables.get("parent_comment_id"):
+            reply = actual_parent_shape("r", 0)
+            reply.pop("parent_comment_id")
+            reply[positive_alias] = 1
+            return httpx.Response(200, json=page([reply], child=True))
+        return httpx.Response(200, json=page([actual_parent_shape("p")]))
+
+    fetch, _ = source(monkeypatch, handler, expected=1)
+    result = CommentActivity(store, fetch, clock=lambda: OBSERVED).execute(**args)
+    assert result["complete"] is False
+    observed = result["checkpoint"]["comment_pages"]["observed"]["r"]
+    assert observed["expected_replies"] == 0 and observed["native_reply_leaf"] is False
+    assert observed["unsupported_reply_topology"] is True
+    assert (
+        existing.query(
+            tx,
+            "select is_missing from social.instagram_comments where post_id=%s and comment_id='old'",
+            (args["post_id"],),
+        )[0]["is_missing"]
+        is False
+    )
+
+
+@pytest.mark.parametrize("null_alias", [None, "childCommentCount"])
+def test_public_missing_or_null_alias_stays_unknown_through_checkpoint_resume_and_replay(
+    database, monkeypatch, null_alias
+):
+    store, tx, args = setup(database)
+    attempt = 0
+    captured = []
+
+    def handler(request):
+        if request.method == "GET":
+            return bootstrap()
+        _, variables = body(request)
+        if not variables.get("parent_comment_id"):
+            assert attempt == 0, "refetched exhausted top"
+            return httpx.Response(200, json=page([actual_parent_shape("p")]))
+        if variables.get("after"):
+            assert variables["after"] == "tail"
+            if attempt == 0:
+                raise RuntimeError("interrupted retained unknown reply")
+            return httpx.Response(200, json=page([], child=True))
+        assert attempt == 0
+        reply = actual_parent_shape("r")
+        reply.pop("parent_comment_id")
+        reply.pop("child_comment_count")
+        if null_alias:
+            reply[null_alias] = None
+        payload = page([reply], child=True, more=True, after="tail")
+        captured.append(payload)
+        return httpx.Response(200, json=payload)
+
+    fetch, _ = source(monkeypatch, handler, expected=1)
+    with pytest.raises(RuntimeError, match="interrupted retained unknown reply"):
+        CommentActivity(store, fetch, clock=lambda: OBSERVED).execute(**args)
+    previous = resume_tests.retry(database, args)
+    reply_state = previous["checkpoint"]["comment_pages"]["observed"]["r"]
+    assert reply_state["expected_replies"] is None and reply_state["native_reply_leaf"] is True
+    retained = existing.query(
+        tx,
+        "select * from social.instagram_ingestion_evidence where run_id=%s order by captured_at,evidence_id",
+        (args["run_id"],),
+    )
+    child = next(row for row in retained if "parent_comment_id" in json.loads(row["payload"]))
+    evidence = Evidence(
+        source_identity=child["source_identity"],
+        captured_at=child["captured_at"],
+        parser_version=child["parser_version"],
+        payload_json=child["payload"],
+        content_hash=child["content_hash"],
+        schema_version=child["schema_version"],
+    )
+    replayed = parse_comment_evidence(evidence, pinned=True)
+    assert replayed.source_payloads[0].get("child_comment_count") is None
+    assert "child_comment_count" not in replayed.source_payloads[0]
+    if null_alias:
+        assert replayed.source_payloads[0][null_alias] is None
+    attempt = 1
+    fetch, _ = source(monkeypatch, handler, expected=1)
+    result = CommentActivity(store, fetch, clock=lambda: OBSERVED + timedelta(hours=1)).execute(**args)
+    assert result["complete"] is True
+    assert result["checkpoint"]["comment_pages"]["observed"]["r"]["expected_replies"] is None
+    assert (
+        existing.query(
+            tx,
+            "select scraped_at from social.instagram_comments where post_id=%s and comment_id='r'",
+            (args["post_id"],),
+        )[0]["scraped_at"]
+        == OBSERVED
+    )

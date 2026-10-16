@@ -78,7 +78,10 @@ class Queries:
             stage["complete"] = stage_counts.complete
         result["stages"] = stages
         result["complete"] = run_complete(RunIntent.from_payload(result["intent"]), counts)
+        result["execution_placement"] = result.get("execution_placement", "modal")
         result["allowed_actions"] = [] if execution_hold else self._actions(result["state"], result["complete"])
+        if result["execution_placement"] == "local":
+            result["allowed_actions"] = [action for action in result["allowed_actions"] if action == "cancel"]
         return result
 
     @staticmethod
@@ -96,8 +99,9 @@ class Queries:
             raise ValueError("Recent run limit must be 1 to 100")
         with self.read_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                """select run_id,account,state,intent,engine,workflow_version,created_at,last_committed_at
-                from social.instagram_ingestion_runs where account=%s and intent->>'source_scope'=%s
+                """select run_id,account,state,intent,engine,workflow_version,created_at,last_committed_at,
+                coalesce(to_jsonb(r)->>'execution_placement','modal') as execution_placement
+                from social.instagram_ingestion_runs r where account=%s and intent->>'source_scope'=%s
                 order by created_at desc,run_id desc limit %s""",
                 (account, source_scope, limit),
             )

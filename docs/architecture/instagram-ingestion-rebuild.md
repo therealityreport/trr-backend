@@ -1572,3 +1572,69 @@ placement guard and changed path are reviewed, deployed and verified. Comments,
 replies, media, full pipeline, ten representative runs and the 24-hour observation
 remain unverified. The earlier cloud-only failure is not proof that every public
 access path is unavailable.
+
+### Public results and bounded recovery candidate — 2026-10-16 17:33 UTC
+
+Further local anonymous checks used the shared source gate, with no login, proxy,
+canonical writes or run resume:
+
+- All 33 returned listing rows satisfy the existing detail completeness validator.
+  `public-instagram-observed-posts-33.csv` contains the observed captions, dates,
+  metrics and media types. Listing pagination remains open.
+- The three-request comment diagnostic retrieved 26 top-level comments and ended
+  the top-level lane. Native parent reply counts were null; no child request was
+  sent. This is not a fair full-coverage comparison with an older production run.
+  The maintained older public Relay path also skips these unknown-count parents
+  by default. Older live coverage has not been established by this comparison.
+- Media delivery failed because evidence sanitization removed four native CDN
+  delivery parameters. The bounded fix preserves `_nc_ad`, `_nc_cid`, `_nc_ss`
+  and `ig_cache_key` only on approved Instagram/Facebook CDN hosts. Authentication
+  fields remain excluded. Eleven focused tests passed. A fresh anonymous check
+  confirmed the sanitized URL equals the original and downloads HTTP 200:
+  350844-byte JPEG, 1216 by 1504, SHA-256
+  `7b33ba6752d16ad9a23c3f5b12e0b5f256c2b1862eaf13af37493427759c245c`.
+
+The unknown-reply candidate now probes null-count parents while preserving null
+in observation state. Completion requires native query-bound child-root through
+terminal-page proof; explicit leaf proof is separate from count coercion. Twelve
+new and twelve affected legacy tests passed; unchanged earlier checks are reused.
+Independent review precedes a 40-request/300-second anonymous diagnostic.
+
+The placement review found two recovery defects: old sending reservations could
+block admission after safe recovery, and a stalled lease query could bypass abort.
+The implementer is repairing both in one batch, with real admission and stalled
+query/child-reaping fixtures. No live placement migration or local resume has been
+performed. Deployment must precede the additive placement column; old cloud code
+must not be permitted to execute a locally placed run.
+
+Evidence is under `.artifacts/ingestion-rollout/`: public-local-comments-result.json,
+public-local-listing-validation-result.json, public-local-original-media-result.json,
+public-local-sanitized-media-result.json, and their sanitized source evidence.
+Full pipeline completion and the original representative-run/observation gates
+remain open. Both existing runs are still paused.
+
+### Complete comment-record scope and live reply attempt — 2026-10-16 17:38 UTC
+
+The user reaffirmed that completion includes comments, replies, comment media,
+usernames, comment likes and commenter profiles. Embedded author fields and full
+public profile enrichment must be assessed separately; do not call either
+complete solely because comment pagination completed. No login remains required.
+
+The reviewed repair's bounded anonymous probe admitted five sends, retrieved
+42 top-level comments over three terminally exhausted top-level pages, then
+received `rate_limited` on the first reply attempt. The shared lane retained its
+cooldown through 17:49:38.518628 UTC. No retry was sent during that cooldown.
+This is partial observation, not completed reply coverage or canonical ingestion.
+
+The 42-row export includes usernames, user IDs and avatar URLs for all rows,
+439 total observed comment likes, and one comment with source media URLs.
+It does not prove hosted comment media, hosted avatars or full profile metadata.
+Evidence: `public-local-repaired-comments-result.json`, the three sanitized
+`public-local-repaired-comment-page-*.json` files, and
+`public-instagram-observed-comments-42.csv` under `.artifacts/ingestion-rollout/`.
+
+Both review batches are now resolved. Placement fixes passed 12 affected checks
+and fixes-only review. Comment fixes passed 10 affected cases and fixes-only
+review: any positive conflicting reply-count alias remains unsupported, and
+strict public absent/null counts are not synthesized as zero. Existing unchanged
+checks were reused. App contract/control alignment is in progress.

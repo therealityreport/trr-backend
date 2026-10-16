@@ -440,9 +440,15 @@ class PublicRelayResume:
             lane = lanes.get(parent.comment_id) or {}
             item = lane_resume(lane, root=False)
             expected = (observed.get(parent.comment_id) or {}).get("expected_replies")
+            unknown_proved = (
+                expected is None
+                and item.get("exhausted")
+                and lane.get("started_from_root") is True
+                and bool(item.get("relay_doc_id"))
+            )
             pending = (
                 lane.get("exhausted") is False
-                or (expected is None and not item.get("exhausted"))
+                or (expected is None and not unknown_proved)
                 or (_count(expected) is not None and len(parent.replies) < expected)
             )
             item["pending"] = pending

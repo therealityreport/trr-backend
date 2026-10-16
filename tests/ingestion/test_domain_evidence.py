@@ -113,3 +113,18 @@ def test_only_reviewed_cdn_delivery_parameters_survive_evidence():
         sanitize_payload({"url": "https://scontent.fbcdn.net/asset?oe=ABC&cookie=secret"})["url"]
         == "https://scontent.fbcdn.net/asset?oe=ABC"
     )
+
+
+def test_anonymous_native_media_delivery_query_survives_without_reencoding():
+    # The live anonymous timeline's image failed with 403 after these delivery
+    # fields were removed; its original URL downloaded successfully. Values here
+    # are synthetic. Account credentials remain excluded even on CDN origins.
+    query = "oh=asset%2Bsignature&_nc_ad=z-m&_nc_cid=0&_nc_ss=8&ig_cache_key=asset%3D%3D.3-ccb7-5&oe=ABC"
+    for host in ("scontent.cdninstagram.com", "scontent.fbcdn.net"):
+        url = f"https://{host}/image.jpg?{query}"
+        assert sanitize_payload({"display_url": url + "&sessionid=secret&ds_user_id=secret"}) == {
+            "display_url": url
+        }
+    assert sanitize_payload({"url": f"https://example.com/image.jpg?{query}"}) == {
+        "url": "https://example.com/image.jpg"
+    }

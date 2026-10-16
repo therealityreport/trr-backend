@@ -116,6 +116,7 @@ class InstagramRunIntentV2(StrictModel):
 
 
 class InstagramIngestionProgressV2(StrictModel):
+    execution_placement: Literal["modal", "local"] = "modal"
     run_id: UUID
     account: str
     intent: InstagramRunIntentV2
@@ -185,6 +186,7 @@ class InstagramIngestionCapabilitiesV2(StrictModel):
 
 
 class InstagramRecentRunV2(StrictModel):
+    execution_placement: Literal["modal", "local"] = "modal"
     run_id: UUID
     account: str
     state: RunState

@@ -222,6 +222,10 @@ CDN_DELIVERY_KEYS = frozenset(
         "_nc_gid",
         "_nc_zt",
         "_nc_rid",
+        "_nc_ad",
+        "_nc_cid",
+        "_nc_ss",
+        "ig_cache_key",
         "bytestart",
         "byteend",
     }

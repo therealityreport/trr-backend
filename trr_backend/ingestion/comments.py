@@ -217,12 +217,17 @@ def _find_connection(payload: Mapping[str, Any]) -> tuple[str, Mapping[str, Any]
     return None
 
 
-def _node(source: Any, parent: str | None = None) -> dict[str, Any]:
+def _node(source: Any, parent: str | None = None, *, strict_counts: bool = False) -> dict[str, Any]:
     if not isinstance(source, dict):
         raise CommentSourceError("Comment node is not an object")
     if source.get("source_snapshot_type", "full_comments_scrape") != "full_comments_scrape":
         raise CommentSourceError("Comment samples cannot become full-comments observations")
     result = dict(source)
+    if strict_counts and any(
+        key in source and source[key] is not None and _count(source[key]) is None
+        for key in ("child_comment_count", "childCommentCount", "repliesCount", "reply_count", "replies_count")
+    ):
+        raise CommentSourceError("Native public reply count must be a nonnegative integer or null")
     if "child_comment_count" not in result:
         for alias in ("childCommentCount", "repliesCount"):
             if _count(source.get(alias)) is not None:
@@ -253,12 +258,16 @@ def _node(source: Any, parent: str | None = None) -> dict[str, Any]:
             result["child_comment_count"] = thread["count"]
     if not isinstance(children, list):
         raise CommentSourceError("Native reply list is malformed")
-    result["replies"] = [_node(child, str(identity)) for child in children]
+    result["replies"] = [_node(child, str(identity), strict_counts=strict_counts) for child in children]
     # The supported native Instagram reply topology is one parent level. An
     # explicit reply endpoint/embedded child node is a leaf unless source
     # content itself supplies another child count or connection.
-    if parent and not any(
-        key in result for key in ("child_comment_count", "reply_count", "replies_count", "edge_threaded_comments")
+    if (
+        parent
+        and not strict_counts
+        and not any(
+            key in result for key in ("child_comment_count", "reply_count", "replies_count", "edge_threaded_comments")
+        )
     ):
         result["child_comment_count"] = 0
     result.pop("child_comments", None)
@@ -365,7 +374,7 @@ def parse_comment_evidence(
         raise CommentSourceError("Native pagination flag is not boolean")
     if cursor is not None and not isinstance(cursor, (str, int)):
         raise CommentSourceError("Native cursor is malformed")
-    sources = tuple(_node(node, parent) for node in nodes)
+    sources = tuple(_node(node, parent, strict_counts=provenance is not None) for node in nodes)
     comments = tuple(normalize_comment_source(node) for node in sources)
     identities: dict[str, str | None] = {}
 
@@ -509,12 +518,12 @@ def _advance(state: dict[str, Any], page: CommentPage, *, scan_started_at: datet
         if page.parent_comment_id and page.expected_count is not None and page.parent_comment_id in state["observed"]:
             parent = state["observed"][page.parent_comment_id]
             parent["expected_replies"] = max(parent.get("expected_replies") or 0, page.expected_count)
-    if page.started_from_root and not page.parent_comment_id:
-        state["lanes"]["__top__"]["started_from_root"] = True
+    if page.started_from_root:
+        state["lanes"][page.parent_comment_id or "__top__"]["started_from_root"] = True
     if page.expected_count is not None and not page.parent_comment_id:
         state["expected"] = page.expected_count
 
-    def visit(comment: InstagramComment, source: dict[str, Any]) -> None:
+    def visit(comment: InstagramComment, source: dict[str, Any], *, native_reply: bool = False) -> None:
         thread = source.get("edge_threaded_comments")
         if isinstance(thread, dict):
             info = thread.get("page_info") or {}
@@ -530,11 +539,26 @@ def _advance(state: dict[str, Any], page: CommentPage, *, scan_started_at: datet
             "parent": parent,
             "expected_replies": expected if expected is not None else (previous or {}).get("expected_replies"),
         }
+        if provenance is not None and native_reply:
+            nested = bool(source["replies"]) or isinstance(thread, dict)
+            counts = [
+                source[key]
+                for key in ("child_comment_count", "childCommentCount", "reply_count", "replies_count", "repliesCount")
+                if key in source
+            ]
+            # Native depth-one reply endpoints/edges prove leaf topology even
+            # when their optional child-count field is null. Keep that field
+            # unknown; the topology proof is separate from a numeric count.
+            state["observed"][comment.comment_id]["native_reply_leaf"] = not nested and all(
+                value is None or (type(value) is int and value == 0) for value in counts
+            )
+            if nested or any(type(value) is int and value > 0 for value in counts):
+                state["observed"][comment.comment_id]["unsupported_reply_topology"] = True
         for child, raw in zip(comment.replies, source["replies"], strict=True):
-            visit(child, raw)
+            visit(child, raw, native_reply=True)
 
     for comment, source in zip(page.comments, page.source_payloads, strict=True):
-        visit(comment, source)
+        visit(comment, source, native_reply=page.parent_comment_id is not None)
 
 
 def _valid_source_summary(summary: CommentFetchSummary) -> bool:
@@ -571,14 +595,25 @@ def _complete(state: dict[str, Any], summary: CommentFetchSummary) -> bool:
         return False
     child_counts = Counter(item["parent"] for item in state["observed"].values())
     for identity, observed in state["observed"].items():
-        # Explicit native reply leaves have zero children; parent counts stay unknown
-        # unless the captured page actually supplies them.
+        # Unknown counts remain unknown. A separate native leaf or complete
+        # public reply-lane proof can satisfy topology without inventing a count.
         count = observed["expected_replies"]
-        if count is None:
-            return False
-        if child_counts[identity] < count:
-            return False
         lane = state["lanes"].get(identity)
+        if observed.get("unsupported_reply_topology"):
+            return False
+        if count is None:
+            root_exhausted = (
+                state.get("adapter_family") == "instagram_public_relay"
+                and state.get("adapter_version") == 1
+                and lane is not None
+                and lane.get("started_from_root") is True
+                and lane.get("exhausted") is True
+                and all(lane.get(key) for key in ("relay_doc_id", "relay_friendly_name", "sort_order", "page_size"))
+            )
+            if not observed.get("native_reply_leaf") and not root_exhausted:
+                return False
+        elif child_counts[identity] < count:
+            return False
         if lane is not None and not lane.get("exhausted"):
             return False
     return True

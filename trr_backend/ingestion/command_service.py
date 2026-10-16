@@ -243,6 +243,8 @@ class CommandService:
 
     def _compatible(self, handle: str, run_id: UUID) -> None:
         run = self.queries.progress(str(run_id), handle)
+        if run.get("execution_placement", "modal") == "local":
+            raise Conflict("This run requires the explicit bounded local driver to resume or retry")
         compatible = (
             self.worker_compatible(run)
             if self.worker_compatible

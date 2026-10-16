@@ -92,7 +92,7 @@ class Worker:
 
     def context(self, owned):
         with self.store.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-            run = Store._run(cur, owned["run_id"], owned["account"])
+            run = self.store._execution_run(cur, owned["run_id"], owned["account"])
             if run["generation"] != owned["generation"] or run["state"] not in {"queued", "running"}:
                 raise LostOwnership("Run is no longer active")
             target = _row(
@@ -205,19 +205,40 @@ class Worker:
                     LOGGER.warning("ingestion_source_cleanup_failed")
 
 
-def execute_reservation(reservation: dict[str, Any], *, deadline_callback: Callable | None = None) -> dict[str, Any]:
+def execute_reservation(
+    reservation: dict[str, Any], *, deadline_callback: Callable | None = None, execution_placement: str = "modal"
+) -> dict[str, Any]:
     from trr_backend.ingestion.composition import build_worker
 
-    return build_worker().execute(reservation, deadline_callback=deadline_callback)
+    worker = build_worker() if execution_placement == "modal" else build_worker(execution_placement=execution_placement)
+    return worker.execute(reservation, deadline_callback=deadline_callback)
 
 
-def main() -> int:
+def _watch_parent(expected_parent_pid: int, stop: threading.Event) -> None:
+    # Local activities have private process groups. Driver SIGKILL cannot run its
+    # finally block, so this child stops itself without waiting for a DB lease.
+    while not stop.is_set():
+        if os.getppid() != expected_parent_pid:
+            os._exit(125)
+        stop.wait(0.1)
+
+
+def main(*, execution_placement="modal", expected_parent_pid=None) -> int:
     from trr_backend.db import pg
     from trr_backend.ingestion.public_diagnostics import current_public_diagnostic, reset_public_diagnostic
     from trr_backend.ingestion.runtime import activity_reservation
 
     reset_public_diagnostic()
     timer = None
+    parent_stop = threading.Event()
+    if execution_placement not in {"modal", "local"}:
+        return 1
+    if execution_placement == "local":
+        if type(expected_parent_pid) is not int or expected_parent_pid < 2 or os.getppid() != expected_parent_pid:
+            return 125
+        threading.Thread(
+            target=_watch_parent, args=(expected_parent_pid, parent_stop), daemon=True, name="instagram-local-parent"
+        ).start()
 
     def deadline(expires_at):
         nonlocal timer
@@ -234,7 +255,8 @@ def main() -> int:
         raw = sys.stdin.buffer.read(65537)
         if len(raw) > 65536:
             raise ValueError("Reservation exceeds input bound")
-        result = execute_reservation(activity_reservation(json.loads(raw)), deadline_callback=deadline)
+        kwargs = {"execution_placement": "local"} if execution_placement == "local" else {}
+        result = execute_reservation(activity_reservation(json.loads(raw)), deadline_callback=deadline, **kwargs)
         safe = {key: result[key] for key in ("outcome", "stage", "code") if key in result}
         diagnostic = current_public_diagnostic()
         if diagnostic is not None:
@@ -248,10 +270,19 @@ def main() -> int:
         return 1
     finally:
         reset_public_diagnostic()
+        parent_stop.set()
         if timer:
             timer.cancel()
         pg.close_pool()
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--execution-placement", choices=("modal", "local"), default="modal")
+    parser.add_argument("--expected-parent-pid", type=int)
+    options = parser.parse_args()
+    raise SystemExit(
+        main(execution_placement=options.execution_placement, expected_parent_pid=options.expected_parent_pid)
+    )

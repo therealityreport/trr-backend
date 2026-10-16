@@ -44,8 +44,22 @@ def _row(cursor, query: str, params: tuple = ()) -> dict[str, Any] | None:
 
 
 class Store:
-    def __init__(self, transaction: Callable = _transaction):
+    def __init__(self, transaction: Callable = _transaction, *, execution_placement: str = "modal"):
+        if execution_placement not in {"modal", "local"}:
+            raise ValueError("Unsupported ingestion execution placement")
         self.transaction = transaction
+        self.execution_placement = execution_placement
+
+    def check_placement(self, run: dict[str, Any]) -> None:
+        # Missing is the historical Modal placement. Local execution requires the
+        # additive migration and an explicit operator transition, never an env.
+        if run.get("execution_placement", "modal") != self.execution_placement:
+            raise LostOwnership("Run belongs to a different execution placement")
+
+    def _execution_run(self, cur, run_id: str, account: str) -> dict[str, Any]:
+        run = self._run(cur, run_id, account)
+        self.check_placement(run)
+        return run
 
     def command_result(self, account: str, key: str, command_hash: str) -> dict[str, Any] | None:
         """Resolve an accepted command before mutable launch prerequisites.
@@ -170,6 +184,8 @@ class Store:
         action: str,
         idempotency_key: str,
         selection: dict[str, Any] | None = None,
+        expected_generation: int | None = None,
+        expected_placement: str | None = None,
     ) -> dict[str, Any]:
         if action not in {"cancel", "resume", "retry_targets"}:
             raise ValueError("Unsupported run control")
@@ -185,7 +201,16 @@ class Store:
             selection = {"stage": stage.value, "target_keys": keys}
         elif selection is not None:
             raise ValueError("Selection is only valid for target retry")
-        command_hash = fingerprint({"command": action, "run_id": run_id, "selection": selection})
+        command = {"command": action, "run_id": run_id, "selection": selection}
+        if expected_generation is not None:
+            if type(expected_generation) is not int or expected_generation < 1:
+                raise ValueError("Control requires a positive expected generation")
+            command["expected_generation"] = expected_generation
+        if expected_placement is not None:
+            if expected_placement not in {"local", "modal"}:
+                raise ValueError("Unsupported expected execution placement")
+            command["expected_placement"] = expected_placement
+        command_hash = fingerprint(command)
         with self.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 "select pg_advisory_xact_lock(hashtextextended(%s,0))",
@@ -202,6 +227,12 @@ class Store:
                     raise Conflict("Idempotency key already belongs to a different command")
                 return previous["result"]
             run = self._run(cur, run_id, account)
+            if expected_generation is not None and run["generation"] != expected_generation:
+                raise LostOwnership("Control generation is no longer current")
+            if expected_placement is not None and run.get("execution_placement", "modal") != expected_placement:
+                raise LostOwnership("Control placement is no longer current")
+            if action in {"resume", "retry_targets"}:
+                self.check_placement(run)
             if action in {"resume", "retry_targets"} and run.get("execution_hold_reason"):
                 raise Conflict("Run execution is held; its original work remains preserved")
             if run["state"] == "completed":
@@ -339,6 +370,123 @@ class Store:
             )
             return result
 
+    def set_execution_placement(
+        self,
+        run_id: str,
+        account: str,
+        *,
+        expected_generation: int,
+        expected_intent_hash: str,
+        expected_placement: str,
+        placement: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Explicit cancelled-public-run transition, never automatic fallback.
+
+        The coordinator session lease must be held by the operator driver before
+        this command. SQL still validates the exact generation, intent and all
+        retained ownership evidence. A crash leaves the placement durable.
+        """
+        if type(expected_generation) is not int or expected_generation < 1:
+            raise ValueError("Placement requires an exact positive generation")
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_intent_hash):
+            raise ValueError("Placement requires the exact frozen intent hash")
+        if placement not in {"modal", "local"} or expected_placement not in {"modal", "local"}:
+            raise ValueError("Unsupported execution placement")
+        if not idempotency_key or len(idempotency_key) > 200:
+            raise ValueError("Idempotency key must contain 1 to 200 characters")
+        command_hash = fingerprint(
+            {
+                "command": "set_execution_placement",
+                "run_id": run_id,
+                "expected_generation": expected_generation,
+                "expected_intent_hash": expected_intent_hash,
+                "expected_placement": expected_placement,
+                "placement": placement,
+            }
+        )
+        with self.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "select pg_advisory_xact_lock(hashtextextended(%s,0))",
+                (f"instagram-command:{account}:{idempotency_key}",),
+            )
+            previous = _row(
+                cur,
+                """select command_hash,result from social.instagram_ingestion_commands
+                where account=%s and idempotency_key=%s""",
+                (account, idempotency_key),
+            )
+            if previous:
+                if previous["command_hash"] != command_hash:
+                    raise Conflict("Idempotency key already belongs to a different command")
+                return previous["result"]
+            run = self._run(cur, run_id, account)
+            intent = RunIntent.from_payload(run["intent"])
+            if (
+                run["state"] != "cancelled"
+                or run["generation"] != expected_generation
+                or run["intent_hash"] != expected_intent_hash
+                or intent.digest != expected_intent_hash
+                or run.get("execution_placement", "modal") != expected_placement
+            ):
+                raise Conflict("Placement requires the exact cancelled run, intent and prior placement")
+            if intent.effective_source_profile.access_mode != "public" or run.get("execution_hold_reason"):
+                raise Conflict("Placement requires an unheld explicitly public run")
+            active = _row(
+                cur,
+                """select target_key from social.instagram_ingestion_targets
+                where run_id=%s and (owner_expires_at>clock_timestamp() or
+                (outcome='unresolved' and owner_token is not null and owner_expires_at is null)) limit 1""",
+                (run_id,),
+            )
+            uncertain = _row(
+                cur,
+                """select d.owner_token from social.instagram_ingestion_dispatches d
+                join social.instagram_ingestion_targets t using(run_id,stage,target_key)
+                where d.run_id=%s and t.outcome='unresolved'
+                and not exists(select 1 from social.instagram_ingestion_receipts x
+                    where x.run_id=d.run_id and x.owner_token=d.owner_token)
+                and d.state in ('sending','accepted')
+                and (d.generation>=%s or greatest(d.updated_at,%s)>
+                    clock_timestamp()-interval '600 seconds') limit 1""",
+                (run_id, expected_generation, run["updated_at"]),
+            )
+            if active or uncertain:
+                raise Conflict("Run still has a live or uncertain execution owner")
+            # The same cancelled-generation/drain proof that permits placement
+            # also resolves old send ambiguity for Admission. Keep the journal
+            # identities and counters; never manufacture a receipt or completion.
+            cur.execute(
+                """update social.instagram_ingestion_dispatches d set state='expired',
+                    updated_at=clock_timestamp()
+                from social.instagram_ingestion_targets t
+                where d.run_id=%s and d.generation<%s and d.state in ('sending','accepted')
+                    and t.run_id=d.run_id and t.stage=d.stage and t.target_key=d.target_key
+                    and t.outcome='unresolved'
+                    and greatest(d.updated_at,%s)<=clock_timestamp()-interval '600 seconds'
+                    and not exists(select 1 from social.instagram_ingestion_receipts x
+                        where x.run_id=d.run_id and x.owner_token=d.owner_token)""",
+                (run_id, expected_generation, run["updated_at"]),
+            )
+            cur.execute(
+                """update social.instagram_ingestion_runs set execution_placement=%s,
+                updated_at=clock_timestamp() where run_id=%s""",
+                (placement, run_id),
+            )
+            result = {
+                "run_id": run_id,
+                "state": "cancelled",
+                "generation": expected_generation,
+                "execution_placement": placement,
+                "intent_hash": expected_intent_hash,
+            }
+            cur.execute(
+                """insert into social.instagram_ingestion_commands
+                (account,idempotency_key,command_hash,run_id,result) values(%s,%s,%s,%s,%s::jsonb)""",
+                (account, idempotency_key, command_hash, run_id, stable_json(result)),
+            )
+            return result
+
     def discover(
         self,
         run_id: str,
@@ -369,7 +517,7 @@ class Store:
             }
         )
         with self.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-            run = self._run(cur, run_id, account)
+            run = self._execution_run(cur, run_id, account)
             if run["generation"] != generation or run["state"] not in {"queued", "running"}:
                 raise LostOwnership("Discovery execution is no longer current")
             manifest = _row(
@@ -416,7 +564,7 @@ class Store:
         if not 1 <= lease_seconds <= 600:
             raise ValueError("Reservation must be bounded to at most ten minutes")
         with self.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-            run = self._run(cur, run_id, account)
+            run = self._execution_run(cur, run_id, account)
             if run["generation"] != generation or run["state"] not in {"queued", "running"}:
                 raise LostOwnership("Run execution is no longer current")
             return _row(
@@ -434,7 +582,7 @@ class Store:
         self, run_id: str, account: str, *, generation: int, stage: Stage, target_key: str, owner_token: str
     ) -> dict[str, Any]:
         with self.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-            run = self._run(cur, run_id, account)
+            run = self._execution_run(cur, run_id, account)
             if run["generation"] != generation or run["state"] not in {"queued", "running"}:
                 raise LostOwnership("Run execution is no longer current")
             target = _row(
@@ -479,7 +627,7 @@ class Store:
             nullcontext(connection) if connection is not None else self.transaction() as conn,
             conn.cursor(cursor_factory=RealDictCursor) as cur,
         ):
-            run = self._run(cur, run_id, account)
+            run = self._execution_run(cur, run_id, account)
             if run["generation"] != generation or run["state"] not in {"queued", "running"}:
                 raise LostOwnership("Run execution is no longer current")
             target = _row(
@@ -515,7 +663,7 @@ class Store:
         # constructed dataclass. Expiry is irrelevant while an active run pins it.
         evidence.read(pinned=True)
         with self.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-            run = self._run(cur, run_id, account)
+            run = self._execution_run(cur, run_id, account)
             if run["generation"] != generation or run["state"] not in {"queued", "running"}:
                 raise LostOwnership("Run execution is no longer current")
             target = _row(
@@ -596,7 +744,7 @@ class Store:
         if outcome == Outcome.UNAVAILABLE and evidence_id is None:
             raise ValueError("Source unavailability requires retained source evidence")
         with self.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-            run = self._run(cur, run_id, account)
+            run = self._execution_run(cur, run_id, account)
             if run["generation"] != generation or run["state"] not in {"queued", "running"}:
                 raise LostOwnership("Run execution is no longer current")
             previous = _row(
@@ -687,7 +835,7 @@ class Store:
         safe_code = code if isinstance(code, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,79}", code) else "activity_failed"
         checkpoint = dict(checkpoint, last_error_code=safe_code)
         with self.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-            run = self._run(cur, run_id, account)
+            run = self._execution_run(cur, run_id, account)
             if run["generation"] != generation or run["state"] not in {"queued", "running"}:
                 raise LostOwnership("Run execution is no longer current")
             cur.execute(
@@ -714,7 +862,7 @@ class Store:
     def reconcile_completion(self, run_id: str, account: str, *, generation: int) -> str:
         """Explicit workflow command; progress reads never reconcile state."""
         with self.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-            run = self._run(cur, run_id, account)
+            run = self._execution_run(cur, run_id, account)
             if run["generation"] != generation:
                 raise LostOwnership("Run execution is no longer current")
             if run["state"] not in {"queued", "running"}:
@@ -773,9 +921,10 @@ class Store:
                 social.instagram_ingestion_outbox o join social.instagram_ingestion_runs r using(run_id)
                 where o.acknowledged_at is null and o.available_at<=clock_timestamp()
                     and o.generation=r.generation and r.state in ('queued','running')
+                    and coalesce(to_jsonb(r)->>'execution_placement','modal')=%s
                     and (%s is null or r.engine=%s) and (%s is null or r.workflow_version=%s)
                 order by o.available_at,o.execution_id limit %s""",
-                (engine, engine, workflow_version, workflow_version, limit),
+                (self.execution_placement, engine, engine, workflow_version, workflow_version, limit),
             )
             pending = [dict(row) for row in cur.fetchall()]
         acknowledged = 0

@@ -204,10 +204,15 @@ def _source_profile(context):
     return RunIntent.from_payload(context["run"]["intent"]).effective_source_profile
 
 
+def _worker_store(context):
+    placement = context.get("run", {}).get("execution_placement", "modal")
+    return Store() if placement == "modal" else Store(execution_placement=placement)
+
+
 def _public_source_parts(context, owned):
     from trr_backend.ingestion.identity_policy import SourceRequestGate
 
-    store = Store()
+    store = _worker_store(context)
     remaining = (context["target"]["owner_expires_at"] - datetime.now(UTC)).total_seconds() - 2
     deadline = time.monotonic() + max(0, min(590, remaining))
 
@@ -369,7 +374,7 @@ class _GatedSource:
 def _gate_source(source, context, owned, credentials, *, failure_code, public_only=False):
     from trr_backend.ingestion.identity_policy import SourceRequestGate
 
-    store = Store()
+    store = _worker_store(context)
     expires = context["target"]["owner_expires_at"]
     remaining = (expires - datetime.now(UTC)).total_seconds() - 1
     gate = SourceRequestGate(
@@ -404,7 +409,7 @@ def _details(context, owned):
 
         return PublicDetailSource(shortcode=owned["target_key"], **_public_source_parts(context, owned))
     credentials = _credentials(owned["account"])
-    store = Store()
+    store = _worker_store(context)
     return DetailSource(
         shortcode=owned["target_key"],
         cookies=credentials["raw_cookies"],
@@ -462,7 +467,7 @@ def _media_storage(context, owned):
         build_hosted_url=build_public_object_url,
         prefix=config.prefix,
         refresh=MediaRefresh(
-            store=Store(),
+            store=_worker_store(context),
             owned=owned,
             owner_expires_at=context["target"]["owner_expires_at"],
             credential_provider=lambda: _credentials(owned["account"]),
@@ -518,12 +523,12 @@ def _avatar_skip_ttl_hours():
         return 168
 
 
-def build_worker():
+def build_worker(*, execution_placement="modal"):
     from trr_backend.ingestion.freshness import DetailCache
     from trr_backend.ingestion.media_snapshot import MediaSnapshotLoader
     from trr_backend.ingestion.worker import Worker
 
-    store = Store()
+    store = Store() if execution_placement == "modal" else Store(execution_placement=execution_placement)
     loader = MediaSnapshotLoader(
         store.transaction,
         include_comment_avatars=enabled("SOCIAL_INSTAGRAM_MEDIA_MIRROR_COMMENT_AVATARS"),
@@ -543,6 +548,18 @@ def build_worker():
 
 
 def _dispatch(reservation):
+    # Check persisted placement/generation before importing or addressing Modal.
+    # The worker repeats this fence, closing the preflight-to-spawn race.
+    from trr_backend.ingestion.domain import Stage
+
+    store = Store()
+    with store.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        run = store._execution_run(cur, reservation["run_id"], reservation["account"])
+        if run["generation"] != reservation["generation"] or run["state"] not in {"queued", "running"}:
+            from trr_backend.ingestion.domain import LostOwnership
+
+            raise LostOwnership("Dispatch generation is no longer active")
+        Stage(reservation["stage"])
     target = _modal_target()
     from trr_backend.ingestion.runtime import activity_reservation
     from trr_backend.modal_dispatch import (

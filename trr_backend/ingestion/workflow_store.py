@@ -16,9 +16,8 @@ PHASE_ORDER = "case stage when 'listing' then 0 when 'post_details' then 1 when 
 
 
 class WorkflowStore(Store):
-    @staticmethod
-    def _current(cur, item):
-        run = Store._run(cur, str(item["run_id"]), item["account"])
+    def _current(self, cur, item):
+        run = self._execution_run(cur, str(item["run_id"]), item["account"])
         if run["generation"] != item["generation"] or run["state"] not in {"queued", "running"}:
             raise LostOwnership("Workflow generation is no longer active")
         if run["engine"] != item["engine"] or run["workflow_version"] != item["workflow_version"]:
@@ -60,9 +59,10 @@ class WorkflowStore(Store):
                 join social.instagram_ingestion_runs r using(run_id)
                 where p.acknowledged_at is null and p.completed_at is null and p.available_at<=clock_timestamp()
                 and p.generation=r.generation and r.state in ('queued','running')
+                    and coalesce(to_jsonb(r)->>'execution_placement','modal')=%s
                 and (%s is null or p.workflow_version=%s)
                 order by p.available_at,p.execution_id limit %s""",
-                (workflow_version, workflow_version, limit),
+                (self.execution_placement, workflow_version, workflow_version, limit),
             )
             pending = [dict(row) for row in cur.fetchall()]
         count = 0
@@ -274,7 +274,7 @@ class WorkflowStore(Store):
                 if ordinal is not None:
                     self._bind_decision(cur, item, ordinal, str(existing["owner_token"]))
                 return self._reservation(item, existing)
-            target = Store(same_transaction).reserve(**args)
+            target = Store(same_transaction, execution_placement=self.execution_placement).reserve(**args)
             if not target:
                 return None
             dispatch = _row(
@@ -321,9 +321,10 @@ class WorkflowStore(Store):
                 join social.instagram_ingestion_runs r using(run_id)
                 where p.acknowledged_at is not null and p.completed_at is null
                     and p.generation=r.generation and r.state in ('queued','running')
+                    and coalesce(to_jsonb(r)->>'execution_placement','modal')=%s
                     and p.workflow_version=%s and (%s is null or p.execution_id>%s)
                 order by p.execution_id limit %s""",
-                (workflow_version, after_execution_id, after_execution_id, limit),
+                (self.execution_placement, workflow_version, after_execution_id, after_execution_id, limit),
             )
             return [dict(row) for row in cur.fetchall()]
 
@@ -492,7 +493,7 @@ class WorkflowStore(Store):
 
                 # Original manifests and all original targets remain the only
                 # authority for full completion, including a narrowed execution.
-                reconciled = Store(same_transaction).reconcile_completion(
+                reconciled = Store(same_transaction, execution_placement=self.execution_placement).reconcile_completion(
                     item["run_id"], item["account"], generation=item["generation"]
                 )
                 stop_state = "completed" if reconciled == "completed" else "blocked"
