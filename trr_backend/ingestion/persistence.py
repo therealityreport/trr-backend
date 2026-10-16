@@ -8,7 +8,9 @@ must use the supplied connection and perform only database work.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
+from contextlib import nullcontext
 from datetime import datetime
 from typing import Any
 from uuid import uuid4
@@ -381,9 +383,20 @@ class Store:
         target_key: str,
         owner_token: str,
         record_request: bool = False,
+        connection: Any = None,
     ) -> None:
-        """Check cancellation at request boundaries; count before source dispatch."""
-        with self.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        """Check cancellation at request boundaries; count before source dispatch.
+
+        An explicit connection reuses the caller's transaction and never commits
+        it. Identity gates lock lane -> run -> target; no Store operation holds
+        run/target while acquiring an identity lane.
+        """
+        if connection is not None and connection.autocommit:
+            raise ValueError("Ownership checks require an explicit transaction")
+        with (
+            nullcontext(connection) if connection is not None else self.transaction() as conn,
+            conn.cursor(cursor_factory=RealDictCursor) as cur,
+        ):
             run = self._run(cur, run_id, account)
             if run["generation"] != generation or run["state"] not in {"queued", "running"}:
                 raise LostOwnership("Run execution is no longer current")
@@ -586,6 +599,11 @@ class Store:
         """
         if requests < 0 or failure.source_unavailable:
             raise ValueError("Use an evidence-backed settlement for source unavailability")
+        # Match the runtime's fixed-code projection. Never persist exception
+        # messages or arbitrary payloads in operator-visible diagnostics.
+        code = failure.code
+        safe_code = code if isinstance(code, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,79}", code) else "activity_failed"
+        checkpoint = dict(checkpoint, last_error_code=safe_code)
         with self.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             run = self._run(cur, run_id, account)
             if run["generation"] != generation or run["state"] not in {"queued", "running"}:
@@ -600,7 +618,7 @@ class Store:
                 (
                     stable_json(checkpoint),
                     failure.retry_at,
-                    failure.code if failure.identity_blocked else None,
+                    safe_code if failure.identity_blocked else None,
                     requests,
                     run_id,
                     stage.value,

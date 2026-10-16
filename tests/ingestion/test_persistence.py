@@ -4,14 +4,14 @@ import socket
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
 import psycopg2
 import pytest
 
-from trr_backend.ingestion.domain import Conflict, LostOwnership, ReplayUnavailable, RunIntent, Stage
+from trr_backend.ingestion.domain import Conflict, Failure, LostOwnership, ReplayUnavailable, RunIntent, Stage
 from trr_backend.ingestion.evidence import MAX_PAYLOAD_BYTES, Evidence
 from trr_backend.ingestion.persistence import Store
 from trr_backend.ingestion.queries import Queries
@@ -202,6 +202,46 @@ def test_failed_canonical_write_rolls_back_and_can_retry_same_owner(database):
         assert cur.fetchone()[0] == 0
         cur.execute("select outcome from social.instagram_ingestion_targets where run_id=%s", (args["run_id"],))
         assert cur.fetchone()[0] == "unresolved"
+
+
+@pytest.mark.parametrize(
+    "code,blocked,expected",
+    [
+        ("identity_policy_unavailable", False, "identity_policy_unavailable"),
+        ("credential_snapshot_unavailable", True, "credential_snapshot_unavailable"),
+        ("https://private.example/?token=secret", False, "activity_failed"),
+        ("unsafe private error text", True, "activity_failed"),
+    ],
+)
+def test_operational_failure_diagnostics_roundtrip_preserves_policy_and_fence(database, code, blocked, expected):
+    store, tx = database
+    run = launch(store)
+    owned = target(store, run)
+    owned["owner_token"] = str(store.reserve(**owned)["owner_token"])
+    store.acquire(**owned)
+    retry_at = datetime.now(UTC) + timedelta(minutes=1)
+    failure = Failure(code, retry_at=retry_at, identity_blocked=blocked)
+    store.checkpoint_failure(**owned, failure=failure, checkpoint={"cursor": "kept"}, requests=0)
+    diagnostic = Queries(tx).diagnostics(run["run_id"], "bravotv")["targets"][0]
+    assert diagnostic["last_error_code"] == expected
+    assert datetime.fromisoformat(diagnostic["retry_at"]) == retry_at
+    assert diagnostic["blocked_reason"] == (expected if blocked else None)
+    assert (diagnostic["attempts"], diagnostic["requests"], diagnostic["max_attempts"]) == (1, 0, 3)
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute("select checkpoint from social.instagram_ingestion_targets where run_id=%s", (run["run_id"],))
+        assert cur.fetchone()[0] == {"cursor": "kept", "last_error_code": expected}
+    with pytest.raises(LostOwnership):
+        store.checkpoint_failure(**owned, failure=Failure("stale_worker"), checkpoint={}, requests=0)
+    store.control(run["run_id"], "bravotv", action="cancel", idempotency_key=str(uuid4()))
+    resumed = store.control(run["run_id"], "bravotv", action="resume", idempotency_key=str(uuid4()))
+    assert resumed["generation"] == 3
+    after = Queries(tx).diagnostics(run["run_id"], "bravotv")["targets"][0]
+    assert (after["attempts"], after["requests"], after["max_attempts"], after["last_error_code"]) == (
+        1,
+        0,
+        3,
+        expected,
+    )
 
 
 def test_discovery_replay_after_commit_is_idempotent_and_cannot_rewind(database):

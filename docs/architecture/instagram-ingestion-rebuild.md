@@ -38,9 +38,9 @@ and canonical data. Other platforms and active legacy runs stay on their owner.
 | A | Current behavior matrix and sanitized fixture baselines | Legacy callable map and retained native fixtures established; unassigned media and avatar parity added |
 | B | Matched real-engine failure harness; hosting/recovery/version feasibility | DBOS selected for implementation after local comparison, bounded-executor and 50-target partition tests; production topology verification remains a release gate |
 | C | Domain/provider/replay parity and import boundaries | Canonical, listing, comments, media, runtime integration and hosted-result replay extension implemented and reviewed; local checks pass |
-| D | Real persistence crash, ownership, cancellation and recovery tests | Real PostgreSQL and DBOS failure tests pass; connected four-stage lost-acknowledgement/cancel/resume pipeline passes; live recovery remains pending |
-| E | Backend schema/client parity and browser operator flow | API/client checks and seven fixture-backed browser journeys pass; four screenshots inspected; approved production build precedes the narrow guarded local-auth correction, covered by targeted checks. Live hybrid acceptance remains a rollout gate |
-| F | Deployment identity/readiness, bounded canary, 10 runs and 24h observation | Pending |
+| D | Real persistence crash, ownership, cancellation and recovery tests | Local PostgreSQL/DBOS failure matrix passes. Live cancellation preserved run/targets/budgets; live resume and partial recovery remain pending |
+| E | Backend schema/client parity and browser operator flow | API/client and fixture-backed browser journeys pass. App 964e9ce remote production build and authenticated checks pass; normal TRR browser shows the run, cancellation and persistence across reload. Live resume remains pending |
+| F | Deployment identity/readiness, bounded canary, 10 runs and 24h observation | Target identity/readiness and bounded idle lifecycle pass. First canary cancelled for a pre-request control-pool defect; reviewed repair deployment next. Successful runs, aggregate resource acceptance and 24h observation remain pending |
 
 Engine selection: DBOS 3.3.0 is the implementation candidate. Real local engine
 comparison, version-aware recovery, bounded single-executor replacement and
@@ -446,3 +446,52 @@ login flow. No run was selected. Before a browser launch, source review found
 that the existing month picker emits an inclusive final millisecond while the
 new API uses an exclusive end. An app-only new-client request conversion is being
 prepared; legacy route payloads remain unchanged.
+
+
+Backend revision `938b37b9` deployed to the explicit TRR `main` target and passed
+readiness, HTTP 200 health, and all 42 expected deployed source hashes. Retrying
+the unchanged first-launch payload and idempotency key returned HTTP 202 at
+2026-10-16T10:50:53Z. Run `31fc35b1-654e-4306-8d71-ca02c8bb770a` advanced
+from queued to running without browser polling. The normal production TRR Chrome
+session then displayed that same run and stage accounting.
+
+Listing reached two attempts with zero recorded source requests, no evidence and
+no committed results. This is under investigation and is not a successful canary.
+The parent used the production browser's Cancel Run and Confirm cancel controls;
+the UI confirmed cancelled, generation 2, Work remains, with Resume Run available.
+The run, intent, target and attempt counts were preserved. Resume remains held
+while the worker path is diagnosed. No broader account routing was enabled.
+
+The app month-boundary correction passed seven focused runtime cases, incremental
+TypeScript and independent review. Existing ESLint configuration excludes the
+large page; ESLint exited zero and checked the test file. The new request DTO
+converts only an exact inclusive UTC month end to the following exclusive month
+start. Legacy payloads remain inclusive. Its production release is in progress.
+
+
+Both accepted posts calls returned the safe operational code
+`identity_policy_unavailable` before contacting Instagram. The verified deployed
+`social_control` pool has min/max one. The identity gate borrowed that connection
+then called `Store.check_owner`, which attempted a second borrow and failed. The
+listing lane insert rolled back. The same nested pattern was found in the shared
+detail transport; the batch audit covered listing, comments, details and avatars.
+
+The reviewed correction uses an explicit supplied transaction for in-lock ownership
+checks, preserving lane → run → target lock order and closing the transaction before
+source work. Pool limits remain unchanged. Safe fixed failure codes now persist in
+the target checkpoint and appear through the existing optional diagnostics field;
+invalid text becomes `activity_failed`. No schema change is needed. The 108 passing
+affected checks were reused; one cursor-only checkpoint assertion was updated and
+its single affected case passed. Real one-connection, lane-lock cancellation, detail
+reuse, diagnostic sanitation and retained-budget cases pass. Independent review
+reported no findings. The candidate has not yet been verified in production.
+
+App `964e9ce` is deployed as `dpl_5tR5bTQi3ueMA3mayt4h4dg9RKwW` and promoted
+to `trr-app.vercel.app`. Provider project/team/source/READY checks and immutable plus
+canonical authenticated GETs passed. Compilation, TypeScript and 104 generated
+pages passed. Normal TRR Chrome reload retained the cancelled generation-2 run and
+two listing attempts. The previous app deployment remains READY for rollback.
+
+The next backend deployment will keep coordinator/workers enabled but disable new
+launch routing, to verify rollback semantics through resume of this same pinned run.
+No accounting or successful-ingestion claim follows from the accepted launch.

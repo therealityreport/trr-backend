@@ -71,6 +71,7 @@ class SourceRequestGate:
         transaction: Callable,
         check_cancelled: Callable[[], None],
         deadline: float,
+        check_cancelled_in_transaction: Callable[[Any], None] | None = None,
         cooldown_seconds: float = 900,
         probe_seconds: float = 35,
         monotonic: Callable[[], float] = time.monotonic,
@@ -85,6 +86,7 @@ class SourceRequestGate:
         self.identity_key = hashlib.sha256(identity.encode()).hexdigest()
         self.credential_fingerprint = hashlib.sha256(str(cookies.get("sessionid") or "public").encode()).hexdigest()
         self.transaction, self.check_cancelled = transaction, check_cancelled
+        self.check_cancelled_in_transaction = check_cancelled_in_transaction
         self.deadline, self.cooldown_seconds, self.probe_seconds = deadline, cooldown_seconds, probe_seconds
         self.monotonic = monotonic
         self._owner_token = uuid4().hex
@@ -98,8 +100,13 @@ class SourceRequestGate:
     def __repr__(self) -> str:
         return f"SourceRequestGate(identity_key={self.identity_key!r}, request_count={self.request_count})"
 
-    def _remaining(self) -> float:
-        self.check_cancelled()
+    def _remaining(self, *, connection: Any = None) -> float:
+        if connection is not None and self.check_cancelled_in_transaction is not None:
+            # The named worker pool has one connection. Reuse the lane
+            # transaction for its fence instead of borrowing another slot.
+            self.check_cancelled_in_transaction(connection)
+        else:
+            self.check_cancelled()
         remaining = self.deadline - self.monotonic()
         if remaining <= 0:
             raise IdentityDeferred("target_deadline", datetime.now(UTC) + timedelta(minutes=1))
@@ -140,7 +147,7 @@ class SourceRequestGate:
             raise RuntimeError("identity_gate_already_finished")
         remaining = self._remaining()
         with self._locked(create=True, remaining=remaining) as (cur, row, now):
-            self._remaining()
+            self._remaining(connection=cur.connection)
             cooldown = row.get("cooldown_until")
             replacement = bool(row["blocked"] and row.get("blocked_fingerprint") != self.credential_fingerprint)
             if row["blocked"] and not replacement:
@@ -164,7 +171,7 @@ class SourceRequestGate:
             # Expired probes get a NEW token even for the same gate. Late results
             # from the abandoned lease can never own the replacement lease.
             token = row["probe_token"] if own_probe else (uuid4().hex if cooldown or row.get("probe_token") else None)
-            lease_seconds = min(self.probe_seconds, self._remaining())
+            lease_seconds = min(self.probe_seconds, self._remaining(connection=cur.connection))
             cur.execute(
                 """update social.instagram_detail_request_lanes set request_times=%s,
                 blocked=%s,cooldown_until=%s,probe_token=%s,probe_expires_at=%s where identity_key=%s""",

@@ -47,10 +47,12 @@ class DetailTransport:
         cooldown_seconds: float | None = None,
         source_payload_observer: Callable[[str, dict[str, Any]], None] | None = None,
         transaction: Callable | None = None,
+        check_cancelled_in_transaction: Callable[[Any], None] | None = None,
     ) -> None:
         self.scraper = scraper
         self.source_payload_observer = source_payload_observer
         self.transaction = transaction
+        self.check_cancelled_in_transaction = check_cancelled_in_transaction
         # Hidden adapter retries would escape both the request budget and cap.
         for adapter in scraper.session.adapters.values():
             adapter.max_retries = Retry(total=0, redirect=0)
@@ -75,8 +77,11 @@ class DetailTransport:
         self.client = InstagramRequestClient(session=scraper.session)
         self.evidence: list[dict[str, Any]] = []
 
-    def check_deadline(self) -> float:
-        self.check_cancelled()
+    def check_deadline(self, *, connection: Any = None) -> float:
+        if connection is not None and self.check_cancelled_in_transaction is not None:
+            self.check_cancelled_in_transaction(connection)
+        else:
+            self.check_cancelled()
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
             raise DetailDeferred("target_deadline", datetime.now(UTC) + timedelta(minutes=1))
@@ -125,7 +130,7 @@ class DetailTransport:
                 # prove health before any worker can reserve ordinary work.
                 self.probe_token = uuid.uuid4().hex if cooldown else None
                 self.failure_generation = int(row["failure_generation"])
-                self.check_deadline()
+                self.check_deadline(connection=conn)
                 cur.execute(
                     """update social.instagram_detail_request_lanes set request_times = %s,
                     probe_token = %s, probe_expires_at = %s where identity_key = %s""",

@@ -53,7 +53,7 @@ def test_failed_source_releases_attempt_with_latest_durable_checkpoint(database)
             from social.instagram_ingestion_targets where run_id=%s""",
             (args["run_id"],),
         )
-        assert cur.fetchone() == (1, 1, {"cursor": "after-page"}, None, True)
+        assert cur.fetchone() == (1, 1, {"cursor": "after-page", "last_error_code": "activity_failed"}, None, True)
 
 
 def test_cancelled_reservation_never_constructs_source(database):

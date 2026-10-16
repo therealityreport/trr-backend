@@ -88,9 +88,13 @@ def test_detail_consumes_explicit_credentials_and_raw_observer():
 
         def fetch(self, shortcode, allow_public_fallback):
             assert shortcode == "ABC" and not allow_public_fallback
+            assert self.args["check_cancelled_in_transaction"] is transaction_fence
             self.args["on_request"](True)
             self.args["source_payload_observer"]("details", raw)
             return raw
+
+    def transaction_fence(conn):
+        return None
 
     source = DetailSource(
         shortcode="ABC",
@@ -98,6 +102,7 @@ def test_detail_consumes_explicit_credentials_and_raw_observer():
         browser_account_id=None,
         scraper_factory=scraper_factory,
         transport_factory=Transport,
+        check_cancelled_in_transaction=transaction_fence,
     )
     assert (
         source(

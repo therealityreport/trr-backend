@@ -346,6 +346,7 @@ def _gate_source(source, context, owned, credentials, *, failure_code):
         cookies=credentials["raw_cookies"],
         transaction=store.transaction,
         check_cancelled=lambda: store.check_owner(**owned),
+        check_cancelled_in_transaction=lambda conn: store.check_owner(**owned, connection=conn),
         deadline=time.monotonic() + max(0, min(590, remaining)),
     )
     return _GatedSource(source, gate, failure_code=failure_code)
@@ -363,11 +364,13 @@ def _details(context, owned):
     from trr_backend.ingestion.post_transport import DetailSource
 
     credentials = _credentials(owned["account"])
+    store = Store()
     return DetailSource(
         shortcode=owned["target_key"],
         cookies=credentials["raw_cookies"],
         browser_account_id=credentials["browser_account_id"],
-        transaction=Store().transaction,
+        transaction=store.transaction,
+        check_cancelled_in_transaction=lambda conn: store.check_owner(**owned, connection=conn),
     )
 
 
@@ -432,6 +435,7 @@ def _load_media(loader, store, context, owned, **callbacks):
         cookies=credentials["raw_cookies"],
         transaction=store.transaction,
         check_cancelled=lambda: store.check_owner(**owned),
+        check_cancelled_in_transaction=lambda conn: store.check_owner(**owned, connection=conn),
         deadline=deadline,
     )
     source = AvatarProfileSource(cookies=credentials["raw_cookies"], deadline=deadline)

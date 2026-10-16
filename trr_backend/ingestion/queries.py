@@ -141,7 +141,7 @@ class Queries:
                 """select r.run_id,r.account,
                 (select coalesce(jsonb_agg(t order by t.stage,t.target_key),'[]'::jsonb) from (
                   select stage,target_key,outcome,attempts,requests,max_attempts,
-                    next_attempt_at as retry_at,blocked_reason
+                    next_attempt_at as retry_at,blocked_reason,checkpoint->>'last_error_code' as last_error_code
                   from social.instagram_ingestion_targets where run_id=r.run_id
                   order by stage,target_key limit %s
                 ) t) as targets,

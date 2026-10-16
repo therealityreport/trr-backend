@@ -176,6 +176,34 @@ class Gate:
         return Failure(code, retry_at=datetime.now(UTC) + timedelta(minutes=1)) if code else None
 
 
+@pytest.mark.parametrize("stage", ["listing", "post_details"])
+def test_source_bindings_reuse_explicit_ownership_transaction(monkeypatch, stage):
+    from trr_backend.ingestion import post_transport
+
+    checked = []
+
+    def transaction():
+        return None
+
+    store = SimpleNamespace(transaction=transaction, check_owner=lambda **kw: checked.append(kw))
+    monkeypatch.setattr(composition, "Store", lambda: store)
+    owned = {"account": "bravotv", "stage": stage}
+    credentials = {"raw_cookies": {"sessionid": "synthetic"}, "browser_account_id": None}
+    if stage == "listing":
+        context = {"target": {"owner_expires_at": datetime.now(UTC) + timedelta(minutes=5)}}
+        source = composition._gate_source(None, context, owned, credentials, failure_code="listing_fetch_failed")
+        callback = source.gate.check_cancelled_in_transaction
+    else:
+        monkeypatch.setattr(composition, "_credentials", lambda _: credentials)
+        monkeypatch.setattr(post_transport, "DetailSource", lambda **kw: SimpleNamespace(**kw))
+        source = composition._details({}, dict(owned, target_key="ABC"))
+        callback = source.check_cancelled_in_transaction
+        owned = dict(owned, target_key="ABC")
+    connection = object()
+    callback(connection)
+    assert checked == [{**owned, "connection": connection}]
+
+
 @pytest.mark.parametrize("comments", [False, True])
 def test_request_gate_precedes_each_request_and_only_worker_finalizes_success(comments):
     gate = Gate()
@@ -411,7 +439,10 @@ def avatar_media_handoff(monkeypatch):
             events.append("read_closed")
 
     def check_owner(**kwargs):
+        connection = kwargs.pop("connection", None)
         assert state.depth == 0 and kwargs == owned
+        if connection is not None:
+            state.connection = connection
         events.append("owner_check")
 
     store = SimpleNamespace(transaction=transaction, check_owner=check_owner)
@@ -512,6 +543,9 @@ def test_load_media_resolves_missing_avatars_after_read_closes_and_reloads_once(
         "read_open",
         "read_closed",
     ]
+    connection = object()
+    gate["check_cancelled_in_transaction"](connection)
+    assert case.state.connection is connection
 
 
 @pytest.mark.parametrize("fail_at,loads", [("resolver", 1), ("reload", 2)])

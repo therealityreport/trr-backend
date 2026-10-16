@@ -113,6 +113,7 @@ class DetailSource:
         scraper_factory: Callable | None = None,
         transport_factory: Callable | None = None,
         transaction: Callable | None = None,
+        check_cancelled_in_transaction: Callable | None = None,
     ):
         self.shortcode = shortcode
         self.cookies = cookies
@@ -121,6 +122,7 @@ class DetailSource:
         self.scraper_factory = scraper_factory
         self.transport_factory = transport_factory
         self.transaction = transaction
+        self.check_cancelled_in_transaction = check_cancelled_in_transaction
 
     def __call__(self, *, check_cancelled, on_request, source_observer):
         if self.scraper_factory is None:
@@ -147,6 +149,11 @@ class DetailSource:
                 deadline=time.monotonic() + self.deadline_seconds,
                 source_payload_observer=source_observer,
                 transaction=self.transaction,
+                **(
+                    {"check_cancelled_in_transaction": self.check_cancelled_in_transaction}
+                    if self.check_cancelled_in_transaction is not None
+                    else {}
+                ),
             )
             return transport.fetch(self.shortcode, allow_public_fallback=False)
         finally:

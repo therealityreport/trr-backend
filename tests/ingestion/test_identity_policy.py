@@ -3,16 +3,20 @@
 import hashlib
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 from psycopg2.extras import RealDictCursor
+from psycopg2.pool import ThreadedConnectionPool
 
 from tests.ingestion.test_persistence import database as database_fixture
+from tests.ingestion.test_persistence import launch, target
 from trr_backend.ingestion.domain import LostOwnership
 from trr_backend.ingestion.identity_policy import IdentityDeferred, SourceRequestGate
+from trr_backend.ingestion.persistence import Store
 
 database = database_fixture
 
@@ -37,6 +41,131 @@ def gate(transaction, *, subject=None, session="synthetic-session", **kwargs):
         deadline=kwargs.pop("deadline", time.monotonic() + 300),
         **kwargs,
     )
+
+
+@pytest.fixture
+def one_connection(lanes):
+    with lanes() as conn:
+        dsn = conn.dsn
+    pool = ThreadedConnectionPool(1, 1, dsn=dsn)
+    connection = pool.getconn()
+    backend_pid = connection.get_backend_pid()
+    pool.putconn(connection)
+
+    @contextmanager
+    def transaction():
+        conn = pool.getconn()
+        try:
+            with conn:
+                yield conn
+        finally:
+            pool.putconn(conn)
+
+    try:
+        yield Store(transaction), transaction, backend_pid
+    finally:
+        pool.closeall()
+
+
+def owned_target(store):
+    owned = target(store, launch(store))
+    owned["owner_token"] = str(store.reserve(**owned)["owner_token"])
+    store.acquire(**owned)
+    return owned
+
+
+def test_single_connection_pool_reuses_gate_transaction_for_owner_fence(one_connection):
+    store, transaction, _ = one_connection
+    owned = owned_target(store)
+    # Reproduce the deployed failure without the explicit transaction callback.
+    broken = gate(transaction, check_cancelled=lambda: store.check_owner(**owned))
+    with pytest.raises(IdentityDeferred, match="identity_policy_unavailable"):
+        broken.before_request()
+    assert row(transaction, broken) == {}
+    fixed = gate(
+        transaction,
+        check_cancelled=lambda: store.check_owner(**owned),
+        check_cancelled_in_transaction=lambda conn: store.check_owner(**owned, connection=conn),
+    )
+    fixed.before_request()
+    assert len(row(transaction, fixed)["request_times"]) == 1
+    store.check_owner(**owned, record_request=True)
+    with transaction() as conn, conn.cursor() as cur:
+        cur.execute(
+            "select attempts,requests from social.instagram_ingestion_targets where run_id=%s", (owned["run_id"],)
+        )
+        assert cur.fetchone() == (1, 1)
+
+
+def test_cancellation_while_identity_lock_waits_rolls_back_same_connection_fence(one_connection, lanes):
+    store, transaction, backend_pid = one_connection
+    owned = owned_target(store)
+    fixed = gate(
+        transaction,
+        check_cancelled=lambda: store.check_owner(**owned),
+        check_cancelled_in_transaction=lambda conn: store.check_owner(**owned, connection=conn),
+    )
+    fixed.before_request()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with lanes() as blocker, blocker.cursor() as cur:
+            cur.execute(
+                "select identity_key from social.instagram_detail_request_lanes where identity_key=%s for update",
+                (fixed.identity_key,),
+            )
+            waiting = executor.submit(fixed.before_request)
+            limit = time.monotonic() + 5
+            while time.monotonic() < limit:
+                with lanes() as observer, observer.cursor() as check:
+                    check.execute("select wait_event_type from pg_stat_activity where pid=%s", (backend_pid,))
+                    if check.fetchone() == ("Lock",):
+                        break
+                time.sleep(0.01)
+            else:
+                pytest.fail("identity gate did not wait on the held row lock")
+            # Cancellation never locks the identity row, and must finish while
+            # the gate is still waiting; no run->identity lock cycle is possible.
+            Store(lanes).control(owned["run_id"], "bravotv", action="cancel", idempotency_key=str(uuid4()))
+        with pytest.raises(LostOwnership):
+            waiting.result(timeout=5)
+    assert len(row(transaction, fixed)["request_times"]) == 1
+    assert fixed.request_count == 1
+    with transaction() as conn, conn.cursor() as cur:
+        cur.execute(
+            "select attempts,requests,owner_token from social.instagram_ingestion_targets where run_id=%s",
+            (owned["run_id"],),
+        )
+        assert cur.fetchone() == (1, 0, None)
+
+
+def test_detail_transport_uses_one_connection_for_lane_and_owner(one_connection):
+    import requests
+
+    from trr_backend.socials.instagram.detail_transport import DetailTransport
+
+    store, transaction, _ = one_connection
+    owned = owned_target(store)
+    with requests.Session() as session:
+
+        class Scraper:
+            def _request_cookies(self):
+                return {"ds_user_id": uuid4().hex, "sessionid": "synthetic-session"}
+
+        scraper = Scraper()
+        scraper.session = session
+        transport = DetailTransport(
+            scraper=scraper,
+            transaction=transaction,
+            check_cancelled=lambda: store.check_owner(**owned),
+            check_cancelled_in_transaction=lambda conn: store.check_owner(**owned, connection=conn),
+            on_request=lambda first: pytest.fail("source request was not required"),
+            deadline=time.monotonic() + 30,
+        )
+        transport._reserve()
+        assert len(row(transaction, transport)["request_times"]) == 1
+        store.control(owned["run_id"], "bravotv", action="cancel", idempotency_key=str(uuid4()))
+        with pytest.raises(LostOwnership):
+            transport._reserve()
+        assert len(row(transaction, transport)["request_times"]) == 1
 
 
 def row(transaction, lane):
