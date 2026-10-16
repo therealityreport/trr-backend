@@ -1,7 +1,8 @@
 """Retain native listing evidence, then atomically commit a bounded discovery page.
 
 Transport is injected. No legacy orchestration, session construction or network
-requests occur here. Only an explicit source pagination terminator seals work.
+requests occur here. Discovery ends at source exhaustion or a recorded bounded
+window heuristic; the latter is never represented as provider exhaustion.
 """
 
 from __future__ import annotations
@@ -81,6 +82,30 @@ def _posted_at(node: dict[str, Any]) -> datetime | None:
 
 def page_target(cursor: str) -> str:
     return "page:" + fingerprint({"cursor": cursor})
+
+
+def _date_start_reached(intent: RunIntent, posts: list[tuple[dict[str, Any], datetime | None]]) -> bool:
+    """Strengthened maintained three-older policy, evaluated only after the page.
+
+    Missing pin flags retain legacy ordinary-post behavior; this is an ordering
+    heuristic, not provider-certified exhaustion. Known pins cannot establish
+    the boundary. Explicit malformed/conflicting flags disqualify the page.
+    """
+    if intent.date_start is None:
+        return False
+    candidates = []
+    for node, posted in posts:
+        flags = [node[key] for key in ("is_pinned", "isPinned") if key in node]
+        if any(type(flag) is not bool for flag in flags) or (flags and any(flag != flags[0] for flag in flags)):
+            return False
+        if flags and flags[0]:
+            continue
+        if posted is None or posted >= intent.date_start:
+            return False
+        candidates.append(posted)
+    return len(candidates) >= 3 and all(
+        later <= earlier for earlier, later in zip(candidates, candidates[1:], strict=False)
+    )
 
 
 class ListingActivity:
@@ -165,6 +190,8 @@ class ListingActivity:
         if cursor is not None and page.end_cursor == cursor:
             raise InvalidSourceError("Listing cursor repeated; exhaustion is unproven")
         selected = {}
+        seen_post_keys = set()
+        dated_posts = []
         for node in page.posts:
             normalized = normalize_post_source(node, account=account)
             if (
@@ -177,13 +204,33 @@ class ListingActivity:
             posted = _posted_at(node)
             if posted is None and (intent.date_start or intent.date_end):
                 raise InvalidSourceError("Bounded listing requires a source post timestamp")
+            if normalized.shortcode in seen_post_keys:
+                raise InvalidSourceError("Listing contains duplicate post identities")
+            seen_post_keys.add(normalized.shortcode)
+            dated_posts.append((node, posted))
             if posted is not None and (
                 (intent.date_start and posted < intent.date_start) or (intent.date_end and posted >= intent.date_end)
             ):
                 continue
-            if normalized.shortcode in selected:
-                raise InvalidSourceError("Listing contains duplicate post identities")
             selected[normalized.shortcode] = (node, normalized)
+
+        provider_exhausted = not page.has_next_page
+        date_start_reached = _date_start_reached(intent, dated_posts)
+        discovery_complete = provider_exhausted or date_start_reached
+        coverage = {
+            "stop_reason": "provider_exhausted"
+            if provider_exhausted
+            else "date_start_reached"
+            if date_start_reached
+            else None,
+            "coverage_basis": "provider_exhaustion"
+            if provider_exhausted
+            else "bounded_window_heuristic_v1"
+            if date_start_reached
+            else None,
+            "provider_exhausted": provider_exhausted,
+            "evidence_hash": evidence.content_hash,
+        }
 
         def commit_page(conn):
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -229,7 +276,7 @@ class ListingActivity:
                             (run_id, stage.value, shortcode, budget),
                         )
                 next_target = None
-                if page.has_next_page:
+                if not discovery_complete:
                     next_target = page_target(page.end_cursor)
                     cur.execute(
                         """insert into social.instagram_ingestion_targets
@@ -239,6 +286,7 @@ class ListingActivity:
                 cursor_state = {
                     "cursor": page.end_cursor if page.end_cursor is not None else cursor,
                     "last_page": target_key,
+                    **coverage,
                 }
                 cur.execute(
                     """update social.instagram_ingestion_manifests set cursor_state=%s::jsonb
@@ -250,7 +298,7 @@ class ListingActivity:
                     values(%s,'listing',%s,%s)""",
                     (run_id, target_key, evidence.content_hash),
                 )
-                if not page.has_next_page:
+                if discovery_complete:
                     cur.execute(
                         """update social.instagram_ingestion_manifests set discovery_complete=true,
                         sealed_at=clock_timestamp() where run_id=%s and stage=any(%s)""",
@@ -260,7 +308,8 @@ class ListingActivity:
                     "page_id": target_key,
                     "post_keys": sorted(selected),
                     "next_target_key": next_target,
-                    "discovery_complete": not page.has_next_page,
+                    "discovery_complete": discovery_complete,
+                    **coverage,
                     "posts": identities,
                 }
 

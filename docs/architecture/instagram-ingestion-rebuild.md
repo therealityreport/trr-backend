@@ -786,12 +786,120 @@ checks do not establish production authentication or successful canary completio
 Rollback material remains available: provider `v62`/tag
 `ig-ingestion-20261016-6f38e07d-rollback`, committed source history and prior
 protected evidence. No credential, identity/target block or launch setting was
-changed by this deployment. To continue the canary, retain and refresh the current
-deployed Instagram identity, or obtain explicit approval to replace the shared
-`SOCIAL_INSTAGRAM_COOKIES_JSON` key in `trr-social-auth` with the verified TRR
-browser session for `thereality.report`. This key affects other Instagram consumers,
-not just bravotv. The approved plan excludes identity migration, so the latter
-requires a user decision. Any approved transfer must preserve protected rollback,
-merge only the selected key, verify a fresh worker's selected identity and normal
-source path, then perform guarded target recovery. Normal completion, partial
-recovery and the ten-run/24-hour gate remain unfinished.
+changed by this deployment. The user explicitly prohibits all use of the
+`thereality.report` Instagram account's sessions/cookies, including local diagnostics,
+validation, cookie refresh and deployment. Never use that identity. Earlier local
+probe results are historical evidence only; they do not authorize future use.
+No session/cookies from that account were transferred to Modal or persisted by these
+probes. All 16 task-owned browser-cookie probe scripts have been disabled before
+credential extraction. The proposed shared-cookie replacement option is withdrawn.
+
+To continue, identify and verify a separately authorized Instagram account and use
+only its session. The shared `SOCIAL_INSTAGRAM_COOKIES_JSON` key in `trr-social-auth`
+affects other Instagram consumers, not just bravotv. Preserve the current deployed
+identity unless a different permitted identity is explicitly authorized. Any
+approved refresh must preserve protected rollback, merge only the selected key,
+verify a fresh worker's selected identity and normal source path, then perform
+guarded target recovery. Normal completion, partial recovery and the ten-run/24-hour
+gate remain unfinished.
+
+
+### Same-account session recovery (2026-10-16)
+
+The user directed recovery of the existing Modal ingestion identity and explicitly
+authorized the `livestnation` login in Chrome's `codex` profile. The prohibition on
+`thereality.report` sessions/cookies remains absolute. The active browser tool
+verified profile `codex` and the account's own `livestnation` edit controls. A new
+helper is pinned only to that verified profile; the 16 previous browser probes
+remain disabled.
+
+A salted in-memory comparison verified that Modal's selected `env_json` credential
+and the authorized browser login have the same account ID but different session
+tokens. The resolver's `require_validation=False` result established required
+fields, not live login validity. Browser login does not update the Modal secret.
+The fresh authorized session passed the maintained normal fetcher against
+`bravotv` locally. Two old-session worker attempts failed before a response with
+`instagram_posts_warmup_transport_failed`; browser startup itself passed. These
+failures do not distinguish expired/revoked credentials from a transport event.
+Earlier deployed-session evidence also recorded an authentication rejection.
+
+Only `SOCIAL_INSTAGRAM_COOKIES_JSON` in `trr-social-auth`, environment `main`, was
+refreshed at 2026-10-16T13:30:21Z via the supported merge-only Secret.update API.
+A protected, ignored 0600 rollback copy of the old key is retained inside a 0700
+private directory. No other key or launch/control setting changed. Deployment
+`v64`, tag `ig-session-20261016-79f5dc8d-livestn`, loaded that same-account refresh;
+the 45 runtime source hashes remained unchanged. Guarded API health passed.
+
+At 2026-10-16T13:32:57Z a fresh posts-worker image verified the exact authorized
+account and refreshed session, selected from env_json, and all 45 source hashes.
+One profile warmup and one GraphQL page returned HTTP 200, 33 bravotv posts and
+has_next_page=true without fetch/auth failure. This is an authentication check,
+not a full backfill or a 33-post cap. SourceRequestGate, existing retry budgets and
+per-request pacing remain authoritative for actual ingestion.
+
+After that proof, one guarded transaction on verified trr-core cleared ONLY
+blocked_reason on the exact unresolved listing/page:root target of run
+31fc35b1-654e-4306-8d71-ca02c8bb770a. It required the blocked generation-3 run,
+original intent hash/engine/version, attempts=3 of12, requests=1, original checkpoint,
+no owner/lease, no other target and no receipts/evidence. All those counters and
+checkpoint fields were retained; shared identity lanes were not changed. Supported
+authenticated resume returned HTTP202, queued generation4 with original engine and
+workflow version. New launches remain0; coordinator1 and replay-apply0. Actual
+cross-page commits and full canary completion are pending observation.
+
+
+Post-refresh `verify_modal_readiness.py --env main` passed with no missing functions,
+secrets, or blocking/advisory probe failures. The supported resume was accepted at
+13:35:10Z. At 13:36:29Z generation4 remained queued with no new source request or
+commit yet. The existing dispatch sweep runs on its two-minute schedule; no duplicate
+scheduler or manual legacy sweep was started for this observation.
+
+### Bounded-window parity repair (2026-10-16)
+
+The resumed canary committed its first page at 13:38Z: 33 selected bravotv posts,
+one retained evidence page and receipt, and a durable next cursor. Each selected
+post has detail, comment and media targets. This proves the first page committed;
+it does not establish full-window discovery or downstream completion.
+
+A source comparison then found a bounded-window parity gap. The maintained catalog
+scraper stops after a consecutive older-post/date-page boundary. The new listing
+activity filtered dates but always followed provider cursors to total profile
+exhaustion, delaying downstream manifest sealing while scanning older history.
+The supported cancel command paused the canary at generation5 at 13:40:59Z. A
+read-only check found no active owners; its receipt, next cursor and all targets
+remain preserved. No retry budget, identity lane or credential was reset.
+
+The approved repair retains the native transport and uses a stricter version of
+the existing date-boundary heuristic: validate the entire page, require at least
+three candidate posts all older than date_start in nonincreasing timestamp order,
+and exclude explicitly pinned posts. Missing pin flags retain legacy treatment;
+malformed or conflicting explicit flags prevent heuristic termination. Any candidate
+at or after date_start prevents a boundary stop, including posts after date_end.
+Current retained source evidence has 33 nodes and no pin-named fields, so an
+explicit-is_pinned-false requirement would not repair this live path. No maximum
+number of profile pins is assumed.
+
+This remains an ordering heuristic, not a provider guarantee that unseen pages
+contain no newer post. Atomic cursor state and receipts distinguish the bounded
+heuristic from actual provider exhaustion. Full-history runs retain explicit
+provider pagination termination. The stricter whole-page rule avoids the legacy
+within-page early break before later in-window posts. Focused persistence tests,
+independent review, deployment and resume remain required before acceptance.
+
+The repair's isolated PostgreSQL listing checks passed: 31 tests in 4.50 seconds,
+plus Ruff, compilation and scoped diff checks. The predicate applies to every frozen
+date_start, including recent_window/head_gap; full_history normalization clears
+bounds. Tests cover duplicate identities, whole-page date validation, pin-state
+ambiguity, ordering, lower/upper bounds, no cross-page streak, cursor loops, atomic
+rollback, duplicate receipt delivery and cancel/resume fences and counters. The
+frozen listing source SHA256 is
+864cc112816f8afa708c2cfa324758586a1f0673e07a972728daf17e7fbdcaba;
+the test file SHA256 is
+45fd244dc81c65ab0f5fbb22d2a308db0ae17519e8468bfb24bf6011a9442da3.
+
+Independent review of that frozen two-file batch found no actionable issues. It
+verified hashes, full-page guards, fenced atomic metadata/receipt settlement and
+full-history compatibility, and reused the passing focused checks. Parent accepts
+this as the maintained heuristic with the explicitly recorded unseen-ordering
+limit; live canary acceptance remains separate. Live provider verification again
+confirmed admin-56995 / main / trr-backend-jobs before deployment.
