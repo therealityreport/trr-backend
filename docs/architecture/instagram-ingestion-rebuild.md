@@ -40,7 +40,7 @@ and canonical data. Other platforms and active legacy runs stay on their owner.
 | C | Domain/provider/replay parity and import boundaries | Canonical, listing, comments, media, runtime integration and hosted-result replay extension implemented and reviewed; local checks pass |
 | D | Real persistence crash, ownership, cancellation and recovery tests | Local PostgreSQL/DBOS failure matrix passes. Live cancel/resume preserved run, targets and budgets; successful partial recovery remains pending |
 | E | Backend schema/client parity and browser operator flow | API/client and fixture-backed browser journeys pass. App 773eab6 is promoted and authenticated checks pass; normal TRR browser verifies local placement controls and current durable counts. Earlier cancel/reload/resume evidence remains valid for unchanged modal controls. |
-| F | Deployment identity/readiness, bounded canary, 10 runs and 24h observation | d24b16fb is deployed and verified. Public local canary committed one listing page and created 33 downstream targets per stage, then cancelled generation 4 with all manifests unsealed. Old authenticated run remains held generation 9. Profile-v2 implementation and complete replies/media/profile verification remain pending. Full pipeline, representative-run and 24-hour gates remain open. |
+| F | Deployment identity/readiness, bounded canary, 10 runs and 24h observation | 5b140c72 (v75) is deployed and verified. The public local v2 canary has 99 post identities and is cancelled at generation 6 with all manifests unsealed. Public replies are rate-limited; full commenter-profile metadata remains unverified. Old authenticated run remains held generation 9. Complete live replies/media/profile verification remains pending. Full pipeline, representative-run and 24-hour gates remain open. |
 
 Engine selection: DBOS 3.3.0 is the implementation candidate. Real local engine
 comparison, version-aware recovery, bounded single-executor replacement and
@@ -1805,3 +1805,149 @@ immutable v2 recovery archive, guarded adoption, and live coverage remain separa
 gates; the public run remains cancelled at generation 4 until those prerequisites
 are verified. No successful live reply/profile coverage or ten-run/24-hour gate
 is claimed by source acceptance.
+
+### Profile-v2 deployment and adoption — 2026-10-16 18:26 UTC
+
+Feature commit `24cb811c` and summary fix `be5de077` were deployed to
+`admin-56995/main/trr-backend-jobs` with tag `ig-profile-v2-20261016-be5de077`.
+Provider history confirms v74, deployed at 18:24:24 UTC. Explicit-main readiness
+and cold-start health HTTP 200 passed. Six new containers matched all 59 expected
+source hashes, loaded module origins, v2 profile projection, and public launch
+configuration. One older container was still present during the rolling update;
+it was left untouched and was not claimed as matching v2. The provider's dirty
+revision marker is separate from the verified source manifest.
+
+The verified Git archive of `be5de077` is retained with SHA-256
+`e29cbbf697e090ba55fe8a04ea78575108f11b617e348b7207c1e81cacebe42c`.
+After the shared coordinator lease became available, guarded adoption changed
+the public run from v1 to v2 at cancelled/local generation 4. Before-and-after
+hashes prove that every other run field, four manifests, 101 targets, and one
+receipt were preserved. Adoption made no source requests.
+
+One authenticated request to the canonical legacy lite snapshot returned HTTP
+200 in 37.761 seconds. The response contained a fresh, non-null summary with
+cache age zero: 18,487 catalog posts, 18,487 stored posts, 1,142,609 saved comments,
+and 16,354 of 20,134 media files saved. This proves one successful request after
+the earlier timeout. It is not a general latency guarantee, and these legacy
+totals were not produced by the new run. The safe receipt is in workspace
+`output/releases/instagram-ingestion-app-773eab6/canonical-legacy-summary-after-be5de077.json`.
+
+Native Chrome in the verified TRR profile reloaded the canonical catalog. Saved
+coverage totals were visible again, freshness was `fresh`, and durable progress
+showed v2 generation 4 with the local-driver instruction. The UI reported a
+4.4-second snapshot on that load. This is a second descriptive observation, not
+a controlled speed comparison. No additional app build was needed.
+
+The existing follow-up automation was found paused. Its prompt was updated for
+v2 and its paused status was preserved.
+
+### Bounded v2 continuation and diagnostic release — 2026-10-16 18:32 UTC
+
+The local v2 continuation ran for 122.744 seconds, including setup and
+cancellation. It committed two more listing pages with 66 new post identities,
+then reached its deadline during a third page. The run now has three committed
+listing pages and 99 targets in each downstream stage. The interrupted page
+remains unresolved; no active target owners remain. The run is cancelled/local
+at generation 6 with the same immutable public intent. The interruption is not
+a successful target, and this measurement is not full-pipeline throughput.
+Future continuation bounds should allow enough time for the selected page count.
+
+The parent independently reviewed and accepted the fixed-token comment failure
+diagnostic. All 30 focused tests passed: 22 new cases and eight existing cases.
+Request construction, failure decisions, retries, and gates are unchanged. The
+diagnostic retains fixed enums and booleans, never raw messages or credentials.
+
+Commit `5b140c72` was deployed to the same explicit main target with tag
+`ig-public-basis-20261016-5b140c72`. Provider history confirms v75, deployed at
+18:30:05 UTC. Health HTTP 200 and readiness passed. Seven new containers matched
+all 59 expected source files and the public-v2 runtime checks. An older draining
+container was recorded separately and left untouched. A verified compatible
+archive is retained for recovery.
+
+### Measured cost — 2026-10-16 18:31 UTC
+
+Modal reported $0.03341586 for the whole app during the complete 17:00–18:00 UTC
+hour: CPU $0.02504706, memory $0.00620015, and network egress $0.00216865. The
+report was retrieved at 18:31:56 UTC. The three complete hours from 15:00 through
+18:00 total $0.10340974. These metered amounts precede credits, reservations,
+and allowances, include concurrent app activity, and exclude local-machine
+execution cost. They do not isolate the canary or prove a matched region saving.
+Evidence: `.artifacts/ingestion-rollout/modal-billing-17-18utc.json`.
+
+### Public commenter-profile source constraint — 2026-10-16 18:34 UTC
+
+One anonymous web-profile-info request was admitted at 18:31:41.764743 UTC.
+The shared lane then recorded `public_access_backoff`, failure generation 8,
+and a cooldown until 18:46:42.946819 UTC. The local diagnostic lost its returned
+result when `Path.open` rejected an unsupported `opener` argument. The offline
+repair uses `builtins.open` and retains safe partial results even if cleanup or
+writing fails. No profile-endpoint retry was made. The lane readback proves
+rejection and accounting; it does not establish the HTTP status or successful
+profile parsing.
+
+The normal public profile page is a separate ordinary interface that can be
+checked after cooldown. No native profile metadata shape has been proven there.
+Existing code extracts runtime/page context and recognizes GraphQL `data.user`
+and `data.fetch__XDTUserDict`, but has no complete HTML metadata parser bound to
+the commenter's native ID. No fields will be inferred from Open Graph text,
+tokens, a matching handle alone, or HTTP 200. Missing fields remain unknown.
+The reviewed child-failure diagnostic waits for the same shared cooldown.
+Full live replies, hosted media, commenter profiles, ten representative runs,
+and the 24-hour observation gate remain open.
+
+### Public source checks after cooldown — 2026-10-16 18:47 UTC
+
+The one-request ordinary profile-page diagnostic returned HTTP 200 with 589,638
+bytes, 35 valid embedded JSON scripts, and 1,190 inspected structural nodes in
+2.816 seconds. It found no recognized native profile envelope. This proves that
+the page was publicly retrievable, not that full profile metadata was available.
+No HTML, tokens, biography, or other profile strings were retained. The bounded
+scan's supported native paths limit this conclusion. Its unproved shape did not
+clear source health or create a new rejection; cleanup released only its probe.
+Evidence: `public-commenter-profile-html-be5de077-result.json`.
+
+The improved child diagnostic admitted exactly two requests: a permalink GET
+and one child GraphQL POST. Both returned HTTP 200. The native response contained
+one CRITICAL error with a rate-message marker and the legacy-recognized rate-code
+signal. It contained no child connection, and the bounded diagnostic scan was
+not truncated. The source therefore remains classified `rate_limited`; this
+result is more specific than the earlier sanitized-only error. Zero replies and
+zero accepted child pages were retrieved. No canonical or run writes occurred.
+The shared gate retained cooldown until 19:02:10.760011 UTC. Do not repeat this
+unchanged child request. The native response is not evidence of zero replies.
+Evidence: `public-local-child-only-5b140c72-20261016T184705Z-result.json`.
+
+The public canary remains cancelled/local v2 at generation 6 with its saved
+listing pages and 99 downstream targets per stage preserved. The final maintained
+native profile-content GraphQL assessment is recorded below.
+
+### Final bounded public profile assessment — 2026-10-16 19:03 UTC
+
+After the recorded cooldown, the reviewed diagnostic used the immutable
+`5b140c72` release and verified all 59 source hashes. It admitted exactly two
+requests in 22.037 seconds: one ordinary commenter-profile GET and one maintained
+profile-content GraphQL POST. Both returned HTTP 200. The POST contained one
+native error, no recognized user object, and no native success status. Strict
+profile parsing did not pass. The classifier recorded `parse_error` with the
+fixed basis `native_error_or_status_rejection`; this result does not independently
+prove a rate limit or a request-format defect. No raw response, profile strings,
+credentials, canonical data, or run changes were written by the diagnostic.
+Evidence: `.artifacts/ingestion-rollout/public-commenter-profile-graphql-5b140c72-result.json`.
+
+The read-only check at 19:02:47 UTC confirms cancelled/local v2 generation 6,
+three listing receipts, one unresolved listing continuation, and 99 unresolved
+targets in each of post details, comments, and media. All four manifests remain
+unsealed, no active target owners remain, and the diagnostic released its probe.
+The public lane retains cooldown until 19:17:43.261431 UTC. Evidence:
+`.artifacts/ingestion-rollout/public-v2-observation-190247.json`.
+
+This concludes the bounded public diagnostic sequence. Do not repeat unchanged
+child or profile requests merely because a cooldown expires. Public top-level
+comments were observed separately (42 comments, 439 likes, and one GIF), but
+those diagnostic observations are not canonical completion receipts for this
+run. Full replies, full commenter profiles, hosted comment-media completion,
+and an end-to-end successful canary remain unverified. The ten representative
+runs, 24-hour observation, and matched full-pipeline cost/speed comparison remain
+open. The paused follow-up automation remains paused. Further rollout requires
+new source evidence or a separately authorized change to the public-only access
+constraint; no login, proxy, or paid-provider fallback was used.
