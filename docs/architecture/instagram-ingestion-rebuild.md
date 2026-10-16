@@ -40,7 +40,7 @@ and canonical data. Other platforms and active legacy runs stay on their owner.
 | C | Domain/provider/replay parity and import boundaries | Canonical, listing, comments, media, runtime integration and hosted-result replay extension implemented and reviewed; local checks pass |
 | D | Real persistence crash, ownership, cancellation and recovery tests | Local PostgreSQL/DBOS failure matrix passes. Live cancel/resume preserved run, targets and budgets; successful partial recovery remains pending |
 | E | Backend schema/client parity and browser operator flow | API/client and fixture-backed browser journeys pass. App 964e9ce remote production build and authenticated checks pass; normal TRR browser verifies run display, cancel, reload and resume while new launches are disabled |
-| F | Deployment identity/readiness, bounded canary, 10 runs and 24h observation | Public source 1b648130 is deployed with verified source identity/readiness; US East posts-worker proof passes. Old authenticated run is durably held at generation 9. Public canary bcc7411d-085d-4efc-be77-7d8e87303eb6 is running at generation 1, with first request deferred by public-access backoff until 16:09 UTC. Actual hourly app billing and limited latency observations are recorded; full pipeline completion, representative-run and 24-hour gates remain open |
+| F | Deployment identity/readiness, bounded canary, 10 runs and 24h observation | v71/c0d167c5 deployed and 54-file runtime proof passes. Public canary is cancelled generation 2 after three requests; verified HTTP 302 login redirect at bootstrap prevents listing. Old authenticated run remains durably held generation 9. User access-path choice is pending; full pipeline, representative-run and 24-hour gates remain open |
 
 Engine selection: DBOS 3.3.0 is the implementation candidate. Real local engine
 comparison, version-aware recovery, bounded single-executor replacement and
@@ -1494,3 +1494,34 @@ They verify no-diagnostic output parity, rejection of malicious child fields,
 fixed-type allowlists, first-event bounds and reset/copy isolation. Ruff, AST and
 diff checks passed; parent reviewed the complete six-file change with no findings.
 Existing unchanged transport evidence was reused. Runtime rollout is next.
+
+### Confirmed public login redirect and decision hold — 2026-10-16 16:26 UTC
+
+Diagnostic channel c0d167c5 deployed as Modal v71 at 16:22:36 UTC with tag
+ig-public-channel-20261016-c0d167c5. Readiness and API health passed; all six
+inspected containers matched 54 source hashes and loaded origins, public profile
+and flags 1/1/0. No extra source request was used for deployment verification.
+
+The third scheduled public attempt returned a validated diagnostic through the
+actual worker result: HTTP 302, redirect_login, GET, profile_bootstrap. It made
+one request, taking totals to three attempts/three requests. There are no listing
+pages, source evidence or downstream targets. This confirms that this cloud
+worker's public profile request was redirected to login; it does not establish
+that all public access is impossible or that authenticated access is required
+for every Instagram dataset.
+
+The supported cancel command returned HTTP 202 at 16:25:54 UTC. Database readback
+confirmed public run bcc7411d-085d-4efc-be77-7d8e87303eb6 cancelled generation 2,
+three attempts/requests preserved, no owner, and its 16:39:26 UTC cooldown retained.
+The old authenticated run remains held at cancelled generation 9. Do not resume
+either automatically or transfer state between them.
+
+The user was asked to choose between a separate authenticated run using the
+already-authorized livestnation identity and keeping public-only ingestion while
+assessing an alternative provider without paid usage. This is pending; silence
+is not approval. The existing follow-up was updated to honor this decision hold.
+No provider enrollment, paid call, authentication fallback or source workaround
+was performed. Full pipeline completion remains blocked on source access.
+Evidence: public-canary-attempt3.json, public-login-pause.json,
+public-login-pause-verified.json, deployed-public-channel-proof-c0d167c5.json and
+deploy-public-channel-c0d167c5.log in .artifacts/ingestion-rollout/.
