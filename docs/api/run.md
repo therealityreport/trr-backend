@@ -241,9 +241,15 @@ This guide is for local development. For the current production-target hosting p
 | GET | `/api/v1/surveys` | List all active surveys | Public |
 | GET | `/api/v1/surveys/{survey_id}` | Get survey with questions | Public |
 | GET | `/api/v1/surveys/{survey_id}/results` | Get live survey results | Public |
-| POST | `/api/v1/surveys/{survey_id}/submit` | Submit survey response | Optional |
+| POST | `/api/v1/surveys/{survey_id}/submit` | Submit survey response | Required |
 
-**Note:** Survey submissions support both anonymous and authenticated users. When authenticated, the `user_id` is derived from the JWT token. Anonymous submissions have `user_id = NULL`.
+Survey submissions require a verified user JWT with a UUID identity. The backend
+binds that identity and the fixed `authenticated` database role within the same
+transaction as `surveys.submit_response`; neither identity nor role comes from the
+request payload. Anonymous submissions are rejected. A duplicate response returns
+409, a missing survey 404, invalid answers or an unpublished survey 400, and
+unexpected database errors a sanitized 500. Published status is enforced; the RPC
+does not currently enforce configured start/end windows or required-answer rules.
 
 ### Discussions (Episode Threads)
 
@@ -310,6 +316,24 @@ Authorization: Bearer <token>
 ```
 
 Returns the conversation (creating it if it doesn't exist). Idempotent - calling with the same user pair always returns the same conversation.
+
+Concurrent reciprocal requests use the same canonical pair. Conversation,
+membership and initial read receipts are committed together. Self-conversations
+are rejected; group conversations are not reused as direct conversations.
+
+#### Sending and retrying a message
+
+```json
+{"body": "Hello", "client_request_id": "919d9907-6fb8-4e5f-9b67-aee9d1a74a65"}
+```
+
+`client_request_id` is an optional UUID. Reuse it for a retry of the same body
+in the same conversation as the same sender; the API returns the stored message.
+Reusing it with a different body returns 409. Without this field, each accepted
+send creates a new message, so an ambiguous network failure can duplicate a retry.
+The message and conversation timestamp commit atomically after membership checks.
+Realtime events are best-effort after commit. A missed event does not undo the
+message; recover durable state through the message-list endpoint.
 
 #### Message Pagination
 

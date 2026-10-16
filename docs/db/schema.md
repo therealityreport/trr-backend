@@ -69,13 +69,13 @@ See `docs/architecture.md` for the full TMDb enrichment pipeline.
 - `surveys.surveys`: A survey scoped to a show/season/episode (`show_id` required; `season_id`/`episode_id` optional). Includes `slug` for URL-friendly identifiers.
 - `surveys.questions`: Questions for a survey; `question_order` is unique per survey.
 - `surveys.options`: Options for a question (for choice questions).
-- `surveys.responses`: Per-user response header for a survey (user-scoped). **Unique constraint**: authenticated users can only submit one response per survey.
+- `surveys.responses`: Per-user response header for a survey (user-scoped), with a required user identity. **Unique constraint**: a user can only submit one response per survey.
 - `surveys.answers`: Per-response per-question answers (user-scoped via the owning response); includes `survey_id` to enforce response/question scope.
 - `surveys.aggregates`: Live aggregates for survey questions (read-only to clients).
 
 ### `surveys` RPC functions
 
-- `surveys.submit_response(survey_id uuid, answers jsonb) -> uuid`: Atomically submits a survey response with all answers. Uses `auth.uid()` internally for user identification. Prevents duplicate submissions for authenticated users. Returns the response_id.
+- `surveys.submit_response(p_survey_id uuid, p_answers jsonb) -> uuid`: Atomically submits an authenticated survey response with all answers. Uses `auth.uid()` internally and runs as the caller. The API's scalar RPC adapter sets the fixed authenticated role and verified user claims transaction-locally, and rejects nesting in a caller-owned transaction. Commit or rollback clears identity before pooled reuse. Duplicate responses are rejected. Returns one response UUID; existing row-returning RPC adapters retain their separate contract.
 
 ## Games vs. surveys
 
