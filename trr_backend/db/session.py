@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, cast
+from uuid import UUID
 
 from psycopg2.extras import Json, RealDictCursor, execute_values
 
-from trr_backend.db.pg import db_connection, db_read_connection
+from trr_backend.db.pg import db_connection, db_read_connection, has_active_transaction
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -20,6 +22,7 @@ class DbError:
     code: str | None = None
     details: str | None = None
     hint: str | None = None
+    constraint_name: str | None = None
 
     def __str__(self) -> str:  # pragma: no cover - trivial
         return self.message
@@ -428,24 +431,64 @@ class DbRpc:
         self._params = params
 
     def execute(self) -> DbResponse:
+        """Keep the compatibility contract: RPC results are lists of rows."""
+        return self._execute()
+
+    def execute_scalar(self, *, user_id: UUID) -> DbResponse:
+        """Run an authenticated scalar RPC in one write transaction.
+
+        The caller must supply the server-verified identity. The fixed role and
+        claims are transaction-local, so commit/rollback clears them before reuse.
+        Caller-owned transactions are rejected before their context can change.
+        """
+        return self._execute(user_id=UUID(str(user_id)))
+
+    def _execute(self, *, user_id: UUID | None = None) -> DbResponse:
         try:
+            if user_id is not None and has_active_transaction():
+                raise RuntimeError("Authenticated scalar RPC requires its own transaction")
             if self._params:
                 arg_sql = ", ".join([f"{key} := %s" for key in self._params.keys()])
-                sql = f"SELECT * FROM {self._schema}.{self._function_name}({arg_sql})"
+                function_sql = f"{self._schema}.{self._function_name}({arg_sql})"
                 params = [
                     self._params[key] if not isinstance(self._params[key], (dict, list)) else Json(self._params[key])
                     for key in self._params
                 ]
             else:
-                sql = f"SELECT * FROM {self._schema}.{self._function_name}()"
+                function_sql = f"{self._schema}.{self._function_name}()"
                 params = []
-            with db_read_connection() as conn:
+            scalar = user_id is not None
+            sql = f"SELECT {function_sql} AS rpc_result" if scalar else f"SELECT * FROM {function_sql}"
+            checkout = db_connection if scalar else db_read_connection
+            with checkout() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    if user_id is not None:
+                        cur.execute("SET LOCAL ROLE authenticated")
+                        cur.execute(
+                            "SELECT set_config('request.jwt.claim.sub', %s, true), "
+                            "set_config('request.jwt.claim.role', 'authenticated', true), "
+                            "set_config('request.jwt.claims', %s, true)",
+                            [str(user_id), json.dumps({"sub": str(user_id), "role": "authenticated"})],
+                        )
                     cur.execute(sql, params)
                     rows = cur.fetchall()
+                    if scalar:
+                        if len(rows) != 1:
+                            raise ValueError("Scalar RPC must return exactly one row")
+                        return DbResponse(data=rows[0]["rpc_result"], error=None)
             return DbResponse(data=[dict(r) for r in rows], error=None)
         except Exception as exc:
-            return DbResponse(data=None, error=DbError(message=str(exc)))
+            diag = getattr(exc, "diag", None)
+            return DbResponse(
+                data=None,
+                error=DbError(
+                    message=str(exc),
+                    code=getattr(exc, "pgcode", None),
+                    details=getattr(diag, "message_detail", None),
+                    hint=getattr(diag, "message_hint", None),
+                    constraint_name=getattr(diag, "constraint_name", None),
+                ),
+            )
 
 
 def get_db_session() -> DbSession:

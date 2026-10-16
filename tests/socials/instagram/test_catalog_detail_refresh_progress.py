@@ -14,9 +14,10 @@ from trr_backend.socials.pipelines.account_catalog import progress
 @pytest.fixture(scope="module", autouse=True)
 def _configure_catalog_detail_providers() -> None:
     """Publish the existing legacy providers so the unit fakes patch the exact provider-owned runtime bindings."""
+    from trr_backend.socials import social_season_analytics_impl as social_provider
     from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
 
-    register_social_control_plane_providers()
+    register_social_control_plane_providers(social_provider.__dict__)
 
 
 def _patch_catalog_and_core(monkeypatch: pytest.MonkeyPatch, name: str, value: Any) -> None:

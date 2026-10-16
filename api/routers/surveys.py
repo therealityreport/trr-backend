@@ -8,13 +8,15 @@ immediately gets the current aggregate results across all respondents.
 from __future__ import annotations
 
 import time
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from psycopg2.extras import Json
+from pydantic import BaseModel, field_validator
 
-from api.auth import OptionalUser
+from api.auth import CurrentUser
 from api.deps import (
     SupabaseAdminClient,
     SupabaseClient,
@@ -43,8 +45,9 @@ expanded_answers AS (
       ELSE a.answer->>'value'
     END AS answer_value
   FROM surveys.answers AS a
-  LEFT JOIN LATERAL jsonb_array_elements_text(a.answer->'value') AS array_item(value)
-    ON jsonb_typeof(a.answer->'value') = 'array'
+  LEFT JOIN LATERAL jsonb_array_elements_text(
+    CASE WHEN jsonb_typeof(a.answer->'value') = 'array' THEN a.answer->'value' ELSE '[]'::jsonb END
+  ) AS array_item(value) ON true
   WHERE a.survey_id = %s::uuid
 ),
 distribution AS (
@@ -68,14 +71,15 @@ SELECT
   qt.question_id,
   qt.total_responses,
   COALESCE(
-    jsonb_object_agg(d.answer_value, d.answer_count ORDER BY d.answer_value),
+    jsonb_object_agg(d.answer_value, d.answer_count ORDER BY d.answer_value)
+      FILTER (WHERE d.answer_value IS NOT NULL),
     '{}'::jsonb
   ) AS distribution,
   rt.total_responses AS survey_total_responses
-FROM question_totals AS qt
+FROM response_totals AS rt
+LEFT JOIN question_totals AS qt ON true
 LEFT JOIN distribution AS d
   ON d.question_id = qt.question_id
-CROSS JOIN response_totals AS rt
 GROUP BY qt.question_id, qt.total_responses, rt.total_responses
 ORDER BY qt.question_id
 """
@@ -115,6 +119,11 @@ class Survey(BaseModel):
     ends_at: str | None
     config: dict[str, Any]
 
+    @field_validator("starts_at", "ends_at", mode="before")
+    @classmethod
+    def serialize_timestamp(cls, value: Any) -> Any:
+        return value.isoformat() if isinstance(value, datetime) else value
+
 
 class SurveyWithQuestions(Survey):
     questions: list[SurveyQuestion] = []
@@ -130,8 +139,7 @@ class SurveySubmission(BaseModel):
     Survey submission payload.
 
     Note: user_id is intentionally NOT accepted from client.
-    The server derives user identity from authentication (when implemented)
-    or uses NULL for anonymous submissions.
+    The server derives user identity from verified authentication.
     """
 
     answers: list[AnswerSubmission]
@@ -159,30 +167,46 @@ def _load_survey_questions(db: SupabaseClient, survey_id: str) -> list[dict[str,
     questions_response = (
         db.schema("surveys")
         .table("questions")
-        .select(f"{QUESTION_SELECT_FIELDS}, options({OPTION_SELECT_FIELDS})")
+        .select(QUESTION_SELECT_FIELDS)
         .eq("survey_id", survey_id)
         .order("question_order")
         .execute()
     )
     questions = get_list_result(questions_response, "fetching survey questions")
+    if not questions:
+        return []
+    options_response = (
+        db.schema("surveys")
+        .table("options")
+        .select(OPTION_SELECT_FIELDS)
+        .in_("question_id", [str(question["id"]) for question in questions])
+        .order("option_order")
+        .execute()
+    )
+    options_by_question: dict[str, list[dict[str, Any]]] = {}
+    for option in get_list_result(options_response, "fetching survey options"):
+        options_by_question.setdefault(str(option["question_id"]), []).append(option)
     for question in questions:
-        question["options"] = sorted(question.get("options", []), key=lambda option: option["option_order"])
+        question["options"] = options_by_question.get(str(question["id"]), [])
     return questions
 
 
-def _message_indicates_missing_survey(error: object) -> bool:
-    error_msg = str(error).lower()
-    return any(marker in error_msg for marker in ("survey not found", "not found", "pgrst116", "0 rows", "no rows"))
-
-
-def _survey_exists(admin_db: SupabaseAdminClient, survey_id: UUID) -> bool:
-    try:
-        response = admin_db.schema("surveys").table("surveys").select("id").eq("id", str(survey_id)).single().execute()
-    except Exception as exc:
-        if _message_indicates_missing_survey(exc):
-            return False
-        raise
-    return bool(getattr(response, "data", None))
+def _submission_error(error: object) -> HTTPException:
+    """Translate known RPC failures without exposing SQL or submitted values."""
+    message = str(error).lower()
+    code = getattr(error, "code", None) or getattr(error, "pgcode", None)
+    constraint = getattr(error, "constraint_name", None)
+    if constraint is None:
+        constraint = getattr(getattr(error, "diag", None), "constraint_name", None)
+    if "already submitted" in message or (code == "23505" and constraint == "survey_responses_one_per_user_per_survey"):
+        return HTTPException(status_code=409, detail="You have already submitted a response to this survey")
+    if "survey not found" in message:
+        return HTTPException(status_code=404, detail="Survey not found")
+    if "not accepting" in message:
+        return HTTPException(status_code=400, detail="Survey is not accepting responses")
+    if code in {"23502", "23503", "23505", "23514", "22P02"}:
+        return HTTPException(status_code=400, detail="Invalid survey answers")
+    return HTTPException(status_code=500, detail="Failed to submit survey")
 
 
 # --- Endpoints ---
@@ -261,7 +285,7 @@ def submit_survey(
     admin_db: SupabaseAdminClient,
     survey_id: UUID,
     submission: SurveySubmission,
-    user: OptionalUser,
+    user: CurrentUser,
 ) -> dict:
     """
     Submit a survey response and get instant live results.
@@ -273,14 +297,17 @@ def submit_survey(
 
     Then computes and returns live results.
 
-    Authentication: Optional. Anonymous submissions allowed.
-    - Authenticated: user_id derived from JWT token via RPC
-    - Anonymous: user_id is NULL
+    Authentication is required. The verified user UUID is bound to auth.uid()
+    with the authenticated SQL role for the submission transaction.
 
     Security note: user_id is NEVER accepted from client payload.
     The RPC uses auth.uid() internally.
     """
     started_at = time.perf_counter()
+    try:
+        user_id = UUID(str(user["id"]))
+    except (KeyError, ValueError, TypeError):
+        raise HTTPException(status_code=401, detail="A valid authenticated user is required") from None
     # Build answers array for RPC
     answers_json = [
         {
@@ -290,36 +317,21 @@ def submit_survey(
         for answer in submission.answers
     ]
 
-    # Use the appropriate client based on authentication
-    # For authenticated users, use their client so auth.uid() works in RPC
-    # For anonymous, use admin client with explicit NULL handling
-    client = db if user else admin_db
-
     try:
         # Call the transactional RPC
         rpc_response = (
-            client.schema("surveys")
+            db.schema("surveys")
             .rpc("submit_response", {"p_survey_id": str(survey_id), "p_answers": answers_json})
-            .execute()
+            .execute_scalar(user_id=user_id)
         )
-    except Exception as e:
-        error_msg = str(e).lower()
-        if "already submitted" in error_msg:
-            raise HTTPException(
-                status_code=409, detail="You have already submitted a response to this survey"
-            ) from None
-        if _message_indicates_missing_survey(e):
-            raise HTTPException(status_code=404, detail="Survey not found") from None
-        if "not accepting" in error_msg:
-            raise HTTPException(status_code=400, detail="Survey is not accepting responses") from None
-        raise HTTPException(status_code=500, detail=f"Failed to submit survey: {e}") from e
-
-    if not rpc_response.data:
-        if not _survey_exists(admin_db, survey_id):
-            raise HTTPException(status_code=404, detail="Survey not found")
-        raise HTTPException(status_code=500, detail="Failed to create response")
-
-    response_id = rpc_response.data
+    except Exception as exc:
+        raise _submission_error(exc) from None
+    if rpc_response.error:
+        raise _submission_error(rpc_response.error) from None
+    try:
+        response_id = UUID(str(rpc_response.data))
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=500, detail="Failed to create response") from None
 
     # Compute and return live results
     results = _compute_survey_results(admin_db, survey_id)
@@ -351,6 +363,8 @@ def _compute_survey_results(db: SupabaseClient, survey_id: UUID) -> dict:
     total_responses = int(rows[0]["survey_total_responses"]) if rows else 0
     question_aggregates = []
     for row in rows:
+        if row["question_id"] is None:
+            continue
         distribution_raw = row.get("distribution") or {}
         distribution = {str(key): int(value) for key, value in distribution_raw.items()}
         question_total = int(row.get("total_responses") or 0)
@@ -396,11 +410,13 @@ def _update_aggregates(
         (
             str(survey_id),
             question_result["question_id"],
-            {
-                "total_responses": question_result["total_responses"],
-                "distribution": question_result["distribution"],
-                "percentages": question_result["percentages"],
-            },
+            Json(
+                {
+                    "total_responses": question_result["total_responses"],
+                    "distribution": question_result["distribution"],
+                    "percentages": question_result["percentages"],
+                }
+            ),
         )
         for question_result in results["questions"]
     ]

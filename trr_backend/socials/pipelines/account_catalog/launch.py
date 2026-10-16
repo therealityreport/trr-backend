@@ -8,7 +8,7 @@ import concurrent.futures
 import hashlib
 import os
 from collections.abc import Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import TYPE_CHECKING, Any
 
 from trr_backend.db.deadline import (
@@ -86,6 +86,10 @@ if TYPE_CHECKING:
     _materialized_social_account_total_posts: Callable[..., Any] = _type_only_callable
     _merge_catalog_run_config: Callable[..., Any] = _type_only_callable
     _metadata_dict: Callable[..., Any] = _type_only_callable
+    _normalize_attached_followups: Callable[..., Any] = _type_only_callable
+    _catalog_launch_task_resolution_pending: Callable[..., Any] = _type_only_callable
+    _catalog_backfill_has_bounded_window: Callable[..., Any] = _type_only_callable
+    _derive_run_progress_status: Callable[..., Any] = _type_only_callable
     _normalize_comment_anchor_source_ids: Callable[..., Any] = _type_only_callable
     _normalize_non_negative_int: Callable[..., Any] = _type_only_callable
     _normalize_optional_social_account_catalog_backfill_selected_tasks: Callable[..., Any] = _type_only_callable
@@ -1888,6 +1892,199 @@ def _catalog_launch_group_transaction_lock(launch_group_id: str):
         yield bool((row or {}).get("locked"))
 
 
+def _repair_finalizing_catalog_launch_after_jobs(
+    *,
+    run_row: Mapping[str, Any],
+    job_rows: Sequence[Mapping[str, Any]],
+    platform: str,
+    account_handle: str,
+    conn: Any | None = None,
+    owns_launch_group: bool = False,
+) -> dict[str, Any] | None:
+    _sync_core_overrides()
+
+    config = _metadata_dict(run_row.get("config"))
+    group_id = str(config.get("launch_group_id") or "").strip()
+    if not group_id or not job_rows:
+        return None
+    with nullcontext(True) if owns_launch_group else _catalog_launch_group_transaction_lock(group_id) as acquired:
+        if not acquired:
+            return None
+        current = _load_catalog_run_row_by_id(str(run_row.get("run_id") or run_row.get("id")), conn=conn)
+        current_config = _metadata_dict(current.get("config"))
+        if str(current_config.get("launch_group_id") or "") != group_id:
+            return None
+        if str(current.get("status") or "").lower() in {"cancelled", "cancelling", "failed"}:
+            return None
+        state = str(current_config.get("launch_state") or "").lower()
+        if state != "ready":
+            complete_ids = set(_as_text_list(current_config.get("catalog_launch_job_ids")))
+            actual_ids = {str(row.get("id") or row.get("job_id") or "") for row in job_rows}
+            if not complete_ids or not complete_ids.issubset(actual_ids):
+                return None
+        return _repair_finalizing_catalog_launch_after_jobs_owned(
+            run_row=current,
+            job_rows=job_rows,
+            platform=platform,
+            account_handle=account_handle,
+            conn=conn,
+        )
+
+
+def _repair_finalizing_catalog_launch_after_jobs_owned(
+    *,
+    run_row: Mapping[str, Any],
+    job_rows: Sequence[Mapping[str, Any]],
+    platform: str,
+    account_handle: str,
+    conn: Any | None = None,
+) -> dict[str, Any] | None:
+    _sync_core_overrides()
+    if not job_rows:
+        return None
+    run_config = _metadata_dict(run_row.get("config"))
+    launch_state = str(run_config.get("launch_state") or "").strip().lower()
+    selected_tasks = _normalize_optional_social_account_catalog_backfill_selected_tasks(
+        run_config.get("selected_tasks")
+    )
+    effective_selected_tasks = (
+        _normalize_optional_social_account_catalog_backfill_selected_tasks(run_config.get("effective_selected_tasks"))
+        or selected_tasks
+    )
+    launch_group_id = str(run_config.get("launch_group_id") or "").strip() or None
+    attached_followups = _normalize_attached_followups(run_config.get("attached_followups"))
+    comments_followup_missing = "comments" in effective_selected_tasks and not attached_followups.get("comments")
+    media_followup_missing = bool(
+        "media" in effective_selected_tasks and launch_group_id and not attached_followups.get("media")
+    )
+    finalizing_metadata_incomplete = launch_state == "finalizing" and _catalog_launch_task_resolution_pending(
+        run_config.get("launch_task_resolution_pending")
+    )
+    if not finalizing_metadata_incomplete and not comments_followup_missing and not media_followup_missing:
+        return None
+
+    run_id = str(run_row.get("run_id") or run_row.get("id") or "").strip()
+    if not run_id:
+        return None
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    source_scope = str(run_config.get("source_scope") or run_row.get("source_scope") or "network").strip() or "network"
+    metadata_updates: dict[str, Any] = {
+        "launch_state": "ready",
+        "launch_task_resolution_pending": False,
+        "launch_completed_at": _iso(_now_utc()),
+        "selected_tasks": selected_tasks,
+        "effective_selected_tasks": effective_selected_tasks,
+    }
+    if comments_followup_missing or media_followup_missing:
+        metadata_updates["catalog_followups_disabled"] = False
+
+    if comments_followup_missing:
+        comments_enable_media_followups = (
+            bool(run_config.get("comments_enable_media_followups"))
+            if run_config.get("comments_enable_media_followups") is not None
+            else "media" in effective_selected_tasks
+        )
+        # A bounded existing-post launch must enumerate the whole requested
+        # window. Streaming only sees rows stamped by this backfill run.
+        bounded_comments_window = _catalog_backfill_has_bounded_window(
+            date_start=_coerce_dt(run_config.get("date_start")),
+            date_end=_coerce_dt(run_config.get("date_end")),
+        )
+        use_streaming_comments = bool(
+            normalized_platform == "instagram"
+            and not bool(run_config.get("allow_local_dev_inline_bypass"))
+            and str(run_config.get("execution_preference") or "auto") != "prefer_local_inline"
+            and not bounded_comments_window
+        )
+        if use_streaming_comments:
+            metadata_updates.update(
+                {
+                    "comments_streaming_enabled": True,
+                    "comments_streaming_state": "started",
+                    "comments_streaming_source": "catalog_batch_persist",
+                    "comments_streaming_account_handle": normalized_account,
+                    "comments_streaming_source_scope": source_scope,
+                    "comments_streaming_launch_group_id": launch_group_id,
+                    "comments_streaming_worker_count": _normalize_non_negative_int(
+                        run_config.get("comments_worker_count")
+                    )
+                    or None,
+                    "comments_streaming_enable_media_followups": comments_enable_media_followups,
+                    "comments_streaming_targets_seen": 0,
+                    "comments_streaming_targets_enqueued": 0,
+                    "comments_streaming_targets_skipped_duplicate": 0,
+                    "comments_streaming_append_failures": 0,
+                    "deferred_comments_followup": None,
+                }
+            )
+            attached_followups["comments"] = _build_attached_comments_followup(
+                run_id=None,
+                status="pending",
+                source="catalog_streaming",
+                state="pending",
+            )
+        else:
+            deferred_comments_followup = {
+                "state": "pending",
+                # Lifecycle must reuse a child created before parent attachment.
+                "launch_recovered_at": _iso(_now_utc()),
+                "platform": normalized_platform,
+                "account_handle": normalized_account,
+                "source_scope": source_scope,
+                "refresh_policy": "stale_or_missing",
+                "target_filter": "incomplete" if normalized_platform == "instagram" else None,
+                "date_start": run_config.get("date_start"),
+                "date_end": run_config.get("date_end"),
+                "comments_worker_count": _normalize_non_negative_int(run_config.get("comments_worker_count")) or None,
+                "comments_enable_media_followups": comments_enable_media_followups,
+                "allow_local_dev_inline_bypass": bool(run_config.get("allow_local_dev_inline_bypass")),
+                "launch_group_id": launch_group_id,
+                "runtime_version": _metadata_dict(run_config.get("required_runtime_version"))
+                or dict(_resolve_effective_runtime_version(required_execution_backend="modal")),
+                "created_by_runtime_version": _metadata_dict(run_config.get("created_by_runtime_version"))
+                or dict(_resolve_runtime_version_stamp()),
+            }
+            metadata_updates["comments_streaming_enabled"] = False
+            metadata_updates["deferred_comments_followup"] = deferred_comments_followup
+            attached_followups["comments"] = _build_attached_comments_followup(
+                run_id=None,
+                status="pending",
+                source="deferred_after_catalog",
+                state="pending",
+            )
+    if media_followup_missing:
+        attached_followups["media"] = _build_attached_media_followup(
+            attachment_id=_catalog_media_attachment_id(launch_group_id),
+            source="catalog_media_mirror",
+            status=_derive_run_progress_status(run_row.get("status"), job_rows),
+        )
+    if attached_followups:
+        metadata_updates["attached_followups"] = attached_followups
+
+    merged = _merge_catalog_run_config(
+        run_id=run_id,
+        metadata_updates=metadata_updates,
+        conn=conn,
+        expected_launch_state=launch_state,
+    )
+    merged_config = _metadata_dict(merged.get("config"))
+    if not merged_config:
+        return None
+    logger.info(
+        (
+            "[catalog-launch] finalizing_metadata_repaired platform=%s account=%s run_id=%s "
+            "job_count=%s effective_selected_tasks=%s"
+        ),
+        normalized_platform,
+        normalized_account,
+        run_id,
+        len(job_rows),
+        effective_selected_tasks,
+    )
+    return merged_config or {**run_config, **metadata_updates}
+
+
 def _catalog_launch_parent_snapshot(run_id: str) -> dict[str, Any]:
     row = _load_catalog_run_row_by_id(run_id)
     config = _metadata_dict(row.get("config"))
@@ -2089,10 +2286,6 @@ def finalize_social_account_catalog_backfill_launch(
                 return _catalog_launch_parent_result(parent)
             existing_jobs = _catalog_existing_launch_jobs(run_id)
             if existing_jobs:
-                from trr_backend.socials.social_season_analytics_impl import (
-                    _repair_finalizing_catalog_launch_after_jobs,
-                )
-
                 repaired = _repair_finalizing_catalog_launch_after_jobs(
                     run_row=parent,
                     job_rows=existing_jobs,
@@ -3325,6 +3518,8 @@ def launch_social_account_catalog_backfill(
 
 _LOCAL_ROOM_NAMES.update(
     {
+        "_repair_finalizing_catalog_launch_after_jobs",
+        "_repair_finalizing_catalog_launch_after_jobs_owned",
         "start_social_account_catalog_backfill",
         "begin_social_account_catalog_backfill_launch",
         "finalize_social_account_catalog_backfill_launch",
@@ -3345,6 +3540,8 @@ register_legacy_patchable_namespace(
     globals(),
     (
         *__all__,
+        "_repair_finalizing_catalog_launch_after_jobs",
+        "_repair_finalizing_catalog_launch_after_jobs_owned",
         "_merge_catalog_run_config",
         "probe_modal_instagram_comments_auth_health",
         "probe_modal_instagram_posts_auth_health",

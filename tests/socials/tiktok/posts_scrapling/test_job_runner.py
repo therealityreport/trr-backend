@@ -16,6 +16,7 @@ class _FakeLifecycle:
         self.finish_calls: list[dict[str, Any]] = []
         self.finalize_calls: list[str] = []
         self.finalize_error: Exception | None = None
+        self.finish_accepted = True
 
     def new_job_progress_state(self) -> dict[str, Any]:
         return {}
@@ -37,8 +38,9 @@ class _FakeLifecycle:
     def retry_backoff_seconds(self, _attempt: int) -> int:
         return 30
 
-    def finish_job(self, job_id: str, **kwargs) -> None:
+    def finish_job(self, job_id: str, **kwargs) -> bool:
         self.finish_calls.append({"job_id": job_id, **kwargs})
+        return self.finish_accepted
 
     def finalize_run_status(self, run_id: str) -> dict[str, Any]:
         self.finalize_calls.append(run_id)
@@ -142,10 +144,13 @@ def test_canonical_fallback_uses_ytdlp_without_api_fallthrough(monkeypatch: pyte
     assert metadata["trigger_reason"] == "non_json_response"
 
 
+@pytest.mark.parametrize("finish_accepted", [True, False])
 def test_tiktok_job_runner_records_progress_and_completion_metadata(
     monkeypatch: pytest.MonkeyPatch,
     fake_lifecycle: _FakeLifecycle,
+    finish_accepted: bool,
 ) -> None:
+    fake_lifecycle.finish_accepted = finish_accepted
     from trr_backend.socials.tiktok.posts_scrapling import job_runner as jr
 
     class _FakeFetcher:
@@ -187,7 +192,12 @@ def test_tiktok_job_runner_records_progress_and_completion_metadata(
     monkeypatch.setattr(jr.pg, "fetch_one", _running_status_or_final_row)
 
     jr.run_tiktok_posts_scrapling_job(
-        {"id": "job-1", "run_id": "run-1", "config": {"account": "bravotv"}},
+        {
+            "id": "job-1",
+            "run_id": "run-1",
+            "worker_id": "acquired-worker",
+            "config": {"account": "bravotv", "claim_token": "acquired-token"},
+        },
         worker_id="worker-1",
     )
 
@@ -220,6 +230,13 @@ def test_tiktok_job_runner_records_progress_and_completion_metadata(
         metadata
     )
     assert "raw-session-secret" not in repr(metadata)
+
+    finish = fake_lifecycle.finish_calls[-1]
+    assert finish["expected_worker_id"] == "acquired-worker"
+    assert finish["expected_claim_token"] == "acquired-token"
+    assert fake_lifecycle.finalize_calls == (["run-1"] if finish_accepted else [])
+    assert all(call["claim_token"] == "acquired-token" for call in fake_lifecycle.progress_calls)
+    assert all(call["worker_id"] == "acquired-worker" for call in fake_lifecycle.progress_calls)
 
 
 def test_tiktok_job_runner_records_retryable_error_metadata(

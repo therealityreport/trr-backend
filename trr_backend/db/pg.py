@@ -1181,6 +1181,11 @@ def _get_connection_with_retry(
     raise RuntimeError("unreachable")
 
 
+def has_active_transaction() -> bool:
+    """Whether default-pool helpers would reuse a caller-owned transaction."""
+    return _transaction_connection.get() is not None
+
+
 @contextmanager
 def transaction():
     """Make nested default-pool helpers share one atomic write transaction."""

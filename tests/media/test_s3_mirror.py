@@ -50,7 +50,7 @@ def test_mirror_url_to_s3_uploads_when_missing(monkeypatch: pytest.MonkeyPatch) 
             del chunk_size
             yield b"abc123"
 
-    monkeypatch.setattr(s3_mirror.requests, "get", lambda *args, **kwargs: _FakeResponse())  # noqa: ARG005
+    monkeypatch.setattr(s3_mirror, "safe_requests_get", lambda *args, **kwargs: _FakeResponse())  # noqa: ARG005
     monkeypatch.setattr(s3_mirror, "_head_object", lambda *_args, **_kwargs: None)
     upload_mock = MagicMock(return_value=("etag-1", 6))
     monkeypatch.setattr(s3_mirror, "upload_bytes_to_s3", upload_mock)
@@ -89,7 +89,7 @@ def test_mirror_url_to_s3_skips_upload_when_existing_object(monkeypatch: pytest.
             del chunk_size
             yield b"abc123"
 
-    monkeypatch.setattr(s3_mirror.requests, "get", lambda *args, **kwargs: _FakeResponse())  # noqa: ARG005
+    monkeypatch.setattr(s3_mirror, "safe_requests_get", lambda *args, **kwargs: _FakeResponse())  # noqa: ARG005
     monkeypatch.setattr(
         s3_mirror,
         "_head_object",
@@ -138,7 +138,7 @@ def test_mirror_url_to_s3_fails_for_oversized_assets(monkeypatch: pytest.MonkeyP
             yield b"12345"
             yield b"67890"
 
-    monkeypatch.setattr(s3_mirror.requests, "get", lambda *args, **kwargs: _FakeResponse())  # noqa: ARG005
+    monkeypatch.setattr(s3_mirror, "safe_requests_get", lambda *args, **kwargs: _FakeResponse())  # noqa: ARG005
     result = s3_mirror.mirror_url_to_s3(
         "https://video.twimg.com/ext_tw_video/12345/pu/vid.mp4",
         s3_client=MagicMock(),
@@ -171,7 +171,7 @@ def test_mirror_url_to_s3_rejects_html_body_for_video_suffix(monkeypatch: pytest
             yield b"<!doctype html><html><body>login</body></html>"
 
     upload_mock = MagicMock()
-    monkeypatch.setattr(s3_mirror.requests, "get", lambda *args, **kwargs: _FakeResponse())  # noqa: ARG005
+    monkeypatch.setattr(s3_mirror, "safe_requests_get", lambda *args, **kwargs: _FakeResponse())  # noqa: ARG005
     monkeypatch.setattr(s3_mirror, "upload_bytes_to_s3", upload_mock)
 
     result = s3_mirror.mirror_url_to_s3(
@@ -190,7 +190,7 @@ def test_mirror_url_to_s3_rejects_private_network_url_before_download(monkeypatc
         raise AssertionError("private URL should not be fetched")
 
     upload_mock = MagicMock()
-    monkeypatch.setattr(s3_mirror.requests, "get", fail_get)
+    monkeypatch.setattr(s3_mirror, "safe_requests_get", fail_get)
     monkeypatch.setattr(s3_mirror, "upload_bytes_to_s3", upload_mock)
 
     result = s3_mirror.mirror_url_to_s3(
@@ -226,7 +226,7 @@ def test_mirror_url_to_s3_rejects_non_image_bytes_for_image_suffix(monkeypatch: 
             yield b"<html>not an image</html>"
 
     upload_mock = MagicMock()
-    monkeypatch.setattr(s3_mirror.requests, "get", lambda *args, **kwargs: _FakeResponse())  # noqa: ARG005
+    monkeypatch.setattr(s3_mirror, "safe_requests_get", lambda *args, **kwargs: _FakeResponse())  # noqa: ARG005
     monkeypatch.setattr(s3_mirror, "upload_bytes_to_s3", upload_mock)
 
     result = s3_mirror.mirror_url_to_s3(
@@ -554,7 +554,7 @@ def test_download_image_sets_referer_for_fandom(monkeypatch: pytest.MonkeyPatch)
     captured = {}
     webp_bytes = b"RIFF\x0c\x00\x00\x00WEBPVP8 "
 
-    def fake_get(url, headers=None, timeout=None, stream=None):  # noqa: ANN001
+    def fake_get(_client, url, headers=None, timeout=None, stream=None, **_kwargs):  # noqa: ANN001
         captured["headers"] = headers or {}
         response = MagicMock()
         response.raise_for_status.return_value = None
@@ -562,20 +562,20 @@ def test_download_image_sets_referer_for_fandom(monkeypatch: pytest.MonkeyPatch)
         response.content = webp_bytes
         return response
 
-    monkeypatch.setattr(s3_mirror.requests, "get", fake_get)
+    monkeypatch.setattr(s3_mirror, "safe_requests_get", fake_get)
     s3_mirror.download_image("https://example.com/x.webp", source="fandom", referer="https://fandom.test")
     assert captured["headers"]["referer"] == "https://fandom.test"
 
 
 def test_download_image_rejects_non_image_content_type(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_get(url, headers=None, timeout=None, stream=None):  # noqa: ANN001
+    def fake_get(_client, url, headers=None, timeout=None, stream=None, **_kwargs):  # noqa: ANN001
         response = MagicMock()
         response.raise_for_status.return_value = None
         response.headers = {"Content-Type": "text/html; charset=utf-8"}
         response.content = b"<html>nope</html>"
         return response
 
-    monkeypatch.setattr(s3_mirror.requests, "get", fake_get)
+    monkeypatch.setattr(s3_mirror, "safe_requests_get", fake_get)
     with pytest.raises(RuntimeError):
         s3_mirror.download_image("https://example.com/x.html", source="fandom")
 
@@ -583,14 +583,14 @@ def test_download_image_rejects_non_image_content_type(monkeypatch: pytest.Monke
 def test_download_image_sniffs_image_type_when_missing_content_type(monkeypatch: pytest.MonkeyPatch) -> None:
     png_bytes = b"\x89PNG\r\n\x1a\n" + b"rest"
 
-    def fake_get(url, headers=None, timeout=None, stream=None):  # noqa: ANN001
+    def fake_get(_client, url, headers=None, timeout=None, stream=None, **_kwargs):  # noqa: ANN001
         response = MagicMock()
         response.raise_for_status.return_value = None
         response.headers = {}
         response.content = png_bytes
         return response
 
-    monkeypatch.setattr(s3_mirror.requests, "get", fake_get)
+    monkeypatch.setattr(s3_mirror, "safe_requests_get", fake_get)
     data, content_type = s3_mirror.download_image("https://example.com/x.png", source="fandom")
     assert data == png_bytes
     assert content_type == "image/png"
@@ -1201,12 +1201,12 @@ def test_mirror_url_to_s3_falls_back_to_ytdlp_for_twitter_video(monkeypatch: pyt
     def _fake_get(*args, **kwargs):  # noqa: ANN001, ARG005
         nonlocal call_count
         call_count += 1
-        url = args[0] if args else kwargs.get("url", "")
+        url = args[1] if len(args) > 1 else kwargs.get("url", "")
         if url == expired_url:
             return _FakeResponse403()
         return _FakeResponseOK()
 
-    monkeypatch.setattr(s3_mirror.requests, "get", _fake_get)
+    monkeypatch.setattr(s3_mirror, "safe_requests_get", _fake_get)
     monkeypatch.setattr(s3_mirror, "_head_object", lambda *_args, **_kwargs: None)
     upload_mock = MagicMock(return_value=("etag-fresh", 17))
     monkeypatch.setattr(s3_mirror, "upload_bytes_to_s3", upload_mock)
@@ -1300,14 +1300,14 @@ def test_mirror_url_to_s3_accepts_ytdlp_retry_when_object_already_exists(monkeyp
             yield b"fresh-video-bytes"
 
     def _fake_get(*args, **kwargs):  # noqa: ANN001, ARG005
-        url = args[0] if args else kwargs.get("url", "")
+        url = args[1] if len(args) > 1 else kwargs.get("url", "")
         if url == expired_url:
             return _FakeResponse403()
         if url == fresh_url:
             return _FakeResponseOK()
         raise AssertionError(f"unexpected url {url}")
 
-    monkeypatch.setattr(s3_mirror.requests, "get", _fake_get)
+    monkeypatch.setattr(s3_mirror, "safe_requests_get", _fake_get)
     monkeypatch.setattr(s3_mirror.shutil, "which", lambda cmd: "/usr/local/bin/yt-dlp" if cmd == "yt-dlp" else None)
 
     ytdlp_payload = json.dumps({"url": fresh_url})
@@ -1373,7 +1373,7 @@ def test_mirror_url_to_s3_no_ytdlp_fallback_without_tweet_url(monkeypatch: pytes
             del chunk_size
             return iter([])
 
-    monkeypatch.setattr(s3_mirror.requests, "get", lambda *args, **kwargs: _FakeResponse403())  # noqa: ARG005
+    monkeypatch.setattr(s3_mirror, "safe_requests_get", lambda *args, **kwargs: _FakeResponse403())  # noqa: ARG005
 
     result = s3_mirror.mirror_url_to_s3(
         expired_url,

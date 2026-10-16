@@ -19,7 +19,7 @@ Operational Instagram comments readiness is still blocked by live session behavi
 
 ## Artifacts
 
-- Approved plan saved at `docs/codex/plans/2026-05-03-instagram-social-scraper-readiness.md`.
+- Approved plan saved at [archived readiness plan](../../../plans/archive/codex-2026-05/2026-05-03-instagram-social-scraper-readiness.md); unresolved acceptance is tracked in [workspace 049](../../../../plans/049-instagram-comments-acceptance-followup.md).
 - This readiness note records the local/admin smoke evidence and the remaining live-auth blocker.
 
 ## Code Changes From Readiness Pass

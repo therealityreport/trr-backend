@@ -1093,7 +1093,7 @@ def test_execute_run_with_caps_stops_after_job_cap(monkeypatch) -> None:
 
     assert process_calls == ["job-1", "job-2"]
     assert [call["limit"] for call in claim_calls] == [1, 1]
-    assert finalize_calls == [("run-1", False)]
+    assert finalize_calls == []
     assert payload["id"] == "run-1"
 
 
@@ -1133,7 +1133,7 @@ def test_execute_run_with_caps_stops_after_runtime_cap(monkeypatch) -> None:
         max_run_seconds=0.1,
     )
 
-    assert finalize_calls == ["run-1"]
+    assert finalize_calls == []
     assert payload["id"] == "run-1"
 
 

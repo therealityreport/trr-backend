@@ -54,6 +54,7 @@ from trr_backend.socials.control_plane import (
     get_targets,
     sentiment_for_text,
 )
+from trr_backend.socials.control_plane import dispatch_runtime as dispatch_runtime
 from trr_backend.socials.control_plane import instagram_detail_targets as detail_targets
 from trr_backend.socials.crawlee_runtime import runtime as crawlee_runtime
 from trr_backend.socials.crawlee_runtime.auth_preflight import AuthPreflightResult
@@ -28920,7 +28921,7 @@ def test_recover_stale_running_jobs_updates_worker_state_and_run_summaries(monke
     monkeypatch.setattr(
         social_repo,
         "_clear_worker_heartbeat_for_job",
-        lambda *, job_id, status="idle", metadata=None: cleared.append(job_id),
+        lambda *, job_id, status="idle", metadata=None, expected_job_snapshot=None: cleared.append(job_id),
     )
     monkeypatch.setattr(social_repo, "_finalize_run_status", lambda run_id, **_kwargs: finalized.append(run_id) or {})
 
@@ -29032,6 +29033,7 @@ def test_set_job_running_clears_stale_error_fields(monkeypatch: pytest.MonkeyPat
         captured_sql["params"] = list(params)
         return {"id": "job-1"}
 
+    monkeypatch.setattr(social_repo.pg, "transaction", lambda: nullcontext())
     monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
 
     social_repo._set_job_running("job-1", worker_id="worker-1")
@@ -29040,7 +29042,8 @@ def test_set_job_running_clears_stale_error_fields(monkeypatch: pytest.MonkeyPat
     assert "error_message = null" in sql_text
     assert "last_error_code = null" in sql_text
     assert "last_error_class = null" in sql_text
-    assert captured_sql["params"] == ["worker-1", "job-1"]
+    assert captured_sql["params"] == ["worker-1", "job-1", "worker-1"]
+    assert "gen_random_uuid()" in sql_text
 
 
 def test_touch_job_heartbeat_refuses_requeued_job_after_lease_loss(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -29060,14 +29063,16 @@ def test_touch_job_heartbeat_refuses_requeued_job_after_lease_loss(monkeypatch: 
         lambda **kwargs: worker_touches.append(kwargs),
     )
 
-    touched = social_repo._touch_job_heartbeat("job-1", worker_id="worker-1")
+    touched = social_repo._touch_job_heartbeat("job-1", worker_id="worker-1", claim_token="claim-a")
 
     sql_text = " ".join(str(captured_sql.get("sql") or "").split()).lower()
     assert touched is False
     assert "status = 'running'" in sql_text
     assert "claimed_at is not null" in sql_text
+    assert "config->>'claim_token' = %s::text" in sql_text
+    assert "like worker_id" not in sql_text
     assert "status in ('queued', 'pending', 'retrying'" not in sql_text
-    assert captured_sql["params"] == ["worker-1", "job-1", "worker-1", "worker-1", "worker-1"]
+    assert captured_sql["params"] == ["job-1", "worker-1", "claim-a"]
     assert captured_sql["pool_name"] == social_repo.SOCIAL_CATALOG_PROGRESS_POOL_NAME
     assert worker_touches == []
 
@@ -29094,14 +29099,17 @@ def test_update_job_progress_requires_running_claimed_job(monkeypatch: pytest.Mo
         items_found=10,
         metadata={"activity": {"phase": "running"}},
         worker_id="worker-1",
+        claim_token="claim-a",
     )
 
     sql_text = " ".join(str(captured_sql.get("sql") or "").split()).lower()
     assert updated is False
     assert "status = 'running'" in sql_text
     assert "claimed_at is not null" in sql_text
+    assert "config->>'claim_token' = %s::text" in sql_text
+    assert "like worker_id" not in sql_text
     assert "status in ('queued', 'pending', 'retrying'" not in sql_text
-    assert captured_sql["params"][2:] == ["job-1", "worker-1", "worker-1", "worker-1"]
+    assert captured_sql["params"][2:] == ["job-1", "worker-1", "claim-a"]
     assert captured_sql["pool_name"] == social_repo.SOCIAL_CATALOG_PROGRESS_POOL_NAME
     assert worker_touches == []
 
@@ -29147,6 +29155,7 @@ def test_claim_job_by_id_clears_stale_error_fields(monkeypatch: pytest.MonkeyPat
         captured_sql["params"] = list(params)
         return {"id": "job-1"}
 
+    monkeypatch.setattr(social_repo.pg, "transaction", lambda: nullcontext())
     monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
     monkeypatch.setattr(
         social_repo,
@@ -29207,13 +29216,50 @@ def test_finish_job_expected_worker_skips_stale_terminal_write(monkeypatch: pyte
         status="completed",
         items_found=10,
         expected_worker_id="worker-1",
+        expected_claim_token="claim-a",
     )
 
     sql_text = " ".join(str(captured_sql.get("sql") or "").split()).lower()
     assert "prior.prior_status = 'running'" in sql_text
     assert "social.scrape_jobs.claimed_at is not null" in sql_text
     assert "social.scrape_jobs.worker_id = %s::text" in sql_text
-    assert captured_sql["params"][-3:] == ["worker-1", "worker-1", "worker-1"]
+    assert captured_sql["params"][-6:] == [None, "worker-1", "claim-a", None, None, "claim-a"]
+    assert "like social.scrape_jobs.worker_id" not in sql_text
+    assert "social.scrape_jobs.config->>'claim_token' = %s::text" in sql_text
+    assert side_effects == []
+
+    # Claim A's accepted finish can be delayed until the same worker reclaims B.
+    social_repo._finish_job_followups(
+        "job-1",
+        run_id="run-1",
+        status="retrying",
+        items_found=10,
+        claim_token="claim-a",
+        worker_id="worker-1",
+    )
+    followup_sql = " ".join(captured_sql["sql"].split()).lower()
+    assert "for update" in followup_sql
+    assert "config->>'claim_token'" in followup_sql
+    assert captured_sql["params"] == ["job-1", "retrying", "claim-a", None, False, "claim-a"]
+    assert side_effects == []
+
+    monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
+    retained_dispatch = {
+        "dispatch_reservation_id": "reserve-a",
+        "dispatch_attempt_count": 1,
+        "lease_expires_at": "2026-10-04T12:00:00+00:00",
+        "remote_invocation_id": "call-a",
+    }
+    assert not social_repo._transition_job_state(
+        "job-1",
+        expected_status="queued",
+        expected_claim_token=None,
+        expected_dispatch_snapshot=retained_dispatch,
+        status="failed",
+        items_found=0,
+    )
+    assert "coalesce(metadata->'dispatch', '{}'::jsonb) = %s::jsonb" in captured_sql["sql"]
+    assert json.loads(captured_sql["params"][-1]) == retained_dispatch
     assert side_effects == []
 
 
@@ -29222,6 +29268,8 @@ def test_finish_job_retrying_clears_stale_dispatch_metadata(monkeypatch: pytest.
     side_effects: list[str] = []
 
     def _fake_fetch_one(sql: str, params: list[object], **_kwargs) -> dict[str, Any]:
+        if sql.lstrip().startswith("select id"):
+            return {"id": "job-1"}
         captured_sql["sql"] = sql
         captured_sql["params"] = list(params)
         return {
@@ -29249,6 +29297,8 @@ def test_finish_job_retrying_clears_stale_dispatch_metadata(monkeypatch: pytest.
     social_repo._finish_job(
         "job-1",
         status="retrying",
+        expected_worker_id="worker-1",
+        expected_claim_token="claim-a",
         items_found=10,
         metadata={"retry_rebalance": {"remaining_target_source_ids": ["A"]}},
     )
@@ -29321,6 +29371,8 @@ def test_finish_job_terminal_status_finalizes_parent_run(monkeypatch: pytest.Mon
     finalized: list[dict[str, Any]] = []
 
     def _fake_fetch_one(sql: str, params: list[object], **_kwargs) -> dict[str, Any]:
+        if sql.lstrip().startswith("select id"):
+            return {"id": "job-1"}
         if "update social.scrape_jobs" in sql:
             return {
                 "id": "job-1",
@@ -29345,6 +29397,8 @@ def test_finish_job_terminal_status_finalizes_parent_run(monkeypatch: pytest.Mon
     social_repo._finish_job(
         "job-1",
         status="completed",
+        expected_worker_id="worker-1",
+        expected_claim_token="claim-a",
         items_found=437,
         metadata={"stage": social_repo.SHARED_ACCOUNT_POSTS_STAGE},
     )
@@ -29446,7 +29500,7 @@ def test_recover_stale_running_jobs_releases_matching_frontier_lease(monkeypatch
     monkeypatch.setattr(
         social_repo,
         "_clear_worker_heartbeat_for_job",
-        lambda *, job_id, status="idle", metadata=None: cleared.append(job_id),
+        lambda *, job_id, status="idle", metadata=None, expected_job_snapshot=None: cleared.append(job_id),
     )
     monkeypatch.setattr(social_repo, "_finalize_run_status", lambda run_id, **_kwargs: finalized.append(run_id) or {})
     monkeypatch.setattr(
@@ -29588,7 +29642,7 @@ def test_finish_job_retrying_releases_claim_ownership(monkeypatch: pytest.Monkey
     monkeypatch.setattr(
         social_repo,
         "_clear_worker_heartbeat_for_job",
-        lambda *, job_id, status="idle", metadata=None: cleared.append(job_id),
+        lambda *, job_id, status="idle", metadata=None, expected_job_snapshot=None: cleared.append(job_id),
     )
 
     social_repo._finish_job(
@@ -29615,7 +29669,7 @@ def test_finish_job_retrying_releases_claim_ownership(monkeypatch: pytest.Monkey
     assert cleared == []
 
 
-def test_finish_job_ignores_statement_timeout_during_run_counter_sync(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_finish_job_propagates_statement_timeout_during_run_counter_sync(monkeypatch: pytest.MonkeyPatch) -> None:
     touched: dict[str, Any] = {"cleared": [], "touched": [], "partitions": [], "invalidated": 0}
 
     def _fake_fetch_one(sql: str, params: list[object], **_kwargs) -> dict[str, Any]:
@@ -29640,7 +29694,9 @@ def test_finish_job_ignores_statement_timeout_during_run_counter_sync(monkeypatc
     monkeypatch.setattr(
         social_repo,
         "_clear_worker_heartbeat_for_job",
-        lambda *, job_id, status="idle", metadata=None: touched["cleared"].append((job_id, status, metadata)),
+        lambda *, job_id, status="idle", metadata=None, expected_job_snapshot=None: touched["cleared"].append(
+            (job_id, status, metadata)
+        ),
     )
     monkeypatch.setattr(
         social_repo,
@@ -29661,16 +29717,17 @@ def test_finish_job_ignores_statement_timeout_during_run_counter_sync(monkeypatc
     )
     monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: None)
 
-    social_repo._finish_job(
-        "job-1",
-        status="completed",
-        items_found=11,
-        metadata={"stage": "shared_account_posts"},
-    )
+    with pytest.raises(Exception, match="statement timeout"):
+        social_repo._finish_job(
+            "job-1",
+            status="completed",
+            items_found=11,
+            metadata={"stage": "shared_account_posts"},
+        )
 
-    assert touched["cleared"] == [("job-1", "idle", {"source": "job_finish", "job_status": "completed"})]
-    assert touched["partitions"] == [("job-1", "completed", {"source": "job_finish", "job_status": "completed"})]
-    assert touched["invalidated"] == 1
+    assert touched["cleared"] == []
+    assert touched["partitions"] == []
+    assert touched["invalidated"] == 0
 
 
 def test_claim_next_jobs_uses_batch_limit_and_run_fairness(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -29681,6 +29738,7 @@ def test_claim_next_jobs_uses_batch_limit_and_run_fairness(monkeypatch: pytest.M
         captured["params"] = list(params)
         return []
 
+    monkeypatch.setattr(social_repo.pg, "transaction", lambda: nullcontext())
     monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
     monkeypatch.setattr(social_repo, "_resolve_run_in_flight_cap", lambda: 4)
 
@@ -29704,6 +29762,12 @@ def test_claim_next_jobs_uses_batch_limit_and_run_fairness(monkeypatch: pytest.M
     assert params[-11] == 4  # run in-flight cap
     assert params[-10] == 25  # capped batch limit
     assert params[-9] == "worker-1"
+
+    assert "auth_fallback_rank = 1" in sql_text
+    assert "for update of claimable skip locked" in sql_text
+    assert "comments_auth_fallback" in sql_text
+    assert "lease_expires_at" in sql_text
+    assert params[0] == []
 
 
 def test_claim_next_queued_jobs_treats_empty_platform_filter_as_none(
@@ -30019,6 +30083,15 @@ def test_instagram_discovery_recovery_jobs_are_posts_auth_cooldown_scoped() -> N
 
 
 def test_dispatch_due_social_jobs_modal_dispatches_eligible_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Preserve the accepted bookkeeping I/O stub across the authoritative facade.
+    monkeypatch.setattr(
+        dispatch_runtime,
+        "_touch_dispatch_metadata_for_snapshot",
+        lambda job, **updates: social_repo._touch_job_dispatch_metadata(
+            job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
+        )
+        is not False,
+    )
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
     monkeypatch.setenv("TRR_REMOTE_EXECUTOR", "modal")
@@ -30093,10 +30166,55 @@ def test_dispatch_due_social_jobs_modal_dispatches_eligible_jobs(monkeypatch: py
     assert any(update[1].get("remote_invocation_id") == "call-job-1" for update in metadata_updates)
     assert dispatcher_heartbeats
 
+    assert getattr(social_repo.dispatch_due_social_jobs, "__trr_delegates_to_control_plane__", False)
+    authoritative_calls: list[dict[str, Any]] = []
+    dispatch_runtime._call_extracted_override(
+        "dispatch_due_social_jobs", lambda **kw: authoritative_calls.append(kw) or {}, run_id="run-1", limit=1
+    )
+    assert authoritative_calls == [{"run_id": "run-1", "limit": 1}]
+    media_job = {
+        "id": "media-job",
+        "run_id": "run-1",
+        "platform": "instagram",
+        "status": "queued",
+        "config": {"stage": social_repo.INSTAGRAM_MEDIA_MIRROR_STAGE, "account": "probe"},
+        "metadata": {},
+    }
+    monkeypatch.setattr(social_repo, "_list_candidate_media_mirror_jobs_for_account_dispatch", lambda **kw: [media_job])
+    monkeypatch.setattr(social_repo, "_job_required_lane_blocks_modal_dispatch", lambda *args, **kw: False)
+    monkeypatch.setattr(social_repo, "_dispatch_request_is_fresh", lambda job: False)
+    monkeypatch.setattr(social_repo, "_modal_dispatch_stage_global_cap", lambda stage: 10)
+    monkeypatch.setattr(social_repo, "_modal_dispatch_effective_platform_cap", lambda *args, **kw: None)
+    monkeypatch.setattr(dispatch_runtime, "_touch_dispatch_metadata_for_snapshot", lambda *args, **kw: False)
+    dispatch_calls.clear()
+    denied = social_repo._dispatch_media_mirror_account_jobs(
+        run_id="run-1", account_handle="probe", stages=[social_repo.INSTAGRAM_MEDIA_MIRROR_STAGE], limit=1
+    )
+    assert dispatch_calls == [] and denied["dispatch_attempts"] == 0 and denied["dispatched_job_ids"] == []
+    guard_results = iter([True, False])
+    monkeypatch.setattr(
+        dispatch_runtime, "_touch_dispatch_metadata_for_snapshot", lambda *args, **kw: next(guard_results)
+    )
+    unbound = social_repo._dispatch_media_mirror_account_jobs(
+        run_id="run-1", account_handle="probe", stages=[social_repo.INSTAGRAM_MEDIA_MIRROR_STAGE], limit=1
+    )
+    assert len(dispatch_calls) == 1 and unbound["dispatched_job_ids"] == []
+    assert unbound["unbound_dispatch_results"][0]["call_id"] == "call-media-job"
+    assert unbound["unbound_dispatch_results"][0]["dispatch_reservation_id"]
+
 
 def test_dispatch_due_social_jobs_skips_instagram_posts_auth_cooldown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Preserve the accepted bookkeeping I/O stub across the authoritative facade.
+    monkeypatch.setattr(
+        dispatch_runtime,
+        "_touch_dispatch_metadata_for_snapshot",
+        lambda job, **updates: social_repo._touch_job_dispatch_metadata(
+            job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
+        )
+        is not False,
+    )
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
     monkeypatch.setenv("TRR_REMOTE_EXECUTOR", "modal")
@@ -30297,6 +30415,15 @@ def test_dispatch_due_social_jobs_fails_closed_when_modal_resolution_is_unavaila
 
 
 def test_dispatch_due_social_jobs_uses_env_dispatch_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Preserve the accepted bookkeeping I/O stub across the authoritative facade.
+    monkeypatch.setattr(
+        dispatch_runtime,
+        "_touch_dispatch_metadata_for_snapshot",
+        lambda job, **updates: social_repo._touch_job_dispatch_metadata(
+            job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
+        )
+        is not False,
+    )
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
     monkeypatch.setenv("TRR_REMOTE_EXECUTOR", "modal")
@@ -30359,6 +30486,15 @@ def test_dispatch_due_social_jobs_uses_env_dispatch_limit(monkeypatch: pytest.Mo
 
 
 def test_dispatch_due_social_jobs_catalog_mode_honors_platform_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Preserve the accepted bookkeeping I/O stub across the authoritative facade.
+    monkeypatch.setattr(
+        dispatch_runtime,
+        "_touch_dispatch_metadata_for_snapshot",
+        lambda job, **updates: social_repo._touch_job_dispatch_metadata(
+            job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
+        )
+        is not False,
+    )
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
     monkeypatch.setenv("TRR_REMOTE_EXECUTOR", "modal")
@@ -30438,6 +30574,15 @@ def test_dispatch_due_social_jobs_catalog_mode_honors_platform_cap(monkeypatch: 
 def test_dispatch_due_social_jobs_catalog_mode_skips_same_active_account(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Preserve the accepted bookkeeping I/O stub across the authoritative facade.
+    monkeypatch.setattr(
+        dispatch_runtime,
+        "_touch_dispatch_metadata_for_snapshot",
+        lambda job, **updates: social_repo._touch_job_dispatch_metadata(
+            job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
+        )
+        is not False,
+    )
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
     monkeypatch.setenv("TRR_REMOTE_EXECUTOR", "modal")
@@ -30517,6 +30662,15 @@ def test_dispatch_due_social_jobs_catalog_mode_skips_same_active_account(
 
 
 def test_dispatch_due_social_jobs_catalog_mode_honors_run_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Preserve the accepted bookkeeping I/O stub across the authoritative facade.
+    monkeypatch.setattr(
+        dispatch_runtime,
+        "_touch_dispatch_metadata_for_snapshot",
+        lambda job, **updates: social_repo._touch_job_dispatch_metadata(
+            job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
+        )
+        is not False,
+    )
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
     monkeypatch.setenv("TRR_REMOTE_EXECUTOR", "modal")
@@ -30591,6 +30745,15 @@ def test_twitter_shared_account_posts_default_platform_cap_is_db_conservative(
 def test_dispatch_due_social_jobs_keeps_modal_required_instagram_catalog_jobs_dispatchable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Preserve the accepted bookkeeping I/O stub across the authoritative facade.
+    monkeypatch.setattr(
+        dispatch_runtime,
+        "_touch_dispatch_metadata_for_snapshot",
+        lambda job, **updates: social_repo._touch_job_dispatch_metadata(
+            job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
+        )
+        is not False,
+    )
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
     monkeypatch.setenv("TRR_REMOTE_EXECUTOR", "modal")
@@ -30665,6 +30828,15 @@ def test_dispatch_due_social_jobs_keeps_modal_required_instagram_catalog_jobs_di
 def test_dispatch_due_social_jobs_skips_redispatch_when_modal_call_is_pending(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Preserve the accepted bookkeeping I/O stub across the authoritative facade.
+    monkeypatch.setattr(
+        dispatch_runtime,
+        "_touch_dispatch_metadata_for_snapshot",
+        lambda job, **updates: social_repo._touch_job_dispatch_metadata(
+            job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
+        )
+        is not False,
+    )
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
     monkeypatch.setenv("TRR_REMOTE_EXECUTOR", "modal")
@@ -30762,17 +30934,28 @@ def test_touch_job_dispatch_metadata_does_not_refresh_worker_heartbeat(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured_sql: list[str] = []
+    captured_params: list[list[Any]] = []
+    stale = False
 
-    def _fake_fetch_one(sql: str, params: list[Any]) -> dict[str, Any]:
+    def _fake_fetch_one(sql: str, params: list[Any]) -> dict[str, Any] | None:
+        captured_params.append(list(params))
         captured_sql.append(" ".join(sql.split()).lower())
         if sql.lstrip().lower().startswith("select metadata"):
-            return {"metadata": {}}
+            return None if stale else {"metadata": {}}
         return {"id": params[-1]}
 
     monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
+    monkeypatch.setattr(social_repo.pg, "transaction", lambda: nullcontext())
 
     social_repo._touch_job_dispatch_metadata(
         "00000000-0000-0000-0000-000000000001",
+        expected_job_snapshot={
+            "id": "00000000-0000-0000-0000-000000000001",
+            "status": "running",
+            "worker_id": "worker-1",
+            "config": {"claim_token": "claim-a"},
+            "metadata": {"dispatch": {"remote_invocation_id": "call-a"}},
+        },
         dispatch_backend="modal",
         remote_invocation_status="pending",
         remote_invocation_checked_at=datetime(2026, 3, 22, 9, 45, tzinfo=UTC),
@@ -30782,6 +30965,22 @@ def test_touch_job_dispatch_metadata_does_not_refresh_worker_heartbeat(
     update_sql = captured_sql[1]
     assert "update social.scrape_jobs" in update_sql
     assert "heartbeat_at" not in update_sql
+
+    assert "for update" in captured_sql[0]
+    assert captured_params[0][-5:] == ["running", "claim-a", "worker-1", "call-a", None]
+    stale = True
+    snapshot = {
+        "id": "00000000-0000-0000-0000-000000000001",
+        "status": "running",
+        "worker_id": "worker-1",
+        "config": {"claim_token": "claim-a"},
+    }
+    assert not social_repo._touch_job_dispatch_metadata(
+        snapshot["id"], expected_job_snapshot=snapshot, dispatch_backend="modal"
+    )
+    assert len(captured_sql) == 3
+    assert not social_repo._touch_job_dispatch_metadata(snapshot["id"], dispatch_backend="modal")
+    assert len(captured_sql) == 3
 
 
 def test_mark_claimed_modal_dispatch_running_clears_pending_capacity(
@@ -30830,6 +31029,15 @@ def test_dispatch_due_social_jobs_redispatches_unknown_modal_call_for_due_queue_
     monkeypatch: pytest.MonkeyPatch,
     candidate_status: str,
 ) -> None:
+    # Preserve the accepted bookkeeping I/O stub across the authoritative facade.
+    monkeypatch.setattr(
+        dispatch_runtime,
+        "_touch_dispatch_metadata_for_snapshot",
+        lambda job, **updates: social_repo._touch_job_dispatch_metadata(
+            job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
+        )
+        is not False,
+    )
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
     monkeypatch.setenv("TRR_REMOTE_EXECUTOR", "modal")
@@ -30923,6 +31131,15 @@ def test_dispatch_due_social_jobs_redispatches_unknown_modal_call_for_due_queue_
 def test_dispatch_due_social_jobs_redispatches_terminal_modal_call_without_cooldown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Preserve the accepted bookkeeping I/O stub across the authoritative facade.
+    monkeypatch.setattr(
+        dispatch_runtime,
+        "_touch_dispatch_metadata_for_snapshot",
+        lambda job, **updates: social_repo._touch_job_dispatch_metadata(
+            job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
+        )
+        is not False,
+    )
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
     monkeypatch.setenv("TRR_REMOTE_EXECUTOR", "modal")
@@ -31012,6 +31229,15 @@ def test_dispatch_due_social_jobs_redispatches_terminal_modal_call_without_coold
 def test_dispatch_due_social_jobs_redispatches_refreshed_terminal_modal_call_without_cooldown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Preserve the accepted bookkeeping I/O stub across the authoritative facade.
+    monkeypatch.setattr(
+        dispatch_runtime,
+        "_touch_dispatch_metadata_for_snapshot",
+        lambda job, **updates: social_repo._touch_job_dispatch_metadata(
+            job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
+        )
+        is not False,
+    )
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
     monkeypatch.setenv("TRR_REMOTE_EXECUTOR", "modal")
@@ -31493,6 +31719,15 @@ def test_modal_dispatch_stage_caps_follow_worker_pool_env(monkeypatch: pytest.Mo
 def test_dispatch_due_social_jobs_caps_comments_scrapling_as_comments(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Preserve the accepted bookkeeping I/O stub across the authoritative facade.
+    monkeypatch.setattr(
+        dispatch_runtime,
+        "_touch_dispatch_metadata_for_snapshot",
+        lambda job, **updates: social_repo._touch_job_dispatch_metadata(
+            job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
+        )
+        is not False,
+    )
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
     monkeypatch.setenv("TRR_REMOTE_EXECUTOR", "modal")
@@ -31557,6 +31792,15 @@ def test_dispatch_due_social_jobs_caps_comments_scrapling_as_comments(
 def test_dispatch_due_social_jobs_honors_comments_shard_count_over_default_platform_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Preserve the accepted bookkeeping I/O stub across the authoritative facade.
+    monkeypatch.setattr(
+        dispatch_runtime,
+        "_touch_dispatch_metadata_for_snapshot",
+        lambda job, **updates: social_repo._touch_job_dispatch_metadata(
+            job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
+        )
+        is not False,
+    )
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
     monkeypatch.setenv("TRR_REMOTE_EXECUTOR", "modal")
@@ -40545,7 +40789,7 @@ def test_execute_claimed_job_aborts_cancelled_run_before_stage_execution(monkeyp
 
     def _fake_fetch_one(query: str, params: list[Any] | None = None) -> dict[str, Any]:
         normalized = " ".join(str(query).split()).lower()
-        if "select status from social.scrape_jobs where id = %s" in normalized:
+        if "select status, config from social.scrape_jobs where id = %s" in normalized:
             return {"status": "running"}
         if "select status from social.scrape_runs where id = %s" in normalized:
             return {"status": "cancelled"}
@@ -40581,9 +40825,11 @@ def test_execute_claimed_job_aborts_cancelled_run_before_stage_execution(monkeyp
         lambda **_kwargs: (_ for _ in ()).throw(AssertionError("crawlee stage should not run")),
     )
 
-    def _fake_finish_job(job_id: str, **kwargs: Any) -> None:
+    def _fake_finish_job(job_id: str, **kwargs: Any) -> bool:
         state["last_finish"] = {"job_id": job_id, **kwargs}
+        return True
 
+    monkeypatch.setattr(social_repo, "_transition_job_state", _fake_finish_job)
     monkeypatch.setattr(social_repo, "_finish_job", _fake_finish_job)
 
     result = social_repo._execute_claimed_job(_instagram_job_fixture())
@@ -40598,7 +40844,7 @@ def test_cancel_claimed_job_before_processing_aborts_cancelled_job(monkeypatch: 
 
     def _fake_fetch_one(query: str, params: list[Any] | None = None) -> dict[str, Any]:
         normalized = " ".join(str(query).split()).lower()
-        if "select status from social.scrape_jobs where id = %s" in normalized:
+        if "select status, config from social.scrape_jobs where id = %s" in normalized:
             return {"status": "cancelled"}
         if "select status from social.scrape_runs where id = %s" in normalized:
             return {"status": "running"}
@@ -40621,10 +40867,11 @@ def test_cancel_claimed_job_before_processing_aborts_cancelled_job(monkeypatch: 
         social_repo, "_finalize_run_status", lambda run_id: state.setdefault("finalized_runs", []).append(run_id)
     )
 
-    def _fake_finish_job(job_id: str, **kwargs: Any) -> None:
+    def _fake_finish_job(job_id: str, **kwargs: Any) -> bool:
         state["last_finish"] = {"job_id": job_id, **kwargs}
+        return True
 
-    monkeypatch.setattr(social_repo, "_finish_job", _fake_finish_job)
+    monkeypatch.setattr(social_repo, "_transition_job_state", _fake_finish_job)
 
     result = social_repo.cancel_claimed_job_before_processing(
         {
@@ -47203,6 +47450,25 @@ def test_create_job_modal_runtime_metadata_uses_authoritative_runtime_and_preser
     }
     assert inserted_metadata["created_by_runtime_version"] == creator_runtime
 
+    captured_params.clear()
+    counter_writes: list[dict[str, Any]] = []
+    monkeypatch.setattr(social_repo, "_increment_run_counters_on_job_create", lambda **kw: counter_writes.append(kw))
+    with pytest.raises(ValueError, match="fallback jobs must be queued"):
+        social_repo._create_job(
+            None,
+            run_id="run-1",
+            platform="instagram",
+            source_scope="bravo",
+            job_type="comments",
+            stage=social_repo.INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+            config={"comments_auth_fallback": True},
+            initiated_by="test",
+            status="queued",
+            preclaim=True,
+            worker_id="worker-1",
+        )
+    assert captured_params == [] and counter_writes == []
+
 
 def test_resolve_run_progress_runtime_versions_dedupes_semantically_equivalent_runtime_stamps() -> None:
     runtime_versions = social_repo._resolve_run_progress_runtime_versions(
@@ -50937,6 +51203,8 @@ def test_maybe_enqueue_shared_catalog_classify_jobs_after_fetch_skips_bounded_em
 def test_execute_shared_claimed_job_retries_on_retryable_shared_stage_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(social_repo, "_job_claim_write_scope", lambda _job_id: nullcontext(True))
+    monkeypatch.setattr(social_repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     job = {
         "id": "11111111-1111-1111-1111-111111111111",
         "run_id": "22222222-2222-2222-2222-222222222222",
@@ -50986,7 +51254,7 @@ def test_execute_shared_claimed_job_retries_on_retryable_shared_stage_error(
     monkeypatch.setattr(
         social_repo,
         "_finish_job",
-        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}),
+        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True,
     )
     monkeypatch.setattr(
         social_repo,
@@ -51012,6 +51280,8 @@ def test_execute_shared_claimed_job_retries_on_retryable_shared_stage_error(
 def test_execute_shared_claimed_job_marks_mid_stage_cancellation_cancelled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(social_repo, "_job_claim_write_scope", lambda _job_id: nullcontext(True))
+    monkeypatch.setattr(social_repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     job = {
         "id": "11111111-1111-1111-1111-111111111111",
         "run_id": "22222222-2222-2222-2222-222222222222",
@@ -51069,7 +51339,7 @@ def test_execute_shared_claimed_job_marks_mid_stage_cancellation_cancelled(
     monkeypatch.setattr(
         social_repo,
         "_finish_job",
-        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}),
+        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True,
     )
     monkeypatch.setattr(
         social_repo,
@@ -51099,6 +51369,8 @@ def test_execute_shared_claimed_job_marks_mid_stage_cancellation_cancelled(
 def test_execute_shared_claimed_job_defers_retry_until_instagram_posts_auth_cooldown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(social_repo, "_job_claim_write_scope", lambda _job_id: nullcontext(True))
+    monkeypatch.setattr(social_repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     cooldown_until = datetime.now(UTC) + timedelta(hours=2)
     job = {
         "id": "11111111-1111-1111-1111-111111111111",
@@ -51158,7 +51430,7 @@ def test_execute_shared_claimed_job_defers_retry_until_instagram_posts_auth_cool
             else {}
         ),
     )
-    monkeypatch.setattr(social_repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append(kwargs))
+    monkeypatch.setattr(social_repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append(kwargs) or True)
     monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(social_repo, "_load_current_job_row", lambda _job_id: {"id": job["id"], "status": "retrying"})
 
@@ -51174,6 +51446,8 @@ def test_execute_shared_claimed_job_defers_retry_until_instagram_posts_auth_cool
 def test_execute_shared_claimed_job_retries_post_classify_db_disconnect_at_attempt_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(social_repo, "_job_claim_write_scope", lambda _job_id: nullcontext(True))
+    monkeypatch.setattr(social_repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     job = {
         "id": "11111111-1111-1111-1111-111111111111",
         "run_id": "22222222-2222-2222-2222-222222222222",
@@ -51216,7 +51490,7 @@ def test_execute_shared_claimed_job_retries_post_classify_db_disconnect_at_attem
     monkeypatch.setattr(
         social_repo,
         "_finish_job",
-        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}),
+        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True,
     )
     monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
@@ -51238,6 +51512,8 @@ def test_execute_shared_claimed_job_retries_post_classify_db_disconnect_at_attem
 def test_execute_shared_claimed_job_marks_tiktok_transport_fallback_terminal_when_incomplete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(social_repo, "_job_claim_write_scope", lambda _job_id: nullcontext(True))
+    monkeypatch.setattr(social_repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     job = {
         "id": "11111111-1111-1111-1111-111111111111",
         "run_id": "22222222-2222-2222-2222-222222222222",
@@ -51293,7 +51569,7 @@ def test_execute_shared_claimed_job_marks_tiktok_transport_fallback_terminal_whe
     monkeypatch.setattr(
         social_repo,
         "_finish_job",
-        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}),
+        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True,
     )
     monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
@@ -51315,6 +51591,8 @@ def test_execute_shared_claimed_job_marks_tiktok_transport_fallback_terminal_whe
 def test_execute_shared_claimed_job_escalates_retry_to_frontier_recovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(social_repo, "_job_claim_write_scope", lambda _job_id: nullcontext(True))
+    monkeypatch.setattr(social_repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     job = {
         "id": "11111111-1111-1111-1111-111111111111",
         "run_id": "22222222-2222-2222-2222-222222222222",
@@ -51370,7 +51648,7 @@ def test_execute_shared_claimed_job_escalates_retry_to_frontier_recovery(
     monkeypatch.setattr(
         social_repo,
         "_finish_job",
-        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}),
+        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True,
     )
     monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
@@ -51393,6 +51671,8 @@ def test_execute_shared_claimed_job_escalates_retry_to_frontier_recovery(
 def test_execute_shared_claimed_job_keeps_local_inline_recovery_with_same_worker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(social_repo, "_job_claim_write_scope", lambda _job_id: nullcontext(True))
+    monkeypatch.setattr(social_repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     job = {
         "id": "11111111-1111-1111-1111-111111111111",
         "run_id": "22222222-2222-2222-2222-222222222222",
@@ -51439,7 +51719,7 @@ def test_execute_shared_claimed_job_keeps_local_inline_recovery_with_same_worker
             else {}
         ),
     )
-    monkeypatch.setattr(social_repo, "_finish_job", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(social_repo, "_finish_job", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
         social_repo,
@@ -51455,6 +51735,8 @@ def test_execute_shared_claimed_job_keeps_local_inline_recovery_with_same_worker
 def test_execute_shared_claimed_job_retries_once_for_modal_initial_empty_page(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(social_repo, "_job_claim_write_scope", lambda _job_id: nullcontext(True))
+    monkeypatch.setattr(social_repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     job = {
         "id": "11111111-1111-1111-1111-111111111111",
         "run_id": "22222222-2222-2222-2222-222222222222",
@@ -51513,7 +51795,7 @@ def test_execute_shared_claimed_job_retries_once_for_modal_initial_empty_page(
     monkeypatch.setattr(
         social_repo,
         "_finish_job",
-        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}),
+        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True,
     )
     monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
@@ -51536,6 +51818,8 @@ def test_execute_shared_claimed_job_retries_once_for_modal_initial_empty_page(
 def test_execute_shared_claimed_job_fails_when_modal_initial_empty_page_retry_is_exhausted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(social_repo, "_job_claim_write_scope", lambda _job_id: nullcontext(True))
+    monkeypatch.setattr(social_repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     job = {
         "id": "11111111-1111-1111-1111-111111111111",
         "run_id": "22222222-2222-2222-2222-222222222222",
@@ -51589,7 +51873,7 @@ def test_execute_shared_claimed_job_fails_when_modal_initial_empty_page_retry_is
     monkeypatch.setattr(
         social_repo,
         "_finish_job",
-        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}),
+        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True,
     )
     monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
@@ -51609,6 +51893,8 @@ def test_execute_shared_claimed_job_fails_when_modal_initial_empty_page_retry_is
 def test_execute_shared_claimed_job_fails_fast_when_authenticated_modal_workers_are_unavailable_for_empty_page_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(social_repo, "_job_claim_write_scope", lambda _job_id: nullcontext(True))
+    monkeypatch.setattr(social_repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     job = {
         "id": "11111111-1111-1111-1111-111111111111",
         "run_id": "22222222-2222-2222-2222-222222222222",
@@ -51667,7 +51953,7 @@ def test_execute_shared_claimed_job_fails_fast_when_authenticated_modal_workers_
     monkeypatch.setattr(
         social_repo,
         "_finish_job",
-        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}),
+        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True,
     )
     monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
@@ -51689,6 +51975,8 @@ def test_execute_shared_claimed_job_fails_fast_when_authenticated_modal_workers_
 def test_execute_shared_claimed_job_requeues_discovery_with_authenticated_transport_after_cursor_auth_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(social_repo, "_job_claim_write_scope", lambda _job_id: nullcontext(True))
+    monkeypatch.setattr(social_repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     job = {
         "id": "11111111-1111-1111-1111-111111111111",
         "run_id": "22222222-2222-2222-2222-222222222222",
@@ -51747,7 +52035,7 @@ def test_execute_shared_claimed_job_requeues_discovery_with_authenticated_transp
     monkeypatch.setattr(
         social_repo,
         "_finish_job",
-        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}),
+        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True,
     )
     monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
@@ -52073,6 +52361,8 @@ def test_resolve_social_job_stale_seconds_uses_longer_shared_stage_defaults(
 def test_execute_shared_claimed_job_retries_when_modal_required_job_runs_locally(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(social_repo, "_job_claim_write_scope", lambda _job_id: nullcontext(True))
+    monkeypatch.setattr(social_repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     job = {
         "id": "11111111-1111-1111-1111-111111111111",
         "run_id": "22222222-2222-2222-2222-222222222222",
@@ -52101,7 +52391,7 @@ def test_execute_shared_claimed_job_retries_when_modal_required_job_runs_locally
     monkeypatch.setattr(
         social_repo,
         "_finish_job",
-        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}),
+        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True,
     )
     monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
@@ -52338,7 +52628,7 @@ def test_cancel_stuck_jobs_targets_only_requested_ids(monkeypatch: pytest.Monkey
     monkeypatch.setattr(
         social_repo,
         "_clear_worker_heartbeat_for_job",
-        lambda job_id, status, metadata=None: heartbeat_calls.append(f"{job_id}:{status}"),
+        lambda job_id, status, metadata=None, expected_job_snapshot=None: heartbeat_calls.append(f"{job_id}:{status}"),
     )
 
     payload = social_repo.cancel_stuck_jobs(
@@ -52375,7 +52665,11 @@ def test_cancel_stuck_jobs_clear_all_uses_null_filter(monkeypatch: pytest.Monkey
     monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
     monkeypatch.setattr(social_repo, "_count_stuck_jobs", lambda: 0)
     monkeypatch.setattr(social_repo, "_finalize_run_status", lambda run_id, force_recompute=False: {})
-    monkeypatch.setattr(social_repo, "_clear_worker_heartbeat_for_job", lambda job_id, status, metadata=None: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_clear_worker_heartbeat_for_job",
+        lambda job_id, status, metadata=None, expected_job_snapshot=None: None,
+    )
 
     payload = social_repo.cancel_stuck_jobs(cancelled_by="admin@example.com")
 
@@ -52410,7 +52704,7 @@ def test_cancel_active_jobs_cancels_all_active_and_finalizes_runs(monkeypatch: p
     monkeypatch.setattr(
         social_repo,
         "_clear_worker_heartbeat_for_job",
-        lambda job_id, status, metadata=None: heartbeat_calls.append(f"{job_id}:{status}"),
+        lambda job_id, status, metadata=None, expected_job_snapshot=None: heartbeat_calls.append(f"{job_id}:{status}"),
     )
 
     payload = social_repo.cancel_active_jobs(cancelled_by="admin@example.com")
@@ -52472,7 +52766,7 @@ def test_cancel_run_marks_running_jobs_cancelling_and_clears_terminal_heartbeats
     monkeypatch.setattr(
         social_repo,
         "_clear_worker_heartbeat_for_job",
-        lambda job_id, status, metadata=None: heartbeat_calls.append(
+        lambda job_id, status, metadata=None, expected_job_snapshot=None: heartbeat_calls.append(
             f"{job_id}:{status}:{metadata.get('source') if metadata else ''}"
         ),
     )
@@ -52527,7 +52821,7 @@ def test_recover_stale_running_jobs_terminalizes_stale_cancelling_jobs(
     monkeypatch.setattr(
         social_repo,
         "_clear_worker_heartbeat_for_job",
-        lambda *, job_id, status, metadata=None: cleared_heartbeats.append(
+        lambda *, job_id, status, metadata=None, expected_job_snapshot=None: cleared_heartbeats.append(
             f"{job_id}:{status}:{(metadata or {}).get('job_status')}"
         ),
     )
@@ -52978,6 +53272,7 @@ def test_claim_next_jobs_filters_by_worker_capability(monkeypatch: pytest.Monkey
         captured["params"] = list(params)
         return []
 
+    monkeypatch.setattr(social_repo.pg, "transaction", lambda: nullcontext())
     monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
     monkeypatch.setattr(social_repo, "_resolve_run_in_flight_cap", lambda: 4)
 
@@ -53007,7 +53302,7 @@ def test_claim_next_jobs_filters_by_worker_capability(monkeypatch: pytest.Monkey
     assert "any((select platforms from worker_caps))" not in sql.lower()
 
     # Verify worker_id is the first parameter (for the CTE)
-    assert params[0] == "test-worker-1"
+    assert params[1] == "test-worker-1"
 
 
 def test_claim_next_jobs_legacy_null_capability_uses_safe_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -53017,6 +53312,7 @@ def test_claim_next_jobs_legacy_null_capability_uses_safe_defaults(monkeypatch: 
         captured["sql"] = sql
         return []
 
+    monkeypatch.setattr(social_repo.pg, "transaction", lambda: nullcontext())
     monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
     monkeypatch.setattr(social_repo, "_resolve_run_in_flight_cap", lambda: 4)
 
@@ -53042,6 +53338,7 @@ def test_claim_next_jobs_prefers_instagram_auth_workers_when_available(
         captured["params"] = list(params)
         return []
 
+    monkeypatch.setattr(social_repo.pg, "transaction", lambda: nullcontext())
     monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
     monkeypatch.setattr(social_repo, "_resolve_run_in_flight_cap", lambda: 4)
     monkeypatch.setenv("SOCIAL_WORKER_HEARTBEAT_STALE_SECONDS", "77")
@@ -53055,8 +53352,8 @@ def test_claim_next_jobs_prefers_instagram_auth_workers_when_available(
     assert "auth_capabilities" in sql
     assert "instagram_authenticated" in sql
     assert "j.platform <> 'instagram'" in sql
-    assert params[0] == "w1"
-    assert params[1] == 77
+    assert params[1] == "w1"
+    assert params[2] == 77
 
 
 def test_claim_next_jobs_excludes_instagram_posts_auth_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -53067,6 +53364,7 @@ def test_claim_next_jobs_excludes_instagram_posts_auth_cooldown(monkeypatch: pyt
         captured["params"] = list(params)
         return []
 
+    monkeypatch.setattr(social_repo.pg, "transaction", lambda: nullcontext())
     monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
     monkeypatch.setattr(social_repo, "_resolve_run_in_flight_cap", lambda: 4)
 
@@ -53089,6 +53387,7 @@ def test_claim_next_jobs_reclaims_stale_worker_ownership_sql(monkeypatch: pytest
         captured["params"] = list(params)
         return []
 
+    monkeypatch.setattr(social_repo.pg, "transaction", lambda: nullcontext())
     monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
     monkeypatch.setattr(social_repo, "_resolve_run_in_flight_cap", lambda: 4)
     monkeypatch.setenv("SOCIAL_WORKER_HEARTBEAT_STALE_SECONDS", "77")
@@ -53102,8 +53401,8 @@ def test_claim_next_jobs_reclaims_stale_worker_ownership_sql(monkeypatch: pytest
     assert "owning_worker.status = 'stopped'" in sql
     assert "owning_worker.last_seen_at < now() - (select max_staleness from stale_worker_window)" in sql
     assert "or not exists (" in sql
-    assert params[0] == "worker-2"
-    assert params[1] == 77
+    assert params[1] == "worker-2"
+    assert params[2] == 77
 
 
 def test_claim_next_jobs_reclaims_stale_worker_ownership(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -53114,6 +53413,7 @@ def test_claim_next_jobs_reclaims_stale_worker_ownership(monkeypatch: pytest.Mon
         captured["params"] = list(params)
         return []
 
+    monkeypatch.setattr(social_repo.pg, "transaction", lambda: nullcontext())
     monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
     monkeypatch.setattr(social_repo, "_resolve_run_in_flight_cap", lambda: 4)
     monkeypatch.setenv("SOCIAL_WORKER_HEARTBEAT_STALE_SECONDS", "91")
@@ -53127,7 +53427,7 @@ def test_claim_next_jobs_reclaims_stale_worker_ownership(monkeypatch: pytest.Mon
     assert "owning_worker.last_seen_at < now() - (select max_staleness from stale_worker_window)" in sql
     assert "owning_worker.status = 'stopped'" in sql
     assert "or not exists (" in sql
-    assert params[1] == 91
+    assert params[2] == 91
 
 
 def test_claim_next_jobs_filters_runtime_pinned_jobs_to_matching_runtime(
@@ -53140,6 +53440,7 @@ def test_claim_next_jobs_filters_runtime_pinned_jobs_to_matching_runtime(
         captured["params"] = list(params)
         return []
 
+    monkeypatch.setattr(social_repo.pg, "transaction", lambda: nullcontext())
     monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
     monkeypatch.setattr(social_repo, "_resolve_run_in_flight_cap", lambda: 4)
     monkeypatch.setattr(
@@ -53175,6 +53476,7 @@ def test_claim_next_jobs_allows_generic_modal_runtime_label_pin(
         captured["params"] = list(params)
         return []
 
+    monkeypatch.setattr(social_repo.pg, "transaction", lambda: nullcontext())
     monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
     monkeypatch.setattr(social_repo, "_resolve_run_in_flight_cap", lambda: 4)
     monkeypatch.setattr(
@@ -53206,6 +53508,7 @@ def test_claim_next_jobs_binds_run_id_before_runtime_label(monkeypatch: pytest.M
         captured["params"] = list(params)
         return []
 
+    monkeypatch.setattr(social_repo.pg, "transaction", lambda: nullcontext())
     monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
     monkeypatch.setattr(social_repo, "_resolve_run_in_flight_cap", lambda: 4)
     monkeypatch.setattr(social_repo, "_resolve_authoritative_catalog_runtime_version", lambda **_kwargs: {})
@@ -53220,11 +53523,11 @@ def test_claim_next_jobs_binds_run_id_before_runtime_label(monkeypatch: pytest.M
 
     params = list(captured["params"])
 
-    assert params[2] == "edfced11-5d5b-4aa4-90b3-afef75ca3ed9"
     assert params[3] == "edfced11-5d5b-4aa4-90b3-afef75ca3ed9"
-    assert "instagram" in params[8]
+    assert params[4] == "edfced11-5d5b-4aa4-90b3-afef75ca3ed9"
     assert "instagram" in params[9]
-    assert params[10] is None
+    assert "instagram" in params[10]
+    assert params[11] is None
 
 
 def test_claim_next_jobs_caps_youtube_when_other_platforms_are_ready(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -53235,6 +53538,7 @@ def test_claim_next_jobs_caps_youtube_when_other_platforms_are_ready(monkeypatch
         captured["params"] = list(params)
         return []
 
+    monkeypatch.setattr(social_repo.pg, "transaction", lambda: nullcontext())
     monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
     monkeypatch.setattr(social_repo, "_resolve_run_in_flight_cap", lambda: 12)
     monkeypatch.setattr(social_repo, "_resolve_youtube_run_in_flight_cap", lambda: 4)
@@ -53259,6 +53563,7 @@ def test_claim_next_jobs_returns_empty_without_worker_id(monkeypatch: pytest.Mon
         called["fetch_all"] = True
         return []
 
+    monkeypatch.setattr(social_repo.pg, "transaction", lambda: nullcontext())
     monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
 
     result = social_repo._claim_next_jobs(worker_id=None, limit=1)

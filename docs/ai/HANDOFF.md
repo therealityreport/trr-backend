@@ -27,5 +27,5 @@ Purpose: active-work index for multi-turn AI agent sessions in `TRR-Backend`. Ke
 
 ## Archives / Canonical Links
 - History archive: `archive/HANDOFF-legacy-2026-03-16.md`
-- Canonical workflow: `../../../docs/cross-collab/WORKFLOW.md`
+- Cross-repo coordination: `../../../docs/cross-collab/WORKFLOW.md`
 - Repo policy: `../../AGENTS.md`

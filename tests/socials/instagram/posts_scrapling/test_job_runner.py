@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -95,12 +96,15 @@ def test_anonymous_job_skips_auth_session_and_cooldown(monkeypatch: pytest.Monke
     monkeypatch.setattr(jr, "InstagramPostsScraplingFetcher", _FakeFetcher)
     monkeypatch.setattr(jr, "select_posts_proxy", lambda **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: True)
     monkeypatch.setattr(repo, "_iso", lambda _value: "2026-04-21T00:00:00+00:00")
     monkeypatch.setattr(repo, "_now_utc", lambda: datetime(2026, 4, 28, tzinfo=UTC))
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
     monkeypatch.setattr(repo, "latest_instagram_profile_pagination_state", lambda **_kwargs: {})
     monkeypatch.setattr(repo, "persist_instagram_profile_pagination_state", lambda **_kwargs: {})
     monkeypatch.setattr(jr.pg, "fetch_one", lambda *_args, **_kwargs: {})
@@ -125,7 +129,10 @@ def test_anonymous_job_skips_auth_session_and_cooldown(monkeypatch: pytest.Monke
     assert finish_calls[-1]["status"] == "completed"
 
 
-def test_public_first_job_uses_no_auth_no_proxy_and_persists_cursors(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("finish_accepted", [True, False])
+def test_public_first_job_uses_no_auth_no_proxy_and_persists_cursors(
+    monkeypatch: pytest.MonkeyPatch, finish_accepted: bool
+) -> None:
     from trr_backend.repositories import social_season_analytics as repo
     from trr_backend.socials.instagram.posts_scrapling import job_runner as jr
     from trr_backend.socials.instagram.posts_scrapling.persistence import PersistedInstagramPosts
@@ -135,6 +142,9 @@ def test_public_first_job_uses_no_auth_no_proxy_and_persists_cursors(monkeypatch
     persist_calls: list[dict[str, Any]] = []
     pagination_calls: list[dict[str, Any]] = []
     finish_calls: list[dict[str, Any]] = []
+    heartbeat_calls: list[dict[str, Any]] = []
+    progress_calls: list[dict[str, Any]] = []
+    finalize_calls: list[str] = []
 
     class _PublicScraper:
         def __init__(self, **kwargs: Any) -> None:
@@ -188,11 +198,12 @@ def test_public_first_job_uses_no_auth_no_proxy_and_persists_cursors(monkeypatch
         jr,
         "lifecycle",
         SimpleNamespace(
+            job_claim_write_scope=lambda *_args, **_kwargs: nullcontext(True),
             new_job_progress_state=lambda: {},
-            touch_job_heartbeat=lambda *_args, **_kwargs: None,
-            emit_job_progress=lambda **_kwargs: True,
-            finish_job=lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}),
-            finalize_run_status=lambda *_args, **_kwargs: {},
+            touch_job_heartbeat=lambda *_args, **kwargs: heartbeat_calls.append(kwargs) or True,
+            emit_job_progress=lambda **kwargs: progress_calls.append(kwargs) or True,
+            finish_job=lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or finish_accepted,
+            finalize_run_status=lambda run_id, **_kwargs: finalize_calls.append(run_id) or {},
             now_utc=lambda: datetime(2026, 4, 28, tzinfo=UTC),
             format_time=lambda value: value.isoformat(),
         ),
@@ -207,8 +218,10 @@ def test_public_first_job_uses_no_auth_no_proxy_and_persists_cursors(monkeypatch
         {
             "id": "job-public",
             "run_id": "run-public",
+            "worker_id": "acquired-worker",
             "config": {
                 "account": "bravotv",
+                "claim_token": "acquired-token",
                 "stage": "posts_scrapling",
                 "instagram_scrape_mode": "public_first",
                 "max_pages": 2,
@@ -232,6 +245,12 @@ def test_public_first_job_uses_no_auth_no_proxy_and_persists_cursors(monkeypatch
     assert finish_calls[-1]["metadata"]["instagram_scrape_mode"] == "public_first"
     assert finish_calls[-1]["metadata"]["auth_state"] == "public"
     assert finish_calls[-1]["metadata"]["proxy_state"] == "none"
+
+    assert finish_calls[-1]["expected_claim_token"] == "acquired-token"
+    assert finish_calls[-1]["expected_worker_id"] == "acquired-worker"
+    assert finalize_calls == (["run-public"] if finish_accepted else [])
+    assert all(call["claim_token"] == "acquired-token" for call in heartbeat_calls + progress_calls)
+    assert all(call["worker_id"] == "acquired-worker" for call in heartbeat_calls + progress_calls)
 
 
 def test_job_runner_emits_post_skip_truthfulness_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -290,6 +309,7 @@ def test_job_runner_emits_post_skip_truthfulness_metadata(monkeypatch: pytest.Mo
         ),
     )
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: True)
     monkeypatch.setattr(repo, "_iso", lambda _value: "2026-04-21T00:00:00+00:00")
@@ -302,6 +322,7 @@ def test_job_runner_emits_post_skip_truthfulness_metadata(monkeypatch: pytest.Mo
         captured_finish["items_found"] = items_found
         captured_finish["error_message"] = error_message
         captured_finish["metadata"] = metadata
+        return True
 
     monkeypatch.setattr(repo, "_finish_job", _fake_finish_job)
     monkeypatch.setattr(
@@ -379,9 +400,12 @@ def test_job_runner_preserves_warmup_error_runtime_metadata(monkeypatch: pytest.
     )
     monkeypatch.setattr(jr, "select_posts_proxy", lambda **_kwargs: None)
     monkeypatch.setattr(jr, "InstagramPostsScraplingFetcher", lambda **_kwargs: _FakeFetcher())
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_retry_backoff_seconds", lambda _attempt: 30)
     monkeypatch.setattr(repo, "_now_utc", lambda: datetime(2026, 4, 28, tzinfo=UTC))
     monkeypatch.setattr(jr.pg, "fetch_one", lambda *_args, **_kwargs: {"id": "job-1", "status": "retrying"})
@@ -450,9 +474,12 @@ def test_job_runner_cancels_before_fetching_next_posts_page(monkeypatch: pytest.
     monkeypatch.setattr(jr, "select_posts_proxy", lambda **_kwargs: None)
     monkeypatch.setattr(jr, "InstagramPostsScraplingFetcher", lambda **_kwargs: _FakeFetcher())
     monkeypatch.setattr(jr.pg, "fetch_one", fake_fetch_one)
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: True)
     monkeypatch.setattr(repo, "_iso", lambda _value: "2026-04-28T00:00:00+00:00")
@@ -526,6 +553,7 @@ def test_job_runner_returns_degraded_completed_summary_when_final_read_saturates
     monkeypatch.setattr(repo, "_finish_job", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: True)
     monkeypatch.setattr(repo, "_iso", lambda _value: "2026-04-28T00:00:00+00:00")
@@ -616,6 +644,7 @@ def test_job_runner_persists_page_checkpoint_and_resumes_latest_cursor(monkeypat
 
     monkeypatch.setattr(repo, "persist_instagram_profile_pagination_state", _capture_checkpoint)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: True)
     monkeypatch.setattr(repo, "_finish_job", lambda *_args, **_kwargs: None)
@@ -703,9 +732,12 @@ def test_job_runner_retries_when_page_checkpoint_persist_fails(monkeypatch: pyte
         lambda **_kwargs: {"skipped": True, "reason": "pagination_state_persist_failed"},
     )
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: True)
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_retry_backoff_seconds", lambda _attempt: 30)
     monkeypatch.setattr(repo, "_now_utc", lambda: datetime(2026, 5, 3, tzinfo=UTC))
@@ -813,6 +845,7 @@ def test_job_runner_rotates_page_proxy_when_enabled(monkeypatch: pytest.MonkeyPa
         lambda **kwargs: {"end_cursor": kwargs.get("end_cursor"), "stop_reason": kwargs.get("stop_reason")},
     )
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: True)
     monkeypatch.setattr(repo, "_finish_job", lambda *_args, **_kwargs: None)
@@ -937,9 +970,12 @@ def test_job_runner_starts_reverse_walker_after_bidirectional_probe_passes(
         lambda **kwargs: checkpoint_calls.append(kwargs) or {"end_cursor": kwargs.get("end_cursor")},
     )
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: True)
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_iso", lambda _value: "2026-05-03T00:00:00+00:00")
     monkeypatch.setattr(repo, "_now_utc", lambda: datetime(2026, 5, 3, tzinfo=UTC))
@@ -1000,8 +1036,11 @@ def test_job_runner_timeout_guard_records_partial_retry(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(repo, "persist_instagram_profile_pagination_state", _capture_checkpoint)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_retry_backoff_seconds", lambda _attempt: 30)
     monkeypatch.setattr(repo, "_now_utc", lambda: datetime(2026, 5, 3, tzinfo=UTC))
@@ -1080,8 +1119,11 @@ def test_job_runner_cursor_expired_records_restart_required(monkeypatch: pytest.
         lambda **kwargs: checkpoint_calls.append(kwargs) or {"end_cursor": kwargs.get("end_cursor")},
     )
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_now_utc", lambda: datetime(2026, 5, 3, tzinfo=UTC))
     monkeypatch.setattr(repo, "instagram_posts_acceleration_flags", lambda: {"flags": {}})

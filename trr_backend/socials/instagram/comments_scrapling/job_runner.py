@@ -465,12 +465,13 @@ async def _maintain_comments_job_heartbeat(
     job_id: str,
     worker_id: str | None,
     interval_seconds: int,
+    claim_token: str | None,
 ) -> None:
     if not job_id:
         return
     while True:
         try:
-            lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id)
+            lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id, claim_token=claim_token)
         except pg.DatabaseServiceUnavailableError as exc:
             logger.warning(
                 "Skipping comments job heartbeat after database saturation: job_id=%s error=%s",
@@ -2906,6 +2907,63 @@ def _completion_residual_gap_targets_from_health(
     return residual
 
 
+def _completion_recovery_handoff_metadata(
+    *,
+    run_id: str,
+    stage: str,
+    residual_gap_targets: Sequence[Mapping[str, Any]],
+    completion_metadata: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Confirm this completion's durable children cover its deferred health gaps."""
+    deferred = _metadata_dict(completion_metadata)
+    residual_ids = {str(row.get("shortcode") or "").strip() for row in residual_gap_targets}
+    residual_ids.discard("")
+    deliberate_ids: set[str] = set()
+    child_ids: set[str] = set()
+    for target_key, result_key in (
+        ("public_recovery_source_ids", "public_recovery_result"),
+        ("auth_fallback_escalated_source_ids", "auth_fallback_result"),
+    ):
+        deliberate_ids.update(str(value or "").strip() for value in deferred.get(target_key, []))
+        result = _metadata_dict(deferred.get(result_key))
+        enqueue_result = _metadata_dict(_metadata_dict(result.get("enqueue")).get("result"))
+        for candidates in (
+            result.get("created_job_ids"),
+            result.get("created_target_job_ids"),
+            enqueue_result.get("job_ids"),
+        ):
+            child_ids.update(str(value or "").strip() for value in candidates or [] if str(value or "").strip())
+    if not residual_ids or not residual_ids.issubset(deliberate_ids) or not child_ids:
+        return {}
+    children = pg.fetch_all(
+        """select id::text as id, config from social.scrape_jobs
+        where id = any(%s::uuid[]) and run_id = %s::uuid
+          and status in ('queued', 'pending', 'retrying', 'running')
+          and coalesce(config->>'stage', metadata->>'stage', job_type) = %s
+          and (lower(coalesce(config->>'comments_public_recovery', 'false')) = 'true'
+            or lower(coalesce(config->>'comments_auth_fallback', 'false')) = 'true')""",
+        [sorted(child_ids), run_id, stage],
+    )
+    covered_ids: set[str] = set()
+    covering_jobs: list[str] = []
+    for child in children:
+        targets = {
+            str(value or "").strip() for value in _metadata_dict(child.get("config")).get("target_source_ids", [])
+        }
+        if targets & residual_ids:
+            covered_ids.update(targets)
+            covering_jobs.append(str(child["id"]))
+    if not residual_ids.issubset(covered_ids):
+        return {}
+    return {
+        "comment_capture_complete": False,
+        "comment_capture_completion_status": "deferred_to_recovery",
+        "comment_capture_health_residual_gaps": [dict(row) for row in residual_gap_targets],
+        "comment_capture_deferred_target_source_ids": sorted(residual_ids),
+        "comment_capture_recovery_job_ids": sorted(covering_jobs),
+    }
+
+
 def _auto_auth_fallback_min_gap() -> int:
     # SA-2 (comment-completeness): default lowered from 100 -> 1 so the long tail
     # of small-but-real coverage gaps still escalates to the auth/endpoint-cursor
@@ -2944,27 +3002,98 @@ def _select_auto_auth_fallback_targets(
 
 def _enqueue_auto_auth_fallback_targets(
     *,
+    repo: Any,
+    source_job: Mapping[str, Any],
     account_handle: str,
     source_ids: Sequence[str],
 ) -> dict[str, Any]:
-    from trr_backend.socials.pipelines.comments.instagram import enqueue_instagram_comments_audit_cursor_retries
-
+    """Create durable same-run children inside the acquired source claim scope."""
     targets = list(dict.fromkeys(str(item or "").strip() for item in source_ids if str(item or "").strip()))
-    if not targets:
+    run_id = str(source_job.get("run_id") or "").strip()
+    source_job_id = str(source_job.get("id") or "").strip()
+    if not targets or not run_id or not source_job_id:
         return {"requested": False, "created_job_count": 0, "target_source_ids": []}
-    return enqueue_instagram_comments_audit_cursor_retries(
-        account_handle=account_handle,
-        limit=len(targets),
-        shortcodes=targets,
-        batch_size=1,
-        max_comments_per_post=0,
-        comments_load_strategy="instagram_comments_endpoint_cursor",
-        dry_run=False,
-        attach_to_active_run=True,
-        dispatch_immediately=True,
-        force_rerun_existing=False,
-        initiated_by="comments-public-auto-auth-fallback",
+    source_config = _metadata_dict(source_job.get("config"))
+    # Only policy/configuration crosses generations. Dispatch, receipts, attempts,
+    # runtime stamps and cursor checkpoints belong to the source acquisition.
+    child_config = {
+        key: value
+        for key, value in source_config.items()
+        if key not in {"claim_token", "required_runtime_version", "created_by_runtime_version", "runtime_version"}
+        and not key.startswith(("claimed_", "dispatch_", "remote_", "receipt_", "attempt_", "detail_"))
+        and key not in {"dispatch", "worker_id", "heartbeat_at", "started_at", "claimed_at"}
+        and "checkpoint" not in key
+    }
+    child_config.update(
+        {
+            "stage": repo.INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+            "account": account_handle,
+            "comments_load_strategy": "instagram_comments_endpoint_cursor",
+            "instagram_scrape_mode": "authenticated",
+            "scrape_mode": "authenticated",
+            "comments_scrape_mode": "authenticated",
+            "comments_session_scope": _COMMENTS_ENDPOINT_CURSOR_SESSION_SCOPE,
+            "comments_auth_validation_mode": "comments_endpoint",
+            "comments_public_recovery": False,
+            "auto_auth_fallback": False,
+            "auto_public_recovery": False,
+            "comments_auth_fallback": True,
+            "comments_auth_fallback_source_job_id": source_job_id,
+            "comments_auth_fallback_source_claim_token": source_config.get("claim_token"),
+            "comments_audit_cursor_retry": True,
+            "comments_audit_cursor_retry_standalone": True,
+            "comments_audit_cursor_retry_source_job_id": source_job_id,
+            "comments_audit_cursor_retry_force_rerun": True,
+            "comments_target_batch_size": 1,
+            "comments_per_post_concurrency": 1,
+            "max_comments_per_post": 0,
+            "explicit_target_source_ids": True,
+            "target_source_ids_count": 1,
+            "comments_shard_target_count": 1,
+            "auth_fallback_escalated_source_ids": targets,
+        }
     )
+    created: list[str] = []
+    represented: list[str] = []
+    for target in targets:
+        # The source job lock serializes this lookup/create across generations.
+        # Include terminal children so replay cannot create the action twice.
+        existing = pg.fetch_one(
+            """select id::text as id from social.scrape_jobs
+            where run_id = %s::uuid
+              and config->>'comments_auth_fallback_source_job_id' = %s
+              and config->>'comments_auth_fallback_source_id' = %s
+              and coalesce(config->>'stage', metadata->>'stage', job_type) = %s
+            order by created_at asc limit 1""",
+            [run_id, source_job_id, target, repo.INSTAGRAM_COMMENTS_SCRAPLING_STAGE],
+        )
+        if existing:
+            represented.append(str(existing["id"]))
+            continue
+        child_id = repo._create_job(
+            None,
+            run_id=run_id,
+            platform="instagram",
+            source_scope=str(source_job.get("source_scope") or "bravo"),
+            job_type="comments",
+            stage=repo.INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+            config={**child_config, "comments_auth_fallback_source_id": target, "target_source_ids": [target]},
+            initiated_by="comments-public-auto-auth-fallback",
+            status="queued",
+            priority=max(1, _safe_int(source_job.get("priority")) or 100),
+            max_attempts=max(1, _safe_int(source_job.get("max_attempts")) or _QUEUE_DEFAULT_MAX_ATTEMPTS),
+        )
+        created.append(child_id)
+        represented.append(child_id)
+    return {
+        "requested": True,
+        "run_id": run_id,
+        "target_source_ids": targets,
+        "created_job_ids": created,
+        "created_job_count": len(created),
+        "created_target_job_count": len(created),
+        "enqueue": {"performed": bool(represented), "result": {"run_id": run_id, "job_ids": represented}},
+    }
 
 
 def _auto_public_recovery_enabled(config: Mapping[str, Any]) -> bool:
@@ -2992,7 +3121,7 @@ def _enqueue_auto_public_recovery_targets(
         account_handle=account_handle,
         target_source_ids=targets,
         batch_size=1,
-        dispatch_immediately=True,
+        dispatch_immediately=False,
         initiated_by="comments-public-auto-recovery",
         exclude_active_job_id=source_job_id,
     )
@@ -3168,7 +3297,7 @@ def _abort_queued_sibling_shards_after_run_fatal_error(
             return 0
     sibling_rows = pg.fetch_all(
         """
-        select id::text as id, coalesce(items_found, 0)::int as items_found
+        select id::text as id, status, config, coalesce(items_found, 0)::int as items_found
         from social.scrape_jobs
         where run_id = %s::uuid
           and id <> %s::uuid
@@ -3183,10 +3312,10 @@ def _abort_queued_sibling_shards_after_run_fatal_error(
         sibling_id = str(sibling.get("id") or "").strip()
         if not sibling_id:
             continue
-        finish_job = getattr(repo, "_finish_job", None)
-        finish = finish_job if callable(finish_job) else lifecycle.finish_job
-        finish(
+        if not repo._transition_job_state(
             sibling_id,
+            expected_status=str(sibling.get("status") or ""),
+            expected_claim_token=(sibling.get("config") or {}).get("claim_token"),
             status="failed",
             items_found=_safe_int(sibling.get("items_found")) or 0,
             error_message=(
@@ -3207,7 +3336,8 @@ def _abort_queued_sibling_shards_after_run_fatal_error(
             },
             last_error_code=normalized_error_code,
             last_error_class=error_class or "SiblingShardAborted",
-        )
+        ):
+            continue
         aborted += 1
     if aborted:
         logger.warning(
@@ -3227,6 +3357,9 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
     job_id = str(job.get("id") or "").strip()
     run_id = str(job.get("run_id") or "").strip()
     config = dict(job.get("config") or {})
+    claim_token = config.get("claim_token")
+    worker_id = job.get("worker_id")
+    finish_accepted = False
     account_handle = str(config.get("account") or "").strip().lower().lstrip("@")
     target_source_ids = [
         str(item or "").strip()
@@ -3648,6 +3781,298 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
     # Single event loop: fetcher is created, warmed up, used for all
     # shortcodes, and closed within one asyncio.run(). The httpx client
     # and Patchright browser share the same loop lifetime.
+    def _prepare_completion_followups() -> None:
+        nonlocal incomplete_retry_stall_metadata
+        retryable_incomplete_targets = _retryable_incomplete_target_source_ids(
+            incomplete_target_source_ids=incomplete_target_source_ids,
+            incomplete_fetch_reasons=incomplete_fetch_reasons,
+            auth_failed_target_source_ids=[] if single_session_load_all else auth_failed_target_source_ids,
+        )
+        # Any target-level gap should be retried automatically. Earlier
+        # versions only retried when enough posts in a shard failed, which
+        # stranded small but real reported-vs-saved gaps in metadata.
+        incomplete_raise_threshold = _MIN_INCOMPLETE_RAISE_TARGETS
+        if retryable_incomplete_targets:
+            retry_fetch_reasons = {
+                shortcode: incomplete_fetch_reasons.get(shortcode) or auth_failed_fetch_reasons.get(shortcode)
+                for shortcode in retryable_incomplete_targets
+            }
+            (
+                retryable_incomplete_targets,
+                retry_fetch_reasons,
+                final_skipped_complete_targets,
+            ) = _filter_retryable_incomplete_targets_against_current_db(
+                account_handle=account_handle,
+                retryable_incomplete_targets=retryable_incomplete_targets,
+                retry_fetch_reasons=retry_fetch_reasons,
+                repo=repo,
+            )
+            if final_skipped_complete_targets:
+                skipped_complete_target_source_ids.extend(final_skipped_complete_targets)
+            if not retryable_incomplete_targets:
+                incomplete_retry_stall_metadata = {
+                    "stalled": False,
+                    "completion_status": "current_db_targets_complete",
+                    "skipped_complete_target_source_ids": list(dict.fromkeys(final_skipped_complete_targets)),
+                }
+            else:
+                stalled_retry = _incomplete_retry_has_stalled(
+                    job=job,
+                    attempt_count=attempt_count,
+                    retryable_incomplete_targets=retryable_incomplete_targets,
+                    retry_fetch_reasons=retry_fetch_reasons,
+                    comments_fetched=comments_fetched,
+                    zero_comment_incomplete_targets=zero_comment_incomplete_target_source_ids,
+                )
+                if stalled_retry:
+                    incomplete_retry_stall_metadata = stalled_retry
+                    logger.info(
+                        "Instagram comments incomplete retry stalled; completing shard without requeue: "
+                        "job_id=%s attempt=%s targets=%s",
+                        job_id,
+                        attempt_count,
+                        retryable_incomplete_targets,
+                    )
+                elif incomplete_fill_enabled and attempt_count >= max_attempts:
+                    incomplete_retry_stall_metadata = {
+                        "stalled": False,
+                        "retry_exhausted": True,
+                        "attempt_count": attempt_count,
+                        "max_attempts": max_attempts,
+                        "target_source_ids": retryable_incomplete_targets,
+                        "fetch_reasons": retry_fetch_reasons,
+                        "current_comments_fetched": comments_fetched,
+                        "completion_status": "attempted_incomplete_fill",
+                    }
+                    logger.info(
+                        "Instagram comments incomplete fill exhausted its one-pass retry budget; "
+                        "completing shard with unresolved targets: job_id=%s targets=%s",
+                        job_id,
+                        retryable_incomplete_targets,
+                    )
+                elif public_comments_mode:
+                    # SA-2 (comment-completeness): decide whether the unresolved
+                    # targets are SOFT (no genuine block signal) or GENUINE.
+                    # Soft, non-exhausted shards stay retryable. Genuine or
+                    # exhausted public gaps route to public recovery before any
+                    # authenticated fallback can be considered.
+                    unresolved_genuine_block_signals = {
+                        signal
+                        for shortcode in retryable_incomplete_targets
+                        if (
+                            signal := str(public_blocked_genuine_signals.get(str(shortcode or "").strip()) or "")
+                            .strip()
+                            .lower()
+                        )
+                        and signal != "none"
+                    }
+                    has_genuine_block = bool(unresolved_genuine_block_signals)
+                    attempts_remaining = attempt_count < max_attempts
+                    if not has_genuine_block and attempts_remaining:
+                        logger.info(
+                            "Instagram public comments soft-incomplete (no genuine block); requeuing shard "
+                            "with backoff: job_id=%s attempt=%s/%s targets=%s",
+                            job_id,
+                            attempt_count,
+                            max_attempts,
+                            retryable_incomplete_targets,
+                        )
+                        raise CommentsScraplingRuntimeError(
+                            "Instagram public comments incomplete with no genuine source block; retrying.",
+                            error_code="instagram_comments_public_retryable",
+                            retryable=True,
+                            runtime_metadata={
+                                "incomplete_target_source_ids": retryable_incomplete_targets,
+                                "incomplete_fetch_reasons": retry_fetch_reasons,
+                                "retry_target_source_ids": retryable_incomplete_targets,
+                                "zero_comment_incomplete_target_source_ids": list(
+                                    dict.fromkeys(zero_comment_incomplete_target_source_ids)
+                                ),
+                                "coauthor_status_only_target_source_ids": list(
+                                    dict.fromkeys(coauthor_status_only_target_source_ids)
+                                ),
+                                "auth_failed_target_source_ids": list(dict.fromkeys(auth_failed_target_source_ids)),
+                                "auth_failed_fetch_reasons": dict(auth_failed_fetch_reasons),
+                                "completion_status": "public_comments_soft_incomplete_retryable",
+                                "current_comments_fetched": comments_fetched,
+                                "fallback_policy": "soft_retry",
+                                "public_block_signal": "none",
+                                "attempt_count": attempt_count,
+                                "max_attempts": max_attempts,
+                                "target_source_ids_count": len(target_source_ids),
+                                "skipped_complete_target_source_ids": list(
+                                    dict.fromkeys(final_skipped_complete_targets)
+                                ),
+                            },
+                        )
+
+                    if has_genuine_block and attempts_remaining:
+                        logger.info(
+                            "Instagram public comments blocked; requeuing saved partial/cursor work after "
+                            "cooldown: job_id=%s attempt=%s/%s targets=%s signals=%s",
+                            job_id,
+                            attempt_count,
+                            max_attempts,
+                            retryable_incomplete_targets,
+                            sorted(unresolved_genuine_block_signals),
+                        )
+                        raise CommentsScraplingRuntimeError(
+                            "Instagram public comments blocked; retrying after cooldown.",
+                            error_code="instagram_comments_public_retryable",
+                            retryable=True,
+                            runtime_metadata={
+                                "incomplete_target_source_ids": retryable_incomplete_targets,
+                                "incomplete_fetch_reasons": retry_fetch_reasons,
+                                "retry_target_source_ids": retryable_incomplete_targets,
+                                "completion_status": "public_comments_blocked_retryable",
+                                "current_comments_fetched": comments_fetched,
+                                "fallback_policy": "public_retry_after_cooldown",
+                                "auth_fallback_policy": "not_considered",
+                                "public_block_signal_values": sorted(unresolved_genuine_block_signals),
+                                "attempt_count": attempt_count,
+                                "max_attempts": max_attempts,
+                                "target_source_ids_count": len(target_source_ids),
+                            },
+                        )
+
+                    public_recovery_targets = (
+                        retryable_incomplete_targets if _auto_public_recovery_enabled(config) else []
+                    )
+                    public_recovery_result: dict[str, Any] | None = None
+                    if public_recovery_targets:
+                        public_recovery_result = _enqueue_auto_public_recovery_targets(
+                            run_id=run_id,
+                            source_job_id=job_id,
+                            account_handle=account_handle,
+                            source_ids=public_recovery_targets,
+                        )
+                    public_recovery_enqueue = _metadata_dict((public_recovery_result or {}).get("enqueue"))
+                    public_recovery_created = max(
+                        _safe_int((public_recovery_result or {}).get("created_target_job_count")) or 0,
+                        _safe_int((public_recovery_result or {}).get("created_job_count")) or 0,
+                    )
+                    if public_recovery_targets and (
+                        bool(public_recovery_enqueue.get("performed")) or bool(public_recovery_created)
+                    ):
+                        incomplete_retry_stall_metadata = {
+                            "stalled": False,
+                            "completion_status": "public_comments_public_recovery_enqueued",
+                            "target_source_ids": retryable_incomplete_targets,
+                            "public_recovery_source_ids": public_recovery_targets,
+                            "public_recovery_result": public_recovery_result,
+                            "fetch_reasons": retry_fetch_reasons,
+                            "current_comments_fetched": comments_fetched,
+                            "fallback_policy": "public_recovery_queued",
+                            "auth_fallback_policy": "not_considered",
+                        }
+                        logger.info(
+                            "Instagram public comments queued public recovery before auth fallback: "
+                            "job_id=%s targets=%s",
+                            job_id,
+                            public_recovery_targets,
+                        )
+                    else:
+                        auto_fallback_targets = (
+                            []
+                            if _auto_public_recovery_enabled(config)
+                            else _select_auto_auth_fallback_targets(
+                                config=config,
+                                retryable_incomplete_targets=retryable_incomplete_targets,
+                                expected_comment_counts_by_shortcode=expected_comment_counts_by_shortcode,
+                            )
+                        )
+                        auto_fallback_result: dict[str, Any] | None = None
+                        if auto_fallback_targets:
+                            auto_fallback_result = _enqueue_auto_auth_fallback_targets(
+                                repo=repo,
+                                source_job=job,
+                                account_handle=account_handle,
+                                source_ids=auto_fallback_targets,
+                            )
+                        auto_enqueue_payload = _metadata_dict((auto_fallback_result or {}).get("enqueue"))
+                        auto_fallback_created = _safe_int((auto_fallback_result or {}).get("created_target_job_count"))
+                        if auto_fallback_targets and (
+                            bool(auto_enqueue_payload.get("performed")) or bool(auto_fallback_created)
+                        ):
+                            incomplete_retry_stall_metadata = {
+                                "stalled": False,
+                                "completion_status": "public_comments_auto_auth_escalated",
+                                "target_source_ids": retryable_incomplete_targets,
+                                "auth_fallback_escalated_source_ids": auto_fallback_targets,
+                                "auth_fallback_min_gap": _auto_auth_fallback_min_gap(),
+                                "auth_fallback_result": auto_fallback_result,
+                                "fetch_reasons": retry_fetch_reasons,
+                                "current_comments_fetched": comments_fetched,
+                                "fallback_policy": "automatic_auth_enabled",
+                            }
+                            logger.info(
+                                "Instagram public comments auto-auth fallback attached endpoint-cursor follow-up: "
+                                "job_id=%s targets=%s",
+                                job_id,
+                                auto_fallback_targets,
+                            )
+                        else:
+                            logger.info(
+                                "Instagram public comments pending public recovery before auth/proxy fallback: "
+                                "job_id=%s targets=%s genuine_block=%s attempts=%s/%s",
+                                job_id,
+                                retryable_incomplete_targets,
+                                sorted(unresolved_genuine_block_signals),
+                                attempt_count,
+                                max_attempts,
+                            )
+                            raise CommentsScraplingRuntimeError(
+                                "Instagram public comments need public recovery before auth/proxy fallback.",
+                                error_code="instagram_comments_public_recovery_pending",
+                                retryable=False,
+                                runtime_metadata={
+                                    "incomplete_target_source_ids": retryable_incomplete_targets,
+                                    "incomplete_fetch_reasons": retry_fetch_reasons,
+                                    "zero_comment_incomplete_target_source_ids": list(
+                                        dict.fromkeys(zero_comment_incomplete_target_source_ids)
+                                    ),
+                                    "coauthor_status_only_target_source_ids": list(
+                                        dict.fromkeys(coauthor_status_only_target_source_ids)
+                                    ),
+                                    "auth_failed_target_source_ids": list(dict.fromkeys(auth_failed_target_source_ids)),
+                                    "auth_failed_fetch_reasons": dict(auth_failed_fetch_reasons),
+                                    "completion_status": "public_comments_public_recovery_pending",
+                                    "current_comments_fetched": comments_fetched,
+                                    "fallback_policy": "public_recovery_pending",
+                                    "auth_fallback_policy": "not_considered",
+                                    "legacy_error_code": "instagram_comments_public_requires_approval",
+                                    "public_block_signal_values": sorted(unresolved_genuine_block_signals),
+                                    "attempt_count": attempt_count,
+                                    "max_attempts": max_attempts,
+                                    "target_source_ids_count": len(target_source_ids),
+                                    "skipped_complete_target_source_ids": list(
+                                        dict.fromkeys(final_skipped_complete_targets)
+                                    ),
+                                    "public_recovery_result": public_recovery_result,
+                                },
+                            )
+                else:
+                    raise CommentsScraplingRuntimeError(
+                        "Instagram comments Scrapling job had retryable incomplete posts.",
+                        error_code="instagram_comments_incomplete_retryable",
+                        retryable=True,
+                        runtime_metadata={
+                            "incomplete_target_source_ids": retryable_incomplete_targets,
+                            "incomplete_fetch_reasons": retry_fetch_reasons,
+                            "zero_comment_incomplete_target_source_ids": list(
+                                dict.fromkeys(zero_comment_incomplete_target_source_ids)
+                            ),
+                            "coauthor_status_only_target_source_ids": list(
+                                dict.fromkeys(coauthor_status_only_target_source_ids)
+                            ),
+                            "auth_failed_target_source_ids": list(dict.fromkeys(auth_failed_target_source_ids)),
+                            "auth_failed_fetch_reasons": dict(auth_failed_fetch_reasons),
+                            "incomplete_raise_threshold": incomplete_raise_threshold,
+                            "target_source_ids_count": len(target_source_ids),
+                            "skipped_complete_target_source_ids": list(dict.fromkeys(final_skipped_complete_targets)),
+                        },
+                    )
+
     async def _run_job() -> tuple[dict[str, Any], dict[str, Any]]:
         nonlocal processed_posts, comments_upserted, comments_inserted, comments_refreshed
         nonlocal comments_changed, comments_fetched, parent_comments_fetched, child_replies_fetched
@@ -3749,6 +4174,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                 job_id=job_id,
                 worker_id=worker_id,
                 interval_seconds=_resolve_job_heartbeat_interval_seconds(),
+                claim_token=claim_token,
             )
         )
         auth_metadata: dict[str, Any] = {}
@@ -3801,7 +4227,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                 worker_id=worker_id,
                 runtime_metadata=dict(fetcher.runtime_metadata),
             )
-            if not lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id):
+            if not lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id, claim_token=claim_token):
                 _raise_if_job_lease_lost(
                     job_id=job_id,
                     worker_id=worker_id,
@@ -3876,6 +4302,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                 worker_id=worker_id,
                 force=True,
                 extra_metadata=progress_metadata_common(),
+                claim_token=claim_token,
             )
 
             def should_poll_cancellation(post_index: int) -> bool:
@@ -3948,7 +4375,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                 shortcode: str,
             ) -> _CommentsPostFetchWork | _CommentsPostFetchOutcome:
                 post_started_at = time.monotonic()
-                if not lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id):
+                if not lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id, claim_token=claim_token):
                     _raise_if_job_lease_lost(
                         job_id=job_id,
                         worker_id=worker_id,
@@ -4327,6 +4754,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                         worker_id=worker_id,
                         force=index == len(target_source_ids),
                         extra_metadata=progress_metadata_common(),
+                        claim_token=claim_token,
                     )
                     continue
                 result = outcome.result
@@ -4456,6 +4884,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                         worker_id=worker_id,
                         force=index == len(target_source_ids),
                         extra_metadata=progress_metadata_common(),
+                        claim_token=claim_token,
                     )
                     if (
                         not public_replay_guard_skip
@@ -4589,6 +5018,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                             worker_id=worker_id,
                             force=index == len(target_source_ids),
                             extra_metadata=progress_metadata_common(),
+                            claim_token=claim_token,
                         )
                         continue
                     if is_genuine_public_block:
@@ -4707,6 +5137,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                             worker_id=worker_id,
                             force=index == len(target_source_ids),
                             extra_metadata=progress_metadata_common(),
+                            claim_token=claim_token,
                         )
                         # A genuine 429 stops immediately; other genuine public
                         # blocks retain the bounded consecutive threshold. Soft
@@ -5031,6 +5462,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                     worker_id=worker_id,
                     force=index == len(target_source_ids),
                     extra_metadata=progress_metadata_common(),
+                    claim_token=claim_token,
                 )
                 if is_genuine_public_block and _public_blocked_shard_should_stop(
                     signal=public_block_signal,
@@ -5045,300 +5477,6 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                         public_block_signal,
                     )
                     break
-
-            retryable_incomplete_targets = _retryable_incomplete_target_source_ids(
-                incomplete_target_source_ids=incomplete_target_source_ids,
-                incomplete_fetch_reasons=incomplete_fetch_reasons,
-                auth_failed_target_source_ids=[] if single_session_load_all else auth_failed_target_source_ids,
-            )
-            # Any target-level gap should be retried automatically. Earlier
-            # versions only retried when enough posts in a shard failed, which
-            # stranded small but real reported-vs-saved gaps in metadata.
-            incomplete_raise_threshold = _MIN_INCOMPLETE_RAISE_TARGETS
-            if retryable_incomplete_targets:
-                retry_fetch_reasons = {
-                    shortcode: incomplete_fetch_reasons.get(shortcode) or auth_failed_fetch_reasons.get(shortcode)
-                    for shortcode in retryable_incomplete_targets
-                }
-                (
-                    retryable_incomplete_targets,
-                    retry_fetch_reasons,
-                    final_skipped_complete_targets,
-                ) = _filter_retryable_incomplete_targets_against_current_db(
-                    account_handle=account_handle,
-                    retryable_incomplete_targets=retryable_incomplete_targets,
-                    retry_fetch_reasons=retry_fetch_reasons,
-                    repo=repo,
-                )
-                if final_skipped_complete_targets:
-                    skipped_complete_target_source_ids.extend(final_skipped_complete_targets)
-                if not retryable_incomplete_targets:
-                    incomplete_retry_stall_metadata = {
-                        "stalled": False,
-                        "completion_status": "current_db_targets_complete",
-                        "skipped_complete_target_source_ids": list(dict.fromkeys(final_skipped_complete_targets)),
-                    }
-                else:
-                    stalled_retry = _incomplete_retry_has_stalled(
-                        job=job,
-                        attempt_count=attempt_count,
-                        retryable_incomplete_targets=retryable_incomplete_targets,
-                        retry_fetch_reasons=retry_fetch_reasons,
-                        comments_fetched=comments_fetched,
-                        zero_comment_incomplete_targets=zero_comment_incomplete_target_source_ids,
-                    )
-                    if stalled_retry:
-                        incomplete_retry_stall_metadata = stalled_retry
-                        logger.info(
-                            "Instagram comments incomplete retry stalled; completing shard without requeue: "
-                            "job_id=%s attempt=%s targets=%s",
-                            job_id,
-                            attempt_count,
-                            retryable_incomplete_targets,
-                        )
-                    elif incomplete_fill_enabled and attempt_count >= max_attempts:
-                        incomplete_retry_stall_metadata = {
-                            "stalled": False,
-                            "retry_exhausted": True,
-                            "attempt_count": attempt_count,
-                            "max_attempts": max_attempts,
-                            "target_source_ids": retryable_incomplete_targets,
-                            "fetch_reasons": retry_fetch_reasons,
-                            "current_comments_fetched": comments_fetched,
-                            "completion_status": "attempted_incomplete_fill",
-                        }
-                        logger.info(
-                            "Instagram comments incomplete fill exhausted its one-pass retry budget; "
-                            "completing shard with unresolved targets: job_id=%s targets=%s",
-                            job_id,
-                            retryable_incomplete_targets,
-                        )
-                    elif public_comments_mode:
-                        # SA-2 (comment-completeness): decide whether the unresolved
-                        # targets are SOFT (no genuine block signal) or GENUINE.
-                        # Soft, non-exhausted shards stay retryable. Genuine or
-                        # exhausted public gaps route to public recovery before any
-                        # authenticated fallback can be considered.
-                        unresolved_genuine_block_signals = {
-                            signal
-                            for shortcode in retryable_incomplete_targets
-                            if (
-                                signal := str(public_blocked_genuine_signals.get(str(shortcode or "").strip()) or "")
-                                .strip()
-                                .lower()
-                            )
-                            and signal != "none"
-                        }
-                        has_genuine_block = bool(unresolved_genuine_block_signals)
-                        attempts_remaining = attempt_count < max_attempts
-                        if not has_genuine_block and attempts_remaining:
-                            logger.info(
-                                "Instagram public comments soft-incomplete (no genuine block); requeuing shard "
-                                "with backoff: job_id=%s attempt=%s/%s targets=%s",
-                                job_id,
-                                attempt_count,
-                                max_attempts,
-                                retryable_incomplete_targets,
-                            )
-                            raise CommentsScraplingRuntimeError(
-                                "Instagram public comments incomplete with no genuine source block; retrying.",
-                                error_code="instagram_comments_public_retryable",
-                                retryable=True,
-                                runtime_metadata={
-                                    "incomplete_target_source_ids": retryable_incomplete_targets,
-                                    "incomplete_fetch_reasons": retry_fetch_reasons,
-                                    "retry_target_source_ids": retryable_incomplete_targets,
-                                    "zero_comment_incomplete_target_source_ids": list(
-                                        dict.fromkeys(zero_comment_incomplete_target_source_ids)
-                                    ),
-                                    "coauthor_status_only_target_source_ids": list(
-                                        dict.fromkeys(coauthor_status_only_target_source_ids)
-                                    ),
-                                    "auth_failed_target_source_ids": list(dict.fromkeys(auth_failed_target_source_ids)),
-                                    "auth_failed_fetch_reasons": dict(auth_failed_fetch_reasons),
-                                    "completion_status": "public_comments_soft_incomplete_retryable",
-                                    "current_comments_fetched": comments_fetched,
-                                    "fallback_policy": "soft_retry",
-                                    "public_block_signal": "none",
-                                    "attempt_count": attempt_count,
-                                    "max_attempts": max_attempts,
-                                    "target_source_ids_count": len(target_source_ids),
-                                    "skipped_complete_target_source_ids": list(
-                                        dict.fromkeys(final_skipped_complete_targets)
-                                    ),
-                                },
-                            )
-
-                        if has_genuine_block and attempts_remaining:
-                            logger.info(
-                                "Instagram public comments blocked; requeuing saved partial/cursor work after "
-                                "cooldown: job_id=%s attempt=%s/%s targets=%s signals=%s",
-                                job_id,
-                                attempt_count,
-                                max_attempts,
-                                retryable_incomplete_targets,
-                                sorted(unresolved_genuine_block_signals),
-                            )
-                            raise CommentsScraplingRuntimeError(
-                                "Instagram public comments blocked; retrying after cooldown.",
-                                error_code="instagram_comments_public_retryable",
-                                retryable=True,
-                                runtime_metadata={
-                                    "incomplete_target_source_ids": retryable_incomplete_targets,
-                                    "incomplete_fetch_reasons": retry_fetch_reasons,
-                                    "retry_target_source_ids": retryable_incomplete_targets,
-                                    "completion_status": "public_comments_blocked_retryable",
-                                    "current_comments_fetched": comments_fetched,
-                                    "fallback_policy": "public_retry_after_cooldown",
-                                    "auth_fallback_policy": "not_considered",
-                                    "public_block_signal_values": sorted(unresolved_genuine_block_signals),
-                                    "attempt_count": attempt_count,
-                                    "max_attempts": max_attempts,
-                                    "target_source_ids_count": len(target_source_ids),
-                                },
-                            )
-
-                        public_recovery_targets = (
-                            retryable_incomplete_targets if _auto_public_recovery_enabled(config) else []
-                        )
-                        public_recovery_result: dict[str, Any] | None = None
-                        if public_recovery_targets:
-                            public_recovery_result = _enqueue_auto_public_recovery_targets(
-                                run_id=run_id,
-                                source_job_id=job_id,
-                                account_handle=account_handle,
-                                source_ids=public_recovery_targets,
-                            )
-                        public_recovery_enqueue = _metadata_dict((public_recovery_result or {}).get("enqueue"))
-                        public_recovery_created = max(
-                            _safe_int((public_recovery_result or {}).get("created_target_job_count")) or 0,
-                            _safe_int((public_recovery_result or {}).get("created_job_count")) or 0,
-                        )
-                        if public_recovery_targets and (
-                            bool(public_recovery_enqueue.get("performed")) or bool(public_recovery_created)
-                        ):
-                            incomplete_retry_stall_metadata = {
-                                "stalled": False,
-                                "completion_status": "public_comments_public_recovery_enqueued",
-                                "target_source_ids": retryable_incomplete_targets,
-                                "public_recovery_source_ids": public_recovery_targets,
-                                "public_recovery_result": public_recovery_result,
-                                "fetch_reasons": retry_fetch_reasons,
-                                "current_comments_fetched": comments_fetched,
-                                "fallback_policy": "public_recovery_queued",
-                                "auth_fallback_policy": "not_considered",
-                            }
-                            logger.info(
-                                "Instagram public comments queued public recovery before auth fallback: "
-                                "job_id=%s targets=%s",
-                                job_id,
-                                public_recovery_targets,
-                            )
-                        else:
-                            auto_fallback_targets = (
-                                []
-                                if _auto_public_recovery_enabled(config)
-                                else _select_auto_auth_fallback_targets(
-                                    config=config,
-                                    retryable_incomplete_targets=retryable_incomplete_targets,
-                                    expected_comment_counts_by_shortcode=expected_comment_counts_by_shortcode,
-                                )
-                            )
-                            auto_fallback_result: dict[str, Any] | None = None
-                            if auto_fallback_targets:
-                                auto_fallback_result = _enqueue_auto_auth_fallback_targets(
-                                    account_handle=account_handle,
-                                    source_ids=auto_fallback_targets,
-                                )
-                            auto_enqueue_payload = _metadata_dict((auto_fallback_result or {}).get("enqueue"))
-                            auto_fallback_created = _safe_int(
-                                (auto_fallback_result or {}).get("created_target_job_count")
-                            )
-                            if auto_fallback_targets and (
-                                bool(auto_enqueue_payload.get("performed")) or bool(auto_fallback_created)
-                            ):
-                                incomplete_retry_stall_metadata = {
-                                    "stalled": False,
-                                    "completion_status": "public_comments_auto_auth_escalated",
-                                    "target_source_ids": retryable_incomplete_targets,
-                                    "auth_fallback_escalated_source_ids": auto_fallback_targets,
-                                    "auth_fallback_min_gap": _auto_auth_fallback_min_gap(),
-                                    "auth_fallback_result": auto_fallback_result,
-                                    "fetch_reasons": retry_fetch_reasons,
-                                    "current_comments_fetched": comments_fetched,
-                                    "fallback_policy": "automatic_auth_enabled",
-                                }
-                                logger.info(
-                                    "Instagram public comments auto-auth fallback attached endpoint-cursor follow-up: "
-                                    "job_id=%s targets=%s",
-                                    job_id,
-                                    auto_fallback_targets,
-                                )
-                            else:
-                                logger.info(
-                                    "Instagram public comments pending public recovery before auth/proxy fallback: "
-                                    "job_id=%s targets=%s genuine_block=%s attempts=%s/%s",
-                                    job_id,
-                                    retryable_incomplete_targets,
-                                    sorted(unresolved_genuine_block_signals),
-                                    attempt_count,
-                                    max_attempts,
-                                )
-                                raise CommentsScraplingRuntimeError(
-                                    "Instagram public comments need public recovery before auth/proxy fallback.",
-                                    error_code="instagram_comments_public_recovery_pending",
-                                    retryable=False,
-                                    runtime_metadata={
-                                        "incomplete_target_source_ids": retryable_incomplete_targets,
-                                        "incomplete_fetch_reasons": retry_fetch_reasons,
-                                        "zero_comment_incomplete_target_source_ids": list(
-                                            dict.fromkeys(zero_comment_incomplete_target_source_ids)
-                                        ),
-                                        "coauthor_status_only_target_source_ids": list(
-                                            dict.fromkeys(coauthor_status_only_target_source_ids)
-                                        ),
-                                        "auth_failed_target_source_ids": list(
-                                            dict.fromkeys(auth_failed_target_source_ids)
-                                        ),
-                                        "auth_failed_fetch_reasons": dict(auth_failed_fetch_reasons),
-                                        "completion_status": "public_comments_public_recovery_pending",
-                                        "current_comments_fetched": comments_fetched,
-                                        "fallback_policy": "public_recovery_pending",
-                                        "auth_fallback_policy": "not_considered",
-                                        "legacy_error_code": "instagram_comments_public_requires_approval",
-                                        "public_block_signal_values": sorted(unresolved_genuine_block_signals),
-                                        "attempt_count": attempt_count,
-                                        "max_attempts": max_attempts,
-                                        "target_source_ids_count": len(target_source_ids),
-                                        "skipped_complete_target_source_ids": list(
-                                            dict.fromkeys(final_skipped_complete_targets)
-                                        ),
-                                        "public_recovery_result": public_recovery_result,
-                                    },
-                                )
-                    else:
-                        raise CommentsScraplingRuntimeError(
-                            "Instagram comments Scrapling job had retryable incomplete posts.",
-                            error_code="instagram_comments_incomplete_retryable",
-                            retryable=True,
-                            runtime_metadata={
-                                "incomplete_target_source_ids": retryable_incomplete_targets,
-                                "incomplete_fetch_reasons": retry_fetch_reasons,
-                                "zero_comment_incomplete_target_source_ids": list(
-                                    dict.fromkeys(zero_comment_incomplete_target_source_ids)
-                                ),
-                                "coauthor_status_only_target_source_ids": list(
-                                    dict.fromkeys(coauthor_status_only_target_source_ids)
-                                ),
-                                "auth_failed_target_source_ids": list(dict.fromkeys(auth_failed_target_source_ids)),
-                                "auth_failed_fetch_reasons": dict(auth_failed_fetch_reasons),
-                                "incomplete_raise_threshold": incomplete_raise_threshold,
-                                "target_source_ids_count": len(target_source_ids),
-                                "skipped_complete_target_source_ids": list(
-                                    dict.fromkeys(final_skipped_complete_targets)
-                                ),
-                            },
-                        )
 
             return auth_metadata, dict(fetcher.runtime_metadata)
         finally:
@@ -5355,103 +5493,129 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
             worker_id=worker_id,
             runtime_metadata=dict(fetcher_metadata),
         )
-        residual_gap_targets = _completion_residual_gap_targets_from_health(target_source_ids=target_source_ids)
-        if residual_gap_targets:
-            retry_targets = [
-                row["shortcode"] for row in residual_gap_targets if str(row.get("shortcode") or "").strip()
-            ]
-            raise CommentsScraplingRuntimeError(
-                "Instagram comments job still has residual comment_capture_health gaps; retrying incomplete targets.",
-                error_code="instagram_comments_health_gap_incomplete",
-                retryable=True,
-                runtime_metadata={
-                    "completion_status": "comment_capture_health_incomplete",
-                    "incomplete_target_source_ids": retry_targets,
-                    "retry_target_source_ids": retry_targets,
-                    "incomplete_fetch_reasons": dict.fromkeys(retry_targets, "comment_capture_health_parent_gap"),
-                    "comment_capture_health_residual_gaps": residual_gap_targets,
-                    "comment_capture_health_gap_threshold": _COMMENT_CAPTURE_HEALTH_COMPLETION_GAP_THRESHOLD,
-                    "target_source_ids_count": len(target_source_ids),
-                    "skipped_complete_target_source_ids": list(dict.fromkeys(skipped_complete_target_source_ids)),
-                },
+        with lifecycle.job_claim_write_scope(job_id, claim_token=claim_token, worker_id=worker_id) as current:
+            if not current:
+                return repo._load_current_job_row(job_id)
+            _prepare_completion_followups()
+            residual_gap_targets = _completion_residual_gap_targets_from_health(target_source_ids=target_source_ids)
+            completion_handoff_metadata = _completion_recovery_handoff_metadata(
+                run_id=run_id,
+                stage=stage,
+                residual_gap_targets=residual_gap_targets,
+                completion_metadata=incomplete_retry_stall_metadata,
             )
-        cumulative_counters = _build_cumulative_counters(
-            job_id,
-            posts=processed_posts,
-            comments=comments_fetched,
-            comments_upserted=comments_upserted,
-            comments_inserted=comments_inserted,
-            comments_refreshed=comments_refreshed,
-            comments_changed=comments_changed,
-        )
-        metadata = {
-            "stage": stage,
-            "platform": "instagram",
-            "account": account_handle,
-            "mode": mode,
-            "source_scope": source_scope,
-            "comments_load_strategy": comments_load_strategy,
-            "comments_session_scope": comments_session_scope,
-            "target_source_ids": target_source_ids,
-            "auth_failed_target_source_ids": list(dict.fromkeys(auth_failed_target_source_ids)),
-            "auth_failed_fetch_reasons": dict(auth_failed_fetch_reasons),
-            **terminal_metadata_common(),
-            "stage_counters": {"posts": processed_posts, "comments": comments_fetched},
-            "cumulative_counters": cumulative_counters,
-            "skipped_complete_target_source_ids": skipped_complete_target_source_ids,
-            "persist_counters": {
-                "posts_upserted": processed_posts,
-                "comments_upserted": comments_upserted,
-                "comments_inserted": comments_inserted,
-                "comments_refreshed": comments_refreshed,
-                "comments_changed": comments_changed,
-                "db_rows_written": comments_upserted,
-                "new_instagram_comments_saved": comments_inserted,
-                "existing_comment_rows_seen": comments_refreshed,
-                "existing_comment_rows_updated": max(0, comments_changed - comments_inserted),
-                "comments_marked_missing": comments_marked_missing,
-                "comment_media_mirror_jobs_enqueued": mirror_jobs_enqueued,
-                "comment_media_mirror_job_enqueue_errors": mirror_job_enqueue_errors,
-            },
-            "activity": {
-                "phase": "comments_scrapling_end",
-                "last_progress_at": lifecycle.format_time(lifecycle.now_utc()),
-            },
-            "fetch_counters": {
-                "request_count": fetcher_metadata.get("request_count", 0),
-                "target_posts": len(target_source_ids),
-                "comments_fetched": comments_fetched,
-                "parent_comments_fetched": parent_comments_fetched,
-                "child_replies_fetched": child_replies_fetched,
-                "parentless_replies_fetched": parentless_replies_fetched,
-            },
-            "comment_phase_counts": dict(comment_phase_counts),
-            "cursor_diagnostics": {
-                "cursor_param_counts": dict(comment_cursor_param_counts),
-                "cursor_shape_counts": dict(comment_cursor_shape_counts),
-                "samples": list(comment_capture_samples),
-            },
-            "auth_context": {
-                **auth_context,
-                "metadata_source": auth_metadata.get("source"),
-            },
-            "fetcher_runtime": fetcher_metadata,
-        }
-        lifecycle.finish_job(
-            job_id,
-            status="completed",
-            items_found=_cumulative_items_found(cumulative_counters),
-            metadata=metadata,
-            expected_worker_id=worker_id,
-        )
+            if residual_gap_targets and not completion_handoff_metadata:
+                retry_targets = [
+                    row["shortcode"] for row in residual_gap_targets if str(row.get("shortcode") or "").strip()
+                ]
+                raise CommentsScraplingRuntimeError(
+                    "Instagram comments job still has residual comment_capture_health gaps; "
+                    "retrying incomplete targets.",
+                    error_code="instagram_comments_health_gap_incomplete",
+                    retryable=True,
+                    runtime_metadata={
+                        "completion_status": "comment_capture_health_incomplete",
+                        "incomplete_target_source_ids": retry_targets,
+                        "retry_target_source_ids": retry_targets,
+                        "incomplete_fetch_reasons": dict.fromkeys(retry_targets, "comment_capture_health_parent_gap"),
+                        "comment_capture_health_residual_gaps": residual_gap_targets,
+                        "comment_capture_health_gap_threshold": _COMMENT_CAPTURE_HEALTH_COMPLETION_GAP_THRESHOLD,
+                        "target_source_ids_count": len(target_source_ids),
+                        "skipped_complete_target_source_ids": list(dict.fromkeys(skipped_complete_target_source_ids)),
+                    },
+                )
+            cumulative_counters = _build_cumulative_counters(
+                job_id,
+                posts=processed_posts,
+                comments=comments_fetched,
+                comments_upserted=comments_upserted,
+                comments_inserted=comments_inserted,
+                comments_refreshed=comments_refreshed,
+                comments_changed=comments_changed,
+            )
+            metadata = {
+                "stage": stage,
+                "platform": "instagram",
+                "account": account_handle,
+                "mode": mode,
+                "source_scope": source_scope,
+                "comments_load_strategy": comments_load_strategy,
+                "comments_session_scope": comments_session_scope,
+                "target_source_ids": target_source_ids,
+                "auth_failed_target_source_ids": list(dict.fromkeys(auth_failed_target_source_ids)),
+                "auth_failed_fetch_reasons": dict(auth_failed_fetch_reasons),
+                **terminal_metadata_common(),
+                **completion_handoff_metadata,
+                "stage_counters": {"posts": processed_posts, "comments": comments_fetched},
+                "cumulative_counters": cumulative_counters,
+                "skipped_complete_target_source_ids": skipped_complete_target_source_ids,
+                "persist_counters": {
+                    "posts_upserted": processed_posts,
+                    "comments_upserted": comments_upserted,
+                    "comments_inserted": comments_inserted,
+                    "comments_refreshed": comments_refreshed,
+                    "comments_changed": comments_changed,
+                    "db_rows_written": comments_upserted,
+                    "new_instagram_comments_saved": comments_inserted,
+                    "existing_comment_rows_seen": comments_refreshed,
+                    "existing_comment_rows_updated": max(0, comments_changed - comments_inserted),
+                    "comments_marked_missing": comments_marked_missing,
+                    "comment_media_mirror_jobs_enqueued": mirror_jobs_enqueued,
+                    "comment_media_mirror_job_enqueue_errors": mirror_job_enqueue_errors,
+                },
+                "activity": {
+                    "phase": "comments_scrapling_end",
+                    "last_progress_at": lifecycle.format_time(lifecycle.now_utc()),
+                },
+                "fetch_counters": {
+                    "request_count": fetcher_metadata.get("request_count", 0),
+                    "target_posts": len(target_source_ids),
+                    "comments_fetched": comments_fetched,
+                    "parent_comments_fetched": parent_comments_fetched,
+                    "child_replies_fetched": child_replies_fetched,
+                    "parentless_replies_fetched": parentless_replies_fetched,
+                },
+                "comment_phase_counts": dict(comment_phase_counts),
+                "cursor_diagnostics": {
+                    "cursor_param_counts": dict(comment_cursor_param_counts),
+                    "cursor_shape_counts": dict(comment_cursor_shape_counts),
+                    "samples": list(comment_capture_samples),
+                },
+                "auth_context": {
+                    **auth_context,
+                    "metadata_source": auth_metadata.get("source"),
+                },
+                "fetcher_runtime": fetcher_metadata,
+            }
+            finish_accepted = lifecycle.finish_job(
+                job_id,
+                defer_followups=True,
+                status="completed",
+                items_found=_cumulative_items_found(cumulative_counters),
+                metadata=metadata,
+                expected_worker_id=worker_id,
+                expected_claim_token=claim_token,
+            )
+            if not finish_accepted:
+                raise RuntimeError("Comments completion lost acquired claim")
         terminal_status = "completed"
         terminal_error_message = None
+        if finish_accepted:
+            lifecycle.finish_job_followups(
+                job_id,
+                run_id=run_id,
+                status=terminal_status,
+                items_found=_cumulative_items_found(cumulative_counters),
+                metadata=metadata,
+                claim_token=claim_token,
+                worker_id=worker_id,
+            )
         # REVISED §4: after a public comments shard completes, recompute the
         # public-blocked ratio from job metadata and ramp the run's active worker
         # cap (12 -> 15 -> 20 while blocked ratio stays low; back to 6 on spikes).
         # The ramp helper also refills queued jobs to the new cap, so it runs
         # before the generic auto-refill below. Best-effort and public-mode only.
-        if public_comments_mode and run_id:
+        if finish_accepted and public_comments_mode and run_id:
             try:
                 _ramp_public_comments_worker_cap(run_id=run_id)
             except Exception:  # noqa: BLE001
@@ -5461,8 +5625,27 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                     run_id,
                     exc_info=True,
                 )
+        followup_runs: set[str] = set()
+        if finish_accepted:
+            for key in ("public_recovery_result", "auth_fallback_result"):
+                result = _metadata_dict(_metadata_dict(incomplete_retry_stall_metadata).get(key))
+                enqueue = _metadata_dict(result.get("enqueue"))
+                queued_result = _metadata_dict(enqueue.get("result"))
+                followup_run_id = str(result.get("run_id") or queued_result.get("run_id") or "").strip()
+                if followup_run_id and (enqueue.get("performed") or result.get("created_job_count")):
+                    followup_runs.add(followup_run_id)
+            for followup_run_id in sorted(followup_runs):
+                try:
+                    _dispatch_due_social_jobs(run_id=followup_run_id, limit=max(1, len(target_source_ids)))
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "Comments committed followup dispatch deferred: job_id=%s run_id=%s",
+                        job_id,
+                        followup_run_id,
+                        exc_info=True,
+                    )
         auto_refill_limit = _comments_auto_refill_dispatch_limit(config)
-        if auto_refill_limit > 0 and run_id:
+        if finish_accepted and auto_refill_limit > 0 and run_id and run_id not in followup_runs:
             try:
                 dispatch_result = _dispatch_due_social_jobs(run_id=run_id, limit=auto_refill_limit)
                 logger.info(
@@ -5499,7 +5682,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
             comments_refreshed=comments_refreshed,
             comments_changed=comments_changed,
         )
-        lifecycle.finish_job(
+        finish_accepted = lifecycle.finish_job(
             job_id,
             status="cancelled",
             items_found=_cumulative_items_found(cumulative_counters),
@@ -5558,6 +5741,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
             last_error_code="instagram_comments_scrapling_cancelled",
             last_error_class=exc.__class__.__name__,
             expected_worker_id=worker_id,
+            expected_claim_token=claim_token,
         )
         terminal_status = "cancelled"
         terminal_error_message = str(exc)
@@ -5599,10 +5783,14 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
             ],
         ]
         retry_target_source_ids = list(dict.fromkeys(retry_target_source_ids))
-        if can_retry and retry_target_source_ids:
-            try:
+        with lifecycle.job_claim_write_scope(job_id, claim_token=claim_token, worker_id=worker_id) as current:
+            if not current:
+                return repo._load_current_job_row(job_id)
+            if can_retry and retry_target_source_ids:
                 repo._update_job_config(
                     job_id,
+                    claim_token=claim_token,
+                    worker_id=worker_id,
                     config_updates={
                         "target_source_ids": retry_target_source_ids,
                         "comments_shard_target_count": len(retry_target_source_ids),
@@ -5610,32 +5798,21 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                         "comments_retry_incomplete_source_job_id": job_id,
                     },
                 )
-            except pg.DatabaseServiceUnavailableError as update_exc:
-                logger.warning(
-                    "Deferred comments retry target narrowing after database saturation: job_id=%s error=%s",
-                    job_id,
-                    update_exc,
-                )
-        next_available_at = (
-            lifecycle.now_utc() + timedelta(seconds=lifecycle.retry_backoff_seconds(attempt_count))
-            if can_retry
-            else None
-        )
-        cumulative_counters = _build_cumulative_counters(
-            job_id,
-            posts=processed_posts,
-            comments=comments_fetched,
-            comments_upserted=comments_upserted,
-            comments_inserted=comments_inserted,
-            comments_refreshed=comments_refreshed,
-            comments_changed=comments_changed,
-        )
-        lifecycle.finish_job(
-            job_id,
-            status="retrying" if can_retry else "failed",
-            items_found=_cumulative_items_found(cumulative_counters),
-            error_message=str(exc),
-            metadata={
+            next_available_at = (
+                lifecycle.now_utc() + timedelta(seconds=lifecycle.retry_backoff_seconds(attempt_count))
+                if can_retry
+                else None
+            )
+            cumulative_counters = _build_cumulative_counters(
+                job_id,
+                posts=processed_posts,
+                comments=comments_fetched,
+                comments_upserted=comments_upserted,
+                comments_inserted=comments_inserted,
+                comments_refreshed=comments_refreshed,
+                comments_changed=comments_changed,
+            )
+            metadata = {
                 "stage": stage,
                 "platform": "instagram",
                 "account": account_handle,
@@ -5675,15 +5852,35 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                 "auth_context": auth_context,
                 "fetcher_runtime": fetcher_metadata,
                 "retry_rebalance": retry_rebalance,
-            },
-            last_error_code=error_code,
-            last_error_class=error_class,
-            next_available_at=next_available_at,
-            expected_worker_id=worker_id,
-        )
+            }
+            finish_accepted = lifecycle.finish_job(
+                job_id,
+                defer_followups=True,
+                status="retrying" if can_retry else "failed",
+                items_found=_cumulative_items_found(cumulative_counters),
+                error_message=str(exc),
+                metadata=metadata,
+                last_error_code=error_code,
+                last_error_class=error_class,
+                next_available_at=next_available_at,
+                expected_worker_id=worker_id,
+                expected_claim_token=claim_token,
+            )
+            if not finish_accepted:
+                raise RuntimeError("Comments retry completion lost acquired claim") from exc
         terminal_status = "retrying" if can_retry else "failed"
         terminal_error_message = str(exc)
-        if terminal_status == "failed":
+        if finish_accepted:
+            lifecycle.finish_job_followups(
+                job_id,
+                run_id=run_id,
+                status=terminal_status,
+                items_found=_cumulative_items_found(cumulative_counters),
+                metadata=metadata,
+                claim_token=claim_token,
+                worker_id=worker_id,
+            )
+        if finish_accepted and terminal_status == "failed":
             try:
                 _abort_queued_sibling_shards_after_run_fatal_error(
                     repo=repo,
@@ -5705,7 +5902,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                     abort_exc,
                 )
     finally:
-        if run_id:
+        if finish_accepted and run_id:
             try:
                 finalize_result = lifecycle.finalize_run_status(run_id)
                 if isinstance(finalize_result, dict) and finalize_result.get("finalize_deferred"):

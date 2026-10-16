@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -62,8 +62,17 @@ class _FakeLifecycle:
         self._progress_calls.append(dict(kwargs))
         return True
 
-    def finish_job(self, job_id: str, **kwargs: Any) -> None:
+    def finish_job(self, job_id: str, **kwargs: Any) -> bool:
         self._finish_calls.append({"job_id": job_id, **kwargs})
+        return True
+
+    @staticmethod
+    def job_claim_write_scope(*_args: Any, **_kwargs: Any):
+        return nullcontext(True)
+
+    @staticmethod
+    def finish_job_followups(*_args: Any, **_kwargs: Any) -> None:
+        return None
 
     @staticmethod
     def finalize_run_status(_run_id: str, **_kwargs: Any) -> dict[str, Any]:
@@ -181,7 +190,9 @@ def _run_job(jr: Any, repo: Any, targets: list[str]) -> dict[str, Any]:
             "id": "job-1",
             "run_id": "run-1",
             "status": "running",
+            "worker_id": "worker-1",
             "config": {
+                "claim_token": "acquired-token",
                 "account": "thetraitorsus",
                 "stage": repo.INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
                 "target_source_ids": targets,
@@ -209,8 +220,10 @@ def test_comments_per_post_concurrency_env_defaults_and_clamps(monkeypatch: pyte
     assert jr._resolve_comments_per_post_concurrency() == 1
 
 
+@pytest.mark.parametrize("capture_case", ["captured", "public_handoff", "auth_handoff", "uncovered", "terminal_child"])
 def test_comments_concurrency_one_preserves_serial_fetch_then_persist_order(
     monkeypatch: pytest.MonkeyPatch,
+    capture_case: str,
 ) -> None:
     from trr_backend.repositories import social_season_analytics as repo
     from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
@@ -231,9 +244,82 @@ def test_comments_concurrency_one_preserves_serial_fetch_then_persist_order(
         events=events,
     )
 
+    queued: list[str] = []
+    if capture_case != "captured":
+        monkeypatch.setattr(jr, "_job_attempt_state", lambda _job: (12, 12))
+        original_fetch = fetcher.fetch_comments_for_shortcode
+
+        async def incomplete_fetch(shortcode: str, **kwargs: Any) -> InstagramCommentsFetchResult:
+            result = await original_fetch(shortcode, **kwargs)
+            if shortcode == "A":
+                result.fetch_failed = True
+                result.retryable = True
+                result.fetch_reason = "public_blocked"
+                result.reported_comment_count = 100
+            return result
+
+        monkeypatch.setattr(fetcher, "fetch_comments_for_shortcode", incomplete_fetch)
+        monkeypatch.setattr(
+            jr,
+            "_filter_retryable_incomplete_targets_against_current_db",
+            lambda **_kwargs: (["A"], {"A": "public_blocked"}, []),
+        )
+        monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {"A": 100})
+        monkeypatch.setattr(jr, "_auto_public_recovery_enabled", lambda _config: capture_case != "auth_handoff")
+        monkeypatch.setattr(jr, "_select_auto_auth_fallback_targets", lambda **_kwargs: ["A"])
+        monkeypatch.setattr(
+            jr,
+            "_completion_residual_gap_targets_from_health",
+            lambda **_kwargs: [{"shortcode": "A", "parent_capture_gap": 5}]
+            + ([{"shortcode": "B", "parent_capture_gap": 5}] if capture_case == "uncovered" else []),
+        )
+
+        def enqueue(**_kwargs: Any) -> dict[str, Any]:
+            queued.append("child-A")
+            return {
+                "run_id": "run-1",
+                "created_target_job_count": 1,
+                "created_job_ids": ["child-A"],
+                "enqueue": {"performed": True},
+            }
+
+        monkeypatch.setattr(jr, "_enqueue_auto_public_recovery_targets", enqueue)
+        monkeypatch.setattr(jr, "_enqueue_auto_auth_fallback_targets", enqueue)
+        monkeypatch.setattr(
+            jr.pg,
+            "fetch_all",
+            lambda sql, *_args, **_kwargs: []
+            if capture_case == "terminal_child" or "id = any" not in sql
+            else [{"id": "child-A", "config": {"target_source_ids": ["A"], "comments_public_recovery": True}}],
+        )
+        monkeypatch.setattr(jr, "_ramp_public_comments_worker_cap", lambda **_kwargs: None)
+        monkeypatch.setattr(jr, "_dispatch_due_social_jobs", lambda **_kwargs: {"dispatched_job_ids": []})
+
+        @contextmanager
+        def scope(*_args: Any, **_kwargs: Any):
+            previous = list(queued)
+            try:
+                yield True
+            except BaseException:
+                queued[:] = previous
+                raise
+
+        monkeypatch.setattr(jr.lifecycle, "job_claim_write_scope", scope)
+
     payload = _run_job(jr, repo, ["A", "B"])
 
-    assert payload["status"] == "completed"
+    if capture_case in {"uncovered", "terminal_child"}:
+        assert payload["status"] == "failed", payload
+        assert not queued
+        assert finish_calls[-1]["last_error_code"] == "instagram_comments_health_gap_incomplete"
+    else:
+        assert payload["status"] == "completed", payload
+        if capture_case != "captured":
+            assert queued == ["child-A"]
+            assert payload["metadata"]["comment_capture_complete"] is False
+            assert payload["metadata"]["comment_capture_completion_status"] == "deferred_to_recovery"
+            assert payload["metadata"]["comment_capture_deferred_target_source_ids"] == ["A"]
+            assert payload["metadata"]["comment_capture_recovery_job_ids"] == ["child-A"]
     assert max(active_samples) == 1
     assert events.index("fetch-end:A") < events.index("persist:A") < events.index("fetch-start:B")
     assert events.index("fetch-end:B") < events.index("persist:B")
@@ -263,7 +349,7 @@ def test_comments_concurrency_overlaps_fetches_and_serializes_progress(
 
     payload = _run_job(jr, repo, ["A", "B", "C"])
 
-    assert payload["status"] == "completed"
+    assert payload["status"] == "completed", payload
     assert max(active_samples) > 1
     assert events.index("fetch-start:B") < events.index("fetch-end:A")
     assert [event for event in events if event.startswith("persist:")] == ["persist:A", "persist:B", "persist:C"]

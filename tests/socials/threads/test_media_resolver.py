@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+import pytest
+
 from trr_backend.socials.threads import media_resolver
 
 
@@ -25,7 +27,8 @@ class _ProbeSession:
         return _ProbeResponse(status_code=self.status_code, content_type=self.content_type, url=url)
 
 
-def test_resolve_threads_media_accepts_image_probe_and_records_evidence() -> None:
+def test_resolve_threads_media_accepts_image_probe_and_records_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(media_resolver, "safe_requests_head", lambda client, url, **kwargs: client.head(url, **kwargs))
     session = _ProbeSession(content_type="image/jpeg")
     post_data = {
         "media_type": 1,
@@ -44,7 +47,8 @@ def test_resolve_threads_media_accepts_image_probe_and_records_evidence() -> Non
     assert result.media_asset_meta["source_assets"][0]["probe"]["http_status"] == 200
 
 
-def test_resolve_threads_media_rejects_html_probe_response() -> None:
+def test_resolve_threads_media_rejects_html_probe_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(media_resolver, "safe_requests_head", lambda client, url, **kwargs: client.head(url, **kwargs))
     session = _ProbeSession(content_type="text/html; charset=utf-8")
     post_data = {
         "media_type": 2,

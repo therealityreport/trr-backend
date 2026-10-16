@@ -8,6 +8,9 @@ All DM endpoints require authentication.
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
+from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -268,13 +271,19 @@ class TestCreateConversation:
             "role": "member",
             "joined_at": "2025-01-01T00:00:00Z",
         }
+        members = [mock_member, {**mock_member, "user_id": MOCK_OTHER_USER_ID}]
+        conversation = {**MOCK_CONVERSATION, "created_at": datetime(2025, 1, 1, tzinfo=UTC)}
 
         app.dependency_overrides[auth.require_user] = lambda: MOCK_USER
 
         with (
-            patch("api.routers.dms.pg.fetch_one", side_effect=[None, MOCK_CONVERSATION, MOCK_CONVERSATION]),
+            patch("api.routers.dms.pg.transaction", return_value=nullcontext()),
+            patch("api.routers.dms.pg.fetch_one", side_effect=[None, None, conversation]),
             patch("api.routers.dms.pg.execute_returning", return_value=[mock_member]),
-            patch("api.routers.dms.pg.fetch_all", return_value=[mock_member]),
+            patch(
+                "api.routers.dms.pg.fetch_all",
+                side_effect=[[{"id": MOCK_USER["id"]}, {"id": MOCK_OTHER_USER_ID}], members],
+            ),
         ):
             client = TestClient(app)
             response = client.post(
@@ -283,8 +292,10 @@ class TestCreateConversation:
             )
             assert response.status_code == 200
             data = response.json()
-            assert "id" in data
+            assert data["id"] == MOCK_CONVERSATION["id"]
             assert data["is_group"] is False
+            assert {member["user_id"] for member in data["members"]} == {MOCK_USER["id"], MOCK_OTHER_USER_ID}
+            assert data["created_at"] == "2025-01-01T00:00:00+00:00"
 
         app.dependency_overrides.clear()
 
@@ -329,23 +340,27 @@ class TestMessages:
         """Send message succeeds with valid auth."""
         app.dependency_overrides[auth.require_user] = lambda: MOCK_USER
 
-        mock_sent = MOCK_MESSAGE.copy()
+        mock_sent: dict[str, Any] = MOCK_MESSAGE.copy()
         mock_sent["body"] = "Hello!"
         mock_sent["sender_id"] = MOCK_USER["id"]
+        mock_sent["created_at"] = datetime(2025, 1, 1, tzinfo=UTC)
         with (
+            patch("api.routers.dms.pg.transaction", return_value=nullcontext()),
             patch("api.routers.dms._require_membership", return_value=None),
             patch("api.routers.dms.pg.fetch_one", return_value=mock_sent),
-            patch("api.routers.dms.pg.execute_returning", return_value=None),
+            patch("api.routers.dms.pg.execute_returning", return_value=[{"id": MOCK_CONVERSATION["id"]}]),
         ):
             client = TestClient(app)
             response = client.post(
                 f"/api/v1/dms/{MOCK_CONVERSATION['id']}/messages",
-                json={"body": "Hello!"},
+                json={"body": "Hello!", "sender_id": MOCK_OTHER_USER_ID},
             )
             assert response.status_code == 200
             data = response.json()
             assert data["body"] == "Hello!"
             assert data["sender_id"] == MOCK_USER["id"]
+            assert data["id"] == MOCK_MESSAGE["id"]
+            assert data["created_at"] == "2025-01-01T00:00:00+00:00"
 
         app.dependency_overrides.clear()
 

@@ -13,7 +13,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Protocol
 
 from trr_backend.db import pg
 
@@ -454,7 +454,7 @@ def finish_chunk(
         )
         # Keep the existing stage accounting/rollup transition in this same
         # transaction. items_found is unique committed targets, never attempts.
-        legacy._finish_job(
+        if not legacy._finish_job(
             job_id,
             status=status,
             items_found=int(job_totals["committed"]),
@@ -475,7 +475,8 @@ def finish_chunk(
             if status == "retrying"
             else None,
             last_error_code=error_code,
-        )
+        ):
+            raise LostDetailOwnershipError("Detail finish lost acquired ownership")
     legacy._clear_worker_heartbeat_for_job(
         job_id=job_id,
         status="idle",
@@ -485,14 +486,24 @@ def finish_chunk(
     return receipt
 
 
-def execute_job(legacy: Any, job: Mapping[str, Any], *, worker_id: str) -> dict[str, Any]:
-    from trr_backend.socials.instagram.catalog_ingest import run_durable_instagram_details
+class DurableDetailExecutor(Protocol):
+    """Provider execution port; durable receipt ownership remains here."""
 
+    def __call__(self, job: Mapping[str, Any], *, worker_id: str) -> dict[str, Any]: ...
+
+
+def execute_job(
+    legacy: Any,
+    job: Mapping[str, Any],
+    *,
+    worker_id: str,
+    detail_executor: DurableDetailExecutor,
+) -> dict[str, Any]:
     error_code = None
     cancelled = False
     stopped = False
     try:
-        run_durable_instagram_details(job, worker_id=worker_id)
+        detail_executor(job, worker_id=worker_id)
     except LostDetailOwnershipError:
         # No write, receipt or completion by a superseded worker.
         return legacy._load_current_job_row(str(job["id"]))
@@ -518,7 +529,7 @@ def recover_expired(
     with pg.transaction() as conn:
         with pg.db_cursor(conn=conn, label="recover_expired_detail_dispatch") as cur:
             cur.execute(
-                """select id::text, run_id::text, worker_id, detail_dispatch_token, items_found
+                """select id::text, run_id::text, worker_id, detail_dispatch_token, items_found, status, config
                 from social.scrape_jobs
                 where status = 'running' and config->>'detail_contract_version' = '1'
                   and detail_dispatch_expires_at < now()
@@ -531,8 +542,10 @@ def recover_expired(
             rows = list(cur.fetchall())
         for row in rows:
             totals = snapshot(row["run_id"], conn=conn)
-            legacy._finish_job(
+            if not legacy._transition_job_state(
                 row["id"],
+                expected_status=row["status"],
+                expected_claim_token=(row.get("config") or {}).get("claim_token"),
                 status="retrying",
                 items_found=int(row.get("items_found") or 0),
                 expected_worker_id=row["worker_id"],
@@ -545,7 +558,8 @@ def recover_expired(
                 },
                 next_available_at=datetime.now(UTC) + timedelta(seconds=5),
                 last_error_code="detail_dispatch_expired",
-            )
+            ):
+                continue
             _one(
                 """update social.scrape_jobs set detail_dispatch_token = null,
                   detail_dispatch_generation = detail_dispatch_generation + 1,
@@ -569,7 +583,7 @@ def reconcile_provider_failure(legacy: Any, row: Mapping[str, Any], inspection: 
         return False
     with pg.transaction() as conn:
         current = _one(
-            """select id, worker_id, items_found from social.scrape_jobs
+            """select id, worker_id, items_found, status, config from social.scrape_jobs
             where id = %s::uuid and status = 'running' and detail_dispatch_token = %s
               and metadata->'dispatch'->>'remote_invocation_id' = %s for update""",
             [row["id"], token, (row.get("metadata") or {}).get("dispatch", {}).get("remote_invocation_id")],
@@ -577,8 +591,10 @@ def reconcile_provider_failure(legacy: Any, row: Mapping[str, Any], inspection: 
         )
         if not current:
             return False
-        legacy._finish_job(
+        if not legacy._transition_job_state(
             str(row["id"]),
+            expected_status=current["status"],
+            expected_claim_token=(current.get("config") or {}).get("claim_token"),
             status="failed",
             items_found=int(current.get("items_found") or 0),
             expected_worker_id=current["worker_id"],
@@ -586,7 +602,8 @@ def reconcile_provider_failure(legacy: Any, row: Mapping[str, Any], inspection: 
             defer_followups=True,
             last_error_code="detail_provider_" + status,
             metadata={"resume_eligible": True, "detail_provider_terminal_status": status},
-        )
+        ):
+            return False
     legacy._finalize_run_status(str(row["run_id"]), force_recompute=True)
     return True
 

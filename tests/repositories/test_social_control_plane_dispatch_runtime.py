@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 
+from trr_backend.socials import social_season_analytics_impl as social_provider
 from trr_backend.socials.control_plane import dispatch_runtime
 from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
 
-register_social_control_plane_providers()
+register_social_control_plane_providers(social_provider.__dict__)
 
 
 def test_dispatch_runtime_skips_same_active_shared_account(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -82,7 +84,9 @@ def test_dispatch_runtime_skips_same_active_shared_account(monkeypatch: pytest.M
             {(legacy.SHARED_ACCOUNT_POSTS_STAGE, "instagram"): {"bravodailydish"}},
         ),
     )
-    monkeypatch.setattr(legacy, "_touch_job_dispatch_metadata", lambda job_id, **kwargs: None)
+    monkeypatch.setattr(legacy, "_touch_job_dispatch_metadata", lambda job_id, **kwargs: True)
+    monkeypatch.setattr(legacy.pg, "transaction", lambda: nullcontext())
+    monkeypatch.setattr(legacy.pg, "fetch_one", lambda *_args, **_kwargs: {"id": "current"})
     monkeypatch.setattr(legacy, "_touch_modal_social_dispatcher_heartbeat", lambda **kwargs: {})
     monkeypatch.setattr(
         legacy,
@@ -144,7 +148,9 @@ def test_dispatch_runtime_allows_modal_detail_shards_with_required_lanes(
     monkeypatch.setattr(legacy, "_list_candidate_jobs_for_modal_dispatch", lambda **_kwargs: list(candidates))
     monkeypatch.setattr(legacy, "_current_modal_dispatch_running_counts", lambda: ({}, {}, {}, {}, {}))
     monkeypatch.setattr(legacy, "_resolve_catalog_run_in_flight_cap", lambda: 3)
-    monkeypatch.setattr(legacy, "_touch_job_dispatch_metadata", lambda job_id, **kwargs: None)
+    monkeypatch.setattr(legacy, "_touch_job_dispatch_metadata", lambda job_id, **kwargs: True)
+    monkeypatch.setattr(legacy.pg, "transaction", lambda: nullcontext())
+    monkeypatch.setattr(legacy.pg, "fetch_one", lambda *_args, **_kwargs: {"id": "current"})
     monkeypatch.setattr(legacy, "_touch_modal_social_dispatcher_heartbeat", lambda **kwargs: {})
     monkeypatch.setattr(
         legacy,
@@ -220,7 +226,9 @@ def test_dispatch_runtime_skips_paused_run_candidates_during_global_dispatch(
     monkeypatch.setattr(legacy, "_list_candidate_jobs_for_modal_dispatch", lambda **_kwargs: list(candidates))
     monkeypatch.setattr(legacy, "_current_modal_dispatch_running_counts", lambda: ({}, {}, {}, {}, {}))
     monkeypatch.setattr(legacy, "_modal_comment_recovery_priority_override_slots", lambda: 0)
-    monkeypatch.setattr(legacy, "_touch_job_dispatch_metadata", lambda job_id, **kwargs: None)
+    monkeypatch.setattr(legacy, "_touch_job_dispatch_metadata", lambda job_id, **kwargs: True)
+    monkeypatch.setattr(legacy.pg, "transaction", lambda: nullcontext())
+    monkeypatch.setattr(legacy.pg, "fetch_one", lambda *_args, **_kwargs: {"id": "current"})
     monkeypatch.setattr(legacy, "_touch_modal_social_dispatcher_heartbeat", lambda **kwargs: {})
     monkeypatch.setattr(
         legacy,
@@ -268,6 +276,8 @@ def test_dispatch_runtime_clears_expired_pause_for_global_dispatch_candidate(
         if "update social.scrape_runs" in sql:
             updated_pause_rows.append({"sql": sql, "params": list(params or [])})
             return {"id": "11111111-1111-1111-1111-111111111111"}
+        if "select id, metadata from social.scrape_jobs" in sql:
+            return {"id": "current"}
         return None
 
     monkeypatch.setattr(legacy, "is_queue_enabled", lambda: True)
@@ -282,7 +292,8 @@ def test_dispatch_runtime_clears_expired_pause_for_global_dispatch_candidate(
     monkeypatch.setattr(legacy, "_list_candidate_jobs_for_modal_dispatch", lambda **_kwargs: list(candidates))
     monkeypatch.setattr(legacy, "_current_modal_dispatch_running_counts", lambda: ({}, {}, {}, {}, {}))
     monkeypatch.setattr(legacy, "_modal_comment_recovery_priority_override_slots", lambda: 0)
-    monkeypatch.setattr(legacy, "_touch_job_dispatch_metadata", lambda job_id, **kwargs: None)
+    monkeypatch.setattr(legacy, "_touch_job_dispatch_metadata", lambda job_id, **kwargs: True)
+    monkeypatch.setattr(legacy.pg, "transaction", lambda: nullcontext())
     monkeypatch.setattr(legacy, "_touch_modal_social_dispatcher_heartbeat", lambda **kwargs: {})
     monkeypatch.setattr(
         legacy,
@@ -403,8 +414,12 @@ def test_dispatch_runtime_skips_posts_auth_cooldown_candidates(
     assert result["dispatch_attempts"] == 0
 
 
+@pytest.mark.parametrize(
+    "reservation_case", ["normal", "auth", "capacity_busy", "own_lease", "uncertain", "replaced_reservation"]
+)
 def test_dispatch_runtime_stamps_remote_function_name(
     monkeypatch: pytest.MonkeyPatch,
+    reservation_case: str,
 ) -> None:
     legacy = dispatch_runtime.legacy
     candidates = [
@@ -415,6 +430,7 @@ def test_dispatch_runtime_stamps_remote_function_name(
             "job_type": legacy.SHARED_ACCOUNT_POSTS_JOB_TYPE,
             "status": "queued",
             "config": {
+                "comments_auth_fallback": reservation_case != "normal",
                 "stage": legacy.SHARED_ACCOUNT_POSTS_STAGE,
                 "account": "bravotv",
                 "pipeline_ingest_mode": legacy.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
@@ -423,6 +439,29 @@ def test_dispatch_runtime_stamps_remote_function_name(
         }
     ]
     dispatch_writes: list[dict[str, object]] = []
+    provider_calls: list[str] = []
+    dispatch_state: dict[str, Any] = {}
+    capacity_locked = False
+
+    @contextmanager
+    def capacity_scope(_job_id: str):
+        nonlocal capacity_locked
+        capacity_locked = True
+        try:
+            yield reservation_case != "capacity_busy"
+        finally:
+            capacity_locked = False
+
+    def dispatch_provider(**_kwargs: Any) -> dict[str, object]:
+        assert not capacity_locked
+        provider_calls.append("dispatch")
+        if reservation_case == "replaced_reservation":
+            dispatch_state["dispatch_reservation_id"] = "successor-reservation"
+        return {
+            "dispatched": reservation_case != "uncertain",
+            "call_id": "fc-123",
+            "function_name": "trr-backend-jobs.run_social_job",
+        }
 
     monkeypatch.setattr(legacy, "is_queue_enabled", lambda: True)
     monkeypatch.setattr(legacy, "is_modal_remote_executor_enabled", lambda: True)
@@ -435,23 +474,48 @@ def test_dispatch_runtime_stamps_remote_function_name(
     monkeypatch.setattr(legacy, "_current_modal_dispatch_running_counts", lambda: ({}, {}, {}, {}, {}))
     monkeypatch.setattr(legacy, "_modal_comment_recovery_priority_override_slots", lambda: 0)
     monkeypatch.setattr(legacy, "_job_blocked_by_posts_auth_cooldown", lambda _job: None)
-    monkeypatch.setattr(legacy, "_touch_job_dispatch_metadata", lambda job_id, **kwargs: dispatch_writes.append(kwargs))
-    monkeypatch.setattr(legacy, "_touch_modal_social_dispatcher_heartbeat", lambda **_kwargs: {})
+
+    def touch_metadata(_job_id: str, **kwargs: Any) -> bool:
+        dispatch_writes.append(kwargs)
+        dispatch_state.update({key: value for key, value in kwargs.items() if key != "expected_job_snapshot"})
+        return True
+
+    monkeypatch.setattr(legacy, "_touch_job_dispatch_metadata", touch_metadata)
+    monkeypatch.setattr(legacy.pg, "transaction", lambda: nullcontext())
     monkeypatch.setattr(
-        legacy,
-        "dispatch_social_job",
-        lambda **_kwargs: {
-            "dispatched": True,
-            "call_id": "fc-123",
-            "function_name": "trr-backend-jobs.run_social_job",
+        legacy.pg,
+        "fetch_one",
+        lambda *_args, **_kwargs: {
+            "id": "current",
+            "metadata": {"dispatch": {"lease_expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat()}}
+            if reservation_case == "own_lease"
+            else {"dispatch": dict(dispatch_state)},
         },
     )
+    monkeypatch.setattr(legacy, "_comments_auth_fallback_claim_scope", capacity_scope)
+    monkeypatch.setattr(legacy, "_touch_modal_social_dispatcher_heartbeat", lambda **_kwargs: {})
+    monkeypatch.setattr(legacy, "dispatch_social_job", dispatch_provider)
 
     result = dispatch_runtime.dispatch_due_social_jobs(run_id="run-catalog", limit=1)
 
-    assert result["dispatched_job_ids"] == ["job-posts"]
-    assert dispatch_writes[-1]["remote_invocation_id"] == "fc-123"
-    assert dispatch_writes[-1]["remote_function_name"] == "trr-backend-jobs.run_social_job"
+    if reservation_case in {"capacity_busy", "own_lease"}:
+        assert not provider_calls
+        assert not dispatch_writes
+        assert result["dispatched_job_ids"] == []
+    elif reservation_case == "replaced_reservation":
+        assert provider_calls == ["dispatch"]
+        assert result["dispatched_job_ids"] == []
+        assert len(dispatch_writes) == 1
+        assert result["unbound_dispatch_results"][0]["call_id"] == "fc-123"
+        assert dispatch_state["dispatch_reservation_id"] == "successor-reservation"
+    elif reservation_case == "uncertain":
+        assert provider_calls == ["dispatch"]
+        assert result["dispatched_job_ids"] == []
+        assert dispatch_writes[-1]["lease_expires_at"] is not None
+    else:
+        assert result["dispatched_job_ids"] == ["job-posts"]
+        assert dispatch_writes[-1]["remote_invocation_id"] == "fc-123"
+        assert dispatch_writes[-1]["remote_function_name"] == "trr-backend-jobs.run_social_job"
 
 
 def test_reconcile_terminal_modal_running_jobs_keeps_receipt_absent_success_unverified(
@@ -503,8 +567,8 @@ def test_reconcile_terminal_modal_running_jobs_keeps_receipt_absent_success_unve
     monkeypatch.setattr(legacy.pg, "fetch_all", lambda *_args, **_kwargs: [dict(row)])
     monkeypatch.setattr(
         legacy,
-        "_refresh_remote_modal_invocation_state",
-        lambda job, **kwargs: refreshed.append({"job": job, **kwargs})
+        "inspect_modal_function_call",
+        lambda call_id, **kwargs: refreshed.append({"call_id": call_id, **kwargs})
         or {
             "function_call_id": "fc-success",
             "status": "completed",
@@ -516,19 +580,21 @@ def test_reconcile_terminal_modal_running_jobs_keeps_receipt_absent_success_unve
     )
     monkeypatch.setattr(
         legacy,
-        "_finish_job",
-        lambda job_id, **kwargs: finished.append({"job_id": job_id, **kwargs}),
+        "_transition_job_state",
+        lambda job_id, **kwargs: finished.append({"job_id": job_id, **kwargs}) or True,
     )
 
     result = dispatch_runtime.reconcile_terminal_modal_running_jobs(run_id="run-catalog", limit=10)
 
     assert result == []
-    assert refreshed and refreshed[0]["lease_expires_at"] is None
+    assert refreshed and refreshed[0]["call_id"] == "fc-success"
     assert finished == []
 
 
+@pytest.mark.parametrize("snapshot_current", [True, False])
 def test_reconcile_terminal_modal_running_jobs_requeues_unfinished_frontier_after_failed_call(
     monkeypatch: pytest.MonkeyPatch,
+    snapshot_current: bool,
 ) -> None:
     legacy = dispatch_runtime.legacy
     now = datetime(2026, 6, 12, 4, 20, tzinfo=UTC)
@@ -572,9 +638,12 @@ def test_reconcile_terminal_modal_running_jobs_requeues_unfinished_frontier_afte
     monkeypatch.setattr(legacy, "_scrape_jobs_features", lambda: {"has_queue_fields": True})
     monkeypatch.setattr(legacy, "_now_utc", lambda: now)
     monkeypatch.setattr(legacy.pg, "fetch_all", lambda *_args, **_kwargs: [dict(row)])
+    monkeypatch.setattr(legacy.pg, "transaction", lambda: nullcontext())
+    monkeypatch.setattr(legacy, "_finish_job_followups", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(legacy.pg, "fetch_one", lambda *_args, **_kwargs: row if snapshot_current else None)
     monkeypatch.setattr(
         legacy,
-        "_refresh_remote_modal_invocation_state",
+        "inspect_modal_function_call",
         lambda _job, **_kwargs: {
             "function_call_id": "fc-failed",
             "status": "failed",
@@ -609,12 +678,18 @@ def test_reconcile_terminal_modal_running_jobs_requeues_unfinished_frontier_afte
     )
     monkeypatch.setattr(
         legacy,
-        "_finish_job",
-        lambda job_id, **kwargs: finished.append({"job_id": job_id, **kwargs}),
+        "_transition_job_state",
+        lambda job_id, **kwargs: finished.append({"job_id": job_id, **kwargs}) or True,
     )
 
     result = dispatch_runtime.reconcile_terminal_modal_running_jobs(run_id="run-catalog", limit=10)
 
+    if not snapshot_current:
+        assert result == []
+        assert enqueued == released == finished == []
+        return
+    assert finished[0]["expected_status"] == "running"
+    assert finished[0]["expected_claim_token"] is None
     assert result[0]["id"] == "job-frontier"
     assert result[0]["status"] == "cancelled"
     assert result[0]["continuation_job_id"] == "job-continuation"
@@ -680,9 +755,12 @@ def test_reconcile_terminal_modal_running_jobs_defers_unfinished_frontier_during
     monkeypatch.setattr(legacy, "_scrape_jobs_features", lambda: {"has_queue_fields": True})
     monkeypatch.setattr(legacy, "_now_utc", lambda: now)
     monkeypatch.setattr(legacy.pg, "fetch_all", lambda *_args, **_kwargs: [dict(row)])
+    monkeypatch.setattr(legacy.pg, "transaction", lambda: nullcontext())
+    monkeypatch.setattr(legacy, "_finish_job_followups", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(legacy.pg, "fetch_one", lambda *_args, **_kwargs: row)
     monkeypatch.setattr(
         legacy,
-        "_refresh_remote_modal_invocation_state",
+        "inspect_modal_function_call",
         lambda _job, **_kwargs: {
             "function_call_id": "fc-failed",
             "status": "failed",
@@ -720,8 +798,8 @@ def test_reconcile_terminal_modal_running_jobs_defers_unfinished_frontier_during
     )
     monkeypatch.setattr(
         legacy,
-        "_finish_job",
-        lambda job_id, **kwargs: finished.append({"job_id": job_id, **kwargs}),
+        "_transition_job_state",
+        lambda job_id, **kwargs: finished.append({"job_id": job_id, **kwargs}) or True,
     )
 
     result = dispatch_runtime.reconcile_terminal_modal_running_jobs(run_id="run-catalog", limit=10)
@@ -816,7 +894,9 @@ def test_dispatch_runtime_uses_capacity_stage_and_job_config_cap(
             or 4
         ),
     )
-    monkeypatch.setattr(legacy, "_touch_job_dispatch_metadata", lambda job_id, **kwargs: None)
+    monkeypatch.setattr(legacy, "_touch_job_dispatch_metadata", lambda job_id, **kwargs: True)
+    monkeypatch.setattr(legacy.pg, "transaction", lambda: nullcontext())
+    monkeypatch.setattr(legacy.pg, "fetch_one", lambda *_args, **_kwargs: {"id": "current"})
     monkeypatch.setattr(legacy, "_touch_modal_social_dispatcher_heartbeat", lambda **kwargs: {})
 
     def fake_dispatch_social_job(
@@ -881,7 +961,9 @@ def test_dispatch_runtime_priority_comment_recovery_bypasses_comments_capacity(
     monkeypatch.setattr(legacy, "_modal_dispatch_effective_platform_cap", lambda *_args, **_kwargs: 8)
     monkeypatch.setattr(legacy, "_modal_comment_recovery_priority_override_slots", lambda: 1)
     monkeypatch.setattr(legacy, "_current_modal_priority_comment_recovery_running_count", lambda: 0)
-    monkeypatch.setattr(legacy, "_touch_job_dispatch_metadata", lambda job_id, **kwargs: None)
+    monkeypatch.setattr(legacy, "_touch_job_dispatch_metadata", lambda job_id, **kwargs: True)
+    monkeypatch.setattr(legacy.pg, "transaction", lambda: nullcontext())
+    monkeypatch.setattr(legacy.pg, "fetch_one", lambda *_args, **_kwargs: {"id": "current"})
     monkeypatch.setattr(legacy, "_touch_modal_social_dispatcher_heartbeat", lambda **kwargs: {})
 
     def fake_dispatch_social_job(
@@ -964,7 +1046,9 @@ def test_dispatch_runtime_uses_normal_function_when_priority_override_slot_busy(
     monkeypatch.setattr(legacy, "_modal_dispatch_effective_platform_cap", lambda *_args, **_kwargs: 8)
     monkeypatch.setattr(legacy, "_modal_comment_recovery_priority_override_slots", lambda: 1)
     monkeypatch.setattr(legacy, "_current_modal_priority_comment_recovery_running_count", lambda: 1)
-    monkeypatch.setattr(legacy, "_touch_job_dispatch_metadata", lambda job_id, **kwargs: None)
+    monkeypatch.setattr(legacy, "_touch_job_dispatch_metadata", lambda job_id, **kwargs: True)
+    monkeypatch.setattr(legacy.pg, "transaction", lambda: nullcontext())
+    monkeypatch.setattr(legacy.pg, "fetch_one", lambda *_args, **_kwargs: {"id": "current"})
     monkeypatch.setattr(legacy, "_touch_modal_social_dispatcher_heartbeat", lambda **kwargs: {})
 
     def fake_dispatch_social_job(
@@ -1046,8 +1130,10 @@ def test_dispatch_runtime_clears_stale_pending_modal_capacity_before_rerun(
     monkeypatch.setattr(
         legacy,
         "_touch_job_dispatch_metadata",
-        lambda job_id, **kwargs: touched.append({"job_id": job_id, **kwargs}),
+        lambda job_id, **kwargs: touched.append({"job_id": job_id, **kwargs}) or True,
     )
+    monkeypatch.setattr(legacy.pg, "transaction", lambda: nullcontext())
+    monkeypatch.setattr(legacy.pg, "fetch_one", lambda *_args, **_kwargs: {"id": "current"})
     monkeypatch.setattr(legacy, "_touch_modal_social_dispatcher_heartbeat", lambda **kwargs: {})
     monkeypatch.setattr(
         legacy,
@@ -1162,7 +1248,9 @@ def _setup_public_comments_cap_dispatch(
         "_modal_dispatch_effective_platform_cap",
         lambda stage, platform, *, active_account_count=1, job_config=None: 1000,
     )
-    monkeypatch.setattr(legacy, "_touch_job_dispatch_metadata", lambda job_id, **kwargs: None)
+    monkeypatch.setattr(legacy, "_touch_job_dispatch_metadata", lambda job_id, **kwargs: True)
+    monkeypatch.setattr(legacy.pg, "transaction", lambda: nullcontext())
+    monkeypatch.setattr(legacy.pg, "fetch_one", lambda *_args, **_kwargs: {"id": "current"})
     monkeypatch.setattr(legacy, "_touch_modal_social_dispatcher_heartbeat", lambda **kwargs: {})
     monkeypatch.setattr(
         legacy,

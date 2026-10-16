@@ -88,7 +88,7 @@ def update_media_upload_session(upload_session_id: str, payload: dict[str, Any])
 
     assignments: list[str] = []
     params: list[Any] = []
-    for key, value in payload.items():
+    for key, value in validate_mapping_keys(payload).items():
         assignments.append(f"{key} = %s")
         params.append(_json(_normalize(value)))
     params.append(upload_session_id)
@@ -1108,7 +1108,7 @@ def update_run(run_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         return get_run(run_id)
     assignments: list[str] = []
     params: list[Any] = []
-    for key, value in payload.items():
+    for key, value in validate_mapping_keys(payload).items():
         assignments.append(f"{key} = %s")
         params.append(_json(_normalize(value)))
     params.append(run_id)

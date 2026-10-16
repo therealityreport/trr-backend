@@ -7854,7 +7854,11 @@ def test_get_queue_status_endpoint_returns_500_on_unhandled_error(
         )
 
     assert response.status_code == 500
-    assert response.json()["detail"] == "queue status failed"
+    assert response.json()["detail"] == {
+        "code": "INTERNAL_ERROR",
+        "message": "Internal server error.",
+    }
+    assert "queue status failed" not in response.text
 
 
 def test_get_run_progress_endpoint_returns_payload(

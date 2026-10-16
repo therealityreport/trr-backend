@@ -8,6 +8,6 @@ opencv-python==4.11.0.86
 opencv-python-headless==4.11.0.86
 onnxruntime==1.18.1
 insightface==0.7.3
-torch==2.5.1+cpu
-torchvision==0.20.1+cpu
+torch==2.13.0+cpu
+torchvision==0.28.0+cpu
 ultralytics==8.3.39

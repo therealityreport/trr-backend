@@ -605,9 +605,10 @@ def test_social_comments_concurrency_limit_reads_comments_env(monkeypatch: pytes
 def test_execute_social_job_closes_db_pool_after_success(monkeypatch: pytest.MonkeyPatch) -> None:
     from trr_backend.db import pg
     from trr_backend.socials import control_plane
+    from trr_backend.socials import social_season_analytics_impl as social_provider
     from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
 
-    register_social_control_plane_providers()
+    register_social_control_plane_providers(social_provider.__dict__)
 
     close_calls: list[str] = []
 
@@ -629,9 +630,10 @@ def test_execute_social_job_closes_db_pool_after_success(monkeypatch: pytest.Mon
 def test_execute_social_job_closes_db_pool_after_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     from trr_backend.db import pg
     from trr_backend.socials import control_plane
+    from trr_backend.socials import social_season_analytics_impl as social_provider
     from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
 
-    register_social_control_plane_providers()
+    register_social_control_plane_providers(social_provider.__dict__)
 
     close_calls: list[str] = []
 
@@ -703,9 +705,10 @@ def test_sweep_social_dispatch_queue_closes_db_pool_after_success(monkeypatch: p
 
     close_calls: list[str] = []
     from trr_backend.socials import control_plane
+    from trr_backend.socials import social_season_analytics_impl as social_provider
     from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
 
-    register_social_control_plane_providers()
+    register_social_control_plane_providers(social_provider.__dict__)
     monkeypatch.setattr(
         control_plane,
         "recover_and_dispatch_due_social_jobs",
@@ -739,9 +742,10 @@ def test_sweep_social_dispatch_queue_invokes_pending_launch_recovery(monkeypatch
 
     recovery_calls: list[str] = []
     from trr_backend.socials import control_plane
+    from trr_backend.socials import social_season_analytics_impl as social_provider
     from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
 
-    register_social_control_plane_providers()
+    register_social_control_plane_providers(social_provider.__dict__)
     monkeypatch.setattr(
         control_plane,
         "recover_and_dispatch_due_social_jobs",
@@ -771,9 +775,10 @@ def test_sweep_social_dispatch_queue_pending_launch_recovery_error_does_not_fail
 ) -> None:
     from trr_backend.db import pg
     from trr_backend.socials import control_plane
+    from trr_backend.socials import social_season_analytics_impl as social_provider
     from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
 
-    register_social_control_plane_providers()
+    register_social_control_plane_providers(social_provider.__dict__)
     monkeypatch.setattr(
         control_plane,
         "recover_and_dispatch_due_social_jobs",
@@ -1256,9 +1261,10 @@ def test_heartbeat_remote_executors_reports_social_auth_capabilities(
 
     from trr_backend import modal_dispatch
     from trr_backend.socials import control_plane
+    from trr_backend.socials import social_season_analytics_impl as social_provider
     from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
 
-    register_social_control_plane_providers()
+    register_social_control_plane_providers(social_provider.__dict__)
     monkeypatch.setattr(modal_dispatch, "_record_dispatcher_heartbeat", _fake_record_dispatcher_heartbeat)
     monkeypatch.setattr(control_plane, "is_queue_enabled", lambda: True)
     monkeypatch.setattr(

@@ -453,7 +453,8 @@ def extract_socialblade_cookies_from_chrome_profile(
     so opt-in callers can still persist/push a structurally-valid cookie set.
     """
     try:
-        from pycookiecheat import chrome_cookies
+        # Optional operator-only dependency, absent from the server runtime.
+        from pycookiecheat import chrome_cookies  # pyright: ignore[reportMissingImports]
     except ImportError as exc:  # pragma: no cover - dependency failure is environment-specific
         raise RuntimeError("SocialBlade Chrome cookie extraction requires pycookiecheat") from exc
 

@@ -2,20 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import io
-import ipaddress
 import json
 import logging
 import mimetypes
 import os
 import re
 import shutil
-import socket
 import subprocess
 import tempfile
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from functools import lru_cache
 from typing import Any, cast
 from urllib.parse import quote, unquote, urlparse
 
@@ -25,6 +22,12 @@ from botocore.client import Config
 from botocore.exceptions import ClientError, ProfileNotFound
 
 from trr_backend.object_storage import load_object_storage_config
+from trr_backend.socials.media_url_safety import (
+    MediaUrlSafetyPolicy,
+    UnsafeMediaUrlError,
+    safe_requests_get,
+    validate_media_url,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -44,7 +47,7 @@ _MEDIA_MIRROR_CHUNK_SIZE_BYTES = 64 * 1024
 _IMAGE_MEDIA_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".avif", ".bmp", ".tif", ".tiff"}
 _VIDEO_MEDIA_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mpeg", ".mpg", ".ts", ".m3u8"}
 _OCTET_STREAM_CONTENT_TYPES = {"application/octet-stream", "binary/octet-stream"}
-_LOCAL_HOSTNAMES = {"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"}
+_PUBLIC_MEDIA_POLICY = MediaUrlSafetyPolicy((), allow_test_hosts=False, allow_any_public_host=True)
 
 
 def _is_image_content_type(value: str | None) -> bool:
@@ -129,47 +132,26 @@ def _looks_like_html_or_json_payload(data: bytes) -> bool:
     return False
 
 
-def _is_public_ip_address(value: str) -> bool:
-    try:
-        address = ipaddress.ip_address(value.split("%", 1)[0])
-    except ValueError:
-        return False
-    return address.is_global
-
-
-@lru_cache(maxsize=2048)
-def _resolve_host_addresses(hostname: str, port: int) -> tuple[str, ...]:
-    infos = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
-    addresses = sorted({str(info[4][0]).split("%", 1)[0] for info in infos if info and info[4]})
-    return tuple(addresses)
-
-
-def _public_media_url_error(value: str | None) -> str | None:
-    source_url = str(value or "").strip()
-    parsed = urlparse(source_url)
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+def _media_url_error_reason(exc: UnsafeMediaUrlError) -> str:
+    reason = str(exc)
+    if "dns_resolution" in reason:
+        return "unresolvable_source_url"
+    if "blocked_ip" in reason or reason == "media_url_host_not_allowed":
+        return "private_network_url"
+    if reason in {"media_url_invalid", "media_url_empty", "media_url_invalid_scheme", "media_url_missing_host"}:
         return "invalid_source_url"
+    return reason
 
-    hostname = parsed.hostname.strip().strip("[]").lower()
-    if not hostname or hostname in _LOCAL_HOSTNAMES or hostname.endswith(".localhost") or hostname.endswith(".local"):
-        return "private_network_url"
+
+def _public_media_url_error(value: str | None, *, resolve_dns: bool = True) -> str | None:
+    from dataclasses import replace
 
     try:
-        address = ipaddress.ip_address(hostname)
-    except ValueError:
-        address = None
-    if address is not None:
-        return None if address.is_global else "private_network_url"
-
-    port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
-    try:
-        addresses = _resolve_host_addresses(hostname, port)
-    except (OSError, socket.gaierror):
-        return "unresolvable_source_url"
-    if not addresses:
-        return "unresolvable_source_url"
-    if any(not _is_public_ip_address(address) for address in addresses):
-        return "private_network_url"
+        validate_media_url(str(value or ""), policy=replace(_PUBLIC_MEDIA_POLICY, resolve_dns=resolve_dns))
+    except UnsafeMediaUrlError as exc:
+        return _media_url_error_reason(exc)
+    except requests.exceptions.Timeout:
+        return "request_timeout"
     return None
 
 
@@ -799,7 +781,7 @@ def download_image(
     max_bytes: int = 25 * 1024 * 1024,
 ) -> tuple[bytes, str | None]:
     source_url = str(url or "").strip()
-    url_error = _public_media_url_error(source_url)
+    url_error = _public_media_url_error(source_url, resolve_dns=False)
     if url_error:
         raise RuntimeError(url_error)
     try:
@@ -812,7 +794,20 @@ def download_image(
     merged = {**_DEFAULT_HEADERS, **(headers or {})}
     if source in {"fandom", "fandom-gallery"}:
         merged["referer"] = referer or "https://real-housewives.fandom.com/"
-    resp = requests.get(source_url, headers=merged, timeout=(5, 30), stream=True)
+    try:
+        resp = safe_requests_get(
+            requests,
+            source_url,
+            policy=_PUBLIC_MEDIA_POLICY,
+            headers=merged,
+            timeout=(5, 30),
+            stream=True,
+            max_bytes=max_bytes_limit,
+            total_timeout=60,
+            body_timeout=45,
+        )
+    except UnsafeMediaUrlError as exc:
+        raise RuntimeError(_media_url_error_reason(exc)) from None
     try:
         resp.raise_for_status()
         content_type = resp.headers.get("Content-Type")
@@ -821,6 +816,10 @@ def download_image(
         if _response_content_length_exceeds(resp.headers, max_bytes_limit):
             raise RuntimeError("asset_too_large")
         data, _size_bytes, read_error = _read_response_bytes_with_cap(resp, max_bytes=max_bytes_limit)
+    except UnsafeMediaUrlError as exc:
+        raise RuntimeError(_media_url_error_reason(exc)) from None
+    except requests.exceptions.HTTPError:
+        raise RuntimeError(f"http_{resp.status_code}") from None
     finally:
         close = getattr(resp, "close", None)
         if callable(close):
@@ -1237,7 +1236,7 @@ def mirror_url_to_s3(
             status="skipped",
             error="invalid_source_url",
         )
-    url_error = _public_media_url_error(source_url)
+    url_error = _public_media_url_error(source_url, resolve_dns=False)
     if url_error:
         return MirrorResult(
             source_url=source_url,
@@ -1277,7 +1276,7 @@ def mirror_url_to_s3(
             content_type=None,
             size_bytes=None,
             status="failed",
-            error=f"s3_setup_failed:{exc}",
+            error=f"s3_setup_failed:{exc.__class__.__name__}",
         )
 
     data_parts: list[bytes] = []
@@ -1285,8 +1284,13 @@ def mirror_url_to_s3(
     digest = hashlib.sha256()
     content_type: str | None = None
     try:
-        with requests.get(
+        with safe_requests_get(
+            requests,
             source_url,
+            policy=_PUBLIC_MEDIA_POLICY,
+            max_bytes=max_bytes_limit,
+            total_timeout=120,
+            body_timeout=90,
             headers=_MEDIA_MIRROR_HEADERS,
             timeout=(10, 60),
             stream=True,
@@ -1332,6 +1336,17 @@ def mirror_url_to_s3(
                     )
                 digest.update(chunk)
                 data_parts.append(chunk)
+    except UnsafeMediaUrlError as exc:
+        return MirrorResult(
+            source_url=source_url,
+            hosted_url=None,
+            hosted_key=None,
+            sha256=None,
+            content_type=content_type,
+            size_bytes=size_bytes or None,
+            status="failed",
+            error=_media_url_error_reason(exc),
+        )
     except requests.exceptions.Timeout:
         return MirrorResult(
             source_url=source_url,
@@ -1362,10 +1377,7 @@ def mirror_url_to_s3(
         if status_code in (401, 403, 404) and tweet_url and is_twitter_video_url(source_url):
             fresh_url = _resolve_twitter_video_via_ytdlp(tweet_url)
             if fresh_url and fresh_url != source_url:
-                _log.info(
-                    "Retrying mirror with fresh yt-dlp URL for %s",
-                    source_url,
-                )
+                _log.info("Retrying mirror with fresh yt-dlp URL")
                 result = mirror_url_to_s3(
                     fresh_url,
                     s3_client=s3,

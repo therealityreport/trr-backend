@@ -20,11 +20,11 @@ firebase-admin>=6.5.0
 
 # Postgres/core schema helpers (used by sync + schema docs)
 psycopg2-binary>=2.9.9
-PyJWT>=2.8,<3
+PyJWT>=2.15.0,<3
 
 # Media mirroring
 boto3>=1.35.0
-Pillow>=10.0.0
+Pillow>=12.3.0
 cairosvg>=2.7.1
 reportlab>=4.2.0
 
@@ -49,9 +49,6 @@ httpx>=0.28.0
 playwright>=1.61.0
 jsonschema==4.26.0
 
-# Local Chrome cookie extraction for operator-run auth repair helpers.
-pycookiecheat>=0.8.0,<0.9
-
 # Repository map generation
 tree-sitter>=0.21.0
 tree-sitter-python>=0.21.0
@@ -61,3 +58,14 @@ sentry-sdk[fastapi]>=2.0.0
 
 # Modal ops MCP server (local stdio server powering the modal-ops MCP / Codex modal plugin)
 mcp>=1.2.0
+
+# Security minimums shared by runtime lanes. Keep operator cookie extraction
+# separate: pycookiecheat requires cryptography 43 and must not downgrade these.
+aiohttp>=3.14.3
+anyio>=4.14.2
+h2>=4.4.1
+oauthlib>=4.0.0
+pyasn1>=0.6.4
+soupsieve>=2.9
+urllib3>=2.8.0
+cryptography>=50.0.0

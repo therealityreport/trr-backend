@@ -66,6 +66,7 @@ def test_resolve_tiktok_media_prefers_ytdlp_when_available(monkeypatch: pytest.M
 
 
 def test_resolve_tiktok_media_skips_ytdlp_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(media_resolver, "safe_requests_get", lambda client, url, **kwargs: client.get(url, **kwargs))
     monkeypatch.setattr(
         media_resolver.shutil,
         "which",
@@ -120,6 +121,7 @@ def test_resolve_tiktok_media_skips_ytdlp_when_disabled(monkeypatch: pytest.Monk
 
 
 def test_resolve_tiktok_media_rejects_unsafe_canonical_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(media_resolver, "safe_requests_get", lambda client, url, **kwargs: client.get(url, **kwargs))
     monkeypatch.setattr(media_resolver.shutil, "which", lambda _name: None)
 
     result = media_resolver.resolve_tiktok_media(
@@ -133,6 +135,7 @@ def test_resolve_tiktok_media_rejects_unsafe_canonical_url(monkeypatch: pytest.M
 
 
 def test_resolve_tiktok_media_falls_back_to_watch_page_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(media_resolver, "safe_requests_get", lambda client, url, **kwargs: client.get(url, **kwargs))
     monkeypatch.setattr(media_resolver.shutil, "which", lambda _name: None)
     payload = {
         "__DEFAULT_SCOPE__": {
@@ -186,6 +189,7 @@ def test_resolve_tiktok_media_falls_back_to_watch_page_json(monkeypatch: pytest.
 
 
 def test_resolve_tiktok_media_falls_back_to_unofficial_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(media_resolver, "safe_requests_get", lambda client, url, **kwargs: client.get(url, **kwargs))
     monkeypatch.setattr(media_resolver.shutil, "which", lambda _name: None)
 
     class _FakeApiResponse:
@@ -222,6 +226,7 @@ def test_resolve_tiktok_media_falls_back_to_unofficial_api(monkeypatch: pytest.M
 def test_resolve_tiktok_media_uses_unofficial_when_watch_url_not_downloadable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(media_resolver, "safe_requests_get", lambda client, url, **kwargs: client.get(url, **kwargs))
     monkeypatch.setattr(media_resolver.shutil, "which", lambda _name: None)
     payload = {
         "__DEFAULT_SCOPE__": {
@@ -299,6 +304,7 @@ def test_resolve_tiktok_media_uses_unofficial_when_watch_url_not_downloadable(
 def test_resolve_tiktok_media_accepts_no_suffix_video_probe_and_records_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(media_resolver, "safe_requests_get", lambda client, url, **kwargs: client.get(url, **kwargs))
     monkeypatch.setattr(media_resolver.shutil, "which", lambda _name: None)
     stream_url = "https://v16-webapp-prime.tiktokcdn-us.com/tos-useast5-pve/no-extension-token"
     monkeypatch.setattr(
@@ -349,6 +355,7 @@ def test_resolve_tiktok_media_accepts_no_suffix_video_probe_and_records_evidence
 def test_resolve_tiktok_media_rejects_html_probe_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(media_resolver, "safe_requests_get", lambda client, url, **kwargs: client.get(url, **kwargs))
     monkeypatch.setattr(media_resolver.shutil, "which", lambda _name: None)
     stream_url = "https://v16-webapp-prime.tiktokcdn-us.com/tos-useast5-pve/no-extension-token"
     monkeypatch.setattr(

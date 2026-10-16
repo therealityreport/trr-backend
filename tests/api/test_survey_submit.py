@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, cast
 from uuid import uuid4
+
+from psycopg2.extensions import adapt
 
 from api.routers import surveys
 
@@ -85,14 +88,13 @@ def test_update_aggregates_batches_rows(monkeypatch):
     )
 
     assert "INSERT INTO surveys.aggregates" in str(captured["query"])
-    assert captured["rows"] == [
-        (
-            str(survey_id),
-            "question-1",
-            {
-                "total_responses": 4,
-                "distribution": {"yes": 3, "no": 1},
-                "percentages": {"yes": 75.0, "no": 25.0},
-            },
-        )
-    ]
+    rows = cast("list[tuple[object, ...]]", captured["rows"])
+    assert len(rows) == 1
+    assert rows[0][:2] == (str(survey_id), "question-1")
+    # Exercise the actual driver's JSON wire adaptation, which a bare dict lacks.
+    aggregate_json = adapt(rows[0][2]).getquoted().decode()[1:-1]
+    assert json.loads(aggregate_json) == {
+        "total_responses": 4,
+        "distribution": {"yes": 3, "no": 1},
+        "percentages": {"yes": 75.0, "no": 25.0},
+    }

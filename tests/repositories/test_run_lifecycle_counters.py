@@ -123,7 +123,7 @@ def test_increment_run_counters_on_job_finish_terminal_transitions(
     }
 
 
-def test_finish_job_preserves_primary_update_when_counter_sync_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_finish_job_rolls_back_primary_update_when_counter_sync_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     counter_calls: list[dict[str, Any]] = []
     events: list[str] = []
     conn = object()
@@ -166,7 +166,14 @@ def test_finish_job_preserves_primary_update_when_counter_sync_fails(monkeypatch
     monkeypatch.setattr(social_impl, "_finalize_run_status", lambda *_args, **_kwargs: {"status": "deferred"})
     monkeypatch.setattr(social_impl, "_invalidate_queue_status_cache", lambda: None)
 
-    social_impl._finish_job("job-1", status="failed", items_found=5)
+    with pytest.raises(pg.DatabaseServiceUnavailableError, match="counter sync unavailable"):
+        social_impl._finish_job(
+            "job-1",
+            status="failed",
+            items_found=5,
+            expected_worker_id="worker-1",
+            expected_claim_token="claim-a",
+        )
 
     assert counter_calls == [
         {
@@ -182,9 +189,6 @@ def test_finish_job_preserves_primary_update_when_counter_sync_fails(monkeypatch
     assert events == [
         "transaction_started",
         "job_update_returned",
-        "SAVEPOINT finish_job_counter_sync",
         "counter_failed",
-        "ROLLBACK TO SAVEPOINT finish_job_counter_sync",
-        "RELEASE SAVEPOINT finish_job_counter_sync",
-        "transaction_committed",
+        "transaction_rolled_back",
     ]

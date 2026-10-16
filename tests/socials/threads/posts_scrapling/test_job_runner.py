@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
@@ -18,6 +19,7 @@ class _FakeLifecycle:
         self.finish_calls: list[dict[str, Any]] = []
         self.finalize_calls: list[str] = []
         self.finalize_error: Exception | None = None
+        self.finish_accepted = True
 
     def new_job_progress_state(self) -> dict[str, Any]:
         return {}
@@ -39,8 +41,9 @@ class _FakeLifecycle:
     def retry_backoff_seconds(self, _attempt: int) -> int:
         return 30
 
-    def finish_job(self, job_id: str, **kwargs: Any) -> None:
+    def finish_job(self, job_id: str, **kwargs: Any) -> bool:
         self.finish_calls.append({"job_id": job_id, **kwargs})
+        return self.finish_accepted
 
     def finalize_run_status(self, run_id: str) -> dict[str, Any]:
         self.finalize_calls.append(run_id)
@@ -55,6 +58,7 @@ def fake_lifecycle(monkeypatch: pytest.MonkeyPatch) -> _FakeLifecycle:
 
     fake = _FakeLifecycle()
     monkeypatch.setattr(jr, "lifecycle", fake)
+    monkeypatch.setattr(fake, "job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True), raising=False)
     return fake
 
 
@@ -298,10 +302,13 @@ def test_threads_job_runner_fails_safely_when_scrapling_rollout_disabled(
     assert metadata["runtime_metadata"]["error"]["threads_posts_scrapling_enabled"] is False
 
 
+@pytest.mark.parametrize("finish_accepted", [True, False])
 def test_threads_job_runner_uses_final_fetcher_metadata_not_warmup_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     fake_lifecycle: _FakeLifecycle,
+    finish_accepted: bool,
 ) -> None:
+    fake_lifecycle.finish_accepted = finish_accepted
     from trr_backend.socials.threads.posts_scrapling import job_runner as jr
 
     class _FakeFetcher:
@@ -369,7 +376,8 @@ def test_threads_job_runner_uses_final_fetcher_metadata_not_warmup_snapshot(
         "id": "00000000-0000-0000-0000-000000000101",
         "run_id": "00000000-0000-0000-0000-000000000201",
         "platform": "threads",
-        "config": {"stage": "threads_posts_scrapling", "account": "bravotv"},
+        "worker_id": "acquired-worker",
+        "config": {"stage": "threads_posts_scrapling", "account": "bravotv", "claim_token": "acquired-token"},
         "metadata": {},
         "attempt_count": 1,
         "max_attempts": 1,
@@ -381,6 +389,13 @@ def test_threads_job_runner_uses_final_fetcher_metadata_not_warmup_snapshot(
     assert metadata["fetch_counters"]["request_count"] == 4
     assert metadata["fetcher_runtime"]["request_count"] == 4
     assert metadata["source_runtime"]["request_count"] == 4
+
+    finish = fake_lifecycle.finish_calls[-1]
+    assert finish["expected_worker_id"] == "acquired-worker"
+    assert finish["expected_claim_token"] == "acquired-token"
+    assert fake_lifecycle.finalize_calls == ([job["run_id"]] if finish_accepted else [])
+    assert all(call["claim_token"] == "acquired-token" for call in fake_lifecycle.progress_calls)
+    assert all(call["worker_id"] == "acquired-worker" for call in fake_lifecycle.progress_calls)
 
 
 def test_threads_job_runner_marks_cancelled_job(

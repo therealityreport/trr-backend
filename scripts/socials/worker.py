@@ -16,7 +16,7 @@ import sys
 import threading
 import time
 from datetime import UTC, datetime
-from typing import cast
+from typing import Any, cast
 
 from trr_backend.db import pg
 from trr_backend.repositories.social_sync_orchestrator import tick_sync_orchestrator
@@ -410,6 +410,7 @@ def _execute_run_with_caps(
     run_started_at = time.monotonic()
     processed = 0
     claimed_jobs: list[dict[str, object]] = []
+    cancellation_accepted = False
 
     try:
         while True:
@@ -455,10 +456,13 @@ def _execute_run_with_caps(
                         break
             if not job:
                 break
+            job = cast(dict[str, Any], job)
             run_state = pg.fetch_one("select status from social.scrape_runs where id = %s", [run_id]) or {}
             if str(run_state.get("status") or "").strip().lower() == "cancelled":
-                social_repo._finish_job(
+                cancellation_accepted = social_repo._finish_job(
                     str(job.get("id") or ""),
+                    expected_worker_id=job.get("worker_id"),
+                    expected_claim_token=(job.get("config") or {}).get("claim_token"),
                     status="cancelled",
                     items_found=0,
                     metadata={"stage": "cancelled"},
@@ -467,7 +471,8 @@ def _execute_run_with_caps(
             process_claimed_job(job, worker_id=worker_id)
             processed += 1
     finally:
-        social_repo._finalize_run_status(run_id)
+        if cancellation_accepted:
+            social_repo._finalize_run_status(run_id)
 
     return _fetch_run_result(run_id)
 

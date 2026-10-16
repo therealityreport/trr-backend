@@ -335,7 +335,7 @@ def _to_social_read_http_exception(error: Exception) -> HTTPException:
         return _value_error_to_bad_request(error)
     if is_database_service_unavailable_error(error):
         return HTTPException(status_code=503, detail=database_service_unavailable_detail(error))
-    return HTTPException(status_code=500, detail=str(error) or "Internal server error")
+    return _internal_error_response(error)
 
 
 def _worker_health_detail(worker_health: Any) -> Any:

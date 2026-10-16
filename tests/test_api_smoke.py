@@ -15,9 +15,11 @@ from fastapi.testclient import TestClient
 
 from api import deps
 from api import main as api_main
+from api.auth import require_user
 from api.main import app
 from api.routers import shows as shows_router
 from api.routers import surveys as surveys_router
+from trr_backend.db.session import DbError, DbResponse
 
 
 # Mock Supabase client for testing without database connection
@@ -60,7 +62,9 @@ def mock_supabase():
     mock_client.schema.return_value.table.return_value.select.return_value.eq.return_value.order.return_value.execute.return_value = empty_list_response  # noqa: E501
 
     # RPC calls - simulate survey not found
-    mock_client.schema.return_value.rpc.return_value.execute.side_effect = Exception("Survey not found")
+    mock_client.schema.return_value.rpc.return_value.execute_scalar.return_value = DbResponse(
+        data=None, error=DbError(message="Survey not found", code="P0001")
+    )
 
     return mock_client
 
@@ -246,6 +250,7 @@ class TestSurveysEndpoints:
 
     def test_submit_survey_returns_404_when_survey_not_found(self, client: TestClient):
         """Submit survey returns 404 for non-existent survey."""
+        app.dependency_overrides[require_user] = lambda: {"id": "00000000-0000-0000-0000-000000000001"}
         response = client.post(
             "/api/v1/surveys/00000000-0000-0000-0000-000000000000/submit",
             json={"answers": []},
@@ -254,6 +259,7 @@ class TestSurveysEndpoints:
 
     def test_submit_survey_validates_payload(self, client: TestClient):
         """Submit survey endpoint validates payload structure."""
+        app.dependency_overrides[require_user] = lambda: {"id": "00000000-0000-0000-0000-000000000001"}
         # Missing answers field should return 422
         response = client.post(
             "/api/v1/surveys/00000000-0000-0000-0000-000000000000/submit",

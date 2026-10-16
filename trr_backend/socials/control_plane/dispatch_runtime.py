@@ -3,8 +3,12 @@
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Mapping
+from contextlib import nullcontext
 from datetime import timedelta
 from typing import Any
+from uuid import uuid4
 
 from trr_backend.socials.control_plane.run_lifecycle import _legacy_module as _published
 from trr_backend.socials.control_plane.run_lifecycle import legacy as _legacy_proxy
@@ -14,6 +18,8 @@ from trr_backend.socials.provider_registry import (
     publish_module_slot,
     register_legacy_patchable_namespace,
 )
+
+logger = logging.getLogger(__name__)
 
 legacy: Any = _legacy_proxy
 del _legacy_proxy
@@ -34,6 +40,57 @@ def _call_extracted_override(name: str, local_impl: Any, /, *args: Any, **kwargs
     if callable(candidate) and not getattr(candidate, "__trr_delegates_to_control_plane__", False):
         return candidate(*args, **kwargs)
     return local_impl(*args, **kwargs)
+
+
+def _touch_dispatch_metadata_for_snapshot(
+    job: dict[str, Any],
+    *,
+    expected_reservation: tuple[int, Any, str] | None = None,
+    expected_dispatch_snapshot: Mapping[str, Any] | None = None,
+    **updates: Any,
+) -> bool:
+    """Reject dispatch bookkeeping from a superseded administrative snapshot."""
+    with legacy.pg.transaction():
+        current = legacy.pg.fetch_one(
+            """select id, metadata from social.scrape_jobs
+            where id = %s::uuid and status = %s
+              and (config->>'claim_token') is not distinct from %s::text
+              and nullif(metadata->'dispatch'->>'remote_invocation_id', '') is not distinct from %s::text
+            for update""",
+            [
+                job["id"],
+                job.get("status"),
+                legacy._metadata_dict(job.get("config")).get("claim_token"),
+                str(legacy._job_dispatch_metadata(job).get("remote_invocation_id") or "").strip() or None,
+            ],
+        )
+        if not current:
+            return False
+        if (
+            expected_dispatch_snapshot is not None
+            and legacy._job_dispatch_metadata(current) != expected_dispatch_snapshot
+        ):
+            return False
+        if expected_reservation is not None:
+            current_dispatch = legacy._job_dispatch_metadata(current)
+            attempt, expiry, reservation_id = expected_reservation
+            if (
+                legacy._dispatch_metadata_attempt_count(current_dispatch) != attempt
+                or legacy._coerce_dt(current_dispatch.get("lease_expires_at")) != expiry
+                or current_dispatch.get("dispatch_reservation_id") != reservation_id
+            ):
+                return False
+        if not legacy._touch_job_dispatch_metadata(str(job["id"]), expected_job_snapshot=job, **updates):
+            return False
+        # Retain this accepted write's exact normalized payload while its row
+        # lock is still held; a later response must never reload a successor.
+        written = legacy.pg.fetch_one("select metadata from social.scrape_jobs where id = %s::uuid", [job["id"]])
+        retained_metadata = legacy._metadata_dict((written or {}).get("metadata"))
+    job["metadata"] = retained_metadata or {
+        **legacy._metadata_dict(job.get("metadata")),
+        "dispatch": {**legacy._job_dispatch_metadata(job), **updates},
+    }
+    return True
 
 
 def _instagram_public_comments_worker_cap(run_id: str, cache: dict[str, int | None]) -> int | None:
@@ -99,112 +156,150 @@ def _reconcile_terminal_frontier_modal_call(
     worker_id = str(row.get("worker_id") or "").strip()
     if lease_owner and lease_owner not in {job_id, worker_id}:
         return None
-    enqueue_result = legacy._coerce_shared_posts_enqueue_result(
-        legacy._enqueue_shared_posts_job(
+    with legacy.pg.transaction():
+        current = legacy.pg.fetch_one(
+            """select id from social.scrape_jobs
+            where id = %s::uuid and status = %s
+              and (config->>'claim_token') is not distinct from %s::text
+              and coalesce(metadata->'dispatch', '{}'::jsonb) = %s::jsonb
+            for update""",
+            [
+                job_id,
+                row.get("status"),
+                config.get("claim_token"),
+                legacy._json_dumps(legacy._job_dispatch_metadata(row)),
+            ],
+        )
+        if not current:
+            return None
+        enqueue_result = legacy._coerce_shared_posts_enqueue_result(
+            legacy._enqueue_shared_posts_job(
+                run_id=run_id,
+                platform=platform,
+                source_scope=str(config.get("source_scope") or row.get("source_scope") or "network"),
+                account_handle=account_handle,
+                shared_account_source_id=config.get("shared_account_source_id"),
+                pipeline_ingest_mode=str(
+                    config.get("pipeline_ingest_mode") or legacy.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE
+                ),
+                runner_count=legacy._normalize_non_negative_int(config.get("runner_count"))
+                or legacy.CATALOG_BACKFILL_FULL_HISTORY_RUNNER_COUNT,
+                expected_total_posts=legacy._normalize_non_negative_int(frontier.get("total_posts"))
+                or legacy._normalize_non_negative_int(config.get("expected_total_posts"))
+                or None,
+                runner_strategy=legacy.CATALOG_FULL_HISTORY_FRONTIER_STRATEGY,
+                partition_strategy=legacy.CATALOG_FULL_HISTORY_FRONTIER_STRATEGY,
+                required_worker_lane=str(config.get("required_worker_lane") or "").strip().lower() or None,
+                required_execution_backend=str(config.get("required_execution_backend") or "").strip().lower() or None,
+                allow_local_dev_inline_bypass=bool(config.get("allow_local_dev_inline_bypass")),
+                frontier_auth_allowed=config.get("frontier_auth_allowed"),
+                frontier_auth_reason=str(config.get("frontier_auth_reason") or "").strip().lower() or None,
+                frontier_transport=(
+                    str(frontier.get("last_transport") or config.get("frontier_transport") or "").strip().lower()
+                    or None
+                ),
+                transport_preference=str(config.get("transport_preference") or "").strip().lower() or None,
+                allow_public_transport_fallback=config.get("allow_public_transport_fallback"),
+                selected_tasks=config.get("selected_tasks"),
+                effective_selected_tasks=config.get("effective_selected_tasks"),
+                details_refresh_skip_detail_fetch=config.get("details_refresh_skip_detail_fetch"),
+                details_refresh_force_detail_fetch=config.get("details_refresh_force_detail_fetch"),
+                details_refresh_worker_count=legacy._normalize_non_negative_int(
+                    config.get("details_refresh_worker_count")
+                )
+                or None,
+                comments_worker_count=legacy._normalize_non_negative_int(config.get("comments_worker_count")) or None,
+                details_refresh_skip_media_followups=config.get("details_refresh_skip_media_followups"),
+                tiktok_comments_in_posts_stage=bool(config.get("tiktok_comments_in_posts_stage")),
+                tiktok_direct_comment_api_override=bool(config.get("tiktok_direct_comment_api_override")),
+                twitter_comments_in_posts_stage=bool(config.get("twitter_comments_in_posts_stage")),
+                initiated_by="terminal_modal_frontier_reconciliation",
+                priority=legacy._normalize_non_negative_int(row.get("priority")) or 101,
+            )
+        )
+        if enqueue_result.status == "failed":
+            release_status = "retrying"
+            old_job_status = "retrying"
+            error_code = "terminal_modal_frontier_requeue_failed"
+            next_available_at = legacy._now_utc() + timedelta(
+                seconds=max(5, legacy._modal_dispatch_retry_delay_seconds())
+            )
+        elif enqueue_result.status == "deferred_by_cooldown":
+            release_status = "retrying"
+            old_job_status = "retrying"
+            error_code = "terminal_modal_frontier_deferred_by_cooldown"
+            next_available_at = _terminal_frontier_continuation_next_available_at(enqueue_result.cooldown)
+        else:
+            release_status = "queued"
+            old_job_status = "cancelled"
+            error_code = "terminal_modal_frontier_requeued"
+            next_available_at = None
+        legacy._release_shared_account_run_frontier(
             run_id=run_id,
             platform=platform,
-            source_scope=str(config.get("source_scope") or row.get("source_scope") or "network"),
             account_handle=account_handle,
-            shared_account_source_id=config.get("shared_account_source_id"),
-            pipeline_ingest_mode=str(
-                config.get("pipeline_ingest_mode") or legacy.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE
-            ),
-            runner_count=legacy._normalize_non_negative_int(config.get("runner_count"))
-            or legacy.CATALOG_BACKFILL_FULL_HISTORY_RUNNER_COUNT,
-            expected_total_posts=legacy._normalize_non_negative_int(frontier.get("total_posts"))
-            or legacy._normalize_non_negative_int(config.get("expected_total_posts"))
-            or None,
-            runner_strategy=legacy.CATALOG_FULL_HISTORY_FRONTIER_STRATEGY,
-            partition_strategy=legacy.CATALOG_FULL_HISTORY_FRONTIER_STRATEGY,
-            required_worker_lane=str(config.get("required_worker_lane") or "").strip().lower() or None,
-            required_execution_backend=str(config.get("required_execution_backend") or "").strip().lower() or None,
-            allow_local_dev_inline_bypass=bool(config.get("allow_local_dev_inline_bypass")),
-            frontier_auth_allowed=config.get("frontier_auth_allowed"),
-            frontier_auth_reason=str(config.get("frontier_auth_reason") or "").strip().lower() or None,
-            frontier_transport=(
-                str(frontier.get("last_transport") or config.get("frontier_transport") or "").strip().lower() or None
-            ),
-            transport_preference=str(config.get("transport_preference") or "").strip().lower() or None,
-            allow_public_transport_fallback=config.get("allow_public_transport_fallback"),
-            selected_tasks=config.get("selected_tasks"),
-            effective_selected_tasks=config.get("effective_selected_tasks"),
-            details_refresh_skip_detail_fetch=config.get("details_refresh_skip_detail_fetch"),
-            details_refresh_force_detail_fetch=config.get("details_refresh_force_detail_fetch"),
-            details_refresh_worker_count=legacy._normalize_non_negative_int(config.get("details_refresh_worker_count"))
-            or None,
-            comments_worker_count=legacy._normalize_non_negative_int(config.get("comments_worker_count")) or None,
-            details_refresh_skip_media_followups=config.get("details_refresh_skip_media_followups"),
-            tiktok_comments_in_posts_stage=bool(config.get("tiktok_comments_in_posts_stage")),
-            tiktok_direct_comment_api_override=bool(config.get("tiktok_direct_comment_api_override")),
-            twitter_comments_in_posts_stage=bool(config.get("twitter_comments_in_posts_stage")),
-            initiated_by="terminal_modal_frontier_reconciliation",
-            priority=legacy._normalize_non_negative_int(row.get("priority")) or 101,
+            lease_owner=lease_owner or None,
+            status=release_status,
         )
-    )
-    if enqueue_result.status == "failed":
-        release_status = "retrying"
-        old_job_status = "retrying"
-        error_code = "terminal_modal_frontier_requeue_failed"
-        next_available_at = legacy._now_utc() + timedelta(seconds=max(5, legacy._modal_dispatch_retry_delay_seconds()))
-    elif enqueue_result.status == "deferred_by_cooldown":
-        release_status = "retrying"
-        old_job_status = "retrying"
-        error_code = "terminal_modal_frontier_deferred_by_cooldown"
-        next_available_at = _terminal_frontier_continuation_next_available_at(enqueue_result.cooldown)
-    else:
-        release_status = "queued"
-        old_job_status = "cancelled"
-        error_code = "terminal_modal_frontier_requeued"
-        next_available_at = None
-    legacy._release_shared_account_run_frontier(
-        run_id=run_id,
-        platform=platform,
-        account_handle=account_handle,
-        lease_owner=lease_owner or None,
-        status=release_status,
-    )
-    dispatch = legacy._job_dispatch_metadata(row)
-    metadata_updates = dict(row.get("metadata") or {})
-    metadata_updates["dispatch"] = {
-        **dispatch,
-        "remote_invocation_status": str(inspection.get("status") or "").strip().lower() or None,
-        "remote_invocation_checked_at": inspection.get("checked_at") or legacy._iso(now_utc),
-        "remote_task_id": str(inspection.get("task_id") or "").strip() or None,
-        "remote_blocked_reason": str(inspection.get("reason") or "").strip() or None,
-        "lease_expires_at": None,
-    }
-    metadata_updates["terminal_modal_frontier_reconciliation"] = {
-        "source": "reconcile_terminal_modal_running_jobs",
-        "remote_status": str(inspection.get("status") or "").strip().lower() or None,
-        "function_call_id": str(dispatch.get("remote_invocation_id") or "").strip() or None,
-        "status": enqueue_result.status,
-        "continuation_job_id": enqueue_result.job_id,
-        "frontier_release_status": release_status,
-        "cooldown": enqueue_result.cooldown,
-        "error": enqueue_result.error,
-        "reconciled_at": legacy._iso(now_utc),
-    }
-    metadata_updates["retryable"] = old_job_status == "retrying"
-    legacy._finish_job(
+        dispatch = legacy._job_dispatch_metadata(row)
+        metadata_updates = dict(row.get("metadata") or {})
+        metadata_updates["dispatch"] = {
+            **dispatch,
+            "remote_invocation_status": str(inspection.get("status") or "").strip().lower() or None,
+            "remote_invocation_checked_at": inspection.get("checked_at") or legacy._iso(now_utc),
+            "remote_task_id": str(inspection.get("task_id") or "").strip() or None,
+            "remote_blocked_reason": str(inspection.get("reason") or "").strip() or None,
+            "lease_expires_at": None,
+        }
+        metadata_updates["terminal_modal_frontier_reconciliation"] = {
+            "source": "reconcile_terminal_modal_running_jobs",
+            "remote_status": str(inspection.get("status") or "").strip().lower() or None,
+            "function_call_id": str(dispatch.get("remote_invocation_id") or "").strip() or None,
+            "status": enqueue_result.status,
+            "continuation_job_id": enqueue_result.job_id,
+            "frontier_release_status": release_status,
+            "cooldown": enqueue_result.cooldown,
+            "error": enqueue_result.error,
+            "reconciled_at": legacy._iso(now_utc),
+        }
+        metadata_updates["retryable"] = old_job_status == "retrying"
+        if not legacy._transition_job_state(
+            job_id,
+            defer_followups=True,
+            expected_status=str(row.get("status") or ""),
+            expected_claim_token=legacy._metadata_dict(row.get("config")).get("claim_token"),
+            expected_dispatch_snapshot=dict(dispatch),
+            status=old_job_status,
+            items_found=legacy._normalize_non_negative_int(row.get("items_found")),
+            error_message="Terminal Modal invocation reconciled for unfinished shared-account frontier.",
+            metadata=metadata_updates,
+            last_error_code=error_code,
+            last_error_class="ModalFrontierTerminalReconciliation",
+            next_available_at=next_available_at,
+        ):
+            raise RuntimeError("Frontier completion lost its observed job state")
+        result = {
+            "id": job_id,
+            "run_id": run_id,
+            "platform": platform,
+            "status": old_job_status,
+            "remote_invocation_id": str(dispatch.get("remote_invocation_id") or "").strip() or None,
+            "frontier_status": release_status,
+            "continuation_job_id": enqueue_result.job_id,
+            "deferred_by_cooldown": enqueue_result.status == "deferred_by_cooldown",
+        }
+
+    legacy._finish_job_followups(
         job_id,
+        run_id=run_id,
         status=old_job_status,
         items_found=legacy._normalize_non_negative_int(row.get("items_found")),
-        error_message="Terminal Modal invocation reconciled for unfinished shared-account frontier.",
         metadata=metadata_updates,
-        last_error_code=error_code,
-        last_error_class="ModalFrontierTerminalReconciliation",
-        next_available_at=next_available_at,
+        claim_token=config.get("claim_token"),
+        worker_id=row.get("worker_id"),
+        administrative=True,
     )
-    return {
-        "id": job_id,
-        "run_id": run_id,
-        "platform": platform,
-        "status": old_job_status,
-        "remote_invocation_id": str(dispatch.get("remote_invocation_id") or "").strip() or None,
-        "frontier_status": release_status,
-        "continuation_job_id": enqueue_result.job_id,
-        "deferred_by_cooldown": enqueue_result.status == "deferred_by_cooldown",
-    }
+    return result
 
 
 def recover_dispatch_blocked_no_progress_jobs(*, limit: int = 100) -> list[dict[str, Any]]:
@@ -230,7 +325,8 @@ def recover_dispatch_blocked_no_progress_jobs(*, limit: int = 100) -> list[dict[
                   max_attempts,
                   error_message,
                   last_error_code,
-                  metadata
+                  metadata,
+                  config
                 from social.scrape_jobs
                 where id = %s::uuid
                 """,
@@ -273,8 +369,11 @@ def recover_dispatch_blocked_no_progress_jobs(*, limit: int = 100) -> list[dict[
                 "dispatch_blocked_terminalized_at": None,
                 "stale_unclaimed_dispatch_exhausted": False,
             }
-            legacy._finish_job(
+            if not legacy._transition_job_state(
                 job_id,
+                expected_status=str(full_row.get("status") or ""),
+                expected_claim_token=legacy._metadata_dict(full_row.get("config")).get("claim_token"),
+                expected_dispatch_snapshot=dict(dispatch),
                 status="retrying",
                 items_found=legacy._normalize_non_negative_int(full_row.get("items_found")),
                 error_message=None,
@@ -289,7 +388,8 @@ def recover_dispatch_blocked_no_progress_jobs(*, limit: int = 100) -> list[dict[
                 last_error_code=None,
                 last_error_class=None,
                 next_available_at=now_utc + timedelta(seconds=max(5, legacy._modal_dispatch_retry_delay_seconds())),
-            )
+            ):
+                continue
             run_id = str(full_row.get("run_id") or "").strip()
             if run_id:
                 affected_run_ids.add(run_id)
@@ -302,8 +402,11 @@ def recover_dispatch_blocked_no_progress_jobs(*, limit: int = 100) -> list[dict[
                 }
             )
             continue
-        legacy._finish_job(
+        if not legacy._transition_job_state(
             job_id,
+            expected_status=str(full_row.get("status") or ""),
+            expected_claim_token=legacy._metadata_dict(full_row.get("config")).get("claim_token"),
+            expected_dispatch_snapshot=dict(dispatch),
             status="failed",
             items_found=legacy._normalize_non_negative_int(full_row.get("items_found")),
             error_message=str(dispatch.get("last_dispatch_error") or "Modal dispatch blocked"),
@@ -319,7 +422,8 @@ def recover_dispatch_blocked_no_progress_jobs(*, limit: int = 100) -> list[dict[
             },
             last_error_code="modal_dispatch_blocked",
             last_error_class="ModalDispatchBlocked",
-        )
+        ):
+            continue
         run_id = str(full_row.get("run_id") or "").strip()
         if run_id:
             affected_run_ids.add(run_id)
@@ -405,7 +509,7 @@ def reconcile_terminal_modal_running_jobs(
         remote_invocation_id = str(dispatch.get("remote_invocation_id") or "").strip()
         if not remote_invocation_id:
             continue
-        inspection = legacy._refresh_remote_modal_invocation_state(row, lease_expires_at=None)
+        inspection = legacy.inspect_modal_function_call(remote_invocation_id)
         inspection_status = str(inspection.get("status") or "").strip().lower()
         if (row.get("config") or {}).get("detail_contract_version") == 1:
             from trr_backend.socials.control_plane.instagram_detail_targets import reconcile_provider_failure
@@ -501,12 +605,22 @@ def recover_stale_unclaimed_dispatched_jobs(
                     has_queue_fields=True,
                 )
             )
-            inspection = legacy._refresh_remote_modal_invocation_state(
-                row,
-                lease_expires_at=refreshed_lease_expires_at,
-            )
+            inspection = legacy.inspect_modal_function_call(remote_invocation_id)
             inspection_status = str(inspection.get("status") or "").strip().lower()
             if legacy._modal_invocation_is_nonterminal(inspection_status):
+                _touch_dispatch_metadata_for_snapshot(
+                    row,
+                    expected_dispatch_snapshot=dict(dispatch),
+                    dispatch_backend="modal",
+                    dispatch_requested_at=legacy._coerce_dt(dispatch.get("dispatch_requested_at")),
+                    dispatch_attempt_count=legacy._dispatch_metadata_attempt_count(dispatch),
+                    lease_expires_at=refreshed_lease_expires_at,
+                    remote_invocation_id=remote_invocation_id,
+                    remote_invocation_status=inspection_status,
+                    remote_invocation_checked_at=legacy._coerce_dt(inspection.get("checked_at")),
+                    remote_task_id=str(inspection.get("task_id") or "").strip() or None,
+                    remote_blocked_reason=str(inspection.get("reason") or "").strip() or None,
+                )
                 continue
 
         recovery_count = legacy._dispatch_metadata_recovery_count(dispatch) + 1
@@ -539,15 +653,19 @@ def recover_stale_unclaimed_dispatched_jobs(
             "retryable": not exhausted,
         }
         if exhausted:
-            legacy._finish_job(
+            if not legacy._transition_job_state(
                 job_id,
+                expected_status=str(row.get("status") or ""),
+                expected_claim_token=legacy._metadata_dict(row.get("config")).get("claim_token"),
+                expected_dispatch_snapshot=dict(dispatch),
                 status="failed",
                 items_found=legacy._normalize_non_negative_int(row.get("items_found")),
                 error_message=recovery_error,
                 metadata=metadata_updates,
                 last_error_code=legacy.STALE_MODAL_DISPATCH_UNCLAIMED_ERROR_CODE,
                 last_error_class="ModalDispatchUnclaimed",
-            )
+            ):
+                continue
             recovered_rows.append(
                 {
                     "id": job_id,
@@ -559,8 +677,11 @@ def recover_stale_unclaimed_dispatched_jobs(
                 }
             )
             continue
-        legacy._finish_job(
+        if not legacy._transition_job_state(
             job_id,
+            expected_status=str(row.get("status") or ""),
+            expected_claim_token=legacy._metadata_dict(row.get("config")).get("claim_token"),
+            expected_dispatch_snapshot=dict(dispatch),
             status="retrying",
             items_found=legacy._normalize_non_negative_int(row.get("items_found")),
             error_message=recovery_error,
@@ -568,7 +689,8 @@ def recover_stale_unclaimed_dispatched_jobs(
             last_error_code=legacy.STALE_MODAL_DISPATCH_UNCLAIMED_ERROR_CODE,
             last_error_class="ModalDispatchUnclaimed",
             next_available_at=now_utc + recovery_backoff,
-        )
+        ):
+            continue
         recovered_rows.append(
             {
                 "id": job_id,
@@ -587,11 +709,8 @@ def recover_stale_unclaimed_dispatched_jobs(
 
 
 def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = None) -> dict[str, Any]:
-    # Worker C handoff: this extracted dispatcher now carries the legacy parity
-    # fixes for auth cooldowns, remote function stamping, run-scoped comments
-    # capacity recovery, and capacity-stage accounting. The legacy body remains
-    # as a compatibility/reference surface; do not flip additional direct callers
-    # without a fresh whole-body parity diff.
+    # Authoritative dispatcher; the legacy default delegates here while
+    # deliberate compatibility overrides remain selected by the bridge.
     safe_limit = max(1, min(int(limit or legacy._modal_dispatch_limit()), legacy.SOCIAL_JOB_CLAIM_BATCH_SIZE_MAX))
     if not legacy.is_queue_enabled():
         return {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": "queue_disabled"}
@@ -675,6 +794,7 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
         legacy._current_modal_priority_comment_recovery_running_count() if priority_recovery_override_slots > 0 else 0
     )
     dispatched_job_ids: list[str] = []
+    unbound_dispatch_results: list[dict[str, Any]] = []
     dispatch_attempts = 0
     # REVISED §4: per-run active-worker cap for Instagram public comments runs.
     # Cached run worker caps keyed by run_id so a multi-shard run is queried once.
@@ -700,6 +820,14 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
         if legacy._job_blocked_by_posts_auth_cooldown(job) is not None:
             continue
         if legacy._job_required_lane_blocks_modal_dispatch(job_config, platform=platform):
+            continue
+        auth_child = str(job_config.get("comments_auth_fallback") or "").lower() == "true"
+        auth_reservation_expiry = legacy._coerce_dt(job_dispatch.get("lease_expires_at"))
+        if (
+            auth_child
+            and job_dispatch.get("lease_expires_at")
+            and (auth_reservation_expiry is None or auth_reservation_expiry > legacy._now_utc())
+        ):
             continue
         existing_remote_invocation_id = str(job_dispatch.get("remote_invocation_id") or "").strip()
         if job_config.get("detail_contract_version") == 1:
@@ -729,7 +857,12 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
                     job_id_for_clear = str(job.get("id") or "").strip()
                     if not job_id_for_clear:
                         continue
-                    job_dispatch = legacy._clear_stale_pending_modal_dispatch(job_id_for_clear, job_dispatch)
+                    job_dispatch = legacy._clear_stale_pending_modal_dispatch(
+                        job_id_for_clear, job_dispatch, expected_job_snapshot=job
+                    )
+                    if str(job_dispatch.get("remote_invocation_id") or "").strip():
+                        continue
+                    job["metadata"] = {**legacy._metadata_dict(job.get("metadata")), "dispatch": job_dispatch}
                     existing_remote_invocation_id = ""
                 else:
                     if priority_recovery_job:
@@ -752,8 +885,8 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
             if existing_remote_invocation_id and inspection_status == "unknown":
                 job_id_for_clear = str(job.get("id") or "").strip()
                 if status in {"queued", "pending", "retrying"} and job_id_for_clear:
-                    legacy._touch_job_dispatch_metadata(
-                        job_id_for_clear,
+                    if not _touch_dispatch_metadata_for_snapshot(
+                        job,
                         dispatch_backend=str(job_dispatch.get("dispatch_backend") or "modal"),
                         dispatch_requested_at=legacy._coerce_dt(job_dispatch.get("dispatch_requested_at")),
                         dispatch_attempt_count=legacy._dispatch_metadata_attempt_count(job_dispatch),
@@ -764,7 +897,8 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
                         remote_task_id=None,
                         remote_pending_since=None,
                         remote_blocked_reason=None,
-                    )
+                    ):
+                        continue
                     job_dispatch = {
                         **job_dispatch,
                         "remote_invocation_id": None,
@@ -878,30 +1012,50 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
                 has_queue_fields=True,
             )
         )
-        legacy._touch_job_dispatch_metadata(
-            job_id,
-            dispatch_backend="modal",
-            dispatch_requested_at=legacy._now_utc(),
-            dispatch_attempt_count=dispatch_attempt_count,
-            lease_expires_at=lease_expires_at,
-            last_dispatch_error=None,
-            last_dispatch_error_code=None,
-            last_dispatch_error_at=None,
-            remote_invocation_status=None,
-            remote_invocation_checked_at=None,
-            remote_task_id=None,
-            remote_pending_since=None,
-            remote_blocked_reason=None,
-            dispatch_blocked_failure_count=0,
-            dispatch_blocked_first_seen_at=None,
-        )
+        auth_child = str(job_config.get("comments_auth_fallback") or "").lower() == "true"
+        reservation_id = str(uuid4()) if auth_child else None
+        reservation_kwargs: dict[str, Any] = {"dispatch_reservation_id": reservation_id} if reservation_id else {}
+        expected_reservation = (dispatch_attempt_count, lease_expires_at, reservation_id) if reservation_id else None
+        capacity_scope = legacy._comments_auth_fallback_claim_scope(job_id) if auth_child else nullcontext(True)
+        with capacity_scope as capacity_available:
+            if not capacity_available:
+                continue
+            if auth_child:
+                reserved = legacy.pg.fetch_one("select metadata from social.scrape_jobs where id = %s::uuid", [job_id])
+                current_dispatch = legacy._job_dispatch_metadata(reserved or {})
+                if legacy._dispatch_metadata_attempt_count(current_dispatch) != dispatch_attempt_count - 1:
+                    continue
+                raw_lease = current_dispatch.get("lease_expires_at")
+                current_lease = legacy._coerce_dt(raw_lease)
+                if raw_lease and (current_lease is None or current_lease > legacy._now_utc()):
+                    continue
+            if not _touch_dispatch_metadata_for_snapshot(
+                job,
+                dispatch_backend="modal",
+                dispatch_requested_at=legacy._now_utc(),
+                dispatch_attempt_count=dispatch_attempt_count,
+                **reservation_kwargs,
+                lease_expires_at=lease_expires_at,
+                last_dispatch_error=None,
+                last_dispatch_error_code=None,
+                last_dispatch_error_at=None,
+                remote_invocation_status=None,
+                remote_invocation_checked_at=None,
+                remote_task_id=None,
+                remote_pending_since=None,
+                remote_blocked_reason=None,
+                dispatch_blocked_failure_count=0,
+                dispatch_blocked_first_seen_at=None,
+            ):
+                continue
         dispatch_kwargs: dict[str, Any] = {"job_id": job_id, "stage": stage}
         if priority_recovery_override_allowed:
             dispatch_kwargs["priority_recovery"] = True
         dispatch_result = legacy.dispatch_social_job(**dispatch_kwargs)
         if dispatch_result.get("dispatched"):
-            legacy._touch_job_dispatch_metadata(
-                job_id,
+            if not _touch_dispatch_metadata_for_snapshot(
+                job,
+                expected_reservation=expected_reservation,
                 dispatch_backend="modal",
                 dispatch_requested_at=legacy._now_utc(),
                 dispatch_attempt_count=dispatch_attempt_count,
@@ -918,7 +1072,16 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
                 remote_blocked_reason=None,
                 dispatch_blocked_failure_count=0,
                 dispatch_blocked_first_seen_at=None,
-            )
+            ):
+                unbound = {
+                    "job_id": job_id,
+                    "call_id": dispatch_result.get("call_id"),
+                    "function_name": dispatch_result.get("function_name"),
+                    "dispatch_reservation_id": reservation_id,
+                }
+                unbound_dispatch_results.append(unbound)
+                logger.warning("Dispatched provider invocation could not bind its retained reservation: %s", unbound)
+                continue
             dispatched_job_ids.append(job_id)
             running_by_stage[capacity_stage] = running_by_stage.get(capacity_stage, 0) + 1
             running_by_stage_platform[(capacity_stage, platform)] = (
@@ -944,12 +1107,13 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
             blocked_failure_count = max(1, blocked_failure_count + 1)
             blocked_first_seen_at = blocked_first_seen_at or legacy._now_utc()
             blocked_for_seconds = max(0, int((legacy._now_utc() - blocked_first_seen_at).total_seconds()))
-            legacy._touch_job_dispatch_metadata(
-                job_id,
+            if not _touch_dispatch_metadata_for_snapshot(
+                job,
+                expected_reservation=expected_reservation,
                 dispatch_backend="modal",
                 dispatch_requested_at=legacy._now_utc(),
                 dispatch_attempt_count=dispatch_attempt_count,
-                lease_expires_at=None,
+                lease_expires_at=lease_expires_at if auth_child else None,
                 last_dispatch_error=dispatch_reason,
                 last_dispatch_error_code="modal_dispatch_failed",
                 last_dispatch_error_at=legacy._now_utc(),
@@ -960,13 +1124,17 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
                 remote_blocked_reason=dispatch_reason_code,
                 dispatch_blocked_failure_count=blocked_failure_count,
                 dispatch_blocked_first_seen_at=blocked_first_seen_at,
-            )
-            if (
+            ):
+                continue
+            if not auth_child and (
                 blocked_failure_count >= legacy._resolve_modal_dispatch_blocked_failure_limit()
                 or blocked_for_seconds >= legacy._resolve_modal_dispatch_no_progress_seconds()
             ):
-                legacy._finish_job(
+                if not legacy._transition_job_state(
                     job_id,
+                    expected_status=str(job.get("status") or ""),
+                    expected_claim_token=legacy._metadata_dict(job.get("config")).get("claim_token"),
+                    expected_dispatch_snapshot=dict(legacy._job_dispatch_metadata(job)),
                     status="failed",
                     items_found=legacy._normalize_non_negative_int(job.get("items_found")),
                     error_message=dispatch_reason,
@@ -989,7 +1157,8 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
                     },
                     last_error_code="modal_dispatch_blocked",
                     last_error_class="ModalDispatchBlocked",
-                )
+                ):
+                    continue
                 if job_run_id:
                     legacy._finalize_run_status(job_run_id, force_recompute=True)
 
@@ -1009,6 +1178,7 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
     legacy._touch_modal_social_dispatcher_heartbeat(metadata_updates=heartbeat_updates)
     return {
         "dispatched_job_ids": dispatched_job_ids,
+        "unbound_dispatch_results": unbound_dispatch_results,
         "dispatch_attempts": dispatch_attempts,
         "recovered_unclaimed_job_ids": [
             str(row.get("id") or "").strip() for row in recovered_unclaimed if str(row.get("id") or "").strip()
