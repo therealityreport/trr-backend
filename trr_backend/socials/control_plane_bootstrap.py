@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import Any
+
 SOCIAL_CONTROL_PLANE_PROVIDER_NAMES = (
     "queue_status",
     "run_lifecycle",
@@ -13,9 +16,8 @@ SOCIAL_CONTROL_PLANE_PROVIDER_NAMES = (
 )
 
 
-def register_social_control_plane_providers() -> None:
-    """Load the legacy provider and verify every control-plane publication."""
-    from trr_backend.socials import social_season_analytics_impl as provider
+def register_social_control_plane_providers(provider_namespace: Mapping[str, Any]) -> None:
+    """Verify every control-plane publication from explicit outer composition."""
     from trr_backend.socials.control_plane import (
         dispatch,
         dispatch_runtime,
@@ -26,7 +28,6 @@ def register_social_control_plane_providers() -> None:
         shared_accounts,
     )
 
-    provider_namespace = provider.__dict__
     provider_modules = (
         ("queue_status", queue_status),
         ("run_lifecycle", run_lifecycle),

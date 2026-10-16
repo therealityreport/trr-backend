@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -39,6 +39,8 @@ def _patch_common_runner_dependencies(monkeypatch: pytest.MonkeyPatch, jr: Any, 
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_kwargs: _session())
     monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: True)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *_args, **_kwargs: None)
@@ -97,7 +99,9 @@ def test_comments_job_runner_checks_cancellation_after_warmup_before_opening_per
     monkeypatch.setattr(jr, "_load_instagram_comments_audit_cursor_resume_metadata", lambda **_kwargs: {})
     monkeypatch.setattr(jr.pg, "fetch_one", fake_fetch_one)
     monkeypatch.setattr(jr.pg, "db_connection", fake_db_connection)
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
 
     payload = jr.run_instagram_comments_scrapling_job(
         {
@@ -166,7 +170,9 @@ def test_comments_job_runner_reuses_persist_conn_for_loop_cancellation(
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_kwargs: _FakeFetcher())
     monkeypatch.setattr(jr.pg, "fetch_one", fake_fetch_one)
     monkeypatch.setattr(jr.pg, "db_connection", fake_db_connection)
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
 
     payload = jr.run_instagram_comments_scrapling_job(
         {
@@ -258,10 +264,11 @@ def test_comments_job_runner_passes_single_session_strategy_and_records_saved_on
             return {"status": "running"}
         return {}
 
-    def fake_finish_job(job_id: str, **kwargs: Any) -> None:
+    def fake_finish_job(job_id: str, **kwargs: Any) -> bool:
         nonlocal finished_metadata
         finished_metadata = dict(kwargs.get("metadata") or {})
         finish_calls.append({"job_id": job_id, **kwargs})
+        return True
 
     def fake_persist_instagram_comments_for_post(**kwargs: Any) -> Any:
         persist_calls.append(dict(kwargs))
@@ -305,7 +312,7 @@ def test_comments_job_runner_passes_single_session_strategy_and_records_saved_on
         worker_id="worker-1",
     )
 
-    assert payload["status"] == "completed"
+    assert payload["status"] == "completed", payload
     assert fetch_kwargs_calls[0]["load_strategy"] == "single_session_load_all"
     assert persist_calls[0]["shortcode"] == "SHORT1"
     assert len(persist_calls) == 1

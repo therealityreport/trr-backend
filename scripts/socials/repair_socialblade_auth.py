@@ -157,6 +157,22 @@ def main() -> int:
         summary["exported"] = True
         summary["validation_bypassed"] = True
     except Exception as exc:  # noqa: BLE001
+        if "requires pycookiecheat" in str(exc):
+            from scripts.modal.refresh_instagram_cookies_from_chrome import (
+                COOKIE_EXTRACTION_DEPENDENCY_INSTALL_COMMAND,
+                COOKIE_EXTRACTION_DEPENDENCY_MESSAGE,
+            )
+
+            summary["reason"] = "cookie_extraction_dependency_missing"
+            summary["next_action"] = COOKIE_EXTRACTION_DEPENDENCY_INSTALL_COMMAND
+            summary["setup_error"] = {
+                "category": "dependency_setup",
+                "package": "pycookiecheat",
+                "message": COOKIE_EXTRACTION_DEPENDENCY_MESSAGE,
+                "install_command": COOKIE_EXTRACTION_DEPENDENCY_INSTALL_COMMAND,
+            }
+            _emit(summary, as_json=args.json)
+            return 2
         summary["reason"] = str(exc) or type(exc).__name__
         summary["cookie_health"] = socialblade_cookie_health_report(
             validate=True,

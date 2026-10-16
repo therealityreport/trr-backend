@@ -263,7 +263,9 @@ if TYPE_CHECKING:
 
     def _raise_if_shared_account_stage_cancelled(*args: Any, **kwargs: Any) -> None: ...
 
-    def _touch_job_heartbeat(job_id: str, *, worker_id: str | None = None) -> bool: ...
+    def _touch_job_heartbeat(
+        job_id: str, *, worker_id: str | None = None, claim_token: str | None = None
+    ) -> bool: ...
 
 
 _IMPORTED_CORE_NAMES: set[str] = set()
@@ -2795,7 +2797,7 @@ def run_durable_instagram_details(job: Mapping[str, Any], *, worker_id: str) -> 
                     target["lease_generation"],
                 ],
             )
-        _touch_job_heartbeat(job_id, worker_id=worker_id)
+        _touch_job_heartbeat(job_id, worker_id=job.get("worker_id"), claim_token=config.get("claim_token"))
     flush_pending()
     return targets.snapshot(run_id, account=account)
 

@@ -34,7 +34,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
-from functools import lru_cache
+from functools import lru_cache, wraps
 from pathlib import Path
 from threading import Lock, Thread, current_thread, main_thread
 from types import SimpleNamespace
@@ -69,6 +69,14 @@ from trr_backend.runtime_version import build_runtime_version_stamp
 from trr_backend.socials import source_scopes as _source_scopes
 from trr_backend.socials import windowing as _windowing
 from trr_backend.socials.control_plane.debug import run_social_debug
+from trr_backend.socials.control_plane.job_ownership import (
+    _job_claim_context,
+    _job_claim_identity,
+    _job_followup_write_scope,
+)
+from trr_backend.socials.control_plane.job_ownership import (
+    _job_claim_write_scope as _owned_job_claim_write_scope,
+)
 from trr_backend.socials.cookie_sources import (
     _default_platform_cookie_file_path,
     _platform_cookie_file_candidates,
@@ -6347,7 +6355,7 @@ def cancel_stuck_jobs(
           metadata = coalesce(j.metadata, '{{}}'::jsonb) || %s::jsonb
         from candidate_jobs c
         where j.id = c.id
-        returning j.id::text as id, j.run_id::text as run_id
+        returning j.id::text as id, j.run_id::text as run_id, j.status, j.worker_id, j.config
         """,
         [
             *where_params,
@@ -6358,9 +6366,11 @@ def cancel_stuck_jobs(
     )
     cancelled_job_ids = [str(row.get("id") or "") for row in updated_rows if str(row.get("id") or "").strip()]
 
-    for cancelled_job_id in cancelled_job_ids:
+    for cancelled_row in updated_rows:
+        cancelled_job_id = str(cancelled_row.get("id") or "")
         _clear_worker_heartbeat_for_job(
             job_id=cancelled_job_id,
+            expected_job_snapshot=cancelled_row,
             status="idle",
             metadata={"source": "cancel_stuck_jobs", "job_status": "cancelled"},
         )
@@ -6422,7 +6432,7 @@ def cancel_dispatch_blocked_jobs(
           metadata = coalesce(j.metadata, '{{}}'::jsonb) || %s::jsonb
         from candidate_jobs c
         where j.id = c.id
-        returning j.id::text as id, j.run_id::text as run_id
+        returning j.id::text as id, j.run_id::text as run_id, j.status, j.worker_id, j.config
         """,
         [
             *where_params,
@@ -6432,9 +6442,11 @@ def cancel_dispatch_blocked_jobs(
         ],
     )
     cancelled_job_ids = [str(row.get("id") or "") for row in updated_rows if str(row.get("id") or "").strip()]
-    for cancelled_job_id in cancelled_job_ids:
+    for cancelled_row in updated_rows:
+        cancelled_job_id = str(cancelled_row.get("id") or "")
         _clear_worker_heartbeat_for_job(
             job_id=cancelled_job_id,
+            expected_job_snapshot=cancelled_row,
             status="idle",
             metadata={"source": "cancel_dispatch_blocked_jobs", "job_status": "cancelled"},
         )
@@ -6484,7 +6496,7 @@ def cancel_active_jobs(
           metadata = coalesce(j.metadata, '{}'::jsonb) || %s::jsonb
         from candidate_jobs c
         where j.id = c.id
-        returning j.id::text as id, j.run_id::text as run_id
+        returning j.id::text as id, j.run_id::text as run_id, j.status, j.worker_id, j.config
         """,
         [
             list(_ACTIVE_CANCEL_JOB_STATUSES),
@@ -6493,9 +6505,11 @@ def cancel_active_jobs(
     )
     cancelled_job_ids = [str(row.get("id") or "") for row in updated_rows if str(row.get("id") or "").strip()]
 
-    for cancelled_job_id in cancelled_job_ids:
+    for cancelled_row in updated_rows:
+        cancelled_job_id = str(cancelled_row.get("id") or "")
         _clear_worker_heartbeat_for_job(
             job_id=cancelled_job_id,
+            expected_job_snapshot=cancelled_row,
             status="idle",
             metadata={"source": "cancel_active_jobs", "job_status": "cancelled"},
         )
@@ -12083,7 +12097,7 @@ def _touch_worker_heartbeat_for_job(
         returning w.worker_id
         """,
         [_normalize_worker_status(status), _json_dumps(_metadata_dict(metadata)), job_id],
-        pool_name=SOCIAL_CATALOG_PROGRESS_POOL_NAME,
+        pool_name="default" if pg.has_active_transaction() else SOCIAL_CATALOG_PROGRESS_POOL_NAME,
     )
 
 
@@ -12092,7 +12106,21 @@ def _clear_worker_heartbeat_for_job(
     job_id: str,
     status: str = "idle",
     metadata: dict[str, Any] | None = None,
+    expected_job_snapshot: Mapping[str, Any] | None = None,
+    conn: Any | None = None,
 ) -> None:
+    if expected_job_snapshot is not None:
+        with _job_followup_write_scope(
+            job_id,
+            expected_status=str(expected_job_snapshot.get("status") or ""),
+            claim_token=_metadata_dict(expected_job_snapshot.get("config")).get("claim_token"),
+            worker_id=expected_job_snapshot.get("worker_id"),
+            administrative=True,
+            conn=conn,
+        ) as snapshot_current:
+            if snapshot_current:
+                _clear_worker_heartbeat_for_job(job_id=job_id, status=status, metadata=metadata, conn=conn)
+        return
     if not _worker_heartbeat_schema_ready():
         return
     pg.fetch_one(
@@ -12109,10 +12137,12 @@ def _clear_worker_heartbeat_for_job(
         where j.id = %s::uuid
           and j.worker_id is not null
           and w.worker_id = j.worker_id
+          and w.current_job_id = j.id
         returning w.worker_id
         """,
         [_normalize_worker_status(status), _json_dumps(_metadata_dict(metadata)), job_id],
-        pool_name=SOCIAL_CATALOG_PROGRESS_POOL_NAME,
+        conn=conn,
+        pool_name="default" if pg.has_active_transaction() else SOCIAL_CATALOG_PROGRESS_POOL_NAME,
     )
 
 
@@ -12146,7 +12176,7 @@ def _abort_claimed_job_if_cancelled(
     platform: str,
     account: str,
 ) -> dict[str, Any] | None:
-    job_state = pg.fetch_one("select status from social.scrape_jobs where id = %s", [job_id]) or {}
+    job_state = pg.fetch_one("select status, config from social.scrape_jobs where id = %s", [job_id]) or {}
     job_is_cancelled = str(job_state.get("status") or "").strip().lower() in {"cancelled", "cancelling"}
     run_is_cancelled = False
     if run_id:
@@ -12156,8 +12186,10 @@ def _abort_claimed_job_if_cancelled(
         return None
 
     existing_job = _load_current_job_row(job_id)
-    _finish_job(
+    transition_accepted = _transition_job_state(
         job_id,
+        expected_status=str(job_state.get("status") or ""),
+        expected_claim_token=_metadata_dict(job_state.get("config")).get("claim_token"),
         status="cancelled",
         items_found=_normalize_non_negative_int(existing_job.get("items_found")),
         error_message="Cancelled by user request",
@@ -12169,7 +12201,7 @@ def _abort_claimed_job_if_cancelled(
             "cancel_scope": "run" if run_is_cancelled else "job",
         },
     )
-    if run_id:
+    if run_id and transition_accepted:
         _finalize_run_status(run_id)
     return _load_current_job_row(job_id)
 
@@ -12263,6 +12295,11 @@ def _create_job(
     if preclaim and worker_id:
         effective_status = "running"
     config_payload = _metadata_dict(config)
+    if preclaim and str(config_payload.get("comments_auth_fallback") or "").lower() == "true":
+        raise ValueError("Authenticated fallback jobs must be queued before claim")
+    config_payload.pop("claim_token", None)
+    if preclaim and worker_id:
+        config_payload["claim_token"] = str(uuid4())
     required_execution_backend = _job_required_execution_backend(config_payload, platform=platform)
     creator_runtime_version = dict(_resolve_runtime_version_stamp())
     effective_runtime_version = _resolve_effective_runtime_version(
@@ -12460,12 +12497,40 @@ def _insert_job_with_conflict_target(
         return str(existing["id"]) if existing and existing.get("id") else None
 
 
-def _set_job_running(job_id: str, *, worker_id: str | None = None) -> None:
-    pg.fetch_one(
+def _job_claim_write_scope(job_id: str, *, claim_token: str | None = None, worker_id: str | None = None):
+    """Compose the authoritative guard with the patchable claim resolver."""
+    return _owned_job_claim_write_scope(
+        job_id, claim_token=claim_token, worker_id=worker_id, claim_identity=_job_claim_identity
+    )
+
+
+def _with_claimed_job_context(executor: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
+    @wraps(executor)
+    def execute(job: Mapping[str, Any], *, worker_id: str | None = None) -> dict[str, Any]:
+        config = _metadata_dict(job.get("config"))
+        binding = _job_claim_context.set((str(job.get("id") or ""), config.get("claim_token"), job.get("worker_id")))
+        try:
+            return executor(job, worker_id=job.get("worker_id") or worker_id)
+        finally:
+            _job_claim_context.reset(binding)
+
+    return execute
+
+
+def _set_job_running(job_id: str, *, worker_id: str | None = None) -> dict[str, Any] | None:
+    with _comments_auth_fallback_claim_scope(job_id) as available:
+        if not available:
+            return None
+        return _set_job_running_with_capacity(job_id, worker_id=worker_id)
+
+
+def _set_job_running_with_capacity(job_id: str, *, worker_id: str | None = None) -> dict[str, Any] | None:
+    return pg.fetch_one(
         """
         update social.scrape_jobs
         set
           status = 'running',
+          config = coalesce(config, '{}'::jsonb) || jsonb_build_object('claim_token', gen_random_uuid()::text),
           started_at = coalesce(started_at, now()),
           claimed_at = now(),
           heartbeat_at = now(),
@@ -12475,40 +12540,45 @@ def _set_job_running(job_id: str, *, worker_id: str | None = None) -> None:
           last_error_code = null,
           last_error_class = null
         where id = %s
-        returning id::text
+          and id in (select locked_job.id from social.scrape_jobs locked_job
+                     where locked_job.id = social.scrape_jobs.id for update skip locked)
+          and status in ('queued', 'pending', 'retrying')
+          and coalesce(config->>'detail_contract_version', '') <> '1'
+          and %s::text is not null
+        returning id::text, worker_id, config
         """,
-        [worker_id, job_id],
+        [worker_id, job_id, worker_id],
     )
 
 
-def _touch_job_heartbeat(job_id: str, *, worker_id: str | None = None) -> bool:
+def _touch_job_heartbeat(job_id: str, *, worker_id: str | None = None, claim_token: str | None = None) -> bool:
+    claim_token, worker_id = _job_claim_identity(job_id, claim_token=claim_token, worker_id=worker_id)
     row = pg.fetch_one(
         """
         update social.scrape_jobs
         set
-          heartbeat_at = now(),
-          worker_id = coalesce(%s, worker_id)
+          heartbeat_at = now()
         where id = %s
           and status = 'running'
           and claimed_at is not null
-          and (
-            %s::text is null
-            or worker_id is null
-            or worker_id = %s::text
-            or %s::text like worker_id || '%%'
-          )
+          and worker_id = %s::text
+          and config->>'claim_token' = %s::text
         returning id::text
         """,
-        [worker_id, job_id, worker_id, worker_id, worker_id],
+        [job_id, worker_id, claim_token],
         pool_name=SOCIAL_CATALOG_PROGRESS_POOL_NAME,
     )
     if not row:
         return False
-    _touch_worker_heartbeat_for_job(
-        job_id=job_id,
-        status="working",
-        metadata={"source": "job_heartbeat"},
-    )
+    with _job_followup_write_scope(
+        job_id, expected_status="running", claim_token=claim_token, worker_id=worker_id
+    ) as claim_current:
+        if claim_current:
+            _touch_worker_heartbeat_for_job(
+                job_id=job_id,
+                status="working",
+                metadata={"source": "job_heartbeat"},
+            )
     return True
 
 
@@ -12523,7 +12593,9 @@ def _job_dispatch_metadata(job_row: Mapping[str, Any] | None) -> dict[str, Any]:
 def _touch_job_dispatch_metadata(
     job_id: str,
     *,
+    expected_job_snapshot: Mapping[str, Any] | None = None,
     dispatch_backend: str,
+    dispatch_reservation_id: str | None | object = FIELD_UNSET,
     dispatch_requested_at: datetime | None | object = FIELD_UNSET,
     dispatch_attempt_count: int | None | object = FIELD_UNSET,
     remote_invocation_id: str | None | object = FIELD_UNSET,
@@ -12539,64 +12611,88 @@ def _touch_job_dispatch_metadata(
     remote_blocked_reason: str | None | object = FIELD_UNSET,
     dispatch_blocked_failure_count: int | None | object = FIELD_UNSET,
     dispatch_blocked_first_seen_at: datetime | None | object = FIELD_UNSET,
-) -> None:
-    existing_row = pg.fetch_one("select metadata from social.scrape_jobs where id = %s::uuid", [job_id]) or {}
-    existing_dispatch = _job_dispatch_metadata(existing_row)
+) -> bool:
+    # Provider observations and dispatch results retain their observed generation.
+    if expected_job_snapshot is None or str(expected_job_snapshot.get("id") or "") != job_id:
+        return False
+    with pg.transaction():
+        existing_row = pg.fetch_one(
+            """select metadata from social.scrape_jobs
+            where id = %s::uuid and status = %s
+              and (config->>'claim_token') is not distinct from %s::text
+              and worker_id is not distinct from %s::text
+              and (metadata #>> '{dispatch,remote_invocation_id}') is not distinct from %s::text
+              and (metadata #>> '{dispatch,dispatch_reservation_id}') is not distinct from %s::text
+            for update""",
+            [
+                job_id,
+                expected_job_snapshot.get("status"),
+                _metadata_dict(expected_job_snapshot.get("config")).get("claim_token"),
+                expected_job_snapshot.get("worker_id"),
+                _job_dispatch_metadata(expected_job_snapshot).get("remote_invocation_id"),
+                _job_dispatch_metadata(expected_job_snapshot).get("dispatch_reservation_id"),
+            ],
+        )
+        if not existing_row:
+            return False
+        existing_dispatch = _job_dispatch_metadata(existing_row)
 
-    if dispatch_attempt_count is FIELD_UNSET:
-        dispatch_attempt_count = int(existing_dispatch.get("dispatch_attempt_count") or 0) + 1
+        if dispatch_attempt_count is FIELD_UNSET:
+            dispatch_attempt_count = int(existing_dispatch.get("dispatch_attempt_count") or 0) + 1
 
-    def _resolve_text(value: str | None | object, existing_key: str) -> str | None:
-        if value is FIELD_UNSET:
-            resolved = existing_dispatch.get(existing_key)
-        else:
-            resolved = value
-        return str(resolved or "").strip() or None
+        def _resolve_text(value: str | None | object, existing_key: str) -> str | None:
+            if value is FIELD_UNSET:
+                resolved = existing_dispatch.get(existing_key)
+            else:
+                resolved = value
+            return str(resolved or "").strip() or None
 
-    def _resolve_dt(value: datetime | None | object, existing_key: str) -> str | None:
-        if value is FIELD_UNSET:
-            return _iso(_coerce_dt(existing_dispatch.get(existing_key)))
-        return _iso(_coerce_dt(value))
+        def _resolve_dt(value: datetime | None | object, existing_key: str) -> str | None:
+            if value is FIELD_UNSET:
+                return _iso(_coerce_dt(existing_dispatch.get(existing_key)))
+            return _iso(_coerce_dt(value))
 
-    if dispatch_requested_at is FIELD_UNSET:
-        dispatch_requested_at = _coerce_dt(existing_dispatch.get("dispatch_requested_at")) or _now_utc()
+        if dispatch_requested_at is FIELD_UNSET:
+            dispatch_requested_at = _coerce_dt(existing_dispatch.get("dispatch_requested_at")) or _now_utc()
 
-    dispatch_payload = {
-        **existing_dispatch,
-        "dispatch_backend": dispatch_backend,
-        "dispatch_requested_at": _iso(_coerce_dt(dispatch_requested_at) or _now_utc()),
-        "dispatch_attempt_count": max(1, int(cast(Any, dispatch_attempt_count))),
-        "remote_invocation_id": _resolve_text(remote_invocation_id, "remote_invocation_id"),
-        "remote_function_name": _resolve_text(remote_function_name, "remote_function_name"),
-        "lease_expires_at": _resolve_dt(lease_expires_at, "lease_expires_at"),
-        "last_dispatch_error": _resolve_text(last_dispatch_error, "last_dispatch_error"),
-        "last_dispatch_error_code": _resolve_text(last_dispatch_error_code, "last_dispatch_error_code"),
-        "last_dispatch_error_at": _resolve_dt(last_dispatch_error_at, "last_dispatch_error_at"),
-        "remote_invocation_status": _resolve_text(remote_invocation_status, "remote_invocation_status"),
-        "remote_invocation_checked_at": _resolve_dt(remote_invocation_checked_at, "remote_invocation_checked_at"),
-        "remote_task_id": _resolve_text(remote_task_id, "remote_task_id"),
-        "remote_pending_since": _resolve_dt(remote_pending_since, "remote_pending_since"),
-        "remote_blocked_reason": _resolve_text(remote_blocked_reason, "remote_blocked_reason"),
-        "dispatch_blocked_failure_count": (
-            _normalize_non_negative_int(existing_dispatch.get("dispatch_blocked_failure_count"))
-            if dispatch_blocked_failure_count is FIELD_UNSET
-            else _normalize_non_negative_int(dispatch_blocked_failure_count)
-        ),
-        "dispatch_blocked_first_seen_at": _resolve_dt(
-            dispatch_blocked_first_seen_at,
-            "dispatch_blocked_first_seen_at",
-        ),
-    }
-    pg.fetch_one(
-        """
-        update social.scrape_jobs
-        set
-          metadata = jsonb_set(coalesce(metadata, '{}'::jsonb), '{dispatch}', %s::jsonb, true)
-        where id = %s::uuid
-        returning id::text
-        """,
-        [_json_dumps(dispatch_payload), job_id],
-    )
+        dispatch_payload = {
+            **existing_dispatch,
+            "dispatch_backend": dispatch_backend,
+            "dispatch_reservation_id": _resolve_text(dispatch_reservation_id, "dispatch_reservation_id"),
+            "dispatch_requested_at": _iso(_coerce_dt(dispatch_requested_at) or _now_utc()),
+            "dispatch_attempt_count": max(1, int(cast(Any, dispatch_attempt_count))),
+            "remote_invocation_id": _resolve_text(remote_invocation_id, "remote_invocation_id"),
+            "remote_function_name": _resolve_text(remote_function_name, "remote_function_name"),
+            "lease_expires_at": _resolve_dt(lease_expires_at, "lease_expires_at"),
+            "last_dispatch_error": _resolve_text(last_dispatch_error, "last_dispatch_error"),
+            "last_dispatch_error_code": _resolve_text(last_dispatch_error_code, "last_dispatch_error_code"),
+            "last_dispatch_error_at": _resolve_dt(last_dispatch_error_at, "last_dispatch_error_at"),
+            "remote_invocation_status": _resolve_text(remote_invocation_status, "remote_invocation_status"),
+            "remote_invocation_checked_at": _resolve_dt(remote_invocation_checked_at, "remote_invocation_checked_at"),
+            "remote_task_id": _resolve_text(remote_task_id, "remote_task_id"),
+            "remote_pending_since": _resolve_dt(remote_pending_since, "remote_pending_since"),
+            "remote_blocked_reason": _resolve_text(remote_blocked_reason, "remote_blocked_reason"),
+            "dispatch_blocked_failure_count": (
+                _normalize_non_negative_int(existing_dispatch.get("dispatch_blocked_failure_count"))
+                if dispatch_blocked_failure_count is FIELD_UNSET
+                else _normalize_non_negative_int(dispatch_blocked_failure_count)
+            ),
+            "dispatch_blocked_first_seen_at": _resolve_dt(
+                dispatch_blocked_first_seen_at,
+                "dispatch_blocked_first_seen_at",
+            ),
+        }
+        pg.fetch_one(
+            """
+            update social.scrape_jobs
+            set
+              metadata = jsonb_set(coalesce(metadata, '{}'::jsonb), '{dispatch}', %s::jsonb, true)
+            where id = %s::uuid
+            returning id::text
+            """,
+            [_json_dumps(dispatch_payload), job_id],
+        )
+        return True
 
 
 def _resolve_stale_modal_dispatch_recovery_limit() -> int:
@@ -12847,13 +12943,15 @@ def _clear_stale_pending_modal_dispatch(
     job_id: str,
     job_dispatch: Mapping[str, Any] | None,
     *,
+    expected_job_snapshot: Mapping[str, Any] | None = None,
     reason: str = "stale_modal_pending_capacity_cleared",
 ) -> dict[str, Any]:
     dispatch = _metadata_dict(job_dispatch)
     now_utc = _now_utc()
     clear_count = _normalize_non_negative_int(dispatch.get("stale_pending_modal_clear_count")) + 1
-    _touch_job_dispatch_metadata(
+    accepted = _touch_job_dispatch_metadata(
         job_id,
+        expected_job_snapshot=expected_job_snapshot,
         dispatch_backend=str(dispatch.get("dispatch_backend") or "modal"),
         dispatch_requested_at=_coerce_dt(dispatch.get("dispatch_requested_at")),
         dispatch_attempt_count=_dispatch_metadata_attempt_count(dispatch),
@@ -12870,6 +12968,8 @@ def _clear_stale_pending_modal_dispatch(
         dispatch_blocked_failure_count=0,
         dispatch_blocked_first_seen_at=None,
     )
+    if not accepted:
+        return dispatch
     return {
         **dispatch,
         "remote_invocation_id": None,
@@ -12922,6 +13022,7 @@ def _refresh_remote_modal_invocation_state(
     refreshed_lease_value = lease_expires_at if clear_dispatch_error else FIELD_UNSET
     _touch_job_dispatch_metadata(
         job_id,
+        expected_job_snapshot=job,
         dispatch_backend=str(dispatch.get("dispatch_backend") or "modal"),
         dispatch_requested_at=requested_at,
         dispatch_attempt_count=_dispatch_metadata_attempt_count(dispatch),
@@ -12938,8 +13039,16 @@ def _refresh_remote_modal_invocation_state(
     return inspection
 
 
-def _update_job_config(job_id: str, *, config_updates: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def _update_job_config(
+    job_id: str,
+    *,
+    config_updates: Mapping[str, Any] | None = None,
+    claim_token: str | None = None,
+    worker_id: str | None = None,
+) -> dict[str, Any]:
     updates = _metadata_dict(config_updates)
+    updates.pop("claim_token", None)
+    claim_token, worker_id = _job_claim_identity(job_id, claim_token=claim_token, worker_id=worker_id)
     if not job_id or not updates:
         return {}
     row = (
@@ -12950,9 +13059,11 @@ def _update_job_config(job_id: str, *, config_updates: Mapping[str, Any] | None 
               config = coalesce(config, '{}'::jsonb) || %s::jsonb,
               heartbeat_at = now()
             where id = %s::uuid
+              and status = 'running' and claimed_at is not null
+              and worker_id = %s::text and config->>'claim_token' = %s::text
             returning config
             """,
-            [_json_dumps(updates), job_id],
+            [_json_dumps(updates), job_id, worker_id, claim_token],
         )
         or {}
     )
@@ -12976,6 +13087,7 @@ def _mark_claimed_modal_dispatch_running(claimed_job: Mapping[str, Any] | None) 
         return
     _touch_job_dispatch_metadata(
         job_id,
+        expected_job_snapshot=claimed_job,
         dispatch_backend=dispatch_backend or "modal",
         dispatch_requested_at=_coerce_dt(dispatch.get("dispatch_requested_at")),
         dispatch_attempt_count=_dispatch_metadata_attempt_count(dispatch),
@@ -13006,7 +13118,61 @@ def _claimed_media_runtime_versions() -> tuple[str, str]:
     return _json_dumps(media_runtime), _json_dumps(comment_media_runtime)
 
 
+def _comments_auth_fallback_capacity_sql(table_alias: str) -> str:
+    # Invalid nonempty leases deny capacity; invalid timestamp casts fail closed.
+    return f"""not exists (
+        select 1 from social.scrape_jobs auth_sibling
+        where auth_sibling.run_id = {table_alias}.run_id
+          and auth_sibling.id <> {table_alias}.id
+          and lower(coalesce(auth_sibling.config->>'comments_auth_fallback', 'false')) = 'true'
+          and (auth_sibling.status in ('running', 'cancelling') or (
+            auth_sibling.status in ('queued', 'pending', 'retrying') and
+            case
+              when nullif(auth_sibling.metadata #>> '{{dispatch,lease_expires_at}}', '') is null then false
+              when (auth_sibling.metadata #>> '{{dispatch,lease_expires_at}}')
+                   ~ '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}T'
+                then (auth_sibling.metadata #>> '{{dispatch,lease_expires_at}}')::timestamptz > now()
+              else true
+            end
+          ))
+    )"""
+
+
+@contextmanager
+def _comments_auth_fallback_claim_scope(job_id: str):
+    """Serialize flagged claim/reservation capacity, skipping contested runs."""
+    with pg.transaction():
+        job = pg.fetch_one("select id, run_id, config from social.scrape_jobs where id = %s::uuid", [job_id])
+        if not job:
+            yield False
+            return
+        if str(_metadata_dict(job.get("config")).get("comments_auth_fallback") or "").lower() != "true":
+            yield True
+            return
+        run = pg.fetch_one(
+            "select id from social.scrape_runs where id = %s::uuid for update skip locked", [job.get("run_id")]
+        )
+        if not run:
+            yield False
+            return
+        available = pg.fetch_one(
+            f"select j.id from social.scrape_jobs j where j.id = %s::uuid "
+            f"and {_comments_auth_fallback_capacity_sql('j')} for update skip locked",
+            [job_id],
+        )
+        yield bool(available)
+
+
 def _claim_job_by_id(*, job_id: str, worker_id: str, dispatch_token: str | None = None) -> dict[str, Any] | None:
+    with _comments_auth_fallback_claim_scope(job_id) as available:
+        if not available:
+            return None
+        return _claim_job_by_id_with_capacity(job_id=job_id, worker_id=worker_id, dispatch_token=dispatch_token)
+
+
+def _claim_job_by_id_with_capacity(
+    *, job_id: str, worker_id: str, dispatch_token: str | None = None
+) -> dict[str, Any] | None:
     media_runtime_json, comment_media_runtime_json = _claimed_media_runtime_versions()
     return pg.fetch_one(
         """
@@ -13021,7 +13187,7 @@ def _claim_job_by_id(*, job_id: str, worker_id: str, dispatch_token: str | None 
           error_message = null,
           last_error_code = null,
           last_error_class = null,
-          config = case
+          config = (case
             when coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type) = 'media_mirror'
               then coalesce(j.config, '{}'::jsonb) || jsonb_build_object(
                 'required_runtime_version', %s::jsonb,
@@ -13034,8 +13200,8 @@ def _claim_job_by_id(*, job_id: str, worker_id: str, dispatch_token: str | None 
                 'claimed_runtime_version', %s::jsonb,
                 'claimed_runtime_refreshed_at', now()
               )
-            else j.config
-          end,
+            else coalesce(j.config, '{}'::jsonb)
+          end) || jsonb_build_object('claim_token', gen_random_uuid()::text),
           metadata = case
             when coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type) = 'media_mirror'
               then coalesce(j.metadata, '{}'::jsonb) || jsonb_build_object(
@@ -13052,6 +13218,10 @@ def _claim_job_by_id(*, job_id: str, worker_id: str, dispatch_token: str | None 
             else j.metadata
           end
         where j.id = %s::uuid
+          and j.id in (
+            select locked_job.id from social.scrape_jobs locked_job
+            where locked_job.id = j.id for update skip locked
+          )
           and (coalesce(j.config->>'detail_contract_version', '') <> '1'
             or (j.detail_dispatch_token = %s and j.detail_dispatch_expires_at > now()))
           and j.status in ('queued', 'pending', 'retrying')
@@ -13116,6 +13286,7 @@ def _claim_job_by_id(*, job_id: str, worker_id: str, dispatch_token: str | None 
           platform,
           job_type,
           status,
+          worker_id,
           config,
           metadata,
           attempt_count,
@@ -13148,7 +13319,9 @@ def _update_job_progress(
     items_found: int,
     metadata: dict[str, Any] | None = None,
     worker_id: str | None = None,
+    claim_token: str | None = None,
 ) -> bool:
+    claim_token, worker_id = _job_claim_identity(job_id, claim_token=claim_token, worker_id=worker_id)
     row = pg.fetch_one(
         """
         update social.scrape_jobs
@@ -13159,24 +13332,24 @@ def _update_job_progress(
         where id = %s
           and status = 'running'
           and claimed_at is not null
-          and (
-            %s::text is null
-            or worker_id is null
-            or worker_id = %s::text
-            or %s::text like worker_id || '%%'
-          )
+          and worker_id = %s::text
+          and config->>'claim_token' = %s::text
         returning id::text
         """,
-        [items_found, _json_dumps(_metadata_dict(metadata)), job_id, worker_id, worker_id, worker_id],
+        [items_found, _json_dumps(_metadata_dict(metadata)), job_id, worker_id, claim_token],
         pool_name=SOCIAL_CATALOG_PROGRESS_POOL_NAME,
     )
     if not row:
         return False
-    _touch_worker_heartbeat_for_job(
-        job_id=job_id,
-        status="working",
-        metadata={"source": "job_progress"},
-    )
+    with _job_followup_write_scope(
+        job_id, expected_status="running", claim_token=claim_token, worker_id=worker_id
+    ) as claim_current:
+        if claim_current:
+            _touch_worker_heartbeat_for_job(
+                job_id=job_id,
+                status="working",
+                metadata={"source": "job_progress"},
+            )
     return True
 
 
@@ -13252,15 +13425,17 @@ def _cancel_duplicate_active_facebook_shared_post_jobs_after_completed_save(
           and coalesce(j.config->>'runner_strategy', '') not in ('parallel_detail_refresh', 'adaptive_dual_runner')
           and coalesce(j.config->>'shard_index', '') = ''
           and coalesce(j.config->>'details_refresh_shard_index', '') = ''
-        returning j.id::text as id
+        returning j.id::text as id, j.status, j.worker_id, j.config
         """,
         [job_id, run_id, job_id, SHARED_ACCOUNT_POSTS_STAGE, account],
         pool_name=SOCIAL_CATALOG_PROGRESS_POOL_NAME,
     )
     cancelled_ids = [str(row.get("id") or "").strip() for row in rows if str(row.get("id") or "").strip()]
-    for duplicate_id in cancelled_ids:
+    for cancelled_row in rows:
+        duplicate_id = str(cancelled_row.get("id") or "")
         _clear_worker_heartbeat_for_job(
             job_id=duplicate_id,
+            expected_job_snapshot=cancelled_row,
             status="idle",
             metadata={
                 "source": "facebook_duplicate_cleanup",
@@ -13290,9 +13465,96 @@ def _finish_job(
     last_error_class: str | None = None,
     next_available_at: datetime | None = None,
     expected_worker_id: str | None = None,
+    expected_claim_token: str | None = None,
     expected_dispatch_token: str | None = None,
     defer_followups: bool = False,
-) -> None:
+) -> bool:
+    expected_claim_token, expected_worker_id = _job_claim_identity(
+        job_id, claim_token=expected_claim_token, worker_id=expected_worker_id
+    )
+    return _finish_job_transition(
+        job_id,
+        status=status,
+        items_found=items_found,
+        error_message=error_message,
+        metadata=metadata,
+        last_error_code=last_error_code,
+        last_error_class=last_error_class,
+        next_available_at=next_available_at,
+        expected_worker_id=expected_worker_id,
+        expected_claim_token=expected_claim_token,
+        expected_dispatch_token=expected_dispatch_token,
+        defer_followups=defer_followups,
+    )
+
+
+def _transition_job_state(
+    job_id: str,
+    *,
+    expected_status: str,
+    expected_claim_token: str | None,
+    expected_dispatch_snapshot: Mapping[str, Any] | None = None,
+    **kwargs: Any,
+) -> bool:
+    """Administrative transition fenced by observed state and optional dispatch reservation."""
+    if not expected_status:
+        raise ValueError("Administrative job transitions require an observed status")
+    if expected_dispatch_snapshot is None:
+        return _finish_job_transition(
+            job_id, expected_admin_status=expected_status, expected_claim_token=expected_claim_token, **kwargs
+        )
+    defer_followups = bool(kwargs.get("defer_followups"))
+    if pg.has_active_transaction() and not defer_followups:
+        raise RuntimeError("Caller-owned administrative transitions must defer followups until commit")
+    with pg.transaction():
+        observed = pg.fetch_one(
+            """select id, run_id, worker_id from social.scrape_jobs
+            where id = %s::uuid and status = %s
+              and (config->>'claim_token') is not distinct from %s::text
+              and coalesce(metadata->'dispatch', '{}'::jsonb) = %s::jsonb
+            for update""",
+            [job_id, expected_status, expected_claim_token, _json_dumps(dict(expected_dispatch_snapshot))],
+        )
+        if not observed:
+            return False
+        accepted = _finish_job_transition(
+            job_id,
+            expected_admin_status=expected_status,
+            expected_claim_token=expected_claim_token,
+            **{**kwargs, "defer_followups": True},
+        )
+        if not accepted:
+            raise RuntimeError("Administrative dispatch snapshot changed during its locked transition")
+    if accepted and not defer_followups:
+        _finish_job_followups(
+            job_id,
+            run_id=str(observed.get("run_id") or "") or None,
+            status=kwargs["status"],
+            items_found=kwargs["items_found"],
+            metadata=kwargs.get("metadata"),
+            claim_token=expected_claim_token,
+            worker_id=observed.get("worker_id"),
+            administrative=True,
+        )
+    return accepted
+
+
+def _finish_job_transition(
+    job_id: str,
+    *,
+    status: str,
+    items_found: int,
+    error_message: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    last_error_code: str | None = None,
+    last_error_class: str | None = None,
+    next_available_at: datetime | None = None,
+    expected_worker_id: str | None = None,
+    expected_claim_token: str | None = None,
+    expected_dispatch_token: str | None = None,
+    defer_followups: bool = False,
+    expected_admin_status: str | None = None,
+) -> bool:
     is_terminal = status in {"completed", "failed", "cancelled"}
     completed_expr = "now()" if is_terminal else "completed_at"
     with pg.db_connection(label="finish_social_scrape_job") as conn:
@@ -13307,7 +13569,9 @@ def _finish_job(
                 status as prior_status,
                 items_found as prior_items_found,
                 coalesce(config->>'stage', metadata->>'stage', job_type, 'unknown') as stage,
-                metadata as prior_metadata
+                metadata as prior_metadata,
+                worker_id as prior_worker_id,
+                config->>'claim_token' as prior_claim_token
               from social.scrape_jobs
               where id = %s
               for update
@@ -13356,22 +13620,26 @@ def _finish_job(
                 )
               )
               and (
-                %s::text is null
-                or (
-                  prior.prior_status = 'running'
+                (%s::text is null
+                  and prior.prior_status = 'running'
                   and social.scrape_jobs.claimed_at is not null
+                  and social.scrape_jobs.worker_id = %s::text
                   and (
-                    social.scrape_jobs.worker_id = %s::text
-                    or %s::text like social.scrape_jobs.worker_id || '%%'
-                  )
-                )
+                    coalesce(social.scrape_jobs.config->>'detail_contract_version', '') = '1'
+                    or social.scrape_jobs.config->>'claim_token' = %s::text
+                  ))
+                or (%s::text is not null
+                  and prior.prior_status = %s::text
+                  and (social.scrape_jobs.config->>'claim_token') is not distinct from %s::text)
               )
             returning
               social.scrape_jobs.id::text as id,
               prior.run_id as run_id,
               prior.prior_status,
               prior.prior_items_found,
-              prior.stage
+              prior.stage,
+              prior.prior_worker_id,
+              prior.prior_claim_token
             """,
                 [
                     job_id,
@@ -13391,38 +13659,24 @@ def _finish_job(
                     expected_worker_id,
                     expected_dispatch_token,
                     status,
+                    expected_admin_status,
                     expected_worker_id,
-                    expected_worker_id,
-                    expected_worker_id,
+                    expected_claim_token,
+                    expected_admin_status,
+                    expected_admin_status,
+                    expected_claim_token,
                 ],
             )
         if row and row.get("run_id"):
-            counter_savepoint = "finish_job_counter_sync"
-            _create_savepoint(conn, counter_savepoint)
-            try:
-                cast(_IncrementRunCountersOnJobFinishWithConn, _increment_run_counters_on_job_finish)(
-                    run_id=str(row.get("run_id")),
-                    stage=str(row.get("stage") or "unknown"),
-                    prior_status=str(row.get("prior_status") or ""),
-                    new_status=status,
-                    prior_items_found=_normalize_non_negative_int(row.get("prior_items_found")),
-                    new_items_found=_normalize_non_negative_int(items_found),
-                    conn=conn,
-                )
-            except Exception as exc:  # noqa: BLE001
-                if not (pg._is_statement_timeout_error(exc) or isinstance(exc, pg.DatabaseServiceUnavailableError)):
-                    raise
-                _rollback_to_savepoint(conn, counter_savepoint)
-                _release_savepoint(conn, counter_savepoint)
-                logger.warning(
-                    "[finish_job] run counter sync deferred after job=%s run=%s status=%s error=%s",
-                    job_id,
-                    str(row.get("run_id") or ""),
-                    status,
-                    exc,
-                )
-            else:
-                _release_savepoint(conn, counter_savepoint)
+            cast(_IncrementRunCountersOnJobFinishWithConn, _increment_run_counters_on_job_finish)(
+                run_id=str(row.get("run_id")),
+                stage=str(row.get("stage") or "unknown"),
+                prior_status=str(row.get("prior_status") or ""),
+                new_status=status,
+                prior_items_found=_normalize_non_negative_int(row.get("prior_items_found")),
+                new_items_found=_normalize_non_negative_int(items_found),
+                conn=conn,
+            )
     if not row:
         logger.warning(
             "[finish_job] skipped stale finish for job=%s status=%s expected_worker_id=%s",
@@ -13430,48 +13684,85 @@ def _finish_job(
             status,
             expected_worker_id,
         )
-        return
-    if status == "completed" and row.get("run_id"):
-        try:
-            _cancel_duplicate_active_facebook_shared_post_jobs_after_completed_save(
-                job_id=job_id,
-                run_id=str(row.get("run_id")),
-                status=status,
-                items_found=items_found,
-                metadata=metadata,
-            )
-        except Exception as exc:  # noqa: BLE001
-            if pg._is_statement_timeout_error(exc) or isinstance(exc, pg.DatabaseServiceUnavailableError):
-                logger.warning(
-                    "[finish_job] facebook duplicate cleanup deferred after job=%s run=%s error=%s",
-                    job_id,
-                    str(row.get("run_id") or ""),
-                    exc,
+        return False
+    if not defer_followups:
+        _finish_job_followups(
+            job_id,
+            run_id=str(row.get("run_id") or "") or None,
+            status=status,
+            items_found=items_found,
+            metadata=metadata,
+            claim_token=row.get("prior_claim_token", expected_claim_token),
+            worker_id=row.get("prior_worker_id", expected_worker_id),
+            administrative=expected_admin_status is not None,
+        )
+    return True
+
+
+def _finish_job_followups(
+    job_id: str,
+    *,
+    run_id: str | None,
+    status: str,
+    items_found: int,
+    metadata: dict[str, Any] | None = None,
+    claim_token: str | None = None,
+    worker_id: str | None = None,
+    administrative: bool = False,
+) -> None:
+    """Run retained accepted-completion followups after its transaction commits."""
+    if pg.has_active_transaction():
+        raise RuntimeError("Job completion followups require a committed transaction")
+    claim_token, worker_id = _job_claim_identity(job_id, claim_token=claim_token, worker_id=worker_id)
+    is_terminal = status in {"completed", "failed", "cancelled"}
+    with _job_followup_write_scope(
+        job_id,
+        expected_status=status,
+        claim_token=claim_token,
+        worker_id=worker_id,
+        administrative=administrative,
+    ) as claim_current:
+        if not claim_current:
+            return
+        if status == "completed" and run_id:
+            try:
+                _cancel_duplicate_active_facebook_shared_post_jobs_after_completed_save(
+                    job_id=job_id,
+                    run_id=str(run_id),
+                    status=status,
+                    items_found=items_found,
+                    metadata=metadata,
                 )
-            else:
-                raise
-    if defer_followups:
-        return
-    if is_terminal:
-        _clear_worker_heartbeat_for_job(
-            job_id=job_id,
-            status="idle",
-            metadata={"source": "job_finish", "job_status": status},
-        )
-    else:
-        _touch_worker_heartbeat_for_job(
-            job_id=job_id,
-            status="working",
-            metadata={"source": "job_finish", "job_status": status},
-        )
-    if status in {"retrying", "running", "completed", "failed", "cancelled"}:
-        _update_shared_account_partition_status_for_job(
-            job_id=job_id,
-            status="queued" if status == "retrying" else status,
-            metadata_updates={"source": "job_finish", "job_status": status},
-        )
-    if is_terminal and row.get("run_id"):
-        parent_run_id = str(row.get("run_id"))
+            except Exception as exc:  # noqa: BLE001
+                if pg._is_statement_timeout_error(exc) or isinstance(exc, pg.DatabaseServiceUnavailableError):
+                    logger.warning(
+                        "[finish_job] facebook duplicate cleanup deferred after job=%s run=%s error=%s",
+                        job_id,
+                        str(run_id or ""),
+                        exc,
+                    )
+                else:
+                    raise
+        if is_terminal:
+            _clear_worker_heartbeat_for_job(
+                job_id=job_id,
+                status="idle",
+                metadata={"source": "job_finish", "job_status": status},
+            )
+        else:
+            _touch_worker_heartbeat_for_job(
+                job_id=job_id,
+                status="working",
+                metadata={"source": "job_finish", "job_status": status},
+            )
+        if status in {"retrying", "running", "completed", "failed", "cancelled"}:
+            _update_shared_account_partition_status_for_job(
+                job_id=job_id,
+                status="queued" if status == "retrying" else status,
+                metadata_updates={"source": "job_finish", "job_status": status},
+            )
+    if is_terminal and run_id:
+        parent_run_id = str(run_id)
         try:
             finalize_result = _finalize_run_status(parent_run_id, force_recompute=True)
         except Exception as exc:  # noqa: BLE001
@@ -13920,6 +14211,7 @@ def _emit_job_progress(
     activity: dict[str, Any] | None,
     progress_state: dict[str, Any],
     worker_id: str | None = None,
+    claim_token: str | None = None,
     force: bool = False,
     extra_metadata: dict[str, Any] | None = None,
 ) -> bool:
@@ -13960,6 +14252,8 @@ def _emit_job_progress(
     update_kwargs: dict[str, Any] = {"items_found": items_found, "metadata": metadata}
     if worker_id is not None:
         update_kwargs["worker_id"] = worker_id
+    if claim_token is not None:
+        update_kwargs["claim_token"] = claim_token
     updated = _update_job_progress(job_id, **update_kwargs)
     if updated is False:
         return False
@@ -14190,7 +14484,7 @@ def recover_stale_running_jobs(
 
     detail_recovered = (
         recover_expired(
-            importlib.import_module(__name__),
+            importlib.import_module("trr_backend.socials.social_season_analytics_impl"),
             run_id=run_id,
             account=_normalize_account_handle(account_handle) if account_handle else None,
             limit=limit,
@@ -14617,6 +14911,8 @@ def recover_stale_running_jobs(
           stale_jobs.account_handle as account_handle,
           stale_jobs.prior_worker_id as prior_worker_id,
           j.status,
+          j.config,
+          j.worker_id,
           j.attempt_count,
           j.max_attempts
         """,
@@ -14655,6 +14951,7 @@ def recover_stale_running_jobs(
         if row.get("id"):
             _clear_worker_heartbeat_for_job(
                 job_id=str(row.get("id")),
+                expected_job_snapshot=row,
                 status="idle",
                 metadata={"source": "stale_recovery", "job_status": row.get("status")},
             )
@@ -17803,6 +18100,7 @@ def _mirror_platform_media_to_s3_result(
                             "accept": "*/*",
                         },
                         stream=True,
+                        max_bytes=max_asset_bytes,
                     ) as response:
                         response.raise_for_status()
                         content_type = response.headers.get("Content-Type") or "application/octet-stream"
@@ -18268,6 +18566,7 @@ def _download_avatar_to_tempfile(
     )
     temp_path: str | None = None
     content_type = "application/octet-stream"
+    max_asset_bytes = _social_avatar_mirror_max_bytes()
     total_bytes = 0
     sha256 = hashlib.sha256()
     try:
@@ -18278,6 +18577,7 @@ def _download_avatar_to_tempfile(
             timeout=(10, 30),
             headers=dict(headers),
             stream=True,
+            max_bytes=max_asset_bytes,
         ) as response:
             response.raise_for_status()
             content_type = response.headers.get("Content-Type", "application/octet-stream")
@@ -18293,7 +18593,7 @@ def _download_avatar_to_tempfile(
                     if progress_cb is not None:
                         progress_cb()
                     total_bytes += len(chunk)
-                    if total_bytes > _social_avatar_mirror_max_bytes():
+                    if total_bytes > max_asset_bytes:
                         raise RuntimeError("asset_too_large")
                     sha256.update(chunk)
                     temp_file.write(chunk)
@@ -36077,34 +36377,16 @@ def _repair_finalizing_catalog_launch_after_jobs(
     conn: Any | None = None,
     owns_launch_group: bool = False,
 ) -> dict[str, Any] | None:
-    from trr_backend.socials.pipelines.account_catalog.launch import _catalog_launch_group_transaction_lock
+    from trr_backend.socials.pipelines.account_catalog.launch import _LOCAL_ROOM_FUNCTIONS
 
-    config = _metadata_dict(run_row.get("config"))
-    group_id = str(config.get("launch_group_id") or "").strip()
-    if not group_id or not job_rows:
-        return None
-    with nullcontext(True) if owns_launch_group else _catalog_launch_group_transaction_lock(group_id) as acquired:
-        if not acquired:
-            return None
-        current = _load_catalog_run_row_by_id(str(run_row.get("run_id") or run_row.get("id")), conn=conn)
-        current_config = _metadata_dict(current.get("config"))
-        if str(current_config.get("launch_group_id") or "") != group_id:
-            return None
-        if str(current.get("status") or "").lower() in {"cancelled", "cancelling", "failed"}:
-            return None
-        state = str(current_config.get("launch_state") or "").lower()
-        if state != "ready":
-            complete_ids = set(_as_text_list(current_config.get("catalog_launch_job_ids")))
-            actual_ids = {str(row.get("id") or row.get("job_id") or "") for row in job_rows}
-            if not complete_ids or not complete_ids.issubset(actual_ids):
-                return None
-        return _repair_finalizing_catalog_launch_after_jobs_owned(
-            run_row=current,
-            job_rows=job_rows,
-            platform=platform,
-            account_handle=account_handle,
-            conn=conn,
-        )
+    return _LOCAL_ROOM_FUNCTIONS["_repair_finalizing_catalog_launch_after_jobs"](
+        run_row=run_row,
+        job_rows=job_rows,
+        platform=platform,
+        account_handle=account_handle,
+        conn=conn,
+        owns_launch_group=owns_launch_group,
+    )
 
 
 def _repair_finalizing_catalog_launch_after_jobs_owned(
@@ -36115,149 +36397,15 @@ def _repair_finalizing_catalog_launch_after_jobs_owned(
     account_handle: str,
     conn: Any | None = None,
 ) -> dict[str, Any] | None:
-    if not job_rows:
-        return None
-    run_config = _metadata_dict(run_row.get("config"))
-    launch_state = str(run_config.get("launch_state") or "").strip().lower()
-    selected_tasks = _normalize_optional_social_account_catalog_backfill_selected_tasks(
-        run_config.get("selected_tasks")
-    )
-    effective_selected_tasks = (
-        _normalize_optional_social_account_catalog_backfill_selected_tasks(run_config.get("effective_selected_tasks"))
-        or selected_tasks
-    )
-    launch_group_id = str(run_config.get("launch_group_id") or "").strip() or None
-    attached_followups = _normalize_attached_followups(run_config.get("attached_followups"))
-    comments_followup_missing = "comments" in effective_selected_tasks and not attached_followups.get("comments")
-    media_followup_missing = bool(
-        "media" in effective_selected_tasks and launch_group_id and not attached_followups.get("media")
-    )
-    finalizing_metadata_incomplete = launch_state == "finalizing" and _catalog_launch_task_resolution_pending(
-        run_config.get("launch_task_resolution_pending")
-    )
-    if not finalizing_metadata_incomplete and not comments_followup_missing and not media_followup_missing:
-        return None
+    from trr_backend.socials.pipelines.account_catalog.launch import _LOCAL_ROOM_FUNCTIONS
 
-    run_id = str(run_row.get("run_id") or run_row.get("id") or "").strip()
-    if not run_id:
-        return None
-    normalized_platform = _normalize_social_account_profile_platform(platform)
-    normalized_account = _normalize_social_account_profile_handle(account_handle)
-    source_scope = str(run_config.get("source_scope") or run_row.get("source_scope") or "network").strip() or "network"
-    metadata_updates: dict[str, Any] = {
-        "launch_state": "ready",
-        "launch_task_resolution_pending": False,
-        "launch_completed_at": _iso(_now_utc()),
-        "selected_tasks": selected_tasks,
-        "effective_selected_tasks": effective_selected_tasks,
-    }
-    if comments_followup_missing or media_followup_missing:
-        metadata_updates["catalog_followups_disabled"] = False
-
-    if comments_followup_missing:
-        comments_enable_media_followups = (
-            bool(run_config.get("comments_enable_media_followups"))
-            if run_config.get("comments_enable_media_followups") is not None
-            else "media" in effective_selected_tasks
-        )
-        # A bounded existing-post launch must enumerate the whole requested
-        # window. Streaming only sees rows stamped by this backfill run.
-        bounded_comments_window = _catalog_backfill_has_bounded_window(
-            date_start=_coerce_dt(run_config.get("date_start")),
-            date_end=_coerce_dt(run_config.get("date_end")),
-        )
-        use_streaming_comments = bool(
-            normalized_platform == "instagram"
-            and not bool(run_config.get("allow_local_dev_inline_bypass"))
-            and str(run_config.get("execution_preference") or "auto") != "prefer_local_inline"
-            and not bounded_comments_window
-        )
-        if use_streaming_comments:
-            metadata_updates.update(
-                {
-                    "comments_streaming_enabled": True,
-                    "comments_streaming_state": "started",
-                    "comments_streaming_source": "catalog_batch_persist",
-                    "comments_streaming_account_handle": normalized_account,
-                    "comments_streaming_source_scope": source_scope,
-                    "comments_streaming_launch_group_id": launch_group_id,
-                    "comments_streaming_worker_count": _normalize_non_negative_int(
-                        run_config.get("comments_worker_count")
-                    )
-                    or None,
-                    "comments_streaming_enable_media_followups": comments_enable_media_followups,
-                    "comments_streaming_targets_seen": 0,
-                    "comments_streaming_targets_enqueued": 0,
-                    "comments_streaming_targets_skipped_duplicate": 0,
-                    "comments_streaming_append_failures": 0,
-                    "deferred_comments_followup": None,
-                }
-            )
-            attached_followups["comments"] = _build_attached_comments_followup(
-                run_id=None,
-                status="pending",
-                source="catalog_streaming",
-                state="pending",
-            )
-        else:
-            deferred_comments_followup = {
-                "state": "pending",
-                # Lifecycle must reuse a child created before parent attachment.
-                "launch_recovered_at": _iso(_now_utc()),
-                "platform": normalized_platform,
-                "account_handle": normalized_account,
-                "source_scope": source_scope,
-                "refresh_policy": "stale_or_missing",
-                "target_filter": "incomplete" if normalized_platform == "instagram" else None,
-                "date_start": run_config.get("date_start"),
-                "date_end": run_config.get("date_end"),
-                "comments_worker_count": _normalize_non_negative_int(run_config.get("comments_worker_count")) or None,
-                "comments_enable_media_followups": comments_enable_media_followups,
-                "allow_local_dev_inline_bypass": bool(run_config.get("allow_local_dev_inline_bypass")),
-                "launch_group_id": launch_group_id,
-                "runtime_version": _metadata_dict(run_config.get("required_runtime_version"))
-                or dict(_resolve_effective_runtime_version(required_execution_backend="modal")),
-                "created_by_runtime_version": _metadata_dict(run_config.get("created_by_runtime_version"))
-                or dict(_resolve_runtime_version_stamp()),
-            }
-            metadata_updates["comments_streaming_enabled"] = False
-            metadata_updates["deferred_comments_followup"] = deferred_comments_followup
-            attached_followups["comments"] = _build_attached_comments_followup(
-                run_id=None,
-                status="pending",
-                source="deferred_after_catalog",
-                state="pending",
-            )
-    if media_followup_missing:
-        attached_followups["media"] = _build_attached_media_followup(
-            attachment_id=_catalog_media_attachment_id(launch_group_id),
-            source="catalog_media_mirror",
-            status=_derive_run_progress_status(run_row.get("status"), job_rows),
-        )
-    if attached_followups:
-        metadata_updates["attached_followups"] = attached_followups
-
-    merged = _merge_catalog_run_config(
-        run_id=run_id,
-        metadata_updates=metadata_updates,
+    return _LOCAL_ROOM_FUNCTIONS["_repair_finalizing_catalog_launch_after_jobs_owned"](
+        run_row=run_row,
+        job_rows=job_rows,
+        platform=platform,
+        account_handle=account_handle,
         conn=conn,
-        expected_launch_state=launch_state,
     )
-    merged_config = _metadata_dict(merged.get("config"))
-    if not merged_config:
-        return None
-    logger.info(
-        (
-            "[catalog-launch] finalizing_metadata_repaired platform=%s account=%s run_id=%s "
-            "job_count=%s effective_selected_tasks=%s"
-        ),
-        normalized_platform,
-        normalized_account,
-        run_id,
-        len(job_rows),
-        effective_selected_tasks,
-    )
-    return merged_config or {**run_config, **metadata_updates}
 
 
 def _shared_account_run_partitions_table_ready() -> bool:
@@ -43076,11 +43224,16 @@ def _run_shared_account_posts_stage(
         )
     ingest_mode = str(config.get("pipeline_ingest_mode") or SHARED_ACCOUNT_ASYNC_INGEST_MODE).strip().lower()
     if str(config.get("partition_id") or "").strip():
-        _update_shared_account_partition_status_for_job(
-            job_id=job_id,
-            status="running",
-            metadata_updates={"source": "shared_account_posts_stage_start"},
-        )
+        claim_token, claimed_worker_id = _job_claim_identity(job_id)
+        with _job_followup_write_scope(
+            job_id, expected_status="running", claim_token=claim_token, worker_id=claimed_worker_id
+        ) as claim_current:
+            if claim_current:
+                _update_shared_account_partition_status_for_job(
+                    job_id=job_id,
+                    status="running",
+                    metadata_updates={"source": "shared_account_posts_stage_start"},
+                )
     progress_state = _new_job_progress_state()
     activity: dict[str, Any] = {
         "phase": f"{SHARED_ACCOUNT_POSTS_STAGE}_start",
@@ -43956,13 +44109,21 @@ def _run_shared_analytics_refresh_stage(
     return len(season_ids), 0, metadata
 
 
+@_with_claimed_job_context
 def _execute_shared_claimed_job(job: Mapping[str, Any], *, worker_id: str | None = None) -> dict[str, Any]:
     if (job.get("config") or {}).get("detail_contract_version") == 1:
         from trr_backend.socials.control_plane.instagram_detail_targets import execute_job
+        from trr_backend.socials.instagram import catalog_ingest
 
         if not worker_id:
             raise ValueError("Durable Post Details requires a worker identity")
-        return execute_job(importlib.import_module(__name__), job, worker_id=worker_id)
+        return execute_job(
+            importlib.import_module("trr_backend.socials.social_season_analytics_impl"),
+            job,
+            worker_id=worker_id,
+            detail_executor=catalog_ingest.run_durable_instagram_details,
+        )
+    finish_accepted = False
     job_id = str(job.get("id") or "").strip()
     run_id = str(job.get("run_id") or "").strip()
     config = dict(job.get("config") or {})
@@ -44127,7 +44288,7 @@ def _execute_shared_claimed_job(job: Mapping[str, Any], *, worker_id: str | None
             account_handle=account_handle,
             metadata=metadata,
         )
-        _finish_job(
+        finish_accepted = _finish_job(
             job_id,
             status="completed",
             items_found=posts_count + comments_count,
@@ -44177,263 +44338,281 @@ def _execute_shared_claimed_job(job: Mapping[str, Any], *, worker_id: str | None
         ):
             can_retry = False
         next_available_at = _now_utc() + timedelta(seconds=_retry_backoff_seconds(attempt_count)) if can_retry else None
-        cooldown_payload = _record_posts_auth_cooldown_if_applicable(
-            platform=platform,
-            stage=stage,
-            job_type=job.get("job_type"),
-            account_handle=account_handle,
-            error_code=error_code,
-            error_message=str(exc),
-            metadata=runtime_metadata,
-        )
-        if can_retry:
-            next_available_at = _defer_retry_until_posts_auth_cooldown(
+        with _job_claim_write_scope(job_id) as claim_current:
+            if not claim_current:
+                return _load_current_job_row(job_id)
+            cooldown_payload = _record_posts_auth_cooldown_if_applicable(
                 platform=platform,
                 stage=stage,
                 job_type=job.get("job_type"),
                 account_handle=account_handle,
-                next_available_at=next_available_at,
+                error_code=error_code,
+                error_message=str(exc),
                 metadata=runtime_metadata,
             )
-        elif cooldown_payload:
-            cooldown_until = _coerce_dt(cooldown_payload.get("cooldown_until"))
-            if cooldown_until is not None:
-                next_available_at = cooldown_until
-        retry_config_updates = (
-            _shared_account_retry_config_updates(
-                config,
+            if can_retry:
+                next_available_at = _defer_retry_until_posts_auth_cooldown(
+                    platform=platform,
+                    stage=stage,
+                    job_type=job.get("job_type"),
+                    account_handle=account_handle,
+                    next_available_at=next_available_at,
+                    metadata=runtime_metadata,
+                )
+            elif cooldown_payload:
+                cooldown_until = _coerce_dt(cooldown_payload.get("cooldown_until"))
+                if cooldown_until is not None:
+                    next_available_at = cooldown_until
+            retry_config_updates = (
+                _shared_account_retry_config_updates(
+                    config,
+                    platform=platform,
+                    stage=stage,
+                    error_code=error_code,
+                )
+                if can_retry
+                else {}
+            )
+            if _shared_instagram_cursor_auth_repair_required(
                 platform=platform,
                 stage=stage,
                 error_code=error_code,
-            )
-            if can_retry
-            else {}
-        )
-        if _shared_instagram_cursor_auth_repair_required(
-            platform=platform,
-            stage=stage,
-            error_code=error_code,
-            config=config,
-            retry_config_updates=retry_config_updates,
-        ):
-            can_retry = False
-            next_available_at = None
-            error_code = "instagram_graphql_cursor_auth_repair_required"
-            error_class = "InstagramAuthRepairRequired"
-            repair_required_at = _iso(_now_utc())
-            retry_config_updates = {
-                **retry_config_updates,
-                "instagram_auth_repair_required": True,
-                "instagram_auth_repair_required_at": repair_required_at,
-                "instagram_auth_repair_reason": "repeated_cursor_auth_failure",
-                "auth_repair_repairable_reason": "repeated_cursor_auth_failure",
-            }
-            runtime_metadata.update(
-                {
+                config=config,
+                retry_config_updates=retry_config_updates,
+            ):
+                can_retry = False
+                next_available_at = None
+                error_code = "instagram_graphql_cursor_auth_repair_required"
+                error_class = "InstagramAuthRepairRequired"
+                repair_required_at = _iso(_now_utc())
+                retry_config_updates = {
+                    **retry_config_updates,
                     "instagram_auth_repair_required": True,
-                    "auth_repair_required_at": repair_required_at,
-                    "auth_repair_reason": "repeated_cursor_auth_failure",
-                    "cursor_auth_repair_threshold": _shared_instagram_cursor_auth_repair_threshold(),
-                    "retryable": False,
+                    "instagram_auth_repair_required_at": repair_required_at,
+                    "instagram_auth_repair_reason": "repeated_cursor_auth_failure",
+                    "auth_repair_repairable_reason": "repeated_cursor_auth_failure",
                 }
-            )
-        retry_requeue: dict[str, Any] | None = None
-        if can_retry and error_code == "instagram_modal_initial_empty_page":
-            try:
-                assert_worker_available_when_queue_enabled(
-                    required_execution_backend="modal",
+                runtime_metadata.update(
+                    {
+                        "instagram_auth_repair_required": True,
+                        "auth_repair_required_at": repair_required_at,
+                        "auth_repair_reason": "repeated_cursor_auth_failure",
+                        "cursor_auth_repair_threshold": _shared_instagram_cursor_auth_repair_threshold(),
+                        "retryable": False,
+                    }
+                )
+            retry_requeue: dict[str, Any] | None = None
+            if can_retry and error_code == "instagram_modal_initial_empty_page":
+                try:
+                    assert_worker_available_when_queue_enabled(
+                        required_execution_backend="modal",
+                        platform=platform,
+                    )
+                except SocialWorkerUnavailableError as worker_exc:
+                    runtime_metadata["worker_health"] = _metadata_dict(worker_exc.worker_health)
+                    unavailable_reason = _shared_account_authenticated_modal_worker_unavailable_reason(
+                        worker_exc.worker_health
+                    )
+                    if unavailable_reason:
+                        error_code = "no_authenticated_modal_workers"
+                        error_class = worker_exc.__class__.__name__
+                        can_retry = False
+                        retry_config_updates = {}
+                        next_available_at = None
+            if (
+                can_retry
+                and stage == SHARED_ACCOUNT_POSTS_STAGE
+                and error_code != "instagram_modal_initial_empty_page"
+                and not _shared_account_error_is_database_capacity(error_class, exc)
+                and _shared_account_prefers_partitioned_backfill_recovery(
+                    config,
                     platform=platform,
                 )
-            except SocialWorkerUnavailableError as worker_exc:
-                runtime_metadata["worker_health"] = _metadata_dict(worker_exc.worker_health)
-                unavailable_reason = _shared_account_authenticated_modal_worker_unavailable_reason(
-                    worker_exc.worker_health
+            ):
+                recovery_frontier_auth_allowed = retry_config_updates.get(
+                    "frontier_auth_allowed",
+                    config.get("frontier_auth_allowed"),
                 )
-                if unavailable_reason:
-                    error_code = "no_authenticated_modal_workers"
-                    error_class = worker_exc.__class__.__name__
-                    can_retry = False
+                recovery_frontier_auth_reason = retry_config_updates.get(
+                    "frontier_auth_reason",
+                    config.get("frontier_auth_reason"),
+                )
+                recovery_transport_preference = (
+                    str(
+                        retry_config_updates.get("transport_preference")
+                        or retry_config_updates.get("frontier_transport")
+                        or config.get("transport_preference")
+                        or config.get("frontier_transport")
+                        or ""
+                    )
+                    .strip()
+                    .lower()
+                    or None
+                )
+                recovery_allow_public_transport_fallback = (
+                    retry_config_updates["allow_public_transport_fallback"]
+                    if "allow_public_transport_fallback" in retry_config_updates
+                    else config.get("allow_public_transport_fallback")
+                )
+                if (
+                    platform == "instagram"
+                    and recovery_frontier_auth_allowed is True
+                    and recovery_transport_preference == "authenticated"
+                ):
+                    recovery_allow_public_transport_fallback = False
+                expected_total_posts = _shared_account_expected_total_posts_from_config(
+                    config,
+                    platform=platform,
+                    account_handle=account_handle,
+                )
+                try:
+                    recovery_job_id = _enqueue_shared_discovery_job(
+                        run_id=run_id,
+                        platform=platform,
+                        source_scope=source_scope,
+                        account_handle=account_handle,
+                        shared_account_source_id=config.get("shared_account_source_id"),
+                        pipeline_ingest_mode=ingest_mode,
+                        runner_count=max(
+                            1,
+                            _normalize_non_negative_int(config.get("runner_count"))
+                            or CATALOG_BACKFILL_FULL_HISTORY_RUNNER_COUNT,
+                        ),
+                        expected_total_posts=expected_total_posts,
+                        runner_strategy="full_history_cursor_breakpoints",
+                        partition_strategy=CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+                        required_worker_lane=str(config.get("required_worker_lane") or "").strip().lower() or None,
+                        required_execution_backend=str(config.get("required_execution_backend") or "").strip().lower()
+                        or None,
+                        allow_local_dev_inline_bypass=bool(config.get("allow_local_dev_inline_bypass")),
+                        frontier_auth_allowed=recovery_frontier_auth_allowed if platform == "instagram" else None,
+                        frontier_auth_reason=recovery_frontier_auth_reason if platform == "instagram" else None,
+                        transport_preference=recovery_transport_preference if platform == "instagram" else None,
+                        allow_public_transport_fallback=(
+                            recovery_allow_public_transport_fallback if platform == "instagram" else None
+                        ),
+                        date_start=_coerce_dt(config.get("date_start")),
+                        date_end=_coerce_dt(config.get("date_end")),
+                        catalog_action=str(config.get("catalog_action") or "").strip().lower() or None,
+                        catalog_action_scope=str(config.get("catalog_action_scope") or "").strip().lower() or None,
+                        selected_tasks=config.get("selected_tasks"),
+                        effective_selected_tasks=config.get("effective_selected_tasks"),
+                        details_refresh_skip_detail_fetch=config.get("details_refresh_skip_detail_fetch"),
+                        details_refresh_force_detail_fetch=config.get("details_refresh_force_detail_fetch"),
+                        details_refresh_skip_media_followups=config.get("details_refresh_skip_media_followups"),
+                        tiktok_comments_in_posts_stage=bool(config.get("tiktok_comments_in_posts_stage")),
+                        tiktok_direct_comment_api_override=bool(config.get("tiktok_direct_comment_api_override")),
+                        twitter_comments_in_posts_stage=bool(config.get("twitter_comments_in_posts_stage")),
+                        initiated_by=None,
+                        worker_id=followup_worker_id,
+                        priority=100,
+                        recovery_depth=_normalize_non_negative_int(config.get("recovery_depth")) + 1,
+                    )
+                except pg.DatabaseServiceUnavailableError as enqueue_exc:
+                    logger.warning(
+                        "[shared-account] recovery discovery enqueue deferred for run=%s stage=%s account=%s error=%s",
+                        run_id,
+                        stage,
+                        account_handle,
+                        enqueue_exc,
+                    )
+                else:
+                    retry_requeue = {
+                        "job_id": recovery_job_id,
+                        "stage": SHARED_ACCOUNT_DISCOVERY_STAGE,
+                        "runner_strategy": "full_history_cursor_breakpoints",
+                        "partition_strategy": CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+                    }
                     retry_config_updates = {}
                     next_available_at = None
-        if (
-            can_retry
-            and stage == SHARED_ACCOUNT_POSTS_STAGE
-            and error_code != "instagram_modal_initial_empty_page"
-            and not _shared_account_error_is_database_capacity(error_class, exc)
-            and _shared_account_prefers_partitioned_backfill_recovery(
-                config,
-                platform=platform,
-            )
-        ):
-            recovery_frontier_auth_allowed = retry_config_updates.get(
-                "frontier_auth_allowed",
-                config.get("frontier_auth_allowed"),
-            )
-            recovery_frontier_auth_reason = retry_config_updates.get(
-                "frontier_auth_reason",
-                config.get("frontier_auth_reason"),
-            )
-            recovery_transport_preference = (
-                str(
-                    retry_config_updates.get("transport_preference")
-                    or retry_config_updates.get("frontier_transport")
-                    or config.get("transport_preference")
-                    or config.get("frontier_transport")
-                    or ""
-                )
-                .strip()
-                .lower()
-                or None
-            )
-            recovery_allow_public_transport_fallback = (
-                retry_config_updates["allow_public_transport_fallback"]
-                if "allow_public_transport_fallback" in retry_config_updates
-                else config.get("allow_public_transport_fallback")
-            )
-            if (
-                platform == "instagram"
-                and recovery_frontier_auth_allowed is True
-                and recovery_transport_preference == "authenticated"
-            ):
-                recovery_allow_public_transport_fallback = False
-            expected_total_posts = _shared_account_expected_total_posts_from_config(
-                config,
+            if retry_config_updates:
+                updated_config = _update_job_config(job_id, config_updates=retry_config_updates)
+                if updated_config:
+                    config = updated_config
+            _record_shared_account_frontier_retry_details(
+                run_id=run_id,
                 platform=platform,
                 account_handle=account_handle,
+                stage=stage,
+                job_id=job_id,
+                attempt_count=attempt_count,
+                max_attempts=max_attempts,
+                error_code=error_code,
+                error_class=error_class,
+                error_message=str(exc),
+                can_retry=can_retry,
+                next_available_at=next_available_at,
+                metadata=runtime_metadata,
             )
             try:
-                recovery_job_id = _enqueue_shared_discovery_job(
-                    run_id=run_id,
-                    platform=platform,
-                    source_scope=source_scope,
-                    account_handle=account_handle,
-                    shared_account_source_id=config.get("shared_account_source_id"),
-                    pipeline_ingest_mode=ingest_mode,
-                    runner_count=max(
-                        1,
-                        _normalize_non_negative_int(config.get("runner_count"))
-                        or CATALOG_BACKFILL_FULL_HISTORY_RUNNER_COUNT,
-                    ),
-                    expected_total_posts=expected_total_posts,
-                    runner_strategy="full_history_cursor_breakpoints",
-                    partition_strategy=CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
-                    required_worker_lane=str(config.get("required_worker_lane") or "").strip().lower() or None,
-                    required_execution_backend=str(config.get("required_execution_backend") or "").strip().lower()
-                    or None,
-                    allow_local_dev_inline_bypass=bool(config.get("allow_local_dev_inline_bypass")),
-                    frontier_auth_allowed=recovery_frontier_auth_allowed if platform == "instagram" else None,
-                    frontier_auth_reason=recovery_frontier_auth_reason if platform == "instagram" else None,
-                    transport_preference=recovery_transport_preference if platform == "instagram" else None,
-                    allow_public_transport_fallback=(
-                        recovery_allow_public_transport_fallback if platform == "instagram" else None
-                    ),
-                    date_start=_coerce_dt(config.get("date_start")),
-                    date_end=_coerce_dt(config.get("date_end")),
-                    catalog_action=str(config.get("catalog_action") or "").strip().lower() or None,
-                    catalog_action_scope=str(config.get("catalog_action_scope") or "").strip().lower() or None,
-                    selected_tasks=config.get("selected_tasks"),
-                    effective_selected_tasks=config.get("effective_selected_tasks"),
-                    details_refresh_skip_detail_fetch=config.get("details_refresh_skip_detail_fetch"),
-                    details_refresh_force_detail_fetch=config.get("details_refresh_force_detail_fetch"),
-                    details_refresh_skip_media_followups=config.get("details_refresh_skip_media_followups"),
-                    tiktok_comments_in_posts_stage=bool(config.get("tiktok_comments_in_posts_stage")),
-                    tiktok_direct_comment_api_override=bool(config.get("tiktok_direct_comment_api_override")),
-                    twitter_comments_in_posts_stage=bool(config.get("twitter_comments_in_posts_stage")),
-                    initiated_by=None,
-                    worker_id=followup_worker_id,
-                    priority=100,
-                    recovery_depth=_normalize_non_negative_int(config.get("recovery_depth")) + 1,
+                existing_job = (
+                    pg.fetch_one(
+                        "select items_found, metadata from social.scrape_jobs where id = %s",
+                        [job_id],
+                    )
+                    or {}
                 )
-            except pg.DatabaseServiceUnavailableError as enqueue_exc:
+            except pg.DatabaseServiceUnavailableError as fetch_exc:
                 logger.warning(
-                    "[shared-account] recovery discovery enqueue deferred for run=%s stage=%s account=%s error=%s",
-                    run_id,
+                    "[shared-account] existing job metadata fetch deferred for job=%s stage=%s account=%s error=%s",
+                    job_id,
                     stage,
                     account_handle,
-                    enqueue_exc,
+                    fetch_exc,
                 )
-            else:
-                retry_requeue = {
-                    "job_id": recovery_job_id,
-                    "stage": SHARED_ACCOUNT_DISCOVERY_STAGE,
-                    "runner_strategy": "full_history_cursor_breakpoints",
-                    "partition_strategy": CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+                existing_job = {}
+            metadata = _metadata_dict(existing_job.get("metadata"))
+            metadata.update(
+                {
+                    "stage": stage,
+                    "platform": platform,
+                    "account": account_handle,
+                    "pipeline_ingest_mode": ingest_mode,
+                    "error": str(exc),
+                    "error_code": error_code,
+                    "error_class": error_class,
+                    "retryable": can_retry,
                 }
-                retry_config_updates = {}
-                next_available_at = None
-        if retry_config_updates:
-            updated_config = _update_job_config(job_id, config_updates=retry_config_updates)
-            if updated_config:
-                config = updated_config
-        _record_shared_account_frontier_retry_details(
-            run_id=run_id,
-            platform=platform,
-            account_handle=account_handle,
-            stage=stage,
-            job_id=job_id,
-            attempt_count=attempt_count,
-            max_attempts=max_attempts,
-            error_code=error_code,
-            error_class=error_class,
-            error_message=str(exc),
-            can_retry=can_retry,
-            next_available_at=next_available_at,
-            metadata=runtime_metadata,
-        )
-        try:
-            existing_job = (
-                pg.fetch_one(
-                    "select items_found, metadata from social.scrape_jobs where id = %s",
-                    [job_id],
+            )
+            if retry_requeue:
+                metadata["retry_requeue"] = retry_requeue
+            if retry_config_updates:
+                metadata["retry_config_updates"] = retry_config_updates
+            metadata.update(runtime_metadata)
+            activity = _metadata_dict(metadata.get("activity"))
+            activity["phase"] = "cancelled" if cancelled_error else "requeued" if retry_requeue else "failed"
+            activity["last_progress_at"] = _iso(_now_utc())
+            metadata["activity"] = activity
+            finish_status = "cancelled" if cancelled_error or retry_requeue else ("retrying" if can_retry else "failed")
+            try:
+                finish_accepted = _finish_job(
+                    job_id,
+                    status=finish_status,
+                    defer_followups=True,
+                    items_found=_normalize_non_negative_int(existing_job.get("items_found")),
+                    error_message=str(exc),
+                    metadata=metadata,
+                    last_error_code=error_code,
+                    last_error_class=error_class,
+                    next_available_at=next_available_at,
                 )
-                or {}
-            )
-        except pg.DatabaseServiceUnavailableError as fetch_exc:
-            logger.warning(
-                "[shared-account] existing job metadata fetch deferred for job=%s stage=%s account=%s error=%s",
+                if not finish_accepted:
+                    raise RuntimeError("Claim changed during guarded job completion")
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "CRITICAL: _finish_job() failed for job_id=%s — job stuck in running state",
+                    job_id,
+                )
+                raise
+        if finish_accepted:
+            _finish_job_followups(
                 job_id,
-                stage,
-                account_handle,
-                fetch_exc,
-            )
-            existing_job = {}
-        metadata = _metadata_dict(existing_job.get("metadata"))
-        metadata.update(
-            {
-                "stage": stage,
-                "platform": platform,
-                "account": account_handle,
-                "pipeline_ingest_mode": ingest_mode,
-                "error": str(exc),
-                "error_code": error_code,
-                "error_class": error_class,
-                "retryable": can_retry,
-            }
-        )
-        if retry_requeue:
-            metadata["retry_requeue"] = retry_requeue
-        if retry_config_updates:
-            metadata["retry_config_updates"] = retry_config_updates
-        metadata.update(runtime_metadata)
-        activity = _metadata_dict(metadata.get("activity"))
-        activity["phase"] = "cancelled" if cancelled_error else "requeued" if retry_requeue else "failed"
-        activity["last_progress_at"] = _iso(_now_utc())
-        metadata["activity"] = activity
-        try:
-            _finish_job(
-                job_id,
-                status="cancelled" if cancelled_error or retry_requeue else ("retrying" if can_retry else "failed"),
+                run_id=run_id or None,
+                status=finish_status,
                 items_found=_normalize_non_negative_int(existing_job.get("items_found")),
-                error_message=str(exc),
                 metadata=metadata,
-                last_error_code=error_code,
-                last_error_class=error_class,
-                next_available_at=next_available_at,
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "CRITICAL: _finish_job() failed for job_id=%s — job stuck in running state",
-                job_id,
+                claim_token=config.get("claim_token"),
+                worker_id=worker_id,
             )
         if cancelled_error:
             logger.info(
@@ -44446,7 +44625,7 @@ def _execute_shared_claimed_job(job: Mapping[str, Any], *, worker_id: str | None
         else:
             logger.exception("Shared social ingest job failed: job_id=%s stage=%s platform=%s", job_id, stage, platform)
     finally:
-        if run_id:
+        if run_id and finish_accepted:
             _finalize_run_status(run_id)
     return _load_current_job_row(job_id)
 
@@ -44800,6 +44979,8 @@ def _dispatch_media_mirror_account_jobs(
     stages: list[str],
     limit: int,
 ) -> dict[str, Any]:
+    from trr_backend.socials.control_plane.dispatch_runtime import _touch_dispatch_metadata_for_snapshot
+
     safe_limit = max(1, min(int(limit or _modal_dispatch_limit()), SOCIAL_JOB_CLAIM_BATCH_SIZE_MAX))
     candidates = _list_candidate_media_mirror_jobs_for_account_dispatch(
         run_id=run_id,
@@ -44821,6 +45002,7 @@ def _dispatch_media_mirror_account_jobs(
         ) = running_counts
     dispatched_job_ids: list[str] = []
     dispatch_attempts = 0
+    unbound_dispatch_results: list[dict[str, Any]] = []
     for job in candidates:
         if len(dispatched_job_ids) >= safe_limit:
             break
@@ -44860,9 +45042,11 @@ def _dispatch_media_mirror_account_jobs(
         lease_expires_at = _now_utc() + timedelta(
             seconds=_resolve_stale_seconds_for_job(platform=platform, stage=stage, has_queue_fields=True)
         )
-        dispatch_attempts += 1
-        _touch_job_dispatch_metadata(
-            job_id,
+        reservation_id = str(uuid4())
+        expected_reservation = (dispatch_attempt_count, lease_expires_at, reservation_id)
+        reserved = _touch_dispatch_metadata_for_snapshot(
+            job,
+            dispatch_reservation_id=reservation_id,
             dispatch_backend="modal",
             dispatch_requested_at=_now_utc(),
             dispatch_attempt_count=dispatch_attempt_count,
@@ -44878,11 +45062,15 @@ def _dispatch_media_mirror_account_jobs(
             dispatch_blocked_failure_count=0,
             dispatch_blocked_first_seen_at=None,
         )
+        if not reserved:
+            continue
+        dispatch_attempts += 1
         dispatch_result = dispatch_social_job(job_id=job_id, stage=stage)
         if not dispatch_result.get("dispatched"):
             continue
-        _touch_job_dispatch_metadata(
-            job_id,
+        bound = _touch_dispatch_metadata_for_snapshot(
+            job,
+            expected_reservation=expected_reservation,
             dispatch_backend="modal",
             dispatch_requested_at=_now_utc(),
             dispatch_attempt_count=dispatch_attempt_count,
@@ -44900,12 +45088,26 @@ def _dispatch_media_mirror_account_jobs(
             dispatch_blocked_failure_count=0,
             dispatch_blocked_first_seen_at=None,
         )
+        if not bound:
+            unbound = {
+                "job_id": job_id,
+                "call_id": dispatch_result.get("call_id"),
+                "function_name": dispatch_result.get("function_name"),
+                "dispatch_reservation_id": reservation_id,
+            }
+            unbound_dispatch_results.append(unbound)
+            logger.warning("Media provider invocation could not bind its retained reservation: %s", unbound)
+            continue
         dispatched_job_ids.append(job_id)
         running_by_stage[capacity_stage] = running_by_stage.get(capacity_stage, 0) + 1
         running_by_stage_platform[sp_key] = running_by_stage_platform.get(sp_key, 0) + 1
         running_by_run[str(run_id)] = running_by_run.get(str(run_id), 0) + 1
         active_accounts_by_stage_platform.setdefault(sp_key, set()).add(account_handle)
-    return {"dispatched_job_ids": dispatched_job_ids, "dispatch_attempts": dispatch_attempts}
+    return {
+        "dispatched_job_ids": dispatched_job_ids,
+        "dispatch_attempts": dispatch_attempts,
+        "unbound_dispatch_results": unbound_dispatch_results,
+    }
 
 
 def drain_media_mirror_account_jobs(
@@ -45152,381 +45354,12 @@ def _clear_expired_run_dispatch_pause(
 
 
 def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = None) -> dict[str, Any]:
-    safe_limit = max(1, min(int(limit or _modal_dispatch_limit()), SOCIAL_JOB_CLAIM_BATCH_SIZE_MAX))
-    if not is_queue_enabled():
-        return {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": "queue_disabled"}
-    if not is_modal_remote_executor_enabled():
-        return {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": "remote_executor_not_modal"}
-    if _run_pause_after_current_requested(run_id):
-        _touch_modal_social_dispatcher_heartbeat(
-            metadata_updates={
-                "dispatch_enabled": True,
-                "last_dispatch_blocked_reason": "pause_after_current",
-                "last_dispatch_error": None,
-                "last_dispatch_error_code": None,
-            }
-        )
-        return {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": "pause_after_current"}
-    recovered_capacity = (
-        recover_failed_instagram_comments_capacity_jobs(run_id=run_id, limit=max(safe_limit, 25)) if run_id else []
-    )
-    recovered_blocked = recover_dispatch_blocked_no_progress_jobs(limit=max(safe_limit, 25))
-    resolution = _modal_social_dispatch_resolution()
-    ready = bool(resolution.get("resolved"))
-    reason = str(resolution.get("reason") or "").strip() or None
-    if not ready:
-        _touch_modal_social_dispatcher_heartbeat(
-            metadata_updates={
-                "dispatch_enabled": False,
-                "last_dispatch_error": reason,
-                "last_dispatch_error_code": reason,
-                "last_dispatch_blocked_reason": reason,
-                "last_dispatch_error_at": _iso(_now_utc()),
-            }
-        )
-        return {
-            "dispatched_job_ids": [],
-            "dispatch_attempts": 0,
-            "reason": reason,
-            "recovered_dispatch_blocked_job_ids": [
-                str(row.get("id") or "").strip() for row in recovered_blocked if str(row.get("id") or "").strip()
-            ],
-            "recovered_capacity_job_ids": [
-                str(row.get("id") or "").strip() for row in recovered_capacity if str(row.get("id") or "").strip()
-            ],
-        }
+    from trr_backend.socials.control_plane.dispatch_runtime import dispatch_due_social_jobs as impl
 
-    recovered_unclaimed = recover_stale_unclaimed_dispatched_jobs(
-        run_id=run_id,
-        limit=max(safe_limit, 25),
-    )
+    return impl(run_id=run_id, limit=limit)
 
-    candidates = _list_candidate_jobs_for_modal_dispatch(run_id=run_id, limit=max(safe_limit * 4, 50))
-    running_counts = cast(tuple[Any, ...], _current_modal_dispatch_running_counts())
-    if len(running_counts) == 4:
-        (
-            running_by_stage,
-            running_by_stage_platform,
-            running_by_run,
-            running_by_run_stage_platform,
-        ) = running_counts
-        active_accounts_by_stage_platform = {}
-    else:
-        (
-            running_by_stage,
-            running_by_stage_platform,
-            running_by_run,
-            running_by_run_stage_platform,
-            active_accounts_by_stage_platform,
-        ) = running_counts
-    priority_recovery_override_slots = _modal_comment_recovery_priority_override_slots()
-    priority_recovery_running_count = (
-        _current_modal_priority_comment_recovery_running_count() if priority_recovery_override_slots > 0 else 0
-    )
-    dispatched_job_ids: list[str] = []
-    dispatch_attempts = 0
 
-    for job in candidates:
-        if len(dispatched_job_ids) >= safe_limit:
-            break
-        stage = _job_stage_from_row(job)
-        capacity_stage = _modal_dispatch_capacity_stage(stage)
-        platform = _normalize_platform_name(job.get("platform")) or "unknown"
-        status = str(job.get("status") or "").strip().lower()
-        job_run_id = str(job.get("run_id") or "").strip()
-        if job_run_id and _run_pause_after_current_requested(job_run_id):
-            continue
-        job_config = _metadata_dict(job.get("config"))
-        job_dispatch = _job_dispatch_metadata(job)
-        job_ingest_mode = _resolve_pipeline_ingest_mode(job_config.get("pipeline_ingest_mode"))
-        priority_recovery_job = _job_is_priority_comment_recovery(job, job_config, stage=stage)
-        priority_recovery_override_allowed = (
-            priority_recovery_job and priority_recovery_running_count < priority_recovery_override_slots
-        )
-        if _job_blocked_by_posts_auth_cooldown(job) is not None:
-            continue
-        if _job_required_lane_blocks_modal_dispatch(job_config, platform=platform):
-            continue
-        existing_remote_invocation_id = str(job_dispatch.get("remote_invocation_id") or "").strip()
-        terminal_remote_invocation = False
-        if existing_remote_invocation_id:
-            refreshed_lease_expires_at = _now_utc() + timedelta(
-                seconds=_resolve_stale_seconds_for_job(
-                    platform=platform,
-                    stage=stage,
-                    has_queue_fields=True,
-                )
-            )
-            inspection = _refresh_remote_modal_invocation_state(
-                job,
-                lease_expires_at=refreshed_lease_expires_at,
-            )
-            inspection_status = str(inspection.get("status") or "").strip().lower()
-            if _modal_invocation_is_nonterminal(inspection_status):
-                if (
-                    inspection_status == "pending"
-                    and status in {"queued", "pending", "retrying"}
-                    and _modal_pending_capacity_invocation_is_stale(job_dispatch, inspection)
-                ):
-                    job_id_for_clear = str(job.get("id") or "").strip()
-                    if not job_id_for_clear:
-                        continue
-                    job_dispatch = _clear_stale_pending_modal_dispatch(job_id_for_clear, job_dispatch)
-                    existing_remote_invocation_id = ""
-                else:
-                    if priority_recovery_job:
-                        priority_recovery_running_count += 1
-                    running_by_stage[capacity_stage] = running_by_stage.get(capacity_stage, 0) + 1
-                    running_by_stage_platform[(capacity_stage, platform)] = (
-                        running_by_stage_platform.get((capacity_stage, platform), 0) + 1
-                    )
-                    nonterminal_account = _resolve_dispatch_account_handle(job_config)
-                    if nonterminal_account:
-                        active_accounts_by_stage_platform.setdefault((capacity_stage, platform), set()).add(
-                            nonterminal_account
-                        )
-                    if job_run_id:
-                        running_by_run[job_run_id] = running_by_run.get(job_run_id, 0) + 1
-                        if job_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE:
-                            key = (job_run_id, capacity_stage, platform)
-                            running_by_run_stage_platform[key] = running_by_run_stage_platform.get(key, 0) + 1
-                    continue
-            if existing_remote_invocation_id and inspection_status == "unknown":
-                job_id_for_clear = str(job.get("id") or "").strip()
-                if status in {"queued", "pending", "retrying"} and job_id_for_clear:
-                    _touch_job_dispatch_metadata(
-                        job_id_for_clear,
-                        dispatch_backend=str(job_dispatch.get("dispatch_backend") or "modal"),
-                        dispatch_requested_at=_coerce_dt(job_dispatch.get("dispatch_requested_at")),
-                        dispatch_attempt_count=_dispatch_metadata_attempt_count(job_dispatch),
-                        remote_invocation_id=None,
-                        lease_expires_at=None,
-                        remote_invocation_status="unknown",
-                        remote_invocation_checked_at=_now_utc(),
-                        remote_task_id=None,
-                        remote_pending_since=None,
-                        remote_blocked_reason=None,
-                    )
-                    job_dispatch = {
-                        **job_dispatch,
-                        "remote_invocation_id": None,
-                        "lease_expires_at": None,
-                        "remote_invocation_status": "unknown",
-                    }
-                else:
-                    continue
-            elif existing_remote_invocation_id:
-                terminal_remote_invocation = True
-                job_dispatch = {
-                    **job_dispatch,
-                    "remote_invocation_status": inspection_status,
-                    "remote_invocation_checked_at": inspection.get("checked_at"),
-                    "remote_blocked_reason": str(inspection.get("reason") or "").strip() or None,
-                }
-        if not terminal_remote_invocation and _dispatch_request_is_fresh(job):
-            continue
-        if (
-            running_by_stage.get(capacity_stage, 0) >= _modal_dispatch_stage_global_cap(stage)
-            and not priority_recovery_override_allowed
-        ):
-            continue
-        # Compute prospective account count: existing active accounts + this candidate
-        candidate_account = _resolve_dispatch_account_handle(job_config)
-        sp_key = (capacity_stage, platform)
-        existing_accounts = active_accounts_by_stage_platform.get(sp_key, set())
-        if (
-            candidate_account
-            and capacity_stage in {SHARED_ACCOUNT_DISCOVERY_STAGE, SHARED_ACCOUNT_POSTS_STAGE}
-            and candidate_account in existing_accounts
-            and not _job_allows_parallel_same_account_dispatch(job_config)
-        ):
-            continue
-        prospective_accounts = existing_accounts | {candidate_account} if candidate_account else existing_accounts
-        effective_cap = _modal_dispatch_effective_platform_cap(
-            stage,
-            platform,
-            active_account_count=len(prospective_accounts) if prospective_accounts else 1,
-            job_config=job_config,
-        )
-        if (
-            effective_cap is not None
-            and running_by_stage_platform.get(sp_key, 0) >= effective_cap
-            and not priority_recovery_override_allowed
-        ):
-            continue
-        if job_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE and job_run_id:
-            if running_by_run.get(job_run_id, 0) >= _resolve_catalog_run_in_flight_cap():
-                continue
-            if capacity_stage == SHARED_ACCOUNT_POSTS_STAGE:
-                platform_run_cap = _modal_dispatch_effective_platform_cap(
-                    stage,
-                    platform,
-                    active_account_count=1,
-                    job_config=job_config,
-                )
-                if (
-                    platform_run_cap is not None
-                    and running_by_run_stage_platform.get((job_run_id, capacity_stage, platform), 0) >= platform_run_cap
-                ):
-                    continue
-
-        job_id = str(job.get("id") or "").strip()
-        if not job_id:
-            continue
-        dispatch_attempts += 1
-        dispatch_attempt_count = _dispatch_metadata_attempt_count(job_dispatch) + 1
-        blocked_failure_count = _dispatch_metadata_blocked_failure_count(job_dispatch)
-        blocked_first_seen_at = _coerce_dt(job_dispatch.get("dispatch_blocked_first_seen_at"))
-        lease_expires_at = _now_utc() + timedelta(
-            seconds=_resolve_stale_seconds_for_job(
-                platform=platform,
-                stage=stage,
-                has_queue_fields=True,
-            )
-        )
-        _touch_job_dispatch_metadata(
-            job_id,
-            dispatch_backend="modal",
-            dispatch_requested_at=_now_utc(),
-            dispatch_attempt_count=dispatch_attempt_count,
-            lease_expires_at=lease_expires_at,
-            last_dispatch_error=None,
-            last_dispatch_error_code=None,
-            last_dispatch_error_at=None,
-            remote_invocation_status=None,
-            remote_invocation_checked_at=None,
-            remote_task_id=None,
-            remote_pending_since=None,
-            remote_blocked_reason=None,
-            dispatch_blocked_failure_count=0,
-            dispatch_blocked_first_seen_at=None,
-        )
-        dispatch_kwargs: dict[str, Any] = {"job_id": job_id, "stage": stage}
-        if priority_recovery_override_allowed:
-            dispatch_kwargs["priority_recovery"] = True
-        dispatch_result = dispatch_social_job(**dispatch_kwargs)
-        if dispatch_result.get("dispatched"):
-            _touch_job_dispatch_metadata(
-                job_id,
-                dispatch_backend="modal",
-                dispatch_requested_at=_now_utc(),
-                dispatch_attempt_count=dispatch_attempt_count,
-                remote_invocation_id=str(dispatch_result.get("call_id") or "").strip() or None,
-                remote_function_name=str(dispatch_result.get("function_name") or "").strip() or None,
-                lease_expires_at=lease_expires_at,
-                last_dispatch_error=None,
-                last_dispatch_error_code=None,
-                last_dispatch_error_at=None,
-                remote_invocation_status="unknown",
-                remote_invocation_checked_at=None,
-                remote_task_id=None,
-                remote_pending_since=None,
-                remote_blocked_reason=None,
-                dispatch_blocked_failure_count=0,
-                dispatch_blocked_first_seen_at=None,
-            )
-            dispatched_job_ids.append(job_id)
-            running_by_stage[capacity_stage] = running_by_stage.get(capacity_stage, 0) + 1
-            running_by_stage_platform[(capacity_stage, platform)] = (
-                running_by_stage_platform.get((capacity_stage, platform), 0) + 1
-            )
-            if candidate_account:
-                active_accounts_by_stage_platform.setdefault((capacity_stage, platform), set()).add(candidate_account)
-            if job_run_id:
-                running_by_run[job_run_id] = running_by_run.get(job_run_id, 0) + 1
-                if job_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE:
-                    key = (job_run_id, capacity_stage, platform)
-                    running_by_run_stage_platform[key] = running_by_run_stage_platform.get(key, 0) + 1
-            if priority_recovery_override_allowed:
-                priority_recovery_running_count += 1
-        else:
-            dispatch_reason = str(dispatch_result.get("reason") or "dispatch_failed")
-            dispatch_reason_code = str(dispatch_result.get("reason_code") or "").strip().lower() or (
-                _normalize_dispatch_blocked_reason(
-                    last_dispatch_error_code="modal_dispatch_failed",
-                    last_dispatch_error=dispatch_reason,
-                )
-            )
-            blocked_failure_count = max(1, blocked_failure_count + 1)
-            blocked_first_seen_at = blocked_first_seen_at or _now_utc()
-            blocked_for_seconds = max(0, int((_now_utc() - blocked_first_seen_at).total_seconds()))
-            _touch_job_dispatch_metadata(
-                job_id,
-                dispatch_backend="modal",
-                dispatch_requested_at=_now_utc(),
-                dispatch_attempt_count=dispatch_attempt_count,
-                lease_expires_at=None,
-                last_dispatch_error=dispatch_reason,
-                last_dispatch_error_code="modal_dispatch_failed",
-                last_dispatch_error_at=_now_utc(),
-                remote_invocation_status="unknown",
-                remote_invocation_checked_at=_now_utc(),
-                remote_task_id=None,
-                remote_pending_since=None,
-                remote_blocked_reason=dispatch_reason_code,
-                dispatch_blocked_failure_count=blocked_failure_count,
-                dispatch_blocked_first_seen_at=blocked_first_seen_at,
-            )
-            if (
-                blocked_failure_count >= _resolve_modal_dispatch_blocked_failure_limit()
-                or blocked_for_seconds >= _resolve_modal_dispatch_no_progress_seconds()
-            ):
-                _finish_job(
-                    job_id,
-                    status="failed",
-                    items_found=_normalize_non_negative_int(job.get("items_found")),
-                    error_message=dispatch_reason,
-                    metadata={
-                        "dispatch": {
-                            **job_dispatch,
-                            "dispatch_backend": "modal",
-                            "dispatch_requested_at": _iso(_now_utc()),
-                            "dispatch_attempt_count": dispatch_attempt_count,
-                            "last_dispatch_error": dispatch_reason,
-                            "last_dispatch_error_code": "modal_dispatch_failed",
-                            "last_dispatch_error_at": _iso(_now_utc()),
-                            "remote_invocation_status": "failed",
-                            "remote_invocation_checked_at": _iso(_now_utc()),
-                            "remote_blocked_reason": dispatch_reason_code,
-                            "dispatch_blocked_failure_count": blocked_failure_count,
-                            "dispatch_blocked_first_seen_at": _iso(blocked_first_seen_at),
-                            "dispatch_blocked_terminalized_at": _iso(_now_utc()),
-                        }
-                    },
-                    last_error_code="modal_dispatch_blocked",
-                    last_error_class="ModalDispatchBlocked",
-                )
-                if job_run_id:
-                    _finalize_run_status(job_run_id, force_recompute=True)
-
-    heartbeat_updates: dict[str, Any] = {
-        "dispatch_enabled": True,
-        "active_invocations": sum(running_by_stage.values()),
-    }
-    if dispatched_job_ids:
-        heartbeat_updates.update(
-            {
-                "last_dispatch_success_at": _iso(_now_utc()),
-                "last_dispatch_error": None,
-                "last_dispatch_error_code": None,
-                "last_dispatch_blocked_reason": None,
-            }
-        )
-    _touch_modal_social_dispatcher_heartbeat(metadata_updates=heartbeat_updates)
-    return {
-        "dispatched_job_ids": dispatched_job_ids,
-        "dispatch_attempts": dispatch_attempts,
-        "recovered_unclaimed_job_ids": [
-            str(row.get("id") or "").strip() for row in recovered_unclaimed if str(row.get("id") or "").strip()
-        ],
-        "recovered_dispatch_blocked_job_ids": [
-            str(row.get("id") or "").strip() for row in recovered_blocked if str(row.get("id") or "").strip()
-        ],
-        "recovered_capacity_job_ids": [
-            str(row.get("id") or "").strip() for row in recovered_capacity if str(row.get("id") or "").strip()
-        ],
-        "reason": None,
-    }
+cast(Any, dispatch_due_social_jobs).__trr_delegates_to_control_plane__ = True
 
 
 def _dispatch_due_social_jobs_in_background(*, run_id: str) -> None:
@@ -45620,286 +45453,319 @@ def _claim_next_jobs(
                 )
               )
     """
-    return pg.fetch_all(
-        f"""
-        with worker_caps as (
-          select
-            coalesce(
-              supported_platforms,
-              array['instagram', 'tiktok', 'twitter', 'youtube', 'facebook', 'threads']
-            ) as platforms,
-            nullif(lower(coalesce(metadata->>'worker_lane', '')), '') as worker_lane,
-            coalesce((metadata->'auth_capabilities'->>'instagram_authenticated')::boolean, false)
-              as instagram_authenticated,
-            coalesce(
-              nullif(lower(coalesce(metadata->>'execution_backend_canonical', '')), ''),
-              case
-                when lower(coalesce(worker_id, '')) like 'modal:%%' then 'modal'
-                else 'local'
-              end
-            ) as execution_backend_canonical
-          from social.scrape_workers
-          where worker_id = %s
-        ),
-        stale_worker_window as (
-          select make_interval(secs => %s) as max_staleness
-        ),
-        healthy_instagram_auth_workers as (
-          select count(*)::int as healthy_auth_workers
-          from social.scrape_workers
-          where last_seen_at >= now() - (select max_staleness from stale_worker_window)
-            and status in ('starting', 'idle', 'working')
-            and 'instagram' = any(
-              coalesce(
-                supported_platforms,
-                array['instagram', 'tiktok', 'twitter', 'youtube', 'facebook', 'threads']
-              )
+    with pg.transaction():
+        # Separate statements give the capacity query a fresh snapshot after locking.
+        locked_auth_runs = pg.fetch_all(
+            """select r.id::text as id from social.scrape_runs r
+            where (%s::uuid is null or r.id = %s::uuid) and exists (
+              select 1 from social.scrape_jobs auth_job
+              where auth_job.run_id = r.id
+                and auth_job.status in ('queued', 'pending', 'retrying')
+                and auth_job.available_at <= now()
+                and lower(coalesce(auth_job.config->>'comments_auth_fallback', 'false')) = 'true'
             )
-            and coalesce((metadata->'auth_capabilities'->>'instagram_authenticated')::boolean, false)
-        ),
-        run_in_flight as (
-          select run_id::text as run_id, count(*)::int as in_flight
-          from social.scrape_jobs
-          where status = 'running'
-            and run_id is not null
-          group by run_id
-        ),
-        run_platform_in_flight as (
-          select run_id::text as run_id, platform, count(*)::int as in_flight
-          from social.scrape_jobs
-          where status = 'running'
-            and run_id is not null
-          group by run_id, platform
-        ),
-        eligible as (
-          select
-            j.id,
-            j.priority,
-            j.created_at,
-            row_number() over (
-              partition by coalesce(j.run_id::text, j.id::text)
-              order by j.priority asc, j.created_at asc
-            ) as run_rank,
-            coalesce(rif.in_flight, 0)::int as in_flight,
-            coalesce(rpif.in_flight, 0)::int as platform_in_flight
-          from social.scrape_jobs j
-          left join run_in_flight rif on rif.run_id = j.run_id::text
-          left join run_platform_in_flight rpif
-            on rpif.run_id = j.run_id::text
-           and rpif.platform = j.platform
-          where j.status in ('queued', 'pending', 'retrying')
-            and coalesce(j.config->>'detail_contract_version', '') <> '1'
-            and j.available_at <= now()
-            and {_job_posts_auth_cooldown_sql_exclusion("j")}
-            and (%s::uuid is null or j.run_id = %s::uuid)
-            and (
-              %s::text is null
-              or coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type) = %s::text
-            )
-            and (%s::text is null or j.platform = %s::text)
-            and exists (
-              select 1
-              from worker_caps wc
-              where j.platform = any(wc.platforms)
-            )
-            and (
-              nullif(lower(coalesce(j.config->>'required_worker_lane', '')), '') is null
-              or exists (
-                select 1
-                from worker_caps wc
-                where wc.worker_lane = nullif(lower(coalesce(j.config->>'required_worker_lane', '')), '')
-              )
-            )
-            and (
-              not {modal_required_sql}
-              or exists (
-                select 1
-                from worker_caps wc
-                where wc.execution_backend_canonical = 'modal'
-              )
-            )
-            and (
-              not {modal_required_sql}
-              or (
-                nullif(j.config->'required_runtime_version'->>'modal_image', '') is null
-                and nullif(j.config->'required_runtime_version'->>'commit_sha', '') is null
-                and nullif(j.config->'required_runtime_version'->>'label', '') is null
-                and nullif(lower(coalesce(j.config->'required_runtime_version'->>'execution_backend', '')), '') is null
-              )
-              or (
-                %s::text is not null
+            order by r.id for update skip locked""",
+            [run_id, run_id],
+        )
+        locked_auth_run_ids = [row["id"] for row in locked_auth_runs]
+        return pg.fetch_all(
+            f"""
+            with auth_fallback_runs as (
+              select unnest(%s::uuid[]) as id
+            ),
+            worker_caps as (
+              select
+                coalesce(
+                  supported_platforms,
+                  array['instagram', 'tiktok', 'twitter', 'youtube', 'facebook', 'threads']
+                ) as platforms,
+                nullif(lower(coalesce(metadata->>'worker_lane', '')), '') as worker_lane,
+                coalesce((metadata->'auth_capabilities'->>'instagram_authenticated')::boolean, false)
+                  as instagram_authenticated,
+                coalesce(
+                  nullif(lower(coalesce(metadata->>'execution_backend_canonical', '')), ''),
+                  case
+                    when lower(coalesce(worker_id, '')) like 'modal:%%' then 'modal'
+                    else 'local'
+                  end
+                ) as execution_backend_canonical
+              from social.scrape_workers
+              where worker_id = %s
+            ),
+            stale_worker_window as (
+              select make_interval(secs => %s) as max_staleness
+            ),
+            healthy_instagram_auth_workers as (
+              select count(*)::int as healthy_auth_workers
+              from social.scrape_workers
+              where last_seen_at >= now() - (select max_staleness from stale_worker_window)
+                and status in ('starting', 'idle', 'working')
+                and 'instagram' = any(
+                  coalesce(
+                    supported_platforms,
+                    array['instagram', 'tiktok', 'twitter', 'youtube', 'facebook', 'threads']
+                  )
+                )
+                and coalesce((metadata->'auth_capabilities'->>'instagram_authenticated')::boolean, false)
+            ),
+            run_in_flight as (
+              select run_id::text as run_id, count(*)::int as in_flight
+              from social.scrape_jobs
+              where status = 'running'
+                and run_id is not null
+              group by run_id
+            ),
+            run_platform_in_flight as (
+              select run_id::text as run_id, platform, count(*)::int as in_flight
+              from social.scrape_jobs
+              where status = 'running'
+                and run_id is not null
+              group by run_id, platform
+            ),
+            eligible as (
+              select
+                j.id,
+                j.priority,
+                j.created_at,
+                lower(coalesce(j.config->>'comments_auth_fallback', 'false')) = 'true' as auth_fallback,
+                row_number() over (
+                  partition by j.run_id, lower(coalesce(j.config->>'comments_auth_fallback', 'false'))
+                  order by j.priority asc, j.created_at asc, j.id
+                ) as auth_fallback_rank,
+                row_number() over (
+                  partition by coalesce(j.run_id::text, j.id::text)
+                  order by j.priority asc, j.created_at asc
+                ) as run_rank,
+                coalesce(rif.in_flight, 0)::int as in_flight,
+                coalesce(rpif.in_flight, 0)::int as platform_in_flight
+              from social.scrape_jobs j
+              left join run_in_flight rif on rif.run_id = j.run_id::text
+              left join run_platform_in_flight rpif
+                on rpif.run_id = j.run_id::text
+               and rpif.platform = j.platform
+              where j.status in ('queued', 'pending', 'retrying')
+                and coalesce(j.config->>'detail_contract_version', '') <> '1'
+                and (lower(coalesce(j.config->>'comments_auth_fallback', 'false')) <> 'true' or (
+                  j.run_id in (select id from auth_fallback_runs)
+                  and {_comments_auth_fallback_capacity_sql("j")}
+                ))
+                and j.available_at <= now()
+                and {_job_posts_auth_cooldown_sql_exclusion("j")}
+                and (%s::uuid is null or j.run_id = %s::uuid)
                 and (
-                  (
-                    nullif(j.config->'required_runtime_version'->>'modal_image', '') is not null
-                    and j.config->'required_runtime_version'->>'modal_image' = %s::text
+                  %s::text is null
+                  or coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type) = %s::text
+                )
+                and (%s::text is null or j.platform = %s::text)
+                and exists (
+                  select 1
+                  from worker_caps wc
+                  where j.platform = any(wc.platforms)
+                )
+                and (
+                  nullif(lower(coalesce(j.config->>'required_worker_lane', '')), '') is null
+                  or exists (
+                    select 1
+                    from worker_caps wc
+                    where wc.worker_lane = nullif(lower(coalesce(j.config->>'required_worker_lane', '')), '')
                   )
-                  or (
-                    nullif(j.config->'required_runtime_version'->>'modal_image', '') is null
-                    and nullif(j.config->'required_runtime_version'->>'commit_sha', '') is not null
-                    and j.config->'required_runtime_version'->>'commit_sha' = %s::text
+                )
+                and (
+                  not {modal_required_sql}
+                  or exists (
+                    select 1
+                    from worker_caps wc
+                    where wc.execution_backend_canonical = 'modal'
                   )
-                  or (
-                    nullif(j.config->'required_runtime_version'->>'modal_image', '') is null
-                    and nullif(j.config->'required_runtime_version'->>'commit_sha', '') is null
-                    and nullif(j.config->'required_runtime_version'->>'label', '') is not null
-                    and (
-                      j.config->'required_runtime_version'->>'label' = %s::text
-                      or (
-                        lower(j.config->'required_runtime_version'->>'label') in ('modal', 'local')
-                        and lower(j.config->'required_runtime_version'->>'label') = %s::text
-                      )
-                    )
-                  )
+                )
+                and (
+                  not {modal_required_sql}
                   or (
                     nullif(j.config->'required_runtime_version'->>'modal_image', '') is null
                     and nullif(j.config->'required_runtime_version'->>'commit_sha', '') is null
                     and nullif(j.config->'required_runtime_version'->>'label', '') is null
-                    and lower(coalesce(j.config->'required_runtime_version'->>'execution_backend', '')) = %s::text
+                    and nullif(lower(coalesce(
+                      j.config->'required_runtime_version'->>'execution_backend', ''
+                    )), '') is null
+                  )
+                  or (
+                    %s::text is not null
+                    and (
+                      (
+                        nullif(j.config->'required_runtime_version'->>'modal_image', '') is not null
+                        and j.config->'required_runtime_version'->>'modal_image' = %s::text
+                      )
+                      or (
+                        nullif(j.config->'required_runtime_version'->>'modal_image', '') is null
+                        and nullif(j.config->'required_runtime_version'->>'commit_sha', '') is not null
+                        and j.config->'required_runtime_version'->>'commit_sha' = %s::text
+                      )
+                      or (
+                        nullif(j.config->'required_runtime_version'->>'modal_image', '') is null
+                        and nullif(j.config->'required_runtime_version'->>'commit_sha', '') is null
+                        and nullif(j.config->'required_runtime_version'->>'label', '') is not null
+                        and (
+                          j.config->'required_runtime_version'->>'label' = %s::text
+                          or (
+                            lower(j.config->'required_runtime_version'->>'label') in ('modal', 'local')
+                            and lower(j.config->'required_runtime_version'->>'label') = %s::text
+                          )
+                        )
+                      )
+                      or (
+                        nullif(j.config->'required_runtime_version'->>'modal_image', '') is null
+                        and nullif(j.config->'required_runtime_version'->>'commit_sha', '') is null
+                        and nullif(j.config->'required_runtime_version'->>'label', '') is null
+                        and lower(coalesce(j.config->'required_runtime_version'->>'execution_backend', '')) = %s::text
+                      )
+                    )
                   )
                 )
-              )
-            )
-            and (
-              j.platform <> 'instagram'
-              or exists (
-                select 1
-                from worker_caps wc
-                where wc.instagram_authenticated
-              )
-              or (select hiw.healthy_auth_workers from healthy_instagram_auth_workers hiw) = 0
-            )
-            and (
-              j.worker_id is null
-              or j.worker_id = %s::text
-              or (j.worker_id is not null and %s::text is not null and %s::text like j.worker_id || '%%')
-              or exists (
-                select 1
-                from social.scrape_workers owning_worker
-                where owning_worker.worker_id = j.worker_id
-                  and (
-                    owning_worker.status = 'stopped'
-                    or owning_worker.last_seen_at < now() - (select max_staleness from stale_worker_window)
+                and (
+                  j.platform <> 'instagram'
+                  or exists (
+                    select 1
+                    from worker_caps wc
+                    where wc.instagram_authenticated
                   )
-              )
-              or not exists (
-                select 1
-                from social.scrape_workers owning_worker
-                where owning_worker.worker_id = j.worker_id
-              )
+                  or (select hiw.healthy_auth_workers from healthy_instagram_auth_workers hiw) = 0
+                )
+                and (
+                  j.worker_id is null
+                  or j.worker_id = %s::text
+                  or (j.worker_id is not null and %s::text is not null and %s::text like j.worker_id || '%%')
+                  or exists (
+                    select 1
+                    from social.scrape_workers owning_worker
+                    where owning_worker.worker_id = j.worker_id
+                      and (
+                        owning_worker.status = 'stopped'
+                        or owning_worker.last_seen_at < now() - (select max_staleness from stale_worker_window)
+                      )
+                  )
+                  or not exists (
+                    select 1
+                    from social.scrape_workers owning_worker
+                    where owning_worker.worker_id = j.worker_id
+                  )
+                )
+                and (
+                  j.platform <> 'youtube'
+                  or j.run_id is null
+                  or coalesce(rpif.in_flight, 0) < %s
+                  or not exists (
+                    select 1
+                    from social.scrape_jobs other
+                    where other.status in ('queued', 'pending', 'retrying')
+                      and other.available_at <= now()
+                      and other.run_id = j.run_id
+                      and other.platform <> 'youtube'
+                  )
+                )
+                and (j.run_id is null or coalesce(rif.in_flight, 0) < %s)
+            ),
+            candidate as (
+              select eligible.id
+              from eligible join social.scrape_jobs claimable on claimable.id = eligible.id
+              where not eligible.auth_fallback or eligible.auth_fallback_rank = 1
+              order by eligible.run_rank asc, eligible.priority asc, eligible.created_at asc
+              limit %s
+              for update of claimable skip locked
             )
-            and (
-              j.platform <> 'youtube'
-              or j.run_id is null
-              or coalesce(rpif.in_flight, 0) < %s
-              or not exists (
-                select 1
-                from social.scrape_jobs other
-                where other.status in ('queued', 'pending', 'retrying')
-                  and other.available_at <= now()
-                  and other.run_id = j.run_id
-                  and other.platform <> 'youtube'
-              )
-            )
-            and (j.run_id is null or coalesce(rif.in_flight, 0) < %s)
-        ),
-        candidate as (
-          select id
-          from eligible
-          order by run_rank asc, priority asc, created_at asc
-          limit %s
+            update social.scrape_jobs as j
+            set
+              status = 'running',
+              started_at = coalesce(j.started_at, now()),
+              claimed_at = now(),
+              heartbeat_at = now(),
+              worker_id = coalesce(%s, j.worker_id),
+              attempt_count = j.attempt_count + 1,
+              error_message = null,
+              last_error_code = null,
+              last_error_class = null,
+              config = (case
+                when coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type) = 'media_mirror'
+                  then coalesce(j.config, '{{}}'::jsonb) || jsonb_build_object(
+                    'required_runtime_version', %s::jsonb,
+                    'claimed_runtime_version', %s::jsonb,
+                    'claimed_runtime_refreshed_at', now()
+                  )
+                when coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type) = 'comment_media_mirror'
+                  then coalesce(j.config, '{{}}'::jsonb) || jsonb_build_object(
+                    'required_runtime_version', %s::jsonb,
+                    'claimed_runtime_version', %s::jsonb,
+                    'claimed_runtime_refreshed_at', now()
+                  )
+                else coalesce(j.config, '{{}}'::jsonb)
+              end) || jsonb_build_object('claim_token', gen_random_uuid()::text),
+              metadata = case
+                when coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type) = 'media_mirror'
+                  then coalesce(j.metadata, '{{}}'::jsonb) || jsonb_build_object(
+                    'runtime_version', %s::jsonb,
+                    'claimed_runtime_version', %s::jsonb,
+                    'claimed_runtime_refreshed_at', now()
+                  )
+                when coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type) = 'comment_media_mirror'
+                  then coalesce(j.metadata, '{{}}'::jsonb) || jsonb_build_object(
+                    'runtime_version', %s::jsonb,
+                    'claimed_runtime_version', %s::jsonb,
+                    'claimed_runtime_refreshed_at', now()
+                  )
+                else j.metadata
+              end
+            from candidate
+            where j.id = candidate.id
+              and j.status in ('queued', 'pending', 'retrying')
+            returning
+              j.id::text,
+              j.run_id::text as run_id,
+              j.platform,
+              j.job_type,
+              j.status,
+              j.worker_id,
+              j.config,
+              j.metadata,
+              j.attempt_count,
+              j.max_attempts,
+              j.source_scope,
+              j.season_id::text as season_id,
+              j.last_error_code
+            """,
+            [
+                locked_auth_run_ids,
+                worker_id,
+                stale_after_seconds,
+                run_id,
+                run_id,
+                stage,
+                stage,
+                platform,
+                platform,
+                catalog_supported_platforms,
+                catalog_supported_platforms,
+                authoritative_modal_backend,
+                authoritative_modal_image,
+                authoritative_modal_commit,
+                authoritative_modal_label,
+                authoritative_modal_backend,
+                authoritative_modal_backend,
+                worker_id,
+                worker_id,
+                worker_id,
+                youtube_run_in_flight_cap,
+                run_in_flight_cap,
+                safe_limit,
+                worker_id,
+                media_runtime_json,
+                media_runtime_json,
+                comment_media_runtime_json,
+                comment_media_runtime_json,
+                media_runtime_json,
+                media_runtime_json,
+                comment_media_runtime_json,
+                comment_media_runtime_json,
+            ],
         )
-        update social.scrape_jobs as j
-        set
-          status = 'running',
-          started_at = coalesce(j.started_at, now()),
-          claimed_at = now(),
-          heartbeat_at = now(),
-          worker_id = coalesce(%s, j.worker_id),
-          attempt_count = j.attempt_count + 1,
-          error_message = null,
-          last_error_code = null,
-          last_error_class = null,
-          config = case
-            when coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type) = 'media_mirror'
-              then coalesce(j.config, '{{}}'::jsonb) || jsonb_build_object(
-                'required_runtime_version', %s::jsonb,
-                'claimed_runtime_version', %s::jsonb,
-                'claimed_runtime_refreshed_at', now()
-              )
-            when coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type) = 'comment_media_mirror'
-              then coalesce(j.config, '{{}}'::jsonb) || jsonb_build_object(
-                'required_runtime_version', %s::jsonb,
-                'claimed_runtime_version', %s::jsonb,
-                'claimed_runtime_refreshed_at', now()
-              )
-            else j.config
-          end,
-          metadata = case
-            when coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type) = 'media_mirror'
-              then coalesce(j.metadata, '{{}}'::jsonb) || jsonb_build_object(
-                'runtime_version', %s::jsonb,
-                'claimed_runtime_version', %s::jsonb,
-                'claimed_runtime_refreshed_at', now()
-              )
-            when coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type) = 'comment_media_mirror'
-              then coalesce(j.metadata, '{{}}'::jsonb) || jsonb_build_object(
-                'runtime_version', %s::jsonb,
-                'claimed_runtime_version', %s::jsonb,
-                'claimed_runtime_refreshed_at', now()
-              )
-            else j.metadata
-          end
-        from candidate
-        where j.id = candidate.id
-          and j.status in ('queued', 'pending', 'retrying')
-        returning
-          j.id::text,
-          j.run_id::text as run_id,
-          j.platform,
-          j.job_type,
-          j.status,
-          j.config,
-          j.metadata,
-          j.attempt_count,
-          j.max_attempts,
-          j.source_scope,
-          j.season_id::text as season_id,
-          j.last_error_code
-        """,
-        [
-            worker_id,
-            stale_after_seconds,
-            run_id,
-            run_id,
-            stage,
-            stage,
-            platform,
-            platform,
-            catalog_supported_platforms,
-            catalog_supported_platforms,
-            authoritative_modal_backend,
-            authoritative_modal_image,
-            authoritative_modal_commit,
-            authoritative_modal_label,
-            authoritative_modal_backend,
-            authoritative_modal_backend,
-            worker_id,
-            worker_id,
-            worker_id,
-            youtube_run_in_flight_cap,
-            run_in_flight_cap,
-            safe_limit,
-            worker_id,
-            media_runtime_json,
-            media_runtime_json,
-            comment_media_runtime_json,
-            comment_media_runtime_json,
-            media_runtime_json,
-            media_runtime_json,
-            comment_media_runtime_json,
-            comment_media_runtime_json,
-        ],
-    )
 
 
 def _claim_next_job(
@@ -45913,7 +45779,9 @@ def _claim_next_job(
     return claimed[0] if claimed else None
 
 
+@_with_claimed_job_context
 def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -> dict[str, Any]:
+    finish_accepted = False
     job_id = str(job.get("id") or "")
     run_id = str(job.get("run_id") or "")
     platform = _normalize_platform_name(job.get("platform"))
@@ -45961,7 +45829,7 @@ def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -
                 platform,
                 job_id,
             )
-            _finish_job(
+            finish_accepted = _finish_job(
                 job_id,
                 status="retrying",
                 items_found=0,
@@ -45970,11 +45838,13 @@ def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -
                 last_error_class="WorkerCapabilityMismatch",
                 next_available_at=_now_utc(),
             )
-            # Undo the attempt_count bump since this isn't a real attempt failure
-            pg.execute(
-                "UPDATE social.scrape_jobs SET attempt_count = greatest(0, attempt_count - 1) WHERE id = %s",
-                [job_id],
-            )
+            if finish_accepted:
+                # Undo the attempt_count bump since this isn't a real attempt failure
+                pg.execute(
+                    "UPDATE social.scrape_jobs SET attempt_count = greatest(0, attempt_count - 1) "
+                    "WHERE id = %s and status = 'retrying' and config->>'claim_token' = %s",
+                    [job_id, _metadata_dict(job.get("config")).get("claim_token")],
+                )
             return (
                 pg.fetch_one(
                     (
@@ -46183,7 +46053,7 @@ def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -
             run_state = pg.fetch_one("select status from social.scrape_runs where id = %s", [run_id]) or {}
             run_is_cancelled = str(run_state.get("status") or "") == "cancelled"
         if run_is_cancelled:
-            _finish_job(
+            finish_accepted = _finish_job(
                 job_id,
                 status="cancelled",
                 items_found=posts_count + comments_count,
@@ -46208,7 +46078,7 @@ def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -
                 )
                 or {}
             )
-        _finish_job(
+        finish_accepted = _finish_job(
             job_id,
             status="completed",
             items_found=posts_count + comments_count,
@@ -46220,7 +46090,7 @@ def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -
             run_state = pg.fetch_one("select status from social.scrape_runs where id = %s", [run_id]) or {}
             run_is_cancelled = str(run_state.get("status") or "") == "cancelled"
         if run_is_cancelled:
-            _finish_job(
+            finish_accepted = _finish_job(
                 job_id,
                 status="cancelled",
                 items_found=0,
@@ -46231,7 +46101,7 @@ def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -
                     "account": account,
                 },
             )
-            if run_id:
+            if run_id and finish_accepted:
                 _finalize_run_status(run_id)
             return (
                 pg.fetch_one(
@@ -46325,7 +46195,7 @@ def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -
                 next_available_at=next_available_at,
                 metadata=existing_metadata,
             )
-        _finish_job(
+        finish_accepted = _finish_job(
             job_id,
             status="retrying" if can_retry else "failed",
             items_found=_normalize_non_negative_int(existing_job.get("items_found")),
@@ -46337,7 +46207,7 @@ def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -
         )
         logger.exception("Social ingest job failed: job_id=%s stage=%s platform=%s", job_id, stage, platform)
     finally:
-        if run_id:
+        if run_id and finish_accepted:
             _finalize_run_status(run_id)
 
     return (
@@ -46377,6 +46247,7 @@ def _fetch_next_preclaimed_job(
           platform,
           job_type,
           status,
+          worker_id,
           config,
           metadata,
           attempt_count,
@@ -46501,7 +46372,14 @@ def execute_run(
             break
         run_state = pg.fetch_one("select status from social.scrape_runs where id = %s", [run_id]) or {}
         if str(run_state.get("status")) == "cancelled":
-            _finish_job(str(job.get("id")), status="cancelled", items_found=0, metadata={"stage": "cancelled"})
+            _finish_job(
+                str(job.get("id")),
+                status="cancelled",
+                items_found=0,
+                metadata={"stage": "cancelled"},
+                expected_worker_id=job.get("worker_id"),
+                expected_claim_token=_metadata_dict(job.get("config")).get("claim_token"),
+            )
             processed_jobs += 1
             continue
         _execute_claimed_job(job, worker_id=worker_id)
@@ -48320,7 +48198,7 @@ def cancel_shared_run(
           error_message = coalesce(error_message, 'Cancelled by user request')
         where run_id = %s::uuid
           and status in ('queued', 'pending', 'retrying', 'running', 'cancelling')
-        returning id::text as id, {returning_queue_fields}
+        returning id::text as id, status, config, {returning_queue_fields}
         """,
         [run_id],
         conn=conn,
@@ -48334,6 +48212,8 @@ def cancel_shared_run(
         if job_id:
             _clear_worker_heartbeat_for_job(
                 job_id=job_id,
+                expected_job_snapshot=row,
+                conn=conn,
                 status="idle",
                 metadata={"source": "cancel_shared_run", "job_status": "cancelled"},
             )
@@ -48831,24 +48711,23 @@ def cancel_run(season_id: str, run_id: str, *, cancelled_by: str | None = None) 
           )
         where run_id = %s
           and status in ('queued', 'pending', 'retrying', 'running', 'cancelling')
-        returning id::text, run_id::text as run_id, status
+        returning id::text, run_id::text as run_id, status, worker_id, config
         """,
         [cancelled_by, run_id],
     )
     affected_job_ids = [str(row.get("id") or "").strip() for row in cancelled_jobs if str(row.get("id") or "").strip()]
-    terminal_cancelled_job_ids = [
-        str(row.get("id") or "").strip()
-        for row in cancelled_jobs
-        if str(row.get("id") or "").strip() and str(row.get("status") or "").strip().lower() == "cancelled"
-    ]
     cancelling_job_ids = [
         str(row.get("id") or "").strip()
         for row in cancelled_jobs
         if str(row.get("id") or "").strip() and str(row.get("status") or "").strip().lower() == "cancelling"
     ]
-    for job_id in terminal_cancelled_job_ids:
+    for cancelled_row in cancelled_jobs:
+        if str(cancelled_row.get("status") or "").lower() != "cancelled":
+            continue
+        job_id = str(cancelled_row.get("id") or "")
         _clear_worker_heartbeat_for_job(
             job_id=job_id,
+            expected_job_snapshot=cancelled_row,
             status="idle",
             metadata={"source": "cancel_run", "job_status": "cancelled"},
         )

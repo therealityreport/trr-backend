@@ -575,6 +575,9 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
     job_id = str(job.get("id") or "").strip()
     run_id = str(job.get("run_id") or "").strip()
     config = dict(job.get("config") or {})
+    claim_token = config.get("claim_token")
+    worker_id = job.get("worker_id")
+    finish_accepted = False
     job_metadata = dict(job.get("metadata") or {})
     account_handle = str(config.get("account") or "").strip().lower().lstrip("@")
     stage = str(config.get("stage") or "posts_scrapling").strip().lower()
@@ -632,7 +635,7 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                 "validation_category": "public",
             }
             fetcher_metadata = _public_scraper_runtime_metadata(scraper)
-            lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id)
+            lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id, claim_token=claim_token)
             restart_requested = bool(config.get("restart") or config.get("restart_pagination"))
             cursor: str | None = (
                 str(config.get("resume_cursor") or config.get("resume_frontier_cursor") or "").strip() or None
@@ -655,32 +658,37 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                 )
                 if timeout_guard_elapsed:
                     stop_reason = "timeout_guard"
-                    pagination_state = repo.persist_instagram_profile_pagination_state(
-                        run_id=run_id or None,
-                        job_id=job_id,
-                        account_handle=account_handle,
-                        source_scope=source_scope,
-                        direction="forward",
-                        cursor_in=cursor,
-                        end_cursor=cursor,
-                        page_index=pages_fetched,
-                        posts_seen=posts_fetched,
-                        posts_upserted=posts_upserted,
-                        doc_id_used=str(fetcher_metadata.get("doc_id_used") or "").strip() or None,
-                        doc_ids_attempted=_posts_pagination_doc_ids_attempted(fetcher_metadata),
-                        proxy_fingerprint="none",
-                        proxy_session_key=None,
-                        stop_reason=stop_reason,
-                        partial=True,
-                        completed=False,
-                        metadata={
-                            "reason": stop_reason,
-                            "listing_progress": True,
-                            "instagram_scrape_mode": "public_first",
-                            "auth_state": "public",
-                            "proxy_state": "none",
-                        },
-                    )
+                    with lifecycle.job_claim_write_scope(
+                        job_id, claim_token=claim_token, worker_id=worker_id
+                    ) as current:
+                        if not current:
+                            raise RuntimeError("Job claim lost before checkpoint or auth observation")
+                        pagination_state = repo.persist_instagram_profile_pagination_state(
+                            run_id=run_id or None,
+                            job_id=job_id,
+                            account_handle=account_handle,
+                            source_scope=source_scope,
+                            direction="forward",
+                            cursor_in=cursor,
+                            end_cursor=cursor,
+                            page_index=pages_fetched,
+                            posts_seen=posts_fetched,
+                            posts_upserted=posts_upserted,
+                            doc_id_used=str(fetcher_metadata.get("doc_id_used") or "").strip() or None,
+                            doc_ids_attempted=_posts_pagination_doc_ids_attempted(fetcher_metadata),
+                            proxy_fingerprint="none",
+                            proxy_session_key=None,
+                            stop_reason=stop_reason,
+                            partial=True,
+                            completed=False,
+                            metadata={
+                                "reason": stop_reason,
+                                "listing_progress": True,
+                                "instagram_scrape_mode": "public_first",
+                                "auth_state": "public",
+                                "proxy_state": "none",
+                            },
+                        )
                     _raise_if_pagination_state_persist_failed(
                         pagination_state,
                         account_handle=account_handle,
@@ -696,7 +704,7 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                     )
                     break
 
-                lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id)
+                lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id, claim_token=claim_token)
                 _raise_if_cancelled(
                     job_id=job_id,
                     run_id=run_id,
@@ -729,32 +737,37 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                             if "rate_limited" in error_code or retrieval_meta.get("error_status_code") == 429
                             else "public_account_pagination_requires_approval"
                         )
-                        pagination_state = repo.persist_instagram_profile_pagination_state(
-                            run_id=run_id or None,
-                            job_id=job_id,
-                            account_handle=account_handle,
-                            source_scope=source_scope,
-                            direction="forward",
-                            cursor_in=cursor,
-                            end_cursor=cursor,
-                            page_index=pages_fetched,
-                            posts_seen=posts_fetched,
-                            posts_upserted=posts_upserted,
-                            doc_id_used=str(fetcher_metadata.get("doc_id_used") or "").strip() or None,
-                            doc_ids_attempted=_posts_pagination_doc_ids_attempted(fetcher_metadata),
-                            proxy_fingerprint="none",
-                            proxy_session_key=None,
-                            stop_reason=stop_reason,
-                            partial=True,
-                            completed=False,
-                            metadata={
-                                "fetch_reason": error_code,
-                                "instagram_scrape_mode": "public_first",
-                                "auth_state": "public",
-                                "proxy_state": "none",
-                                "fallback_requires_approval": True,
-                            },
-                        )
+                        with lifecycle.job_claim_write_scope(
+                            job_id, claim_token=claim_token, worker_id=worker_id
+                        ) as current:
+                            if not current:
+                                raise RuntimeError("Job claim lost before checkpoint or auth observation")
+                            pagination_state = repo.persist_instagram_profile_pagination_state(
+                                run_id=run_id or None,
+                                job_id=job_id,
+                                account_handle=account_handle,
+                                source_scope=source_scope,
+                                direction="forward",
+                                cursor_in=cursor,
+                                end_cursor=cursor,
+                                page_index=pages_fetched,
+                                posts_seen=posts_fetched,
+                                posts_upserted=posts_upserted,
+                                doc_id_used=str(fetcher_metadata.get("doc_id_used") or "").strip() or None,
+                                doc_ids_attempted=_posts_pagination_doc_ids_attempted(fetcher_metadata),
+                                proxy_fingerprint="none",
+                                proxy_session_key=None,
+                                stop_reason=stop_reason,
+                                partial=True,
+                                completed=False,
+                                metadata={
+                                    "fetch_reason": error_code,
+                                    "instagram_scrape_mode": "public_first",
+                                    "auth_state": "public",
+                                    "proxy_state": "none",
+                                    "fallback_requires_approval": True,
+                                },
+                            )
                         break
                     raise PostsScraplingRuntimeError(
                         f"Public Instagram posts pagination failed for @{account_handle}: {error_code}.",
@@ -796,38 +809,43 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                 else:
                     stop_reason = None
 
-                pagination_state = repo.persist_instagram_profile_pagination_state(
-                    run_id=run_id or None,
-                    job_id=job_id,
-                    account_handle=account_handle,
-                    source_scope=source_scope,
-                    direction="forward",
-                    cursor_in=cursor,
-                    end_cursor=next_cursor,
-                    page_index=pages_fetched,
-                    posts_seen=posts_fetched,
-                    posts_upserted=posts_upserted,
-                    doc_id_used=str(fetcher_metadata.get("doc_id_used") or "").strip() or None,
-                    doc_ids_attempted=_posts_pagination_doc_ids_attempted(fetcher_metadata),
-                    proxy_fingerprint="none",
-                    proxy_session_key=None,
-                    stop_reason=stop_reason,
-                    partial=stop_reason not in {None, "public_pagination_ok"},
-                    completed=stop_reason == "public_pagination_ok",
-                    metadata={
-                        "fetch_reason": None,
-                        "has_next_page": has_next,
-                        "instagram_scrape_mode": "public_first",
-                        "auth_state": "public",
-                        "proxy_state": "none",
-                        "page_number": pages_fetched,
-                        "cursor_in": cursor,
-                        "end_cursor": next_cursor,
-                        "doc_id": str(fetcher_metadata.get("doc_id_used") or "").strip() or None,
-                        "transport": fetcher_metadata.get("transport"),
-                        "unique_shortcode_count": len(unique_post_ids),
-                    },
-                )
+                with lifecycle.job_claim_write_scope(
+                    job_id, claim_token=claim_token, worker_id=worker_id
+                ) as current:
+                    if not current:
+                        raise RuntimeError("Job claim lost before checkpoint or auth observation")
+                    pagination_state = repo.persist_instagram_profile_pagination_state(
+                        run_id=run_id or None,
+                        job_id=job_id,
+                        account_handle=account_handle,
+                        source_scope=source_scope,
+                        direction="forward",
+                        cursor_in=cursor,
+                        end_cursor=next_cursor,
+                        page_index=pages_fetched,
+                        posts_seen=posts_fetched,
+                        posts_upserted=posts_upserted,
+                        doc_id_used=str(fetcher_metadata.get("doc_id_used") or "").strip() or None,
+                        doc_ids_attempted=_posts_pagination_doc_ids_attempted(fetcher_metadata),
+                        proxy_fingerprint="none",
+                        proxy_session_key=None,
+                        stop_reason=stop_reason,
+                        partial=stop_reason not in {None, "public_pagination_ok"},
+                        completed=stop_reason == "public_pagination_ok",
+                        metadata={
+                            "fetch_reason": None,
+                            "has_next_page": has_next,
+                            "instagram_scrape_mode": "public_first",
+                            "auth_state": "public",
+                            "proxy_state": "none",
+                            "page_number": pages_fetched,
+                            "cursor_in": cursor,
+                            "end_cursor": next_cursor,
+                            "doc_id": str(fetcher_metadata.get("doc_id_used") or "").strip() or None,
+                            "transport": fetcher_metadata.get("transport"),
+                            "unique_shortcode_count": len(unique_post_ids),
+                        },
+                    )
                 _raise_if_pagination_state_persist_failed(
                     pagination_state,
                     account_handle=account_handle,
@@ -865,6 +883,8 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                     },
                     progress_state=progress_state,
                     force=not has_next,
+                    claim_token=claim_token,
+                    worker_id=worker_id,
                 )
                 if stop_reason:
                     break
@@ -992,29 +1012,34 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                     if not reverse_stop_reason and (not result.has_next_page or not result.end_cursor):
                         reverse_stop_reason = "completed"
 
-                    reverse_pagination_state = repo.persist_instagram_profile_pagination_state(
-                        run_id=run_id or None,
-                        job_id=job_id,
-                        account_handle=account_handle,
-                        source_scope=source_scope,
-                        direction="reverse",
-                        cursor_in=reverse_cursor,
-                        end_cursor=result.end_cursor,
-                        page_index=reverse_pages_fetched,
-                        posts_seen=reverse_posts_fetched,
-                        posts_upserted=reverse_posts_upserted,
-                        doc_id_used=str(reverse_fetcher.runtime_metadata.get("doc_id_used") or "").strip() or None,
-                        doc_ids_attempted=_posts_pagination_doc_ids_attempted(dict(reverse_fetcher.runtime_metadata)),
-                        proxy_fingerprint=_posts_runtime_proxy_fingerprint(dict(reverse_fetcher.runtime_metadata)),
-                        proxy_session_key=reverse_proxy_session_key,
-                        stop_reason=reverse_stop_reason,
-                        partial=reverse_stop_reason != "completed",
-                        completed=reverse_stop_reason == "completed",
-                        metadata={
-                            "bidirectional_reverse_walker": True,
-                            "overlap_with_forward": overlap,
-                        },
-                    )
+                    with lifecycle.job_claim_write_scope(
+                        job_id, claim_token=claim_token, worker_id=worker_id
+                    ) as current:
+                        if not current:
+                            raise RuntimeError("Job claim lost before checkpoint or auth observation")
+                        reverse_pagination_state = repo.persist_instagram_profile_pagination_state(
+                            run_id=run_id or None,
+                            job_id=job_id,
+                            account_handle=account_handle,
+                            source_scope=source_scope,
+                            direction="reverse",
+                            cursor_in=reverse_cursor,
+                            end_cursor=result.end_cursor,
+                            page_index=reverse_pages_fetched,
+                            posts_seen=reverse_posts_fetched,
+                            posts_upserted=reverse_posts_upserted,
+                            doc_id_used=str(reverse_fetcher.runtime_metadata.get("doc_id_used") or "").strip() or None,
+                            doc_ids_attempted=_posts_pagination_doc_ids_attempted(dict(reverse_fetcher.runtime_metadata)),
+                            proxy_fingerprint=_posts_runtime_proxy_fingerprint(dict(reverse_fetcher.runtime_metadata)),
+                            proxy_session_key=reverse_proxy_session_key,
+                            stop_reason=reverse_stop_reason,
+                            partial=reverse_stop_reason != "completed",
+                            completed=reverse_stop_reason == "completed",
+                            metadata={
+                                "bidirectional_reverse_walker": True,
+                                "overlap_with_forward": overlap,
+                            },
+                        )
                     _raise_if_pagination_state_persist_failed(
                         reverse_pagination_state,
                         account_handle=account_handle,
@@ -1064,7 +1089,7 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
             auth_metadata = {} if session is None else dict(session.auth_session.metadata or {})
             fetcher_metadata = _fetcher_runtime_metadata()
 
-            lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id)
+            lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id, claim_token=claim_token)
             restart_requested = bool(config.get("restart") or config.get("restart_pagination"))
             cursor: str | None = (
                 str(config.get("resume_cursor") or config.get("resume_frontier_cursor") or "").strip() or None
@@ -1085,26 +1110,31 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                 )
                 if timeout_guard_elapsed:
                     stop_reason = "timeout_guard"
-                    pagination_state = repo.persist_instagram_profile_pagination_state(
-                        run_id=run_id or None,
-                        job_id=job_id,
-                        account_handle=account_handle,
-                        source_scope=source_scope,
-                        direction="forward",
-                        cursor_in=cursor,
-                        end_cursor=cursor,
-                        page_index=pages_fetched,
-                        posts_seen=posts_fetched,
-                        posts_upserted=posts_upserted,
-                        doc_id_used=str(fetcher_metadata.get("doc_id_used") or "").strip() or None,
-                        doc_ids_attempted=_posts_pagination_doc_ids_attempted(fetcher_metadata),
-                        proxy_fingerprint=_posts_runtime_proxy_fingerprint(fetcher_metadata),
-                        proxy_session_key=proxy_session_key,
-                        stop_reason=stop_reason,
-                        partial=True,
-                        completed=False,
-                        metadata={"reason": stop_reason, "listing_progress": True},
-                    )
+                    with lifecycle.job_claim_write_scope(
+                        job_id, claim_token=claim_token, worker_id=worker_id
+                    ) as current:
+                        if not current:
+                            raise RuntimeError("Job claim lost before checkpoint or auth observation")
+                        pagination_state = repo.persist_instagram_profile_pagination_state(
+                            run_id=run_id or None,
+                            job_id=job_id,
+                            account_handle=account_handle,
+                            source_scope=source_scope,
+                            direction="forward",
+                            cursor_in=cursor,
+                            end_cursor=cursor,
+                            page_index=pages_fetched,
+                            posts_seen=posts_fetched,
+                            posts_upserted=posts_upserted,
+                            doc_id_used=str(fetcher_metadata.get("doc_id_used") or "").strip() or None,
+                            doc_ids_attempted=_posts_pagination_doc_ids_attempted(fetcher_metadata),
+                            proxy_fingerprint=_posts_runtime_proxy_fingerprint(fetcher_metadata),
+                            proxy_session_key=proxy_session_key,
+                            stop_reason=stop_reason,
+                            partial=True,
+                            completed=False,
+                            metadata={"reason": stop_reason, "listing_progress": True},
+                        )
                     _raise_if_pagination_state_persist_failed(
                         pagination_state,
                         account_handle=account_handle,
@@ -1119,7 +1149,7 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                         },
                     )
                     break
-                lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id)
+                lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id, claim_token=claim_token)
                 _raise_if_cancelled(
                     job_id=job_id,
                     run_id=run_id,
@@ -1201,11 +1231,16 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                         )
                     # Either a checkpoint (no rotate) or rotation budget exhausted:
                     # record the cross-process cooldown and fail this attempt.
-                    cooldown = auth_cooldown.record_auth_block(
-                        _POSTS_PLATFORM,
-                        account_handle,
-                        block_error_code,
-                    )
+                    with lifecycle.job_claim_write_scope(
+                        job_id, claim_token=claim_token, worker_id=worker_id
+                    ) as current:
+                        if not current:
+                            raise RuntimeError("Job claim lost before checkpoint or auth observation")
+                        cooldown = auth_cooldown.record_auth_block(
+                            _POSTS_PLATFORM,
+                            account_handle,
+                            block_error_code,
+                        )
                     raise PostsScraplingRuntimeError(
                         (
                             f"Instagram posts checkpoint required for @{account_handle}."
@@ -1227,26 +1262,31 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                 if result.fetch_failed and not result.posts:
                     stop_reason = _posts_pagination_stop_reason(result)
                     if stop_reason == "cursor_expired_restart_required":
-                        pagination_state = repo.persist_instagram_profile_pagination_state(
-                            run_id=run_id or None,
-                            job_id=job_id,
-                            account_handle=account_handle,
-                            source_scope=source_scope,
-                            direction="forward",
-                            cursor_in=cursor,
-                            end_cursor=cursor,
-                            page_index=pages_fetched,
-                            posts_seen=posts_fetched,
-                            posts_upserted=posts_upserted,
-                            doc_id_used=str(fetcher_metadata.get("doc_id_used") or "").strip() or None,
-                            doc_ids_attempted=_posts_pagination_doc_ids_attempted(fetcher_metadata),
-                            proxy_fingerprint=_posts_runtime_proxy_fingerprint(fetcher_metadata),
-                            proxy_session_key=proxy_session_key,
-                            stop_reason=stop_reason,
-                            partial=True,
-                            completed=False,
-                            metadata={"fetch_reason": getattr(result, "fetch_reason", None)},
-                        )
+                        with lifecycle.job_claim_write_scope(
+                            job_id, claim_token=claim_token, worker_id=worker_id
+                        ) as current:
+                            if not current:
+                                raise RuntimeError("Job claim lost before checkpoint or auth observation")
+                            pagination_state = repo.persist_instagram_profile_pagination_state(
+                                run_id=run_id or None,
+                                job_id=job_id,
+                                account_handle=account_handle,
+                                source_scope=source_scope,
+                                direction="forward",
+                                cursor_in=cursor,
+                                end_cursor=cursor,
+                                page_index=pages_fetched,
+                                posts_seen=posts_fetched,
+                                posts_upserted=posts_upserted,
+                                doc_id_used=str(fetcher_metadata.get("doc_id_used") or "").strip() or None,
+                                doc_ids_attempted=_posts_pagination_doc_ids_attempted(fetcher_metadata),
+                                proxy_fingerprint=_posts_runtime_proxy_fingerprint(fetcher_metadata),
+                                proxy_session_key=proxy_session_key,
+                                stop_reason=stop_reason,
+                                partial=True,
+                                completed=False,
+                                metadata={"fetch_reason": getattr(result, "fetch_reason", None)},
+                            )
                         _raise_if_pagination_state_persist_failed(
                             pagination_state,
                             account_handle=account_handle,
@@ -1272,7 +1312,12 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                 # cooldown so sibling containers stop deferring. Checkpoint
                 # blockers are non-clearing inside clear_cooldown.
                 if not anonymous_enabled:
-                    auth_cooldown.clear_cooldown(_POSTS_PLATFORM, account_handle)
+                    with lifecycle.job_claim_write_scope(
+                        job_id, claim_token=claim_token, worker_id=worker_id
+                    ) as current:
+                        if not current:
+                            raise RuntimeError("Job claim lost before checkpoint or auth observation")
+                        auth_cooldown.clear_cooldown(_POSTS_PLATFORM, account_handle)
 
                 if result.posts:
                     if not bidirectional_probe_done and _posts_bidirectional_walk_enabled():
@@ -1308,29 +1353,34 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                 stop_reason = _posts_pagination_stop_reason(result)
                 if not stop_reason and (not result.has_next_page or not result.end_cursor):
                     stop_reason = "completed"
-                pagination_state = repo.persist_instagram_profile_pagination_state(
-                    run_id=run_id or None,
-                    job_id=job_id,
-                    account_handle=account_handle,
-                    source_scope=source_scope,
-                    direction="forward",
-                    cursor_in=cursor,
-                    end_cursor=result.end_cursor,
-                    page_index=pages_fetched,
-                    posts_seen=posts_fetched,
-                    posts_upserted=posts_upserted,
-                    doc_id_used=str(fetcher_metadata.get("doc_id_used") or "").strip() or None,
-                    doc_ids_attempted=_posts_pagination_doc_ids_attempted(fetcher_metadata),
-                    proxy_fingerprint=_posts_runtime_proxy_fingerprint(fetcher_metadata),
-                    proxy_session_key=proxy_session_key,
-                    stop_reason=stop_reason,
-                    partial=stop_reason != "completed",
-                    completed=stop_reason == "completed",
-                    metadata={
-                        "fetch_reason": getattr(result, "fetch_reason", None),
-                        "has_next_page": bool(result.has_next_page),
-                    },
-                )
+                with lifecycle.job_claim_write_scope(
+                    job_id, claim_token=claim_token, worker_id=worker_id
+                ) as current:
+                    if not current:
+                        raise RuntimeError("Job claim lost before checkpoint or auth observation")
+                    pagination_state = repo.persist_instagram_profile_pagination_state(
+                        run_id=run_id or None,
+                        job_id=job_id,
+                        account_handle=account_handle,
+                        source_scope=source_scope,
+                        direction="forward",
+                        cursor_in=cursor,
+                        end_cursor=result.end_cursor,
+                        page_index=pages_fetched,
+                        posts_seen=posts_fetched,
+                        posts_upserted=posts_upserted,
+                        doc_id_used=str(fetcher_metadata.get("doc_id_used") or "").strip() or None,
+                        doc_ids_attempted=_posts_pagination_doc_ids_attempted(fetcher_metadata),
+                        proxy_fingerprint=_posts_runtime_proxy_fingerprint(fetcher_metadata),
+                        proxy_session_key=proxy_session_key,
+                        stop_reason=stop_reason,
+                        partial=stop_reason != "completed",
+                        completed=stop_reason == "completed",
+                        metadata={
+                            "fetch_reason": getattr(result, "fetch_reason", None),
+                            "has_next_page": bool(result.has_next_page),
+                        },
+                    )
                 _raise_if_pagination_state_persist_failed(
                     pagination_state,
                     account_handle=account_handle,
@@ -1366,6 +1416,8 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                     },
                     progress_state=progress_state,
                     force=not result.has_next_page,
+                    claim_token=claim_token,
+                    worker_id=worker_id,
                 )
 
                 if stop_reason == "pagination_doc_id_stale":
@@ -1501,16 +1553,18 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
             posts_skipped=posts_skipped,
             posts_skipped_by_reason=posts_skipped_by_reason,
         )
-        lifecycle.finish_job(
+        finish_accepted = lifecycle.finish_job(
             job_id,
             status="completed",
             items_found=posts_fetched + reverse_posts_fetched,
             metadata=metadata,
+            expected_claim_token=claim_token,
+            expected_worker_id=worker_id,
         )
         terminal_status = "completed"
         terminal_error_message: str | None = None
     except ScraplingJobCancelledError as exc:
-        lifecycle.finish_job(
+        finish_accepted = lifecycle.finish_job(
             job_id,
             status="cancelled",
             items_found=posts_fetched + reverse_posts_fetched,
@@ -1567,6 +1621,8 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
             },
             last_error_code="instagram_posts_scrapling_cancelled",
             last_error_class=exc.__class__.__name__,
+            expected_claim_token=claim_token,
+            expected_worker_id=worker_id,
         )
         terminal_status = "cancelled"
         terminal_error_message = str(exc)
@@ -1576,7 +1632,7 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
         # pattern) so a sibling container picks it up after the cooldown rather
         # than burning attempts now. This is NOT a hard failure.
         cooldown_available_at = exc.cooldown_until if isinstance(exc.cooldown_until, datetime) else None
-        lifecycle.finish_job(
+        finish_accepted = lifecycle.finish_job(
             job_id,
             status="retrying",
             items_found=posts_fetched + reverse_posts_fetched,
@@ -1621,6 +1677,8 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
             last_error_code=exc.error_code,
             last_error_class=exc.__class__.__name__,
             next_available_at=cooldown_available_at,
+            expected_claim_token=claim_token,
+            expected_worker_id=worker_id,
         )
         terminal_status = "retrying"
         terminal_error_message = str(exc)
@@ -1637,7 +1695,7 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
             if can_retry
             else None
         )
-        lifecycle.finish_job(
+        finish_accepted = lifecycle.finish_job(
             job_id,
             status="retrying" if can_retry else "failed",
             items_found=posts_fetched + reverse_posts_fetched,
@@ -1685,11 +1743,13 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
             last_error_code=error_code,
             last_error_class=error_class,
             next_available_at=next_available_at,
+            expected_claim_token=claim_token,
+            expected_worker_id=worker_id,
         )
         terminal_status = "retrying" if can_retry else "failed"
         terminal_error_message = str(exc)
     finally:
-        if run_id:
+        if finish_accepted and run_id:
             try:
                 lifecycle.finalize_run_status(run_id)
             except pg.DatabaseServiceUnavailableError as exc:

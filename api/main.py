@@ -617,9 +617,10 @@ async def observability_middleware(request: Request, call_next):
 
 
 # Include routers
+from trr_backend.socials import social_season_analytics_impl as social_provider  # noqa: E402
 from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers  # noqa: E402
 
-register_social_control_plane_providers()
+register_social_control_plane_providers(social_provider.__dict__)
 
 from trr_backend.pipeline.admin_operation_bootstrap import register_admin_operation_providers  # noqa: E402
 

@@ -526,6 +526,7 @@ def _probe_media_url(
             policy=_TIKTOK_MEDIA_URL_POLICY,
             headers=_PROBE_HEADERS,
             timeout=timeout,
+            headers_only=True,
             stream=True,
             allow_redirects=True,
         )

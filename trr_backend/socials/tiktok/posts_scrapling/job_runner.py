@@ -225,6 +225,9 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
     job_id = str(job.get("id") or "").strip()
     run_id = str(job.get("run_id") or "").strip()
     config = dict(job.get("config") or {})
+    claim_token = config.get("claim_token")
+    worker_id = job.get("worker_id")
+    finish_accepted = False
     account_handle = str(config.get("account") or "").strip().lower().lstrip("@")
     stage = str(config.get("stage") or "tiktok_posts_scrapling").strip().lower()
     max_pages_raw = config.get("max_pages")
@@ -339,7 +342,7 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
                 if task in done:
                     return task.result()
                 fetcher_metadata = _fetcher_runtime_metadata()
-                lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id)
+                lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id, claim_token=claim_token)
                 _raise_if_cancelled(job_id=job_id, run_id=run_id, runtime_metadata=fetcher_metadata)
 
         async def _run_canonical_fallback(trigger_reason: Any) -> bool:
@@ -406,6 +409,8 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
                 },
                 progress_state=progress_state,
                 force=True,
+                claim_token=claim_token,
+                worker_id=worker_id,
             )
             return True
 
@@ -423,7 +428,7 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
                     runtime_metadata={**_fetcher_runtime_metadata(), "fetch_reason": trigger_reason},
                 ) from exc
             fetcher_metadata = _fetcher_runtime_metadata()
-            lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id)
+            lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id, claim_token=claim_token)
             _raise_if_cancelled(job_id=job_id, run_id=run_id, runtime_metadata=fetcher_metadata)
 
             try:
@@ -446,7 +451,7 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
             cursor: str | None = None
 
             while True:
-                lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id)
+                lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id, claim_token=claim_token)
                 fetcher_metadata = _fetcher_runtime_metadata()
                 _raise_if_cancelled(job_id=job_id, run_id=run_id, runtime_metadata=fetcher_metadata)
                 result = await _await_operation_with_heartbeat(
@@ -522,6 +527,8 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
                     },
                     progress_state=progress_state,
                     force=not result.has_more or bool(stop_reason),
+                    claim_token=claim_token,
+                    worker_id=worker_id,
                 )
 
                 if stop_reason:
@@ -580,16 +587,18 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
             posts_skipped=posts_skipped,
             posts_skipped_by_reason=posts_skipped_by_reason,
         )
-        lifecycle.finish_job(
+        finish_accepted = lifecycle.finish_job(
             job_id,
             status="completed",
             items_found=posts_fetched,
             metadata=metadata,
+            expected_claim_token=claim_token,
+            expected_worker_id=worker_id,
         )
         terminal_status = "completed"
         terminal_error_message = None
     except TikTokPostsScraplingCancelledError as exc:
-        lifecycle.finish_job(
+        finish_accepted = lifecycle.finish_job(
             job_id,
             status="cancelled",
             items_found=posts_fetched,
@@ -613,6 +622,8 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
             },
             last_error_code="tiktok_posts_scrapling_cancelled",
             last_error_class=exc.__class__.__name__,
+            expected_claim_token=claim_token,
+            expected_worker_id=worker_id,
         )
         terminal_status = "cancelled"
         terminal_error_message = str(exc)
@@ -631,7 +642,7 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
         )
         if not stop_reason:
             stop_reason = error_code
-        lifecycle.finish_job(
+        finish_accepted = lifecycle.finish_job(
             job_id,
             status="retrying" if can_retry else "failed",
             items_found=posts_fetched,
@@ -655,11 +666,13 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
             last_error_code=error_code,
             last_error_class=error_class,
             next_available_at=next_available_at,
+            expected_claim_token=claim_token,
+            expected_worker_id=worker_id,
         )
         terminal_status = "retrying" if can_retry else "failed"
         terminal_error_message = str(exc)
     finally:
-        if run_id:
+        if finish_accepted and run_id:
             try:
                 lifecycle.finalize_run_status(run_id)
             except pg.DatabaseServiceUnavailableError as exc:

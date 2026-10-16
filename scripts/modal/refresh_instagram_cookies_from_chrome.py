@@ -65,10 +65,16 @@ INSTAGRAM_COOKIE_ENV_KEYS = {
 }
 COOKIE_EXTRACTION_DEPENDENCY_PACKAGE = "pycookiecheat"
 COOKIE_EXTRACTION_DEPENDENCY_FAILURE_REASON = "cookie_extraction_dependency_missing"
-COOKIE_EXTRACTION_DEPENDENCY_INSTALL_COMMAND = ".venv/bin/python -m pip install -r requirements.txt"
+COOKIE_EXTRACTION_DEPENDENCY_INSTALL_COMMAND = (
+    "python3.11 -m venv .venv-operator-cookies && "
+    ".venv-operator-cookies/bin/python -m pip install -r requirements.operator-cookies.lock.txt"
+)
 COOKIE_EXTRACTION_DEPENDENCY_MESSAGE = (
     "Chrome cookie extraction requires pycookiecheat. "
-    f"Install backend dependencies with `{COOKIE_EXTRACTION_DEPENDENCY_INSTALL_COMMAND}` from TRR-Backend."
+    f"Create the separate operator environment with `{COOKIE_EXTRACTION_DEPENDENCY_INSTALL_COMMAND}` "
+    "from TRR-Backend, then rerun using .venv-operator-cookies/bin/python. "
+    "Do not install these dependencies into the API/worker .venv. "
+    "See docs/operations/operator-cookie-environment.md."
 )
 
 

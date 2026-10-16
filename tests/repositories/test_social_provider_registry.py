@@ -206,9 +206,10 @@ def test_control_plane_bootstrap_rejects_incomplete_publication(
 ) -> None:
     from importlib import import_module
 
+    from trr_backend.socials import social_season_analytics_impl as social_provider
     from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
 
-    register_social_control_plane_providers()
+    register_social_control_plane_providers(social_provider.__dict__)
     leaf = import_module(f"trr_backend.socials.control_plane.{provider_name}")
     if provider_name == "queue_status":
         monkeypatch.setattr(leaf, "_LEGACY_NAMESPACE", None if failure == "unconfigured" else {})
@@ -217,4 +218,4 @@ def test_control_plane_bootstrap_rejects_incomplete_publication(
     else:
         monkeypatch.setattr(leaf._PROVIDER, "_namespace", {})
     with pytest.raises(RuntimeError):
-        register_social_control_plane_providers()
+        register_social_control_plane_providers(social_provider.__dict__)

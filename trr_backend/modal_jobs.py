@@ -1361,9 +1361,10 @@ def probe_reddit_refresh_runtime() -> dict[str, object]:
     timeout=5 * 60,
 )
 def probe_social_remote_auth(platform: str) -> dict[str, object]:
+    from trr_backend.socials import social_season_analytics_impl as social_provider
     from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
 
-    register_social_control_plane_providers()
+    register_social_control_plane_providers(social_provider.__dict__)
     from trr_backend.socials.control_plane import probe_remote_auth_health
 
     return probe_remote_auth_health(platform)
@@ -1377,12 +1378,13 @@ def probe_social_remote_auth(platform: str) -> dict[str, object]:
     timeout=5 * 60,
 )
 def probe_social_control_plane_providers() -> dict[str, object]:
+    from trr_backend.socials import social_season_analytics_impl as social_provider
     from trr_backend.socials.control_plane_bootstrap import (
         SOCIAL_CONTROL_PLANE_PROVIDER_NAMES,
         register_social_control_plane_providers,
     )
 
-    register_social_control_plane_providers()
+    register_social_control_plane_providers(social_provider.__dict__)
     return {
         "ready": True,
         "state_free": True,
@@ -1629,9 +1631,10 @@ def probe_getty_remote_access() -> dict[str, object]:
 
 
 def _execute_social_job(job_id: str, *, worker_prefix: str, dispatch_token: str | None = None) -> dict[str, object]:
+    from trr_backend.socials import social_season_analytics_impl as social_provider
     from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
 
-    register_social_control_plane_providers()
+    register_social_control_plane_providers(social_provider.__dict__)
     from trr_backend.socials.control_plane import claim_and_process_social_job
 
     worker_id = f"{worker_prefix}:{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
@@ -1797,9 +1800,10 @@ def _recover_stale_pending_social_catalog_launches(
 )
 def sweep_social_dispatch_queue() -> dict[str, object]:
     _validate_modal_maintenance_owner_config()
+    from trr_backend.socials import social_season_analytics_impl as social_provider
     from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
 
-    register_social_control_plane_providers()
+    register_social_control_plane_providers(social_provider.__dict__)
     from trr_backend.socials.control_plane import recover_and_dispatch_due_social_jobs
 
     started_at = _worker_started(
@@ -1920,9 +1924,10 @@ def sync_nbcumv_official_images() -> dict[str, object]:
 )
 def heartbeat_remote_executors(heartbeat_source: str = "backend_runtime_scheduler") -> dict[str, object]:
     _validate_modal_maintenance_owner_config()
+    from trr_backend.socials import social_season_analytics_impl as social_provider
     from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
 
-    register_social_control_plane_providers()
+    register_social_control_plane_providers(social_provider.__dict__)
     try:
         _poll_due_show_season_media_watches_impl()
     except Exception:

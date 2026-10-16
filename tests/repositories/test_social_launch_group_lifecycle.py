@@ -6,11 +6,12 @@ from typing import Any
 
 import pytest
 
+from trr_backend.socials import social_season_analytics_impl as social_provider
 from trr_backend.socials.control_plane import shared_accounts
 from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
 from trr_backend.socials.pipelines.account_catalog import launch, progress
 
-register_social_control_plane_providers()
+register_social_control_plane_providers(social_provider.__dict__)
 
 
 def test_launch_owner_uses_transaction_advisory_lock(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -258,6 +258,9 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
     job_id = str(job.get("id") or "").strip()
     run_id = str(job.get("run_id") or "").strip()
     config = dict(job.get("config") or {})
+    claim_token = config.get("claim_token")
+    worker_id = job.get("worker_id")
+    finish_accepted = False
     account_handle = str(config.get("account") or "").strip().lower().lstrip("@")
     stage = str(config.get("stage") or "threads_posts_scrapling").strip().lower()
     max_pages_raw = config.get("max_pages")
@@ -451,7 +454,7 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
                 if task in done:
                     return task.result()
                 fetcher_metadata = _fetcher_runtime_metadata()
-                lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id)
+                lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id, claim_token=claim_token)
                 _raise_if_cancelled(job_id=job_id, run_id=run_id, runtime_metadata=fetcher_metadata)
 
         try:
@@ -463,7 +466,7 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
             )
             await _await_operation_with_heartbeat(fetcher.warmup(account_handle), phase="warmup")
             fetcher_metadata = _fetcher_runtime_metadata()
-            lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id)
+            lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id, claim_token=claim_token)
             _raise_if_cancelled(job_id=job_id, run_id=run_id, runtime_metadata=fetcher_metadata)
 
             result = await _await_operation_with_heartbeat(
@@ -477,7 +480,12 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
 
             if result.auth_failed and not result.posts:
                 error_code = str(result.fetch_reason or "threads_posts_auth_failed").strip()
-                cooldown = auth_cooldown.record_auth_block("threads", account_handle, error_code)
+                with lifecycle.job_claim_write_scope(
+                    job_id, claim_token=claim_token, worker_id=worker_id
+                ) as current:
+                    if not current:
+                        raise RuntimeError("Job claim lost before checkpoint or auth observation")
+                    cooldown = auth_cooldown.record_auth_block("threads", account_handle, error_code)
                 cooldown_metadata = _auth_cooldown_metadata(cooldown)
                 raise ThreadsPostsScraplingRuntimeError(
                     f"Threads posts auth failed for @{account_handle}.",
@@ -594,7 +602,12 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
                 )
             if posts_fetched > 0 and posts_upserted > 0:
                 with contextlib.suppress(Exception):
-                    auth_cooldown.clear_cooldown("threads", account_handle)
+                    with lifecycle.job_claim_write_scope(
+                        job_id, claim_token=claim_token, worker_id=worker_id
+                    ) as current:
+                        if not current:
+                            raise RuntimeError("Job claim lost before checkpoint or auth observation")
+                        auth_cooldown.clear_cooldown("threads", account_handle)
             if stop_reason in {None, "", "complete"}:
                 stop_reason = "completed"
             final_fetcher_runtime = _fetcher_runtime_metadata()
@@ -619,6 +632,8 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
                 },
                 progress_state=progress_state,
                 force=True,
+                claim_token=claim_token,
+                worker_id=worker_id,
             )
             return fetcher_metadata
         finally:
@@ -660,11 +675,13 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
             alias_keys=("threads_posts_scrapling_persist_diagnostics",),
         )
         metadata["threads_posts_scrapling_persist_diagnostics"] = metadata["persist_counters"]
-        lifecycle.finish_job(
+        finish_accepted = lifecycle.finish_job(
             job_id,
             status="completed",
             items_found=posts_fetched,
             metadata=metadata,
+            expected_claim_token=claim_token,
+            expected_worker_id=worker_id,
         )
         terminal_status = "completed"
         terminal_error_message = None
@@ -687,7 +704,7 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
                 "error_class": exc.__class__.__name__,
             },
         )
-        lifecycle.finish_job(
+        finish_accepted = lifecycle.finish_job(
             job_id,
             status="cancelled",
             items_found=posts_fetched,
@@ -695,6 +712,8 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
             metadata=metadata,
             last_error_code="threads_posts_scrapling_cancelled",
             last_error_class=exc.__class__.__name__,
+            expected_claim_token=claim_token,
+            expected_worker_id=worker_id,
         )
         terminal_status = "cancelled"
         terminal_error_message = str(exc)
@@ -715,7 +734,7 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
         if not stop_reason:
             stop_reason = error_code
         runtime_metadata = _safe_runtime_metadata(dict(getattr(exc, "runtime_metadata", {}) or {}))
-        lifecycle.finish_job(
+        finish_accepted = lifecycle.finish_job(
             job_id,
             status="retrying" if can_retry else "failed",
             items_found=posts_fetched,
@@ -738,11 +757,13 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
             last_error_code=error_code,
             last_error_class=error_class,
             next_available_at=next_available_at,
+            expected_claim_token=claim_token,
+            expected_worker_id=worker_id,
         )
         terminal_status = "retrying" if can_retry else "failed"
         terminal_error_message = str(exc)
     finally:
-        if run_id:
+        if finish_accepted and run_id:
             try:
                 lifecycle.finalize_run_status(run_id)
             except pg.DatabaseServiceUnavailableError as exc:

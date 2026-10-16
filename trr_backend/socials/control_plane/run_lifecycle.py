@@ -72,8 +72,19 @@ def metadata_dict(value: Any) -> dict[str, Any]:
     return legacy._metadata_dict(value)
 
 
-def touch_job_heartbeat(job_id: str, *, worker_id: str | None = None) -> bool:
-    return bool(legacy._touch_job_heartbeat(job_id, worker_id=worker_id))
+def job_claim_write_scope(job_id: str, *, claim_token: str | None = None, worker_id: str | None = None):
+    """Guard coupled standard-worker writes in the same transaction as finish.
+
+    Yields False for a stale/missing claim. Exceptions must escape to roll back.
+    """
+    return legacy._job_claim_write_scope(job_id, claim_token=claim_token, worker_id=worker_id)
+
+
+def touch_job_heartbeat(job_id: str, *, worker_id: str | None = None, claim_token: str | None = None) -> bool:
+    kwargs: dict[str, Any] = {"worker_id": worker_id}
+    if claim_token is not None:
+        kwargs["claim_token"] = claim_token
+    return bool(legacy._touch_job_heartbeat(job_id, **kwargs))
 
 
 def emit_job_progress(
@@ -89,6 +100,7 @@ def emit_job_progress(
     activity: dict[str, Any] | None,
     progress_state: JobProgressState,
     worker_id: str | None = None,
+    claim_token: str | None = None,
     force: bool = False,
     extra_metadata: dict[str, Any] | None = None,
 ) -> bool:
@@ -107,6 +119,8 @@ def emit_job_progress(
     }
     if worker_id is not None:
         kwargs["worker_id"] = worker_id
+    if claim_token is not None:
+        kwargs["claim_token"] = claim_token
     if extra_metadata is not None:
         kwargs["extra_metadata"] = extra_metadata
     return bool(legacy._emit_job_progress(**kwargs))
@@ -123,7 +137,9 @@ def finish_job(
     last_error_class: str | None = None,
     next_available_at: datetime | None = None,
     expected_worker_id: str | None = None,
-) -> None:
+    expected_claim_token: str | None = None,
+    defer_followups: bool = False,
+) -> bool:
     kwargs: dict[str, Any] = {"status": status, "items_found": items_found}
     if error_message is not None:
         kwargs["error_message"] = error_message
@@ -137,7 +153,35 @@ def finish_job(
         kwargs["next_available_at"] = next_available_at
     if expected_worker_id is not None:
         kwargs["expected_worker_id"] = expected_worker_id
-    legacy._finish_job(job_id, **kwargs)
+    if expected_claim_token is not None:
+        kwargs["expected_claim_token"] = expected_claim_token
+    if defer_followups:
+        kwargs["defer_followups"] = True
+    return bool(legacy._finish_job(job_id, **kwargs))
+
+
+def finish_job_followups(
+    job_id: str,
+    *,
+    run_id: str | None,
+    status: str,
+    items_found: int,
+    metadata: dict[str, Any] | None = None,
+    claim_token: str | None = None,
+    worker_id: str | None = None,
+    administrative: bool = False,
+) -> None:
+    """Deliver retained accepted-completion actions after the guarded commit."""
+    legacy._finish_job_followups(
+        job_id,
+        run_id=run_id,
+        status=status,
+        items_found=items_found,
+        metadata=metadata,
+        claim_token=claim_token,
+        worker_id=worker_id,
+        administrative=administrative,
+    )
 
 
 def retry_backoff_seconds(attempt_count: int) -> int:
@@ -2127,7 +2171,11 @@ def _increment_run_counters_on_job_finish(
     new_items_found: int,
     conn: Any | None = None,
 ) -> None:
-    if not run_id or not legacy._run_counter_columns_ready():
+    if not run_id:
+        return
+    if not legacy._run_counter_columns_ready():
+        if conn is not None:
+            raise RuntimeError("Run counter columns are required for atomic job completion")
         return
     stage_key = str(stage or "unknown").strip() or "unknown"
     active_delta = (1 if _status_is_active(new_status) else 0) - (1 if _status_is_active(prior_status) else 0)
@@ -2156,6 +2204,8 @@ def _increment_run_counters_on_job_finish(
                 [run_id],
             )
             if not row:
+                if conn is not None:
+                    raise RuntimeError("Run counter row is required for atomic job completion")
                 return
         total_jobs = legacy._normalize_non_negative_int(row.get("total_jobs"))
         completed_jobs = max(0, legacy._normalize_non_negative_int(row.get("completed_jobs")) + completed_delta)
