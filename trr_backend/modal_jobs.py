@@ -1659,6 +1659,7 @@ def _execute_social_job(job_id: str, *, worker_prefix: str, dispatch_token: str 
     name=str(os.getenv("TRR_MODAL_SOCIAL_POSTS_JOB_FUNCTION") or "run_social_posts_job").strip()
     or "run_social_posts_job",
     image=_FUNCTION_IMAGE_BINDINGS["run_social_posts_job"],
+    region="us-east",
     secrets=_secrets,
     retries=0,
     timeout=2 * 60 * 60,
@@ -1683,6 +1684,7 @@ def run_social_posts_job(
     name=str(os.getenv("TRR_MODAL_SOCIAL_MEDIA_JOB_FUNCTION") or "run_social_media_job").strip()
     or "run_social_media_job",
     image=_FUNCTION_IMAGE_BINDINGS["run_social_media_job"],
+    region="us-east",
     secrets=_secrets,
     retries=0,
     timeout=2 * 60 * 60,
@@ -1706,6 +1708,7 @@ def run_social_media_job(
     name=str(os.getenv("TRR_MODAL_SOCIAL_COMMENTS_JOB_FUNCTION") or "run_social_comments_job").strip()
     or "run_social_comments_job",
     image=_FUNCTION_IMAGE_BINDINGS["run_social_comments_job"],
+    region="us-east",
     secrets=_secrets,
     retries=0,
     timeout=2 * 60 * 60,
@@ -1839,6 +1842,7 @@ def _execute_ingestion_reservation(reservation: dict[str, object], *, stages: se
     retries=0,
     timeout=15 * 60,
     max_containers=_SOCIAL_RECOVERY_CONCURRENCY_LIMIT,
+    region="us-east",
     **_modal_cron_schedule_kwargs("*/2 * * * *"),
 )
 def sweep_social_dispatch_queue() -> dict[str, object]:

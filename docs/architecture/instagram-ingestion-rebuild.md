@@ -903,3 +903,83 @@ full-history compatibility, and reused the passing focused checks. Parent accept
 this as the maintained heuristic with the explicitly recorded unseen-ordering
 limit; live canary acceptance remains separate. Live provider verification again
 confirmed admin-56995 / main / trr-backend-jobs before deployment.
+
+### Bounded-window deployment and resume (2026-10-16T13:50Z)
+
+Commit 7cb698c8 is deployed as Modal v65, tag ig-window-20261016-7cb698c8,
+admin-56995 / main / trr-backend-jobs. The provider reports 7cb698c* because
+unrelated dirty work remains preserved. Guarded cold-start API health returned 200
+on attempt 1. Readiness passed with no missing functions/secrets or blocking/advisory
+failures. A fresh posts-worker container verified all 45 runtime hashes and the
+changed date-boundary helper; no source or database operations were made by that
+smoke. Launch 0, coordinator 1, replay-apply 0 remain unchanged. v64 and its source
+history remain available for rollback; the authorized livestnation credential did
+not change during this deployment.
+
+Supported resume with a new stable idempotency key returned 202, generation 6,
+original DBOS engine/workflow version. At 13:50:49Z the run was running: the original
+page receipt and 33 downstream target sets remained preserved, and the saved next
+listing cursor had one active owner on its first attempt. No new launch or manual
+scheduler wakeup was used. Receipt/evidence paths are
+.artifacts/ingestion-rollout/{deployment-7cb698c8,readiness-7cb698c8,
+deployed-worker-source-proof-7cb698c8}.json. Full-window and downstream completion
+remain unproven at this observation.
+
+At 13:54:29Z page two committed. The run retained 66 unique post targets per
+selected downstream stage, two listing receipts and a durable third-page cursor.
+A read-only lock trace during that commit found one progressing canonical writer
+and run-row waiters, without a blocking root or observed cycle. The transaction
+held the run lock across hundreds of synchronous canonical statements. No writer
+was terminated and no receipt or counter was reset.
+
+### Worker locality candidate — awaiting cost decision
+
+Live metadata showed the fresh posts worker in Modal region ap (Azure), while the
+TRR database pooler is aws-1-us-east-1. A lean worker reported ap-northeast; the API
+container reported us-east (GCP). Five read-only SELECT 1 roundtrips on the same
+database at 13:56:55–57Z measured median 199.47 ms from the posts container and
+11.87 ms from the API container. This small cross-cloud sample is descriptive;
+it is not a matched full-pipeline benchmark or a total-cost measurement. Protected
+receipt: .artifacts/ingestion-rollout/region-latency-before.json.
+
+The prepared source candidate adds only region="us-east" to the existing
+run_social_posts_job, run_social_comments_job, run_social_media_job and
+sweep_social_dispatch_queue decorators. AST comparison proved those four keywords
+are the only code changes; Ruff/diff checks and independent review passed.
+It keeps shared container caps, dispatch names, images, secrets, retry policies,
+timeouts and schedules. It affects legacy placement on the shared functions too.
+Dynamic Function.with_options was rejected because it creates an independently
+scaled pool and the existing admission snapshot does not replace the shared cap.
+
+The provider documents a 1.75x compute-rate multiplier for narrow regions such as
+us-east, versus 1.15x for broad us. The candidate has NOT been committed/deployed;
+a direct user cost decision is pending. No assumption is made that faster wall time
+will reduce total cost. Current v65 canary execution continues under automatic
+placement. If approved, use explicit rolling deployment: the provider documents
+that active inputs finish on old containers while new containers take new work.
+Preserve existing calls and reservations; do not redispatch them.
+
+References: https://modal.com/docs/guide/region-selection and
+https://modal.com/docs/guide/managing-deployments (checked 2026-10-16).
+
+At 13:59:55Z the canary had three committed listing pages and 99 target identities
+per selected downstream stage. Page four was queued, with no new block. The shared
+region candidate remains undeployed pending the user's explicit rate-premium
+choice. A thread heartbeat named "Instagram ingestion canary" (automation ID
+instagram-ingestion-canary) now checks every 15 minutes. It observes the existing
+run only, stays quiet for routine page increments, preserves launch 0, and reports
+meaningful stage/terminal changes or failures. It cannot deploy the priced candidate
+or treat silence as approval. The original full rollout acceptance remains open.
+
+### US-East trial authorized (2026-10-16)
+
+The user explicitly approved the US-East trial and its 75% compute-rate premium,
+requested comparison of actual cost and speed, and directed continued work until
+the complete ingestion pipeline is finished and optimized. This supersedes the
+pending-cost-decision boundary above. The reviewed four-keyword candidate hash
+still matches 2bbc1f3dbfff0f464c6392927044528699aa91e4032088f4627d3c1136649789.
+Use a rolling deployment to preserve active inputs. Record actual provider usage
+and billing separately from rate-based estimates, measure stage throughput and
+canonical commit latency, and preserve the single-run admission/capacity policies.
+The livestnation-only identity authorization and thereality.report session/cookie
+prohibition remain unchanged.
