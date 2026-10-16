@@ -39,7 +39,7 @@ and canonical data. Other platforms and active legacy runs stay on their owner.
 | B | Matched real-engine failure harness; hosting/recovery/version feasibility | DBOS selected for implementation after local comparison, bounded-executor and 50-target partition tests; production topology verification remains a release gate |
 | C | Domain/provider/replay parity and import boundaries | Canonical, listing, comments, media, runtime integration and hosted-result replay extension implemented and reviewed; local checks pass |
 | D | Real persistence crash, ownership, cancellation and recovery tests | Real PostgreSQL and DBOS failure tests pass; connected four-stage lost-acknowledgement/cancel/resume pipeline passes; live recovery remains pending |
-| E | Backend schema/client parity and browser operator flow | API, generated client, UI checks and approved full production build pass; live browser acceptance blocked by shared-router restoration |
+| E | Backend schema/client parity and browser operator flow | API/client checks and seven fixture-backed browser journeys pass; four screenshots inspected; approved production build precedes the narrow guarded local-auth correction, covered by targeted checks. Live hybrid acceptance remains a rollout gate |
 | F | Deployment identity/readiness, bounded canary, 10 runs and 24h observation | Pending |
 
 Engine selection: DBOS 3.3.0 is the implementation candidate. Real local engine
@@ -166,8 +166,7 @@ failure harness and rollout batch before production acceptance.
   and exact target/account/window canary configuration are implemented. Live
   Supabase inspection confirmed the intended project and no ingestion or DBOS
   schema yet. No remote migration, secret change, deployment or canary has run.
-- Next gates: restore the shared router and complete browser acceptance, then
-  apply the additive schema and
+- Next gates: apply the additive schema and
   restricted DBOS bootstrap on the verified target, deploy disabled, verify
   readiness and the affected worker path, then enable only the approved canary.
   Ten successful runs and 24 hours of observation remain unfulfilled.
@@ -192,16 +191,20 @@ sudo launchctl kickstart -k system/local.thomashulihan.projectmanager.portless-r
 
 The non-interactive attempt was blocked by `sudo: a password is required`.
 The user was asked to run this command in their own terminal, without sharing
-credentials. Restoration and trusted HTTPS checks of both THB hosts are pending.
+credentials.
 The user then authorized Computer Use to run the command. That tool explicitly
 blocked Terminal access for safety, so no Terminal command ran. The exact
-terminal command remains pending with the user.
+terminal command was then completed by the user.
 The installed Project Manager's native Router Setup was also inspected. Its
 Start or update router control entered Checking while reporting a listener
 ownership conflict. The original PID and stale ready receipt remained, and the
-proxy markers were still absent; this did not establish recovery.
-No configuration, route or application-server rollback is required. No browser
-acceptance is claimed while the router is unavailable.
+proxy markers were still absent; this did not establish recovery. After the user
+completed the exact restart, the managed-router verifier passed and trusted HTTPS
+returned 200 from `thb.localhost` and 307 from `admin.thb.localhost`. Cancel was
+requested for the unused native update preview; its UI confirmation remains
+pending. Authorize & Apply was never clicked. No configuration,
+route or application-server rollback was needed. TRR browser acceptance remains
+separate from this successful shared-router restoration.
 
 ## Local delivery
 
@@ -210,5 +213,177 @@ acceptance is claimed while the router is unavailable.
   `chore/repo-hygiene-2026-09-25`. The 19 committed paths exclude all preexisting
   dirty app work. Semantic OpenAPI review confirms nine added routes/operations
   and 18 added schemas, with no existing API contract changes.
+- Backend candidate: `ac4f95be` on `chore/repo-hygiene-2026-09-25`.
 - These are local source commits. No push, remote migration, deployment, enabled
   routing, or production canary is implied by them.
+
+## Predeployment browser environment
+
+`make dev-hybrid` with automatic database apply and Modal deploy disabled passed
+live Modal readiness but correctly stopped on source fingerprint drift. The
+candidate has not been deployed. The supported `dev-local` target is selected
+for local-only Gate E browser acceptance before the controlled rollout. Modal
+workers, dispatch, coordinator, schema-ready, routing and replay-apply flags stay
+off. Hybrid and production evidence remain separate later gates.
+
+Startup repairs align the doctor with the current Modal CLI/SDK and stop hybrid
+startup after a failed preflight. Five focused checks passed; commit `8f6b1c9`
+preserves the unrelated Makefile interpreter change. The current policy checker
+also needed its retired MCP-matrix expectation replaced by the current tool
+policy section and inventory reference; six focused checks and the live policy
+check passed. Preflight now records a failed legacy Chrome MCP diagnostic as
+unverified browser attention rather than requiring that specific transport.
+Active tool/profile verification remains mandatory. Native Chrome inspection
+confirmed the friendly TRR profile and its `admin@thereality.report` identity.
+
+All three canonical TRR names resolve to loopback and return trusted HTTPS 404
+through the managed router before services start. Startup uses the existing
+`PORTLESS_SYNC_HOSTS=0` option because hosts resolution is already ready; no
+administrator hosts edit is needed. The separate Project Manager preview still
+shows disabled cancel/close controls; no update was authorized or applied.
+
+## Browser acceptance and rollout preparation
+
+Seven browser journeys passed against the guarded local server, with API calls
+fulfilled by browser-only fixtures. Four saved screenshots were inspected: rollout
+disabled, service absent, balanced incomplete progress, and expired replay evidence.
+The three focused transport checks, incremental TypeScript, and scoped ESLint also
+passed. App follow-up commit: `c10889a`. No production build was repeated after
+the narrow existing-local-auth-helper change; the earlier build remains evidence
+for its original inputs. These checks do not prove live ingestion or production
+authentication.
+
+Native Chrome in the verified TRR profile displayed the real account page with
+the new feature disabled. The 2026 summary read returned 1,994 posts. Separate
+legacy snapshot/catalog-total queries hit statement timeouts; this is a retained
+legacy-read limitation, not successful live ingestion acceptance. Database
+inspection found 13 sessions against a 60-connection maximum, without saturation.
+
+Additional workspace startup commits: `8f6b1c9`, `3623bfc`, and `5db5639`. Existing
+unrelated dirty changes remain outside the task commits.
+
+Read-only predeployment verification confirmed Modal workspace `admin-56995`,
+environment `main`, app `trr-backend-jobs`, app ID `ap-DkLTRoSvqhbkGO7fHyHxrD`,
+and current version `v55` with tag `plan055-20261016-59ccb5f4-rotated`. Supabase
+dry-run listed exactly the four additive ingestion migrations. No remote schema,
+credential, secret, or deployment changes have yet been made by this task.
+
+Before canary enablement, a separately reviewed bounded probe must exercise the
+actual deployed coordinator helper with the restricted DBOS role. The temporary
+probe keeps published routing/coordinator/replay flags off, requires empty new
+business and engine state, checks singleton contention and connection demand,
+and confirms owned-process/session cleanup. It does not establish active-run
+recovery or full-workload resource acceptance. The prospective runtime-role
+connection cap is four, based on the observed three-connection topology plus one
+contender; live measurement is still required.
+
+## Disabled rollout actions, 2026-10-16
+
+The exact target was reverified immediately before mutation: Modal
+`admin-56995/main/trr-backend-jobs` and Supabase `vwxfvzutyufrkhfgoeaa`. All four
+additive ingestion migrations applied successfully and are recorded in migration
+history. All 13 new business tables have RLS enabled; `anon` and `authenticated`
+have no SELECT privilege. No canonical data was changed by these migrations.
+
+The DBOS bootstrap completed at migration version 123 using DBOS 3.3.0. Restricted
+role `trr_ingestion_runtime` passed runtime login and grants checks with connection
+limit four, no schema/database creation privilege, no application-table access,
+and `run_migrations=false`. Its credential is retained in the ignored local
+`.env.ingestion-runtime` file with mode 0600; no secret values are in this ledger.
+
+Modal's supported `Secret.update` API merged 14 ingestion/target keys into
+`trr-backend-runtime`, environment `main`, preserving other keys. Schema readiness
+is enabled; launch, coordinator, and replay apply remain explicitly disabled.
+The canary configuration is restricted to `bravotv`, calendar 2026, maximum ten
+runs, with existing one-at-a-time admission. No canary has been launched.
+
+Disabled deployment started through `scripts/modal/deploy_backend.py --env main`
+with tag `instagram-ingestion-20261016-ac4f95be-disabled`. Backend runtime source
+is commit `ac4f95be`; pending task changes at launch are this ledger and the
+standalone probe/test, plus the previously recorded unrelated dirty files.
+Deployment/readiness subsequently passed as recorded below. The bounded runtime
+probe remains pending. Rollback
+retains additive tables and evidence, keeps new routing disabled, and preserves
+compatible workers. The prior deployment identity is v55.
+
+Disabled backend deployment completed as Modal `v56`, tag
+`instagram-ingestion-20261016-ac4f95be-disabled`. Its guarded deploy procedure
+ran explicit `--env main` readiness successfully and API health returned 200 on
+the first attempt. Live provider metadata confirms the API and coordinator
+maintenance function both use lean image `im-zwO0lXq7zwaQR9ngYZefjQ`. In an
+active container of that image, all 42 recorded runtime-source hashes match the
+accepted local candidate. Installed dependencies include DBOS 3.3.0, psycopg
+3.3.6, SQLAlchemy 2.1.4 and psycopg2-binary 2.9.12. Published gates were observed
+as schema-ready 1 and launch/coordinator/replay-apply 0.
+
+The independent temporary-probe review found four issues: unvalidated database
+fallbacks, a blocking stdout read beyond the watchdog deadline, unbound import
+origins, and weak singleton-holder assertions. The complete batch is being
+repaired and reviewed before any lifecycle probe. This is a probe acceptance
+hold; no production run has started.
+
+The app's production backend setting was classified internally as the exact
+expected TRR Modal target, without recording the value. The canonical Vercel
+alias currently targets `dpl_GTftK96AymQheX2juaiQqXJPZ2ax`, source `d11cd281`.
+The intervening `cdb32011` commit changes only Firebase CI publishing. A clean
+archive of app commit `c10889a` contains the 21 ingestion-owned files over that
+current baseline and excludes unrelated local changes. Its SHA-256 is
+`62c935a038b28fd02fb26a31a65cdfe13f57013fa537dac18cfb0f6c2607cfbc`.
+The guarded Vercel production-environment deployment completed with
+`--skip-domain`: `dpl_EGsPZm4DnjQeFMdXSRDRfsJJreA8`, immutable host
+`trr-c035opoo6-the-reality-reports-projects.vercel.app`, is READY. Remote production
+build passed compilation, TypeScript and generation of 104 static pages. Pinned
+release evidence verified the TRR project/team and source commit. Canonical alias
+promotion remains held for the authenticated disabled-capability smoke.
+
+
+## Bounded deployed-runtime diagnosis
+
+The reviewed temporary probe keeps published gates off. The first attempt stopped
+before coordinator A because the Supabase session pooler did not preserve libpq
+startup options. The observer now explicitly establishes and verifies read-only
+transactions, a five-second statement timeout and row-security fail-closed behavior;
+TLS is checked on the actual client connection. Five affected cases and the narrow
+independent review passed.
+
+The second probe returned `HELPER_NOT_COMPLETED`. Owned-process cleanup and
+temporary-source removal were confirmed. A separate read-only database check
+confirmed zero runtime-role sessions, zero advisory locks, zero ingestion business
+rows and zero DBOS workflows. It is not a successful lifecycle result.
+
+Safe failure diagnostics were added to retain fixed helper status/exit code, bounded
+elapsed time and connection/singleton observations. Eight affected cases, Ruff,
+compilation and independent review passed. The third diagnostic attempt uses this
+reviewed probe; the deployed runtime source is unchanged. The source timer ordering
+may consume the shutdown margin during startup; a runtime fix remains contingent
+on actual diagnostic evidence. No canary has started.
+
+Production Vercel metadata confirms the shared signing secret is present and marked
+sensitive/write-only. An initial smoke-harness inference that it was missing was
+incorrect and has been withdrawn. Authenticated capability smoke is still pending;
+no secret replacement or provider configuration change was made for that inference.
+
+
+The third diagnostic probe recorded helper `bounded_timeout`, exit 124, after
+102.03 seconds including probe/startup overhead. Singleton contention passed and
+peak runtime connections were three; owned-process cleanup and temporary-source
+removal passed. This proves the hard timer fired, without isolating SDK startup,
+control SQL or shutdown duration. Source inspection identified a refreshed loop
+budget after startup. The repair uses one monotonic start for both the hard
+90-second lifetime and the 85-second work cutoff. Three affected cases passed
+(two fake slow-startup regressions and the existing real isolated DBOS/PostgreSQL
+matrix), with Ruff, format, compilation and independent review passing.
+
+The immutable app deployment passed a service-authenticated capability GET:
+HTTP 200 JSON, ingestion disabled, replay apply disabled. The actual Firebase
+admin record, verified email, enabled state, allowlist UID and production-project
+match were checked using the existing local SDK credential. Existing matching
+local signing credentials and the existing Vercel bypass token were used only in
+memory. This does not prove a human browser login or Vercel Firebase ADC readiness.
+
+The guarded alias promotion succeeded. Read-only provider verification confirms
+`trr-app.vercel.app` targets `dpl_EGsPZm4DnjQeFMdXSRDRfsJJreA8`, source `c10889a`,
+in the intended TRR project/team. A fresh canonical-host-bound capability GET
+also passed HTTP 200 with both flags disabled. The prior deployment is retained
+for rollback. The nonsecret receipt is at workspace
+`output/releases/instagram-ingestion-app-c10889a/authenticated-smoke.json`.

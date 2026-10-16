@@ -683,3 +683,121 @@ DBOSAdapter(scheduler,config).run_bounded(lambda:psycopg2.connect(sys.argv[2]))
         "select attempts,outcome from social.instagram_ingestion_targets where run_id=%s",
         (failed_run["run_id"],),
     ) == [(1, "committed")]
+
+
+@pytest.mark.parametrize("startup_seconds,expect_work", [(7.0, True), (86.0, False)])
+def test_runtime_startup_consumes_shared_deadline_and_retains_lease_until_exit(
+    monkeypatch, startup_seconds, expect_work
+):
+    """Slow SDK startup must not refresh the work budget or force normal exit124."""
+    from types import SimpleNamespace
+
+    from trr_backend.ingestion import workflows
+
+    class ProcessExit(BaseException):
+        def __init__(self, code):
+            self.code = code
+
+    events, timers, exits = [], [], []
+    clock = SimpleNamespace(now=100.0)
+
+    def advance(seconds):
+        target = clock.now + seconds
+        for timer in timers:
+            if timer.armed and timer.when <= target:
+                timer.armed = False
+                clock.now = timer.when
+                timer.callback()
+        clock.now = target
+
+    class Event:
+        def wait(self, seconds):
+            advance(seconds)
+            return False
+
+        def set(self):
+            events.append("stop")
+
+    class Thread:
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            events.append("monitor_started")
+
+        def join(self, **kwargs):
+            pass
+
+    class Timer:
+        def __init__(self, seconds, callback):
+            self.when, self.callback, self.armed = clock.now + seconds, callback, False
+            timers.append(self)
+
+        def start(self):
+            self.armed = True
+
+        def cancel(self):
+            self.armed = False
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def execute(self, query, args=None):
+            self.query = query
+
+        def fetchone(self):
+            return (True,) if "pg_try_advisory_lock" in self.query else ("test_runtime", False, True, False, False)
+
+    lease = SimpleNamespace(cursor=Cursor, closed=False)
+    lease.close = lambda: setattr(lease, "closed", True)
+
+    def fatal_exit(code):
+        exits.append((code, clock.now, lease.closed))
+        raise ProcessExit(code)
+
+    class DBOS:
+        def __call__(self, **kwargs):
+            assert timers[0].armed
+            events.append("sdk_constructed")
+
+        def launch(self):
+            advance(startup_seconds)
+            events.append("sdk_launched")
+
+        def destroy(self, **kwargs):
+            assert kwargs == {"workflow_completion_timeout_sec": 2}
+            events.append("destroy")
+            advance(2)
+
+    def work(name):
+        # Every control-plane operation in this fixture must start before the
+        # original deadline minus shutdown allowance, independent of launch time.
+        assert clock.now < 185.000001
+        events.append(name)
+
+    adapter = DBOSAdapter.__new__(DBOSAdapter)
+    adapter.config = RuntimeConfig("postgresql://synthetic", "test-v1", runtime_role="test_runtime")
+    adapter.dbos = DBOS()
+    adapter.scheduler = SimpleNamespace(
+        store=SimpleNamespace(
+            dispatch_pending=lambda *a, **kw: work("pending"),
+            dispatch_partitions=lambda *a, **kw: work("partitions"),
+        )
+    )
+    adapter.reconcile_engine_failures = lambda: work("reconcile")
+    monkeypatch.setattr(workflows.time, "monotonic", lambda: clock.now)
+    monkeypatch.setattr(workflows.threading, "Event", Event)
+    monkeypatch.setattr(workflows.threading, "Thread", Thread)
+    monkeypatch.setattr(workflows.threading, "Timer", Timer)
+    with pytest.raises(ProcessExit) as stopped:
+        adapter.run_bounded(lambda: lease, fatal_exit=fatal_exit)
+    assert stopped.value.code == 0 and exits == [(0, clock.now, False)]
+    assert timers[0].when == 190.0 and clock.now < 190.0
+    assert ("pending" in events) == expect_work and ("partitions" in events) == expect_work
+    assert ("reconcile" in events) == expect_work
+    assert events[-1] == "destroy" and "stop" not in events
+    assert not lease.closed  # OS process exit, rather than early close, releases the lease.

@@ -265,13 +265,17 @@ class DBOSAdapter:
 
             monitor = threading.Thread(target=lease_monitor, daemon=True, name="instagram-coordinator-lease")
             monitor.start()
-            deadline = threading.Timer(self.config.lifetime_seconds, lambda: fatal_exit(124))
+            # SDK initialization and launch consume the same finite lifetime
+            # as scheduling. Retain the existing five-second shutdown allowance.
+            started = time.monotonic()
+            hard_deadline = started + self.config.lifetime_seconds
+            end = started + max(0.0, self.config.lifetime_seconds - 5)
+            deadline = threading.Timer(max(0.0, hard_deadline - time.monotonic()), lambda: fatal_exit(124))
             deadline.daemon = True
             deadline.start()
             initialized = True
             self.dbos(config=self.config.dbos_config())
             self.dbos.launch()
-            end = time.monotonic() + max(0.01, self.config.lifetime_seconds - 5)
             next_error_scan = 0.0
             while time.monotonic() < end:
                 if time.monotonic() >= next_error_scan:
