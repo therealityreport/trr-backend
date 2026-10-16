@@ -9117,6 +9117,7 @@ def test_instagram_account_match_sql_matches_owner_and_collaborator_fields() -> 
     assert "collaborators" in sql
     assert "collaborators_detail" in sql
     assert "profile_tags" not in sql
+    assert "to_jsonb(p)" in sql
 
 
 def test_instagram_comment_target_preview_uses_collab_account_match_for_canaries(
@@ -17826,6 +17827,11 @@ def test_instagram_social_account_lite_header_stats_uses_comment_rollups(
     payload = social_repo._instagram_social_account_lite_header_stats("BravoTV")
 
     assert captured["params"] == ["bravotv"]
+    assert "to_jsonb(p)" not in captured["sql"]
+    for column in ("source_account", "owner_username", "username", "collaborators", "collaborators_detail"):
+        assert f"p.{column}" in captured["sql"]
+    assert "p.raw_data ->> 'owner_username'" in captured["sql"]
+    assert "p.raw_data -> 'collaborators_detail'" in captured["sql"]
     assert "from social.instagram_post_comment_rollups r" in captured["sql"]
     assert "join filtered_posts fp on fp.id = r.post_id" in captured["sql"]
     assert "from social.instagram_comments c" not in captured["sql"]
@@ -18942,6 +18948,29 @@ def test_shared_catalog_summary_totals_aliases_catalog_table(monkeypatch: pytest
     assert "owner_username" in captured["sql"]
     assert "collaborators" in captured["sql"]
     assert "profile_tags" not in captured["sql"]
+    assert "to_jsonb(p)" not in captured["sql"]
+    assert "p.username" not in captured["sql"]
+    assert "p.collaborators_detail" not in captured["sql"]
+    assert "null::text" in captured["sql"]
+    assert "null::jsonb" in captured["sql"]
+    assert "p.raw_data ->> 'username'" in captured["sql"]
+    assert "p.raw_data -> 'collaborators_detail'" in captured["sql"]
+
+
+def test_shared_catalog_summary_totals_preserves_non_instagram_predicate(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_fetch_one(sql: str, params: list[Any]) -> dict[str, Any]:
+        captured.update(sql=" ".join(sql.split()).lower(), params=params)
+        return {"catalog_total_posts": 4}
+
+    monkeypatch.setattr(social_repo.pg, "fetch_one", fake_fetch_one)
+
+    assert social_repo._shared_catalog_summary_totals("tiktok", "BravoTV")["catalog_total_posts"] == 4
+    assert captured["params"] == ["bravotv"]
+    assert "from social.tiktok_account_catalog_posts p" in captured["sql"]
+    assert "where lower(p.source_account) = %s" in captured["sql"]
+    assert "_ig_account_match" not in captured["sql"]
 
 
 def test_shared_catalog_total_posts_uses_instagram_collab_account_match(

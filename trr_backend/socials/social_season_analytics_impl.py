@@ -15751,31 +15751,40 @@ def _instagram_account_jsonb_array_match_sql(*, alias: str, path_sql: str, accou
         """
 
 
-def _instagram_account_match_sql(*, alias: str = "p") -> str:
+def _instagram_account_match_sql(*, alias: str = "p", native_columns: frozenset[str] | None = None) -> str:
     """Match an Instagram row to an account through ownership or coauthor data.
 
     This intentionally ignores profile_tags. Tagged-post ownership is a separate
     mode, while profile/comment targeting needs owner and collaborator identity.
     """
 
-    row_json = f"to_jsonb({alias})"
+    def field_sql(name: str, *, text: bool = False) -> str:
+        if native_columns is None:
+            return f"to_jsonb({alias}) {'->>' if text else '->'} '{name}'"
+        if name not in native_columns:
+            return "null::text" if text else "null::jsonb"
+        return f"{alias}.{name}"
+
+    # Known summary table shapes can avoid serializing large unrelated row fields.
+    # Other callers retain the schema-tolerant whole-row JSON lookup.
+    raw_data = field_sql("raw_data")
     account_ref = "_ig_account_match.account_handle"
     direct_candidates = [
-        f"{row_json} ->> 'source_account'",
-        f"{row_json} ->> 'owner_username'",
-        f"{row_json} ->> 'username'",
-        f"{row_json} -> 'raw_data' ->> 'source_account'",
-        f"{row_json} -> 'raw_data' ->> 'owner_username'",
-        f"{row_json} -> 'raw_data' ->> 'username'",
+        field_sql("source_account", text=True),
+        field_sql("owner_username", text=True),
+        field_sql("username", text=True),
+        f"{raw_data} ->> 'source_account'",
+        f"{raw_data} ->> 'owner_username'",
+        f"{raw_data} ->> 'username'",
     ]
     direct_array = ",\n                ".join(
         "nullif(ltrim(lower(trim(coalesce(" + expr + ", ''))), '@'), '')" for expr in direct_candidates
     )
     collaborator_paths = [
-        f"{row_json} -> 'collaborators'",
-        f"{row_json} -> 'collaborators_detail'",
-        f"{row_json} -> 'raw_data' -> 'collaborators'",
-        f"{row_json} -> 'raw_data' -> 'collaborators_detail'",
+        field_sql("collaborators"),
+        field_sql("collaborators_detail"),
+        f"{raw_data} -> 'collaborators'",
+        f"{raw_data} -> 'collaborators_detail'",
     ]
     collaborator_match_sql = "\n              or ".join(
         _instagram_account_jsonb_array_match_sql(
@@ -34667,7 +34676,14 @@ def _shared_catalog_summary_totals(
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     engagement_expr = _social_account_profile_engagement_sql(platform)
     views_expr = _social_account_profile_views_sql(platform)
-    account_match_clause = _shared_catalog_account_match_sql(platform, alias="p")
+    account_match_clause = (
+        _instagram_account_match_sql(
+            alias="p",
+            native_columns=frozenset({"source_account", "owner_username", "raw_data", "collaborators"}),
+        )
+        if table == "instagram_account_catalog_posts"
+        else _shared_catalog_account_match_sql(platform, alias="p")
+    )
     sql = f"""
             select
               count(*)::int as catalog_total_posts,
@@ -63209,7 +63225,12 @@ def _instagram_social_account_lite_header_stats(
     conn: Any | None = None,
 ) -> dict[str, Any]:
     normalized_account = _normalize_social_account_profile_handle(account_handle)
-    owner_match_clause = _social_account_profile_owner_match_sql("instagram", alias="p")
+    owner_match_clause = _instagram_account_match_sql(
+        alias="p",
+        native_columns=frozenset(
+            {"source_account", "owner_username", "username", "raw_data", "collaborators", "collaborators_detail"}
+        ),
+    )
     reported_comments_expr = _instagram_reported_comments_sql("p")
     external_facebook_comments_expr = _instagram_external_facebook_comments_sql("p")
     sql = f"""
