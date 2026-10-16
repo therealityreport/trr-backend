@@ -617,3 +617,74 @@ operations, observer-failure propagation, and frozen-source enforcement. They ar
 being implemented as one batch before one reviewed representative pair. Resolved
 production pool facts remain default min/max 1/2 and control 1/1: local-development
 mode bypasses the Modal session-pooler ceiling. No pool setting was changed.
+
+
+Backend `6f38e07d` deployed to the verified `admin-56995` / `trr-backend-jobs`
+`main` target with new launches disabled, coordinator enabled and replay apply
+disabled. HTTP health and target readiness passed. Four inspected fresh API
+containers matched all 44 source hashes; one short-lived container was unavailable
+for inspection and is not counted as verified. The guarded social-worker bootstrap
+rejected an incomplete reservation before database or source activity. Its actual
+worker container `ta-01M529Y27R99FEZNXDNHHR1G3R` matched all 44 hashes and included
+Patchright. Offline deployed-worker checks passed guarded decoding, explicit auth
+classification, malformed-connection rejection and valid empty-terminal handling.
+They made zero database or source calls.
+
+Local token-context diagnostics stopped before GraphQL when the context was
+ambiguous or unavailable. The one-warmup structural audit at
+2026-10-16T12:11:09Z returned HTTP 200 at the profile route and found two named DTSG
+definitions in separate script scopes. Main-world `require` was absent while
+`requireLazy` and `__d` existed. Both CurrentUser definitions used zero; this alone
+is not evidence of an invalid Instagram identity. No token was selected by position,
+no secret was updated, and no identity/target block was changed. The audit retained
+only bounded structural metadata, not HTML, tokens or account identifiers.
+
+The seven resource-harness corrections passed independent fixes-only review with
+no findings. The parent accepted one representative pair using the frozen corrected
+harness and existing legacy/candidate exports. Full output parity and resource
+acceptance remain pending that pair and attribution. Later guarded-error changes
+are outside its valid-fixture/SQL inputs and do not invalidate their frozen lineage.
+
+
+A fresh native TRR document/request comparison identified two distinct DTSG
+candidates. The successful same-document initial timeline request used the first
+candidate only. Its public operation was `PolarisProfilePostsQuery`, document ID
+`28834890909485062`; the earlier pagination request used a different operation.
+All private values stayed in memory and were cleared; no native token was copied
+into another transport. This narrows document-context selection, but does not prove
+that the copied-cookie browser context is equivalent or that context explains the
+remaining source rejection.
+
+The corrected representative resource pair passed common data and asset assertions:
+12 posts, 24 comments/replies, three avatars, and 147 physical media objects per arm.
+Both arms had zero SQL errors, no final workload sessions, and stopped their private
+Postgres instances. Adjusted statements through business completion were 6,089
+legacy versus 15,872 candidate; full lifecycle counts were 6,102 versus 18,222.
+Peak sessions were two versus five. Single-trial completion times were 69.644 and
+57.775 seconds; full lifecycles were 70.043 and 86.804 seconds. These are descriptive
+measurements, not accepted performance claims. Attribution of SQL, session and
+lifecycle increases remains required; no additional pair was launched.
+
+
+Parent local resource decision: accept the completed matched comparison for the
+bounded canary under the plan's rule against *unexplained* regressions above 10%.
+Independent evidence review found no findings. The additional calls are assigned
+to auditable ownership/request accounting, transaction setup, journal/evidence,
+SDK, storage and global coordinator availability mechanisms; their equations
+reconcile. This is explicit acceptance of measured overhead, not proof that every
+call is necessary or efficient. Repeated avatar downloads and conditional-storage
+HEADs are known implementation costs. No pool cap was raised. Do not claim resource
+improvement or production-wide capacity from this one local pair. Live session
+capacity, active-run behavior and the ten-run/24-hour observation remain required
+before expansion. The reviewed report retains all numeric increases and limits.
+
+At 2026-10-16T12:25:19Z, a bounded local request using its own uniquely selected
+direct document context returned a timeline connection with ten edges. The probe
+used the maintained first document/query/variables, `__user=0`, its own DTSG,
+DTSG-derived jazoest and same-warmup runtime fields. Two operations occurred: one
+warmup and one GraphQL request. Normal pacing remained enabled; zero configured
+session database candidates and no cached session pool meant the maintained file
+fallback applied. No database or credential writes occurred. Its envelope check
+recorded error-key presence, not nonempty errors, so normal parser acceptance is
+still pending. The accepted production-fix design preserves optional-context
+behavior, existing request/retry/auth policy, query IDs, and fresh-token handoffs.
