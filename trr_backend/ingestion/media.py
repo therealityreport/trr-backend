@@ -55,6 +55,10 @@ from trr_backend.socials.media_url_safety import (
 MEDIA_VERSION = "instagram-media-v1"
 _POLICY = MediaUrlSafetyPolicy(allowed_hosts_for_platform("instagram"), allow_test_hosts=False, resolve_dns=False)
 _EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".mov", ".m4v", ".webm"}
+# Instagram's static xg_5YoVlvjp.gif renders "Content unavailable". A valid
+# image response is not proof that the requested attachment was delivered.
+# Match observed bytes, never size/dimensions (which legitimate GIFs can share).
+_SOURCE_PLACEHOLDER_SHA256 = {"05e81bfed1fda5743fea1da04586e635c4f82cd2258c2716265b538508efd5a9"}
 
 
 class MediaIncomplete(ValueError):  # noqa: N818 - completion domain vocabulary
@@ -352,6 +356,8 @@ class MediaStorage:
                                 raise MediaIncomplete("asset_too_large")
                             chunks.append(chunk)
                         data = b"".join(chunks)
+                        if hashlib.sha256(data).hexdigest() in _SOURCE_PLACEHOLDER_SHA256:
+                            raise MediaIncomplete("media_source_placeholder")
                         content_type = str(response.headers.get("Content-Type") or "").split(";", 1)[0].lower()
                         error = _media_payload_error(source_url=current, content_type=content_type, data=data)
                         if not data or error:

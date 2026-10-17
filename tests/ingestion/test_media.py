@@ -391,6 +391,17 @@ def test_cdn_failures_never_mean_source_unavailable(response, code):
         storage(opener=lambda *a, **k: response)._download(SOURCE, check=noop, request=noop)
 
 
+def test_native_unavailable_gif_cannot_be_hosted_as_comment_media():
+    # Public Instagram static asset xg_5YoVlvjp.gif, observed 2026-10-17.
+    # It is a valid GIF whose rendered content says "Content unavailable".
+    data = (Path(__file__).parents[1] / "fixtures/ingestion/instagram-content-unavailable.gif").read_bytes()
+    client = Storage()
+    service = storage(client, opener=lambda *a, **k: Response(data=data, headers={"Content-Type": "image/gif"}))
+    with pytest.raises(MediaIncomplete, match="media_source_placeholder"):
+        service.host(SOURCE, root="comments", name="media-01", check=noop, request=noop)
+    assert client.writes == []
+
+
 def test_private_or_cross_platform_redirect_is_rejected_before_next_request():
     calls = []
 
