@@ -1951,3 +1951,154 @@ runs, 24-hour observation, and matched full-pipeline cost/speed comparison remai
 open. The paused follow-up automation remains paused. Further rollout requires
 new source evidence or a separately authorized change to the public-only access
 constraint; no login, proxy, or paid-provider fallback was used.
+
+
+### Public-only follow-up: verified placeholder and comment UI fixes — 2026-10-17
+
+The cancelled local v2 canary `bcc7411d-085d-4efc-be77-7d8e87303eb6`
+remains at generation 6. The 00:29 UTC readback confirms 99 unresolved targets
+in each downstream stage, three listing receipts, four evidence records, no
+active owners, and unchanged run state. Diagnostic samples are not canonical
+completion receipts. No broad backfill or observation automation was resumed.
+
+The current Instaloader PR 2722 candidate (head
+`83ddd40d40925b98571e18dbd2c582ff0b905e1e`) uses the anonymous feed-by-username
+endpoint. One admitted request for a commenter whose native ID is present in
+retained comment evidence returned HTTP 401 (119 bytes). The shared public gate
+recorded `public_access_backoff`, failure generation 11, with cooldown through
+2026-10-17 00:35:01 UTC. No credentials, proxies, redirects, retries, raw profile
+payload retention, or business writes were used. The candidate was not integrated.
+Safe evidence: `.artifacts/ingestion-rollout/public-feed-profile-20261017T002002Z.json`.
+
+The retained GIF-only comment has a `giphy_media_info` attachment referencing
+Instagram's static `xg_5YoVlvjp.gif`. A real CDN download returned a valid image/gif,
+444 bytes, 160 by 101 pixels, one frame, SHA256
+`05e81bfed1fda5743fea1da04586e635c4f82cd2258c2716265b538508efd5a9`.
+Visual inspection shows **Content unavailable**, not the requested comment media.
+The previous downloader would have hosted this placeholder and reported success.
+Backend commit `7f35ce5b` rejects these exact observed bytes with
+`media_source_placeholder`; the target stays unresolved and no success receipt
+is issued. It does not classify arbitrary small images or assume native deletion.
+The real-byte regression failed before the fix and passed after it; eight affected
+media cases pass, and Ruff check/format pass. Independent read-only review found
+no blockers. Other placeholder variants are not claimed to be recognized.
+
+App commit `7ca68c3e` displays all selected comment attachments, adds HD-avatar
+fallbacks, and shows verification only when explicitly true. The existing modal
+runtime regression now verifies both attachments, HD-only avatar, badge, and hover
+preview. That regression, ESLint, generated checks, and all 80 quick-validation
+cases pass. No production build was needed or run. Full profile biography/counts
+remain stored separately in `social.instagram_profiles`; the comment read model
+currently does not project that enrichment. It must not be described as visible
+in the comment UI. No new API/schema contract was introduced by this fix.
+
+Deployment verified `admin-56995 / main / trr-backend-jobs`
+(`ap-DkLTRoSvqhbkGO7fHyHxrD`). Tagged deployment v76 used
+`ig-placeholder-20261017-7f35ce5b`; the default hybrid-startup reconciler then
+redeployed the same revision as v77. v77 is the latest observed deployment.
+Readiness and health passed (HTTP 200). A live v77 container matched all 59 checked
+ingestion source hashes. A targeted in-container smoke imported the deployed
+media module and rejected the real placeholder fixture without source requests,
+storage writes, or database writes. v75 and its source archive remain available
+for rollback; no rollback was performed. Dirty unrelated checkout files remain
+preserved. The local canary still points at its prior frozen recovery archive;
+no source adoption or canary resume is claimed.
+
+`make dev-hybrid` started successfully with `PORTLESS_SYNC_HOSTS=0` after all three
+canonical TRR hosts were verified to resolve to loopback. The initial attempt
+waited for privileged hosts sync and was stopped; the retry used the supported
+skip because no host change was needed. The retry also set
+`WORKSPACE_RUNTIME_MODAL_AUTO_DEPLOY=0` to avoid another redundant deployment.
+The app and backend health checks pass and canonical Portless routes are ready.
+The browser tool inventory exposes no connected Chrome profile. The Chrome
+DevTools doctor supports an isolated browser but has no verified same-instance
+TRR profile receipt. Browser acceptance remains pending the required TRR profile
+connection; an isolated browser is not evidence of that account context.
+
+The bounded real reply + genuine attachment + full commenter profile sample,
+canonical-to-hosted-to-API-to-browser verification, ten representative runs and
+24-hour observation remain open. These fixes improve correctness but do not
+establish successful anonymous end-to-end ingestion.
+
+### Verified anonymous profile source; public replies still blocked — 2026-10-17 00:58 UTC
+
+Backend commit `690e08c1` adds a separate, finite public GraphQL profile source.
+Current publicly delivered `PolarisProfilePageContentQuery` definition
+`28649589871350527` was observed in static interface code. The adapter makes one
+ordinary profile-page GET and one native-ID-bound GraphQL POST, with no document
+fallback, login, proxy, ambient credentials, redirects, or hidden retries. All six
+Relay provider flags come from the same GET's public bootstrap. Response bytes
+and request time are bounded. Bootstrap tokens stay transient.
+
+The source-only live check passed through the maintained adapter and existing
+public admission gate at 00:47 UTC: two admitted requests, matching native ID and
+handle, and a validated metadata projection. Name, biography, follower/following
+counts, verification, privacy and avatar were observed; post count and HD avatar
+were absent and remain unknown. No commenter posts were retained or paginated.
+Safe evidence: `.artifacts/ingestion-rollout/public-maintained-profile-query-20261017T004750Z.json`.
+
+The separate parser `instagram-public-commenter-profile-graphql-v1` accepts an
+error-free native GraphQL user root without inventing REST's `status: ok`.
+Projection version 2 carries the exact query and six boolean provider flags.
+Old REST evidence retains its original parser/version. Cache settlement compares
+canonical proof with retained evidence under that evidence's parser. Native ID
+matching, per-user targets, field validation, ownership fencing, partial metadata
+persistence and exact avatar reuse remain enforced. Missing fields do not inherit
+stale canonical values. There is no schema or app/API contract change.
+
+Focused validation passed: ten GraphQL source/parser cases, nineteen profile
+cases including real disposable PostgreSQL persistence/cache/cooldown, the
+composed public-v2 pipeline fixture, and fifteen public composition cases. Source
+and storage in the composed fixture are controlled fakes; this is not a live
+full-pipeline result. The existing database-backed profile modules now carry the
+required `live` marker so the shared offline test guard does not block their
+owned local database. Ruff and diff checks pass. Independent review found one
+HTTP-200 native-error Retry-After gap; the fix and focused regression preserve a
+7200-second server delay in the shared lane with two requests and zero canonical
+profile/receipt rows. Repair review found no remaining blockers.
+
+A bounded current-page inspection retained static Bootloader structure and the
+same-page resource map. It linked the comment-input component to a 30-resource
+deferred group. The 30 saved JS bundles total 1,897,603 bytes and contain no
+current child GraphQL query definition. They do contain `PolarisAPIGetChildComments`,
+whose native path is `/api/v1/media/{media_id}/comments/{parent_comment_id}/child_comments/`.
+No module/resource positional pairing or query ID was guessed. The second static
+batch saved its files but hit a diagnostic-only signal-handler variable collision
+while finalizing its status output. The finalizer was repaired; the saved inventory
+was reconstructed offline without repeating source requests. Evidence:
+`.artifacts/ingestion-rollout/public-lazy-inventory-recovered.json`.
+
+One admitted request using that current native child definition and a retained
+parent ID returned HTTP 302 to login at 00:54 UTC. The gate recorded
+`public_access_backoff` / `redirect_login`, failure generation 12, with cooldown
+through `2026-10-17T01:09:40.673662+00:00`. No redirect was followed and no next
+endpoint was tried. Evidence: the timestamped `public-native-child-*.json` artifact.
+This does not prove every possible anonymous approach impossible; it establishes
+that no tested, supported anonymous reply path is available for the required
+sample. Authenticated access requires the separate user decision in the approved
+plan.
+
+Deployment v78 is `admin-56995 / main / trr-backend-jobs`, app
+`ap-DkLTRoSvqhbkGO7fHyHxrD`, tag `ig-public-profile-20261017-690e08c1`, at
+00:53:20 UTC. Provider history records `690e08c*`: unrelated dirty checkout files
+were preserved. Explicit-main readiness and health pass. Five new deployment
+containers matched all 60 checked source files and passed the GraphQL identity,
+projection and unknown-field smoke without source/database IO. One older container
+still had the v77 profile files; it was not treated as new-revision proof or stopped.
+The deployed media worker also rejected an intentionally incomplete reservation
+before source/database IO (call `fc-01M53NSRA4NXHMXHPMYEP03DE5`). Its new media
+worker container matched all 60 source hashes and passed the same GraphQL smoke.
+The initial local
+smoke helper imported the SDK before pinning its profile and failed lookup without
+dispatch; pinning the process environment before import corrected that helper.
+Previous v77/v76 and source commit `7f35ce5b` remain rollback references.
+
+The 00:56 UTC readback confirms the original canary remains cancelled, local v2,
+generation 6: 99 unresolved identities in each downstream stage, three listing
+receipts, four evidence records, unsealed manifests, no active target owners, and
+no held public probe. No broad resume, source adoption or observation automation
+occurred. Anonymous profile source success is not a canonical live profile receipt.
+The real reply + genuine attachment + profile sample, hosted/API/browser acceptance,
+ten representative runs and 24-hour observation remain open. The required TRR
+browser-profile connection is still pending. The earlier app quick checks and
+`make dev-hybrid` result stand; this backend profile change needs no app build.
