@@ -457,6 +457,11 @@ def _profile_provider(context, owned):
         check_cancelled_in_transaction=lambda conn: store.check_owner(**owned, connection=conn),
         deadline=deadline,
     )
+    user_id = context["target"]["checkpoint"].get("user_id")
+    if user_id:
+        from trr_backend.ingestion.profile_transport import PublicGraphQLProfileSource
+
+        return PublicGraphQLProfileSource(user_id=user_id, deadline=deadline), gate
     return AvatarProfileSource(cookies={}, deadline=deadline, public_only=True), gate
 
 

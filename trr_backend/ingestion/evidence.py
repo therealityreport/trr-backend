@@ -194,6 +194,9 @@ hosted_author_profile_pic_url
 CONTENT_KEYS |= frozenset(
     """
 biography followers_count follows_count posts_count profile_projection_version profile_invalid_fields
+profile_source_provenance profile_query_id profile_query_name profile_provider_flags
+PolarisCASB976ProfileEnabled PolarisCannesGuardianExperienceEnabled PolarisShortDramaEnabled
+PolarisProfileRingsGradientEnabled PolarisRepostsConsumptionEnabled PolarisWebSchoolsEnabled
 """.split()
 )
 

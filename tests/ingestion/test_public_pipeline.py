@@ -112,12 +112,30 @@ def test_public_composed_pipeline_commits_native_parent_reply_post_and_avatar_me
             response.status_code, response.request = 200, request
             if request.method == "GET" and path == f"/{ACCOUNT}/":
                 value, content_type = "<html>anonymous bootstrap</html>", "text/html"
-            elif request.method == "POST" and path == "/graphql/query":
+            elif profile_mode and request.method == "GET" and path in {"/reader/", "/replier/"}:
+                from tests.ingestion.test_profile_graphql import bootstrap as profile_bootstrap
+
+                value, content_type = profile_bootstrap(), "text/html"
+            elif (
+                request.method == "POST"
+                and path == "/graphql/query"
+                and "PolarisProfilePageContentQuery" not in str(request.body)
+            ):
                 value, content_type = json.dumps(listing), "application/json"
             elif request.method == "GET" and path == f"/p/{CODE}/":
                 value, content_type = html(detail), "text/html"
-            elif request.method == "GET" and path == "/api/v1/users/web_profile_info/":
-                username = request.url.rsplit("?username=", 1)[-1]
+            elif (request.method == "GET" and path == "/api/v1/users/web_profile_info/") or (
+                profile_mode and request.method == "POST" and path == "/graphql/query"
+            ):
+                if request.method == "POST":
+                    from urllib.parse import parse_qs
+
+                    form = parse_qs(request.body)
+                    variables = json.loads(form["variables"][0])
+                    assert form["doc_id"] == ["28649589871350527"]
+                    username = {"101": "reader", "102": "replier"}[variables["id"]]
+                else:
+                    username = request.url.rsplit("?username=", 1)[-1]
                 assert username in ({"reader", "replier"} if profile_mode else {"replier"})
                 value, content_type = (
                     json.dumps(
@@ -144,7 +162,12 @@ def test_public_composed_pipeline_commits_native_parent_reply_post_and_avatar_me
                 )
             else:
                 pytest.fail("unexpected mocked source route: " + path)
+            if profile_mode and request.method == "POST" and "PolarisProfilePageContentQuery" in str(request.body):
+                native_profile = json.loads(value)
+                native_profile.pop("status")
+                value = json.dumps(native_profile)
             response._content = value.encode()
+            response._content_consumed = True
             response.headers["content-type"] = content_type
             return response
 
@@ -313,10 +336,10 @@ def test_public_composed_pipeline_commits_native_parent_reply_post_and_avatar_me
         "comments": 3,
     }
     assert len(source_calls) == (
-        9 if profile_mode else 7
+        11 if profile_mode else 7
     )  # Two listing, one detail, three Relay and one missing-avatar lookup.
     assert next(stage.requests for stage in progress.stages if stage.stage == "media") == (
-        (3 if profile_mode else 1) + len(downloads) + sum(client.calls.values())
+        (5 if profile_mode else 1) + len(downloads) + sum(client.calls.values())
     )
     assert len(downloads) == 4 and len(client.objects) == 14 and client.closes == 1
     assert all(session.closed for session in sessions if session.sent)

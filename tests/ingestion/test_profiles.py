@@ -432,3 +432,63 @@ def test_source_without_counted_boundary_is_unresolved_without_identity_failure(
     assert source.closed
     assert rows(profiles_db, "select requests from social.instagram_ingestion_targets") == [{"requests": 0}]
     assert rows(profiles_db, "select count(*) as n from social.instagram_ingestion_receipts") == [{"n": 0}]
+
+
+# These tests own a disposable local PostgreSQL database; source/storage stay fake.
+pytestmark = pytest.mark.live
+
+
+def test_graphql_profile_cache_keeps_query_provenance_and_two_request_accounting(profiles_db):
+    from tests.ingestion.test_profile_graphql import Session
+    from trr_backend.ingestion.profile_transport import PROFILE_GRAPHQL_PARSER, PublicGraphQLProfileSource
+
+    owned = owned_target(profiles_db)
+    source = PublicGraphQLProfileSource(user_id="101", deadline=time.monotonic() + 60, session=Session())
+    first = ProfileActivity(profiles_db[0], clock=lambda: NOW).execute(
+        **owned, provider=provider(profiles_db, owned, source), storage=lambda: pytest.fail("unexpected storage")
+    )
+    assert first["outcome"] == Outcome.COMMITTED
+    assert rows(profiles_db, "select requests from social.instagram_ingestion_targets") == [{"requests": 2}]
+    proof = rows(profiles_db, "select raw_data from social.instagram_profiles")[0]["raw_data"][
+        "ingestion_public_profile"
+    ]
+    assert proof["parser_version"] == PROFILE_GRAPHQL_PARSER
+    assert proof["profile_source_provenance"] == source.provenance
+    second = owned_target(profiles_db)
+    cached = ProfileActivity(profiles_db[0], clock=lambda: NOW + timedelta(hours=1)).execute(
+        **second, provider=lambda: pytest.fail("unexpected source"), storage=lambda: pytest.fail("unexpected storage")
+    )
+    assert cached["outcome"] == Outcome.CACHED
+
+
+def test_graphql_native_rate_failure_keeps_shared_gate_code(profiles_db):
+    from tests.ingestion.test_profile_graphql import Session
+    from trr_backend.ingestion.post_transport import SourceFailure
+    from trr_backend.ingestion.profile_transport import PublicGraphQLProfileSource
+
+    owned = owned_target(profiles_db)
+
+    class RateSession(Session):
+        def request(self, *args, **kwargs):
+            response = super().request(*args, **kwargs)
+            response.headers["retry-after"] = "7200"
+            return response
+
+    source = PublicGraphQLProfileSource(
+        user_id="101", deadline=time.monotonic() + 60, session=RateSession({"rate_limited": True})
+    )
+    with pytest.raises(SourceFailure) as caught:
+        ProfileActivity(profiles_db[0], clock=lambda: NOW).execute(
+            **owned, provider=provider(profiles_db, owned, source), storage=lambda: pytest.fail("unexpected storage")
+        )
+    assert caught.value.failure.code == "rate_limited"
+    assert caught.value.failure.retry_at > datetime.now(UTC) + timedelta(seconds=7100)
+    assert rows(profiles_db, "select count(*) as n from social.instagram_profiles") == [{"n": 0}]
+    lane = rows(
+        profiles_db,
+        "select last_error_code,cooldown_until,clock_timestamp() as now from social.instagram_detail_request_lanes",
+    )[0]
+    assert lane["last_error_code"] == "rate_limited"
+    assert 7100 < (lane["cooldown_until"] - lane["now"]).total_seconds() <= 7200
+    assert rows(profiles_db, "select requests from social.instagram_ingestion_targets") == [{"requests": 2}]
+    assert rows(profiles_db, "select count(*) as n from social.instagram_ingestion_receipts") == [{"n": 0}]

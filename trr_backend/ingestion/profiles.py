@@ -84,8 +84,44 @@ def requested(intent: RunIntent, workflow_version: str) -> bool:
     )
 
 
-def project_profile_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+def project_profile_payload(
+    payload: Mapping[str, Any], *, parser_version=PROFILE_PARSER, provenance=None
+) -> dict[str, Any]:
     """Preserve reviewed scalar metadata and count presence, never posts/edges."""
+    graphql = parser_version == "instagram-public-commenter-profile-graphql-v1"
+    if graphql:
+        from trr_backend.ingestion.profile_transport import PROFILE_DOC_ID, PROFILE_QUERY, PROVIDERS
+        from trr_backend.socials.instagram.graphql_response import _error_failure, _top_failure
+
+        if not isinstance(payload, Mapping):
+            raise ProfileError("profile_source_capability_missing")
+        decisions = [_top_failure(payload)]
+        errors = payload.get("errors")
+        if isinstance(errors, list):
+            decisions.extend(_error_failure(item) for item in errors[:32])
+        failures = [decision for decision in decisions if decision is not None]
+        if failures or errors not in (None, []):
+            code = (
+                "public_access_backoff"
+                if any(d.auth_failed for d in failures)
+                else "rate_limited"
+                if any(d.reason == "rate_limited" for d in failures)
+                else "parse_error"
+            )
+            error = ProfileError("profile_source_capability_missing")
+            error.error_code = code
+            raise error
+        flags = provenance.get("profile_provider_flags") if isinstance(provenance, dict) else None
+        if (
+            not isinstance(flags, dict)
+            or set(flags) != set(PROVIDERS)
+            or any(type(value) is not bool for value in flags.values())
+            or provenance.get("profile_query_id") != PROFILE_DOC_ID
+            or provenance.get("profile_query_name") != PROFILE_QUERY
+        ):
+            raise ProfileError("profile_provenance_invalid")
+    elif parser_version != PROFILE_PARSER:
+        raise ProfileError("profile_provenance_invalid")
     data = payload.get("data") if isinstance(payload, Mapping) else None
     user = data.get("user") if isinstance(data, Mapping) else None
     projected, invalid = {}, []
@@ -121,7 +157,8 @@ def project_profile_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "status": payload.get("status") if isinstance(payload, Mapping) else None,
         "data": {"user": projected} if isinstance(user, Mapping) else {},
-        "profile_projection_version": PROFILE_VERSION,
+        "profile_projection_version": 2 if graphql else PROFILE_VERSION,
+        **({"profile_source_provenance": provenance} if graphql else {}),
         "profile_invalid_fields": sorted(invalid),
     }
 
@@ -133,6 +170,8 @@ class ProfileObservation:
     observed_at: datetime
     values: Mapping[str, Any] = field(repr=False)
     coverage: Mapping[str, str]
+    parser_version: str = PROFILE_PARSER
+    provenance: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         native_id(self.user_id)
@@ -173,15 +212,23 @@ def parse_profile(
     evidence: Evidence, *, target_key: str, expected_id: str | None, username: str, pinned=False
 ) -> ProfileObservation:
     if (
-        evidence.parser_version != PROFILE_PARSER
+        evidence.parser_version not in {PROFILE_PARSER, "instagram-public-commenter-profile-graphql-v1"}
         or evidence.source_identity != "instagram:commenter-profile:" + target_key
     ):
         raise ProfileError("profile_evidence_identity_mismatch")
     value = evidence.read(pinned=pinned)
     user = (value.get("data") or {}).get("user")
+    graphql = evidence.parser_version == "instagram-public-commenter-profile-graphql-v1"
+    if graphql:
+        # Revalidate finite query provenance on retained evidence as well.
+        project_profile_payload(
+            value, parser_version=evidence.parser_version, provenance=value.get("profile_source_provenance")
+        )
+        if expected_id is None:
+            raise ProfileError("profile_identity_unresolved")
     if (
-        value.get("status") != "ok"
-        or value.get("profile_projection_version") != PROFILE_VERSION
+        (value.get("status") not in (None, "ok") if graphql else value.get("status") != "ok")
+        or value.get("profile_projection_version") != (2 if graphql else PROFILE_VERSION)
         or value.get("profile_invalid_fields")
         or not isinstance(user, dict)
     ):
@@ -206,14 +253,23 @@ def parse_profile(
         coverage[name] = "observed" if name in user and user[name] is not None else "unknown"
     values["url"] = f"https://www.instagram.com/{actual_handle}/"
     coverage["url"] = "derived"
-    return ProfileObservation(identity, actual_handle, evidence.captured_at, values, coverage)
+    return ProfileObservation(
+        identity,
+        actual_handle,
+        evidence.captured_at,
+        values,
+        coverage,
+        evidence.parser_version,
+        value.get("profile_source_provenance", {}),
+    )
 
 
 def _proof(observation, evidence_id, *, complete, avatar):
     return {
         "version": PROFILE_VERSION,
         "access_mode": "public",
-        "parser_version": PROFILE_PARSER,
+        "parser_version": observation.parser_version,
+        "profile_source_provenance": dict(observation.provenance),
         "evidence_id": str(UUID(str(evidence_id))),
         "observed_at": utc_timestamp(observation.observed_at),
         "user_id": observation.user_id,
@@ -320,7 +376,7 @@ def cached_profile(store, *, expected_id, username, target_key, now):
             not isinstance(proof, dict)
             or proof.get("version") != PROFILE_VERSION
             or proof.get("access_mode") != "public"
-            or proof.get("parser_version") != PROFILE_PARSER
+            or proof.get("parser_version") not in {PROFILE_PARSER, "instagram-public-commenter-profile-graphql-v1"}
             or proof.get("collection_complete") is not True
         ):
             return None
@@ -332,7 +388,7 @@ def cached_profile(store, *, expected_id, username, target_key, now):
             cur,
             """select * from social.instagram_ingestion_evidence
             where evidence_id=%s and parser_version=%s and payload is not null""",
-            (evidence_id, PROFILE_PARSER),
+            (evidence_id, proof["parser_version"]),
         )
     if not retained:
         return None
@@ -353,7 +409,8 @@ def cached_profile(store, *, expected_id, username, target_key, now):
         if not timedelta(0) <= age < timedelta(hours=24) or row["profile_id"] != observation.user_id:
             return None
         if (
-            proof.get("user_id") != observation.user_id
+            proof.get("profile_source_provenance", {}) != dict(observation.provenance)
+            or proof.get("user_id") != observation.user_id
             or proof.get("username") != observation.username
             or proof.get("observed_at") != utc_timestamp(observation.observed_at)
             or proof.get("coverage") != dict(observation.coverage)
@@ -474,10 +531,14 @@ class ProfileActivity:
         sends = 0
         try:
             source, gate = provider()
+            parser_version = getattr(source, "parser_version", PROFILE_PARSER)
+            budget = 2 if parser_version == "instagram-public-commenter-profile-graphql-v1" else 1
+            if getattr(source, "request_budget", 1) != budget:
+                raise ProfileError("profile_request_boundary_missing")
 
             def before():
                 nonlocal sends
-                if sends:
+                if sends >= budget:
                     raise ProfileError("profile_hidden_retry_forbidden")
                 self.store.check_owner(**owned)
                 gate.before_request()
@@ -485,13 +546,15 @@ class ProfileActivity:
                 sends += 1
 
             payload = source(username=username, pre_source_request=before)
-            if sends != 1:
+            if sends != budget:
                 raise ProfileError("profile_request_boundary_missing")
-            projection = project_profile_payload(payload)
+            projection = project_profile_payload(
+                payload, parser_version=parser_version, provenance=getattr(source, "provenance", None)
+            )
             evidence = Evidence.capture(
                 source_identity="instagram:commenter-profile:" + target_key,
                 captured_at=self.clock(),
-                parser_version=PROFILE_PARSER,
+                parser_version=parser_version,
                 payload=projection,
             )
             evidence_id = self.store.retain_evidence(**owned, evidence=evidence)
@@ -555,10 +618,12 @@ class ProfileActivity:
                         raise
                     failure = gate.finish_failure(
                         getattr(error, "error_code", "parse_error"),
-                        retry_after_seconds=getattr(error, "retry_after_seconds", None),
+                        retry_after_seconds=getattr(
+                            error, "retry_after_seconds", getattr(source, "retry_after_seconds", None)
+                        ),
                     )
                     gate = None
-                    if isinstance(error, ProfileError):
+                    if isinstance(error, ProfileError) and not hasattr(error, "error_code"):
                         failure = Failure(
                             error.code, retry_at=failure.retry_at, identity_blocked=failure.identity_blocked
                         )
