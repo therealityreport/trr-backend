@@ -1,6 +1,6 @@
 # Instagram public isolation and Scrapling 0.5 release record
 
-Status: approved 35-path source committed as a662c2e02dfcac891cfc08c8b49d3b4a424be27b and deployed as v79. A reviewed probe-limit repair is being deployed. Acceptance remains limited by Threads credentials and Instagram detail/pagination access.
+Status: deployed v80 from 60cc311716881a7516f831d1ca763d55a9880733. Source and deployment verified; full acceptance remains blocked by Threads credentials and Instagram detail/pagination access. Hygiene changes remain uncommitted.
 
 ## Scope and source
 
@@ -62,7 +62,7 @@ Observed result: **inconclusive**. The baseline's first listing request returned
 - Final optional-runtime/evaluation policy selection: 20 passed, including a real curl option hook proving environment proxies are overridden explicitly. This local strengthening does not change the live evaluation conclusion.
 - Independent review completed with no findings across all 35 scoped paths. The reviewer checked installed 0.5 recorder/session contracts and ran a request-free real-Response parsing probe; all source hashes remained unchanged during review. Detailed commands and local logs are recorded in the task evidence directory.
 
-## Deployment acceptance pending
+## Deployment acceptance procedure and limits
 
 After approval, commit only the final task manifest, then deploy through the wrapper with `main` explicitly selected. Reuse passing source evidence. Verify deployed browser package versions and browser launch, the SocialBlade runtime probe, Threads remote-auth smoke, core workers, and a bounded public Instagram probe. Use `verify_modal_readiness.py --env main --probe-core-workers --strict-probes`; add `--probe-remote-auth threads` for the Threads smoke. Keep all commands pinned to `MODAL_PROFILE=admin-56995` and `MODAL_ENVIRONMENT=main`.
 
@@ -175,18 +175,18 @@ tests/socials/instagram/posts_scrapling/test_job_runner.py
 <!-- modal-deploy-history:start -->
 ## Deploy History Stamp
 
-- Last stamped: `2026-10-19T16:26:31-04:00`
+- Last stamped: `2026-10-19T16:30:05-04:00`
 - Workspace: `admin-56995`
 - Profile: `admin-56995`
 - Canary: `https://admin-56995--trr-backend-api.modal.run/health` HTTP `200` on attempt `1`
 
 | Version | Deployed At | Deployed By | Commit | Client |
 | --- | --- | --- | --- | --- |
+| v80 | 2026-10-19 16:29:39-04:00 | admin-56995 | 60cc311* | 1.5.5 |
 | v79 | 2026-10-19 16:26:06-04:00 | admin-56995 | a662c2e* | 1.5.5 |
 | v78 | 2026-10-16 20:53:20-04:00 | admin-56995 | 690e08c* | 1.5.5 |
 | v77 | 2026-10-16 20:26:38-04:00 | admin-56995 | 7f35ce5* | 1.5.5 |
 | v76 | 2026-10-16 20:26:32-04:00 | admin-56995 | 7f35ce5* | 1.5.5 |
-| v75 | 2026-10-16 14:30:05-04:00 | admin-56995 | 5b140c7* | 1.5.5 |
 
 <!-- modal-deploy-history:end -->
 
@@ -212,3 +212,15 @@ Representative live listing records:
 The probe requested max-pages=2, one sampled detail and one sampled comment post per page. Deployed evidence exposed pre-existing code that ignored max-pages and selected every detail on the first three pages; it attempted 33 details. The run stopped on page two's 401, but did not prove its configured bounds. The repair enforces positive page limits per invocation, preserves the resume cursor and applies detail sampling on every page. Zero remains uncapped; explicit all mode remains available. All 15 owner tests passed, including cap=1/2 and resume regressions. Independent review of only the two changed files found no findings; subsequent test formatting was nonsemantic.
 
 Repair edits and this record remain within the approved 35 paths. Browser/dependency/worker evidence is reused because the repair does not change those inputs. Instagram cooldown and Threads credentials remain acceptance limits.
+
+## Final deployment evidence
+
+- Current provider deployment: **v80**, 2026-10-19 16:29 EDT, app `ap-DkLTRoSvqhbkGO7fHyHxrD`, workspace `admin-56995`, environment `main`, tag `ig-public-probe-bounds-60cc3117`.
+- Runtime source revision: `60cc311716881a7516f831d1ca763d55a9880733`. Provider label `60cc311*` reflects only the excluded 53 hygiene paths at deployment time. The original 35-path implementation is commit `a662c2e02dfcac891cfc08c8b49d3b4a424be27b`; the repair touches two of those paths plus this record.
+- Repair wrapper readiness and API health passed (HTTP 200, first attempt). Earlier unchanged browser/dependency/core-worker/SocialBlade checks are retained. Threads strict readiness remains blocked by missing cookies; no success is claimed for that gate.
+- In deployed container `ta-01M5AXP7ZDFH4HH73Z1TNZ9T2R`, an offline fixture smoke verified source SHA-256 `80b734b5d404348d0a13bdcb0a05476ee038d6f669b2a6c1fdb2c9081952c72f`. Page caps 1 and 2 produced exactly 1 and 2 listing, detail, and comment fixture calls respectively, preserving the cursor and returning `page_cap_reached`. It made zero external source requests and changed no app configuration or shared state.
+- No Instagram requests were repeated after the reported 401/backoff. Live evidence remains the v79 retrieval above; v80 changes only probe limits. This does not prove permalink-detail extraction or complete pagination.
+- Rollback v78 remains in provider history. No rollback was needed for the repair; deployment recovery can target the preserved provider artifact.
+- The final documentation-only evidence commit does not change deployed runtime inputs. No push, PR or branch change was performed.
+
+Remaining acceptance work: supply authorized valid Threads cookies before rerunning its auth smoke; investigate public permalink metadata availability and repeat a bounded Instagram probe only after the reported backoff. FetcherSession comparison remains inconclusive and production adoption remains out of scope.
