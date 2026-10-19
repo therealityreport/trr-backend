@@ -576,3 +576,30 @@ def test_detail_probe_parses_public_shortcode_payload_missing_from_legacy_parser
     assert result.succeeded and result.caption_present and result.thumbnail_present
     assert result.media_url_count == 1 and result.taken_at == "2023-11-14T22:13:20+00:00"
     assert result.http_status == 200 and len(calls) == 1
+
+
+def test_detail_probe_reports_an_empty_parsed_shell_as_failure(monkeypatch):
+    """Logged-out permalinks can parse to a shortcode-only shell; that is not a detail."""
+    import json
+
+    import requests
+
+    from trr_backend.socials.instagram import public_probe as probe
+
+    payload = {"data": {"xdt_shortcode_media": {"code": "PUBLIC01"}}}
+    response = requests.Response()
+    response.status_code = 200
+    response._content = ('<script type="application/json">' + json.dumps(payload) + "</script>").encode()
+    monkeypatch.setattr(
+        probe,
+        "InstagramScraper",
+        lambda **kwargs: SimpleNamespace(
+            session=SimpleNamespace(close=lambda: None),
+            _get=lambda url, **kw: response,
+            _request_cookies=lambda: {},
+        ),
+    )
+    result = probe._default_detail_fetcher("PUBLIC01")
+    assert not result.succeeded and result.stop_reason == "metadata_empty"
+    assert not result.caption_present and result.media_url_count == 0
+    assert probe._detail_status_from_state(__import__("dataclasses").asdict(result)) == result

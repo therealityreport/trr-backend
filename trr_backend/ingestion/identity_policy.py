@@ -27,6 +27,24 @@ from trr_backend.socials.instagram.detail_transport import AUTH_ERRORS
 
 WINDOW_SECONDS = 660
 REQUEST_LIMIT = 180
+# Logged-out source lanes follow the June 2026 public backoff in
+# socials/instagram/public_probe.py: a rejection is temporary only with
+# escalating waits, and a single success steps escalation down one level.
+PUBLIC_BACKOFF_STEPS_SECONDS = (3600, 4 * 3600, 12 * 3600, 24 * 3600)
+PUBLIC_RATE_LIMIT_DEFAULT_SECONDS = 2 * 3600
+NETWORK_LANES = frozenset({"modal", "local"})
+
+
+def public_backoff_seconds(code: str, consecutive_failures: int, *, default: float) -> float:
+    """Wait for a logged-out network lane when the server sent no Retry-After."""
+    if code == "public_access_backoff":
+        step = min(max(consecutive_failures, 1), len(PUBLIC_BACKOFF_STEPS_SECONDS)) - 1
+        return PUBLIC_BACKOFF_STEPS_SECONDS[step]
+    if code == "rate_limited":
+        return PUBLIC_RATE_LIMIT_DEFAULT_SECONDS
+    return default
+
+
 _SAFE_ERRORS = (
     AUTH_ERRORS
     | AUTH_FATAL_MESSAGES
@@ -77,6 +95,7 @@ class SourceRequestGate:
         cooldown_seconds: float = 900,
         probe_seconds: float = 35,
         monotonic: Callable[[], float] = time.monotonic,
+        network_lane: str | None = None,
     ):
         if not all(math.isfinite(value) for value in (deadline, cooldown_seconds, probe_seconds)):
             raise ValueError("Identity policy deadlines must be finite")
@@ -86,9 +105,17 @@ class SourceRequestGate:
             raise ValueError("Identity public-only mode must be explicit")
         if public_only and any(str(key).strip().lower() in {"sessionid", "ds_user_id"} for key in cookies):
             raise ValueError("Public identity cannot contain authentication cookies")
+        if network_lane is not None and (not public_only or network_lane not in NETWORK_LANES):
+            raise ValueError("Network lanes apply only to public sources on modal or local")
         # Match DetailTransport exactly; the caller already chose this explicit
         # credential snapshot. Do not retain cookies, resolve identities or repair.
-        identity = "public" if public_only else str(cookies.get("ds_user_id") or cookies.get("sessionid") or "public")
+        # Logged-out limits belong to the egress network, so Modal and the local
+        # worker never spend one shared budget.
+        public_identity = "public" if network_lane is None else f"public:{network_lane}"
+        identity = (
+            public_identity if public_only else str(cookies.get("ds_user_id") or cookies.get("sessionid") or "public")
+        )
+        self.network_lane = network_lane
         self.identity_key = hashlib.sha256(identity.encode()).hexdigest()
         self.credential_fingerprint = hashlib.sha256(str(cookies.get("sessionid") or "public").encode()).hexdigest()
         self.public_only = public_only
@@ -229,9 +256,17 @@ class SourceRequestGate:
                 # An intermediate response is not proof of the complete target;
                 # keep its exclusive probe and cooldown marker until finish.
                 if not permit.probe_token or finish:
+                    # Network lanes step escalation down one level per success;
+                    # other lanes keep the original immediate reset.
+                    reset = (
+                        """consecutive_failures=greatest(consecutive_failures-1,0),
+                        last_error_code=case when consecutive_failures>1 then last_error_code end"""
+                        if self.network_lane is not None
+                        else "consecutive_failures=0,last_error_code=null"
+                    )
                     cur.execute(
-                        """update social.instagram_detail_request_lanes set consecutive_failures=0,
-                        last_error_code=null,cooldown_until=%s,blocked_fingerprint=%s,
+                        f"""update social.instagram_detail_request_lanes set {reset},
+                        cooldown_until=%s,blocked_fingerprint=%s,
                         probe_token=%s,probe_expires_at=%s where identity_key=%s""",
                         (
                             None if permit.probe_token else row.get("cooldown_until"),
@@ -299,7 +334,10 @@ class SourceRequestGate:
                 self.finish_failure()
             return previous
         delay = self.cooldown_seconds
-        if retry_after_seconds is not None and math.isfinite(retry_after_seconds) and retry_after_seconds >= 0:
+        server_delay = (
+            retry_after_seconds is not None and math.isfinite(retry_after_seconds) and retry_after_seconds >= 0
+        )
+        if server_delay:
             delay = retry_after_seconds
         with self._locked() as (cur, row, now):
             if not self._owns(row, permit, now):
@@ -308,6 +346,8 @@ class SourceRequestGate:
                 )
             else:
                 failures = int(row["consecutive_failures"]) + 1 if code == row.get("last_error_code") else 1
+                if self.network_lane is not None and not server_delay:
+                    delay = public_backoff_seconds(code, failures, default=delay)
                 blocked = bool(row["blocked"]) or (not self.public_only and code in AUTH_ERRORS)
                 opens = (
                     code in {"rate_limited", "public_access_backoff"} or failures >= 3 or permit.probe_token is not None

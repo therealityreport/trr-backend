@@ -44,6 +44,22 @@ if TYPE_CHECKING:
 router = APIRouter()
 
 
+def _reject_legacy_instagram_launch(platform: str) -> None:
+    """Stop the old catalog pipeline from scraping an account that v2 now owns."""
+    from fastapi import HTTPException
+
+    from trr_backend.ingestion.composition import v2_owns_instagram_launches
+
+    if str(platform or "").strip().lower() == "instagram" and v2_owns_instagram_launches():
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "instagram_v2_owns_launches",
+                "message": "Instagram runs start from the v2 Instagram scraper on this page.",
+            },
+        )
+
+
 @router.post("/profiles/{platform}/{account_handle}/catalog/backfill")
 async def post_social_account_catalog_backfill_route(
     platform: str,
@@ -52,6 +68,7 @@ async def post_social_account_catalog_backfill_route(
     background_tasks: BackgroundTasks,
     user: InternalAdminUser,
 ) -> dict[str, Any]:
+    _reject_legacy_instagram_launch(platform)
     from trr_backend.socials.control_plane.runtime import (
         SocialIngestConflictError,
         SocialIngestValidationError,
@@ -310,6 +327,7 @@ async def post_social_account_catalog_sync_recent_route(
     background_tasks: BackgroundTasks,
     user: InternalAdminUser,
 ) -> dict[str, Any]:
+    _reject_legacy_instagram_launch(platform)
     from trr_backend.socials.control_plane.runtime import (
         SocialIngestConflictError,
         SocialIngestValidationError,
@@ -379,6 +397,7 @@ async def post_social_account_catalog_sync_newer_route(
     background_tasks: BackgroundTasks,
     user: InternalAdminUser,
 ) -> dict[str, Any]:
+    _reject_legacy_instagram_launch(platform)
     from trr_backend.socials.control_plane.runtime import (
         SocialIngestConflictError,
         SocialIngestValidationError,
@@ -447,6 +466,7 @@ async def post_social_account_catalog_resume_tail_route(
     background_tasks: BackgroundTasks,
     user: InternalAdminUser,
 ) -> dict[str, Any]:
+    _reject_legacy_instagram_launch(platform)
     if TYPE_CHECKING:
         # ``SOCIAL_ACCOUNT_CATALOG_BACKFILL_SELECTED_TASKS`` is covered by the
         # module-level annotation-only declaration above; only the statically

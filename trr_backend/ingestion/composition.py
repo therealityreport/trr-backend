@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from urllib.parse import urlsplit
@@ -66,13 +66,18 @@ class CanaryPolicy:
             raise ServiceUnavailableError("Canary configuration differs from the approved bravotv calendar-2026 target")
         return cls(accounts, maximum)
 
+    supported_actions = ("backfill",)
+
+    def allows_account(self, account):
+        return account in self.accounts
+
     def validate_scope(self, account, *, action, scope, date_start, date_end):
         if account not in self.accounts:
             raise Conflict("Account is outside the configured ingestion canary")
         if action != "backfill" or scope != "bounded_window" or date_start != _CANARY_START or date_end != _CANARY_END:
             raise Conflict("Ingestion canary requires the approved calendar-2026 bounded backfill")
 
-    def counts(self, cur, *, including_current):
+    def counts(self, cur, *, including_current, account=None):
         cur.execute(
             """select count(*) filter(where account=any(%s)) as total,
             count(*) filter(where state in ('queued','running','blocked','failed','cancelled')
@@ -93,6 +98,106 @@ class CanaryPolicy:
             raise Conflict("Ingestion canary total run budget is exhausted; resume the existing run")
         if active > (1 if including_current else 0):
             raise Conflict("Only one ingestion canary run may be active or resumable")
+
+
+# Each launch action resolves to exactly these intent scopes (command_service.launch).
+# Capacity sees the raw payload, whose backfill_scope is meaningless for sync actions.
+_ACCOUNT_ACTION_SCOPES = {
+    "backfill": frozenset({"full_history", "bounded_window"}),
+    "sync_newer": frozenset({"head_gap"}),
+    "sync_recent": frozenset({"recent_window"}),
+    "resume_tail": frozenset({"full_history"}),
+}
+_PAYLOAD_DEFAULT_SCOPES = frozenset({"full_history", "bounded_window"})
+_ACTIVE_RUN_STATES = ("queued", "running", "blocked")
+_LEGACY_TERMINAL_JOB_STATES = ("completed", "cancelled", "failed")
+
+
+def v2_owns_instagram_launches() -> bool:
+    """While true, the legacy catalog routes must not start Instagram work."""
+    mode = os.getenv("TRR_INSTAGRAM_INGESTION_POLICY", "canary").strip().lower()
+    return enabled("TRR_INSTAGRAM_INGESTION_ENABLED") and mode == "accounts"
+
+
+def _active_shared_instagram_accounts():
+    from trr_backend.db.pg import fetch_all
+
+    rows = fetch_all(
+        """select distinct lower(ltrim(account_handle, '@')) as account
+        from social.shared_account_sources where platform = 'instagram' and is_active"""
+    )
+    return frozenset(str(row["account"]) for row in rows if row.get("account"))
+
+
+@dataclass(frozen=True)
+class AccountRunPolicy:
+    """Manual launches for any active shared Instagram account, one active run each.
+
+    Cancelled and failed runs stay resumable but do not block a new launch; a
+    stale cancelled run must never make the launch button permanently unusable.
+    """
+
+    max_runs_per_day: int
+    workflow_version: str = WORKFLOW_VERSION
+    account_source: Callable[[], frozenset[str]] = _active_shared_instagram_accounts
+    supported_actions = ("backfill", "sync_recent", "sync_newer", "resume_tail")
+
+    @classmethod
+    def configured(cls):
+        try:
+            maximum = int(os.getenv("TRR_INSTAGRAM_INGESTION_MAX_RUNS_PER_DAY", "12"))
+        except ValueError:
+            raise ServiceUnavailableError("Invalid daily Instagram ingestion run limit") from None
+        if not 1 <= maximum <= 48:
+            raise ServiceUnavailableError("Daily Instagram ingestion run limit must be 1 to 48")
+        return cls(maximum)
+
+    def allows_account(self, account):
+        try:
+            return account in self.account_source()
+        except Exception:  # noqa: BLE001 - an unreadable allowlist admits nobody
+            return False
+
+    def validate_scope(self, account, *, action, scope, date_start, date_end):
+        if not self.allows_account(account):
+            raise Conflict("Account is not an active shared Instagram source")
+        allowed = _ACCOUNT_ACTION_SCOPES.get(action)
+        if allowed is None:
+            raise Conflict("Unsupported Instagram ingestion action")
+        if scope not in allowed and not (action != "backfill" and scope in _PAYLOAD_DEFAULT_SCOPES):
+            raise Conflict("Instagram ingestion scope does not match the requested action")
+
+    def counts(self, cur, *, including_current, account=None):
+        if account is None:
+            raise Conflict("Account run limits require an explicit account")
+        cur.execute(
+            """select count(*) filter(where state = any(%s)) as active,
+            count(*) filter(where created_at > now() - interval '24 hours') as recent,
+            (select count(*) from social.scrape_jobs job
+                where job.platform = 'instagram' and job.status <> all(%s)
+                and lower(ltrim(job.config->>'account', '@')) = %s) as legacy_active
+            from social.instagram_ingestion_runs where account = %s""",
+            (list(_ACTIVE_RUN_STATES), list(_LEGACY_TERMINAL_JOB_STATES), account, account),
+        )
+        row = cur.fetchone()
+        active, recent, legacy_active = (
+            (row["active"], row["recent"], row["legacy_active"]) if isinstance(row, Mapping) else row
+        )
+        if legacy_active:
+            raise Conflict("An older-system Instagram job is still active for this account")
+        if active > (1 if including_current else 0):
+            raise Conflict("This Instagram account already has an active ingestion run")
+        if recent > (self.max_runs_per_day if including_current else self.max_runs_per_day - 1):
+            raise Conflict("Daily Instagram ingestion run limit reached for this account")
+
+
+def configured_run_policy():
+    mode = os.getenv("TRR_INSTAGRAM_INGESTION_POLICY", "canary").strip().lower()
+    if mode == "accounts":
+        return AccountRunPolicy.configured()
+    if mode != "canary":
+        raise ServiceUnavailableError("Unknown Instagram ingestion run policy")
+    return CanaryPolicy.configured()
 
 
 class CanaryStore(Store):
@@ -121,7 +226,7 @@ class CanaryStore(Store):
                     "select pg_advisory_xact_lock(hashtextextended(%s,0))",
                     ("instagram-ingestion-canary:" + policy.workflow_version,),
                 )
-                policy.counts(cur, including_current=True)
+                policy.counts(cur, including_current=True, account=intent.account)
             if initialize:
                 initialize(conn, run_id)
 
@@ -144,23 +249,34 @@ class CanaryCapacity:
             date_end=payload.date_end,
         )
         with self.read_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-            self.policy.counts(cur, including_current=False)
+            self.policy.counts(cur, including_current=False, account=account)
         self.admission.validate_launch(account, payload)
 
 
 class CanaryCommandService(CommandService):
     def capabilities(self, handle):
         capabilities = super().capabilities(handle)
-        if self.store.policy is None or capabilities.account not in self.store.policy.accounts:
+        policy = self.store.policy
+        if policy is None or not policy.allows_account(capabilities.account):
             return capabilities.model_copy(
                 update={
                     "enabled": False,
                     "supported_actions": [],
-                    "disabled_reason": "Account is outside the configured bounded ingestion canary.",
+                    "disabled_reason": (
+                        "Account is not an active shared Instagram source."
+                        if isinstance(policy, AccountRunPolicy)
+                        else "Account is outside the configured bounded ingestion canary."
+                    ),
                 }
             )
         if capabilities.enabled:
-            return capabilities.model_copy(update={"supported_actions": ["backfill"]})
+            return capabilities.model_copy(
+                update={
+                    "supported_actions": [
+                        action for action in capabilities.supported_actions if action in policy.supported_actions
+                    ]
+                }
+            )
         return capabilities
 
 
@@ -214,6 +330,11 @@ def _worker_store(context):
     return Store() if placement == "modal" else Store(execution_placement=placement)
 
 
+def _network_lane(context):
+    placement = context.get("run", {}).get("execution_placement", "modal")
+    return placement if placement in {"modal", "local"} else "modal"
+
+
 def _public_source_parts(context, owned):
     from trr_backend.ingestion.identity_policy import SourceRequestGate
 
@@ -232,6 +353,7 @@ def _public_source_parts(context, owned):
             check_cancelled_in_transaction=lambda conn: store.check_owner(**owned, connection=conn),
             deadline=deadline,
             public_only=True,
+            network_lane=_network_lane(context),
         ),
         "deadline": deadline,
         "check_cancelled": check,
@@ -247,7 +369,7 @@ def build_api():
     from trr_backend.ingestion.replay_commands import ReplayCommands
 
     try:
-        policy = CanaryPolicy.configured()
+        policy = configured_run_policy()
         _modal_target()
         source_profile = _configured_source_profile()
     except ServiceUnavailableError:
@@ -389,6 +511,7 @@ def _gate_source(source, context, owned, credentials, *, failure_code, public_on
         check_cancelled_in_transaction=lambda conn: store.check_owner(**owned, connection=conn),
         deadline=time.monotonic() + max(0, min(590, remaining)),
         public_only=public_only,
+        network_lane=_network_lane(context) if public_only else None,
     )
     return _GatedSource(source, gate, failure_code=failure_code)
 

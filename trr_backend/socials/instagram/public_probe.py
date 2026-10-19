@@ -566,6 +566,17 @@ def _default_detail_fetcher(shortcode: str) -> PublicDetailStatus:
         )
     caption = (metadata.raw_media or {}).get("caption")
     caption = caption.get("text") if isinstance(caption, dict) else caption
+    caption_present = bool(str(caption or "").strip())
+    if not (caption_present or metadata.media_urls or metadata.thumbnail_url or metadata.taken_at):
+        # A parsed shell with no caption, media or timestamp is not a detail.
+        return PublicDetailStatus(
+            shortcode=shortcode,
+            attempted=True,
+            succeeded=False,
+            stop_reason="metadata_empty",
+            source="public_permalink_metadata",
+            **response_evidence,
+        )
     return PublicDetailStatus(
         shortcode=shortcode,
         attempted=True,
@@ -574,7 +585,7 @@ def _default_detail_fetcher(shortcode: str) -> PublicDetailStatus:
         media_url_count=len(metadata.media_urls or []),
         thumbnail_present=bool(metadata.thumbnail_url),
         taken_at=metadata.taken_at.isoformat() if metadata.taken_at else None,
-        caption_present=bool(str(caption or "").strip()),
+        caption_present=caption_present,
         source="public_permalink_metadata",
         **response_evidence,
     )
