@@ -27,7 +27,7 @@ anyio==4.15.1
     #   sse-starlette
     #   starlette
     #   watchfiles
-apify-fingerprint-datapoints==0.13.0
+apify-fingerprint-datapoints==0.15.0
     # via
     #   browserforge
     #   scrapling
@@ -95,11 +95,11 @@ cryptography==50.0.2
     #   -r requirements.in
     #   google-auth
     #   pyjwt
-cssselect==1.4.0
+cssselect==1.5.0
     # via scrapling
 cssselect2==0.9.0
     # via cairosvg
-curl-cffi==0.15.0
+curl-cffi==0.16.1
     # via
     #   -r requirements.in
     #   scrapling
@@ -275,14 +275,14 @@ packaging==26.2
     #   deprecation
     #   gunicorn
     #   pytest
-patchright==1.61.2
+patchright==1.62.1
     # via scrapling
 pillow==12.3.0
     # via
     #   -r requirements.in
     #   cairosvg
     #   reportlab
-playwright==1.61.0
+playwright==1.62.0
     # via
     #   -r requirements.in
     #   scrapling
@@ -411,7 +411,6 @@ requests-oauthlib==2.0.0
     # via google-auth-oauthlib
 rich==14.3.4
     # via
-    #   curl-cffi
     #   modal
     #   typer
 rpds-py==2026.5.1
@@ -420,7 +419,7 @@ rpds-py==2026.5.1
     #   referencing
 s3transfer==0.19.0
     # via boto3
-scrapling==0.4.12
+scrapling==0.5
     # via -r requirements.in
 sentry-sdk==2.63.0
     # via -r requirements.in

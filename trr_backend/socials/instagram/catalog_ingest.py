@@ -1335,8 +1335,20 @@ def _build_instagram_scraper_with_auth_fallback(
         return scraper
     return InstagramScraper(
         cookies={},
-        browser_account_id=_sanitize_instagram_browser_account_id(browser_account_id),
+        browser_account_id=None,
+        attach_auth_session=False,
+        strict_public_credentials=True,
     )
+
+
+def _shared_instagram_public_mode(config: Mapping[str, Any] | None = None) -> bool:
+    metadata = config or {}
+    mode = (
+        metadata.get("instagram_scrape_mode")
+        or metadata.get("scrape_mode")
+        or os.getenv("SOCIAL_INSTAGRAM_SCRAPE_MODE")
+    )
+    return str(mode or "public_first").strip().lower() not in {"authenticated", "auth", "login"}
 
 
 def _build_shared_instagram_scraper(
@@ -1366,7 +1378,7 @@ def _build_shared_instagram_scraper(
 
     # Shared-account catalog backfills prefer the warmed public path first to
     # avoid depending on auth cookies when the public transport is healthy.
-    return InstagramScraper(cookies={}, browser_account_id=browser_account_id)
+    return InstagramScraper(cookies={}, attach_auth_session=False, strict_public_credentials=True)
 
 
 def _shared_instagram_graphql_page_has_posts(data: Mapping[str, Any] | None) -> bool:
@@ -1471,6 +1483,8 @@ def _fetch_shared_instagram_graphql_page(
 
 
 def _shared_instagram_frontier_auth_validation(config: Mapping[str, Any] | None = None) -> tuple[bool, str | None]:
+    if _shared_instagram_public_mode(config):
+        return False, "public_mode"
     _sync_core_overrides()
     metadata = _metadata_dict(config)
     if metadata.get("frontier_auth_allowed") is True:
@@ -1495,6 +1509,8 @@ def _shared_instagram_frontier_auth_state(
     *,
     frontier_metadata: Mapping[str, Any] | None = None,
 ) -> tuple[bool, str | None]:
+    if _shared_instagram_public_mode(config):
+        return False, "public_mode"
     _sync_core_overrides()
     metadata = _metadata_dict(config)
     if metadata.get("frontier_auth_allowed") is True:

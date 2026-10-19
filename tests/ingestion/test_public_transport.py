@@ -480,3 +480,97 @@ def test_log_handler_failure_cannot_replace_existing_public_failure_or_accountin
         detail_call(case)
     assert ("failure", "forbidden", 1, 37.0) in case.events
     assert len(case.session.sent) == case.events.count("count") == 1 and case.session.closed
+
+
+@pytest.mark.parametrize("method", ["get", "post"])
+def test_public_scraper_rejects_session_defaults_and_per_request_auth_and_proxy(method):
+    session = SequenceSession([], [{"payload": {"ok": True}}])
+    scraper = scraper_module.InstagramScraper(cookies={}, session=session, strict_public_credentials=True)
+    session.headers.update({"Cookie": "sessionid=ambient", "Authorization": "Bearer ambient"})
+    session.proxies.update({"https": "http://ambient-proxy.invalid"})
+    session.auth = ("ambient", "password")
+    session.trust_env = True
+    response = getattr(scraper, "_" + method)(
+        "https://www.instagram.com/api/v1/test",
+        headers={"Proxy-Authorization": "Basic ambient", "Authorization": "Bearer explicit"},
+        auth=("explicit", "password"),
+        proxies={"https": "http://explicit-proxy.invalid"},
+    )
+    assert response.json() == {"ok": True}
+    prepared, options = session.sent[0]
+    assert not {"cookie", "authorization", "proxy-authorization"} & {key.lower() for key in prepared.headers}
+    assert options["proxies"] == {} and session.auth is None and session.trust_env is False
+    assert scraper.last_retrieval_meta["http_client"] == "requests"
+    assert scraper.last_retrieval_meta["browser_used"] is False
+
+
+@pytest.mark.parametrize("entrypoint", ["catalog", "preview", "live_profile_total"])
+def test_public_profile_entrypoints_never_resolve_ambient_auth(monkeypatch, entrypoint):
+    import asyncio
+
+    from trr_backend.socials.instagram import catalog_ingest
+
+    payload = {"data": {"user": {"username": "isolation_fixture", "edge_owner_to_timeline_media": {"count": 12}}}}
+    session = SequenceSession([], [{"body": "<html>public</html>"}, {"payload": payload}])
+    monkeypatch.setattr(scraper_module.InstagramScraper, "_create_session", lambda _: session)
+    monkeypatch.setattr(scraper_module.InstagramScraper, "_rate_limit", lambda *_: None)
+    if entrypoint == "catalog":
+        scraper = catalog_ingest._build_shared_instagram_scraper(browser_account_id="ambient")
+        assert scraper.fetch_profile_info("isolation_fixture", delay=0) == payload
+    elif entrypoint == "preview":
+        from api.routers.socials.instagram_scrape import preview_instagram_profile
+
+        result = asyncio.run(preview_instagram_profile("isolation_fixture", {"email": "fixture@example.invalid"}))
+        assert result["username"] == "isolation_fixture"
+    else:
+        from trr_backend.socials import social_season_analytics_impl as analytics
+
+        monkeypatch.setattr(analytics, "_SOCIAL_PROFILE_TOTAL_POSTS_CACHE", {})
+        monkeypatch.setattr(analytics, "_load_instagram_cookies", lambda: pytest.fail("public total loaded auth"))
+        assert analytics._cached_live_profile_total_posts("instagram", "isolation_fixture") == 12
+    assert len(session.sent) == 2
+    assert all(options["proxies"] == {} for _, options in session.sent)
+    assert all("sessionid" not in request.headers.get("Cookie", "") for request, _ in session.sent)
+
+
+def test_public_catalog_cannot_upgrade_frontier_auth_from_stale_config(monkeypatch):
+    from trr_backend.socials.instagram import catalog_ingest
+
+    monkeypatch.setattr(
+        catalog_ingest, "_load_instagram_cookies_from_sources", lambda: pytest.fail("ambient auth load")
+    )
+    config = {"instagram_scrape_mode": "public_first", "frontier_auth_allowed": True}
+    assert catalog_ingest._shared_instagram_frontier_auth_validation(config) == (False, "public_mode")
+    assert catalog_ingest._shared_instagram_frontier_auth_state(config, frontier_metadata={"auth_allowed": True}) == (
+        False,
+        "public_mode",
+    )
+
+
+def test_public_probe_detail_uses_one_guarded_request_and_closes_session(monkeypatch):
+    from trr_backend.socials.instagram.public_probe import _default_detail_fetcher
+
+    media = {
+        "pk": "66",
+        "code": "AAAABC",
+        "user": {"username": "bravotv"},
+        "media_type": 1,
+        "image_versions2": {"candidates": [{"url": "https://cdn.example/image.jpg"}]},
+    }
+    session = SequenceSession(
+        [], [{"body": html({"data": {"xdt_api__v1__media__shortcode__web_info": {"items": [media]}}})}]
+    )
+    monkeypatch.setattr(scraper_module.InstagramScraper, "_create_session", lambda _: session)
+    result = _default_detail_fetcher("AAAABC")
+    assert result.succeeded is True and result.media_url_count == 1
+    assert len(session.sent) == 1 and session.closed
+    request, options = session.sent[0]
+    assert options["proxies"] == {} and "Cookie" not in request.headers
+
+
+def test_explicit_authenticated_catalog_mode_still_selects_auth(monkeypatch):
+    from trr_backend.socials.instagram import catalog_ingest
+
+    config = {"instagram_scrape_mode": "authenticated", "frontier_auth_allowed": True}
+    monkeypatch.setattr(catalog_ingest, "_sync_core_overrides", lambda: None)
+    assert catalog_ingest._shared_instagram_frontier_auth_validation(config) == (True, None)

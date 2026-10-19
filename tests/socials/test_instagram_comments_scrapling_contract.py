@@ -23,34 +23,20 @@ def test_scrapling_package_importable() -> None:
     assert scrapling.__version__, "scrapling is installed but __version__ is falsy"
 
 
-def test_stealthy_fetcher_public_import() -> None:
-    """Exercises the same import path as comments_scrapling.fetcher."""
-    from scrapling.fetchers import StealthyFetcher  # noqa: F401
-
-
-def test_proxy_rotator_public_import() -> None:
-    """Exercises the public ProxyRotator path used by TRR adapters."""
-    from scrapling.fetchers import ProxyRotator
-
-    assert ProxyRotator.__module__ == "scrapling.engines.toolbelt.proxy_rotation"
-
-
 def test_scrapling_fetcher_import_surface() -> None:
-    """Records the exact Scrapling 0.4.8 import surface used by TRR."""
-    from scrapling.fetchers import DynamicFetcher, Fetcher, ProxyRotator, StealthyFetcher
+    """Guard the public Scrapling 0.5 imports used by the social lanes."""
+    from scrapling.fetchers import (
+        AsyncStealthySession,
+        Fetcher,
+        FetcherSession,
+        ProxyRotator,
+        StealthyFetcher,
+        StealthySession,
+    )
 
-    resolved = {
-        "Fetcher": f"{Fetcher.__module__}.{Fetcher.__name__}",
-        "DynamicFetcher": f"{DynamicFetcher.__module__}.{DynamicFetcher.__name__}",
-        "StealthyFetcher": f"{StealthyFetcher.__module__}.{StealthyFetcher.__name__}",
-        "ProxyRotator": f"{ProxyRotator.__module__}.{ProxyRotator.__name__}",
-    }
-    assert resolved == {
-        "Fetcher": "scrapling.fetchers.requests.Fetcher",
-        "DynamicFetcher": "scrapling.fetchers.chrome.DynamicFetcher",
-        "StealthyFetcher": "scrapling.fetchers.stealth_chrome.StealthyFetcher",
-        "ProxyRotator": "scrapling.engines.toolbelt.proxy_rotation.ProxyRotator",
-    }
+    for exported in (Fetcher, FetcherSession, ProxyRotator, StealthyFetcher, StealthySession, AsyncStealthySession):
+        assert inspect.isclass(exported)
+    assert inspect.iscoroutinefunction(AsyncStealthySession.fetch)
 
 
 def test_stealth_session_contains_all_kwargs_we_use() -> None:
@@ -73,9 +59,6 @@ def test_stealth_session_contains_all_kwargs_we_use() -> None:
         "retry_delay",
         "timeout",
         "wait",
-        # capture_xhr removed - Scrapling 0.4.x types it as `str | None`.
-        # (XHR URL pattern), not bool. We don't need XHR capture for
-        # comments so we dropped it from the _fetch call entirely.
     }
     actual = set(StealthSession.__annotations__.keys())
     missing = expected_kwargs - actual

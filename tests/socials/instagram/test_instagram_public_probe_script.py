@@ -62,16 +62,22 @@ def test_env_guard_blocks_cookies_decodo_proxy_and_auth(monkeypatch: pytest.Monk
 def test_default_comments_fetcher_treats_non_dict_public_comments_as_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    observed = {}
+
     class FakeCommentsFetcher:
         def __init__(self, **_kwargs: Any) -> None:
-            self._parser: object | None = None
+            observed["public_only"] = _kwargs["public_only"]
 
         async def fetch_comments_for_shortcode(self, *_args: Any, **_kwargs: Any) -> SimpleNamespace:
+            observed["fetch"] = _kwargs
             return SimpleNamespace(
                 diagnostic_metadata={"public_comments": None, "relay_comments": None},
                 comments=[],
                 fetch_reason="relay unavailable",
             )
+
+        async def aclose(self):
+            observed["closed"] = True
 
     monkeypatch.setattr(
         "trr_backend.socials.instagram.comments_scrapling.fetcher.InstagramCommentsScraplingFetcher",
@@ -89,6 +95,9 @@ def test_default_comments_fetcher_treats_non_dict_public_comments_as_empty(
     assert result.classification == "public_blocked"
     assert result.recovered_count == 0
     assert result.stop_reason == "relay unavailable"
+
+    assert observed["public_only"] is True and observed["closed"] is True
+    assert observed["fetch"]["max_comments"] == 5 and observed["fetch"]["fetch_replies"] is False
 
 
 def test_probe_raises_before_scraping_when_public_env_is_dirty(

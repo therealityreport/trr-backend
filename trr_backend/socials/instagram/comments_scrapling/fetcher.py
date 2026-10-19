@@ -3259,6 +3259,9 @@ class InstagramCommentsScraplingFetcher:
             safe_scrapling_proxy_metadata(),
         )
         self._fetcher = None if public_only else build_stealthy_fetcher()
+        self._browser_used = False
+        self._http_client_used: str | None = None
+        self._scrapling_fetcher_invoked: str | None = None
 
         # httpx client (for API calls). Created lazily after warmup bridges cookies.
         self._http_client: httpx.AsyncClient | None = None
@@ -3276,6 +3279,9 @@ class InstagramCommentsScraplingFetcher:
         return {
             "scrapling_runtime": dict(self._scrapling_runtime_metadata),
             **self._scrapling_fetcher_metadata,
+            "http_client": self._http_client_used,
+            "browser_used": self._browser_used,
+            "scrapling_fetcher_class": self._scrapling_fetcher_invoked,
             "warmup_cookie_names": sorted(self._warmup_cookie_delta.keys()),
             "warmup_cookie_count": len(self._warmup_cookie_delta),
             "selected_proxy_fingerprint": self._selected_proxy_fingerprint,
@@ -3300,7 +3306,11 @@ class InstagramCommentsScraplingFetcher:
             "max_transient_retries": self._max_transient_retries,
             "reply_max_transient_retries": self._reply_max_transient_retries,
             "reply_tail_total_budget_seconds": self._reply_tail_total_budget_seconds,
-            "transport": "httpx_after_browser_warmup",
+            "transport": (
+                "httpx_after_browser_warmup"
+                if self._browser_used and self._http_client_used == "httpx"
+                else self._http_client_used or ("browser" if self._browser_used else None)
+            ),
             "comments_auth_validation": dict(self._comments_auth_validation),
             "request_count": self._request_count,
             "bytes_total": self._bytes_total,
@@ -3415,7 +3425,11 @@ class InstagramCommentsScraplingFetcher:
                 "attempt_count": attempt_count,
                 "proxy_fingerprint": self._selected_proxy_fingerprint,
                 "proxy_session_mode": self._proxy_session_mode,
-                "transport": "httpx_after_browser_warmup",
+                "transport": (
+                    "httpx_after_browser_warmup"
+                    if self._browser_used and self._http_client_used == "httpx"
+                    else self._http_client_used or ("browser" if self._browser_used else None)
+                ),
                 "duration_ms": int((time.monotonic() - started_at) * 1000),
                 "checked_at": datetime.now(UTC).isoformat(),
             }
@@ -5549,6 +5563,8 @@ class InstagramCommentsScraplingFetcher:
             {k: v for k, v in all_headers.items() if k.lower() not in _API_HEADER_KEYS_TO_STRIP}
         )
         try:
+            self._browser_used = True
+            self._scrapling_fetcher_invoked = "StealthyFetcher"
             response = await self._fetcher.async_fetch(
                 post_url,
                 locale=SCRAPLING_BROWSER_LOCALE,
@@ -5906,6 +5922,8 @@ class InstagramCommentsScraplingFetcher:
             {key: value for key, value in all_headers.items() if key.lower() not in _API_HEADER_KEYS_TO_STRIP}
         )
         try:
+            self._browser_used = True
+            self._scrapling_fetcher_invoked = "StealthyFetcher"
             response = await self._fetcher.async_fetch(
                 post_url,
                 locale=SCRAPLING_BROWSER_LOCALE,
@@ -6266,6 +6284,7 @@ class InstagramCommentsScraplingFetcher:
             try:
                 self._prepare_credentials(client.cookies)
                 self._before_source("relay_bootstrap")
+                self._http_client_used = "curl_cffi" if type(client).__name__ == "_CurlCffiAsyncClient" else "httpx"
                 page_response = await client.get(post_url, headers=dict(page_headers))
             except TRANSPORT_EXC_TYPES as exc:
                 reason = _transport_failure_reason(exc)
@@ -7567,6 +7586,8 @@ class InstagramCommentsScraplingFetcher:
         for attempt_label, attempt_proxy_rotator in attempt_plan:
             self._request_count += 1
             try:
+                self._browser_used = True
+                self._scrapling_fetcher_invoked = "StealthyFetcher"
                 response = await self._fetcher.async_fetch(
                     post_url,
                     locale=SCRAPLING_BROWSER_LOCALE,
@@ -8106,6 +8127,7 @@ class InstagramCommentsScraplingFetcher:
                 raise _PaginationDeadlineExceededError
             self._before_source("comments_api")
             self._request_count += 1
+            self._http_client_used = "httpx"
             normalized_method = str(method or "").strip().upper()
             if normalized_method == "GET":
                 response = await self._http_client.get(url, **request_kwargs)  # type: ignore[union-attr]
@@ -8138,6 +8160,8 @@ class InstagramCommentsScraplingFetcher:
         nav_headers = self._strip_accept_encoding_header(
             {k: v for k, v in all_headers.items() if k.lower() not in _API_HEADER_KEYS_TO_STRIP}
         )
+        self._browser_used = True
+        self._scrapling_fetcher_invoked = "StealthyFetcher"
         response = await self._fetcher.async_fetch(
             url,
             locale=SCRAPLING_BROWSER_LOCALE,
@@ -8363,6 +8387,8 @@ class InstagramCommentsScraplingFetcher:
                 },
             )
 
+        self._browser_used = True
+        self._scrapling_fetcher_invoked = "StealthyFetcher"
         container_response = await self._fetcher.async_fetch(
             referer,
             locale=SCRAPLING_BROWSER_LOCALE,
@@ -8420,6 +8446,8 @@ class InstagramCommentsScraplingFetcher:
         if remaining is not None:
             fetch_timeout_ms = max(1_000, min(fetch_timeout_ms, int(remaining * 1_000)))
         try:
+            self._browser_used = True
+            self._scrapling_fetcher_invoked = "StealthyFetcher"
             fetch_task = self._fetcher.async_fetch(
                 request_url,
                 locale=SCRAPLING_BROWSER_LOCALE,

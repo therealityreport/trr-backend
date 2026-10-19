@@ -139,3 +139,19 @@ def test_public_post_extractor_parses_carousel_media_and_people():
     assert post.media_urls == ["https://cdn.example/large.jpg", "https://cdn.example/video.mp4"]
     assert post.thumbnail_url == "https://cdn.example/large.jpg"
     assert len(post.children) == 2
+
+
+def test_strict_public_scraper_cannot_repair_auth_or_enter_browser(monkeypatch):
+    from trr_backend.socials.instagram.scraper import InstagramScraper, ScrapeConfig
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COOKIE_AUTO_REFRESH", "true")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_INTERACTIVE_LOGIN", "true")
+    scraper = InstagramScraper(cookies={}, strict_public_credentials=True, attach_auth_session=False)
+    try:
+        assert scraper._try_auto_refresh_cookies() == {"refreshed": False, "reason": "public_mode"}
+        assert scraper._try_interactive_login() == {"refreshed": False, "reason": "public_mode"}
+        assert scraper._fetch_posts_graphql_with_browser("bravotv") is None
+        assert scraper._scrape_browser_intercept(ScrapeConfig(username="bravotv", hashtags=[])) == []
+        assert scraper._browser_used is False
+    finally:
+        scraper.session.close()

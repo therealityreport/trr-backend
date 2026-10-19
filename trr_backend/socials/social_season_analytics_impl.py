@@ -50460,18 +50460,12 @@ def _cached_live_profile_total_posts(platform: str, account_handle: str) -> int 
             probe_deadline_sec = 22.0
         probe_deadline = time_module.monotonic() + max(4.0, probe_deadline_sec)
 
-        auth_cookies = _load_instagram_cookies()
         scraper_candidates: list[tuple[str, InstagramScraper]] = [
-            ("public_profile_info", InstagramScraper(cookies={}, browser_account_id=normalized_account))
-        ]
-        if auth_cookies:
-            scraper_candidates.append(
-                (
-                    "authenticated_profile_info",
-                    _get_cached_scraper(auth_cookies, cache_scope=f"instagram:{normalized_account}")
-                    or InstagramScraper(cookies=auth_cookies, browser_account_id=normalized_account),
-                )
+            (
+                "public_profile_info",
+                InstagramScraper(cookies={}, attach_auth_session=False, strict_public_credentials=True),
             )
+        ]
 
         for source_label, scraper in scraper_candidates:
             if time_module.monotonic() >= probe_deadline:

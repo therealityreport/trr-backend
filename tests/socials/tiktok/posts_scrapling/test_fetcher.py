@@ -250,19 +250,34 @@ def test_tiktok_warmup_optional_xhr_capture_metadata(_mock_scrapling, monkeypatc
     fake_resp.status_code = 200
     fake_resp.text = "<html>not challenge</html>"
     fake_resp.cookies = {}
-    fake_resp.captured_xhr = [
+    from types import SimpleNamespace
+
+    records = [
         {"url": "https://www.tiktok.com/api/user/detail/?uniqueId=someone"},
         {"url": "https://www.tiktok.com/api/post/item_list/?count=30"},
     ]
-    fetcher._fetcher.async_fetch = AsyncMock(return_value=fake_resp)
+    session = MagicMock()
+    session.fetch = AsyncMock(return_value=fake_resp)
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=False)
+
+    def search(**kwargs):
+        session.__aexit__.assert_not_awaited()
+        assert kwargs == {"url_pattern": r"/api/(?:user/detail|post/item_list)/", "limit": None}
+        return records
+
+    session.network = SimpleNamespace(search=search)
+    factory = MagicMock(return_value=session)
+    monkeypatch.setattr("trr_backend.socials.tiktok.posts_scrapling.fetcher.build_async_stealthy_session", factory)
 
     asyncio.run(fetcher.warmup("someone"))
 
-    warmup_await_args = fetcher._fetcher.async_fetch.await_args
-    assert warmup_await_args is not None
-    call_kwargs = warmup_await_args.kwargs
-    assert call_kwargs["capture_xhr"] == r"/api/(?:user/detail|post/item_list)/"
+    call_kwargs = factory.call_args.kwargs
+    assert call_kwargs["record_requests"] is True
+    assert call_kwargs["max_recorded_requests"] == 100
+    assert "capture_xhr" not in call_kwargs
     assert call_kwargs["locale"] == "en-US"
+    session.__aexit__.assert_awaited_once()
     meta = fetcher.runtime_metadata
     assert meta["capture_xhr_enabled"] is True
     assert meta["captured_xhr_count"] == 2

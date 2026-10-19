@@ -281,9 +281,8 @@ _SOCIAL_BROWSER_APT_PACKAGES: Final[tuple[str, ...]] = (
 )
 _SOCIAL_BROWSER_SETUP_COMMANDS: Final[tuple[str, ...]] = (
     "playwright install chromium",
-    # P0-2/P0-3: The Scrapling comments lane uses StealthyFetcher (Patchright-
-    # backed in v0.4+). Scrapling v0.4.9 refreshed browsers and fingerprints,
-    # and upstream recommends forcing the asset refresh after upgrades.
+    # Scrapling 0.5 uses Patchright-backed Stealthy browser sessions. Force
+    # the upstream browser/dependency installer after dependency upgrades.
     "scrapling install --force",
 )
 
@@ -855,6 +854,8 @@ def probe_browser_image_runtime() -> dict[str, object]:
                 "scrapling": package_version("scrapling"),
                 "playwright": package_version("playwright"),
                 "patchright": package_version("patchright"),
+                "curl-cffi": package_version("curl-cffi"),
+                "apify-fingerprint-datapoints": package_version("apify-fingerprint-datapoints"),
                 "chromium": browser_version,
             },
         }

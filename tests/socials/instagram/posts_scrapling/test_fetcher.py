@@ -1001,19 +1001,21 @@ def test_document_context_absent_dtsg_preserves_warmup_and_request_budget(
         allow_requests_recovery=False,
         before_source_request=operations.append,
     )
-    fetcher._fetcher.async_fetch = AsyncMock(
-        return_value=SimpleNamespace(
-            status_code=200,
-            text=_document_context_html(tokens),
-            cookies={},
-            headers={},
-            url="https://www.instagram.com/bravotv/",
-        )
+    warmup = SimpleNamespace(
+        status_code=200,
+        text=_document_context_html(tokens),
+        cookies={},
+        headers={},
+        url="https://www.instagram.com/bravotv/",
     )
     response = httpx.Response(
         200, json=_native_graphql_page(), request=httpx.Request("POST", "https://www.instagram.com/graphql/query")
     )
-    fetcher._http_client = SimpleNamespace(post=AsyncMock(return_value=response), cookies=httpx.Cookies())
+    fetcher._http_client = SimpleNamespace(
+        get=AsyncMock(return_value=warmup), post=AsyncMock(return_value=response), cookies=httpx.Cookies()
+    )
+    if auth_state != "public":
+        fetcher._fetcher.async_fetch = AsyncMock(return_value=warmup)
     fetcher._rebuild_http_client = AsyncMock()
     fetcher._pace_api_requests = AsyncMock()
     fetcher._doc_ids_configured = ("fixture-doc",)
@@ -1024,8 +1026,15 @@ def test_document_context_absent_dtsg_preserves_warmup_and_request_budget(
 
     result = asyncio.run(execute())
     assert not result.fetch_failed and len(result.posts) == 1
-    assert operations == ["browser_warmup", "graphql"] and result.request_count == 2
-    assert fetcher._fetcher.async_fetch.await_count == fetcher._http_client.post.await_count == 1
+    warmup_phase = "http_warmup" if auth_state == "public" else "browser_warmup"
+    assert operations == [warmup_phase, "graphql"] and result.request_count == 2
+    warmup_call = fetcher._http_client.get if auth_state == "public" else fetcher._fetcher.async_fetch
+    assert warmup_call.await_count == fetcher._http_client.post.await_count == 1
+    assert fetcher.runtime_metadata["http_client"] == "httpx"
+    assert fetcher.runtime_metadata["browser_used"] is (auth_state != "public")
+    assert fetcher.runtime_metadata["scrapling_fetcher_class"] == (
+        None if auth_state == "public" else "StealthyFetcher"
+    )
     form = fetcher._http_client.post.await_args.kwargs["data"]
     assert "fb_dtsg" not in form and "jazoest" not in form
     assert form["av"] == ("0" if auth_state == "public" else "viewer") and form["__user"] == "0"
@@ -1893,3 +1902,79 @@ def test_bidirectional_probe_executes_reverse_request_when_enabled(_mock_scrapli
     assert metadata["passed"] is True
     assert metadata["reason"] == "reverse_probe_passed"
     assert metadata["response_order"] == ["old-1"]
+
+
+@pytest.mark.parametrize("auth_state", ["anonymous", "public"])
+@pytest.mark.parametrize("identity_source", ["response", "jar", "snapshot"])
+def test_public_posts_reject_learned_identity_before_another_send(
+    _mock_scrapling, monkeypatch, auth_state, identity_source
+):
+    import asyncio
+
+    import httpx
+
+    from trr_backend.socials.instagram.credential_guard import CredentialIdentityMismatch
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsScraplingFetcher
+
+    sends = []
+
+    def send(request):
+        sends.append(request)
+        headers = {"set-cookie": "SESSIONID=forbidden; Path=/"} if identity_source == "response" else {}
+        return httpx.Response(200, headers=headers, text="<html>public</html>")
+
+    fetcher = InstagramPostsScraplingFetcher(cookies=[], raw_cookies={}, browser_account_id=None, auth_state=auth_state)
+    fetcher._http_client = httpx.AsyncClient(transport=httpx.MockTransport(send), trust_env=False)
+    monkeypatch.setattr(fetcher, "_pace_api_requests", __import__("unittest.mock").mock.AsyncMock())
+
+    async def execute():
+        try:
+            if identity_source == "snapshot":
+                await fetcher.apply_warmup_snapshot({"cookie_state": {"ds_user_id": "forbidden"}})
+            elif identity_source == "jar":
+                fetcher._http_client.cookies.set(" ds_User_ID ", "forbidden", domain=".instagram.com")
+                await fetcher._fetch_graphql("https://www.instagram.com/graphql/query", data={}, headers={})
+            else:
+                await fetcher._fetch_page("https://www.instagram.com/bravotv/", referer="https://www.instagram.com/")
+        finally:
+            await fetcher.aclose()
+
+    with pytest.raises(CredentialIdentityMismatch):
+        asyncio.run(execute())
+    assert len(sends) == (1 if identity_source == "response" else 0)
+    assert fetcher.runtime_metadata["browser_used"] is False
+    assert fetcher.runtime_metadata["scrapling_fetcher_class"] is None
+
+
+@pytest.mark.parametrize("auth_state", ["anonymous", "public"])
+def test_public_posts_ignore_identity_and_proxy_rotation_and_never_activate_requests(
+    _mock_scrapling, monkeypatch, auth_state
+):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsScraplingFetcher
+
+    provider = Mock(side_effect=AssertionError("public must not acquire login identity"))
+    proxy = SimpleNamespace(api_proxy_url="http://forbidden-proxy.invalid")
+    fetcher = InstagramPostsScraplingFetcher(
+        cookies=[],
+        raw_cookies={},
+        browser_account_id="ambient-account",
+        auth_state=auth_state,
+        identity_provider=provider,
+        proxy_config=proxy,
+    )
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_REQUESTS_FALLBACK_ENABLED", "true")
+
+    async def execute():
+        assert await fetcher.rotate_session(proxy_config=proxy) is False
+        await fetcher.set_api_proxy_config(proxy, reason="legacy-anonymous-canary")
+        fetcher._apply_proxy_config(proxy, reason="legacy-internal-rotation")
+
+    asyncio.run(execute())
+    fetcher._raw_cookies = {"sessionid": "forbidden", "ds_user_id": "forbidden"}
+    assert fetcher._activate_requests_fallback("warmup_transport_failed") is False
+    assert fetcher._browser_account_id is None and fetcher._proxy_config is None and fetcher._api_proxy_url is None
+    assert not provider.called

@@ -42,6 +42,7 @@ from trr_backend.socials._scrapling_http_utils import (
 )
 from trr_backend.socials.scrapling_transport import (
     SCRAPLING_BROWSER_LOCALE,
+    build_async_stealthy_session,
     build_stealthy_fetcher,
     cookies_to_scrapling,
     merge_response_cookies,
@@ -117,12 +118,7 @@ def _classify_challenge_response(text: str) -> str | None:
     return None
 
 
-def _captured_xhr_paths(response: Any) -> list[str]:
-    candidates: list[Any] = []
-    for attr_name in ("captured_xhr", "xhr", "xhr_requests", "requests"):
-        value = getattr(response, attr_name, None)
-        if isinstance(value, list):
-            candidates.extend(value)
+def _captured_xhr_paths(candidates: list[Any]) -> list[str]:
     paths: list[str] = []
     for item in candidates:
         raw_url = ""
@@ -263,7 +259,6 @@ class TikTokPostsScraplingFetcher:
         text = _response_text(response)
         status = _status_code(response)
         self._warmup_status_code = status
-        self._captured_xhr_paths = _captured_xhr_paths(response)
         self._warmup_challenge_classification = _classify_challenge_response(text)
         if (status in {401, 403}) or (
             self._warmup_challenge_classification is not None and status not in range(200, 300)
@@ -416,7 +411,13 @@ class TikTokPostsScraplingFetcher:
             "retry_delay": 1.0,
         }
         if self._capture_xhr:
-            fetch_kwargs["capture_xhr"] = r"/api/(?:user/detail|post/item_list)/"
+            async with build_async_stealthy_session(
+                **fetch_kwargs, record_requests=True, max_recorded_requests=100
+            ) as session:
+                response = await session.fetch(url)
+                recorded = session.network.search(url_pattern=r"/api/(?:user/detail|post/item_list)/", limit=None)
+                self._captured_xhr_paths = _captured_xhr_paths(recorded)
+                return response
         return await self._fetcher.async_fetch(url, **fetch_kwargs)
 
     # -------------------------------------------------------------------

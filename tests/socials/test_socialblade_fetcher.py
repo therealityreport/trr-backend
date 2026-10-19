@@ -28,14 +28,12 @@ class _DummyResponse:
         cookies: dict[str, str] | None = None,
         headers: dict[str, str] | None = None,
         url: str = "https://socialblade.com/instagram/user/thetraitorsus",
-        captured_xhr: list[object] | None = None,
     ) -> None:
         self.text = text
         self.status_code = status_code
         self.cookies = cookies or {}
         self.headers = headers or {}
         self.url = url
-        self.captured_xhr = captured_xhr or []
 
 
 def _trpc_payload(result: object) -> str:
@@ -113,25 +111,30 @@ def _build_fetcher(*, platform: str = "instagram") -> SocialBladeScraplingFetche
     )
 
 
-def test_scrapling_fetcher_builds_browser_fetcher_through_shared_transport(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake_fetcher = object()
-    captured: dict[str, bool] = {}
+def _mock_browser_session(monkeypatch, fake_fetch, captured, records=None):
+    from types import SimpleNamespace
 
-    def fake_build_stealthy_fetcher() -> object:
-        captured["called"] = True
-        return fake_fetcher
+    class Session:
+        def __init__(self, **kwargs):
+            captured["kwargs"] = kwargs
+            self.network = SimpleNamespace(search=self.search)
 
-    monkeypatch.setattr(
-        "trr_backend.socials.socialblade.fetcher.build_stealthy_fetcher",
-        fake_build_stealthy_fetcher,
-    )
+        async def __aenter__(self):
+            captured["entered"] = True
+            return self
 
-    fetcher = _build_fetcher(platform="instagram")
+        async def __aexit__(self, *_args):
+            captured["closed"] = True
 
-    assert captured["called"] is True
-    assert fetcher._fetcher is fake_fetcher
+        async def fetch(self, url):
+            return await fake_fetch(url, **captured["kwargs"])
+
+        def search(self, **kwargs):
+            assert captured.get("closed") is not True
+            captured["search"] = kwargs
+            return records or []
+
+    monkeypatch.setattr("trr_backend.socials.socialblade.fetcher.build_async_stealthy_session", Session)
 
 
 def test_scrapling_fetcher_uses_direct_instagram_user_url_without_raw_init_script(
@@ -145,7 +148,7 @@ def test_scrapling_fetcher_uses_direct_instagram_user_url_without_raw_init_scrip
         captured["kwargs"] = kwargs
         return _DummyResponse(text=SOCIALBLADE_HTML, cookies={"sbid": "warm-cookie"})
 
-    monkeypatch.setattr(fetcher._fetcher, "async_fetch", fake_async_fetch)
+    _mock_browser_session(monkeypatch, fake_async_fetch, captured)
 
     response = __import__("asyncio").run(fetcher._fetch_page("https://socialblade.com/instagram/user/thetraitorsus"))
 
@@ -153,10 +156,27 @@ def test_scrapling_fetcher_uses_direct_instagram_user_url_without_raw_init_scrip
     assert captured["url"] == "https://socialblade.com/instagram/user/thetraitorsus"
     assert "init_script" not in captured["kwargs"]
     assert callable(captured["kwargs"]["page_action"])
-    assert captured["kwargs"]["capture_xhr"] == r"/api/trpc/"
+    assert captured["kwargs"]["record_requests"] is True
+    assert captured["kwargs"]["max_recorded_requests"] == 100
+    assert captured["search"] == {"url_pattern": r"/api/trpc/", "limit": None}
+    assert captured["closed"] is True
     assert captured["kwargs"]["locale"] == "en-US"
     assert captured["kwargs"]["wait"] == 2_000
 
+
+
+def test_capture_session_closes_when_browser_fetch_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def failing_fetch(_url, **_kwargs):
+        raise RuntimeError("navigation failed")
+
+    _mock_browser_session(monkeypatch, failing_fetch, captured)
+    fetcher = _build_fetcher()
+    with pytest.raises(RuntimeError, match="navigation failed"):
+        __import__("asyncio").run(fetcher._fetch_page("https://socialblade.com/instagram/user/example"))
+    assert captured["closed"] is True
+    assert "search" not in captured
 
 def test_scrapling_fetcher_passes_proxy_to_browser_and_http_client(monkeypatch: pytest.MonkeyPatch) -> None:
     browser_proxy = {"server": "http://proxy.example:8080", "username": "user", "password": "pass"}
@@ -177,7 +197,7 @@ def test_scrapling_fetcher_passes_proxy_to_browser_and_http_client(monkeypatch: 
         def __init__(self, **kwargs: object) -> None:
             captured["httpx_kwargs"] = kwargs
 
-    monkeypatch.setattr(fetcher._fetcher, "async_fetch", fake_async_fetch)
+    _mock_browser_session(monkeypatch, fake_async_fetch, captured)
     monkeypatch.setattr("trr_backend.socials.socialblade.fetcher.httpx.AsyncClient", _FakeAsyncClient)
 
     __import__("asyncio").run(fetcher._fetch_page("https://socialblade.com/instagram/user/thetraitorsus"))
@@ -199,7 +219,7 @@ def test_scrapling_fetcher_uses_tiktok_user_url_with_trpc_capture(monkeypatch: p
         captured["kwargs"] = kwargs
         return _DummyResponse(text=SOCIALBLADE_HTML, cookies={"sbid": "warm-cookie"})
 
-    monkeypatch.setattr(fetcher._fetcher, "async_fetch", fake_async_fetch)
+    _mock_browser_session(monkeypatch, fake_async_fetch, captured)
 
     response = __import__("asyncio").run(fetcher._fetch_page("https://socialblade.com/tiktok/user/bravotv"))
 
@@ -385,14 +405,15 @@ def test_scrapling_fetcher_prefers_captured_xhr_history_when_html_capture_is_mis
         ),
     ]
 
-    async def fake_fetch_page(_url: str):
-        fetcher._request_count += 1
-        return _DummyResponse(text=SOCIALBLADE_HTML, cookies={"sbid": "warm-cookie"}, captured_xhr=xhr_responses)
+    async def fake_capture_fetch(_url: str, **_kwargs):
+        return _DummyResponse(text=SOCIALBLADE_HTML, cookies={"sbid": "warm-cookie"})
+
+    capture_state: dict[str, Any] = {}
+    _mock_browser_session(monkeypatch, fake_capture_fetch, capture_state, xhr_responses)
 
     async def fake_fetch_http(*_args, **_kwargs):
         raise AssertionError("http search should not run when captured XHR has full history")
 
-    monkeypatch.setattr(fetcher, "_fetch_page", fake_fetch_page)
     monkeypatch.setattr(fetcher, "_fetch_http", fake_fetch_http)
 
     payload = __import__("asyncio").run(fetcher.scrape("thetraitorsus"))

@@ -1381,6 +1381,8 @@ def test_browser_image_runtime_probe_closes_browser_before_playwright_context(
 
     assert result["healthy"] is True
     assert result["versions"]["chromium"] == "test-chromium"
+    assert result["versions"]["curl-cffi"] == "test-curl-cffi"
+    assert result["versions"]["apify-fingerprint-datapoints"] == "test-apify-fingerprint-datapoints"
     assert events == ["enter", "launch", "close", "exit"]
 
 

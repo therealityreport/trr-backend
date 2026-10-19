@@ -411,9 +411,9 @@ def build_stealthy_fetcher(**kwargs: Any) -> Any:
     return _build_fetcher_class("StealthyFetcher", **kwargs)
 
 
-def build_dynamic_fetcher(**kwargs: Any) -> Any:
-    """Lazily construct Scrapling's DynamicFetcher."""
-    return _build_fetcher_class("DynamicFetcher", **kwargs)
+def build_async_stealthy_session(**kwargs: Any) -> Any:
+    """Construct a browser session; callers own its async context and network history."""
+    return _build_fetcher_class("AsyncStealthySession", **kwargs)
 
 
 def build_fetcher(**kwargs: Any) -> Any:

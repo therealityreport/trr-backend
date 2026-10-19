@@ -51,14 +51,26 @@ def test_build_stealthy_fetcher_lazily_imports_scrapling_fetchers(monkeypatch: p
     mock_fetcher_cls.assert_called_once_with(headless=True)
 
 
+
+def test_build_async_stealthy_session_uses_public_export(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.socials.scrapling_transport import build_async_stealthy_session
+
+    mock_fetchers = ModuleType("scrapling.fetchers")
+    session_cls = MagicMock(return_value="session")
+    cast(Any, mock_fetchers).AsyncStealthySession = session_cls
+    monkeypatch.setitem(sys.modules, "scrapling.fetchers", mock_fetchers)
+
+    assert build_async_stealthy_session(record_requests=True, max_recorded_requests=100) == "session"
+    session_cls.assert_called_once_with(record_requests=True, max_recorded_requests=100)
+
 def test_build_fetchers_raise_clear_runtime_error_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    from trr_backend.socials.scrapling_transport import build_dynamic_fetcher
+    from trr_backend.socials.scrapling_transport import build_async_stealthy_session
 
     monkeypatch.delitem(sys.modules, "scrapling", raising=False)
     monkeypatch.setitem(sys.modules, "scrapling.fetchers", None)
 
     with pytest.raises(RuntimeError, match=r"Scrapling fetchers are unavailable\. Install scrapling\[fetchers\]\."):
-        build_dynamic_fetcher()
+        build_async_stealthy_session()
 
 
 def test_build_proxy_rotator_uses_scrapling_fetchers_path(monkeypatch: pytest.MonkeyPatch) -> None:

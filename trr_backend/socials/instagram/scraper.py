@@ -520,7 +520,7 @@ class InstagramScraper:
             else None
         )
         self.cookies = (
-            self._credential_identity.validate_snapshot(cookies) if self._credential_identity else cookies or {}
+            self._credential_identity.validate_snapshot(cookies or {}) if self._credential_identity else cookies or {}
         )
         self.session = session if session is not None else self._create_session()
         if self._credential_identity is not None:
@@ -531,7 +531,7 @@ class InstagramScraper:
             for name in ("Cookie", "Authorization", "Proxy-Authorization"):
                 self.session.headers.pop(name, None)
             self.cookies = self._credential_identity.prepare_jar(self.session.cookies, self.cookies)
-        self.browser_account_id = str(browser_account_id or "").strip() or None
+        self.browser_account_id = None if strict_public_credentials else str(browser_account_id or "").strip() or None
         self._browser_session_manager = browser_session_manager or _INSTAGRAM_BROWSER_SESSIONS
         self._rate_controller = InstagramRateController()
         self._request_client = InstagramRequestClient(session=self.session)
@@ -539,6 +539,8 @@ class InstagramScraper:
         self._context_cache_lock = threading.RLock()
         self._concurrent_rate_limit_lock: threading.Lock | None = None
         self.last_retrieval_meta: dict[str, Any] = {}
+        self._http_client_used: str | None = None
+        self._browser_used = False
         self.comments_auth_failed = False
         self.last_comment_fetch_reason: str | None = None
         self.last_post_info_fetch_reason: str | None = None
@@ -638,6 +640,8 @@ class InstagramScraper:
         )
 
     def _request_proxies(self) -> dict[str, str] | None:
+        if isinstance(getattr(self, "_credential_identity", None), PublicCookieIdentity):
+            return None
         if not self._identity_pool_enabled or self._active_identity is None:
             return None
         proxy_url = str(getattr(self._active_identity, "proxy_url", "") or "").strip()
@@ -717,6 +721,7 @@ class InstagramScraper:
         return previous_session_id != self._active_identity.session_id
 
     def _annotate_identity_meta(self) -> None:
+        self.last_retrieval_meta.update({"http_client": self._http_client_used, "browser_used": self._browser_used})
         self.last_retrieval_meta["identity_mode"] = "pooled" if self._identity_pool_enabled else "legacy"
         self.last_retrieval_meta["fallback_chain"] = list(self._fallback_chain)
         if self._identity_pool is not None and self._identity_pool.proxy_probe_failures:
@@ -898,6 +903,8 @@ class InstagramScraper:
         Requires SOCIAL_INSTAGRAM_COOKIE_AUTO_REFRESH=true plus an exact
         SOCIAL_INSTAGRAM_AUTH_REPAIR_CONFIRMATION value.
         """
+        if isinstance(getattr(self, "_credential_identity", None), PublicCookieIdentity):
+            return {"refreshed": False, "reason": "public_mode"}
         auto_refresh_enabled = (os.getenv("SOCIAL_INSTAGRAM_COOKIE_AUTO_REFRESH") or "").strip().lower()
         if auto_refresh_enabled not in {"1", "true", "yes", "on"}:
             return {"refreshed": False, "reason": "auto_refresh_disabled"}
@@ -1000,6 +1007,8 @@ class InstagramScraper:
         SOCIAL_INSTAGRAM_AUTH_REPAIR_CONFIRMATION value.
         Set SOCIAL_INSTAGRAM_BROWSER_MODE=headed|headless to control visibility.
         """
+        if isinstance(getattr(self, "_credential_identity", None), PublicCookieIdentity):
+            return {"refreshed": False, "reason": "public_mode"}
         explicit = (os.getenv("SOCIAL_INSTAGRAM_INTERACTIVE_LOGIN") or "").strip().lower()
         if explicit not in {"1", "true", "yes", "on"}:
             return {"refreshed": False, "reason": "interactive_login_disabled"}
@@ -1313,6 +1322,10 @@ class InstagramScraper:
         *,
         request_timeout: tuple[int, int] | float | None = None,
     ) -> dict[str, Any] | None:
+        if isinstance(getattr(self, "_credential_identity", None), PublicCookieIdentity):
+            return None
+        self._browser_used = True
+        self.last_retrieval_meta["browser_used"] = True
         try:
             from playwright.sync_api import sync_playwright
         except Exception as exc:  # noqa: BLE001
@@ -1764,6 +1777,16 @@ class InstagramScraper:
             kwargs["cookies"] = dict(self.cookies)
             kwargs["allow_redirects"] = False
             self.session.auth = None
+            self.session.trust_env = False
+            kwargs["auth"] = None
+            if isinstance(guard, PublicCookieIdentity):
+                session_proxies = getattr(self.session, "proxies", None)
+                if session_proxies is not None:
+                    session_proxies.clear()
+                kwargs["proxies"] = {}
+            for key in tuple(self.session.headers):
+                if key.lower() in {"cookie", "authorization", "proxy-authorization"}:
+                    self.session.headers.pop(key, None)
             kwargs["headers"] = {
                 key: value
                 for key, value in kwargs.get("headers", {}).items()
@@ -1774,6 +1797,8 @@ class InstagramScraper:
         if proxies and "proxies" not in kwargs:
             kwargs["proxies"] = proxies
         try:
+            self._http_client_used = "requests"
+            self.last_retrieval_meta.update({"http_client": "requests", "browser_used": self._browser_used})
             response = self.session.get(url, **kwargs)
             self._track_response_status(response.status_code)
             self._record_identity_success_for_response(response)
@@ -1812,6 +1837,16 @@ class InstagramScraper:
             kwargs["cookies"] = dict(self.cookies)
             kwargs["allow_redirects"] = False
             self.session.auth = None
+            self.session.trust_env = False
+            kwargs["auth"] = None
+            if isinstance(guard, PublicCookieIdentity):
+                session_proxies = getattr(self.session, "proxies", None)
+                if session_proxies is not None:
+                    session_proxies.clear()
+                kwargs["proxies"] = {}
+            for key in tuple(self.session.headers):
+                if key.lower() in {"cookie", "authorization", "proxy-authorization"}:
+                    self.session.headers.pop(key, None)
             kwargs["headers"] = {
                 key: value
                 for key, value in kwargs.get("headers", {}).items()
@@ -1822,6 +1857,8 @@ class InstagramScraper:
         if proxies and "proxies" not in kwargs:
             kwargs["proxies"] = proxies
         try:
+            self._http_client_used = "requests"
+            self.last_retrieval_meta.update({"http_client": "requests", "browser_used": self._browser_used})
             response = self.session.post(url, **kwargs)
             self._track_response_status(response.status_code)
             self._record_identity_success_for_response(response)
@@ -3133,6 +3170,9 @@ class InstagramScraper:
         page_size: int | None = None,
     ) -> dict | None:
         """Fetch posts using GraphQL (requires auth for full access)."""
+        if isinstance(getattr(self, "_credential_identity", None), PublicCookieIdentity):
+            allow_browser_fallback = False
+            allow_recovery = False
         self._ensure_active_identity()
         self._rate_controller.before_query(
             QUERY_TYPE_GRAPHQL_PROFILE_POSTS,
@@ -5396,6 +5436,9 @@ class InstagramScraper:
         during its own infinite-scroll pagination.  Zero rate-limiting overhead because
         requests originate from a real browser session.
         """
+        if isinstance(getattr(self, "_credential_identity", None), PublicCookieIdentity):
+            return []
+        self._browser_used = True
         try:
             from playwright.sync_api import sync_playwright
         except Exception as exc:  # noqa: BLE001

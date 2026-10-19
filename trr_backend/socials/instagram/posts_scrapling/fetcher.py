@@ -64,7 +64,11 @@ from trr_backend.socials.instagram.constants import (
     PROFILE_POSTS_ROOT_FIELD_NAME,
     WEB_X_ASBD_ID,
 )
-from trr_backend.socials.instagram.credential_guard import CredentialIdentityMismatch, PinnedCookieIdentity
+from trr_backend.socials.instagram.credential_guard import (
+    CredentialIdentityMismatch,
+    PinnedCookieIdentity,
+    PublicCookieIdentity,
+)
 from trr_backend.socials.instagram.graphql_response import classify_graphql_response
 from trr_backend.socials.instagram.network_policy import (
     default_instagram_network_policy,
@@ -1167,25 +1171,30 @@ class InstagramPostsScraplingFetcher:
             else resolved_raw_cookies
         )
         self._credential_identity = (
-            PinnedCookieIdentity(self._raw_cookies) if consume_credentials_only and not self._anonymous_mode else None
+            PublicCookieIdentity({})
+            if self._anonymous_mode
+            else PinnedCookieIdentity(self._raw_cookies)
+            if consume_credentials_only
+            else None
         )
         if self._credential_identity is not None:
             self._raw_cookies = self._credential_identity.validate_snapshot(self._raw_cookies)
-        self._browser_account_id = str(browser_account_id or "").strip() or None
+        self._browser_account_id = None if self._anonymous_mode else str(browser_account_id or "").strip() or None
         # A3: optional zero-arg callable returning the next pool identity as a
         # PostsRotatedIdentity (cookies, raw_cookies, browser_account_id). Injected
         # from session-resolve only when SOCIAL_INSTAGRAM_IDENTITY_POOL_ENABLED is
         # on. None => single-identity / pool disabled, so rotate_session only
         # swaps the proxy sticky session.
-        self._identity_provider = identity_provider
+        self._identity_provider = None if self._anonymous_mode else identity_provider
         self._identity_rotation_count = 0
+        proxy_config = None if self._anonymous_mode else proxy_config
         self._proxy_config = proxy_config
         self._proxy_rotator = proxy_config.proxy_rotator if proxy_config else None
         self._api_proxy_url = proxy_config.api_proxy_url if proxy_config else None
         self._headless = headless if headless is not None else _env_truthy("SOCIAL_INSTAGRAM_POSTS_HEADLESS", True)
         self._timeout_ms = max(5_000, int(timeout_ms))
         self._fast_mode = bool(fast_mode)
-        self._allow_requests_recovery = bool(allow_requests_recovery)
+        self._allow_requests_recovery = bool(allow_requests_recovery) and not self._anonymous_mode
         resolved_page_size = int(
             page_size
             if page_size is not None
@@ -1276,7 +1285,10 @@ class InstagramPostsScraplingFetcher:
             self._scrapling_fetcher_options.metadata,
             safe_scrapling_proxy_metadata(),
         )
-        self._fetcher = build_stealthy_fetcher()
+        self._fetcher = None if self._anonymous_mode else build_stealthy_fetcher()
+        self._browser_used = False
+        self._http_client_used: str | None = None
+        self._scrapling_fetcher_invoked: str | None = None
 
         # httpx client (for GraphQL POSTs). Created lazily after warmup bridges cookies.
         self._http_client: httpx.AsyncClient | None = None
@@ -1298,7 +1310,9 @@ class InstagramPostsScraplingFetcher:
             "scrapling_runtime": dict(self._scrapling_runtime_metadata),
             **self._scrapling_fetcher_metadata,
             "auth_state": self._auth_state,
-            "http_client": "httpx",
+            "http_client": self._http_client_used,
+            "browser_used": self._browser_used,
+            "scrapling_fetcher_class": self._scrapling_fetcher_invoked,
             "impersonate": None,
             "cookie_count": len(self._raw_cookies),
             "authenticated_cookie_count": sum(1 for name in self._raw_cookies if name in _AUTHENTICATED_COOKIE_NAMES),
@@ -1344,7 +1358,11 @@ class InstagramPostsScraplingFetcher:
             "bytes_by_host": dict(sorted(self._bytes_by_host.items())),
             "request_count_by_host": dict(sorted(self._request_count_by_host.items())),
             "network_policy": self._network_policy.to_metadata(),
-            "transport": "httpx_after_browser_warmup",
+            "transport": (
+                "httpx_after_browser_warmup"
+                if self._browser_used and self._http_client_used == "httpx"
+                else self._http_client_used or ("browser" if self._browser_used else None)
+            ),
             "requests_fallback": {
                 "active": bool(self._requests_fallback_active),
                 "reason": self._requests_fallback_reason,
@@ -1526,7 +1544,7 @@ class InstagramPostsScraplingFetcher:
         await self._rebuild_http_client()
 
     async def _try_apply_warmup_pool_entry(self) -> bool:
-        if not _warmup_pool_enabled():
+        if self._anonymous_mode or not _warmup_pool_enabled():
             self._warmup_pool_metadata.update({"enabled": False, "hit": False, "miss": False})
             return False
         entry = _POSTS_WARMUP_POOL.get(self._warmup_pool_key)
@@ -1603,7 +1621,7 @@ class InstagramPostsScraplingFetcher:
         guard = getattr(self, "_credential_identity", None)
         if guard is not None:
             guard.validate_snapshot(self._raw_cookies)
-        if not _warmup_pool_enabled():
+        if self._anonymous_mode or not _warmup_pool_enabled():
             return
         _POSTS_WARMUP_POOL[self._warmup_pool_key] = _WarmupPoolEntry(
             raw_cookies=dict(self._raw_cookies),
@@ -1626,7 +1644,7 @@ class InstagramPostsScraplingFetcher:
         # The legacy fallback can substitute ambient credentials and has sends
         # outside the explicit source hooks. Durable activities use the observed
         # browser/httpx path until a fully observed fallback is supplied.
-        if getattr(self, "_consume_credentials_only", False):
+        if self._anonymous_mode or getattr(self, "_consume_credentials_only", False):
             return False
         if not _requests_fallback_enabled():
             return False
@@ -1692,6 +1710,7 @@ class InstagramPostsScraplingFetcher:
                 direction=direction,
             )
 
+        self._http_client_used = "requests"
         payload = scraper.fetch_posts_graphql(
             username,
             cursor=cursor,
@@ -2093,6 +2112,8 @@ class InstagramPostsScraplingFetcher:
 
     async def set_api_proxy_config(self, proxy_config: PostsProxyConfig | None, *, reason: str) -> None:
         """Switch the direct GraphQL proxy route without rerunning browser warmup."""
+        if self._anonymous_mode:
+            return
         current_url = self._api_proxy_url
         next_url = proxy_config.api_proxy_url if proxy_config else None
         if current_url == next_url:
@@ -2118,6 +2139,8 @@ class InstagramPostsScraplingFetcher:
     def _apply_proxy_config(self, proxy_config: PostsProxyConfig | None, *, reason: str) -> None:
         """Set proxy state from a new config (no client rebuild). Force-applies
         even when the URL is unchanged so a session-rotation always re-pins."""
+        if self._anonymous_mode:
+            return
         previous_fingerprint = self._selected_proxy_fingerprint
         self._proxy_config = proxy_config
         self._proxy_rotator = proxy_config.proxy_rotator if proxy_config else None
@@ -2150,7 +2173,7 @@ class InstagramPostsScraplingFetcher:
         no-op for the cookies but still swaps the proxy and rebuilds the client,
         and returns False so the caller knows no real identity advance happened.
         """
-        if getattr(self, "_consume_credentials_only", False):
+        if self._anonymous_mode or getattr(self, "_consume_credentials_only", False):
             return False
         rotated_identity = False
         if self._identity_provider is not None:
@@ -2299,6 +2322,26 @@ class InstagramPostsScraplingFetcher:
         Emits a document request with stripped-down nav headers so that the
         profile HTML comes back with the runtime tokens intact.
         """
+        if self._anonymous_mode:
+            if self._http_client is None:
+                await self._rebuild_http_client()
+            self._raw_cookies = self._credential_identity.prepare_jar(self._http_client.cookies, self._raw_cookies)
+            self._http_client.auth = None
+            client_headers = getattr(self._http_client, "headers", {})
+            for key in tuple(client_headers):
+                if key.lower() in {"cookie", "authorization", "proxy-authorization"}:
+                    client_headers.pop(key, None)
+            observer = getattr(self, "_before_source_request", None)
+            if observer is not None:
+                observer("http_warmup")
+            self._request_count += 1
+            self._http_client_used = "httpx"
+            response = await self._http_client.get(url, headers=_build_nav_headers(referer))
+            self._sync_response_cookies(response)
+            self._emit_source_diagnostic(response, phase="http_warmup")
+            self._observe_source_failure(response, warmup=True)
+            self._record_response_bytes(response)
+            return response
         guard = getattr(self, "_credential_identity", None)
         if guard is not None:
             self._raw_cookies = guard.validate_snapshot(self._raw_cookies)
@@ -2323,6 +2366,8 @@ class InstagramPostsScraplingFetcher:
             "retry_delay": 1.0,
             **instagram_scrapling_network_kwargs(policy=self._network_policy),
         }
+        self._browser_used = True
+        self._scrapling_fetcher_invoked = "StealthyFetcher"
         response = await self._fetcher.async_fetch(
             url,
             **fetch_kwargs,
@@ -2367,6 +2412,7 @@ class InstagramPostsScraplingFetcher:
         if observer is not None:
             observer("graphql")
         self._request_count += 1
+        self._http_client_used = "httpx"
         response = await self._http_client.post(url, data=data, headers=headers)  # type: ignore[union-attr]
         self._emit_source_diagnostic(response, phase="graphql")
         self._observe_source_failure(response, graphql=True)
@@ -2478,6 +2524,8 @@ class InstagramPostsScraplingFetcher:
             pass
 
     async def _recover_homepage_redirect(self, *, referer: str) -> bool:
+        if self._anonymous_mode:
+            return False
         recovery_url = str(referer or "").strip() or "https://www.instagram.com/"
         self._record_retry_reason("homepage_redirect_recovery")
         try:

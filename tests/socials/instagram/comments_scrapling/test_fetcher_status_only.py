@@ -1439,3 +1439,59 @@ def test_single_session_load_all_uses_rendered_hydration_only_after_api_gap(monk
     assert result.diagnostic_metadata["rendered_merged_comments"] == 1
     assert result.diagnostic_metadata["merged_comments"] == 2
     fetcher._fetch_rendered_single_session_load_all.assert_awaited_once()
+
+
+def test_public_only_runtime_metadata_does_not_claim_unused_browser(monkeypatch):
+    from trr_backend.socials.instagram.comments_scrapling import fetcher as module
+
+    monkeypatch.setattr(
+        module, "build_stealthy_fetcher", lambda: (_ for _ in ()).throw(AssertionError("browser built"))
+    )
+    fetcher = InstagramCommentsScraplingFetcher(cookies=[], raw_cookies={}, browser_account_id=None, public_only=True)
+    metadata = fetcher.runtime_metadata
+    assert metadata["scrapling_fetcher_class"] is None
+    assert metadata["browser_used"] is False and metadata["http_client"] is None
+    fetcher._parser.session.close()
+
+
+def test_relay_runtime_metadata_reports_actual_http_client(monkeypatch):
+    from trr_backend.socials.instagram.comments_scrapling import fetcher as module
+
+    class _CurlCffiAsyncClient:
+        cookies = httpx.Cookies()
+
+        def __init__(self, **_kwargs):
+            self.requests = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url, **_kwargs):
+            self.requests.append(url)
+            return httpx.Response(403, request=httpx.Request("GET", url))
+
+    fetcher = _build_fetcher()
+    monkeypatch.setattr(module, "build_comments_async_client", _CurlCffiAsyncClient)
+    monkeypatch.setattr(fetcher, "_pace_api_requests", AsyncMock(return_value=True))
+    try:
+        comments, metadata = asyncio.run(
+            fetcher._fetch_public_relay_coauthor_comments_for_status_only(
+                "AAAABC",
+                "https://www.instagram.com/p/AAAABC/",
+                allow_authenticated=False,
+                use_proxy=False,
+                max_comments=5,
+                fetch_replies=False,
+            )
+        )
+        assert comments == [] and metadata["reason"] == "graphql_relay_post_page_unavailable"
+        assert fetcher.runtime_metadata["http_client"] == "curl_cffi"
+        assert fetcher.runtime_metadata["transport"] == "curl_cffi"
+        assert fetcher.runtime_metadata["browser_used"] is False
+        assert fetcher.runtime_metadata["scrapling_fetcher_class"] is None
+    finally:
+        asyncio.run(fetcher.aclose())
+        fetcher._parser.session.close()

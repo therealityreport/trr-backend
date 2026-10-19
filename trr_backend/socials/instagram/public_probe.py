@@ -12,7 +12,11 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
-from trr_backend.socials.instagram.permalink_metadata import fetch_permalink_metadata
+from trr_backend.socials.instagram.permalink_metadata import (
+    _DEFAULT_HEADERS,
+    fetch_permalink_media_item,
+    parse_permalink_metadata,
+)
 from trr_backend.socials.instagram.scraper import InstagramScraper
 
 PUBLIC_PROBE_VERSION = "2026-06-15.public-instagram-proof-v1"
@@ -473,7 +477,9 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _default_page_fetcher(config: PublicProbeConfig) -> Callable[[str, str | None], PublicProbePage]:
-    scraper = InstagramScraper(cookies={}, browser_account_id=None, attach_auth_session=False)
+    scraper = InstagramScraper(
+        cookies={}, browser_account_id=None, attach_auth_session=False, strict_public_credentials=True
+    )
 
     def fetch_page(account: str, cursor: str | None) -> PublicProbePage:
         payload = scraper.fetch_posts_graphql(
@@ -495,8 +501,29 @@ def _default_page_fetcher(config: PublicProbeConfig) -> Callable[[str, str | Non
 
 
 def _default_detail_fetcher(shortcode: str) -> PublicDetailStatus:
+    scraper = InstagramScraper(cookies={}, attach_auth_session=False, strict_public_credentials=True)
+    deadline = time.monotonic() + 15.0
+
+    class PublicPermalinkTransport:
+        def check_deadline(self) -> None:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("public_detail_deadline")
+
+        def request(self, url: str, *, text: bool = False) -> Any:
+            self.check_deadline()
+            response = scraper._get(url, headers=_DEFAULT_HEADERS, timeout=(4, 10))
+            response.raise_for_status()
+            scraper._request_cookies()
+            if response.status_code != 200:
+                raise ValueError("public_detail_redirect")
+            self.check_deadline()
+            return response.text if text else response.json()
+
     try:
-        metadata = fetch_permalink_metadata(shortcode, cookies={})
+        media = fetch_permalink_media_item(
+            shortcode, session=scraper.session, cookies={}, transport=PublicPermalinkTransport()
+        )
+        metadata = parse_permalink_metadata(media) if isinstance(media, dict) else None
     except Exception as exc:  # noqa: BLE001
         return PublicDetailStatus(
             shortcode=shortcode,
@@ -504,6 +531,8 @@ def _default_detail_fetcher(shortcode: str) -> PublicDetailStatus:
             succeeded=False,
             stop_reason=f"{exc.__class__.__name__}: {exc}",
         )
+    finally:
+        scraper.session.close()
     if metadata is None:
         return PublicDetailStatus(
             shortcode=shortcode,
@@ -534,15 +563,18 @@ def _default_comments_fetcher(post: PublicPostSummary) -> PublicCommentsStatus:
             browser_account_id=None,
             proxy_config=None,
             timeout_ms=45_000,
+            public_only=True,
         )
-        fetcher._parser = InstagramScraper(cookies={}, browser_account_id=None, attach_auth_session=False)  # noqa: SLF001
-        result = await fetcher.fetch_comments_for_shortcode(
-            post.shortcode,
-            max_comments=0,
-            fetch_replies=True,
-            expected_comment_count=post.comment_count,
-            load_strategy="public_relay",
-        )
+        try:
+            result = await fetcher.fetch_comments_for_shortcode(
+                post.shortcode,
+                max_comments=5,
+                fetch_replies=False,
+                expected_comment_count=post.comment_count,
+                load_strategy="public_relay",
+            )
+        finally:
+            await fetcher.aclose()
         diagnostic = getattr(result, "diagnostic_metadata", {}) or {}
         is_diag_dict = isinstance(diagnostic, dict)
         public_comments_raw = diagnostic.get("public_comments") if is_diag_dict else {}
@@ -689,6 +721,9 @@ def _public_scraper_runtime_metadata(scraper: Any | None = None) -> dict[str, An
     return {
         "scrape_mode": "public_first",
         "auth_state": "public",
+        "http_client": retrieval_meta.get("http_client"),
+        "browser_used": bool(retrieval_meta.get("browser_used", False)),
+        "scrapling_fetcher_class": None,
         "proxy_state": "none",
         "selected_proxy_fingerprint": "none",
         "transport": retrieval_meta.get("retrieval_transport") or retrieval_meta.get("transport"),

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -179,39 +181,92 @@ def test_fetch_posts_raises_runtime_unsupported_for_empty_payload(monkeypatch: p
         _run(ScraplingRuntime().fetch_posts("bravotv", limit=3))
 
 
-def test_fetch_post_detail_maps_supported_shortcode_payload(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_fetch_json(self, url: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        assert url == "https://www.instagram.com/p/abc123/"
-        return {
-            "graphql": {
-                "shortcode_media": {
-                    "__typename": "GraphImage",
-                    "shortcode": "abc123",
-                    "edge_media_to_caption": {"edges": [{"node": {"text": "Launch #Bravo @traitors"}}]},
-                    "display_url": "https://cdn.example.com/abc123.jpg",
-                }
-            }
-        }
+def test_fetch_post_detail_parses_real_html_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    node = {
+        "__typename": "GraphImage",
+        "shortcode": "abc123",
+        "edge_media_to_caption": {"edges": [{"node": {"text": "Launch #Bravo @traitors"}}]},
+        "display_url": "https://cdn.example.com/abc123.jpg",
+    }
+    html = (
+        '<html><script type="application/json">'
+        + json.dumps({"graphql": {"shortcode_media": node}})
+        + "</script></html>"
+    )
 
-    monkeypatch.setattr(ScraplingRuntime, "_fetch_json", fake_fetch_json)
+    class Fetcher:
+        def get(self, url, **kwargs):
+            assert url == "https://www.instagram.com/p/abc123/"
+            return SimpleNamespace(status_code=200, text=html)
 
+    monkeypatch.setattr("trr_backend.socials.instagram.runtimes.scrapling_runtime.build_fetcher", Fetcher)
     detail = _run(ScraplingRuntime().fetch_post_detail("abc123"))
-
     assert detail.post.shortcode == "abc123"
     assert detail.post.caption == "Launch #Bravo @traitors"
+    assert detail.post.media_urls == ("https://cdn.example.com/abc123.jpg",)
     assert detail.hashtags == ("Bravo",)
     assert detail.mentions == ("@traitors",)
     assert detail.permalink == "https://www.instagram.com/p/abc123/"
 
 
 def test_fetch_post_detail_raises_runtime_unsupported_for_unknown_shape(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_fetch_json(self, url: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return {"status": "ok"}
+    async def fake_fetch_response(self, url, **kwargs):
+        return SimpleNamespace(text="<html>No media</html>")
 
-    monkeypatch.setattr(ScraplingRuntime, "_fetch_json", fake_fetch_json)
-
+    monkeypatch.setattr(ScraplingRuntime, "_fetch_response", fake_fetch_response)
     with pytest.raises(RuntimeUnsupported, match="unsupported detail payload"):
         _run(ScraplingRuntime().fetch_post_detail("abc123"))
+
+
+@pytest.mark.parametrize("repeat_cursor", [False, True])
+def test_fetch_posts_paginates_and_rejects_repeated_cursor(monkeypatch, repeat_cursor):
+    calls = []
+
+    class Fetcher:
+        def get(self, url, **kwargs):
+            return SimpleNamespace(
+                status_code=200,
+                json=lambda: {
+                    "data": {
+                        "user": {
+                            "edge_owner_to_timeline_media": {
+                                "edges": [{"node": {"shortcode": "first"}}],
+                                "page_info": {"has_next_page": True, "end_cursor": "cursor-1"},
+                            }
+                        }
+                    }
+                },
+            )
+
+        def post(self, url, **kwargs):
+            calls.append(json.loads(kwargs["data"]["variables"]))
+            return SimpleNamespace(
+                status_code=200,
+                json=lambda: {
+                    "data": {
+                        "xdt_api__v1__feed__user_timeline_graphql_connection": {
+                            "edges": [
+                                {"node": {"shortcode": "first"}},
+                                {"node": {"code": "second", "caption": {"text": "REST caption"}, "like_count": 7}},
+                            ],
+                            "page_info": {"has_next_page": repeat_cursor, "end_cursor": "cursor-1"},
+                        }
+                    }
+                },
+            )
+
+    monkeypatch.setattr("trr_backend.socials.instagram.runtimes.scrapling_runtime.build_fetcher", Fetcher)
+    if repeat_cursor:
+        with pytest.raises(RuntimeUnsupported, match="cursor did not advance"):
+            _run(ScraplingRuntime().fetch_posts("bravotv", limit=3))
+    else:
+        posts = _run(ScraplingRuntime().fetch_posts("bravotv", limit=3))
+        assert [post.shortcode for post in posts] == ["first", "second"]
+        assert posts[1].caption == "REST caption"
+        assert posts[1].like_count == 7
+    assert len(calls) == 1
+    assert calls[0]["after"] == "cursor-1"
+    assert calls[0]["first"] == 2
 
 
 def test_fetch_json_uses_basic_fetcher_and_request_cookie_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -226,7 +281,8 @@ def test_fetch_json_uses_basic_fetcher_and_request_cookie_mapping(monkeypatch: p
             assert url == "https://www.instagram.com/api/v1/example"
             assert kwargs["params"] == {"username": "bravotv"}
             assert kwargs["cookies"] == {"sessionid": "abc", "csrftoken": "xyz"}
-            assert kwargs["timeout"] == 45_000
+            assert kwargs["timeout"] == 45
+            assert kwargs["proxies"] == {"all": ""}
             return FakeResponse()
 
     monkeypatch.setattr(
