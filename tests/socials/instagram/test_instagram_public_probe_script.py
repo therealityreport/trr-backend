@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -454,3 +455,44 @@ def _read_json(path: Path) -> dict[str, Any]:
     import json
 
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("page_cap", [1, 2])
+def test_probe_honors_page_and_sample_caps_including_resume(tmp_path: Path, page_cap: int) -> None:
+    page_calls = []
+    detail_calls = []
+    comment_calls = []
+
+    def page_fetcher(_account, cursor):
+        page_calls.append(cursor)
+        page_num = len(page_calls)
+        return PublicProbePage(
+            posts=[_node(f"P{page_num}N{n}", "2026-10-01T00:00:00+00:00", comments=10) for n in range(4)],
+            page_info={"has_next_page": True, "end_cursor": f"cursor-{page_num}"},
+            metadata={},
+            connection_found=True,
+        )
+
+    def detail_fetcher(shortcode):
+        detail_calls.append(shortcode)
+        return _detail_success(shortcode)
+
+    def comments_fetcher(post):
+        comment_calls.append(post.shortcode)
+        return _comments_complete(post)
+
+    config = replace(_config(tmp_path, max_pages=page_cap), sample_details_per_page=1)
+    for resume in [False, True]:
+        result = run_public_probe(
+            replace(config, resume=resume),
+            page_fetcher=page_fetcher,
+            detail_fetcher=detail_fetcher,
+            comments_fetcher=comments_fetcher,
+        )
+        multiplier = 2 if resume else 1
+        assert len(page_calls) == page_cap * multiplier
+        assert len(detail_calls) == page_cap * multiplier
+        assert len(comment_calls) == page_cap * multiplier
+        assert result.environment["page_cap"] == page_cap
+        assert result.stop_reason == "page_cap_reached"
+        assert result.next_resume_cursor == f"cursor-{page_cap * multiplier}"

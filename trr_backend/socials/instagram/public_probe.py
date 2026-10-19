@@ -261,8 +261,15 @@ def run_public_probe(
     }
 
     page_index = max(0, int(state.get("pages_recovered") or 0)) + 1
+    pages_this_run = 0
     while True:
+        if config.max_pages is not None and pages_this_run >= config.max_pages:
+            terminal_stop_reason = "page_cap_reached"
+            _update_terminal_state(state, stop_reason=terminal_stop_reason, cursor=cursor, completed=False)
+            _save_state(config.state_file, state)
+            break
         page = fetch_page(account, cursor)
+        pages_this_run += 1
         page_posts = [_post_summary_from_node(node, page_index=page_index) for node in page.posts]
         page_posts = [post for post in page_posts if post.shortcode]
         metadata = dict(page.metadata or {})
@@ -622,7 +629,8 @@ def _normalize_mode(value: Any) -> str:
 
 
 def _normalize_max_pages(value: Any) -> int | None:
-    return None
+    pages = int(value or 0)
+    return pages if pages > 0 else None
 
 
 def parse_target_years(value: Any) -> tuple[int, ...]:
@@ -823,7 +831,6 @@ def _collect_details(
         page_posts,
         mode=config.details_mode,
         per_page=config.sample_details_per_page,
-        all_first_three_pages=True,
     ):
         if post.shortcode not in detail_statuses:
             detail_statuses[post.shortcode] = fetch_detail(post.shortcode)
@@ -840,7 +847,6 @@ def _collect_comments(
         ordered,
         mode=config.comments_mode,
         per_page=config.sample_comments_per_page,
-        all_first_three_pages=False,
     ):
         if post.shortcode not in comment_statuses:
             comment_statuses[post.shortcode] = fetch_comments(post)
@@ -851,14 +857,11 @@ def _select_posts_for_mode(
     *,
     mode: str,
     per_page: int,
-    all_first_three_pages: bool,
 ) -> list[PublicPostSummary]:
     if mode == "all":
         return list(page_posts)
     if not page_posts or per_page <= 0:
         return []
-    if all_first_three_pages and page_posts[0].page_index <= 3:
-        return list(page_posts)
     return list(page_posts[:per_page])
 
 

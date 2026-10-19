@@ -1,6 +1,6 @@
 # Instagram public isolation and Scrapling 0.5 release record
 
-Status: user approved the explicit 35-path commit and deployment to admin-56995 / main / trr-backend-jobs on 2026-10-19. Deployment acceptance remains pending.
+Status: approved 35-path source committed as a662c2e02dfcac891cfc08c8b49d3b4a424be27b and deployed as v79. A reviewed probe-limit repair is being deployed. Acceptance remains limited by Threads credentials and Instagram detail/pagination access.
 
 ## Scope and source
 
@@ -16,7 +16,7 @@ Status: user approved the explicit 35-path commit and deployment to admin-56995 
 
 Live preflight on 2026-10-19 confirmed profile/workspace `admin-56995`, environment `main`, app `trr-backend-jobs`, app ID `ap-DkLTRoSvqhbkGO7fHyHxrD`.
 
-Production remains v78, deployed 2026-10-16 with tag `ig-public-profile-20261017-690e08c1` and source label `690e08c*`. The asterisk denotes uncommitted source: that Git commit alone cannot reproduce the deployed artifact. Preserve the provider's v78 deployment as rollback evidence. The previous 0.4.12 locks remain recoverable from the base revision.
+Pre-deploy production was v78, deployed 2026-10-16 with tag `ig-public-profile-20261017-690e08c1` and source label `690e08c*`. The asterisk denotes uncommitted source: that Git commit alone cannot reproduce the deployed artifact. Preserve the provider's v78 deployment as rollback evidence. The previous 0.4.12 locks remain recoverable from the base revision.
 
 The installed Modal CLI supports explicit artifact rollback:
 
@@ -72,7 +72,7 @@ TRR-APP build: not applicable (backend scraper/runtime change without an app con
 
 ## Remaining dirty paths outside this release
 
-The following 53 existing paths are outside the proposed task commit and outside the Modal image upload/dependency paths. Classification uses path names only; their changes were not reviewed. The image builders upload `api`, `trr_backend`, the listed social script folders/files and `scripts/sync`; dependency layers consume their explicit lock files. This table must be refreshed after the approved commit.
+The following 53 existing paths are outside the proposed task commit and outside the Modal image upload/dependency paths. Classification uses path names only; their changes were not reviewed. The image builders upload `api`, `trr_backend`, the listed social script folders/files and `scripts/sync`; dependency layers consume their explicit lock files. After the approved source commit, these same 53 paths remain uncommitted and outside the image; their contents remain unreviewed.
 
 | Git status | Path | Image classification |
 | --- | --- | --- |
@@ -171,3 +171,44 @@ tests/socials/instagram/test_instagram_public_probe_script.py
 tests/socials/instagram/comments_scrapling/test_fetcher_status_only.py
 tests/socials/instagram/posts_scrapling/test_job_runner.py
 ```
+
+<!-- modal-deploy-history:start -->
+## Deploy History Stamp
+
+- Last stamped: `2026-10-19T16:26:31-04:00`
+- Workspace: `admin-56995`
+- Profile: `admin-56995`
+- Canary: `https://admin-56995--trr-backend-api.modal.run/health` HTTP `200` on attempt `1`
+
+| Version | Deployed At | Deployed By | Commit | Client |
+| --- | --- | --- | --- | --- |
+| v79 | 2026-10-19 16:26:06-04:00 | admin-56995 | a662c2e* | 1.5.5 |
+| v78 | 2026-10-16 20:53:20-04:00 | admin-56995 | 690e08c* | 1.5.5 |
+| v77 | 2026-10-16 20:26:38-04:00 | admin-56995 | 7f35ce5* | 1.5.5 |
+| v76 | 2026-10-16 20:26:32-04:00 | admin-56995 | 7f35ce5* | 1.5.5 |
+| v75 | 2026-10-16 14:30:05-04:00 | admin-56995 | 5b140c7* | 1.5.5 |
+
+<!-- modal-deploy-history:end -->
+
+## Deployed checks and bounded-probe repair
+
+Initial deployment: v79, 2026-10-19 16:26 EDT, tag `ig-public-scrapling05-a662c2e0`. Modal labels source `a662c2e*` because the 53 excluded hygiene paths remain dirty; image inputs match committed source. No global profile was activated.
+
+- Wrapper readiness/API cold-start canary passed: HTTP 200 on first attempt.
+- Admin operations, Google News, Reddit refresh, admin vision, SocialBlade and browser image runtime probes all healthy. Browser launch succeeded. Deployed versions: Scrapling 0.5, curl-cffi 0.16.1, Playwright 1.62.0, Patchright 1.62.1, apify-fingerprint-datapoints 0.15.0; Chromium 151.0.7922.34.
+- Control-plane provider probe ready; all required functions/endpoints present. Dispatch helper pins admin-56995/main/trr-backend-jobs and rejects conflicting targets.
+- Threads remote-auth smoke failed: missing csrftoken and sessionid. Strict readiness exits 1. No cookie repair, login or proxy change was attempted.
+- Public Instagram recovered 33 unique @bravotv listing records and five sampled comments for `DeHyoOPNOiX`. Listing fields include shortcode, media ID/type, publication time, and like/comment counts. No media download or complete-comment-thread claim. Proof reports auth=public, proxy=none, Decodo=none.
+- Zero detail extractions succeeded. Page two returned HTTP 401: `public_graphql_401_backoff_required`, recommending 3600 seconds. No follow-up Instagram requests were made.
+
+Representative live listing records:
+
+| Shortcode | Published UTC | Media type | Likes | Comments advertised |
+| --- | --- | --- | --- | --- |
+| DesEWRWl0Ix | 2026-10-19 20:01:12 | carousel | 537 | 7 |
+| Der2j7hlvnd | 2026-10-19 18:01:25 | video | 1601 | 70 |
+| DeHyoOPNOiX | 2026-10-05 17:59:32 | video | 74033 | 2140 |
+
+The probe requested max-pages=2, one sampled detail and one sampled comment post per page. Deployed evidence exposed pre-existing code that ignored max-pages and selected every detail on the first three pages; it attempted 33 details. The run stopped on page two's 401, but did not prove its configured bounds. The repair enforces positive page limits per invocation, preserves the resume cursor and applies detail sampling on every page. Zero remains uncapped; explicit all mode remains available. All 15 owner tests passed, including cap=1/2 and resume regressions. Independent review of only the two changed files found no findings; subsequent test formatting was nonsemantic.
+
+Repair edits and this record remain within the approved 35 paths. Browser/dependency/worker evidence is reused because the repair does not change those inputs. Instagram cooldown and Threads credentials remain acceptance limits.
