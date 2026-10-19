@@ -224,3 +224,22 @@ Repair edits and this record remain within the approved 35 paths. Browser/depend
 - The final documentation-only evidence commit does not change deployed runtime inputs. No push, PR or branch change was performed.
 
 Remaining acceptance work: supply authorized valid Threads cookies before rerunning its auth smoke; investigate public permalink metadata availability and repeat a bounded Instagram probe only after the reported backoff. FetcherSession comparison remains inconclusive and production adoption remains out of scope.
+
+## Local detail and pagination investigation (after v80)
+
+User narrowed the follow-up to local work first. No live Instagram request, deployment, cookie/auth repair or proxy change occurred in this phase. The 53 hygiene paths remain excluded.
+
+Detail means the individual post's public metadata: caption/hashtags/mentions, media URLs and carousel items, thumbnail, time/type, counts where exposed, owner and tagged/collaborating accounts. The bounded probe reports only success, media type/URL count, caption/thumbnail presence and timestamp; comments are a separate extractor. It does not download media.
+
+Evidence and fixes:
+
+- All 33 deployed detail attempts returned generic metadata_not_found. Since that path only returns this result after a successful HTTP 200 body, these were parser misses or public page shells, not established HTTP 401 detail failures. The earlier proof retained neither status/body-size fields nor response bodies, so the exact live cause cannot be recovered retrospectively.
+- The legacy detail helper only recognizes specific data-sjs roots. A local fixture with xdt_shortcode_media in an application/json script is missed there but parsed by the existing public-post extractor. The probe now reuses that extractor on the same already-fetched HTML when the legacy parser finds nothing; it performs no extra request and requires the requested shortcode.
+- Detail diagnostics now retain HTTP status and body byte count, classify empty/login/challenge pages when no metadata is found, and avoid alternate-route retries on HTTP rejection. Raw HTML, cookies and tokens are not retained in proof output. Caption presence now checks caption text rather than a nonempty caption object.
+- Strict-public cursor requests previously forced a fresh profile context before each page. They now reuse existing public context, reducing extra requests and nonce churn. This is a local reliability fix, not proof that Instagram will allow pagination.
+- Strict public GraphQL stops on the first 401/403/429 instead of cycling document IDs or retrying the public rejection. Successful GraphQL results clear stale errors from earlier warmups/attempts; the prior first-page proof showed 403 alongside recovered posts, illustrating ambiguous old diagnostics.
+- Focused local checks: 39 passed. Additional existing GraphQL/parser checks: 44 passed, one failed. The same failure was reproduced against unchanged HEAD in a disposable pytest process: an existing test expects a redirect URL scheme that the maintained request-client sanitizer removes. No test guard was bypassed and that unrelated expectation was not edited.
+
+Live result remains 33 listing records and five sampled comments from v79. Successful live detail extraction and pagination are still unproven. A new bounded source check can follow after the documented cooldown when the local-first phase is accepted; it must preserve no-auth/no-proxy and stop conditions.
+
+Independent review of this four-file local repair completed with no findings; all reviewed source/test hashes stayed unchanged. The scoped local commit does not update production v80.

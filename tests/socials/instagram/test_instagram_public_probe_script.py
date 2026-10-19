@@ -496,3 +496,83 @@ def test_probe_honors_page_and_sample_caps_including_resume(tmp_path: Path, page
         assert result.environment["page_cap"] == page_cap
         assert result.stop_reason == "page_cap_reached"
         assert result.next_resume_cursor == f"cursor-{page_cap * multiplier}"
+
+
+@pytest.mark.parametrize(
+    "status,body,reason",
+    [
+        (200, '<html><a href="/accounts/login/">Log in</a></html>', "redirect_login"),
+        (200, "<html>challenge_required</html>", "challenge_required"),
+        (200, "", "empty_response"),
+        (200, "<html>public shell without embedded media</html>", "metadata_not_found"),
+        (401, "unauthorized", "RuntimeError: public_detail_http_401"),
+        (403, "forbidden", "RuntimeError: public_detail_http_403"),
+        (302, "", "RuntimeError: public_detail_http_302"),
+    ],
+)
+def test_detail_probe_classifies_responses_without_route_retries(monkeypatch, status, body, reason):
+    import requests
+
+    from trr_backend.socials.instagram import public_probe as probe
+
+    calls = []
+    closed = []
+
+    def factory(**kwargs):
+        assert kwargs == {"cookies": {}, "attach_auth_session": False, "strict_public_credentials": True}
+        response = requests.Response()
+        response.status_code = status
+        response._content = body.encode()
+        return SimpleNamespace(
+            session=SimpleNamespace(close=lambda: closed.append(True)),
+            _get=lambda url, **kw: calls.append(url) or response,
+            _request_cookies=lambda: {},
+        )
+
+    monkeypatch.setattr(probe, "InstagramScraper", factory)
+    result = probe._default_detail_fetcher("PUBLIC01")
+    assert not result.succeeded and result.stop_reason == reason
+    assert result.http_status == status and result.response_bytes == len(body.encode())
+    assert len(calls) == 1 and closed == [True]
+    assert probe._detail_status_from_state(__import__("dataclasses").asdict(result)) == result
+
+
+def test_detail_probe_parses_public_shortcode_payload_missing_from_legacy_parser(monkeypatch):
+    import json
+
+    import requests
+
+    from trr_backend.socials.instagram import public_probe as probe
+
+    payload = {
+        "data": {
+            "xdt_shortcode_media": {
+                "code": "PUBLIC01",
+                "media_type": 2,
+                "taken_at": 1700000000,
+                "caption": {"text": "Public caption #Bravo @friend"},
+                "video_versions": [{"url": "https://cdn.example/video.mp4", "width": 720, "height": 1280}],
+                "image_versions2": {
+                    "candidates": [{"url": "https://cdn.example/cover.jpg", "width": 720, "height": 1280}]
+                },
+            }
+        }
+    }
+    body = '<script type="application/json">' + json.dumps(payload) + "</script>"
+    response = requests.Response()
+    response.status_code = 200
+    response._content = body.encode()
+    calls = []
+    monkeypatch.setattr(
+        probe,
+        "InstagramScraper",
+        lambda **kwargs: SimpleNamespace(
+            session=SimpleNamespace(close=lambda: None),
+            _get=lambda url, **kw: calls.append(url) or response,
+            _request_cookies=lambda: {},
+        ),
+    )
+    result = probe._default_detail_fetcher("PUBLIC01")
+    assert result.succeeded and result.caption_present and result.thumbnail_present
+    assert result.media_url_count == 1 and result.taken_at == "2023-11-14T22:13:20+00:00"
+    assert result.http_status == 200 and len(calls) == 1

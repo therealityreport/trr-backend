@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from trr_backend.socials.instagram.comments_scrapling.fetcher import normalize_comments_load_strategy
 from trr_backend.socials.instagram.comments_scrapling.job_runner import (
     _config_public_comments_mode,
@@ -152,6 +154,66 @@ def test_strict_public_scraper_cannot_repair_auth_or_enter_browser(monkeypatch):
         assert scraper._try_interactive_login() == {"refreshed": False, "reason": "public_mode"}
         assert scraper._fetch_posts_graphql_with_browser("bravotv") is None
         assert scraper._scrape_browser_intercept(ScrapeConfig(username="bravotv", hashtags=[])) == []
+        assert scraper._browser_used is False
+    finally:
+        scraper.session.close()
+
+
+def test_public_cursor_reuses_context_and_clears_stale_warmup_error(monkeypatch):
+    from trr_backend.socials.instagram.scraper import InstagramScraper
+
+    scraper = InstagramScraper(cookies={}, strict_public_credentials=True, attach_auth_session=False)
+    monkeypatch.setattr(scraper._rate_controller, "before_query", lambda *a, **k: None)
+    monkeypatch.setattr(scraper, "_get_profile_page_context_cache_entry", lambda username: {"lsd": "public-token"})
+    monkeypatch.setattr(
+        scraper,
+        "_warm_profile_request_context",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("unexpected warmup")),
+    )
+    observed = []
+
+    def post(*a, **kwargs):
+        observed.append(kwargs)
+        scraper.last_retrieval_meta.update(
+            error_status_code=403, request_error_code="forbidden", session_block_reason="forbidden"
+        )
+        return {"data": {scraper.PROFILE_POSTS_ROOT_FIELD_NAME: {"edges": [], "page_info": {}}}}
+
+    monkeypatch.setattr(scraper._request_client, "post_form_json", post)
+    try:
+        assert scraper.fetch_posts_graphql("bravotv", cursor="next", delay=0) is not None
+        assert len(observed) == 1
+        assert observed[0]["data"]["av"] == "0" and observed[0]["data"]["lsd"] == "public-token"
+        assert "error_status_code" not in scraper.last_retrieval_meta
+        assert "request_error_code" not in scraper.last_retrieval_meta
+    finally:
+        scraper.session.close()
+
+
+@pytest.mark.parametrize("status", [401, 403, 429])
+@pytest.mark.parametrize("cursor", [None, "next"])
+def test_public_graphql_stops_after_access_rejection(monkeypatch, status, cursor):
+    from trr_backend.socials.instagram.request_client import InstagramRequestFailure
+    from trr_backend.socials.instagram.scraper import InstagramScraper
+
+    scraper = InstagramScraper(cookies={}, strict_public_credentials=True, attach_auth_session=False)
+    monkeypatch.setattr(scraper._rate_controller, "before_query", lambda *a, **k: None)
+    monkeypatch.setattr(scraper, "_warm_profile_request_context", lambda *a, **k: {"lsd": "public-token"})
+    monkeypatch.setattr(scraper, "_resolve_graphql_cursor_retry_attempts", lambda cursor: 3)
+    monkeypatch.setattr(scraper, "_profile_posts_doc_ids", lambda: ["one", "two"])
+    calls = []
+
+    def post(*a, **k):
+        calls.append(True)
+        raise InstagramRequestFailure(
+            {401: "unauthorized", 403: "forbidden", 429: "rate_limited"}[status], status_code=status, retryable=True
+        )
+
+    monkeypatch.setattr(scraper._request_client, "post_form_json", post)
+    try:
+        assert scraper.fetch_posts_graphql("bravotv", cursor=cursor, delay=0) is None
+        assert calls == [True]
+        assert scraper.last_retrieval_meta["request_error_status_code"] == status
         assert scraper._browser_used is False
     finally:
         scraper.session.close()

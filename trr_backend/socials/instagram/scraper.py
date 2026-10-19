@@ -3170,7 +3170,8 @@ class InstagramScraper:
         page_size: int | None = None,
     ) -> dict | None:
         """Fetch posts using GraphQL (requires auth for full access)."""
-        if isinstance(getattr(self, "_credential_identity", None), PublicCookieIdentity):
+        strict_public = isinstance(getattr(self, "_credential_identity", None), PublicCookieIdentity)
+        if strict_public:
             allow_browser_fallback = False
             allow_recovery = False
         self._ensure_active_identity()
@@ -3208,6 +3209,8 @@ class InstagramScraper:
             # In fast_mode, only warm context on the very first page (no cursor).
             # Subsequent pages reuse the cached context to avoid extra HTTP requests.
             should_warm = not fast_mode or (not cursor and attempt_index == 0)
+            if strict_public and cursor and self._get_profile_page_context_cache_entry(username):
+                should_warm = False
             page_context = (
                 self._warm_profile_request_context(
                     username,
@@ -3304,6 +3307,20 @@ class InstagramScraper:
                         else {}
                     )
                     if connection:
+                        # A successful connection supersedes any earlier warmup/attempt error.
+                        for error_key in (
+                            "error_code",
+                            "error_class",
+                            "error_status_code",
+                            "error_message",
+                            "retryable",
+                            "request_error_code",
+                            "request_error_retryable",
+                            "request_error_status_code",
+                            "redirect_target",
+                            "session_block_reason",
+                        ):
+                            self.last_retrieval_meta.pop(error_key, None)
                         self.last_retrieval_meta.update(
                             {
                                 "graphql_cursor": str(cursor or "").strip() or None,
@@ -3350,7 +3367,7 @@ class InstagramScraper:
                         "login_required",
                     }:
                         self.last_retrieval_meta["session_block_reason"] = exc.error_code
-                    if cursor and exc.status_code in (401, 403, 429):
+                    if (cursor or strict_public) and exc.status_code in (401, 403, 429):
                         logger.warning(
                             "GraphQL auth error %s for doc_id %s — skipping remaining doc_ids",
                             exc.status_code,
@@ -3372,6 +3389,8 @@ class InstagramScraper:
                     logger.warning("GraphQL request failed for doc_id %s: %s", doc_id, e)
                     continue
 
+            if strict_public and self.last_retrieval_meta.get("request_error_status_code") in {401, 403, 429}:
+                break
             if attempt_index + 1 < attempt_limit and saw_request_error:
                 self._reset_request_session()
                 backoff_seconds = self._resolve_graphql_retry_backoff_seconds(cursor, attempt_index)

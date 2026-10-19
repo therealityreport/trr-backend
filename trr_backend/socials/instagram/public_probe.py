@@ -17,6 +17,8 @@ from trr_backend.socials.instagram.permalink_metadata import (
     fetch_permalink_media_item,
     parse_permalink_metadata,
 )
+from trr_backend.socials.instagram.public_post_extractor import parse_public_post_from_html
+from trr_backend.socials.instagram.request_client import InstagramRequestClient
 from trr_backend.socials.instagram.scraper import InstagramScraper
 
 PUBLIC_PROBE_VERSION = "2026-06-15.public-instagram-proof-v1"
@@ -123,6 +125,8 @@ class PublicDetailStatus:
     caption_present: bool = False
     stop_reason: str | None = None
     source: str | None = None
+    http_status: int | None = None
+    response_bytes: int = 0
 
 
 @dataclass(slots=True)
@@ -510,6 +514,8 @@ def _default_page_fetcher(config: PublicProbeConfig) -> Callable[[str, str | Non
 def _default_detail_fetcher(shortcode: str) -> PublicDetailStatus:
     scraper = InstagramScraper(cookies={}, attach_auth_session=False, strict_public_credentials=True)
     deadline = time.monotonic() + 15.0
+    response_evidence: dict[str, Any] = {"http_status": None, "response_bytes": 0}
+    response_html = ""
 
     class PublicPermalinkTransport:
         def check_deadline(self) -> None:
@@ -519,10 +525,13 @@ def _default_detail_fetcher(shortcode: str) -> PublicDetailStatus:
         def request(self, url: str, *, text: bool = False) -> Any:
             self.check_deadline()
             response = scraper._get(url, headers=_DEFAULT_HEADERS, timeout=(4, 10))
-            response.raise_for_status()
+            nonlocal response_html
+            response_html = response.text or ""
+            response_evidence.update(http_status=response.status_code, response_bytes=len(response.content))
             scraper._request_cookies()
             if response.status_code != 200:
-                raise ValueError("public_detail_redirect")
+                # Do not let the legacy helper retry alternate routes on a public rejection.
+                raise RuntimeError(f"public_detail_http_{response.status_code}")
             self.check_deadline()
             return response.text if text else response.json()
 
@@ -530,6 +539,9 @@ def _default_detail_fetcher(shortcode: str) -> PublicDetailStatus:
         media = fetch_permalink_media_item(
             shortcode, session=scraper.session, cookies={}, transport=PublicPermalinkTransport()
         )
+        if media is None:
+            parsed = parse_public_post_from_html(response_html, shortcode=shortcode)
+            media = parsed.to_raw_media() if parsed is not None else None
         metadata = parse_permalink_metadata(media) if isinstance(media, dict) else None
     except Exception as exc:  # noqa: BLE001
         return PublicDetailStatus(
@@ -537,6 +549,7 @@ def _default_detail_fetcher(shortcode: str) -> PublicDetailStatus:
             attempted=True,
             succeeded=False,
             stop_reason=f"{exc.__class__.__name__}: {exc}",
+            **response_evidence,
         )
     finally:
         scraper.session.close()
@@ -545,8 +558,14 @@ def _default_detail_fetcher(shortcode: str) -> PublicDetailStatus:
             shortcode=shortcode,
             attempted=True,
             succeeded=False,
-            stop_reason="metadata_not_found",
+            stop_reason=(
+                InstagramRequestClient._html_auth_failure_code(response_html)
+                or ("empty_response" if not response_html.strip() else "metadata_not_found")
+            ),
+            **response_evidence,
         )
+    caption = (metadata.raw_media or {}).get("caption")
+    caption = caption.get("text") if isinstance(caption, dict) else caption
     return PublicDetailStatus(
         shortcode=shortcode,
         attempted=True,
@@ -555,8 +574,9 @@ def _default_detail_fetcher(shortcode: str) -> PublicDetailStatus:
         media_url_count=len(metadata.media_urls or []),
         thumbnail_present=bool(metadata.thumbnail_url),
         taken_at=metadata.taken_at.isoformat() if metadata.taken_at else None,
-        caption_present=bool(str((metadata.raw_media or {}).get("caption") or "").strip()),
+        caption_present=bool(str(caption or "").strip()),
         source="public_permalink_metadata",
+        **response_evidence,
     )
 
 
@@ -789,6 +809,8 @@ def _detail_status_from_state(row: Mapping[str, Any]) -> PublicDetailStatus:
         caption_present=bool(row.get("caption_present")),
         stop_reason=str(row.get("stop_reason") or "").strip() or None,
         source=str(row.get("source") or "").strip() or None,
+        http_status=_optional_int(row.get("http_status")),
+        response_bytes=max(0, int(row.get("response_bytes") or 0)),
     )
 
 
