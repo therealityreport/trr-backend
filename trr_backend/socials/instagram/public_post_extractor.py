@@ -123,18 +123,21 @@ def parse_public_post_from_html(html: str, *, shortcode: str) -> PublicInstagram
     if not normalized_shortcode:
         return None
 
-    best: dict[str, Any] | None = None
+    best: PublicInstagramPost | None = None
     best_score = 0
     for payload in iter_application_json_payloads(html):
         for candidate in _iter_matching_media_candidates(payload, shortcode=normalized_shortcode):
+            post = _post_from_media(candidate, shortcode=normalized_shortcode)
+            # Bootstrap navigation objects can match the permalink without
+            # containing any post data. Reject them before ranking candidates.
+            if not (post.caption or post.media_urls or post.thumbnail_url or post.taken_at):
+                continue
             score = _candidate_score(candidate)
             if score > best_score:
-                best = candidate
+                best = post
                 best_score = score
 
-    if best is None:
-        return None
-    return _post_from_media(best, shortcode=normalized_shortcode)
+    return best
 
 
 def iter_application_json_payloads(html: str) -> list[Any]:

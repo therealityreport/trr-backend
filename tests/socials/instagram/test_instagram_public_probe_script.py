@@ -578,7 +578,8 @@ def test_detail_probe_parses_public_shortcode_payload_missing_from_legacy_parser
     assert result.http_status == 200 and len(calls) == 1
 
 
-def test_detail_probe_reports_an_empty_parsed_shell_as_failure(monkeypatch):
+@pytest.mark.parametrize("legacy_media", [False, True])
+def test_detail_probe_reports_an_empty_parsed_shell_as_failure(monkeypatch, legacy_media):
     """Logged-out permalinks can parse to a shortcode-only shell; that is not a detail."""
     import json
 
@@ -599,7 +600,10 @@ def test_detail_probe_reports_an_empty_parsed_shell_as_failure(monkeypatch):
             _request_cookies=lambda: {},
         ),
     )
+    if legacy_media:
+        monkeypatch.setattr(probe, "fetch_permalink_media_item", lambda *args, **kwargs: {"code": "PUBLIC01"})
     result = probe._default_detail_fetcher("PUBLIC01")
-    assert not result.succeeded and result.stop_reason == "metadata_empty"
+    assert not result.succeeded
+    assert result.stop_reason == ("metadata_empty" if legacy_media else "metadata_not_found")
     assert not result.caption_present and result.media_url_count == 0
     assert probe._detail_status_from_state(__import__("dataclasses").asdict(result)) == result

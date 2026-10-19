@@ -250,3 +250,42 @@ def test_resolve_instagram_media_prefers_public_app_json(monkeypatch) -> None:
             "selected_url_count": 1,
         }
     ]
+
+
+def test_rejects_bootstrap_navigation_objects_without_post_content() -> None:
+    from trr_backend.socials.instagram.public_post_extractor import parse_public_post_from_html
+
+    for key in ("url", "permalink", "inputUrl", "input_url", "code", "shortcode"):
+        value = "PUBLIC01" if key in {"code", "shortcode"} else "https://www.instagram.com/p/PUBLIC01/"
+        html = _html_with_app_json({"navigation": {key: value}})
+        assert parse_public_post_from_html(html, shortcode="PUBLIC01") is None
+
+
+def test_empty_high_scoring_shell_does_not_hide_real_post_content() -> None:
+    from trr_backend.socials.instagram.public_post_extractor import parse_public_post_from_html
+
+    html = _html_with_app_json(
+        {
+            "objects": [
+                {"code": "PUBLIC01", "caption": {"text": "Actual post caption"}},
+                {
+                    "inputUrl": "https://www.instagram.com/p/PUBLIC01/",
+                    "__typename": "Route",
+                    "media_type": 2,
+                    "product_type": "clips",
+                    "user": {"username": "bravotv"},
+                    "like_count": 0,
+                },
+            ]
+        }
+    )
+    post = parse_public_post_from_html(html, shortcode="PUBLIC01")
+    assert post is not None and post.caption == "Actual post caption"
+
+
+def test_captionless_timestamp_only_post_is_retained() -> None:
+    from trr_backend.socials.instagram.public_post_extractor import parse_public_post_from_html
+
+    html = _html_with_app_json({"data": {"code": "PUBLIC01", "taken_at": 1700000000}})
+    post = parse_public_post_from_html(html, shortcode="PUBLIC01")
+    assert post is not None and post.taken_at == 1700000000
