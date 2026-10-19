@@ -7,6 +7,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import pytest
 
 from trr_backend.socials.instagram.comments_scrapling.counts import (
     child_reply_count,
@@ -89,18 +90,38 @@ def test_public_comments_coverage_stays_partial_on_exhausted_relay_with_display_
     assert metadata["fallback_blocked_reason"] == "public_comments_partial_public_recovery_pending"
 
 
-def test_public_comments_coverage_complete_when_effective_target_is_met() -> None:
+@pytest.mark.parametrize(
+    "advertised,recovered,limit,reason,missing,classification,limited,exhausted",
+    [
+        (27_000, 100, 100, "graphql_relay_target_reached", 0, "public_partial", True, False),
+        (27_000, 100, 100, "pagination_complete", 0, "public_partial", True, True),
+        (None, 100, 100, "graphql_relay_target_reached", 0, "public_partial", True, False),
+        (100, 100, 100, "graphql_relay_target_reached", 0, "public_partial", True, False),
+        (100, 100, 100, "pagination_complete", 0, "public_complete", False, True),
+        (100, 100, 0, "graphql_relay_target_reached", 0, "public_complete", False, False),
+        (None, 5, 100, "pagination_complete", 0, "public_complete", False, True),
+        (100, 100, 0, "pagination_complete", 2, "public_partial", False, True),
+    ],
+)
+def test_public_comments_coverage_distinguishes_request_limit_from_completion(
+    advertised, recovered, limit, reason, missing, classification, limited, exhausted
+) -> None:
     metadata = _public_comments_coverage_metadata(
-        advertised_count=27_000,
-        recovered_count=100,
-        terminal_reason="pagination_complete",
-        max_comments=100,
-        missing_replies=0,
+        advertised_count=advertised,
+        recovered_count=recovered,
+        terminal_reason=reason,
+        max_comments=limit,
+        missing_replies=missing,
     )
 
-    assert metadata["classification"] == "public_complete"
-    assert metadata["effective_target_count"] == 100
-    assert metadata["fallback_blocked_reason"] is None
+    assert metadata["classification"] == classification
+    assert metadata["request_limit_reached"] is (limit > 0 and recovered >= limit)
+    assert metadata["limited_by_request"] is limited
+    assert metadata["source_exhausted"] is exhausted
+    if limited or classification == "public_complete":
+        assert metadata["fallback_blocked_reason"] is None
+    else:
+        assert metadata["fallback_blocked_reason"] == "public_comments_partial_public_recovery_pending"
 
 
 def test_public_relay_nested_graphql_rate_limit_code_is_blocking() -> None:
@@ -1492,6 +1513,32 @@ def test_relay_runtime_metadata_reports_actual_http_client(monkeypatch):
         assert fetcher.runtime_metadata["transport"] == "curl_cffi"
         assert fetcher.runtime_metadata["browser_used"] is False
         assert fetcher.runtime_metadata["scrapling_fetcher_class"] is None
+    finally:
+        asyncio.run(fetcher.aclose())
+        fetcher._parser.session.close()
+
+
+@pytest.mark.parametrize("missing_replies", [False, True])
+@pytest.mark.parametrize("terminal_reason", ["graphql_relay_target_reached", "http_429"])
+def test_public_relay_request_limit_is_partial_without_automatic_retry(missing_replies, terminal_reason):
+    fetcher = InstagramCommentsScraplingFetcher(cookies=[], raw_cookies={}, browser_account_id=None, public_only=True)
+    comments = [_comment(str(index), reply_count=2 if index == 0 and missing_replies else 0) for index in range(5)]
+    fetcher._fetch_public_relay_coauthor_comments_for_status_only = AsyncMock(
+        return_value=(comments, {"reason": terminal_reason, "pages": [{"has_next_page": True}]})
+    )
+    try:
+        result = asyncio.run(
+            fetcher.fetch_comments_for_shortcode(
+                "AAAABC", max_comments=5, fetch_replies=False, expected_comment_count=50, load_strategy="public_relay"
+            )
+        )
+        metadata = result.diagnostic_metadata["public_comments"]
+        assert metadata["classification"] == "public_partial"
+        assert metadata["request_limit_reached"] is True and metadata["source_exhausted"] is False
+        assert result.fetch_failed is (terminal_reason == "http_429")
+        assert result.retryable is False
+        assert result.fetch_reason == terminal_reason
+        assert metadata["missing_reply_count"] == (2 if missing_replies else 0)
     finally:
         asyncio.run(fetcher.aclose())
         fetcher._parser.session.close()

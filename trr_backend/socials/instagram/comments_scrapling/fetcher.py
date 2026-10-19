@@ -283,17 +283,30 @@ def _public_comments_coverage_metadata(
     else:
         coverage_ratio = min(1.0, recovered / advertised)
 
-    complete_terminal_reasons = {
-        "child_comments_target_reached",
-        "graphql_relay_target_reached",
-        "pagination_complete",
-    }
     missing_reply_count_value = max(0, int(missing_replies or 0))
-    target_met = effective_target is not None and recovered >= effective_target
-    no_reliable_target = effective_target is None
-    if (effective_target is not None and recovered >= effective_target and missing_reply_count_value == 0) or (
-        terminal in complete_terminal_reasons and missing_reply_count_value == 0 and (target_met or no_reliable_target)
-    ):
+    requested_limit = max(0, int(max_comments or 0))
+    request_limit_reached = requested_limit > 0 and recovered >= requested_limit
+    source_exhausted = terminal == "pagination_complete"
+    advertised_count_met = advertised is not None and recovered >= advertised
+    # A fulfilled sample proves only the requested amount was returned. Native
+    # exhaustion and the full advertised count can independently prove coverage.
+    limited_by_request = (
+        request_limit_reached
+        and not (source_exhausted and advertised_count_met)
+        and terminal
+        in {
+            "child_comments_target_reached",
+            "graphql_relay_target_reached",
+            "pagination_complete",
+            "page_limit_reached",
+        }
+    )
+    coverage_complete = missing_reply_count_value == 0 and (
+        (advertised_count_met and not request_limit_reached)
+        or (source_exhausted and advertised_count_met)
+        or (source_exhausted and advertised is None and not request_limit_reached)
+    )
+    if coverage_complete:
         classification = "public_complete"
     elif recovered > 0:
         classification = "public_partial"
@@ -307,12 +320,18 @@ def _public_comments_coverage_metadata(
         "recovered_count": recovered,
         "coverage_ratio": coverage_ratio,
         "terminal_reason": terminal,
-        "max_comments": max(0, int(max_comments or 0)),
+        "max_comments": requested_limit,
+        "request_limit_reached": request_limit_reached,
+        "limited_by_request": limited_by_request,
+        "source_exhausted": source_exhausted,
+        "advertised_count_met": advertised_count_met,
         "effective_target_count": effective_target,
         "target_gap_count": max(0, effective_target - recovered) if effective_target is not None else None,
         "missing_reply_count": missing_reply_count_value,
         "fallback_blocked_reason": (
-            "public_comments_partial_public_recovery_pending"
+            None
+            if limited_by_request
+            else "public_comments_partial_public_recovery_pending"
             if classification == "public_partial"
             else "public_comments_blocked_public_recovery_pending"
             if classification == "public_blocked"
@@ -3811,14 +3830,15 @@ class InstagramCommentsScraplingFetcher:
             public_block_signal = _classify_public_block_signal(relay_terminal_reason)
             public_comments_metadata["public_block_signal"] = public_block_signal
             relay_complete = classification == "public_complete"
-            # Retry soft misses; only terminal when complete or a real signal.
-            public_retryable = (not relay_complete) and public_block_signal == PUBLIC_BLOCK_SIGNAL_NONE
+            request_satisfied = relay_complete or public_comments_metadata["limited_by_request"]
+            # A deliberate sample is partial coverage, but needs no retry.
+            public_retryable = (not request_satisfied) and public_block_signal == PUBLIC_BLOCK_SIGNAL_NONE
             pages_seen = len([page for page in relay_metadata.get("pages", []) if isinstance(page, dict)])
             top_level_checkpoint = self._record_top_level_checkpoint(
                 shortcode=shortcode,
                 media_id=media_id,
                 stop_reason=relay_terminal_reason or classification,
-                last_error_code=classification if classification != "public_complete" else None,
+                last_error_code=classification if not request_satisfied else None,
                 last_top_level_cursor=None,
                 next_top_level_cursor=None,
                 last_top_level_cursor_param=None,
@@ -3873,7 +3893,7 @@ class InstagramCommentsScraplingFetcher:
             )
             return InstagramCommentsFetchResult(
                 comments=relay_comments,
-                fetch_failed=not relay_complete,
+                fetch_failed=not request_satisfied,
                 auth_failed=False,
                 # Preserve the informative terminal reason (the real relay stop)
                 # instead of collapsing it to the bare classification. Fall back

@@ -141,6 +141,9 @@ class PublicCommentsStatus:
     fallback_source: str | None = None
     stop_reason: str | None = None
 
+    request_limit_reached: bool = False
+    source_exhausted: bool = False
+
 
 @dataclass(slots=True)
 class PublicProbeResult:
@@ -630,6 +633,8 @@ def _default_comments_fetcher(post: PublicPostSummary) -> PublicCommentsStatus:
             advertised_count=_optional_int(public_comments.get("advertised_count")),
             recovered_count=recovered,
             coverage_ratio=_optional_float(public_comments.get("coverage_ratio")),
+            request_limit_reached=public_comments.get("request_limit_reached") is True,
+            source_exhausted=public_comments.get("source_exhausted") is True,
             terminal_reason=str(
                 public_comments.get("terminal_reason") or getattr(result, "fetch_reason", "") or ""
             ).strip()
@@ -826,16 +831,39 @@ def _detail_status_from_state(row: Mapping[str, Any]) -> PublicDetailStatus:
 
 
 def _comments_status_from_state(row: Mapping[str, Any]) -> PublicCommentsStatus:
+    classification = str(row.get("classification") or "public_blocked")
+    advertised_count = _optional_int(row.get("advertised_count"))
+    recovered_count = max(0, int(row.get("recovered_count") or 0))
+    terminal_reason = str(row.get("terminal_reason") or "").strip() or None
+    request_limit_reached = row.get("request_limit_reached") is True
+    source_exhausted = row.get("source_exhausted") is True
+    # Normalize only pre-flag rows with positive, reliable counts and an
+    # explicit target stop. Keep the retained input row unchanged.
+    if (
+        "request_limit_reached" not in row
+        and "source_exhausted" not in row
+        and classification == "public_complete"
+        and type(row.get("advertised_count")) is int
+        and type(row.get("recovered_count")) is int
+        and advertised_count is not None
+        and 0 < recovered_count < advertised_count
+        and terminal_reason in {"child_comments_target_reached", "graphql_relay_target_reached"}
+    ):
+        classification = "public_partial"
+        request_limit_reached = True
+        source_exhausted = False
     return PublicCommentsStatus(
         shortcode=str(row.get("shortcode") or "").strip(),
         attempted=bool(row.get("attempted")),
-        classification=str(row.get("classification") or "public_blocked"),
-        advertised_count=_optional_int(row.get("advertised_count")),
-        recovered_count=max(0, int(row.get("recovered_count") or 0)),
+        classification=classification,
+        advertised_count=advertised_count,
+        recovered_count=recovered_count,
         coverage_ratio=_optional_float(row.get("coverage_ratio")),
-        terminal_reason=str(row.get("terminal_reason") or "").strip() or None,
+        terminal_reason=terminal_reason,
         fallback_source=str(row.get("fallback_source") or "").strip() or None,
         stop_reason=str(row.get("stop_reason") or "").strip() or None,
+        request_limit_reached=request_limit_reached,
+        source_exhausted=source_exhausted,
     )
 
 
@@ -961,6 +989,8 @@ def _comments_rollup(statuses: list[PublicCommentsStatus]) -> dict[str, Any]:
         "complete": len(complete),
         "partial": len(partial),
         "blocked": len(blocked),
+        "limit_reached": sum(status.request_limit_reached for status in attempted),
+        "source_exhausted": sum(status.source_exhausted for status in attempted),
     }
 
 
