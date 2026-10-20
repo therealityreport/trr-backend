@@ -11,6 +11,22 @@ from trr_backend.vision import cast_reference_face_matching as matching
 pytestmark = pytest.mark.vision
 
 
+@pytest.mark.parametrize("phase", ["construction", "prepare"])
+def test_initialization_retains_empty_exception_type_and_does_not_cache(monkeypatch, phase):
+    monkeypatch.setattr(matching, "_face_analysis_model", None)
+    monkeypatch.delenv("SCREENALYTICS_VISION_SIM", raising=False)
+    monkeypatch.setattr(matching, "_face_model_profile_candidates", lambda: ["antelopev2"])
+
+    def fail(**_kwargs):
+        raise AssertionError()
+
+    factory = fail if phase == "construction" else lambda **_kwargs: types.SimpleNamespace(prepare=fail)
+    monkeypatch.setattr(matching, "import_module", lambda _name: types.SimpleNamespace(FaceAnalysis=factory))
+    assert matching.get_face_analysis_model() is None
+    assert matching._face_analysis_model is None
+    assert f"profile=antelopev2 phase={phase}: AssertionError" in matching._face_analysis_last_error
+
+
 def test_detect_faces_uses_insightface_faceanalysis(monkeypatch) -> None:
     face = types.SimpleNamespace(
         bbox=np.asarray([10, 20, 40, 60], dtype=np.float32),

@@ -92,13 +92,15 @@ def get_face_analysis_model() -> Any | None:
         insightface_app: Any = import_module("insightface.app")
         face_analysis_class = insightface_app.FaceAnalysis
     except Exception as exc:  # noqa: BLE001
-        _face_analysis_last_error = str(exc)
+        _face_analysis_last_error = f"import: {type(exc).__name__}: {exc}"
         return None
 
     det_size = (640, 640)
     for profile in _face_model_profile_candidates():
+        phase = "construction"
         try:
             model = face_analysis_class(name=profile)
+            phase = "prepare"
             model.prepare(ctx_id=-1, det_size=det_size)
             _face_analysis_model = model
             providers = getattr(model, "providers", None)
@@ -107,8 +109,8 @@ def get_face_analysis_model() -> Any | None:
             _face_analysis_last_error = None
             return _face_analysis_model
         except Exception as exc:  # noqa: BLE001
-            _face_analysis_last_error = str(exc)
-            logger.warning("Cast-reference face model failed profile=%s error=%s", profile, exc)
+            _face_analysis_last_error = f"profile={profile} phase={phase}: {type(exc).__name__}: {exc}"
+            logger.warning("Cast-reference face model failed %s", _face_analysis_last_error, exc_info=True)
     return None
 
 
