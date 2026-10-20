@@ -7,16 +7,16 @@ passed fresh durable retrieval. Full comment and reply retrieval has not passed.
 Full-history launches, resumptions, retries, and dispatch for `bravotv`
 remain gated; v2 ownership remains enabled. No full-history run was started.
 
-The current source cooldown ends at 2026-10-20 20:30:39.741308 UTC
-(4:30:39 p.m. Eastern). Automatic source attempts have stopped after two
-consecutive resumed tranches reported `rate_limited` without committed progress.
-Cooldown expiry alone does not reopen execution or prove access. The user later
-authorized one instrumented retry; it is scheduled for 20:32 UTC (4:32 p.m.
-Eastern) and remains subject to a fresh live preflight. It has not run yet.
+The current source cooldown ends at 2026-10-20 22:32:52.871886 UTC
+(6:32:52 p.m. Eastern). The user-authorized instrumented retry completed at
+20:32 UTC and independently captured an HTTP 200 GraphQL rate rejection.
+Three consecutive resumed tranches have now reported `rate_limited` without
+committed progress. Source attempts have stopped and the one-shot follow-up is
+paused. Cooldown expiry alone does not reopen execution or prove access.
 
 | Fixed post | Details retrieval | Parent retrieval | Reply retrieval |
 | --- | --- | --- | --- |
-| Photo `Dd37XeDly4U` | Passed: fresh source receipt | First page retained; continuation not attempted | Pending child-root query rejected in two resumed tranches |
+| Photo `Dd37XeDly4U` | Passed: fresh source receipt | First page retained; continuation not attempted | Pending child-root query rejected in three resumed tranches |
 | Carousel `Dd60pnHl_ux` | Passed: fresh source receipt | Held by shared cooldown | Not reached |
 | Reel `Dd6m4XKDSQ1` | Passed: fresh source receipt | Held by shared cooldown | Not reached |
 
@@ -459,3 +459,56 @@ These repairs affect private diagnostic files only. Production source, SQL,
 secrets, deployment and service configuration are unchanged. No Modal deployment
 or app build applies. Full history remains gated and the general worker stays
 unloaded.
+
+## Instrumented retry result — 20:33 UTC
+
+The one authorized retry ran after the recorded cooldown and fresh guarded
+preflight. It resumed the frozen run at generation 7, made two charged requests,
+returned exit code 2 (`retrieval_not_passed`, `cooldown_or_wait`), and cancelled
+at generation 8. No new comment page was committed. The one-shot app follow-up
+is now paused; the durable started marker prevents replay.
+
+| Request time (UTC) | Request | HTTP | Native result |
+| --- | --- | --- | --- |
+| 20:32:50.592066 | Anonymous document bootstrap | 200 | Buffered HTML, 856,158 bytes |
+| 20:32:52.461056 | Pending child-root GraphQL query | 200 | 114-byte JSON, one critical rate error, no data/child connection |
+
+The native-safe projection contains `rate_message_marker` and `legacy_rate_code`,
+with no scan truncation. The unchanged classifier returned `rate_limited`.
+There was no Retry-After. This proves a GraphQL-level rate rejection over HTTP
+200 for this attempt; it is not HTTP 429. The production fallback consequently
+set the two-hour cooldown to **22:32:52.871886 UTC (6:32:52 p.m. Eastern)**.
+It does not prove a permanent access restriction or a login requirement.
+
+The actual child request used `PolarisPostChildCommentsQuery` /
+`34884685271179117`, matching header/form names, `first=12`, logged-in provider
+false, chronological false, and no cursor. Its media hash matches the numeric
+media portion of the frozen photo's composite native ID; its parent hash matches
+the preceding rejected child root. Authorization, proxy-authorization,
+`sessionid` and `ds_user_id` were absent. `trust_env` and redirects were false.
+The response SHA-256 is
+`c6cd01e6d597b1d60b0baa2398ad005a96f0a1f1d0aa9be29bf295d72c01d44e`.
+The native response now explains the runtime classification; sanitized historical
+replay is not grounds to replace the classifier. Current remote query support
+remains unproven because the request was rejected.
+
+Post-run read-only verification against `vwxfvzutyufrkhfgoeaa` found all six
+account runs cancelled, zero target owners, no pending control and no open budget
+tranche. The original page receipt/hash and before/after observation hashes match.
+All eleven canonical mappings remain present and distinct with zero identity
+mismatches. The rolling ledger contains 67 charged requests, with 133 remaining.
+The retry established neither parent continuation nor child retrieval/exhaustion.
+
+An independent source investigator reviewed the safe HTTPX events and confirmed
+the native rejection diagnosis. Scrapling's retained browser evidence still shows
+only the logged-out dialog query, not successful pagination. No fresh Scrapling
+source request was made during the renewed cooldown: the new evidence already
+establishes the rejection, and another transport would introduce a separate
+comparison. No later browser attempt or automatic retry is scheduled. Any future
+comparison must preserve this run and the shared request limits; full history
+remains gated. Decodo was not used in this retry.
+
+Private evidence includes `httpx-retry-20261020.execution.log`, the safe observer
+JSONL, preflight/post-run snapshots, original-state backup and started marker.
+Only this validation record changed in the repository. No backend source, SQL,
+app build, Modal deployment, secret or service configuration change was needed.
