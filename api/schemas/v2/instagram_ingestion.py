@@ -34,6 +34,8 @@ class InstagramIngestionLaunchV2(StrictModel):
     enable_cap4_canary: bool = False
     apply_run_id: UUID | None = None
     operator_confirmation: str | None = None
+    # "local" creates the run already placed on the Mac worker (public runs only).
+    execution_placement: Literal["modal", "local"] = "modal"
 
     @field_validator("source_scope", mode="before")
     @classmethod
@@ -183,6 +185,8 @@ class InstagramIngestionCapabilitiesV2(StrictModel):
     )
     replay_apply_enabled: bool = False
     disabled_reason: str | None = None
+    # True while the Mac worker holds its local lease; None when not checked.
+    local_worker_online: bool | None = None
 
 
 class InstagramRecentRunV2(StrictModel):

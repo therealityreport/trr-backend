@@ -5251,6 +5251,17 @@
             ],
             "title": "Engine"
           },
+          "local_worker_online": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Worker Online"
+          },
           "replay_apply_enabled": {
             "default": false,
             "title": "Replay Apply Enabled",
@@ -5503,6 +5514,15 @@
             "default": false,
             "title": "Enable Cap4 Canary",
             "type": "boolean"
+          },
+          "execution_placement": {
+            "default": "modal",
+            "enum": [
+              "modal",
+              "local"
+            ],
+            "title": "Execution Placement",
+            "type": "string"
           },
           "force_catalog_rediscovery": {
             "default": false,

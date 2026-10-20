@@ -104,6 +104,7 @@ class CommandService:
         replay_command: ReplayCommand | None = None,
         replay_apply_enabled: bool = False,
         source_profile: SourceProfile | None = None,
+        local_worker_status: Callable[[], bool] | None = None,
     ):
         if engine not in {"dbos", "temporal"} or not workflow_version.strip():
             raise ValueError("An explicit engine and workflow version are required")
@@ -125,10 +126,20 @@ class CommandService:
         if source_profile is not None and not isinstance(source_profile, SourceProfile):
             raise ValueError("Source profile must be an immutable SourceProfile")
         self.source_profile = source_profile
+        self.local_worker_status = local_worker_status
+
+    def _local_worker_online(self) -> bool | None:
+        if self.local_worker_status is None:
+            return None
+        try:
+            return bool(self.local_worker_status())
+        except Exception:  # noqa: BLE001 - an unreadable status is reported as unknown
+            return None
 
     def capabilities(self, handle: str) -> InstagramIngestionCapabilitiesV2:
         ready = self.enabled and self.capacity is not None
         return InstagramIngestionCapabilitiesV2(
+            local_worker_online=self._local_worker_online() if ready else None,
             enabled=ready,
             account=_account(handle),
             engine=self.engine,
@@ -152,6 +163,10 @@ class CommandService:
         account = _account(handle)
         key = _key(idempotency_key)
         request_payload = payload.model_dump(mode="json")
+        placement = request_payload.pop("execution_placement", "modal")
+        if placement != "modal":
+            # Default Modal launches keep their historical command fingerprint.
+            request_payload["execution_placement"] = placement
         command_hash = fingerprint({"command": "start", "intent": request_payload})
         previous = self.store.command_result(account, key, command_hash)
         if previous is not None:
@@ -160,6 +175,8 @@ class CommandService:
             raise ServiceUnavailableError("New-run routing requires an enabled service and capacity validator")
         if payload.apply_run_id is not None:
             raise Conflict("apply_run_id is not supported by the rebuilt launch command")
+        if placement == "local" and (self.source_profile is None or self.source_profile.access_mode != "public"):
+            raise Conflict("Mac (local) runs require the explicitly public source profile")
         # The capacity adapter validates the existing worker-count and canary
         # confirmation rules. It must raise on rejection; no defaults bypass it.
         self.capacity(account, payload.model_copy(deep=True))
@@ -213,6 +230,14 @@ class CommandService:
                     values(%s,'listing','page:root',%s,'{"cursor":null}'::jsonb)""",
                     (run_id, intent.listing_max_attempts),
                 )
+                if placement == "local":
+                    # Same transaction as creation: no Modal executor ever sees
+                    # this run as Modal-placed, so the placement fence holds.
+                    cur.execute(
+                        """update social.instagram_ingestion_runs set execution_placement='local'
+                        where run_id=%s""",
+                        (run_id,),
+                    )
 
         return _command(
             self.store.start(

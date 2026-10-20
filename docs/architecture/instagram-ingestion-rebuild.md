@@ -2102,3 +2102,98 @@ The real reply + genuine attachment + profile sample, hosted/API/browser accepta
 ten representative runs and 24-hour observation remain open. The required TRR
 browser-profile connection is still pending. The earlier app quick checks and
 `make dev-hybrid` result stand; this backend profile change needs no app build.
+
+### Account run policy, network lanes and the Modal page limit (2026-10-19)
+
+Commit `2186d546` adds an opt-in replacement for the bravotv canary lock. Codex
+commits `e7bc474c`, `3c77cc2a` and `fc90431a` sit on top of it. None is deployed;
+live remains v80 (`60cc3117`).
+
+Runtime settings (Modal secret `trr-backend-runtime`; all absent on 2026-10-19,
+so v2 is fully off in production):
+
+| Setting | Value to enable | Meaning |
+| --- | --- | --- |
+| `TRR_INSTAGRAM_DBOS_DATABASE_URL` | session DSN, port 5432, user `trr_ingestion_runtime.<ref>` | DBOS refuses any other role, owner, superuser or port 6543 |
+| `TRR_INSTAGRAM_DBOS_RUNTIME_ROLE` | `trr_ingestion_runtime` | Restricted role; exists in `trr-core` with the `dbos` schema |
+| `TRR_INSTAGRAM_INGESTION_SCHEMA_READY` | `1` | API builds the v2 command service |
+| `TRR_INSTAGRAM_INGESTION_ENABLED` | `1` | New-run routing |
+| `TRR_INSTAGRAM_INGESTION_COORDINATOR_ENABLED` | `1` | Coordinator runs inside `sweep_social_dispatch_queue` (2-minute cron) |
+| `TRR_INSTAGRAM_INGESTION_POLICY` | `accounts` | Default `canary` keeps the old bravotv calendar-2026 lock; unknown values fail closed |
+| `TRR_INSTAGRAM_INGESTION_MAX_RUNS_PER_DAY` | optional, default `12` (1–48) | Per-account daily launch cap |
+
+Account policy rules (`AccountRunPolicy`, `composition.py`):
+
+- Accounts are active Instagram rows in `social.shared_account_sources`; an
+  unreadable list admits nobody.
+- Actions: `backfill` (`full_history` or `bounded_window`), `sync_newer`
+  (`head_gap`, requires an initial backfill), `sync_recent` (`recent_window`),
+  `resume_tail`.
+- One `queued`/`running`/`blocked` run per account. Cancelled and failed runs stay
+  resumable but no longer block a new launch.
+- While `ENABLED=1` and `POLICY=accounts`, the legacy `/catalog/{backfill,
+  sync-recent,sync-newer,resume-tail}` routes return 409
+  `instagram_v2_owns_launches` for Instagram, and v2 rejects a launch while a
+  legacy `social.scrape_jobs` Instagram job for that account is non-terminal.
+- With v2 enabled, the account page's existing Backfill / Sync buttons already
+  launch v2 runs (`SocialAccountProfilePage.tsx`, `ingestionLaunchFromCatalog`).
+
+Logged-out request lanes (`identity_policy.py`):
+
+- Public listing, detail and comment gates use `public:modal` or `public:local`
+  from the run's execution placement, so the Mac and Modal never share a budget.
+  Avatar, profile and media gates keep the shared `public` lane.
+- Network lanes follow the June public backoff without Retry-After: rejection
+  1 h → 4 h → 12 h → 24 h; 429 waits 2 h; a server Retry-After always wins. One
+  success steps escalation down one level instead of resetting it.
+
+Measured logged-out behaviour (2026-10-19, bounded probes, no DB writes):
+
+- Mac (residential): 10 listing pages, 330 posts, 82 s, no rejection.
+- Modal (datacenter): page 1 (33 posts), then HTTP 401 on page 2, both before and
+  after a full one-hour cooldown. Logged-out Modal runs can therefore serve only
+  the newest page; full history must run with `local` placement.
+- Listing fills caption, time, likes, comment count, all media URLs, tags,
+  collaborators and location. It does not fill video view count or duration.
+  Logged-out permalink details return an empty shell (`metadata_empty` in the
+  probe; `public_detail_unresolved` in v2), so public runs should select only
+  `comments` and `media`.
+- Replies: the earlier entry above found no supported anonymous reply path; the
+  2026-10-19 child-reply request returned GraphQL rate-limit error `1675004` on
+  its first call. Treat replies as unavailable logged out. No login fallback is
+  configured.
+
+Deferred: video duration (the browser image has no FFmpeg), skipping unchanged
+comment targets (rollups hold counts, not coverage), and view counts.
+
+### Mac worker and "Run on: This Mac" (2026-10-19)
+
+- Launch: `InstagramIngestionLaunchV2.execution_placement` (`modal` default,
+  `local`). A local launch sets the placement inside the creating transaction, so
+  the Modal coordinator never sees the run as Modal-placed. Local launches require
+  the public source profile. Default Modal launches keep their historical command
+  fingerprint (the default field is excluded from the hash).
+- Worker: `scripts/ingestion/local_worker.py` serves every queued/running `local`
+  run until stopped. It holds its own session advisory lease
+  (`composition.LOCAL_WORKER_LOCK_KEY`, namespace 48112, key 20261017), so it never
+  blocks the Modal coordinator (key 20261016). Partitions run inline with the real
+  Scheduler; a stop mid-partition leaves the partition unacknowledged and the next
+  start replays it without resending settled targets. Shutdown never cancels runs.
+- Status: capabilities report `local_worker_online` from `pg_locks` while that lease
+  is held; the app disables "This Mac" when it is false.
+- API resume/retry of local runs stays rejected by the existing placement fence;
+  cancel works from the app.
+- Install (user-level LaunchAgent): create git-ignored `TRR-Backend/.env.local-worker`
+  with `TRR_INSTAGRAM_DBOS_DATABASE_URL`, `TRR_INSTAGRAM_DBOS_RUNTIME_ROLE` and
+  `TRR_INSTAGRAM_INGESTION_COORDINATOR_ENABLED=1`, copy
+  `scripts/ingestion/launchd/com.trr.instagram-local-worker.plist` to
+  `~/Library/LaunchAgents/`, then `launchctl bootstrap gui/$(id -u) <plist>`.
+  Logs: `~/Library/Logs/trr-instagram-local-worker.log` (no DSN is printed).
+- App: logged-out v2 backfills default to `comments, media`; the Backfill dialog
+  shows "Run on: Modal / This Mac" only while v2 is enabled.
+
+Validation: 9 worker tests plus the existing local-execution suite pass on an
+isolated PostgreSQL; the ingestion and API suites pass (2632) except the pre-existing
+real-DBOS timing test in `test_workflows.py`, which fails identically on `032e86f7`.
+App: ingestion and account-page tests (231), `make app-validate-quick` and
+`pnpm run typecheck` pass.

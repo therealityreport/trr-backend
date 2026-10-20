@@ -191,6 +191,25 @@ class AccountRunPolicy:
             raise Conflict("Daily Instagram ingestion run limit reached for this account")
 
 
+# The Mac worker holds its own session advisory lock: the same namespace as the
+# Modal coordinator (RuntimeConfig.lock_namespace) with a distinct key, so the
+# two never block each other. Placement fences keep their runs apart.
+LOCAL_WORKER_LOCK_NAMESPACE = 48112
+LOCAL_WORKER_LOCK_KEY = 20261017
+
+
+def local_worker_online(read_connection) -> bool:
+    """True while some session holds the Mac worker lease (no new table needed)."""
+    with read_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """select exists(select 1 from pg_locks where locktype='advisory' and granted
+            and classid=%s::oid and objid=%s::oid and objsubid=2)""",
+            (LOCAL_WORKER_LOCK_NAMESPACE, LOCAL_WORKER_LOCK_KEY),
+        )
+        row = cur.fetchone()
+    return bool(row["exists"] if isinstance(row, Mapping) else row[0])
+
+
 def configured_run_policy():
     mode = os.getenv("TRR_INSTAGRAM_INGESTION_POLICY", "canary").strip().lower()
     if mode == "accounts":
@@ -389,6 +408,7 @@ def build_api():
         listing_max_attempts=int(os.getenv("TRR_SOCIAL_SHARED_POSTS_FRONTIER_MAX_ATTEMPTS", "12")),
         comments_max_attempts=int(os.getenv("SOCIAL_INSTAGRAM_COMMENTS_MAX_ATTEMPTS", "12")),
         source_profile=source_profile,
+        local_worker_status=lambda: local_worker_online(queries.read_connection),
     )
 
 

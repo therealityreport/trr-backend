@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Mac worker for logged-out Instagram runs placed on "This Mac" (local).
+
+  Install (user-level LaunchAgent; nothing runs as root):
+    1. Create TRR-Backend/.env.local-worker (git-ignored) with:
+         TRR_INSTAGRAM_DBOS_DATABASE_URL=<session DSN, port 5432, user trr_ingestion_runtime.<ref>>
+         TRR_INSTAGRAM_DBOS_RUNTIME_ROLE=trr_ingestion_runtime
+         TRR_INSTAGRAM_INGESTION_COORDINATOR_ENABLED=1
+       Business database settings still come from TRR-Backend/.env.
+    2. cp this file to ~/Library/LaunchAgents/com.trr.instagram-local-worker.plist
+    3. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trr.instagram-local-worker.plist
+
+  Stop: launchctl bootout gui/$(id -u)/com.trr.instagram-local-worker
+  The worker never cancels runs on stop; the next start resumes saved progress.
+  Logs never contain the DSN.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.trr.instagram-local-worker</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-c</string>
+    <string>cd /Users/thomashulihan/Development/Projects/TRR/TRR-Backend &amp;&amp; set -a &amp;&amp; source ./.env.local-worker &amp;&amp; set +a &amp;&amp; exec ./.venv/bin/python scripts/ingestion/local_worker.py</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/Users/thomashulihan/Library/Logs/trr-instagram-local-worker.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/thomashulihan/Library/Logs/trr-instagram-local-worker.log</string>
+</dict>
+</plist>
