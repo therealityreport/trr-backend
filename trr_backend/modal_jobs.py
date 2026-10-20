@@ -555,6 +555,12 @@ _vision_image = (
         str(_MODAL_VISION_REQUIREMENTS),
         extra_index_url="https://download.pytorch.org/whl/cpu",
     )
+    .add_local_file(
+        str(_BACKEND_ROOT / "scripts/modal/provision_insightface.py"),
+        "/opt/trr/provision_insightface.py",
+        copy=True,
+    )
+    .run_commands("python /opt/trr/provision_insightface.py")
     .add_local_python_source("api", "trr_backend")
 )
 
