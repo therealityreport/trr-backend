@@ -10,7 +10,9 @@ remain gated; v2 ownership remains enabled. No full-history run was started.
 The current source cooldown ends at 2026-10-20 20:30:39.741308 UTC
 (4:30:39 p.m. Eastern). Automatic source attempts have stopped after two
 consecutive resumed tranches reported `rate_limited` without committed progress.
-Cooldown expiry alone does not reopen execution or prove access.
+Cooldown expiry alone does not reopen execution or prove access. The user later
+authorized one instrumented retry; it is scheduled for 20:32 UTC (4:32 p.m.
+Eastern) and remains subject to a fresh live preflight. It has not run yet.
 
 | Fixed post | Details retrieval | Parent retrieval | Reply retrieval |
 | --- | --- | --- | --- |
@@ -389,3 +391,71 @@ passing offline checks were reused; the new private observer received an offline
 stub check. Modal remains at the previously recorded v85 identity; no new Modal
 verification or deployment was needed or performed. TRR-APP build is not
 applicable to this validation/documentation close-out.
+
+## HTTPX instrumentation repair and authorized follow-up — 19:38 UTC
+
+The user explicitly authorized subagents to repair the instrumentation, diagnose
+the child-query failure, and make one bounded retry after cooldown while keeping
+full history gated. This is a specific exception to the preceding operational
+stop; it does not authorize repeated resumed tranches or full-history execution.
+
+The source investigator traced the evidence discrepancy. The public comment
+adapter classifies the native response before retaining a sanitized payload.
+Sanitization removes native messages, errors and rate flags; replay of that saved
+projection can therefore report `source_incomplete` while the original runtime
+reported `rate_limited`. Safe diagnostic ContextVar values must be read inside
+the adapter's async callback, because writes inside `asyncio.run()` do not reach
+the outer caller. No classifier repair is supported by the retained evidence.
+
+The maintained child query and its recorded provenance agree. Actual child
+variables contain the logged-in provider flag, `first`, `is_chronological`,
+`media_id`, `parent_comment_id`, and optional `after`. There is no child
+`sort_order` variable; the retained popular-sort label is provenance. A remote
+query change remains possible but unproven. No query or transport was switched.
+
+A private observer now wraps the actual `httpx.AsyncClient.send` boundary. It
+records UTC/sequence, known query and document identity, header/form agreement,
+bounded flags, hashed media/parent/cursor values, prepared credential-presence
+booleans, client environment/redirect settings, exact HTTP status, buffered-body
+size/hash, Retry-After, and the existing safe native failure projection. It
+examines only buffered content inside the coroutine and handles the native
+`for (;;);` JSON prefix. It adds no requests, preserves arguments, response and
+exception identity, and isolates logging failures. Raw bodies, credentials,
+cookies and arbitrary native messages are excluded.
+
+The private one-shot runner preserves source `e6fab2ce`, the original manifest,
+state, run and ledger. It checks the time floor and live public gate, cancelled
+generation 6/local placement, absent competing runs/owners/worker, budget, and
+the original page/mappings before invoking the unchanged CLI with
+`resume --interrupt-after child --apply`. An exclusive persisted marker prevents
+replaying a started or uncertain invocation. The production per-request guards,
+single-stream lock, 50-request/15-minute limit and rolling daily limit still apply.
+
+Ten offline observer tests passed. Four offline runner cases passed: ready,
+blocked gate, changed generation and existing owner. An actual invocation before
+the cooldown was rejected before source or control work. Independent review of
+the complete observer, tests and runner found no blocking issue. Missing telemetry
+must remain unresolved; it cannot be treated as proof of anonymous transmission
+or native failure classification. Router reconciliation again could not load the
+native child identity; routed acceptance/exact instruction matching remain
+unverified, separate from the retained native reports and passing checks.
+
+The app follow-up `instagram-instrumented-retry` is active for one occurrence at
+**2026-10-20 16:32 America/New_York (20:32 UTC)** in this chat. The reviewed runner
+also refuses execution before 20:30:40 UTC and checks the current database gate.
+At this preparation checkpoint, no additional Instagram request or run resume has
+occurred. The expected result is pending, not a retrieval pass.
+
+Scrapling investigation found that the old browser harness uses an older release,
+run and cooldown and cannot be reused unchanged. Prior retained metadata shows
+one load-more click and `PolarisLoggedOutDynamicDialogQuery`, with no actual
+comment pagination request. No retained HTML/HAR is available for useful offline
+Selector analysis. If the instrumented retry still fails, inspect its native-safe
+diagnostics first; any necessary fresh Scrapling capture must use a reviewed,
+anonymous, tightly bounded harness with the same budget and current cooldown.
+Browser evidence remains diagnostic and cannot satisfy durable retrieval cells.
+
+These repairs affect private diagnostic files only. Production source, SQL,
+secrets, deployment and service configuration are unchanged. No Modal deployment
+or app build applies. Full history remains gated and the general worker stays
+unloaded.
