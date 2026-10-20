@@ -732,3 +732,89 @@ closed, the shared gate was not modified, no new cooldown was imposed, and all
 Instagram schedules remain paused. Full history stays gated. Safe records are
 `direct-browser-20261020-v3/result.json` and
 `direct-browser-20261020-v4-photo/result.json` under the existing private task base.
+
+### Immediate reproduction of the June anonymous HTTPX procedure
+
+The user requested the earlier public HTTPX path on all three posts, including
+comments and nested replies, without login, Decodo, or schedules. The diagnostic
+used a fresh guest client for each post, direct HTTPX with environment proxy
+discovery disabled, fresh permalink bootstrap values, the June parent-query
+selection order, parent pages before children, and only newly returned cursors.
+The authenticated curl supplied by the user was structural comparison evidence;
+its cookies, tokens, viewer state, and cursors were not replayed or saved.
+
+The earlier parent operation **works anonymously now**. All three posts returned
+verified details and two native parent-comment pages using
+`PolarisPostCommentsPaginationQuery`, document `25516980651312394`, at
+`https://www.instagram.com/graphql/query/`. All nine baseline requests returned
+HTTP 200. No rate error, native access error, or Retry-After was observed.
+
+| Post | Verified type | Parent pages | Unique parent rows | Native more pages |
+| --- | --- | --- | --- | --- |
+| `Dd37XeDly4U` | Image, type 1, product `feed` | 2 | 21 | Yes |
+| `Dd60pnHl_ux` | Carousel, type 8; eight image children | 2 | 30 | Yes |
+| `Dd6m4XKDSQ1` | Video, type 2, product `clips` | 2 | 30 | Yes |
+
+The six pages contain 81 unique parent comments with no overlap. The local page
+bound was reached; this is not exhaustion. The reproduced June selection rule
+found no positive parsed reply counts and therefore sent no child request in this
+first attempt. That is an untested reply path, not evidence that replies are
+absent or inaccessible. A separately labeled bounded reply diagnostic follows.
+
+Three independent fresh-client GETs to `/p/{shortcode}/comments/` each returned
+HTTP 302 to `/accounts/login/`; redirects were not followed. These UI-route
+results do not negate the successful anonymous GraphQL pagination. The supplied
+authenticated request used `/graphql/query` without a trailing slash, a different
+parent document, logged-in viewer state, and mobile-comments route context.
+
+The full diagnostic sent 12 requests, inspected 2,600,599 decoded bytes, and
+verified that the original cancelled run remained unchanged. The source gate
+was not read or changed, no cooldown was imposed, and schedules remain paused.
+The safe record is `public-httpx-june-repro-20261020/result.json` in the private
+task base. Focused transport/protocol checks and the fixes from one review batch
+passed before execution. This is diagnostic evidence, not production deployment
+or full-history acceptance.
+
+### Supplemental anonymous nested-reply probe
+
+Because the user explicitly requested nested replies, a separate diagnostic
+selected up to two freshly returned parent comments even when the parsed reply
+count was zero or unknown. It reused the reviewed direct transport and June child
+queries, with one fresh parent root per post and no repeated `/comments/` checks.
+This deliberately differs from June's positive-count-only selection. A focused
+regression verified that missing and explicit-zero count fixtures both cause real
+child requests, while preserving their distinct raw-field observations.
+
+The photo bootstrap and parent root succeeded again. All 11 parent nodes had
+`child_comment_count: null`; `reply_count`, `edge_threaded_comments`, and
+`preview_child_comments` were absent. The existing converter produced parsed
+reply counts of zero. Thus the zero used by the earlier selector was not a
+source-reported zero for these nodes. This behavior exists in both June and
+current parsing logic and must not be treated as proof of exhausted replies.
+
+The first real child request used `PolarisPostChildCommentsQuery`, document
+`34884685271179117`, with the same fresh guest jar and a parent ID returned by
+that session. Instagram returned HTTP 200 with the actual native error:
+
+```json
+{"code":1675004,"message":"Rate limit exceeded","severity":"CRITICAL"}
+```
+
+The response contained no child connection. Its 114-byte body SHA-256 is
+`c6cd01e6d597b1d60b0baa2398ad005a96f0a1f1d0aa9be29bf295d72c01d44e`.
+No Retry-After was supplied. This is a child-operation rate rejection, distinct
+from the browser's ancillary promotion-query error 1675002. It does not establish
+a numeric daily quota, a two-hour wait, or the exact scope/internal cause of
+Instagram's limit. Parent pagination succeeded immediately before this rejection.
+
+The diagnostic stopped after that actual rate response: three requests total,
+zero child pages, and no child attempts for the carousel or reel. The requested
+all-three nested-reply coverage therefore remains incomplete. No alternate
+query, session rotation, scheduled retry, or new local cooldown followed the
+rejection. The original cancelled run passed final verification unchanged.
+The safe record is `public-httpx-june-repro-20261020-replies/result.json`.
+
+The combined result is **all-three detail and parent-pagination success; nested
+replies blocked at the first child request; full-history acceptance still gated**.
+These changes are private diagnostic scripts plus this evidence record. Backend
+runtime, app, SQL, and Modal deployment were not changed.
