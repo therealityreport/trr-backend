@@ -608,3 +608,64 @@ unchanged. None of these source differences independently proves the cause of th
 current rejection, and the old partial count does not establish complete nested
 reply coverage. A clean-browser diagnostic is a separate transport experiment;
 the current failing direct attempt was not a fresh browser window.
+
+### User-directed direct browser test
+
+The user then directed testing the same three posts without Decodo first and
+explicitly rejected further scheduled tasks. The Decodo follow-up is paused;
+the direct-retry and older canary follow-ups are also confirmed paused. No new
+schedule is authorized for this test.
+
+The immediate diagnostic uses a fresh temporary browser profile, no saved state,
+no login and no proxy. It leaves the durable run and shared database gate unchanged.
+For this explicitly requested isolated test, the unsupported local two-hour
+fallback is not treated as a server instruction. The browser must stop on an
+actual upstream rate rejection, login requirement or challenge. Source-data
+requests use the existing ledger; static scripts have separate explicit caps.
+This is a small diagnostic, not a resumption of full history or a change to the
+production policy. A local-only startup check confirmed an empty initial cookie
+jar and closed the temporary browser without making an Instagram request.
+
+The first immediate browser attempt exposed a diagnostic mistake: its eight-data-
+request per-post ceiling stopped normal initialization of the photo page. It made
+eight document/XHR/fetch requests and sixteen script requests, verified the photo
+detail identity, and clicked no controls. That was a local cap failure, not an
+observed upstream rate rejection. Its started marker and result remain intact.
+
+A corrected isolated attempt used a new output directory and retained all prior
+ledger entries. Its private accounting override kept the shared stream lock and
+tranche lifecycle, while using explicit diagnostic bounds of 100 data requests,
+50 per post, 150 scripts, 75 per post, five minutes, and at most two comment and
+two reply expansion clicks per post. The production accounting class and shared
+source-gate row were not changed. Three focused correction tests passed; prior
+unaffected synthetic checks and the successful browser launch were reused.
+
+The corrected browser attempt reached the photo, verified its expected identity
+and type, and clicked **Load more comments once**. It then stopped on the native
+comment classifier's `source_auth_failed` result. There were 23 document/XHR/fetch
+requests and 23 script requests; all 46 observed HTTP statuses were 200. The
+rejected JSON body was 125 bytes, with one critical error and no child connection.
+Its SHA-256 is
+`fb43ffdc4b0a7a58f2c7c1d4919e0b88e038cbe181027483dfd7bbd0acd42cb3`.
+There was no Retry-After or retained rate marker. No visible login form was
+observed. The safe projection does not retain the exact authentication message;
+this supports an authentication-related application rejection, not a proven
+particular login requirement. No manually constructed GraphQL request was sent.
+The failing event's query name is retained as `other`, so it cannot be attributed
+to a specific parent or child query from this artifact. The classifier checks
+recognized rate conditions before auth conditions; auth-classified does not prove
+that Instagram's underlying internal reason could not involve throttling.
+
+| Target | Fresh browser detail | Parent comment pages | Nested reply pages |
+| --- | --- | --- | --- |
+| `Dd37XeDly4U` photo | Verified | None; expansion caused rejection | None |
+| `Dd60pnHl_ux` carousel | Not attempted after rejection | Not attempted | Not attempted |
+| `Dd6m4XKDSQ1` reel | Not attempted after rejection | Not attempted | Not attempted |
+
+The original run remained cancelled at generation 8 and passed final verification.
+The account ledger contains 99 recorded requests and zero open tranches after
+both diagnostic attempts. Temporary browser contexts were closed. No Decodo or
+saved/login profile was used, no cooldown was imposed by this test, and all
+Instagram follow-ups remain paused. Full history remains gated. These are actual
+partial test results; neither all-three browser success nor comment/reply
+retrieval has been established.
