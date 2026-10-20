@@ -1542,3 +1542,221 @@ def test_public_relay_request_limit_is_partial_without_automatic_retry(missing_r
     finally:
         asyncio.run(fetcher.aclose())
         fetcher._parser.session.close()
+
+
+def _relay_budget_node(identity, *, reply_count=0, previews=()):
+    node = {
+        "pk": identity,
+        "text": f"comment {identity}",
+        "created_at": 1772766459,
+        "child_comment_count": reply_count,
+        "user": {"pk": f"user-{identity}", "username": f"user{identity}"},
+    }
+    if previews:
+        node["edge_threaded_comments"] = {
+            "count": reply_count,
+            "edges": [{"node": _relay_budget_node(child)} for child in previews],
+            "page_info": {"has_next_page": True, "end_cursor": "inline-next"},
+        }
+    return node
+
+
+def _relay_budget_page(nodes, *, child=False, more=True, cursor="next"):
+    key = (
+        "xdt_api__v1__media__media_id__comments__parent_comment_id__child_comments__connection"
+        if child
+        else "xdt_api__v1__media__media_id__comments__connection"
+    )
+    return httpx.Response(
+        200,
+        json={
+            "data": {
+                key: {
+                    "edges": [{"node": node} for node in nodes],
+                    "page_info": {"has_next_page": more, "end_cursor": cursor if more else None},
+                }
+            }
+        },
+    )
+
+
+def _run_public_budget_sample(monkeypatch, *, cap, fetch_replies, parent_pages, child_pages):
+    from trr_backend.socials.instagram.comments_scrapling import fetcher as module
+
+    calls = []
+    parent_pages, child_pages = list(parent_pages), list(child_pages)
+    client = MagicMock()
+    client.cookies = httpx.Cookies()
+    client.get = AsyncMock(
+        return_value=httpx.Response(
+            200,
+            text='"LSD",[],{"token":"fixture"}',
+            request=httpx.Request("GET", "https://www.instagram.com/p/AAAABC/"),
+        )
+    )
+
+    async def post(_url, *, data, **_kwargs):
+        variables = json.loads(data["variables"])
+        child = "parent_comment_id" in variables
+        calls.append(("child" if child else "parent", variables))
+        pages = child_pages if child else parent_pages
+        assert pages, "unexpected source request after the sample budget or block"
+        response = pages.pop(0)
+        response.request = httpx.Request("POST", _url)
+        return response
+
+    client.post = AsyncMock(side_effect=post)
+    monkeypatch.setattr(module, "build_comments_async_client", lambda **_kw: _AsyncClientContext(client))
+    monkeypatch.setattr(module, "_post_comments_graphql_doc_ids", lambda *_: ["parent-doc"])
+    monkeypatch.setattr(module, "_post_child_comments_graphql_doc_attempts", lambda: [("child-query", "child-doc")])
+    fetcher = _build_fetcher()
+    fetcher._pace_api_requests = AsyncMock(return_value=True)
+    try:
+        result = asyncio.run(
+            fetcher.fetch_comments_for_shortcode(
+                "AAAABC",
+                max_comments=cap,
+                fetch_replies=fetch_replies,
+                expected_comment_count=1000,
+                load_strategy="public_relay",
+            )
+        )
+        return result, calls
+    finally:
+        asyncio.run(fetcher.aclose())
+        fetcher._parser.session.close()
+
+
+@pytest.mark.parametrize("cap", [1, 2, 100])
+@pytest.mark.parametrize("fetch_replies", [False, True])
+def test_public_sample_reserves_reply_room_within_total_cap(monkeypatch, cap, fetch_replies):
+    parents = [_relay_budget_node(str(index), reply_count=1000 if index == cap - 1 else 0) for index in range(cap)]
+    result, calls = _run_public_budget_sample(
+        monkeypatch,
+        cap=cap,
+        fetch_replies=fetch_replies,
+        parent_pages=[_relay_budget_page(parents)],
+        child_pages=[_relay_budget_page([_relay_budget_node(f"reply-{index}") for index in range(50)], child=True)],
+    )
+    assert flattened_comment_count(result.comments) == cap
+    expected_replies = 1 if fetch_replies and cap > 1 else 0
+    assert child_reply_count(result.comments) == expected_replies
+    assert [kind for kind, _ in calls] == (["parent", "child"] if expected_replies else ["parent"])
+    if expected_replies:
+        assert calls[-1][1]["first"] == 1
+        assert result.diagnostic_metadata["relay_comments"]["pages"][0]["reply_slots_reserved"] == 1
+    assert not result.fetch_failed and not result.retryable
+
+
+def test_public_sample_hydrates_between_parent_pages_and_counts_inline_previews(monkeypatch):
+    result, calls = _run_public_budget_sample(
+        monkeypatch,
+        cap=5,
+        fetch_replies=True,
+        parent_pages=[
+            _relay_budget_page([_relay_budget_node("p1", reply_count=3, previews=["preview"])]),
+            _relay_budget_page([_relay_budget_node("p2")]),
+        ],
+        child_pages=[_relay_budget_page([_relay_budget_node("r1"), _relay_budget_node("r2")], child=True, more=False)],
+    )
+    assert [kind for kind, _ in calls] == ["parent", "child", "parent"]
+    assert flattened_comment_count(result.comments) == 5
+    assert parent_comment_count(result.comments) == 2 and child_reply_count(result.comments) == 3
+
+
+def test_public_sample_without_reply_gaps_continues_parent_pages(monkeypatch):
+    result, calls = _run_public_budget_sample(
+        monkeypatch,
+        cap=3,
+        fetch_replies=True,
+        parent_pages=[
+            _relay_budget_page([_relay_budget_node("p1")]),
+            _relay_budget_page([_relay_budget_node("p2"), _relay_budget_node("p3")]),
+        ],
+        child_pages=[],
+    )
+    assert [kind for kind, _ in calls] == ["parent", "parent"]
+    assert flattened_comment_count(result.comments) == 3 and child_reply_count(result.comments) == 0
+
+
+def test_public_sample_inline_reply_tree_cannot_overflow_total_cap(monkeypatch):
+    result, calls = _run_public_budget_sample(
+        monkeypatch,
+        cap=2,
+        fetch_replies=False,
+        parent_pages=[
+            _relay_budget_page(
+                [
+                    _relay_budget_node("p1", reply_count=4, previews=["r1", "r2", "r3", "r4"]),
+                    _relay_budget_node("p2"),
+                ]
+            )
+        ],
+        child_pages=[],
+    )
+    assert [kind for kind, _ in calls] == ["parent"]
+    assert flattened_comment_count(result.comments) == 2
+
+
+def test_public_child_budget_deduplicates_existing_ids_before_count_and_stops_pages(monkeypatch):
+    result, calls = _run_public_budget_sample(
+        monkeypatch,
+        cap=5,
+        fetch_replies=True,
+        parent_pages=[_relay_budget_page([_relay_budget_node("p1", reply_count=100, previews=["preview"])])],
+        child_pages=[
+            _relay_budget_page(
+                [_relay_budget_node("preview"), _relay_budget_node("r1"), _relay_budget_node("r1")], child=True
+            ),
+            _relay_budget_page(
+                [
+                    _relay_budget_node("r1"),
+                    _relay_budget_node("r2"),
+                    _relay_budget_node("r3"),
+                    _relay_budget_node("overflow"),
+                ],
+                child=True,
+            ),
+        ],
+    )
+    assert [kind for kind, _ in calls] == ["parent", "child", "child"]
+    assert [variables["first"] for kind, variables in calls if kind == "child"] == [3, 2]
+    assert flattened_comment_count(result.comments) == 5
+    assert [reply.comment_id for reply in result.comments[0].replies] == ["preview", "r1", "r2", "r3"]
+
+
+def test_public_child_block_after_partial_replies_is_not_target_success(monkeypatch):
+    result, calls = _run_public_budget_sample(
+        monkeypatch,
+        cap=5,
+        fetch_replies=True,
+        parent_pages=[_relay_budget_page([_relay_budget_node("p1", reply_count=10)])],
+        child_pages=[
+            _relay_budget_page([_relay_budget_node("r1")], child=True),
+            httpx.Response(429, text="rate limited"),
+        ],
+    )
+    assert [kind for kind, _ in calls] == ["parent", "child", "child"]
+    assert result.fetch_failed and not result.retryable
+    assert result.fetch_reason == "http_429" and result.public_block_signal != "none"
+    assert result.diagnostic_metadata["public_comments"]["classification"] == "public_partial"
+    assert child_reply_count(result.comments) == 1
+
+
+def test_public_sample_reserves_reply_slot_when_gap_parent_arrives_on_later_page(monkeypatch):
+    result, calls = _run_public_budget_sample(
+        monkeypatch,
+        cap=3,
+        fetch_replies=True,
+        parent_pages=[
+            _relay_budget_page([_relay_budget_node("p1"), _relay_budget_node("p2")]),
+            _relay_budget_page([_relay_budget_node("p3", reply_count=10)]),
+        ],
+        child_pages=[_relay_budget_page([_relay_budget_node("r1")], child=True)],
+    )
+    assert [kind for kind, _ in calls] == ["parent", "parent", "child"]
+    assert [parent.comment_id for parent in result.comments] == ["p1", "p3"]
+    assert [reply.comment_id for reply in result.comments[-1].replies] == ["r1"]
+    assert flattened_comment_count(result.comments) == 3
+    assert parent_comment_count(result.comments) == 2 and child_reply_count(result.comments) == 1
+    assert result.diagnostic_metadata["relay_comments"]["pages"][-1]["reply_slots_reserved"] == 1

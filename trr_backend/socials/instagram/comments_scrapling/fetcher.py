@@ -23,7 +23,7 @@ import tempfile
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any, cast
 from urllib.parse import urlencode, urlparse
@@ -65,6 +65,7 @@ from trr_backend.socials.instagram.comments_scrapling.counts import (
     child_reply_count,
     expected_reply_count,
     flattened_comment_count,
+    iter_flattened_comments,
     merge_comment_replies,
     missing_reply_count,
     parent_comment_count,
@@ -301,10 +302,14 @@ def _public_comments_coverage_metadata(
             "page_limit_reached",
         }
     )
-    coverage_complete = missing_reply_count_value == 0 and (
-        (advertised_count_met and not request_limit_reached)
-        or (source_exhausted and advertised_count_met)
-        or (source_exhausted and advertised is None and not request_limit_reached)
+    coverage_complete = (
+        missing_reply_count_value == 0
+        and _classify_public_block_signal(terminal) == PUBLIC_BLOCK_SIGNAL_NONE
+        and (
+            (advertised_count_met and not request_limit_reached)
+            or (source_exhausted and advertised_count_met)
+            or (source_exhausted and advertised is None and not request_limit_reached)
+        )
     )
     if coverage_complete:
         classification = "public_complete"
@@ -1522,6 +1527,80 @@ def _merge_unique_comments(
         if max_comments > 0 and len(comments) >= max_comments:
             break
     return appended
+
+
+def _merge_bounded_public_comments(
+    comments: list[InstagramComment],
+    page_comments: list[InstagramComment],
+    *,
+    limit: int,
+    fetch_replies: bool,
+    existing_ids: set[str] | None = None,
+) -> tuple[int, int]:
+    """Keep a unique total sample, reserving room for an advertised reply gap."""
+    before_parents = len(comments)
+    remaining = max(0, limit - flattened_comment_count(comments))
+    if remaining == 0:
+        return 0, 0
+    candidates = list(comments)
+    _merge_unique_comments(candidates, page_comments, max_comments=0)
+    incoming = candidates[before_parents:]
+    if (
+        fetch_replies
+        and limit > 1
+        and flattened_comment_count(candidates) >= limit
+        and not missing_reply_count(comments)
+    ):
+        # Prefer first-seen order; only promote a gap parent if it could fall
+        # outside the sample and otherwise leave every reply starved.
+        gap = next((parent for parent in incoming if expected_reply_count(parent) > reply_count_observed(parent)), None)
+        if gap is not None and gap not in incoming[: max(1, remaining - 1)]:
+            incoming = [
+                *incoming[: max(0, remaining - 2)],
+                gap,
+                *[p for p in incoming[max(0, remaining - 2) :] if p is not gap],
+            ]
+    seen = {str(comment.comment_id or "").strip() for comment in iter_flattened_comments(comments)} | (
+        existing_ids or set()
+    )
+
+    def retain(comment: InstagramComment) -> InstagramComment | None:
+        nonlocal remaining
+        identity = str(comment.comment_id or "").strip()
+        if remaining == 0 or not identity or identity in seen:
+            return None
+        seen.add(identity)
+        remaining -= 1
+        replies = []
+        for reply in comment.replies or []:
+            kept = retain(reply)
+            if kept is not None:
+                replies.append(kept)
+        return replace(comment, replies=replies)
+
+    for parent in incoming:
+        kept = retain(parent)
+        if kept is not None:
+            comments.append(kept)
+        if remaining == 0:
+            break
+    reserved = 0
+    if fetch_replies and limit > 1 and remaining == 0 and missing_reply_count(comments):
+        gap_parent = next(parent for parent in comments if expected_reply_count(parent) > reply_count_observed(parent))
+        removable = next((parent for parent in reversed(comments[before_parents:]) if parent is not gap_parent), None)
+        if removable is None:
+            removable = next(
+                (
+                    parent
+                    for parent in reversed(comments[:before_parents])
+                    if not parent.replies and expected_reply_count(parent) <= 0
+                ),
+                None,
+            )
+        if removable is not None:
+            reserved = flattened_comment_count([removable])
+            comments.remove(removable)
+    return len(comments) - before_parents, reserved
 
 
 def _comment_content_signature(comment: InstagramComment) -> tuple[str, str, str, bool] | None:
@@ -3794,7 +3873,7 @@ class InstagramCommentsScraplingFetcher:
                 durable_resume=public_relay_resume if strict_native_exhaustion else None,
                 persisted_comments=persisted_top_level_comments if strict_native_exhaustion else None,
                 strict_native_exhaustion=strict_native_exhaustion,
-                fetch_replies=fetch_replies if strict_native_exhaustion else True,
+                fetch_replies=fetch_replies,
             )
             if strict_native_exhaustion:
                 reason = str(relay_metadata.get("reason") or "source_incomplete")
@@ -6405,12 +6484,16 @@ class InstagramCommentsScraplingFetcher:
                 }
                 attempt_metadata["attempts"].append(attempt)
 
+                bounded_public_replies = not strict_native_exhaustion and not relay_is_logged_in and max_comments > 0
+
                 async def hydrate_child_comments(
                     terminal_reason: str,
                     *,
                     attempt_ref: dict[str, Any] = attempt,
                     comments_ref: list[InstagramComment] = comments,
                 ) -> str:
+                    if not fetch_replies:
+                        return terminal_reason
                     child_metadata = await self._fetch_public_relay_child_comments_for_status_only(
                         public_client=client,
                         shortcode=normalized_shortcode,
@@ -6427,6 +6510,11 @@ class InstagramCommentsScraplingFetcher:
                         strict_native_exhaustion=strict_native_exhaustion,
                     )
                     attempt_metadata["child_comments"] = child_metadata
+                    child_block = child_metadata.get("block_reason") or child_metadata.get("reason")
+                    if _classify_public_block_signal(child_block) != PUBLIC_BLOCK_SIGNAL_NONE:
+                        attempt_metadata["block_reason"] = str(child_block)
+                        attempt_ref["success"] = False
+                        return str(child_block)
                     if strict_native_exhaustion:
                         reply_resume = resume.setdefault("replies", {})
                         for identity in child_metadata.get("completed_parent_ids", []):
@@ -6644,11 +6732,16 @@ class InstagramCommentsScraplingFetcher:
                                 )
                             elif not count_known:
                                 replies.setdefault(identity, {"pending": True})
-                    appended = _merge_unique_comments(
-                        comments,
-                        page_comments,
-                        max_comments=max_comments,
-                    )
+                    reply_slots_reserved = 0
+                    if bounded_public_replies:
+                        appended, reply_slots_reserved = _merge_bounded_public_comments(
+                            comments,
+                            page_comments,
+                            limit=max_comments,
+                            fetch_replies=fetch_replies,
+                        )
+                    else:
+                        appended = _merge_unique_comments(comments, page_comments, max_comments=max_comments)
                     next_cursor = str(page_metadata.get("end_cursor") or "").strip() or None
                     page_summary = {
                         "doc_id": normalized_doc_id,
@@ -6658,6 +6751,7 @@ class InstagramCommentsScraplingFetcher:
                         "merged_comments": appended,
                         "has_next_page": page_metadata.get("has_next_page"),
                         "has_end_cursor": bool(next_cursor),
+                        "reply_slots_reserved": reply_slots_reserved,
                     }
                     attempt_metadata["pages"].append(page_summary)
                     attempt["pages"] = page_index
@@ -6667,20 +6761,34 @@ class InstagramCommentsScraplingFetcher:
                         more = page_metadata.get("page_info", {}).get("has_next_page")
                         if type(more) is not bool or (more and not next_cursor):
                             return comments, {"reason": "graphql_relay_unproved_pagination", **attempt_metadata}
+                    children_hydrated = False
                     if (
-                        not strict_native_exhaustion
-                        and target_count is not None
-                        and flattened_comment_count(comments) >= target_count
+                        bounded_public_replies
+                        and fetch_replies
+                        and flattened_comment_count(comments) < max_comments
+                        and missing_reply_count(comments)
                     ):
-                        terminal_reason = await hydrate_child_comments("graphql_relay_target_reached")
-                        attempt["success"] = True
+                        child_reason = await hydrate_child_comments("parent_page_loaded")
+                        children_hydrated = True
+                        if attempt_metadata.get("block_reason"):
+                            return comments, {"reason": child_reason, **attempt_metadata}
+                    if not strict_native_exhaustion and (
+                        (target_count is not None and flattened_comment_count(comments) >= target_count)
+                        or (bounded_public_replies and flattened_comment_count(comments) >= max_comments)
+                    ):
+                        terminal_reason = "graphql_relay_target_reached"
+                        if not children_hydrated:
+                            terminal_reason = await hydrate_child_comments(terminal_reason)
+                        elif child_reply_count(comments):
+                            terminal_reason = "child_comments_target_reached"
+                        attempt["success"] = not bool(attempt_metadata.get("block_reason"))
                         attempt["reason"] = terminal_reason
                         return comments, {"reason": attempt["reason"], **attempt_metadata}
                     if not page_metadata.get("has_next_page") or not next_cursor:
                         terminal_reason = "pagination_complete" if comments else "graphql_relay_empty"
                         if strict_native_exhaustion:
                             terminal_reason = "pagination_complete"
-                        if fetch_replies:
+                        if fetch_replies and not children_hydrated:
                             terminal_reason = await hydrate_child_comments(terminal_reason)
                         attempt["success"] = bool(comments)
                         attempt["reason"] = terminal_reason
@@ -6963,6 +7071,13 @@ class InstagramCommentsScraplingFetcher:
                     continue
 
                 child_comments: list[InstagramComment] = []
+                bounded_public = not strict_native_exhaustion and not relay_is_logged_in and max_comments > 0
+                existing_reply_ids = (
+                    {str(comment.comment_id or "").strip() for comment in iter_flattened_comments(comments)}
+                    if bounded_public
+                    else set()
+                )
+                reply_budget = max(0, max_comments - flattened_comment_count(comments)) if bounded_public else None
                 cursor: str | None = lane_resume.get("after") if strict_native_exhaustion else None
                 seen_cursors: set[str] = (
                     set(lane_resume.get("seen_cursors") or []) if strict_native_exhaustion else set()
@@ -7027,13 +7142,18 @@ class InstagramCommentsScraplingFetcher:
 
                 page_index = 0
                 while max_pages is None or page_index < max_pages:
+                    if bounded_public and flattened_comment_count(child_comments) >= reply_budget:
+                        stop_reason = "max_comments_reached"
+                        break
                     page_index += 1
                     if not await self._pace_api_requests(deadline=child_deadline):
                         metadata["reason"] = "graphql_child_relay_deadline_exceeded"
                         return metadata
                     variables: dict[str, Any] = {
                         "__relay_internal__pv__PolarisIsLoggedInrelayprovider": relay_is_logged_in,
-                        "first": effective_page_size,
+                        "first": min(effective_page_size, reply_budget - flattened_comment_count(child_comments))
+                        if bounded_public
+                        else effective_page_size,
                         "is_chronological": False,
                         "media_id": media_id,
                         "parent_comment_id": parent_comment_id,
@@ -7131,7 +7251,22 @@ class InstagramCommentsScraplingFetcher:
                         post_url=post_url,
                         parent_comment_id=parent_comment_id,
                     )
-                    appended = _merge_unique_comments(child_comments, page_comments, max_comments=0)
+                    if bounded_public:
+                        page_comments = [
+                            comment
+                            for comment in page_comments
+                            if str(comment.comment_id or "").strip() not in existing_reply_ids
+                        ]
+                    if bounded_public:
+                        appended, _ = _merge_bounded_public_comments(
+                            child_comments,
+                            page_comments,
+                            limit=reply_budget,
+                            fetch_replies=False,
+                            existing_ids=existing_reply_ids,
+                        )
+                    else:
+                        appended = _merge_unique_comments(child_comments, page_comments, max_comments=0)
                     next_cursor = str(page_metadata.get("end_cursor") or "").strip() or None
                     if len(metadata["pages"]) < _STATUS_ONLY_METADATA_MAX_ITEMS:
                         metadata["pages"].append(
@@ -7151,6 +7286,9 @@ class InstagramCommentsScraplingFetcher:
                         if type(more) is not bool or (more and not next_cursor):
                             stop_reason = "graphql_child_relay_unproved_pagination"
                             break
+                    if bounded_public and flattened_comment_count(child_comments) >= reply_budget:
+                        stop_reason = "max_comments_reached"
+                        break
                     if not page_metadata.get("has_next_page") or not next_cursor:
                         stop_reason = "pagination_complete"
                         parent_complete = True
@@ -7191,6 +7329,8 @@ class InstagramCommentsScraplingFetcher:
                     metadata["fetched_replies"] += len(child_comments)
                     metadata["merged_replies"] += merged_count
                     metadata["parents_with_replies"] += 1
+                    if metadata.get("block_reason"):
+                        return metadata
                     break
 
                 if metadata.get("block_reason"):
