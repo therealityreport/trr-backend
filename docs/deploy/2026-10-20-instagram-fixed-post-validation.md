@@ -7,12 +7,14 @@ passed fresh durable retrieval. Full comment and reply retrieval has not passed.
 Full-history launches, resumptions, retries, and dispatch for `bravotv`
 remain gated; v2 ownership remains enabled. No full-history run was started.
 
-The current source cooldown ends at 2026-10-20 18:30:10.295022 UTC.
-A cooldown expiry permits a bounded attempt; it does not prove access.
+The current source cooldown ends at 2026-10-20 20:30:39.741308 UTC
+(4:30:39 p.m. Eastern). Automatic source attempts have stopped after two
+consecutive resumed tranches reported `rate_limited` without committed progress.
+Cooldown expiry alone does not reopen execution or prove access.
 
 | Fixed post | Details retrieval | Parent retrieval | Reply retrieval |
 | --- | --- | --- | --- |
-| Photo `Dd37XeDly4U` | Passed: fresh source receipt | First page committed; resume rate-limited | Not reached |
+| Photo `Dd37XeDly4U` | Passed: fresh source receipt | First page retained; continuation not attempted | Pending child-root query rejected in two resumed tranches |
 | Carousel `Dd60pnHl_ux` | Passed: fresh source receipt | Held by shared cooldown | Not reached |
 | Reel `Dd6m4XKDSQ1` | Passed: fresh source receipt | Held by shared cooldown | Not reached |
 
@@ -272,3 +274,118 @@ shared account budget. Do not restart from root or overwrite the manifest. Compl
 parent/child native exhaustion and the independent fresh-session repeat before
 accepting the nine-cell matrix or opening full history. The first failed run and
 the first committed parent page are retained as recovery evidence.
+
+## Bounded resume and stop-rule close-out — 18:31 UTC
+
+This section supersedes the preceding instruction to resume after cooldown.
+Validation remains incomplete; this is an operational stop, not capability
+acceptance or proof of permanent logged-out unavailability.
+
+The implementation session verified the original private manifest, state and
+shared ledger, all 2,539 installed release files against the frozen archive/source,
+and the installed LaunchAgent identity. The workspace relocation resolves through
+the existing `/Users/thomashulihan/Projects` symlink; the isolated release and
+private configuration do not depend on the moved checkout. The worker was
+unloaded and no matching worker or harness process was present before execution.
+
+A read-only database snapshot verified project `vwxfvzutyufrkhfgoeaa`, the frozen
+run at generation 4, unchanged manifest/intent, local placement, no pending control
+command, no competing run/owner/uncertain dispatch, and the source cooldown ending
+at 18:30:10.295022 UTC. The original parent-page receipt, evidence hash and eleven
+canonical comment mappings were intact. No full-history run existed.
+
+The parent resumed run `dbc80df9-0df7-43ca-9abc-2f1d1e393056` using source
+`e6fab2ce149423a96a59ba4256ea340c8040d5a6`, the original private files and shared
+ledger, and `--interrupt-after child`. The clean process environment loaded the
+same private release configuration. No manifest, source, query identity,
+transport selection or request limit was changed.
+
+| Resumed generation | First charged request (UTC) | Charged requests | Result | New committed pages |
+| --- | --- | --- | --- | --- |
+| 3, then cancelled at 4 | 16:30:07.610590 | 2 | `rate_limited`; remaining targets held | 0 |
+| 5, then cancelled at 6 | 18:30:37.296826 | 2 | `rate_limited`; remaining targets held | 0 |
+
+The new tranche ended with exit code 2, `retrieval_not_passed`, and
+`cooldown_or_wait`. The production source gate now records two consecutive
+failures and defers requests until 20:30:39.741308 UTC. The shared rolling ledger
+contains 65 charges, with 135 remaining and no open tranche. No retry was made
+inside either rejection's cooldown.
+
+### What the rejection evidence establishes
+
+Both failed resumes reached the same pending child-root query, not the parent's
+saved `after` cursor. The frozen fetcher hydrates pending children before
+continuing parent pagination. Retained evidence identifies
+`PolarisPostChildCommentsQuery` / document `34884685271179117`, root provenance,
+page size 12, popular sort, a matching parent identity, and null request cursor:
+
+- Earlier rejection evidence: `4663ad8b-a300-4ac1-b0d2-51223292700b`,
+  captured at 16:30:09.957407 UTC.
+- New rejection evidence: `b74c7c7d-6942-44ef-be1c-7eaee6423cc1`,
+  captured at 18:30:39.425862 UTC.
+- Both retained payloads have SHA-256
+  `bd80e05e4f86be9af646f14efdf0f4b41fbd330f82a40011ec244469bcf4500e`.
+
+The runtime reported `rate_limited`, but exact HTTP status and the original
+rate-limit marker are not independently recoverable from these sanitized
+payloads. Reclassifying the retained payload yields `source_incomplete`, and
+the safe failure-basis projection contains no retained rate marker. Do not
+describe this as proven HTTP 429, permanent anonymous unavailability, or a
+successfully transmitted parent continuation.
+
+A private Requests metadata observer was checked offline, including logging
+failures, before this tranche. It made no extra requests and did not alter request
+arguments. It captured no comment calls because durable public comments use
+`httpx.AsyncClient`, with `trust_env=False` and `follow_redirects=False`. It
+therefore supplies no wire-level cursor/authentication proof. No replay was made
+to recover telemetry. Anonymous configuration evidence remains the verified
+frozen public adapter with empty credential inputs, no proxy and the production
+credential/request guards; it is distinct from independent wire evidence.
+
+### Preserved state and final acceptance matrix
+
+The post-tranche read-only snapshot confirmed generation 6, cancelled state,
+no target owners, no open budget tranche, and all six account runs cancelled.
+The original page receipt `8c0cf24a-4dd2-4632-b458-754a3953de5b`, its evidence and
+content hash are unchanged. Before/after observation hashes match. All eleven
+native IDs still map to eleven distinct canonical rows with zero identity
+mismatches. No page or identity was lost. This proves preservation through this
+failed resume, not successful continuation or child-page interruption.
+
+| Fixed post | Details | Parents | Replies |
+| --- | --- | --- | --- |
+| Photo `Dd37XeDly4U` | PASS: retained fresh receipt | INCOMPLETE: one page, eleven IDs, saved cursor; continuation untested | BLOCKED: same child-root query failed twice; no committed child page |
+| Carousel `Dd60pnHl_ux` | PASS: retained fresh receipt | NOT REACHED: shared cooldown | NOT REACHED |
+| Reel `Dd6m4XKDSQ1` | PASS: retained fresh receipt | NOT REACHED: shared cooldown | NOT REACHED |
+
+The two consecutive eligible resumes continued the frozen run's pending child
+work and produced no committed progress. They satisfy the accepted stop rule;
+the rule does not establish a pagination-cursor continuation. Automatic source
+attempts stop here. The multi-page parent/child requirements, deliberate committed
+child interruption/resume, and independent anonymous repeat remain unproven.
+No fresh repeat was started and no lane was restarted from root.
+
+The harness still reports `capability_matrix_acceptance: not_evaluated`.
+An additional source-level constraint remains relevant to later work: current
+comment settlement requires a known expected overall count. Unknown reply
+counts can be resolved by native lane/leaf proof, but native exhaustion alone
+does not satisfy an unknown overall count. This was inspected, not changed or
+established as the cause of the live rejection.
+
+The full-history gate remains installed and the general Mac worker remains
+unloaded. The approved stop requires a next-step decision before more source
+attempts; expiration of the new cooldown is not that decision. Any later repair
+must preserve this frozen run and use a new source-labelled validation run.
+
+Two native investigators supplied artifact/runtime checks and evidence mapping.
+Their routing preparations succeeded and both returned results. Router lifecycle
+reconciliation returned `HOST_ERROR: thread not loaded` for both child IDs, so
+router acceptance and exact delivered-instruction matching remain unverified.
+The parent retained their reports and checked the live database/run outcomes.
+
+Only this validation record changed in the repository. No production code, SQL
+schema, dependency, secret, deployment or service configuration changed. Existing
+passing offline checks were reused; the new private observer received an offline
+stub check. Modal remains at the previously recorded v85 identity; no new Modal
+verification or deployment was needed or performed. TRR-APP build is not
+applicable to this validation/documentation close-out.
