@@ -262,11 +262,16 @@ class PublicListingSource(_PublicSource):
 
 class PublicDetailSource(_PublicSource):
     def __init__(self, *, shortcode, permalink_fetcher=None, **kwargs):
+        from trr_backend.ingestion.public_http import PublicDocumentSession
+
+        if kwargs.get("session_factory") is None:
+            kwargs["session_factory"] = PublicDocumentSession
         super().__init__(**kwargs)
         self.shortcode, self.permalink_fetcher = shortcode, permalink_fetcher
 
     def __call__(self, *, check_cancelled, on_request, source_observer):
-        from trr_backend.socials.instagram.permalink_metadata import _DEFAULT_HEADERS, fetch_permalink_media_item
+        from trr_backend.ingestion.public_http import PUBLIC_DOCUMENT_HEADERS
+        from trr_backend.socials.instagram.permalink_metadata import fetch_permalink_media_item
         from trr_backend.socials.instagram.public_post_extractor import parse_public_post_from_html
 
         session = None
@@ -279,7 +284,7 @@ class PublicDetailSource(_PublicSource):
                     return _guard(session.check_deadline)
 
                 def request(self, url, *, text=False):
-                    response = session.get(url, headers=_DEFAULT_HEADERS, cookies={})
+                    response = session.get(url, headers=PUBLIC_DOCUMENT_HEADERS, cookies={})
                     if text:
                         documents.append(response.text)
                     return response.text if text else response.json()
