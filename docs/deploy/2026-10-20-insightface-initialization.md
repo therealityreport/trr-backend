@@ -75,5 +75,18 @@ accuracy or browser click-through behavior.
 
 Detailed nonsecret evidence is retained at
 `/Users/thomashulihan/Documents/Codex/2026-10-20/insightface-repair/`.
-The candidate archive and patch remain there for exact recovery. No temporary
-Git branch or worktree was created.
+The candidate archive and patch remain there for exact recovery. Deployment
+used an archive, without a temporary Git branch or worktree.
+
+## GitHub publication
+
+The fix and this record were cherry-picked onto GitHub `main` at `c1ad6b1f`
+in a separate publication worktree, producing `b320def8` and `f9bbf928`.
+Only the six InsightFace implementation, regression-test and release-note paths
+are included. The local-only ingestion commits are excluded.
+
+Publication validation also changed the helper's image-only InsightFace import
+to `import_module`, consistent with the existing vision runtime, because the
+API/CI dependency lane does not install InsightFace. Formatting was normalized
+for the repository's pinned Ruff version. These changes preserve model-loading
+behavior; production v81 remains the deployed artifact recorded above.

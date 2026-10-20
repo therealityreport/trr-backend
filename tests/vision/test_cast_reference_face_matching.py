@@ -24,6 +24,7 @@ def test_initialization_retains_empty_exception_type_and_does_not_cache(monkeypa
     monkeypatch.setattr(matching, "import_module", lambda _name: types.SimpleNamespace(FaceAnalysis=factory))
     assert matching.get_face_analysis_model() is None
     assert matching._face_analysis_model is None
+    assert matching._face_analysis_last_error is not None
     assert f"profile=antelopev2 phase={phase}: AssertionError" in matching._face_analysis_last_error
 
 

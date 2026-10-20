@@ -9,7 +9,9 @@ from scripts.modal import provision_insightface as provision
 def _archive(tmp_path, monkeypatch, *, missing=None):
     archive = tmp_path / "models.zip"
     with zipfile.ZipFile(archive, "w") as bundle:
-        for name in provision.MODEL_FILES - {missing}:
+        for name in provision.MODEL_FILES:
+            if name == missing:
+                continue
             bundle.writestr(f"antelopev2/{name}", b"model-fixture")
     monkeypatch.setattr(provision, "MODEL_SHA256", hashlib.sha256(archive.read_bytes()).hexdigest())
     return archive
