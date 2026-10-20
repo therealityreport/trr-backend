@@ -2,19 +2,19 @@
 
 ## Acceptance status
 
-Candidate implementation passed offline verification and review. Live retrieval has not
-passed. Full-history launches, resumptions, retries, and dispatch for `bravotv`
+Implementation passed offline verification and review. All three detail targets
+passed fresh durable retrieval. Full comment and reply retrieval has not passed.
+Full-history launches, resumptions, retries, and dispatch for `bravotv`
 remain gated; v2 ownership remains enabled. No full-history run was started.
 
-The previous Mac run's recorded source cooldown ends at
-2026-10-20 15:56:20.832068 UTC. No task Instagram requests were sent before that
-deadline. A cooldown expiry permits a bounded attempt; it does not prove access.
+The current source cooldown ends at 2026-10-20 18:30:10.295022 UTC.
+A cooldown expiry permits a bounded attempt; it does not prove access.
 
 | Fixed post | Details retrieval | Parent retrieval | Reply retrieval |
 | --- | --- | --- | --- |
-| Photo `Dd37XeDly4U` | Not run | Not run | Not run |
-| Carousel `Dd60pnHl_ux` | Not run | Not run | Not run |
-| Reel `Dd6m4XKDSQ1` | Not run | Not run | Not run |
+| Photo `Dd37XeDly4U` | Passed: fresh source receipt | First page committed; resume rate-limited | Not reached |
+| Carousel `Dd60pnHl_ux` | Passed: fresh source receipt | Held by shared cooldown | Not reached |
+| Reel `Dd6m4XKDSQ1` | Passed: fresh source receipt | Held by shared cooldown | Not reached |
 
 Catalog identities select September 2026 posts outside the latest twelve. Catalog
 counts and metadata are setup provenance, never fresh retrieval evidence.
@@ -103,7 +103,7 @@ hashed and preserved privately. Only task-owned paths may enter the release.
 
 Live provider baseline was verified as workspace `admin-56995`, environment
 `main`, app `trr-backend-jobs` (`ap-DkLTRoSvqhbkGO7fHyHxrD`), deployment `v83`,
-tag `ig-public-enabled-e27568bc`. No candidate deployment has occurred yet.
+tag `ig-public-enabled-e27568bc`. This was the pre-release baseline.
 
 The idle Mac LaunchAgent `com.trr.instagram-local-worker` was stopped and its
 process exit verified before edits. Its prior configuration points at the editable
@@ -115,3 +115,160 @@ Release requires a committed Git archive, the same explicit Modal environment fo
 deployment and readiness, and a Mac launch configuration pointing to a reviewed
 release directory. Core readiness probes were inspected: they do not perform
 Instagram retrieval. Separate source probes must debit the shared request budget.
+
+## Verified Modal release
+
+Backend candidate commit: `98c6604bae5da16bad5091f04836af3c2eac26ce`.
+Workspace contract commit: `a51b77a`. The archive's 2,537 tracked files were
+byte-verified against the backend commit. Archive SHA-256:
+`37f8838ef7beac7bfae5c235c1dde94e6121b86268a33727e46fa16a44244aac`.
+
+The candidate deployed from that archive to the same verified target as **v84**,
+tag `ig-fixed-post-98c6604b`, at 2026-10-20 11:45:41 Eastern. The deployment
+helper's API cold-start canary returned HTTP 200 on its first attempt.
+
+The required `--env main --probe-core-workers --strict-probes` readiness check
+passed before and after deployment. All six core probes were healthy, with no
+missing functions/endpoints or blocking failures. These probes issued no
+Instagram requests. No secrets or provider configuration values were changed.
+The preceding v83 remains in provider history and had fresh passing core readiness
+evidence immediately before this deployment.
+
+The deployed browser probe reports Playwright 1.64.0, Patchright 1.64.1,
+curl-cffi 0.16.3, Scrapling 0.5 and Chromium 156.0.8078.4. Modal's existing
+Python base remains 3.11.12; the explicit Homebrew Python update and rebuilt Mac
+environment use 3.11.17. These are separate runtime identities.
+
+Deployment and its health checks were completed during the existing Mac source
+cooldown. This does not accept any retrieval cell or the full capability matrix.
+
+## Preflight dispatch reconciliation
+
+The final exclusivity check found one accepted dispatch from cancelled Modal run
+`4e3c0cb5-efc3-4038-9708-fd5341db69b5`. Its target had no owner. Modal's call graph
+confirmed `fc-01M5CSBZFBV5VXZAWHGM30MRZJ` was `SUCCESS` with no child calls.
+
+At 15:53:13 UTC, a conditional transaction changed only dispatch owner token
+`93adbd80-e770-4550-b09d-7fd7d0e614aa` from `accepted` to `expired`. The transaction
+required that exact remote identity and generation, a cancelled newer run
+generation, and no target owner. The before/after records were retained.
+The remote identity, cancelled run, source evidence and checkpoints were preserved.
+No source request or run resume occurred during reconciliation.
+
+## First Mac tranche
+
+Run `81127e19-8b72-4e32-9dd2-b12fc53c8101` used the committed release, exact
+manifest hash `03a521624c38ab2d0e25e0a8b3b65938e288027551501af0357c8b36d16e03f9`,
+and intent hash `c756fdf680d1b6ed512c3524041149c0bd594cde2e1dec118c0645c90ec06e17`.
+It was configured to interrupt after a committed parent page.
+
+At 15:57:03 UTC the photo's public document returned HTTP 200, 590,267 bytes,
+with no redirect. Neither maintained parser yielded an acceptable media object.
+Response SHA-256:
+`f0b742dbfebf7fb6a848ef7419af04dfa0908a4cf2db662e8f2ceae3e0dd7878`.
+Safe response metadata was retained privately; raw bootstrap tokens were not logged.
+
+The durable result was `public_detail_unresolved`. The shared request gate
+deferred further sends until 16:12:10 UTC. The other post details and all comments
+were therefore unattempted in that run; they were not independently proven unavailable.
+The CLI returned exit code 2 and `retrieval_not_passed`, then left the run
+cancelled at generation 2 with zero target owners. The shared task ledger counted
+one actual source request, leaving 199 in its rolling 24-hour allowance.
+
+There were zero successful source evidence rows and zero committed comment pages.
+No page existed to exercise the planned interruption/resume proof. Failure
+handling passed for this incomplete document: counted request, retained diagnostic
+metadata, explicit incomplete result, respected cooldown, and safe cancellation.
+Retrieval and recovery acceptance did not pass.
+
+The previous Mac source was separately archived from `348c9332`; SHA-256:
+`8ef35a618ddbf10ccd64025a55fb1150524c4564f67e768d67b2531480b51a44`.
+A private clone of its environment is pinned to the retained Python 3.11.15
+binary and standard library. Imports and dependency consistency passed; it retains
+psycopg2-binary 2.9.12, Playwright 1.62.0 and curl-cffi 0.16.1. This supplements the
+original plist, original configuration, source patch and file-hash inventory.
+Use the explicit cloned Python executable for recovery; its old console-script
+shebangs still reference the original checkout.
+## Transport diagnosis and second release
+
+A bounded anonymous browser diagnosis retrieved the selected photo. Its observed
+navigation headers alone did not repair the Requests response. The same headers
+with curl-cffi's `chrome150` transport retrieved the native photo through the
+production detail parser. This diagnostic result was not used as durable proof.
+No actual comment-pagination operation was observed in the browser capture;
+the load-more click issued `PolarisLoggedOutDynamicDialogQuery`. This alone does
+not establish that a login is required, and no query names were guessed or changed.
+
+Commit `e6fab2ce149423a96a59ba4256ea340c8040d5a6` selects that transport only for
+public detail documents. The existing credential/cookie guard, request gate,
+deadline, zero retries, and disabled redirects remain. Curl exceptions enter the
+redacted failure path. Explicit `CurlOpt.PROXY=""` disables libcurl environment
+proxy inheritance. Listing and comment transports remain unchanged.
+
+The existing detail/refresh checks passed (57 tests), and eight new adapter checks
+passed, including a real curl option boundary intercepted before network I/O.
+Independent review found the environment-proxy gap, which was fixed and verified;
+no other findings remained. Ruff and scoped diff checks passed.
+
+One reviewer probe may have reached a public permalink once because its attempted
+interception was ineffective. No response metadata was retained. One request was
+conservatively charged to the shared ledger; it is not acceptance evidence. The
+reviewer stopped further probes. No response-specific cooldown can be inferred
+from that call. All subsequent source work used the production gate and budget.
+
+The new Git archive contains 2,539 byte-verified tracked files, SHA-256
+`a6487cc10c5d6d1de5155d4c983b985311926bb10920eb9371eaac0625bfea7d`.
+Its isolated Mac environment was synchronized from the unchanged reviewed lock;
+all 155 installed packages passed the dependency check. Matching browser binaries
+were copied into the release. The previous release remains intact for rollback.
+
+The same archive deployed to `admin-56995/main/trr-backend-jobs` as **v85**, tag
+`ig-fixed-curl-e6fab2ce`, at 2026-10-20 12:28:33 Eastern. The API cold-start canary
+returned HTTP 200 on attempt one. The required strict core readiness checks passed
+with all six core probes healthy and no missing or blocking entries. This proves
+runtime health, not public retrieval from Modal's network. v84 and v83 remain in
+provider history. No secret or provider configuration was changed.
+
+## Durable detail success and parent-page interruption
+
+New run `dbc80df9-0df7-43ca-9abc-2f1d1e393056` freezes source `e6fab2ce`, manifest
+hash `f9838e3e7b4ab52f5ec9964baa7bd060e26f1a155402cb6e19c71d21c6df0def`,
+and the unchanged exact September post selection and intent hash. The earlier
+run and its evidence were preserved.
+
+All three detail targets committed fresh evidence and matching source receipts,
+one request each. The photo then committed its first public parent page: 11 native
+comment identities, a non-exhausted `after` cursor, and persisted provenance
+`PolarisPostCommentsPaginationQuery` / document `26297736713236852`. This is live
+proof of that maintained query's first page, not proof of every pagination query.
+The page receipt is `8c0cf24a-4dd2-4632-b458-754a3953de5b`; its content hash is
+`8da696d4c7c06c7e8d78dea7eb64a72f3168fbcadfbf3e9c01267ea9c0a81a61`.
+The harness intentionally cancelled after the committed parent page (generation 2).
+
+The same run resumed at generation 3. Its next comment attempt made two counted
+requests and received a `rate_limited` outcome. The shared public lane deferred all
+further source calls until **2026-10-20 18:30:10.295022 UTC (2:30:10 p.m. Eastern)**.
+The harness preserved the first page and cancelled at generation 4. Resume cursor
+correctness, later pages, native parent/child exhaustion, qualifying multi-page
+replies, and a fresh anonymous repeat remain unverified. Returned parent counts
+were null, not proved zero; unknown reply coverage must remain unresolved.
+
+The ledger now contains 63 charged requests, including the conservative reviewer
+charge, with 137 remaining in the rolling 24-hour allowance. Budget headroom does
+not override the provider cooldown. No Instagram request is permitted by this
+validation workflow before the recorded cooldown expires.
+
+## Mac configuration and remaining gate
+
+The installed LaunchAgent now points at the isolated `e6fab2ce` release and its
+private environment, not the editable checkout. Its installed plist SHA-256 is
+`80fb36aea9f6cd5d55ed24933f9a6716a845666afab9ed7a1a1e1cfa5c8d25b7`.
+The prior plist, environment, source archive and dependency environment are retained.
+The service remains stopped during incomplete validation. No full-history run
+has started, and the admission gate remains closed.
+
+After the provider cooldown, resume the same frozen run with its private state and
+shared account budget. Do not restart from root or overwrite the manifest. Complete
+parent/child native exhaustion and the independent fresh-session repeat before
+accepting the nine-cell matrix or opening full history. The first failed run and
+the first committed parent page are retained as recovery evidence.
