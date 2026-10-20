@@ -512,3 +512,99 @@ Private evidence includes `httpx-retry-20261020.execution.log`, the safe observe
 JSONL, preflight/post-run snapshots, original-state backup and started marker.
 Only this validation record changed in the repository. No backend source, SQL,
 app build, Modal deployment, secret or service configuration change was needed.
+
+## Decodo setup repair and comparison preparation
+
+The user authorized a bounded Decodo comparison of the same photo, carousel and
+reel, including parent comments and nested replies, while keeping full history
+gated. The scheduled direct retry had already completed as recorded above; its
+result remains the direct baseline. It is not replayed by this comparison.
+
+The standalone `trr-decodo-social-backfill` package had a missing package-local
+helper and could report misleading readiness when MCP configuration was absent.
+PLUGINS commit `9de8d3ae` repairs those defects, adds readiness/root-selection
+regressions, and bumps the package to `1.0.1`. Five regression tests and six syntax
+checks passed. Independent review of the complete package batch found no blocking
+issue. A scoped refresh installed `1.0.1` with source/cache parity and preserved
+listed-only registration and disabled MCP configuration. The installed dry-run
+doctor reports eight passes and two warnings for absent managed API credentials
+and MCP configuration; it does not claim an enabled managed API.
+
+The user's existing Decodo dashboard was inspected in the verified Chrome `TRR`
+profile. The configured proxy identity matched the selected TRR account without
+exposing credentials. One provider-only proxy request returned HTTP 200 and JSON;
+no raw response or egress address was retained. It was conservatively charged to
+the shared ledger, bringing the observed total to 68 requests. No Instagram request
+was made during setup. Existing residential allowance is sufficient for this
+bounded test; no purchase, subscription change or new credential was needed.
+
+The comparison uses explicit requests through the existing residential proxy so
+each source request can be counted. Generic managed scraping API retries would
+not provide the same source-request bound. The private runner must use the frozen
+release's pure parsers, a new diagnostic identity, the existing account ledger and
+local source gate, a single sticky anonymous proxy session, and a durable one-shot
+marker. Limits are 24 source requests total, eight per post, ten minutes, 10 MiB of
+decoded responses, zero automatic retries and no redirects. Stop the whole
+comparison on rate/auth/provider rejection. Full history and the general worker
+remain disabled.
+
+One permalink per post supplies detail evidence and fresh bootstrap context. At
+most two parent pages and two child pages for each of two freshly observed parent
+IDs may follow. Inline reply previews do not count as child-page retrieval. Native
+boolean pagination, cursor linkage and duplicate checks must distinguish genuine
+exhaustion from a bounded partial result. Safe comparison evidence is private;
+this diagnostic does not satisfy the production durable capability matrix.
+
+The retained direct baseline has detail receipts for all three posts, one photo
+parent page with eleven canonical mappings, and no retrieved child page. The
+latest direct retry rejected the photo child root before reaching other comment
+targets. These are retained observations from different times, not a simultaneous
+controlled performance comparison. Decodo retrieval remains pending until its
+reviewed runner executes after the live source gate permits it.
+
+The private runner passed sixteen initial offline tests. Complete independent
+review found native retry-delay handling and failure-time evidence-retention
+defects; both were repaired with cross-page identity evidence in one batch. Eight
+focused tests passed, followed by two affected retry tests after their last change.
+Independent fix-only review found no remaining issue. The default plan command
+confirmed no network or database access. These checks establish preparation, not
+live retrieval success.
+
+The one-shot app follow-up `instagram-decodo-bounded-comparison` is scheduled for
+**October 20, 2026, 18:34 America/New_York (22:34 UTC)**. The driver separately
+enforces the live gate, fixed source/state, shared budget and exclusive execution.
+A started marker prevents repeating a started or uncertain attempt. A safe report
+is retained on cleanup or final-verification failure; such a result is nonpassing.
+The already-completed direct follow-up remains paused. No additional Instagram
+request has been made during this preparation.
+
+Browser verification used the user's existing vendor dashboard in Chrome `TRR`;
+no TRR application startup target was needed. Backend/API production code, app
+contracts and SQL are unchanged. TRR-APP build is not applicable. No Modal update
+is needed for the private diagnostic and standalone plugin repair.
+
+### Local limits and historical comparison
+
+The 200-request rolling daily ceiling is a local fixed-validation budget introduced
+by `98c6604b` on October 20, not an Instagram-published quota. No measured basis
+for that specific ceiling has been established. The two-hour rejection fallback
+is also local policy: the durable public lanes adopted it on October 19 from the
+June public probe. The observed upstream response did not specify that duration.
+The daily budget was not exhausted when Instagram rejected the child query.
+
+The June 16 session record reports a public Modal sample with 33 detail results
+and 823 of 1,208 advertised comments, without login, Decodo or a proxy. This is
+historical reported evidence, not a current replay. Source at `cb5efbfe` confirms
+the public configuration and HTTPX transport; a scraper class name did not mean a
+rendered browser was used. Earlier authenticated successes are not a valid basis
+for explaining away this public result.
+
+Concrete differences remain to test: June parent-first requests and child fetches
+shared one anonymous session, while the current resumed run starts pending child
+work after a fresh bootstrap. The earlier default could skip unknown/zero reply
+counts; strict durable validation probes pending unknown topology. Parent query
+selection and local-versus-Modal egress also differ. The first child query ID is
+unchanged. None of these source differences independently proves the cause of the
+current rejection, and the old partial count does not establish complete nested
+reply coverage. A clean-browser diagnostic is a separate transport experiment;
+the current failing direct attempt was not a fresh browser window.
