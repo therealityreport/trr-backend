@@ -7,15 +7,14 @@ import shutil
 import tempfile
 import urllib.request
 import zipfile
+from importlib import import_module
 from pathlib import Path
 
 MODEL_NAME = "antelopev2"
 MODEL_URL = f"https://github.com/deepinsight/insightface/releases/download/v0.7/{MODEL_NAME}.zip"
 # Official v0.7 archive, verified from the production worker's downloaded pack.
 MODEL_SHA256 = "8e182f14fc6e80b3bfa375b33eb6cff7ee05d8ef7633e738d1c89021dcf0c5c5"
-MODEL_FILES = frozenset(
-    {"genderage.onnx", "2d106det.onnx", "1k3d68.onnx", "glintr100.onnx", "scrfd_10g_bnkps.onnx"}
-)
+MODEL_FILES = frozenset({"genderage.onnx", "2d106det.onnx", "1k3d68.onnx", "glintr100.onnx", "scrfd_10g_bnkps.onnx"})
 
 
 def install_model_archive(archive: Path, root: Path) -> Path:
@@ -46,9 +45,9 @@ def main() -> None:
             shutil.copyfileobj(source, destination)
         target = install_model_archive(archive, root)
 
-    from insightface.app import FaceAnalysis
-
-    model = FaceAnalysis(name=MODEL_NAME, root=str(root), providers=["CPUExecutionProvider"])
+    # InsightFace is installed only in the vision image, not the API/CI lane.
+    face_analysis = import_module("insightface.app").FaceAnalysis
+    model = face_analysis(name=MODEL_NAME, root=str(root), providers=["CPUExecutionProvider"])
     if not {"detection", "recognition"}.issubset(model.models):
         raise RuntimeError("InsightFace model pack requires detection and recognition")
     model.prepare(ctx_id=-1, det_size=(640, 640))
