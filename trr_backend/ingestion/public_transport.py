@@ -267,10 +267,12 @@ class PublicDetailSource(_PublicSource):
 
     def __call__(self, *, check_cancelled, on_request, source_observer):
         from trr_backend.socials.instagram.permalink_metadata import _DEFAULT_HEADERS, fetch_permalink_media_item
+        from trr_backend.socials.instagram.public_post_extractor import parse_public_post_from_html
 
         session = None
         try:
             session = self._session(on_request=on_request, on_payload=lambda payload: None)
+            documents: list[str] = []
 
             class Transport:
                 def check_deadline(self):
@@ -278,6 +280,8 @@ class PublicDetailSource(_PublicSource):
 
                 def request(self, url, *, text=False):
                     response = session.get(url, headers=_DEFAULT_HEADERS, cookies={})
+                    if text:
+                        documents.append(response.text)
                     return response.text if text else response.json()
 
             check_cancelled()
@@ -287,6 +291,14 @@ class PublicDetailSource(_PublicSource):
                 cookies={},
                 transport=Transport(),
             )
+            if not isinstance(payload, dict):
+                for document in documents:
+                    extracted = parse_public_post_from_html(document, shortcode=self.shortcode)
+                    if extracted is not None:
+                        # Keep native field presence. The presentation conversion
+                        # supplies defaults, which cannot prove detail coverage.
+                        payload = dict(extracted.raw_media)
+                        break
             if not isinstance(payload, dict):
                 raise SourceFailure(Failure("public_detail_unresolved"))
             source_observer("details", payload)

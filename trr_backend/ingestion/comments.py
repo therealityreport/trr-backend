@@ -19,7 +19,7 @@ from uuid import uuid4
 from psycopg2.extras import RealDictCursor
 
 from trr_backend.ingestion.canonical import normalize_comment_source, write_comments
-from trr_backend.ingestion.domain import Conflict, LostOwnership, Outcome, Stage, stable_json, utc_timestamp
+from trr_backend.ingestion.domain import Conflict, Failure, LostOwnership, Outcome, Stage, stable_json, utc_timestamp
 from trr_backend.ingestion.evidence import Evidence
 from trr_backend.ingestion.persistence import Store
 from trr_backend.socials.instagram.post_normalizer import InstagramComment
@@ -36,6 +36,12 @@ _UNAVAILABLE = frozenset({"deleted", "comments_disabled", "restricted", "media_u
 
 class CommentSourceError(ValueError):
     """Evidence cannot safely prove a comment page."""
+
+
+class CursorStalledError(CommentSourceError):
+    """A retained lane repeated a cursor; an audited root restart is required."""
+
+    failure = Failure("cursor_stalled")
 
 
 @dataclass(frozen=True)
@@ -692,10 +698,36 @@ class CommentActivity:
                 return
             page = parse_comment_evidence(evidence, pinned=True)
             updated = _progress({"comment_pages": state})
+            from trr_backend.ingestion.lane_restart import pending_restarts
+
+            restarts = dict(pending_restarts(current_checkpoint))
+            lane_key = page.parent_comment_id or "__top__"
+            restarted = restarts.get(lane_key)
+            if restarted:
+                if not page.started_from_root:
+                    raise CommentSourceError("Authorized lane restart must begin at its root")
+                if page.parent_comment_id:
+                    # A new child root must prove its own inventory, while the
+                    # committed rows/evidence from the old scan stay retained.
+                    updated["observed"] = {
+                        key: value
+                        for key, value in updated["observed"].items()
+                        if value["parent"] != page.parent_comment_id
+                    }
             _advance(updated, page, scan_started_at=attempt_started_at)
             if not page.parent_comment_id and (page.started_from_root or "__top__" not in state["lanes"]):
                 updated["scan_root_evidence_id"] = evidence_id
             next_checkpoint = {**current_checkpoint, "comment_pages": updated}
+            if restarted:
+                restarts.pop(lane_key)
+                if lane_key == "__top__":
+                    # The new parent scan supersedes any pending child restart.
+                    restarts = {}
+                next_checkpoint["public_lane_restarts"] = restarts
+                next_checkpoint["public_lane_restart_history"] = [
+                    *current_checkpoint.get("public_lane_restart_history", []),
+                    {**restarted, "root_evidence_id": evidence_id, "committed_at": self.clock().isoformat()},
+                ]
             self._persist_page(
                 owned,
                 post_id=post_id,
@@ -709,6 +741,11 @@ class CommentActivity:
             )
             current_checkpoint, state = next_checkpoint, updated
             retained = (evidence_id, evidence, page)
+            if state.get("adapter_family") == "instagram_public_relay" and any(
+                lane.get("repeated") and key not in current_checkpoint.get("public_lane_restarts", {})
+                for key, lane in state["lanes"].items()
+            ):
+                raise CursorStalledError("Comment lane has a repeated cursor")
 
         summary = source(
             shortcode=target_key,

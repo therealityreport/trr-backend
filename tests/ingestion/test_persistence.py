@@ -1,4 +1,4 @@
-"""Run with --confcutdir=tests/ingestion; never connects to configured TRR services."""
+"""Real isolated PostgreSQL through the non-live guard; no configured TRR services."""
 
 import socket
 import subprocess
@@ -18,7 +18,7 @@ from trr_backend.ingestion.queries import Queries
 
 
 @pytest.fixture(scope="module")
-def database(tmp_path_factory):
+def database(tmp_path_factory, register_isolated_postgres):
     root = tmp_path_factory.mktemp("ingestion")
     binaries = Path("/opt/homebrew/opt/postgresql@17/bin")
     if not (binaries / "initdb").exists():
@@ -68,30 +68,31 @@ def database(tmp_path_factory):
         finally:
             conn.close()
 
-    try:
-        with transaction() as conn, conn.cursor() as cur:
-            cur.execute("""create role anon; create role authenticated; create role service_role;
-                create schema social;
-                create table social.scrape_runs(id uuid primary key,source_scope text,status text,
-                    initiated_by text,config jsonb,cancelled_at timestamptz);
-                create table social.test_canonical(run_id uuid primary key, writes integer not null);""")
-            cur.execute(
-                (
-                    Path(__file__).resolve().parents[2]
-                    / "supabase/migrations/20261016070000_instagram_ingestion_foundation.sql"
-                ).read_text()
+    with register_isolated_postgres(host="127.0.0.1", port=port, dbname="postgres", user="ingestion_test"):
+        try:
+            with transaction() as conn, conn.cursor() as cur:
+                cur.execute("""create role anon; create role authenticated; create role service_role;
+                    create schema social;
+                    create table social.scrape_runs(id uuid primary key,source_scope text,status text,
+                        initiated_by text,config jsonb,cancelled_at timestamptz);
+                    create table social.test_canonical(run_id uuid primary key, writes integer not null);""")
+                cur.execute(
+                    (
+                        Path(__file__).resolve().parents[2]
+                        / "supabase/migrations/20261016070000_instagram_ingestion_foundation.sql"
+                    ).read_text()
+                )
+                cur.execute(
+                    (
+                        Path(__file__).resolve().parents[2]
+                        / "supabase/migrations/20261016153330_instagram_ingestion_run_holds.sql"
+                    ).read_text()
+                )
+            yield Store(transaction), transaction
+        finally:
+            subprocess.run(
+                [str(binaries / "pg_ctl"), "-D", str(data), "-m", "fast", "-w", "stop"], check=True, capture_output=True
             )
-            cur.execute(
-                (
-                    Path(__file__).resolve().parents[2]
-                    / "supabase/migrations/20261016153330_instagram_ingestion_run_holds.sql"
-                ).read_text()
-            )
-        yield Store(transaction), transaction
-    finally:
-        subprocess.run(
-            [str(binaries / "pg_ctl"), "-D", str(data), "-m", "fast", "-w", "stop"], check=True, capture_output=True
-        )
 
 
 def launch(store, key=None):

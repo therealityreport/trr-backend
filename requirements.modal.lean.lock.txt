@@ -76,7 +76,7 @@ cryptography==50.0.2
     #   pyjwt
 cssselect2==0.9.0
     # via cairosvg
-curl-cffi==0.15.0
+curl-cffi==0.16.3
     # via -r requirements.modal.lean.in
 dbos==3.3.0
     # via -r requirements.modal.lean.in
@@ -249,7 +249,7 @@ psycopg==3.3.6
     #   dbos
 psycopg-binary==3.3.6
     # via psycopg
-psycopg2-binary==2.9.12
+psycopg2-binary==2.9.13
     # via -r requirements.modal.lean.in
 pyasn1==0.6.4
     # via
@@ -312,7 +312,6 @@ requests-oauthlib==2.0.0
     # via google-auth-oauthlib
 rich==14.3.4
     # via
-    #   curl-cffi
     #   modal
     #   typer
 s3transfer==0.19.0

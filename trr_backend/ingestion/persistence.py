@@ -858,7 +858,7 @@ class Store:
                 (
                     stable_json(checkpoint),
                     failure.retry_at,
-                    safe_code if failure.identity_blocked else None,
+                    safe_code if failure.identity_blocked or safe_code == "cursor_stalled" else None,
                     requests,
                     run_id,
                     stage.value,

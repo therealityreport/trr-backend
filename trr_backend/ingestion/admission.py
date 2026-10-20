@@ -254,6 +254,9 @@ class Admission:
             if any(key in item and item[key] != run[key] for key in ("engine", "workflow_version")):
                 return False
             intent = RunIntent.from_payload(run["intent"])
+            from trr_backend.ingestion.validation_gate import require_allowed_intent
+
+            require_allowed_intent(intent)
             if intent.account != account or (
                 item["stage"] != "listing" and Stage(item["stage"]) not in intent.selected_tasks
             ):

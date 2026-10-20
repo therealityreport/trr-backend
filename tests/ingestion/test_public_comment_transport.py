@@ -16,6 +16,7 @@ from trr_backend.ingestion.comments import (
     CommentActivity,
     CommentFetchSummary,
     CommentSourceError,
+    CursorStalledError,
     _advance,
     _complete,
     parse_comment_evidence,
@@ -217,13 +218,26 @@ def actual_parent_shape(identity, count=None):
     }
 
 
-def setup(database, *, seed_missing=False):
+def setup(database, *, seed_missing=False, bounded=False):
     """Reuse canonical fixtures while freezing a public run at creation."""
     from uuid import uuid4
 
     store, tx = database
     run = store.start(
-        RunIntent(account="bravotv", selected_tasks=(Stage.COMMENTS,), source_profile=SourceProfile.for_mode("public")),
+        RunIntent(
+            account="bravotv",
+            selected_tasks=(Stage.COMMENTS,),
+            source_profile=SourceProfile.for_mode("public"),
+            **(
+                {
+                    "scope": "recent_window",
+                    "date_start": datetime(2026, 9, 1, tzinfo=UTC),
+                    "date_end": datetime(2026, 10, 1, tzinfo=UTC),
+                }
+                if bounded
+                else {}
+            ),
+        ),
         idempotency_key=str(uuid4()),
         engine="dbos",
         workflow_version="public-comments-test",
@@ -604,9 +618,16 @@ def test_public_repeated_cursor_stays_unresolved_without_deleting_missing(databa
         )
 
     fetch, _ = source(monkeypatch, handler, expected=1)
-    result = CommentActivity(store, fetch, clock=lambda: OBSERVED).execute(**args)
-    assert result["complete"] is False and requests == ["GET", "POST", "POST"]
-    assert result["checkpoint"]["comment_pages"]["lanes"]["__top__"]["repeated"] is True
+    with pytest.raises(CursorStalledError) as caught:
+        CommentActivity(store, fetch, clock=lambda: OBSERVED).execute(**args)
+    assert caught.value.failure.code == "cursor_stalled"
+    assert requests == ["GET", "POST", "POST"]
+    target = existing.query(
+        tx,
+        "select checkpoint from social.instagram_ingestion_targets where run_id=%s and stage='comments'",
+        (args["run_id"],),
+    )[0]
+    assert target["checkpoint"]["comment_pages"]["lanes"]["__top__"]["repeated"] is True
     assert (
         existing.query(
             tx,
@@ -615,6 +636,84 @@ def test_public_repeated_cursor_stays_unresolved_without_deleting_missing(databa
         )[0]["is_missing"]
         is False
     )
+
+
+@pytest.mark.parametrize("lane", ["__top__", "p"])
+def test_audited_stalled_lane_restart_retains_pages_and_deduplicates(database, monkeypatch, lane):
+    from uuid import uuid4
+
+    from trr_backend.ingestion.lane_restart import restart_lane
+
+    store, tx, args = setup(database, bounded=True)
+
+    def stalled(request):
+        if request.method == "GET":
+            return bootstrap()
+        _, variables = body(request)
+        child = variables.get("parent_comment_id") is not None
+        if lane == "p" and not child:
+            return httpx.Response(200, json=page([node("p", count=2)]))
+        return httpx.Response(200, json=page([node("r1" if child else "p")], child=child, more=True, after="same"))
+
+    fetch, _ = source(monkeypatch, stalled, expected=3 if lane == "p" else 1)
+    with pytest.raises(CursorStalledError):
+        CommentActivity(store, fetch, clock=lambda: OBSERVED).execute(**args)
+    before = existing.query(
+        tx,
+        "select count(*) as n from social.instagram_ingestion_comment_pages where run_id=%s",
+        (args["run_id"],),
+    )[0]["n"]
+    cancelled = store.control(args["run_id"], "bravotv", action="cancel", idempotency_key=str(uuid4()))
+    key = str(uuid4())
+    command = {
+        "run_id": args["run_id"],
+        "account": "bravotv",
+        "generation": cancelled["generation"],
+        "target_key": args["target_key"],
+        "lane": lane,
+        "reason": "reviewed cursor repair",
+        "source_revision": "fixture-repaired-source",
+        "initiated_by": "fixture-operator",
+        "idempotency_key": key,
+    }
+    approved = restart_lane(store, **command)
+    assert restart_lane(store, **command) == approved
+    resumed = store.control(args["run_id"], "bravotv", action="resume", idempotency_key=str(uuid4()))
+    target = store.reserve(
+        args["run_id"],
+        "bravotv",
+        generation=resumed["generation"],
+        stage=Stage.COMMENTS,
+        target_key=args["target_key"],
+    )
+    calls = []
+
+    def repaired(request):
+        if request.method == "GET":
+            return bootstrap()
+        _, variables = body(request)
+        calls.append(variables)
+        assert variables.get("after") is None
+        if lane == "p":
+            assert variables.get("parent_comment_id") == "p"
+            return httpx.Response(200, json=page([node("r1"), node("r2")], child=True))
+        return httpx.Response(200, json=page([node("p")]))
+
+    fetch, _ = source(monkeypatch, repaired, expected=3 if lane == "p" else 1)
+    result = CommentActivity(store, fetch, clock=lambda: OBSERVED + timedelta(minutes=1)).execute(
+        **{**args, "generation": resumed["generation"], "owner_token": str(target["owner_token"])}
+    )
+    assert result["complete"] is True and len(calls) == 1
+    rows = existing.query(tx, "select comment_id from social.instagram_comments where post_id=%s", (args["post_id"],))
+    assert {row["comment_id"] for row in rows} == ({"p", "r1", "r2"} if lane == "p" else {"p"})
+    after = existing.query(
+        tx,
+        "select count(*) as n from social.instagram_ingestion_comment_pages where run_id=%s",
+        (args["run_id"],),
+    )[0]["n"]
+    assert after == before + 1
+    assert result["checkpoint"]["public_lane_restarts"] == {}
+    assert result["checkpoint"]["public_lane_restart_history"][0]["previous_lane"]["repeated"] is True
 
 
 def test_public_constructor_ignores_ambient_pool_and_blocks_nonpublic_operations(monkeypatch):

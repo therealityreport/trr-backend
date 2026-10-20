@@ -175,6 +175,48 @@ def test_real_public_permalink_parser_retains_native_media_not_bootstrap_html():
     assert case.session.sent[0][0].url == "https://www.instagram.com/p/AAAABC/"
 
 
+@pytest.mark.parametrize("media_type", [1, 2, 8])
+def test_public_detail_reuses_same_document_application_json(media_type):
+    media = {
+        "pk": "66",
+        "code": "AAAABC",
+        "user": {"pk": "99", "username": "bravotv"},
+        "media_type": media_type,
+        "image_versions2": {"candidates": [{"url": "https://cdn.example/photo.jpg"}]},
+    }
+    if media_type == 8:
+        media["carousel_media"] = [{"pk": "67", "media_type": 1, "image_versions2": media["image_versions2"]}]
+    document = '<script type="application/json">' + json.dumps({"media": media}) + "</script>"
+    case = source_case(
+        PublicDetailSource,
+        [{"body": document, "headers": {"content-type": "text/html"}}],
+        shortcode="AAAABC",
+    )
+    assert detail_call(case) == media
+    assert case.retained == [("details", media)]
+    assert len(case.session.sent) == case.gate.request_count == 1
+    assert case.session.closed
+    # Missing caption/counts stay missing, never manufactured as known values.
+    assert "caption" not in case.retained[0][1]
+    assert "comment_count" not in case.retained[0][1]
+
+
+def test_public_detail_same_document_fallback_rejects_other_post():
+    document = (
+        '<script type="application/json">'
+        + json.dumps({"media": {"pk": "66", "code": "ZZZZZZ", "user": {"username": "bravotv"}, "media_type": 1}})
+        + "</script>"
+    )
+    case = source_case(
+        PublicDetailSource,
+        [{"body": document, "headers": {"content-type": "text/html"}}],
+        shortcode="AAAABC",
+    )
+    with pytest.raises(SourceFailure, match="public_detail_unresolved"):
+        detail_call(case)
+    assert len(case.session.sent) == 1 and case.retained == []
+
+
 @pytest.mark.parametrize(
     "spec,code",
     [

@@ -95,7 +95,7 @@ cryptography==50.0.2
     #   pyjwt
 cssselect2==0.9.0
     # via cairosvg
-curl-cffi==0.15.0
+curl-cffi==0.16.3
     # via -r requirements.modal.lean.in
 cycler==0.12.1
     # via matplotlib
@@ -448,7 +448,7 @@ psycopg==3.3.6
     #   dbos
 psycopg-binary==3.3.6
     # via psycopg
-psycopg2-binary==2.9.12
+psycopg2-binary==2.9.13
     # via -r requirements.modal.lean.in
 py-cpuinfo==9.0.0
     # via ultralytics
@@ -530,7 +530,6 @@ retina-face==0.0.18
     # via deepface
 rich==14.3.4
     # via
-    #   curl-cffi
     #   keras
     #   modal
     #   typer

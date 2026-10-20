@@ -17,6 +17,7 @@ from trr_backend.ingestion.comments import (
     CommentFetchSummary,
     CommentResumeNode,
     CommentSourceError,
+    CursorStalledError,
     comment_page_failure,
 )
 from trr_backend.socials.instagram.credential_guard import CredentialIdentityMismatch
@@ -388,6 +389,9 @@ class PublicRelayResume:
 
     @classmethod
     def from_checkpoint(cls, checkpoint: Mapping[str, Any], parents: list[Any]) -> PublicRelayResume:
+        from trr_backend.ingestion.lane_restart import pending_restarts
+
+        restarts = pending_restarts(dict(checkpoint))
         pages = checkpoint.get("comment_pages") or {}
         if not isinstance(pages, Mapping):
             raise CommentSourceError("Invalid public comment checkpoint")
@@ -399,12 +403,14 @@ class PublicRelayResume:
             raise CommentSourceError("Public comments cannot reinterpret another adapter's checkpoint")
         if checkpoint.get("top_level_checkpoint") or checkpoint.get("reply_checkpoints"):
             raise CommentSourceError("Public comments cannot consume legacy transport cursors")
+        if "__top__" in restarts:
+            return cls({}, {}, True)
 
         def lane_resume(lane, *, root):
             if not isinstance(lane, Mapping):
                 raise CommentSourceError("Invalid public Relay lane")
             if lane.get("repeated"):
-                raise CommentSourceError("Public Relay lane has a repeated cursor")
+                raise CursorStalledError("Public Relay lane has a repeated cursor")
             if not lane:
                 return {}
             result = {"exhausted": lane.get("exhausted") is True}
@@ -438,6 +444,9 @@ class PublicRelayResume:
         replies = {}
         for parent in parents:
             lane = lanes.get(parent.comment_id) or {}
+            if parent.comment_id in restarts:
+                replies[parent.comment_id] = {"pending": True}
+                continue
             item = lane_resume(lane, root=False)
             expected = (observed.get(parent.comment_id) or {}).get("expected_replies")
             unknown_proved = (
@@ -490,6 +499,8 @@ class PublicRelayCommentSource:
             raise RuntimeError("Run the synchronous comment activity outside the active event loop")
         parents = _seed_parents(resume_inventory, shortcode)
         resume = PublicRelayResume.from_checkpoint(checkpoint, parents)
+        if "__top__" in (checkpoint.get("public_lane_restarts") or {}):
+            parents = []
         expected = self._expected_count
         if expected is None:
             expected = _count((checkpoint.get("comment_pages") or {}).get("expected"))

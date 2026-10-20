@@ -13,8 +13,8 @@ from psycopg2.extras import RealDictCursor
 
 from trr_backend.ingestion.command_service import CommandService, ServiceUnavailableError
 from trr_backend.ingestion.domain import Conflict, RunIntent, SourceProfile
-from trr_backend.ingestion.persistence import Store
 from trr_backend.ingestion.queries import Queries
+from trr_backend.ingestion.validation_gate import ValidationStore as Store
 
 WORKFLOW_VERSION = "instagram-ingestion-v2"
 
@@ -491,13 +491,13 @@ class _GatedSource:
         import psycopg2
 
         from trr_backend.ingestion.canonical import CanonicalWriteError
-        from trr_backend.ingestion.comments import CommentSourceError
+        from trr_backend.ingestion.comments import CommentSourceError, CursorStalledError
         from trr_backend.ingestion.domain import LostOwnership
         from trr_backend.ingestion.identity_policy import IdentityDeferred
         from trr_backend.ingestion.providers import InvalidSourceError
 
         if not self.gate.request_count or isinstance(
-            error, (LostOwnership, IdentityDeferred, psycopg2.Error, CanonicalWriteError)
+            error, (LostOwnership, IdentityDeferred, CursorStalledError, psycopg2.Error, CanonicalWriteError)
         ):
             result = self.gate.finish_failure()
         else:
@@ -779,7 +779,7 @@ def _reconcile(reservation):
 
 def build_scheduler():
     from trr_backend.ingestion.admission import Admission
-    from trr_backend.ingestion.workflow_store import WorkflowStore
+    from trr_backend.ingestion.validation_gate import ValidationWorkflowStore as WorkflowStore
     from trr_backend.ingestion.workflows import Scheduler
 
     return Scheduler(WorkflowStore(), admit=Admission().admit, dispatch=_dispatch, reconcile=_reconcile)

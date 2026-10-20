@@ -402,21 +402,23 @@ def test_driver_refuses_wrong_generation_before_resume_and_plan_has_no_connectio
     assert json.loads(capsys.readouterr().out)["status"] == "plan"
 
 
-def test_shared_session_lease_busy_and_loss_sets_abort(database):
+def test_shared_session_lease_busy_and_loss_sets_abort(database, register_isolated_postgres):
     with database[2]() as conn:
         dsn = conn.dsn
+        endpoint = {"host": conn.info.host, "port": conn.info.port, "dbname": conn.info.dbname, "user": "local_runtime"}
     config = RuntimeConfig(dsn, WORKFLOW_VERSION, runtime_role="local_runtime")
 
     def connect():
         return psycopg2.connect(dsn, user="local_runtime")
 
     abort = threading.Event()
-    with CoordinatorLease(connect, config, abort) as lease:
-        with pytest.raises(Conflict, match="busy"):
-            with CoordinatorLease(connect, config, threading.Event()):
-                pytest.fail("second consumer")
-        lease.connection.close()
-        assert abort.wait(2)
+    with register_isolated_postgres(**endpoint):
+        with CoordinatorLease(connect, config, abort) as lease:
+            with pytest.raises(Conflict, match="busy"):
+                with CoordinatorLease(connect, config, threading.Event()):
+                    pytest.fail("second consumer")
+            lease.connection.close()
+            assert abort.wait(2)
 
 
 def test_runtime_local_abort_kills_and_reaps_child(monkeypatch):

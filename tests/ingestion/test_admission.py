@@ -48,6 +48,9 @@ def sql(database, statement, params=()):
 def candidate(database, stage="post_details", *, workers=12, comments_workers=24, account="bravotv", tasks=None):
     intent = RunIntent(
         account=account,
+        scope="recent_window",
+        date_start=datetime(2026, 9, 1, tzinfo=UTC),
+        date_end=datetime(2026, 10, 1, tzinfo=UTC),
         detail_worker_count=workers,
         comments_worker_count=comments_workers,
         **({"selected_tasks": tasks} if tasks else {}),
@@ -411,3 +414,16 @@ def test_old_nonterminal_remote_ambiguity_still_holds_capacity(database, status)
     subject, _ = admission(database, env={"SOCIAL_INSTAGRAM_DB_SESSION_WORKER_BUDGET": "1"})
     with pytest.raises(ServiceUnavailableError, match="capacity"):
         subject.validate_launch("bravotv", InstagramIngestionLaunchV2())
+
+
+def test_full_history_validation_gate_denies_dispatch_before_capacity_probe(database):
+    run = database[0].start(
+        RunIntent(account="bravotv"),
+        idempotency_key=str(uuid4()),
+        engine="dbos",
+        workflow_version="v1",
+        initiated_by="test",
+    )
+    subject, probes = admission(database)
+    assert not subject.admit(dict(run, account="bravotv", stage="post_details", target_key="candidate"))
+    assert probes == []
