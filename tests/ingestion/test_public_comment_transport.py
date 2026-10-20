@@ -283,7 +283,7 @@ def setup(database, *, seed_missing=False, bounded=False):
 
 
 @pytest.mark.parametrize("crash_phase,cancel", [("top_tail", False), ("child_tail", True)])
-def test_public_real_relay_receipts_resume_children_first_with_exact_query_and_original_times(
+def test_public_real_relay_receipts_resume_parent_first_with_exact_query_and_original_times(
     database, monkeypatch, crash_phase, cancel
 ):
     store, tx, args = setup(database, seed_missing=True)
@@ -345,7 +345,7 @@ def test_public_real_relay_receipts_resume_children_first_with_exact_query_and_o
     assert result["complete"] is True
     resumed = [item[1:] for item in calls if item[0] == 1]
     assert resumed == (
-        [("bootstrap", None), ("p1", None), ("p1", "child-1"), ("top", "top-1")]
+        [("bootstrap", None), ("top", "top-1"), ("p1", None), ("p1", "child-1")]
         if crash_phase == "top_tail"
         else [("bootstrap", None), ("p1", "child-1")]
     )
@@ -1247,3 +1247,40 @@ def test_public_missing_or_null_alias_stays_unknown_through_checkpoint_resume_an
         )[0]["scraped_at"]
         == OBSERVED
     )
+
+
+@pytest.mark.parametrize("count", [None, 0, 2])
+def test_native_reply_expectation_survives_dto_and_resume_seed(count):
+    from types import SimpleNamespace
+
+    from trr_backend.ingestion.comment_transport import _seed_parents
+
+    native = actual_parent_shape("p", count)
+    dto = maintained._graphql_comment_to_instagram_comment(native, shortcode="fixture", post_url="fixture")
+    assert dto.reply_count == count and dto.child_comment_count == count
+    assert dto.to_dict()["reply_count"] == count
+    restored = _seed_parents((SimpleNamespace(source_payload=native),), "fixture")[0]
+    assert restored.reply_count == count and restored.child_comment_count == count
+
+
+@pytest.mark.parametrize("count", [None, 0, 2])
+def test_fresh_public_june_request_and_unknown_child_probe(monkeypatch, count):
+    calls = []
+
+    def handler(request):
+        if request.method == "GET":
+            return bootstrap()
+        fields, variables = body(request)
+        parent = variables.get("parent_comment_id")
+        calls.append(parent)
+        assert request.url.path == "/graphql/query/"
+        if parent is None:
+            assert fields["doc_id"] == "25516980651312394"
+            assert request.headers["user-agent"] == "Mozilla/5.0"
+            assert "csrftoken=anonymous" in request.headers["cookie"]
+            return httpx.Response(200, json=page([actual_parent_shape("p", count)]))
+        return httpx.Response(200, json=page([], child=True))
+
+    fetch, _ = source(monkeypatch, handler, expected=1)
+    fetch(shortcode="fixture", checkpoint={}, source_observer=lambda *args: None, pre_source_request=lambda: None)
+    assert calls == ([None] if count == 0 else [None, "p"])

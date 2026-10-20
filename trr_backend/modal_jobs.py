@@ -818,6 +818,29 @@ configure_runtime_observability(service_name="trr-backend-modal-jobs")
 app = modal.App(_APP_NAME, image=_image)
 
 
+def _instagram_comment_count_contract() -> dict[str, bool]:
+    """Exercise deployed anonymous comment parsing with synthetic data only."""
+    from trr_backend.socials.instagram.comments_scrapling.counts import reported_reply_count
+    from trr_backend.socials.instagram.comments_scrapling.fetcher import _graphql_comment_to_instagram_comment
+
+    checks = {}
+    for name, fields, expected in (
+        ("missing_is_unknown", {}, None),
+        ("null_is_unknown", {"child_comment_count": None}, None),
+        ("zero_is_known", {"child_comment_count": 0}, 0),
+        ("positive_is_known", {"child_comment_count": 3}, 3),
+    ):
+        comment = _graphql_comment_to_instagram_comment(
+            {"pk": "1", "text": "synthetic probe", "user": {"username": "runtime_probe", "pk": "2"}, **fields},
+            shortcode="runtime_probe",
+            post_url="https://www.instagram.com/p/runtime_probe/",
+        )
+        checks[name] = comment is not None and reported_reply_count(comment) == expected
+    if not all(checks.values()):
+        raise RuntimeError("instagram_reply_count_contract_failed")
+    return checks
+
+
 @app.function(
     name="probe_browser_image_runtime",
     image=_FUNCTION_IMAGE_BINDINGS["probe_browser_image_runtime"],
@@ -838,6 +861,7 @@ def probe_browser_image_runtime() -> dict[str, object]:
         from scrapling.fetchers import StealthyFetcher
 
         _ = StealthyFetcher, patchright_sync_playwright
+        instagram_comment_counts = _instagram_comment_count_contract()
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             try:
@@ -852,6 +876,7 @@ def probe_browser_image_runtime() -> dict[str, object]:
             "reason": "ok",
             "worker_family": "browser_image",
             "state_free": True,
+            "instagram_comment_counts": instagram_comment_counts,
             "timestamp": datetime.now(UTC).isoformat(),
             "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
             "versions": {

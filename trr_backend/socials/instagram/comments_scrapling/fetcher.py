@@ -71,6 +71,7 @@ from trr_backend.socials.instagram.comments_scrapling.counts import (
     parent_comment_count,
     parentless_reply_ids,
     reply_count_observed,
+    reported_reply_count,
 )
 from trr_backend.socials.instagram.comments_scrapling.proxy import CommentsProxyConfig
 from trr_backend.socials.instagram.comments_scrapling.proxy_budget import (
@@ -171,6 +172,7 @@ _POST_ACTION_GRAPHQL_URL = "https://www.instagram.com/graphql/query/"
 _POST_ACTION_GRAPHQL_FRIENDLY_NAME = "PolarisPostActionLoadPostQueryQuery"
 _POST_COMMENTS_GRAPHQL_FRIENDLY_NAME = "PolarisPostCommentsPaginationQuery"
 _POST_COMMENTS_GRAPHQL_HEADER_FRIENDLY_NAME = "PolarisPostCommentsPaginationQuery"
+_PUBLIC_POST_COMMENTS_GRAPHQL_DOC_IDS = ("25516980651312394", "26113520058347588")
 _POST_COMMENTS_CONTAINER_GRAPHQL_DOC_ID = "26297736713236852"
 _POST_COMMENTS_GRAPHQL_DOC_IDS = (
     _POST_COMMENTS_CONTAINER_GRAPHQL_DOC_ID,
@@ -1197,7 +1199,7 @@ def _graphql_comment_to_instagram_comment(
         likes=_graphql_comment_likes(node),
         is_reply=is_reply,
         parent_comment_id=parent_comment_id,
-        reply_count=reply_count if reply_count is not None else len(replies),
+        reply_count=reply_count,
         reply_depth=max(0, int(reply_depth or 0)),
         replies=replies,
         media_urls=media_urls,
@@ -1240,7 +1242,7 @@ def _graphql_comment_to_instagram_comment(
         is_edited=coerce_bool(first_present("is_edited", "isEdited", "edited"), False),
         is_pinned=coerce_bool(first_present("is_pinned", "isPinned", "pinned"), False),
         meta_ai_comment_type=first_text("meta_ai_comment_type", "metaAiCommentType") or "NONE",
-        child_comment_count=child_comment_count or 0,
+        child_comment_count=child_comment_count,
         liked_by_media_coauthors=coerce_bool(
             first_present(
                 "liked_by_media_coauthors",
@@ -5547,7 +5549,7 @@ class InstagramCommentsScraplingFetcher:
             )
             after_count = reply_count_observed(comment)
             merged_count = max(0, after_count - before_count)
-            if after_count > int(comment.reply_count or 0):
+            if comment.reply_count is not None and after_count > comment.reply_count:
                 comment.reply_count = after_count
             metadata["merged_replies"] = int(metadata.get("merged_replies") or 0) + merged_count
             metadata["reply_checkpoints"].extend(replies_result.reply_checkpoints)
@@ -6464,7 +6466,11 @@ class InstagramCommentsScraplingFetcher:
             doc_ids = (
                 [top_resume["relay_doc_id"]]
                 if strict_native_exhaustion and top_resume.get("relay_doc_id")
-                else _post_comments_graphql_doc_ids(str(context.get("container_query_id") or ""))
+                else (
+                    list(_PUBLIC_POST_COMMENTS_GRAPHQL_DOC_IDS)
+                    if self._public_only
+                    else _post_comments_graphql_doc_ids(str(context.get("container_query_id") or ""))
+                )
             )
             for doc_id in doc_ids:
                 normalized_doc_id = str(doc_id or "").strip()
@@ -6572,12 +6578,13 @@ class InstagramCommentsScraplingFetcher:
                 attempt["decode_retry_limit"] = decode_retry_limit
                 attempt["zero_append_advance_limit"] = zero_append_advance_limit
 
-                if strict_native_exhaustion and comments and fetch_replies:
-                    child_reason = await hydrate_child_comments("pagination_complete")
-                    if child_reason != "pagination_complete":
-                        return comments, {"reason": child_reason, **attempt_metadata}
                 if strict_native_exhaustion and top_resume.get("exhausted") is True:
-                    return comments, {"reason": "pagination_complete", "native_complete": True, **attempt_metadata}
+                    child_reason = await hydrate_child_comments("pagination_complete")
+                    return comments, {
+                        "reason": child_reason,
+                        "native_complete": child_reason == "pagination_complete",
+                        **attempt_metadata,
+                    }
 
                 async def _retry_parent_relay_soft_failure(
                     reason: str,
@@ -7028,6 +7035,7 @@ class InstagramCommentsScraplingFetcher:
             # Bug #1: use the unified expectation (greatest(reply_count,
             # child_comment_count)) so a parent whose child_comment_count exceeds
             # its reply_count is still probed — matching the persistence topology.
+            reported_replies = reported_reply_count(parent)
             expected_replies = expected_reply_count(parent)
             observed_replies = reply_count_observed(parent)
             lane_resume = dict((durable_resume or {}).get(parent_comment_id) or {}) if strict_native_exhaustion else {}
@@ -7037,7 +7045,7 @@ class InstagramCommentsScraplingFetcher:
             if not pending and expected_replies > 0 and expected_replies <= observed_replies:
                 metadata["parents_skipped_without_reply_gap"] += 1
                 continue
-            if expected_replies <= 0 and not pending:
+            if reported_replies == 0 and not pending:
                 if (
                     zero_count_probe_limit is not None
                     and metadata["zero_count_parent_probes"] >= zero_count_probe_limit
@@ -7055,7 +7063,7 @@ class InstagramCommentsScraplingFetcher:
                 count=observed_replies,
                 metadata={
                     "parent_comment_id": parent_comment_id,
-                    "reported_reply_count": expected_replies,
+                    "reported_reply_count": reported_replies,
                 },
             )
             parent_attempts = (
@@ -7324,7 +7332,7 @@ class InstagramCommentsScraplingFetcher:
                     )
                     after_count = reply_count_observed(parent)
                     merged_count = max(0, after_count - before_count)
-                    if after_count > int(parent.reply_count or 0):
+                    if parent.reply_count is not None and after_count > parent.reply_count:
                         parent.reply_count = after_count
                     metadata["fetched_replies"] += len(child_comments)
                     metadata["merged_replies"] += merged_count

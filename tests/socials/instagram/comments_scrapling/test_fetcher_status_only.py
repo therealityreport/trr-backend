@@ -1760,3 +1760,24 @@ def test_public_sample_reserves_reply_slot_when_gap_parent_arrives_on_later_page
     assert flattened_comment_count(result.comments) == 3
     assert parent_comment_count(result.comments) == 2 and child_reply_count(result.comments) == 1
     assert result.diagnostic_metadata["relay_comments"]["pages"][-1]["reply_slots_reserved"] == 1
+
+
+def test_public_relay_child_hydration_probes_unknown_without_zero_probe_allowance(monkeypatch) -> None:
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_PUBLIC_COMMENTS_ZERO_REPLY_PROBE_LIMIT", raising=False)
+    fetcher = _build_fetcher()
+    fetcher._pace_api_requests = AsyncMock(return_value=True)
+    parent = _comment("unknown-parent")
+    parent.reply_count = parent.child_comment_count = None
+    public_client = MagicMock()
+    public_client.post = AsyncMock(return_value=httpx.Response(200, json={
+        "data": {"xdt_api__v1__media__media_id__comments__parent_comment_id__child_comments__connection": {
+            "edges": [], "page_info": {"has_next_page": False, "end_cursor": None},
+        }},
+    }))
+    metadata = asyncio.run(fetcher._fetch_public_relay_child_comments_for_status_only(
+        public_client=public_client, shortcode="fixture", post_url="https://www.instagram.com/p/fixture/",
+        media_id="123", comments=[parent], graphql_headers={}, common_body={}, target_count=None, max_comments=0,
+    ))
+    assert public_client.post.await_count == 1
+    assert metadata["zero_count_parent_probes"] == 0
+    assert parent.reply_count is None and parent.child_comment_count is None

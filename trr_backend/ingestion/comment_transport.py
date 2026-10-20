@@ -617,6 +617,17 @@ def _seed_parents(inventory: tuple[CommentResumeNode, ...], shortcode: str) -> l
         parsed = normalize_comment_source(source)
         if not parsed.comment_id or parsed.comment_id in nodes:
             raise CommentSourceError("Resume inventory contains duplicate or absent identities")
+        # The canonical integer topology count is not native count evidence.
+        # Recover nullable expectations from the retained source on resume.
+        count_values = [
+            source.get(key)
+            for key in ("child_comment_count", "childCommentCount", "repliesCount", "reply_count", "replies_count")
+        ]
+        thread = source.get("edge_threaded_comments")
+        if isinstance(thread, Mapping):
+            count_values.append(thread.get("count"))
+        native_counts = [value for value in count_values if type(value) is int and value >= 0]
+        reported_count = max(native_counts) if native_counts else None
         nodes[parsed.comment_id] = InstagramComment(
             comment_id=parsed.comment_id,
             text=parsed.text,
@@ -627,8 +638,8 @@ def _seed_parents(inventory: tuple[CommentResumeNode, ...], shortcode: str) -> l
             likes=parsed.likes_count,
             is_reply=bool(parsed.parent_comment_id),
             parent_comment_id=parsed.parent_comment_id,
-            reply_count=parsed.replies_count,
-            child_comment_count=parsed.replies_count,
+            reply_count=reported_count,
+            child_comment_count=reported_count,
             post_shortcode=shortcode,
             post_url=f"https://www.instagram.com/p/{shortcode}/",
         )

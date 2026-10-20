@@ -1383,7 +1383,21 @@ def test_browser_image_runtime_probe_closes_browser_before_playwright_context(
     assert result["versions"]["chromium"] == "test-chromium"
     assert result["versions"]["curl-cffi"] == "test-curl-cffi"
     assert result["versions"]["apify-fingerprint-datapoints"] == "test-apify-fingerprint-datapoints"
+    assert result["instagram_comment_counts"] == {
+        "missing_is_unknown": True,
+        "null_is_unknown": True,
+        "zero_is_known": True,
+        "positive_is_known": True,
+    }
     assert events == ["enter", "launch", "close", "exit"]
+
+
+def test_instagram_comment_count_runtime_probe_rejects_unknown_as_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.socials.instagram.comments_scrapling import counts
+
+    monkeypatch.setattr(counts, "reported_reply_count", lambda comment: 0)
+    with pytest.raises(RuntimeError, match="instagram_reply_count_contract_failed"):
+        modal_jobs._instagram_comment_count_contract()
 
 
 def test_cast_screentime_modal_function_uses_vision_image() -> None:

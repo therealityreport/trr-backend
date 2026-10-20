@@ -818,3 +818,47 @@ The combined result is **all-three detail and parent-pagination success; nested
 replies blocked at the first child request; full-history acceptance still gated**.
 These changes are private diagnostic scripts plus this evidence record. Backend
 runtime, app, SQL, and Modal deployment were not changed.
+
+### Other two child operations and requested post figures
+
+The next user request explicitly authorized one child test on each remaining
+post and a production repair for unknown reply counts and the working public
+HTTPX path. The controlled comparison used one anonymous HTTPX client across
+all three detail requests and the carousel/reel parent-child pairs. It made
+exactly one child attempt per remaining post, with no retry, alternate child
+query, proxy, login, scheduled follow-up, or session rotation after rejection.
+HTTP-level rejection or an actual Retry-After remained a whole-test stop.
+
+The carousel parent returned 15 rows, its child returned native 1675004, the reel
+parent then returned 15 rows in the same client, and its child also returned
+1675004. Both child bodies were the same 114-byte `Rate limit exceeded` response
+as the earlier photo child. All seven requests returned HTTP 200 and no
+Retry-After was supplied. This demonstrates that the child operation is rejected
+while the parent operation remains available in that same anonymous session;
+it does not identify Instagram's internal admission policy or a numeric quota.
+No authoritative public explanation of this internal code/query was found.
+
+| Post | Reported comments | Unique parent comments scraped in these bounded tests | Child replies scraped | Likes | Reposts | Shares |
+| --- | --- | --- | --- | --- | --- | --- |
+| `Dd37XeDly4U` image | 222 | 21 | 0 | 15,259 | Not exposed | Not exposed |
+| `Dd60pnHl_ux` carousel | 34 | 30 | 0 | 1,319 | Not exposed | Not exposed |
+| `Dd6m4XKDSQ1` reel | 96 | 30 | 0 | 3,153 | Not exposed | Not exposed |
+
+Counts are deduplicated across all three anonymous diagnostic artifacts, not
+summed across repeated pages. The reported comment total is source metadata;
+the scraped figure is actual unique parent rows observed, not exhaustive
+coverage. Repost/share aliases were absent, not zero, and are not independent
+metrics inferred from the existing normalizer's coalesced repost/share field.
+
+- Image: collaborators and tagged accounts `countessluann`, `kylerichards18`;
+  caption hashtag `RHUGT`; no caption mentions found.
+- Carousel: explicit empty coauthor list; no tagged accounts found at post or
+  eight-slide level; caption hashtag `BravoFanFest`; no caption mentions found.
+- Reel: explicit empty coauthor list; tagged account `rhoc_emilysimpson`;
+  caption hashtag `RHOC`; no caption mentions found.
+
+All three captions were observed directly; accessibility text was not used as
+caption evidence. The user spelling `tabs` was interpreted as tags/tagged
+accounts. Safe field-presence records are in
+`public-httpx-other-replies-20261020/result.json`. Final reconciliation verified
+the original run unchanged. No source-gate row or schedule was changed.

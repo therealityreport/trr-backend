@@ -131,6 +131,16 @@ def media_comment_count(comments: Iterable[Any]) -> int:
     )
 
 
+def reported_reply_count(comment: Any) -> int | None:
+    """Native reported total, preserving unknown separately from explicit zero."""
+    counts = [
+        value
+        for name in ("reply_count", "child_comment_count")
+        if type(value := getattr(comment, name, None)) is int and value >= 0
+    ]
+    return max(counts) if counts else None
+
+
 def expected_reply_count(comment: Any) -> int:
     """Expected reply total for a parent, matching the persistence topology.
 

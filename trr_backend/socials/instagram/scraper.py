@@ -263,7 +263,7 @@ class InstagramComment:
     likes: int
     is_reply: bool
     parent_comment_id: str | None  # ID of parent comment if this is a reply
-    reply_count: int
+    reply_count: int | None
     reply_depth: int = 0
     replies: list["InstagramComment"] = field(default_factory=list)
     media_urls: list[str] = field(default_factory=list)
@@ -309,7 +309,7 @@ class InstagramComment:
     is_edited: bool = False
     is_pinned: bool = False
     meta_ai_comment_type: str = "NONE"
-    child_comment_count: int = 0
+    child_comment_count: int | None = 0
     liked_by_media_coauthors: bool = False
     cursor_min_id: str | None = None
     cursor_param: str | None = None
@@ -3779,7 +3779,9 @@ class InstagramScraper:
                 comments_fetched += 1
 
                 # Fetch reply tails when Instagram only embedded a preview subset.
-                if fetch_replies and comment.reply_count > self._observed_reply_count(comment):
+                if fetch_replies and (
+                    comment.reply_count is None or comment.reply_count > self._observed_reply_count(comment)
+                ):
                     replies = self._fetch_comment_replies(
                         media_id,
                         comment.comment_id,
