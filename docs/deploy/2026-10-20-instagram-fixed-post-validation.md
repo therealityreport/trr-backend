@@ -862,3 +862,61 @@ caption evidence. The user spelling `tabs` was interpreted as tags/tagged
 accounts. Safe field-presence records are in
 `public-httpx-other-replies-20261020/result.json`. Final reconciliation verified
 the original run unchanged. No source-gate row or schedule was changed.
+
+### Maintained repair and release candidate
+
+Source revision `9d7baa61dac791b3cdad079749e2a7700b2b4e4c` preserves native
+missing/null reply expectations through DTO conversion and retained-source
+resume reconstruction. Unknown expectations trigger child probing separately
+from explicit-zero probe limits. Fresh public HTTPX parent pagination uses the
+working June query sequence; durable resumes keep their pinned query and cursor.
+Pending parent pages precede child hydration, while an exhausted parent lane
+can resume children directly. Existing rate guards remain in place.
+
+Validation: 28 targeted transport/count/selection/resume tests and three targeted
+Modal probe tests passed; Ruff and diff checks passed. One complete independent
+review found no blockers. Existing app nullable types were inspected; no app
+code or SQL change was required. Workspace contract revision `bddbc0b` records
+these boundaries. Legacy persisted numeric counts remain compatible; retained
+native evidence determines unknown/exhaustion state.
+
+The isolated local release is installed from the committed archive (SHA-256
+`f692a13aa2eff3e46250d30bfa02edf2f97ea38482e21ea0b4b8f485dd54a2be`). Its
+missing/null/zero/positive contract smoke and public query check passed. The
+LaunchAgent points to that release but remains unloaded in both user and GUI
+domains. Previous release `e6fab2ce149423a96a59ba4256ea340c8040d5a6` and the
+prior plist remain available for rollback. The superseded `98c6604b` runnable
+copy was moved to actual Trash after dependency/process checks; its archive
+remains retained. Original fixed-post artifacts and run state were not repinned.
+
+Deployment target is the live-verified `admin-56995/trr-backend-jobs/main`. The
+maintained backend `.env` is selected explicitly through `TRR_MODAL_SOURCE_ENV`.
+Its ownership flags and timezone were checked against the five existing live
+Modal schedules: existing schedules are preserved, and no new retry or follow-up
+is created. Runtime verification is separate from Instagram source acceptance;
+all-three child rejection and the full-history gate remain unresolved.
+
+### Deployed runtime verification
+
+The owner deployment command completed successfully for the exact candidate:
+Modal **v86**, tag `ig-public-httpx-9d7baa61`, app
+`ap-DkLTRoSvqhbkGO7fHyHxrD`, workspace `admin-56995`, environment `main`.
+The API cold-start canary passed. Target-specific strict readiness with
+`--env main --probe-core-workers --strict-probes --json` passed: `ok` and
+`core_ok` true, no missing functions or advisories, and all six runtime probes
+healthy. The deployed browser-image probe asserted all four count checks true:
+missing is unknown, null is unknown, zero is known, positive is known. These
+probes use synthetic data and do not issue Instagram requests.
+
+The dispatch consumer hard-pins the same workspace/environment/app and rejects
+a mismatched handle. All five existing schedules were read again after deploy
+and match their prior cron expressions and America/New_York timezone. Modal
+v85 and local release `e6fab2ce` are retained for rollback. Safe detailed
+evidence is in the private `modal-public-httpx-*` artifacts.
+
+Backend/API and local runtime repair are verified. App code/build and SQL are
+unchanged and need no new build or migration for this internal contract repair.
+The original generation-8 run is unchanged, no worker/backfill was resumed,
+and no login, Decodo call, new schedule, or source retry was used for release
+verification. Successful runtime rollout does not resolve the observed native
+child-operation rejection or establish full-history completion.
