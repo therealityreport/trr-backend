@@ -7,7 +7,9 @@
          TRR_INSTAGRAM_DBOS_DATABASE_URL=<session DSN, port 5432, user trr_ingestion_runtime.<ref>>
          TRR_INSTAGRAM_DBOS_RUNTIME_ROLE=trr_ingestion_runtime
          TRR_INSTAGRAM_INGESTION_COORDINATOR_ENABLED=1
-       Business database settings still come from TRR-Backend/.env.
+       Also copy the required business database and object-storage settings into
+       .env.local-worker. This launcher sources only .env.local-worker, not .env.
+       Keep that file private (chmod 600); do not copy Instagram login credentials.
     2. cp this file to ~/Library/LaunchAgents/com.trr.instagram-local-worker.plist
     3. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trr.instagram-local-worker.plist
 
