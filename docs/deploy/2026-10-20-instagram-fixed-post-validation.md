@@ -669,3 +669,66 @@ saved/login profile was used, no cooldown was imposed by this test, and all
 Instagram follow-ups remain paused. Full history remains gated. These are actual
 partial test results; neither all-three browser success nor comment/reply
 retrieval has been established.
+
+### Completed three-post browser diagnosis and corrected error attribution
+
+The user explicitly requested immediate tests of the remaining carousel and reel
+and the actual native error, rather than stopping at our classifier label. V3
+visited both targets in independent fresh anonymous/no-proxy browser profiles.
+It retained bounded, sanitized native error fields and actual operation names,
+separated ancillary operation errors from comment/document failures, and allowed
+a per-post access error to leave the other post test runnable. Eight distinct
+focused checks passed with unaffected evidence reused. Parent review accepted the
+changed paths before execution. No scheduled task was created or resumed.
+
+The actual repeated error is **code 1675002, `Unauthorized logged out query.`**,
+severity `CRITICAL`, returned over HTTP 200 by
+`QuickPromotionSupportIGSchemaBatchFetchQuery`, document `26673487622279953`,
+at `/api/graphql`. This is an ancillary promotion-support operation, not a
+parent-comment or child-reply pagination operation. The 125-byte response hash
+matches the previous photo failure. Hash equality identifies identical response
+content but alone cannot recover the earlier request's operation name. A final
+photo-only V4 diagnostic using corrected handling directly observed the same
+promotion operation and native error, removing that attribution uncertainty for
+the new photo attempt.
+
+The earlier diagnostic's decision to stop the whole browser test on this ancillary
+auth/access label was wrong. The native error establishes that this particular
+operation rejects logged-out access; it does not establish a comment rate limit,
+a login requirement for all public comments, or a failed comment-pagination call.
+No matching public documentation for the internal error/query was found; the
+captured request identity and native response supply the evidence here.
+
+| Post | Verified native type | Source-reported comments | Source-reported likes | Corrected browser interaction |
+| --- | --- | --- | --- | --- |
+| `Dd37XeDly4U` | Photo, type 1 | 222 | 15,259 | Two load-more clicks; logged-out dialog query |
+| `Dd60pnHl_ux` | Carousel, type 8 | 34 | 1,319 | Login-route document request observed; no completed load-more click |
+| `Dd6m4XKDSQ1` | Reel/video, type 2 | 96 | 3,153 | Two load-more clicks; logged-out dialog query |
+
+These are fresh detail metadata counts, not retrieved comment rows. All three
+detail identity/type checks passed. Photo and reel each returned HTTP 200 for
+`PolarisLoggedOutDynamicDialogQuery` (133-byte body), recorded one visible dialog,
+and showed no visible username/password form. Carousel recorded `redirect_login`,
+but the request frame identity was not retained, so this does not establish a
+top-level login wall. No recognized native parent or child pagination connection
+was returned by the inspected responses. Supported inline/preview shapes were
+also inspected separately; absence of a recognized shape is not proof that every
+possible bootstrap or DOM comment format was absent.
+
+This explains the current zero-page metric: it counts recognized actual comment
+pagination, while these browser interactions produced ancillary/logged-out UI
+operations. The historical June public HTTPX path explicitly sent parent-comment
+queries, then children; it was not this rendered-browser interaction path. The
+older substantial public retrieval remains valid historical evidence. Current
+browser results do not by themselves prove Instagram globally disabled anonymous
+comment retrieval. The separate earlier HTTPX child-root rate error remains a
+different, independently observed failure.
+
+V3 used 56 data requests and 52 scripts; V4 photo used 28 data requests and 25
+scripts. Both diagnostics completed and final guards verified the frozen run
+unchanged. Comments/replies retrieval did not pass. The shared ledger now records
+183 requests in the rolling window and zero open tranches. Temporary contexts
+closed, the shared gate was not modified, no new cooldown was imposed, and all
+Instagram schedules remain paused. Full history stays gated. Safe records are
+`direct-browser-20261020-v3/result.json` and
+`direct-browser-20261020-v4-photo/result.json` under the existing private task base.
