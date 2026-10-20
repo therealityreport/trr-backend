@@ -920,3 +920,32 @@ The original generation-8 run is unchanged, no worker/backfill was resumed,
 and no login, Decodo call, new schedule, or source retry was used for release
 verification. Successful runtime rollout does not resolve the observed native
 child-operation rejection or establish full-history completion.
+
+## Child contract comparison with June and current Instagram (2026-10-20)
+
+The user requested further immediate diagnosis of child replies, comparison with the working June implementation and current requests, and another test of all three fixed posts. Login, Decodo, scheduled tasks, and full-history execution remain excluded.
+
+Historical evidence now confirms an actual anonymous child retrieval: the June 15 17:27:46 America/New_York run for `CfhVcINpHiY` recorded public mode, `relay_is_logged_in:false`, 45 parents, 46 flattened rows, and one reply fetched and merged through `PolarisPostChildCommentsQuery` / `34884685271179117`. This is stronger than the earlier aggregate 823-comment evidence. It establishes historical success, not current availability or complete historical coverage.
+
+The bounded comparisons produced these results on each fixed post:
+
+| Comparison | Photo `Dd37XeDly4U` | Carousel `Dd60pnHl_ux` | Reel `Dd6m4XKDSQ1` |
+| --- | --- | --- | --- |
+| Primary `348` with June variables | Native 1675004 | Native 1675004 | Native 1675004 |
+| Primary `348` with explicit null cursors/chronological value and first 50 | Native 1675004 | Native 1675004 | Native 1675004 |
+| Primary `348` with June variables through `/api/graphql` | Native 1675004 | Native 1675004 | Native 1675004 |
+| Alternate `362`, four distinct parents per post across two batches | 4 empty native child connections | 4 empty native child connections | 4 empty native child connections |
+
+The primary response is HTTP 200 with native GraphQL code `1675004`, message `Rate limit exceeded`, severity `CRITICAL`, and the same 114-byte response hash previously recorded. There is no server Retry-After. Parent requests continue to succeed in the same client after child errors. This narrows the failure to the child operation/request context; it does not establish an account-wide daily quota or reveal Instagram's internal rejection rule.
+
+The alternate `PolarisPostCommentsChildrenPaginationtQuery` / `36239935742272683` returned native boolean `has_next_page:false` and no edges for 12 distinct parents total. Their native reply counts were null or absent. Zero retrieved children from unknown-count parents does not verify a working reply path or prove no replies exist. The June loop could try this second document after a first-document error; the current strict path stops on a native rate error. Restoring unconditional fallback without a positive child retrieval is not an established repair.
+
+The current official public asset defines parent query `PolarisLoggedOutDesktopWWWPostCommentsPaginationQuery` / `27837656105907150`. Current browser evidence uses `/api/graphql`. A diagnostic initially sent that newer query through the older `/graphql/query` route and received HTTP 403. Correcting the diagnostic route returned HTTP 200 comment data on all three posts. The response uses exact `POLARIS_<native ID>` media IDs and matching image/carousel/video typenames. Strict offline identity correction verified the retained safe projection without repeating the successful source requests.
+
+The current parent response contained 11/15/15 rows; every native `child_comment_count` was null. These values remain unknown. The captured `PolarisLoggedOutDesktopWWWPostChildComments.react` control invokes the logged-out intent dialog rather than dispatching a child query. This establishes that specific UI control's behavior, not universal anonymous API prohibition. An April third-party child document `26914912424764761` returned a distinct document-not-found error on all three posts and is not a current verified replacement.
+
+Existing capabilities remain in maintained source: parent threads, nested replies, comment media, rendered hidden-comment recovery, and Facebook crosspost count accounting. Facebook counts can come from crosspost metadata and do not alone establish fetched Facebook comment bodies. None of these categories was removed by this work.
+
+Private evidence is under `~/.codex/tmp/trr-instagram-repair-01a1599f/child-contract-20261020/`, including `comparison-findings.md`, `june-positive-child-proof.json`, `variant-348-null/result.json`, `variant-362-june/result.json`, `current-api-positive362-v2/result.json`, `primary-child-api348/result.json`, and `secondary362-sample/result.json`. Focused offline request-contract, identity, selection, and stop tests passed before the changed diagnostic branches ran. Every completed live batch retained `original_run_unchanged:true` and `final_guard_status:verified`.
+
+No replacement child contract passed a positive retrieval check. This follow-up changes private diagnostics and this evidence record only. Backend runtime remains the previously verified Modal v86, source `9d7baa61dac791b3cdad079749e2a7700b2b4e4c`, in `admin-56995 / trr-backend-jobs / main`; no new deployment, app build, or SQL change is required. The original run remains cancelled at generation 8, the local worker remains unloaded, and full history remains gated. No schedule, login, or Decodo usage was introduced.
