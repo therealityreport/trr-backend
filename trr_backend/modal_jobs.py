@@ -860,8 +860,11 @@ def probe_browser_image_runtime() -> dict[str, object]:
         from playwright.sync_api import sync_playwright
         from scrapling.fetchers import StealthyFetcher
 
+        from trr_backend.socials.instagram.comments_scrapling.fetcher import _post_child_comments_graphql_doc_attempts
+
         _ = StealthyFetcher, patchright_sync_playwright
         instagram_comment_counts = _instagram_comment_count_contract()
+        child_friendly_name, child_doc_id = _post_child_comments_graphql_doc_attempts()[0]
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             try:
@@ -877,6 +880,7 @@ def probe_browser_image_runtime() -> dict[str, object]:
             "worker_family": "browser_image",
             "state_free": True,
             "instagram_comment_counts": instagram_comment_counts,
+            "instagram_child_query": {"friendly_name": child_friendly_name, "doc_id": child_doc_id},
             "timestamp": datetime.now(UTC).isoformat(),
             "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
             "versions": {

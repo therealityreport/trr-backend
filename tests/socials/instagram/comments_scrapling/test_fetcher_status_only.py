@@ -1781,3 +1781,90 @@ def test_public_relay_child_hydration_probes_unknown_without_zero_probe_allowanc
     assert public_client.post.await_count == 1
     assert metadata["zero_count_parent_probes"] == 0
     assert parent.reply_count is None and parent.child_comment_count is None
+
+
+def _run_default_child_contract(monkeypatch, *, strict, resume=None, rejected=False):
+    for key in ("INSTAGRAM_POST_CHILD_COMMENTS_GRAPHQL_DOC_IDS", "INSTAGRAM_POST_CHILD_COMMENTS_GRAPHQL_FRIENDLY_NAME"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_COAUTHOR_GRAPHQL_CHILD_PAGE_SIZE", "12")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_PUBLIC_COMMENTS_ZERO_REPLY_PROBE_LIMIT", "0")
+    fetcher = _build_fetcher()
+    fetcher._pace_api_requests = AsyncMock(return_value=True)
+    parent = _comment("18034559608366960")
+    parent.reply_count = parent.child_comment_count = None
+    client = MagicMock()
+    client.cookies = httpx.Cookies()
+    payloads = []
+    fetcher._source_payload_observer = lambda kind, payload: payloads.append((kind, payload))
+    node = _relay_budget_node("17928451544257455")
+    node["parent_comment_id"] = parent.comment_id
+    response = (
+        httpx.Response(200, json={"errors": [
+            {"code": 1675004, "message": "Rate limit exceeded", "severity": "CRITICAL"},
+        ]})
+        if rejected else _relay_budget_page([node], child=True, more=False)
+    )
+    response.request = httpx.Request("POST", "https://www.instagram.com/graphql/query/")
+    client.post = AsyncMock(return_value=response)
+    try:
+        metadata = asyncio.run(fetcher._fetch_public_relay_child_comments_for_status_only(
+            public_client=client, shortcode="CfhVcINpHiY", post_url="https://www.instagram.com/p/CfhVcINpHiY/",
+            media_id="2873672329179986072", comments=[parent], graphql_headers={}, common_body={},
+            target_count=None, max_comments=0, relay_is_logged_in=False,
+            strict_native_exhaustion=strict, durable_resume=resume,
+        ))
+        return metadata, parent, client.post.await_args_list, payloads
+    finally:
+        asyncio.run(fetcher.aclose())
+        fetcher._parser.session.close()
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_default_child_contract_prefers_secondary_and_merges_unknown_count_reply(monkeypatch, strict):
+    metadata, parent, calls, payloads = _run_default_child_contract(monkeypatch, strict=strict)
+    assert len(calls) == 1
+    request = calls[0]
+    assert request.args == ("https://www.instagram.com/graphql/query/",)
+    assert request.kwargs["data"]["doc_id"] == "36239935742272683"
+    assert request.kwargs["data"]["fb_api_req_friendly_name"] == "PolarisPostCommentsChildrenPaginationtQuery"
+    assert request.kwargs["headers"]["x-fb-friendly-name"] == "PolarisPostCommentsChildrenPaginationtQuery"
+    assert json.loads(request.kwargs["data"]["variables"]) == {
+        "__relay_internal__pv__PolarisIsLoggedInrelayprovider": False, "first": 12, "is_chronological": False,
+        "media_id": "2873672329179986072", "parent_comment_id": "18034559608366960",
+    }
+    assert metadata["merged_replies"] == 1 and metadata["pages"][0]["has_next_page"] is False
+    assert parent.reply_count is None and parent.child_comment_count is None
+    assert [reply.comment_id for reply in parent.replies] == ["17928451544257455"]
+    assert parent.replies[0].parent_comment_id == parent.comment_id
+    if strict:
+        assert metadata["native_complete"] is True
+        assert metadata["completed_parent_ids"] == [parent.comment_id]
+        assert payloads[0][1]["cursor_payload"]["relay_doc_id"] == "36239935742272683"
+
+
+def test_pinned_child_resume_keeps_primary_contract_and_exact_cursor(monkeypatch):
+    resume = {"18034559608366960": {"pending": True, "relay_doc_id": "34884685271179117",
+        "relay_friendly_name": "PolarisPostChildCommentsQuery", "page_size": 17,
+        "after": "pinned-child-tail", "seen_cursors": ["pinned-child-tail"]}}
+    metadata, parent, calls, payloads = _run_default_child_contract(monkeypatch, strict=True, resume=resume)
+    assert len(calls) == 1
+    request = calls[0].kwargs
+    assert request["data"]["doc_id"] == "34884685271179117"
+    assert request["data"]["fb_api_req_friendly_name"] == "PolarisPostChildCommentsQuery"
+    assert request["headers"]["x-fb-friendly-name"] == "PolarisPostChildCommentsQuery"
+    variables = json.loads(request["data"]["variables"])
+    assert variables["after"] == "pinned-child-tail" and variables["first"] == 17
+    assert variables["parent_comment_id"] == parent.comment_id
+    assert metadata["native_complete"] is True
+    assert payloads[0][1]["cursor_payload"]["relay_doc_id"] == "34884685271179117"
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_default_child_native_rate_stops_without_switching_document(monkeypatch, strict):
+    metadata, parent, calls, _ = _run_default_child_contract(monkeypatch, strict=strict, rejected=True)
+    assert len(calls) == 1
+    assert calls[0].kwargs["data"]["doc_id"] == "36239935742272683"
+    assert metadata["block_reason"] == "http_429"
+    assert parent.replies == []
+    if strict:
+        assert metadata.get("native_complete") is not True

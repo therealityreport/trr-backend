@@ -183,8 +183,10 @@ _POST_COMMENTS_GRAPHQL_PAGE_SIZE = 12
 _POST_COMMENTS_GRAPHQL_MAX_PAGES = 0
 _POST_CHILD_COMMENTS_GRAPHQL_FRIENDLY_NAME = "PolarisPostChildCommentsQuery"
 _POST_CHILD_COMMENTS_GRAPHQL_DOC_ATTEMPTS = (
-    ("PolarisPostChildCommentsQuery", "34884685271179117"),
+    # Anonymous positive control verified 2026-10-20; the legacy first query
+    # rejects that same parent with native 1675004 before strict lanes can proceed.
     ("PolarisPostCommentsChildrenPaginationtQuery", "36239935742272683"),
+    ("PolarisPostChildCommentsQuery", "34884685271179117"),
 )
 _POST_CHILD_COMMENTS_GRAPHQL_PAGE_SIZE = 12
 _POST_CHILD_COMMENTS_GRAPHQL_MAX_PAGES = 0

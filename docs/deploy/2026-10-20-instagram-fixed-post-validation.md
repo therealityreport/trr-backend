@@ -949,3 +949,16 @@ Existing capabilities remain in maintained source: parent threads, nested replie
 Private evidence is under `~/.codex/tmp/trr-instagram-repair-01a1599f/child-contract-20261020/`, including `comparison-findings.md`, `june-positive-child-proof.json`, `variant-348-null/result.json`, `variant-362-june/result.json`, `current-api-positive362-v2/result.json`, `primary-child-api348/result.json`, and `secondary362-sample/result.json`. Focused offline request-contract, identity, selection, and stop tests passed before the changed diagnostic branches ran. Every completed live batch retained `original_run_unchanged:true` and `final_guard_status:verified`.
 
 No replacement child contract passed a positive retrieval check. This follow-up changes private diagnostics and this evidence record only. Backend runtime remains the previously verified Modal v86, source `9d7baa61dac791b3cdad079749e2a7700b2b4e4c`, in `admin-56995 / trr-backend-jobs / main`; no new deployment, app build, or SQL change is required. The original run remains cancelled at generation 8, the local worker remains unloaded, and full history remains gated. No schedule, login, or Decodo usage was introduced.
+
+
+## Exact June control recovered a reply (2026-10-20)
+
+The follow-up used the exact historical post `CfhVcINpHiY`, media `2873672329179986072`, and parent `18034559608366960`. Both runs verified the post identity and found that parent in the current 15-row parent page. Each used one fresh anonymous client and exactly three source requests (bootstrap, parent page, child page).
+
+The original primary query `34884685271179117` again returned native error `1675004`. The separately selected alternate `PolarisPostCommentsChildrenPaginationtQuery` / `36239935742272683` returned one actual child, `17928451544257455`, linked to that exact parent, with native `has_next_page:false` and no cursor. This verifies current anonymous child retrieval for the historical thread. The retained June summary does not expose the historical reply ID, so identity with June's reply is not claimed.
+
+The earlier empty alternate results were from different parents with unknown reply counts. They did not test this known positive thread. The new result supports preferring the alternate for fresh child lanes while retaining explicit overrides and saved query/cursor identities. It does not establish a daily quota or full-history coverage.
+
+Evidence: private `child-contract-20261020/june-exact-primary-june/result.json` and private `child-contract-20261020/june-exact-secondary-june/result.json`. Both preserve the original cancelled generation-8 run and report verified final guards. No login, proxy, Decodo call, or schedule was used. Runtime rollout is tracked in the backend validation record.
+
+The maintained repair prefers the proven `36239935742272683` pair for fresh child lanes. Explicit overrides and pinned resume queries/cursors remain unchanged. Five focused fetcher cases and three runtime-probe tests passed, along with Ruff and diff checks. Independent review of the production change found no blockers; the lead reviewed the new fetcher tests. The runtime probe now reports its effective child-query pair without Instagram traffic. Deployment and installed-runtime verification follow below.

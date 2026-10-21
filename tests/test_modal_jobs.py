@@ -1376,6 +1376,8 @@ def test_browser_image_runtime_probe_closes_browser_before_playwright_context(
     monkeypatch.setitem(sys.modules, "patchright.sync_api", patchright_sync_api)
     monkeypatch.setitem(sys.modules, "scrapling.fetchers", scrapling_fetchers)
     monkeypatch.setattr(modal_jobs, "package_version", lambda package: f"test-{package}")
+    monkeypatch.delenv("INSTAGRAM_POST_CHILD_COMMENTS_GRAPHQL_DOC_IDS", raising=False)
+    monkeypatch.delenv("INSTAGRAM_POST_CHILD_COMMENTS_GRAPHQL_FRIENDLY_NAME", raising=False)
 
     result = modal_jobs.probe_browser_image_runtime.get_raw_f()()
 
@@ -1388,6 +1390,10 @@ def test_browser_image_runtime_probe_closes_browser_before_playwright_context(
         "null_is_unknown": True,
         "zero_is_known": True,
         "positive_is_known": True,
+    }
+    assert result["instagram_child_query"] == {
+        "friendly_name": "PolarisPostCommentsChildrenPaginationtQuery",
+        "doc_id": "36239935742272683",
     }
     assert events == ["enter", "launch", "close", "exit"]
 
