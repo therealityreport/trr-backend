@@ -1232,6 +1232,41 @@ No scraper, runtime, worker credentials, schedule or ingestion records changed.
 Full-history ingestion remains gated. Private comparison evidence is
 `gap-investigation/browser-reel-comparison.json`.
 
+### Browser query comparison and photo reply audit (2026-10-21)
+
+The signed-in browser used `PolarisPostCommentsPaginationQuery`, document
+`28915717348095854`, at `/api/graphql`. Its native variables include `after`,
+`before: null`, `first: 10`, `last: null`, numeric media ID, popular order,
+the logged-in Relay provider and the disabled Threads-style provider. Clicking
+`View hidden comments` exposed rows already loaded by ordinary pagination;
+the observed reveal itself did not issue another comment request.
+
+A separate anonymous probe used that exact query with the logged-in provider
+set to false. It stopped at the first photo root with `source_auth_failed`,
+after two requests including bootstrap. It returned no comment page, made no
+canonical writes and left the original frozen run unchanged. Its result is
+`gap-investigation/browser-parent/result.json`. This does not prove that the
+query will succeed with the worker account.
+
+A fresh photo view, with no replies expanded, exposed 131 parent permalinks
+and the two previously identified GIF entries. Every permalink ID was already
+collected. The retained parent `18110958494142733` was not present in that view.
+The 18 reply labels summed to 53. Three labels differed from retained reply
+counts: parent `18133193512661815` advertised 8 but expanded to 7 replies;
+`18049445372813312` advertised 2 but expanded to 1; `17937440769383053`
+advertised 1 but expanded to no reply. All eight exposed reply IDs were already
+collected. This audit found no new photo IDs and does not reconcile 222.
+Evidence is `gap-investigation/browser-photo-comparison.json`.
+
+Authenticated native retrieval remains pending account selection: the connected
+TRR browser is `thereality.report`, while the worker snapshot pins `livestnation`.
+No browser credentials were copied and no worker identity was changed. Current
+source also requires a distinct authenticated Relay contract and a fresh root
+scan; it cannot safely resume the clean-exhausted public cursor family as an
+authenticated scan. No production scraper or deployment changed in this check.
+Full-history ingestion remains gated on both fixed-post counts matching with
+native evidence.
+
 
 ### Authenticated diagnostic deployed; settlement rollout held (2026-10-21)
 
