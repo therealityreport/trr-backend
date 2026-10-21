@@ -863,12 +863,14 @@ def test_get_social_account_profile_posts_search_comments_only_falls_back_to_ins
         *,
         search: str | None = None,
         comments_only: bool = False,
+        comment_filter: str | None = None,
         sort_by: str | None = None,
         sort_dir: str | None = None,
     ) -> list[dict[str, Any]]:
         captured["account_handle"] = account_handle
         captured["search"] = search
         captured["comments_only"] = comments_only
+        captured["comment_filter"] = comment_filter
         captured["sort_by"] = sort_by
         captured["sort_dir"] = sort_dir
         return []
@@ -882,6 +884,7 @@ def test_get_social_account_profile_posts_search_comments_only_falls_back_to_ins
         page_size=25,
         search="#BravoCon",
         comments_only=True,
+        comment_filter="commentable",
     )
 
     assert payload["items"] == []
@@ -889,6 +892,7 @@ def test_get_social_account_profile_posts_search_comments_only_falls_back_to_ins
         "account_handle": "bravotv",
         "search": "#BravoCon",
         "comments_only": True,
+        "comment_filter": "commentable",
         "sort_by": "missing_comments",
         "sort_dir": "desc",
     }

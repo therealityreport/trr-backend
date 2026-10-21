@@ -2684,6 +2684,7 @@ def get_social_account_profile_posts(
                     normalized_account,
                     search=normalized_search,
                     comments_only=comments_only,
+                    comment_filter=normalized_comment_filter,
                     sort_by=normalized_sort_by,
                     sort_dir=normalized_sort_dir,
                 )

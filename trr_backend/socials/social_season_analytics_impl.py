@@ -60607,6 +60607,29 @@ def _fetch_social_account_profile_source_rows(
     ]
 
 
+def _instagram_profile_search_projection_sql(source_id_column: str, *, native_columns: set[str]) -> str:
+    # Keep the maintained matcher inputs, without transferring source/media payloads.
+    optional_fields = (
+        "title", "headline", "caption", "text", "post_url", "permalink", "permalink_url",
+        "canonical_url", "url", "link", "hashtags", "mentions", "collaborators",
+        "collaborators_detail", "profile_tags",
+    )
+    fields = ", ".join(
+        f"p.{name} as {name}" if name in native_columns else f"null as {name}"
+        for name in optional_fields
+    )
+    return f"""
+        p.id::text as id, p.{source_id_column} as source_id,
+        p.{source_id_column} as shortcode, p.source_account, p.posted_at,
+        sh.name as show_name, {fields},
+        jsonb_build_object(
+            'caption', p.raw_data -> 'caption',
+            'caption_text', p.raw_data -> 'caption_text',
+            'text', p.raw_data -> 'text'
+        ) as raw_data
+    """
+
+
 def _instagram_catalog_profile_rows_select_sql() -> str:
     return """
             select
@@ -60633,6 +60656,8 @@ def _fetch_instagram_owner_catalog_rows(
     account_handle: str,
     *,
     limit: int | None = None,
+    search_projection: bool = False,
+    source_ids: list[str] | None = None,
     posted_since: datetime | None = None,
     conn: Any | None = None,
 ) -> list[dict[str, Any]]:
@@ -60647,16 +60672,33 @@ def _fetch_instagram_owner_catalog_rows(
     if normalized_posted_since is not None:
         posted_since_clause = "and p.posted_at >= %s"
         params.append(normalized_posted_since)
+    native_columns = (
+        _relation_columns("social", "instagram_account_catalog_posts", conn=conn)
+        if search_projection or source_ids is not None else None
+    )
+    source_ids_clause = ""
+    if source_ids is not None:
+        source_ids_clause = "and p.source_id = any(%s::text[])"
+        params.append(source_ids)
+    select_sql = _instagram_catalog_profile_rows_select_sql()
+    if search_projection:
+        select_sql = (
+            "select " + _instagram_profile_search_projection_sql("source_id", native_columns=native_columns or set())
+            + select_sql[select_sql.index("from social.instagram_account_catalog_posts"):]
+        )
     limit_clause = ""
     if limit is not None:
         limit_clause = "limit %s"
         params.append(max(1, int(limit)))
-    account_match_clause = _instagram_account_match_sql(alias="p")
+    account_match_clause = _instagram_account_match_sql(
+        alias="p", native_columns=frozenset(native_columns) if native_columns is not None else None,
+    )
     try:
         query = f"""
-            {_instagram_catalog_profile_rows_select_sql()}
+            {select_sql}
             where {account_match_clause}
               {posted_since_clause}
+              {source_ids_clause}
             order by p.posted_at desc nulls last, p.id desc
             {limit_clause}
             """
@@ -60672,6 +60714,8 @@ def _fetch_instagram_collaborator_catalog_rows(
     account_handle: str,
     *,
     limit: int | None = None,
+    search_projection: bool = False,
+    source_ids: list[str] | None = None,
     posted_since: datetime | None = None,
     conn: Any | None = None,
 ) -> list[dict[str, Any]]:
@@ -60686,18 +60730,33 @@ def _fetch_instagram_collaborator_catalog_rows(
     if normalized_posted_since is not None:
         posted_since_clause = "and m.posted_at >= %s"
         params.append(normalized_posted_since)
+    native_columns = (
+        _relation_columns("social", "instagram_account_catalog_posts", conn=conn)
+        if search_projection or source_ids is not None else None
+    )
+    source_ids_clause = ""
+    if source_ids is not None:
+        source_ids_clause = "and p.source_id = any(%s::text[])"
+        params.append(source_ids)
+    select_sql = _instagram_catalog_profile_rows_select_sql()
+    if search_projection:
+        select_sql = (
+            "select " + _instagram_profile_search_projection_sql("source_id", native_columns=native_columns or set())
+            + select_sql[select_sql.index("from social.instagram_account_catalog_posts"):]
+        )
     limit_clause = ""
     if limit is not None:
         limit_clause = "limit %s"
         params.append(max(1, int(limit)))
     try:
         query = f"""
-            {_instagram_catalog_profile_rows_select_sql()}
+            {select_sql}
             join social.instagram_account_catalog_post_collaborators m
               on m.catalog_post_id = p.id
             where m.collaborator_handle = %s
               and lower(p.source_account) <> %s
               {posted_since_clause}
+              {source_ids_clause}
             order by m.posted_at desc nulls last, m.catalog_post_id desc
             {limit_clause}
             """
@@ -60815,16 +60874,51 @@ def _instagram_social_account_profile_dataset_rows(
     collaborator_posted_since: datetime | None = None,
     conn: Any | None = None,
     comments_only: bool = False,
+    comment_filter: str | None = None,
     sort_by: str | None = None,
     sort_dir: str | None = None,
 ) -> list[dict[str, Any]]:
+    from trr_backend.socials.read_models.account_profile.comment_breakdown import (
+        instagram_facebook_comment_count_from_row,
+    )
+
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     fetch_limit = max(1, int(limit)) if limit is not None else None
+    source_kwargs: dict[str, Any] = {}
+    if search and comments_only and fetch_limit is None:
+        candidate_rows = []
+        for loader, args, projection, surface, mode, priority, since in (
+            (_fetch_social_account_profile_rows, ("instagram", normalized_account),
+             {"projection": "search"}, "materialized", "owner", 3, posted_since),
+            (_fetch_instagram_owner_catalog_rows, (normalized_account,),
+             {"search_projection": True}, "catalog", "owner", 2, posted_since),
+            (_fetch_instagram_collaborator_catalog_rows, (normalized_account,),
+             {"search_projection": True}, "catalog", "collaborator", 1,
+             collaborator_posted_since if collaborator_posted_since is not None else posted_since),
+        ):
+            candidates = _call_profile_summary_loader_with_conn(
+                loader, *args, posted_since=since, conn=conn, **projection,
+            )
+            candidate_rows.extend(_annotate_instagram_social_account_profile_dataset_rows(
+                candidates, source_surface=surface, match_mode=mode, priority=priority,
+            ))
+        source_ids = [
+            str(row.get("source_id") or row.get("shortcode") or "")
+            for row in _dedupe_social_account_profile_dataset_rows(candidate_rows)
+            if _social_account_profile_row_matches_search(
+                "instagram", row, account_handle=normalized_account, search=search,
+                known_handle_identity_index={},
+            )
+        ]
+        if not source_ids:
+            return []
+        source_kwargs["source_ids"] = source_ids
     materialized_rows = _call_profile_summary_loader_with_conn(
         _fetch_social_account_profile_rows,
         "instagram",
         normalized_account,
         limit=fetch_limit,
+        **source_kwargs,
         posted_since=posted_since,
         conn=conn,
     )
@@ -60832,6 +60926,7 @@ def _instagram_social_account_profile_dataset_rows(
         _fetch_instagram_owner_catalog_rows,
         normalized_account,
         limit=fetch_limit,
+        **source_kwargs,
         posted_since=posted_since,
         conn=conn,
     )
@@ -60859,6 +60954,7 @@ def _instagram_social_account_profile_dataset_rows(
             _fetch_instagram_collaborator_catalog_rows,
             normalized_account,
             limit=collaborator_limit,
+            **source_kwargs,
             posted_since=collaborator_posted_since if collaborator_posted_since is not None else posted_since,
             conn=conn,
         )
@@ -60874,6 +60970,18 @@ def _instagram_social_account_profile_dataset_rows(
             ),
         ]
     )
+    known_handle_identity_index = _build_social_account_profile_known_handle_identity_index("instagram", dataset_rows)
+    dataset_rows = [
+        row
+        for row in dataset_rows
+        if _social_account_profile_row_matches_search(
+            "instagram",
+            row,
+            account_handle=normalized_account,
+            search=search,
+            known_handle_identity_index=known_handle_identity_index,
+        )
+    ]
     post_ids = [str(row.get("id") or "").strip() for row in dataset_rows if str(row.get("id") or "").strip()]
     saved_comment_counts: dict[str, int] = {}
     saved_comment_breakdowns: dict[str, dict[str, int]] = {}
@@ -60895,6 +61003,7 @@ def _instagram_social_account_profile_dataset_rows(
                 "instagram",
                 conn=conn,
             )
+    normalized_comment_filter = _normalize_social_account_profile_comment_filter(comment_filter)
     enriched_rows: list[dict[str, Any]] = []
     for row in dataset_rows:
         normalized_row = dict(row)
@@ -60913,22 +61022,27 @@ def _instagram_social_account_profile_dataset_rows(
         normalized_row["saved_comments"] = _normalize_non_negative_int(saved_comment_counts.get(row_id, 0))
         if comments_only:
             reported_comments = _normalize_non_negative_int(normalized_row.get("comments_count"))
-            if max(reported_comments, _normalize_non_negative_int(normalized_row.get("saved_comments"))) <= 0:
+            saved_comments = _normalize_non_negative_int(normalized_row.get("saved_comments"))
+            if normalized_comment_filter == "commentable":
+                include = reported_comments > 0
+            elif normalized_comment_filter == "not_commentable":
+                include = reported_comments == 0
+            elif normalized_comment_filter == "incomplete":
+                accounted = (
+                    saved_comments
+                    + _normalize_non_negative_int(normalized_row.get("classified_missing_comments"))
+                    + instagram_facebook_comment_count_from_row(normalized_row)
+                )
+                include = reported_comments > 0 and (
+                    reported_comments - accounted > _INCOMPLETE_COMMENT_TARGET_ALLOWED_MISSING_COMMENTS
+                )
+            else:
+                include = max(reported_comments, saved_comments) > 0
+            if not include:
                 continue
         enriched_rows.append(normalized_row)
 
-    known_handle_identity_index = _build_social_account_profile_known_handle_identity_index("instagram", enriched_rows)
-    dataset_rows = [
-        row
-        for row in enriched_rows
-        if _social_account_profile_row_matches_search(
-            "instagram",
-            row,
-            account_handle=normalized_account,
-            search=search,
-            known_handle_identity_index=known_handle_identity_index,
-        )
-    ]
+    dataset_rows = enriched_rows
     dataset_rows = _sort_social_account_profile_post_rows(dataset_rows, sort_by=sort_by, sort_dir=sort_dir)
     if fetch_limit is not None:
         return dataset_rows[:fetch_limit]
@@ -62082,13 +62196,19 @@ def _fetch_social_account_profile_rows(
     limit: int | None = None,
     offset: int = 0,
     search: str | None = None,
-    projection: Literal["detail", "summary"] = "detail",
+    projection: Literal["detail", "summary", "search"] = "detail",
+    source_ids: list[str] | None = None,
     posted_since: datetime | None = None,
     conn: Any | None = None,
 ) -> list[dict[str, Any]]:
     table, source_id_column, posted_at_column = _social_account_profile_base_query_parts(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
-    owner_match_clause = _social_account_profile_owner_match_sql(platform, alias="p")
+    native_columns = None
+    if platform == "instagram" and (projection == "search" or source_ids is not None):
+        native_columns = _relation_columns("social", table, conn=conn)
+        owner_match_clause = _instagram_account_match_sql(alias="p", native_columns=frozenset(native_columns))
+    else:
+        owner_match_clause = _social_account_profile_owner_match_sql(platform, alias="p")
     params: list[Any] = [normalized_account]
     posted_since_clause = ""
     if posted_since is not None:
@@ -62099,12 +62219,20 @@ def _fetch_social_account_profile_rows(
         params.append(normalized_posted_since)
     search_clause, search_params = _social_account_profile_search_sql_parts(platform, search=search)
     params.extend(search_params)
+    source_ids_clause = ""
+    if source_ids is not None:
+        source_ids_clause = f"and p.{source_id_column} = any(%s::text[])"
+        params.append(source_ids)
     limit_clause = ""
     if limit is not None:
         safe_limit = max(1, min(int(limit), _SOCIAL_ACCOUNT_PROFILE_MAX_PAGE_SIZE))
         limit_clause = "limit %s offset %s"
         params.extend([safe_limit, max(0, int(offset))])
-    if projection == "summary":
+    if projection == "search":
+        select_fields = _instagram_profile_search_projection_sql(
+            source_id_column, native_columns=native_columns or set(),
+        )
+    elif projection == "summary":
         summary_raw_data_sql = _social_account_profile_summary_raw_data_sql(platform, alias="p")
         select_fields = f"""
           p.id::text as id,
@@ -62174,6 +62302,7 @@ def _fetch_social_account_profile_rows(
         where {owner_match_clause}
           {posted_since_clause}
           {search_clause}
+          {source_ids_clause}
         order by p.{posted_at_column} desc nulls last, p.id desc
         {limit_clause}
         """
