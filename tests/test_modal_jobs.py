@@ -512,6 +512,44 @@ def test_probe_instagram_public_history_scrubs_auth_proxy_and_decodo_env(
     assert os.environ["DECODO_USERNAME"] == "decodo-user"
 
 
+def test_authenticated_comment_probe_missing_credentials_sends_nothing(monkeypatch):
+    import json
+
+    from trr_backend.socials.instagram import authenticated_comment_probe
+
+    monkeypatch.delenv("TRR_INSTAGRAM_INGESTION_AUTH_USERNAME", raising=False)
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COOKIES_JSON", "SECRET")
+    monkeypatch.setattr(authenticated_comment_probe, "probe_authenticated_comment_ids",
+                        lambda _: pytest.fail("Missing credentials must not send"))
+    result = modal_jobs.probe_instagram_authenticated_comment_ids.local()
+    assert result["stop_reason"] == "credential_snapshot_unavailable"
+    assert result["requests"] == 0
+    assert result["auth_state"] == "unavailable"
+    assert "SECRET" not in json.dumps(result)
+
+
+def test_authenticated_comment_probe_consumes_only_pinned_environment(monkeypatch):
+    import json
+
+    from trr_backend.socials.instagram import authenticated_comment_probe
+
+    monkeypatch.setenv("TRR_INSTAGRAM_INGESTION_AUTH_USERNAME", "livestnation")
+    monkeypatch.setenv("TRR_INSTAGRAM_INGESTION_AUTH_USER_ID", "123")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COOKIES_JSON", json.dumps({
+        "sessionid": "SECRET", "csrftoken": "CSRF", "ds_user_id": "123",
+    }))
+
+    def probe(snapshot):
+        assert snapshot.username == "livestnation" and snapshot.user_id == "123"
+        assert snapshot.source_kwargs()["raw_cookies"]["sessionid"] == "SECRET"
+        return authenticated_comment_probe.empty_report()
+
+    monkeypatch.setattr(authenticated_comment_probe, "probe_authenticated_comment_ids", probe)
+    result = modal_jobs.probe_instagram_authenticated_comment_ids.local()
+    assert result["auth_state"] == "unverified"
+    assert "SECRET" not in json.dumps(result)
+
+
 def test_probe_instagram_child_reply_access_is_anonymous_and_restores_environment(monkeypatch):
     from trr_backend.socials.instagram import child_reply_probe
 

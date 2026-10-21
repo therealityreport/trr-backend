@@ -1653,6 +1653,32 @@ def probe_instagram_public_history(
 
 
 @app.function(
+    name="probe_instagram_authenticated_comment_ids",
+    image=_FUNCTION_IMAGE_BINDINGS["run_social_comments_job"],
+    secrets=_secrets,
+    retries=0,
+    timeout=300,
+    max_containers=1,
+)
+def probe_instagram_authenticated_comment_ids() -> dict[str, object]:
+    """One diagnostic, two fixed posts, at most 12 sends; no ingestion writes."""
+    from trr_backend.ingestion.credential_snapshot import CredentialSnapshot
+    from trr_backend.socials.instagram.authenticated_comment_probe import (
+        empty_report,
+        probe_authenticated_comment_ids,
+    )
+
+    try:
+        snapshot = CredentialSnapshot.from_environ()
+    except Exception:
+        result = empty_report()
+        result.update(auth_state="unavailable", stop_reason="credential_snapshot_unavailable")
+    else:
+        result = probe_authenticated_comment_ids(snapshot)
+    return {**result, "execution_backend": "modal", "proxy_state": "none"}
+
+
+@app.function(
     name="probe_instagram_child_reply_access",
     image=_FUNCTION_IMAGE_BINDINGS["run_social_comments_job"],
     secrets=_secrets,
