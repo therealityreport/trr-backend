@@ -207,10 +207,11 @@ def test_upload_failure_keeps_media_capture_unresolved(monkeypatch):
     monkeypatch.setattr(capture, "finish_target", finish)
     monkeypatch.setattr(capture, "record_capture", record)
     monkeypatch.setattr(execution_module.workflows, "enroll_capture", Mock())
-    monkeypatch.setattr(
-        s3_mirror, "mirror_url_to_s3", lambda *a, **k: Mock(status="failed", hosted_key=None, error="upload failed")
-    )
+    mirror = Mock(return_value=Mock(status="failed", hosted_key=None, error="upload failed"))
+    monkeypatch.setattr(s3_mirror, "mirror_url_to_s3", mirror)
     execution_module.media_capture({"reddit_post_id": "p", "raw_payload": {"url": "https://i.redd.it/a.jpg"}}, executor)
     assert record.call_args.args[2] == "retry_wait"
     assert finish.call_count == 2
     assert all(call.args[4] == "retry_wait" for call in finish.call_args_list)
+    # Native animated GIFs can exceed 50 MiB; retain a finite download bound.
+    assert 69_578_496 < mirror.call_args.kwargs["max_bytes"] <= 100 * 1024 * 1024
