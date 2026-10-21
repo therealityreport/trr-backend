@@ -15811,7 +15811,9 @@ def _instagram_account_match_sql(*, alias: str = "p", native_columns: frozenset[
         """
 
 
-def _instagram_owner_account_match_sql(*, alias: str = "p") -> str:
+def _instagram_owner_account_match_sql(
+    *, alias: str = "p", native_columns: set[str] | None = None
+) -> str:
     """Match only direct Instagram owner fields.
 
     Collaborator-aware paths should pair this with the indexed collaborator
@@ -15828,6 +15830,16 @@ def _instagram_owner_account_match_sql(*, alias: str = "p") -> str:
         f"{row_json} -> 'raw_data' ->> 'owner_username'",
         f"{row_json} -> 'raw_data' ->> 'username'",
     ]
+    if native_columns is not None:
+        direct_candidates = [
+            f"{alias}.{column}::text" if column in native_columns else "null::text"
+            for column in ("source_account", "owner_username", "username")
+        ]
+        if "raw_data" in native_columns:
+            direct_candidates.extend(
+                f"{alias}.raw_data ->> '{column}'"
+                for column in ("source_account", "owner_username", "username")
+            )
     direct_array = ",\n                ".join(
         "nullif(ltrim(lower(trim(coalesce(" + expr + ", ''))), '@'), '')" for expr in direct_candidates
     )
@@ -61419,7 +61431,8 @@ def _fetch_instagram_owner_comments_only_profile_rows_page(
         sort_dir=sort_dir,
         missing_comments_sql="greatest(coalesce(filtered_rows.missing_comments, 0), 0)",
     )
-    owner_match_clause = _instagram_owner_account_match_sql(alias="p")
+    owner_columns = _relation_columns("social", "instagram_posts", conn=conn)
+    owner_match_clause = _instagram_owner_account_match_sql(alias="p", native_columns=owner_columns)
     lifecycle_supported = _comment_lifecycle_supported("instagram_comments", conn=conn)
     use_comment_rollups = _instagram_post_comment_rollups_available(conn=conn)
     active_condition = "c.is_missing is not true" if lifecycle_supported else "true"
@@ -61592,7 +61605,8 @@ def _fetch_instagram_comments_only_profile_rows_page(
         sort_dir=sort_dir,
         missing_comments_sql="greatest(coalesce(filtered_rows.missing_comments, 0), 0)",
     )
-    owner_match_clause = _instagram_owner_account_match_sql(alias="p")
+    owner_columns = _relation_columns("social", "instagram_posts", conn=conn)
+    owner_match_clause = _instagram_owner_account_match_sql(alias="p", native_columns=owner_columns)
     lifecycle_supported = _comment_lifecycle_supported("instagram_comments", conn=conn)
     use_comment_rollups = _instagram_post_comment_rollups_available(conn=conn)
     active_condition = "c.is_missing is not true" if lifecycle_supported else "true"
@@ -61625,6 +61639,11 @@ def _fetch_instagram_comments_only_profile_rows_page(
         reported_comments_is_normalized=True,
     )
     search_where_sql, search_params = _comments_only_profile_search_where_sql(search, alias="d")
+    catalog_columns = _relation_columns("social", "instagram_account_catalog_posts", conn=conn)
+
+    def optional_field(columns: set[str], name: str, data_type: str) -> str:
+        return f"p.{name}" if name in columns else f"null::{data_type}"
+
     candidate_rows_sql = f"""
         with owner_rows as materialized (
           select
@@ -61647,14 +61666,16 @@ def _fetch_instagram_comments_only_profile_rows_page(
             coalesce(p.media_urls, '[]'::jsonb) as media_urls,
             nullif(p.thumbnail_url, '') as thumbnail_url,
             coalesce(p.media_urls, '[]'::jsonb) as source_media_urls,
-            coalesce(to_jsonb(p) -> 'hosted_media_urls', '[]'::jsonb) as hosted_media_urls,
+            coalesce({optional_field(owner_columns, "hosted_media_urls", "jsonb")}, '[]'::jsonb) as hosted_media_urls,
             nullif(p.thumbnail_url, '') as source_thumbnail_url,
-            nullif(coalesce(to_jsonb(p) ->> 'hosted_thumbnail_url', ''), '') as hosted_thumbnail_url,
-            nullif(coalesce(to_jsonb(p) ->> 'post_format', ''), '') as post_format,
+            nullif(coalesce({optional_field(owner_columns, "hosted_thumbnail_url", "text")}, ''), '')
+              as hosted_thumbnail_url,
+            nullif(coalesce({optional_field(owner_columns, "post_format", "text")}, ''), '') as post_format,
             coalesce(p.hashtags, '[]'::jsonb) as hashtags,
             coalesce(p.mentions, '[]'::jsonb) as mentions,
             coalesce(p.collaborators, '[]'::jsonb) as collaborators,
-            coalesce(to_jsonb(p) -> 'collaborators_detail', '[]'::jsonb) as collaborators_detail,
+            coalesce({optional_field(owner_columns, "collaborators_detail", "jsonb")}, '[]'::jsonb)
+              as collaborators_detail,
             coalesce(p.profile_tags, '[]'::jsonb) as profile_tags,
             coalesce(p.likes, 0)::bigint as likes,
             {reported_comments_expr}::bigint as comments_count,
@@ -61702,14 +61723,16 @@ def _fetch_instagram_comments_only_profile_rows_page(
             coalesce(p.media_urls, '[]'::jsonb) as media_urls,
             nullif(p.thumbnail_url, '') as thumbnail_url,
             coalesce(p.media_urls, '[]'::jsonb) as source_media_urls,
-            coalesce(to_jsonb(p) -> 'hosted_media_urls', '[]'::jsonb) as hosted_media_urls,
+            coalesce({optional_field(catalog_columns, "hosted_media_urls", "jsonb")}, '[]'::jsonb) as hosted_media_urls,
             nullif(p.thumbnail_url, '') as source_thumbnail_url,
-            nullif(coalesce(to_jsonb(p) ->> 'hosted_thumbnail_url', ''), '') as hosted_thumbnail_url,
-            nullif(coalesce(to_jsonb(p) ->> 'post_format', ''), '') as post_format,
+            nullif(coalesce({optional_field(catalog_columns, "hosted_thumbnail_url", "text")}, ''), '')
+              as hosted_thumbnail_url,
+            nullif(coalesce({optional_field(catalog_columns, "post_format", "text")}, ''), '') as post_format,
             coalesce(p.hashtags, '[]'::jsonb) as hashtags,
             coalesce(p.mentions, '[]'::jsonb) as mentions,
             coalesce(p.collaborators, '[]'::jsonb) as collaborators,
-            coalesce(to_jsonb(p) -> 'collaborators_detail', p.raw_data -> 'collaborators_detail', '[]'::jsonb)
+            coalesce({optional_field(catalog_columns, "collaborators_detail", "jsonb")},
+                     p.raw_data -> 'collaborators_detail', '[]'::jsonb)
               as collaborators_detail,
             coalesce(p.profile_tags, '[]'::jsonb) as profile_tags,
             coalesce(p.likes, 0)::bigint as likes,
