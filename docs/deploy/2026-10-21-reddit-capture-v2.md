@@ -64,9 +64,11 @@ Browser validation used `make dev-hybrid`, friendly Chrome profile `TRR`, and
 `https://admin.trr.localhost/summer-house/s10/social/reddit`. Verified: authenticated
 coverage loading, committed versus unknown post capture, run selection, committed
 work targets, and disabled schedule/AI settings. A local auth option mismatch was
-fixed and browser-rechecked. Expanded boundary/target evidence received a focused
-component regression test; the browser connection dropped during a subsequent
-network change. No production app deployment was performed.
+fixed and browser-rechecked. Follow-up browser verification confirmed expanded requested/observed boundaries,
+completion reasons, and all four detail-target disclosures. Empty evidence display
+was clarified and browser-rechecked; eight component tests and scoped ESLint passed.
+Unresolved-child rendering is covered by a regression fixture because the live
+canaries have no unresolved children. No production app deployment was performed.
 
 ## Rollback and retained limits
 
