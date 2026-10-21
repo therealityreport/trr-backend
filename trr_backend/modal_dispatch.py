@@ -850,6 +850,16 @@ def dispatch_reddit_refresh(*, run_id: str) -> bool:
     return bool(result.get("dispatched"))
 
 
+def dispatch_reddit_workflow(*, job_id: str, episode: bool = False) -> bool:
+    result = _spawn_named_modal_function(
+        function_name="run_reddit_episode_discovery" if episode else "run_reddit_workflow",
+        log_label="reddit episode discovery" if episode else "reddit workflow",
+        kwargs={"job_id": job_id},
+        dispatcher_name="reddit",
+    )
+    return bool(result.get("dispatched"))
+
+
 def dispatch_cast_screentime_run(*, run_id: str) -> dict[str, Any]:
     return _spawn_named_modal_function(
         function_name=modal_cast_screentime_function_name(),

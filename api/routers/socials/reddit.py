@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import APIRouter
+from pydantic import model_validator
 
 from ._shared import *
 from ._surfaces import RouteRecord, routes_matching
@@ -69,6 +70,19 @@ class RedditRefreshRunRequest(BaseModel):
     run_config_hash: str | None = Field(default=None, min_length=8, max_length=64)
     fetch_comments: bool = Field(default=False)
     comment_delta_only: bool = Field(default=True)
+    refresh_policy: Literal["missing", "stale", "force"] | None = None
+    force_rescrape: bool = False
+    selected_post_ids: list[str] = Field(default_factory=list, max_length=10000)
+    requested_phases: list[Literal["discovery", "comments", "media"]] | None = None
+    stale_after_seconds: int = Field(default=86400, ge=60, le=86400)
+
+    @model_validator(mode="after")
+    def validate_capture_policy(self):
+        from trr_backend.repositories.reddit_capture import normalize_policy
+
+        normalize_policy(self.model_dump())
+        return self
+
     max_pages: int = Field(default=10_000, ge=1, le=10_000)
     mode: Literal["sync_posts", "sync_details", "sync_full"] = Field(default="sync_posts")
     client_session_id: str | None = Field(default=None, max_length=200)
@@ -234,7 +248,9 @@ def serialize_reddit_refresh_payload(payload: Any) -> dict[str, Any]:
         data["period_end"] = period_end.astimezone(UTC).isoformat().replace("+00:00", "Z")
     data["community_id"] = str(payload.community_id)
     data["season_id"] = str(payload.season_id)
-    return data
+    from trr_backend.repositories.reddit_capture import normalize_policy
+
+    return normalize_policy(data)
 
 
 def normalize_reddit_backfill_container_keys(values: list[str]) -> list[str]:
@@ -772,6 +788,210 @@ async def auto_categorize_flairs_batch(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to batch auto-categorize flairs: show_id=%s", body.show_id)
         raise _internal_error_response(exc) from exc
+
+
+class RedditControlRequest(BaseModel):
+    action: Literal["pause", "resume", "cancel", "retry"]
+
+
+class RedditWorkflowRequest(BaseModel):
+    season_id: UUID
+    post_ids: list[str] | None = None
+    legacy: bool = False
+    kind: Literal["deterministic", "ai"] = "deterministic"
+    apply: bool = False
+    preview_id: UUID | None = None
+
+
+@router.get("/reddit/runs/{run_id}/targets")
+async def reddit_run_targets(
+    run_id: UUID,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    _: InternalAdminUser = cast(Any, None),
+) -> dict:
+    from trr_backend.repositories import reddit_capture
+
+    return {
+        "targets": await _run_admin_repo_call(reddit_capture.list_targets, str(run_id), limit, offset),
+        **await _run_admin_repo_call(reddit_capture.run_contract, str(run_id)),
+    }
+
+
+@router.post("/reddit/runs/{run_id}/control")
+async def reddit_run_control(run_id: UUID, body: RedditControlRequest, _: InternalAdminUser = cast(Any, None)) -> dict:
+    from trr_backend.repositories import reddit_capture
+
+    try:
+        if body.action == "resume":
+            from trr_backend.repositories.reddit_runtime import probe_health
+
+            health = await _run_admin_repo_call(probe_health)
+            if not health.get("authenticated") or health.get("blocked"):
+                raise HTTPException(status_code=409, detail="Reddit identity remains blocked or cooling down")
+        return await _run_admin_repo_call(reddit_capture.control_run, str(run_id), body.action)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/reddit/runs/{run_id}/compare")
+async def reddit_run_compare(run_id: UUID, baseline_id: UUID, _: InternalAdminUser = cast(Any, None)) -> dict:
+    from trr_backend.repositories import reddit_workflows
+
+    try:
+        return await _run_admin_repo_call(reddit_workflows.compare_runs, str(run_id), str(baseline_id))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/reddit/communities/{community_id}/coverage")
+async def reddit_coverage(community_id: UUID, season_id: UUID, _: InternalAdminUser = cast(Any, None)) -> dict:
+    from trr_backend.db import pg
+    from trr_backend.repositories import reddit_workflows
+
+    result = await _run_admin_repo_call(
+        reddit_workflows.community_coverage, community_id=str(community_id), season_id=str(season_id)
+    )
+    result["posts"] = await _run_admin_repo_call(
+        pg.fetch_all,
+        """select p.reddit_post_id,
+        coalesce(jsonb_object_agg(c.phase,to_jsonb(c)) filter(where c.phase is not null),'{}'::jsonb) as capture_state
+        from social.reddit_posts p join social.reddit_period_post_matches m using(reddit_post_id)
+        left join social.reddit_capture_state c using(reddit_post_id)
+        where m.community_id=%s and m.season_id=%s group by p.reddit_post_id""",
+        [str(community_id), str(season_id)],
+    )
+    return result
+
+
+@router.get("/reddit/communities/{community_id}/settings")
+async def reddit_settings(community_id: UUID, season_id: UUID, _: InternalAdminUser = cast(Any, None)) -> dict:
+    from trr_backend.repositories import reddit_workflows
+
+    return await _run_admin_repo_call(
+        reddit_workflows.get_settings, community_id=str(community_id), season_id=str(season_id)
+    )
+
+
+@router.patch("/reddit/communities/{community_id}/settings")
+async def reddit_update_settings(
+    community_id: UUID, season_id: UUID, body: dict[str, Any], _: InternalAdminUser = cast(Any, None)
+) -> dict:
+    from trr_backend.repositories import reddit_workflows
+
+    patch = dict(body)
+    schedule = patch.pop("schedule", {})
+    analysis = patch.pop("analysis", {})
+    if schedule:
+        patch.update({("schedule_enabled" if key == "enabled" else key): value for key, value in schedule.items()})
+    if analysis:
+        patch.update({("ai_enabled" if key == "enabled" else key): value for key, value in analysis.items()})
+    try:
+        if patch.get("schedule_enabled") and not patch.get("capture_payload"):
+            existing = await _run_admin_repo_call(
+                reddit_workflows.get_settings, community_id=str(community_id), season_id=str(season_id)
+            )
+            if not existing.get("capture_payload"):
+                from trr_backend.repositories.reddit_runtime import schedule_capture_template
+
+                patch["capture_payload"] = await _run_admin_repo_call(
+                    schedule_capture_template, str(community_id), str(season_id)
+                )
+        return await _run_admin_repo_call(
+            reddit_workflows.update_settings, community_id=str(community_id), season_id=str(season_id), patch=patch
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/reddit/communities/{community_id}/legacy-inventory")
+async def reddit_legacy_inventory(community_id: UUID, season_id: UUID, _: InternalAdminUser = cast(Any, None)) -> dict:
+    from trr_backend.repositories import reddit_workflows
+
+    return await _run_admin_repo_call(
+        reddit_workflows.legacy_inventory, community_id=str(community_id), season_id=str(season_id)
+    )
+
+
+@router.post("/reddit/communities/{community_id}/reclassify")
+async def reddit_reclassify(
+    community_id: UUID, body: RedditWorkflowRequest, _: InternalAdminUser = cast(Any, None)
+) -> dict:
+    from trr_backend.repositories import reddit_workflows
+
+    try:
+        return await _run_admin_repo_call(
+            reddit_workflows.reclassify,
+            community_id=str(community_id),
+            season_id=str(body.season_id),
+            apply=body.apply,
+            preview_id=str(body.preview_id) if body.preview_id else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/reddit/communities/{community_id}/lifecycle")
+async def reddit_lifecycle(
+    community_id: UUID, body: RedditWorkflowRequest, _: InternalAdminUser = cast(Any, None)
+) -> dict:
+    from trr_backend.repositories import reddit_workflows
+
+    return await _run_admin_repo_call(
+        reddit_workflows.enqueue_job,
+        community_id=str(community_id),
+        season_id=str(body.season_id),
+        kind="lifecycle",
+        payload={"post_ids": body.post_ids, "legacy": body.legacy},
+    )
+
+
+@router.post("/reddit/communities/{community_id}/analysis")
+async def reddit_analysis(
+    community_id: UUID, body: RedditWorkflowRequest, _: InternalAdminUser = cast(Any, None)
+) -> dict:
+    from trr_backend.repositories import reddit_workflows
+
+    try:
+        return await _run_admin_repo_call(
+            reddit_workflows.enqueue_job,
+            community_id=str(community_id),
+            season_id=str(body.season_id),
+            kind="ai_analysis" if body.kind == "ai" else "deterministic_analysis",
+            payload={"post_ids": body.post_ids},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/reddit/jobs/{job_id}")
+async def reddit_job(job_id: UUID, _: InternalAdminUser = cast(Any, None)) -> dict:
+    from trr_backend.repositories import reddit_episode_jobs, reddit_workflows
+
+    try:
+        return await _run_admin_repo_call(reddit_workflows.get_job, str(job_id))
+    except LookupError as exc:
+        episode_job = await _run_admin_repo_call(reddit_episode_jobs.get_job, str(job_id))
+        if episode_job:
+            return episode_job
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/reddit/communities/{community_id}/episode-discussions/discover", status_code=202)
+async def reddit_episode_discovery(
+    community_id: UUID, body: dict[str, Any], _: InternalAdminUser = cast(Any, None)
+) -> dict:
+    from trr_backend.repositories import reddit_episode_jobs
+    from trr_backend.repositories.reddit_capture import enabled
+
+    if not enabled():
+        raise HTTPException(status_code=503, detail="Reddit capture rollout is not active; retry after activation")
+    job = await _run_admin_repo_call(reddit_episode_jobs.create_job, str(community_id), body)
+    if job["state"] == "completed":
+        return job["result"]
+    return {"job_id": str(job["id"]), "status": job["state"]}
 
 
 ROUTE_PREFIXES = ("/admin/socials/reddit/",)

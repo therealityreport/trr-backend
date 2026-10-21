@@ -1153,7 +1153,7 @@ def test_execute_refresh_run_marks_partial_when_discovery_raises_reddit_403(monk
     assert partial_update is not None
     assert partial_update["error_message"] == "Reddit request failed (403)"
     diagnostics = partial_update.get("diagnostics") or {}
-    assert diagnostics.get("error_type") == "RedditRefreshError"
+    assert diagnostics.get("error_type") == "RedditTransportError"
     assert diagnostics.get("failure_reason_code") == "reddit_http_403"
     assert diagnostics.get("terminal_summary", {}).get("status") == "partial"
 

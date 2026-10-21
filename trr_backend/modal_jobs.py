@@ -55,6 +55,9 @@ def _build_modal_stub_module():
         def run_commands(self, *_args, **_kwargs):
             return self
 
+        def env(self, *_args, **_kwargs):
+            return self
+
     class _ModalSecret:
         @staticmethod
         def from_name(name: str):
@@ -466,6 +469,7 @@ _OPERATOR_TUNABLE_RUNTIME_DEFAULT_KEYS: Final[frozenset[str]] = frozenset(
 def _build_lean_image_base(
     *,
     apt_packages: tuple[str, ...] = (),
+    runtime_env: dict[str, str] | None = None,
     image_factory: Any | None = None,
 ):
     factory = image_factory or modal.Image
@@ -473,6 +477,8 @@ def _build_lean_image_base(
     if apt_packages:
         image = image.apt_install(*apt_packages)
     image = image.pip_install_from_requirements(str(_MODAL_LEAN_REQUIREMENTS))
+    if runtime_env:
+        image = image.env(runtime_env)
     image = image.add_local_python_source("api", "trr_backend")
     for local_path, remote_path in _LEAN_IMAGE_LOCAL_FILES:
         image = image.add_local_file(local_path, remote_path=remote_path)
@@ -544,7 +550,15 @@ def modal_completion_evidence_contract() -> dict[str, object]:
     }
 
 
-_image = _build_lean_image_base()
+# Deployment-specific Reddit rollout flag; applies to compatible API readers and workers.
+# Default is off until additive schema and a bounded v2 canary have been verified.
+_image = _build_lean_image_base(
+    runtime_env={
+        "REDDIT_PIPELINE_V2_ENABLED": "1"
+        if os.getenv("REDDIT_PIPELINE_V2_ENABLED", "").lower() in {"1", "true", "yes"}
+        else "0"
+    }
+)
 _media_image = _build_media_image_base()
 
 _vision_image = (
@@ -570,6 +584,9 @@ _FUNCTION_IMAGE_BINDINGS: Final[dict[str, object]] = {
     "run_admin_operation_v2": _image,
     "run_google_news_sync": _image,
     "run_reddit_refresh": _image,
+    "run_reddit_workflow": _image,
+    "run_reddit_episode_discovery": _image,
+    "dispatch_reddit_capture_work": _image,
     "probe_reddit_refresh_runtime": _image,
     "probe_admin_operation_runtime": _image,
     "probe_google_news_runtime": _image,
@@ -1385,7 +1402,79 @@ def _reddit_runtime_probe_payload() -> dict[str, object]:
     max_containers=1,
 )
 def probe_reddit_refresh_runtime() -> dict[str, object]:
-    return _reddit_runtime_probe_payload()
+    from trr_backend.repositories.reddit_runtime import probe_health
+
+    configured = _reddit_runtime_probe_payload()
+    if not configured["healthy"]:
+        return configured
+    from trr_backend.repositories.reddit_capture import enabled
+
+    if not enabled():
+        # Compatible reader deploy can precede the additive budget schema.
+        from trr_backend.repositories.reddit_transport import RedditHttpClient
+
+        health = RedditHttpClient(require_oauth=True).token_probe()
+    else:
+        health = probe_health()
+    return {
+        **configured,
+        **health,
+        "healthy": bool(health.get("authenticated") and health.get("reachable") and not health.get("blocked")),
+        "reason": "cooling_down" if health.get("cooling_down") else ("blocked" if health.get("blocked") else "ok"),
+    }
+
+
+@app.function(
+    image=_FUNCTION_IMAGE_BINDINGS["run_reddit_workflow"],
+    secrets=_secrets,
+    retries=0,
+    timeout=30 * 60,
+    max_containers=4,
+)
+def run_reddit_workflow(job_id: str) -> dict[str, object]:
+    from trr_backend.repositories.reddit_runtime import execute_workflow
+
+    try:
+        return execute_workflow(job_id)
+    finally:
+        _close_db_pools_after_worker("reddit_workflow", job_id=job_id)
+
+
+@app.function(
+    image=_FUNCTION_IMAGE_BINDINGS["run_reddit_episode_discovery"],
+    secrets=_secrets,
+    retries=0,
+    timeout=30 * 60,
+    max_containers=2,
+)
+def run_reddit_episode_discovery(job_id: str) -> dict[str, object]:
+    from trr_backend.repositories.reddit_episode_jobs import execute_job
+
+    try:
+        return execute_job(job_id)
+    finally:
+        _close_db_pools_after_worker("reddit_episode", job_id=job_id)
+
+
+@app.function(
+    image=_FUNCTION_IMAGE_BINDINGS["dispatch_reddit_capture_work"],
+    secrets=_secrets,
+    retries=0,
+    timeout=5 * 60,
+    max_containers=1,
+)
+def dispatch_reddit_capture_work() -> dict[str, object]:
+    from trr_backend.modal_dispatch import dispatch_reddit_refresh, dispatch_reddit_workflow
+    from trr_backend.repositories.reddit_runtime import dispatch_tick
+
+    try:
+        return dispatch_tick(
+            lambda run_id: dispatch_reddit_refresh(run_id=run_id),
+            lambda job_id: dispatch_reddit_workflow(job_id=job_id),
+            lambda job_id: dispatch_reddit_workflow(job_id=job_id, episode=True),
+        )
+    finally:
+        _close_db_pools_after_worker("reddit_dispatch")
 
 
 @app.function(
@@ -2097,6 +2186,12 @@ def sync_nbcumv_official_images() -> dict[str, object]:
 )
 def heartbeat_remote_executors(heartbeat_source: str = "backend_runtime_scheduler") -> dict[str, object]:
     _validate_modal_maintenance_owner_config()
+    # Reuse the existing minute clock; Reddit executes in its own bounded worker.
+    if os.getenv("REDDIT_PIPELINE_V2_ENABLED", "").lower() in {"1", "true", "yes"}:
+        try:
+            dispatch_reddit_capture_work.spawn()
+        except Exception:
+            logger.exception("[executor-heartbeat] Reddit dispatcher wake failed")
     from trr_backend.socials import social_season_analytics_impl as social_provider
     from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
 

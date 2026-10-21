@@ -30,6 +30,10 @@ class _FakeImage:
         self.operations.append(("pip_install_from_requirements", args, dict(kwargs)))
         return self
 
+    def env(self, *args, **kwargs):
+        self.operations.append(("env", args, dict(kwargs)))
+        return self
+
     def pip_install(self, *args, **kwargs):
         self.operations.append(("pip_install", args, dict(kwargs)))
         return self
@@ -1313,14 +1317,19 @@ def test_run_socialblade_scrape_persists_account_scoped_payload_without_person(
     }
 
 
+@pytest.mark.parametrize("reddit_enabled", [False, True])
 def test_heartbeat_remote_executors_reports_social_auth_capabilities(
     monkeypatch: pytest.MonkeyPatch,
+    reddit_enabled: bool,
 ) -> None:
     from trr_backend.db import pg
 
     close_calls: list[str] = []
     recorded: list[dict[str, Any]] = []
     media_poll_calls: list[bool] = []
+    reddit_wakes: list[bool] = []
+    monkeypatch.setenv("REDDIT_PIPELINE_V2_ENABLED", "1" if reddit_enabled else "0")
+    monkeypatch.setattr(modal_jobs.dispatch_reddit_capture_work, "spawn", lambda: reddit_wakes.append(True))
 
     def _fake_record_dispatcher_heartbeat(**kwargs):
         recorded.append(kwargs)
@@ -1348,6 +1357,7 @@ def test_heartbeat_remote_executors_reports_social_auth_capabilities(
 
     payload = modal_jobs.heartbeat_remote_executors.local()
     assert media_poll_calls == [True]
+    assert reddit_wakes == ([True] if reddit_enabled else [])
 
     assert payload == {
         "ok": True,
@@ -1977,3 +1987,9 @@ def test_social_provider_probe_is_state_free_and_repeatable_in_fresh_process() -
     )
     assert completed.returncode == 0, completed.stderr
     assert "state-free-repeatable" in completed.stdout
+
+
+def test_reddit_rollout_environment_precedes_local_mounts() -> None:
+    image = modal_jobs._build_lean_image_base(runtime_env={"REDDIT_PIPELINE_V2_ENABLED": "0"}, image_factory=_FakeImage)
+    names = [name for name, _, _ in image.operations]
+    assert names.index("env") < names.index("add_local_python_source")

@@ -1,0 +1,32 @@
+{
+  "base_revision": "22ae7a68a7f57e9bbd73e8b18d20f69aa064243b",
+  "environment": "main",
+  "workspace": "admin-56995",
+  "app": "trr-backend-jobs",
+  "files": {
+    "api/main.py": "168cc1f7f5a912fd637810fdec5d3b1f76efa4bc8910b99221fb44eed880df00",
+    "api/routers/admin_reddit_reads.py": "84befd566bc073c86e0983d87d9ab99c13f7ce0b7830d144ba4e93391082f43c",
+    "api/routers/socials/reddit.py": "5af5bc622e3eafc48c9b1179e88a762e9bc96783346c5de16a59e674b2f55404",
+    "scripts/export_reddit_capture_contract.py": "f4ef637334182c2fb83055aae09ab25058593e297a552537c01024ca47e82257",
+    "scripts/modal/verify_modal_readiness.py": "769d541c8846ee73bf1d329b8c7f2252be8be21db2d3f5c4183eaa9f6d1aad57",
+    "supabase/migrations/20261021210000_reddit_capture_v2.sql": "ec735ff94215dfb83b9932ae03c111088aed8505f833f39c339a36f95e932340",
+    "supabase/migrations/20261021210100_reddit_workflows.sql": "5bb972be74d4340fea67f9d27d7aca0e6248f4d0d3efc713db20af9038251b60",
+    "trr_backend/media/s3_mirror.py": "af4205940590381f5990ba50e51a428fbf8a6bfb5ea25ab4bf42e7b1ef918703",
+    "trr_backend/modal_dispatch.py": "520df8a308fd44a824f8f536e4d87ab813958ee59e7adec4021c92a3cacfa7eb",
+    "trr_backend/modal_jobs.py": "eea2cce60681916b37ebecad2a764579e02147db8be2a9dca92ddf0aa6cba1ab",
+    "trr_backend/repositories/admin_reddit_reads.py": "970970fa5676cd82c0f106ce343886571860f25bf89c5ef693a4f6cd3edd664b",
+    "trr_backend/repositories/reddit_capture.py": "ecb85fec86de229e672031667080543e9cbf5ead345b8a317e2aa004a26b121f",
+    "trr_backend/repositories/reddit_contract.py": "1a07949bf00fa7762e169584bd7ec54ba8487fd40a99003d08484fd6024d903c",
+    "trr_backend/repositories/reddit_discovery.py": "6c877fa48a7e200f91e99bc9a2ee299e2beb45dd00fcf1c5214fa1206caa7ff8",
+    "trr_backend/repositories/reddit_episode.py": "7eda147b7fb358c5ef9ba62ea5588fa47d28e51ef9af03cab37a10a2836c5048",
+    "trr_backend/repositories/reddit_episode_jobs.py": "7eeb5616d1b0dc4c2ab171c9eb82afdb1493802cb7bb10404b4c0b250feab73f",
+    "trr_backend/repositories/reddit_execution.py": "957520158c8b5179033b93c4f8ae5aff472a6f8d1a19e900dabc6273505309de",
+    "trr_backend/repositories/reddit_refresh.py": "31c8b9ba49470eb49b2f5fb0ec666ef1e68614f0479defa04702a58624c5a8f4",
+    "trr_backend/repositories/reddit_runtime.py": "cbb0103b49fb66c0acd00424f51cbd46a610d618538b43353447db93d81e0aa8",
+    "trr_backend/repositories/reddit_transport.py": "3fca615bf5d79eeae12300b146213b60abf6a38a4dd8f947213d5e3af620d0c5",
+    "trr_backend/repositories/reddit_workflows.py": "83fe6ba4fda876bc1451fc902a2e2617340b4b6480f0ed54a0cdfe2b16846824"
+  },
+  "rollout_flag": "REDDIT_PIPELINE_V2_ENABLED=1",
+  "enabled_version": "v94",
+  "compatible_readers_version": "v92"
+}

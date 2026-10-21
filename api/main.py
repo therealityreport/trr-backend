@@ -278,6 +278,17 @@ def _run_modal_media_watch_poller_once() -> dict[str, object]:
     )
 
 
+def _run_modal_reddit_dispatch_once() -> dict[str, object]:
+    from trr_backend.modal_dispatch import spawn_modal_maintenance_function
+    from trr_backend.repositories.reddit_capture import enabled
+
+    if not enabled():
+        return {"enabled": False}
+    return spawn_modal_maintenance_function(
+        function_name="dispatch_reddit_capture_work", log_label="reddit durable dispatcher", dispatcher_name="reddit"
+    )
+
+
 async def _run_modal_runtime_scheduler_loop(
     *,
     stop_event: asyncio.Event,
@@ -497,6 +508,7 @@ async def lifespan(app: FastAPI):
     if not preview_read_only and _modal_runtime_scheduler_enabled():
         modal_scheduler_stop = asyncio.Event()
         modal_scheduler_specs = [
+            ("reddit_capture_dispatch", 60, _run_modal_reddit_dispatch_once),
             ("media_watch_poller", _modal_media_watch_interval_seconds(), _run_modal_media_watch_poller_once),
             ("executor_heartbeat", _modal_heartbeat_interval_seconds(), _run_modal_executor_heartbeat_once),
             ("social_recovery", _modal_social_recovery_interval_seconds(), _run_modal_social_recovery_once),

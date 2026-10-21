@@ -237,6 +237,32 @@ def get_reddit_post_details_by_community_and_season(
         )
         or {}
     )
+    from trr_backend.repositories.reddit_capture import enabled
+
+    capture_state = {}
+    if enabled():
+        capture_rows = pg.fetch_all(
+            "select * from social.reddit_capture_state where reddit_post_id=%s", [reddit_post_id]
+        )
+        capture_state = {row["phase"]: dict(row) for row in capture_rows}
+        assets = pg.fetch_all(
+            """select a.id::text,l.reddit_comment_id,a.source_url,a.media_type,a.hosted_url,
+            a.state as status,a.content_type,a.size_bytes,a.error as error_message,a.updated_at::text as created_at
+            from social.reddit_assets a join social.reddit_asset_links l on l.asset_id=a.id
+            where l.reddit_post_id=%s""",
+            [reddit_post_id],
+        )
+        known = {(row["source_url"], row.get("reddit_comment_id")) for row in assets}
+        media_rows = assets + [
+            row for row in media_rows if (row["source_url"], row.get("reddit_comment_id")) not in known
+        ]
+        media_summary_row = {
+            "total_media": len(media_rows),
+            **{
+                name + "_media": sum(row["status"] == name for row in media_rows)
+                for name in ("mirrored", "pending", "failed")
+            },
+        }
     assigned_threads = pg.fetch_all(
         f"""
         select *
@@ -252,6 +278,7 @@ def get_reddit_post_details_by_community_and_season(
     total_comments = _to_int(comment_summary_row.get("total_comments"))
     top_level_comments = _to_int(comment_summary_row.get("top_level_comments"))
     payload = {
+        "capture_state": capture_state,
         "reddit_post_id": _to_string_or_none(post_row.get("reddit_post_id")) or reddit_post_id,
         "subreddit": _to_string_or_none(post_row.get("subreddit")),
         "title": _to_string_or_none(post_row.get("title")),

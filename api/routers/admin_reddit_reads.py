@@ -65,6 +65,10 @@ _RESOLVE_CACHE_TTL_SECONDS = max(int(os.getenv("TRR_ADMIN_REDDIT_RESOLVE_BACKEND
 
 
 def _cache_get(key: str) -> dict[str, Any] | None:
+    from trr_backend.repositories.reddit_capture import enabled
+
+    if enabled():
+        return None
     now = time.monotonic()
     with _CACHE_LOCK:
         entry = _CACHE.get(key)
@@ -78,6 +82,10 @@ def _cache_get(key: str) -> dict[str, Any] | None:
 
 
 def _cache_set(key: str, payload: dict[str, Any], ttl_seconds: int) -> None:
+    from trr_backend.repositories.reddit_capture import enabled
+
+    if enabled():
+        return
     with _CACHE_LOCK:
         _CACHE[key] = (time.monotonic() + ttl_seconds, payload)
 

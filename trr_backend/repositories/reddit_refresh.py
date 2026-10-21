@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import random
 import re
 import socket
 import threading
@@ -20,7 +19,6 @@ from html import unescape
 from typing import Any
 from zoneinfo import ZoneInfo
 
-import requests
 from psycopg2.extras import Json
 
 from trr_backend.db import pg
@@ -32,6 +30,8 @@ from trr_backend.modal_dispatch import (
     modal_execution_metadata,
     modal_reddit_refresh_function_name,
 )
+from trr_backend.repositories import reddit_capture
+from trr_backend.repositories.reddit_transport import RedditHttpClient, RedditTransportError, build_client
 
 logger = logging.getLogger(__name__)
 
@@ -130,11 +130,7 @@ HINT_STOPWORDS = {
 }
 
 
-class RedditRefreshError(Exception):
-    def __init__(self, message: str, *, status: int = 500, retry_after_seconds: float | None = None) -> None:
-        super().__init__(message)
-        self.status = status
-        self.retry_after_seconds = retry_after_seconds
+RedditRefreshError = RedditTransportError
 
 
 def _env_int(name: str, default: int, *, minimum: int = 1, maximum: int | None = None) -> int:
@@ -1010,167 +1006,7 @@ def _parse_listing_rows(children: list[dict[str, Any]], *, source_sort: str) -> 
     return out
 
 
-class RedditHttpClient:
-    def __init__(self) -> None:
-        self.session = requests.Session()
-        self.timeout_seconds = _env_float(
-            "REDDIT_FETCH_TIMEOUT_SECONDS",
-            REDDIT_TIMEOUT_SECONDS_DEFAULT,
-            minimum=1.0,
-        )
-        self.max_retries = _env_int(
-            "REDDIT_FETCH_MAX_RETRIES",
-            REDDIT_MAX_HTTP_RETRIES_DEFAULT,
-            minimum=1,
-            maximum=8,
-        )
-        self.page_cooldown = _env_float(
-            "REDDIT_PAGE_COOLDOWN_SECONDS",
-            REDDIT_PAGE_COOLDOWN_SECONDS_DEFAULT,
-            minimum=0.0,
-        )
-        self.rate_limit_delay = _env_float(
-            "REDDIT_RATE_LIMIT_DELAY_SECONDS",
-            REDDIT_RATE_LIMIT_DELAY_SECONDS_DEFAULT,
-            minimum=0.0,
-        )
-        self.client_id = (os.getenv("REDDIT_CLIENT_ID") or "").strip()
-        self.client_secret = (os.getenv("REDDIT_CLIENT_SECRET") or "").strip()
-        self.user_agent = (os.getenv("REDDIT_USER_AGENT") or "").strip() or REDDIT_USER_AGENT_DEFAULT
-        self._oauth_token: str | None = None
-        self._oauth_expires_at: float = 0.0
-        self._state_lock = threading.Lock()
-        self._oauth_refresh_lock = threading.Lock()
-        # Adaptive cooldown: starts at configured minimum, increases on 429s, decays on success
-        self._adaptive_cooldown: float = self.page_cooldown
-        self._adaptive_cooldown_min: float = self.page_cooldown
-        self._adaptive_cooldown_max: float = max(0.5, self.page_cooldown * 10)
-
-        if not self.client_id:
-            logger.warning(
-                "[reddit_http] OAuth not configured (REDDIT_CLIENT_ID not set) — "
-                "rate limits will be ~6x lower than authenticated requests"
-            )
-
-    def _auth_headers(self, *, use_oauth: bool) -> dict[str, str]:
-        headers = {"User-Agent": self.user_agent}
-        if use_oauth:
-            token = self._get_oauth_token()
-            if token:
-                headers["Authorization"] = f"Bearer {token}"
-        return headers
-
-    def _get_oauth_token(self) -> str | None:
-        if not self.client_id or not self.client_secret:
-            return None
-
-        with self._state_lock:
-            if self._oauth_token and time.time() < (self._oauth_expires_at - 30):
-                return self._oauth_token
-
-        with self._oauth_refresh_lock:
-            with self._state_lock:
-                if self._oauth_token and time.time() < (self._oauth_expires_at - 30):
-                    return self._oauth_token
-            try:
-                response = self.session.post(
-                    "https://www.reddit.com/api/v1/access_token",
-                    headers={"User-Agent": self.user_agent},
-                    auth=(self.client_id, self.client_secret),
-                    data={"grant_type": "client_credentials"},
-                    timeout=self.timeout_seconds,
-                )
-                if response.status_code >= 400:
-                    logger.warning("[reddit_refresh_oauth_failed] status=%s", response.status_code)
-                    return None
-                payload = response.json() if response.content else {}
-                token = str(payload.get("access_token") or "").strip()
-                expires_in = float(payload.get("expires_in") or 3600)
-                if not token:
-                    return None
-                with self._state_lock:
-                    self._oauth_token = token
-                    self._oauth_expires_at = time.time() + max(60.0, expires_in)
-                return token
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("[reddit_refresh_oauth_exception] %s", exc)
-                return None
-
-    def get_json(self, path: str, *, params: dict[str, Any]) -> dict[str, Any]:
-        supports_oauth = bool(self.client_id and self.client_secret)
-        base_urls = (
-            ["https://oauth.reddit.com", "https://www.reddit.com"] if supports_oauth else ["https://www.reddit.com"]
-        )
-        last_error: Exception | None = None
-
-        for base_index, base_url in enumerate(base_urls):
-            use_oauth = base_url.startswith("https://oauth")
-            for attempt in range(1, self.max_retries + 1):
-                try:
-                    response = self.session.get(
-                        f"{base_url}{path}",
-                        params=params,
-                        headers=self._auth_headers(use_oauth=use_oauth),
-                        timeout=self.timeout_seconds,
-                    )
-                    if response.status_code == 429:
-                        # Adaptive backoff: increase cooldown on rate limit
-                        with self._state_lock:
-                            self._adaptive_cooldown = min(
-                                self._adaptive_cooldown_max,
-                                self._adaptive_cooldown * 2,
-                            )
-                        retry_after = response.headers.get("Retry-After")
-                        delay = self.rate_limit_delay
-                        if retry_after:
-                            try:
-                                delay = max(delay, float(retry_after))
-                            except ValueError:
-                                pass
-                        if attempt >= self.max_retries:
-                            raise RedditRefreshError(
-                                "Reddit rate limit hit, try again shortly.",
-                                status=429,
-                                retry_after_seconds=delay,
-                            )
-                        time.sleep(delay + random.uniform(0, 0.35))
-                        continue
-                    if response.status_code >= 500 and attempt < self.max_retries:
-                        time.sleep((0.2 * (2 ** (attempt - 1))) + random.uniform(0, 0.1))
-                        continue
-                    if response.status_code >= 400:
-                        raise RedditRefreshError(
-                            f"Reddit request failed ({response.status_code})",
-                            status=response.status_code,
-                        )
-                    payload = response.json() if response.content else {}
-                    # Adaptive cooldown: use current adaptive value, decay toward minimum on success
-                    with self._state_lock:
-                        current_cooldown = self._adaptive_cooldown
-                    if current_cooldown > 0:
-                        time.sleep(current_cooldown)
-                    with self._state_lock:
-                        self._adaptive_cooldown = max(
-                            self._adaptive_cooldown_min,
-                            self._adaptive_cooldown * 0.9,
-                        )
-                    return payload if isinstance(payload, dict) else {}
-                except RedditRefreshError:
-                    raise
-                except Exception as exc:  # noqa: BLE001
-                    last_error = exc
-                    if attempt >= self.max_retries:
-                        break
-                    time.sleep((0.2 * (2 ** (attempt - 1))) + random.uniform(0, 0.1))
-            if base_index < len(base_urls) - 1:
-                continue
-
-        if last_error is not None:
-            raise RedditRefreshError(f"Reddit request failed: {last_error}", status=502) from last_error
-        raise RedditRefreshError("Reddit request failed", status=502)
-
-
-_HTTP_CLIENT = RedditHttpClient()
+_HTTP_CLIENT = build_client() if reddit_capture.enabled() else RedditHttpClient()
 _column_exists_cache: dict[tuple[str, str, str], bool] = {}
 
 ProgressCallback = Callable[[dict[str, Any]], None]
@@ -1731,55 +1567,18 @@ def _fetch_submission_by_post_id(post_id: str, *, source_sort: str = "seed_url")
     normalized_id = str(post_id or "").strip().lower()
     if not normalized_id:
         return None
-
-    supports_oauth = bool(_HTTP_CLIENT.client_id and _HTTP_CLIENT.client_secret)
-    base_urls = ["https://oauth.reddit.com", "https://www.reddit.com"] if supports_oauth else ["https://www.reddit.com"]
-
-    for base_url in base_urls:
-        use_oauth = base_url.startswith("https://oauth")
-        endpoint = f"{base_url}/comments/{normalized_id}.json"
-        for attempt in range(1, _HTTP_CLIENT.max_retries + 1):
-            response = _HTTP_CLIENT.session.get(
-                endpoint,
-                params={"limit": 1, "depth": 1, "raw_json": 1},
-                headers=_HTTP_CLIENT._auth_headers(use_oauth=use_oauth),
-                timeout=_HTTP_CLIENT.timeout_seconds,
-            )
-            if response.status_code == 429:
-                delay = _HTTP_CLIENT.rate_limit_delay
-                retry_after = response.headers.get("Retry-After")
-                if retry_after:
-                    try:
-                        delay = max(delay, float(retry_after))
-                    except ValueError:
-                        pass
-                if attempt >= _HTTP_CLIENT.max_retries:
-                    raise RedditRefreshError("Reddit rate limit hit, try again shortly.", status=429)
-                time.sleep(delay + random.uniform(0, 0.35))
-                continue
-            if response.status_code >= 500 and attempt < _HTTP_CLIENT.max_retries:
-                time.sleep((0.2 * (2 ** (attempt - 1))) + random.uniform(0, 0.1))
-                continue
-            if response.status_code >= 400:
-                raise RedditRefreshError(
-                    f"Reddit submission fetch failed ({response.status_code})",
-                    status=response.status_code,
-                )
-
-            payload = response.json() if response.content else []
-            if not isinstance(payload, list) or len(payload) < 1:
-                return None
-            listing = payload[0].get("data") if isinstance(payload[0], dict) else None
-            children = listing.get("children") if isinstance(listing, dict) else []
-            parsed_rows = _parse_listing_rows(children if isinstance(children, list) else [], source_sort=source_sort)
-            if not parsed_rows:
-                return None
-            for row in parsed_rows:
-                if str(row.get("reddit_post_id") or "").strip().lower() == normalized_id:
-                    return row
-            return parsed_rows[0]
-
-    return None
+    payload = _HTTP_CLIENT.get_json(
+        f"/comments/{normalized_id}.json",
+        params={"limit": 1, "depth": 1, "raw_json": 1},
+        expected_type=list,
+    )
+    if not payload or not isinstance(payload[0], dict):
+        raise RedditRefreshError("Malformed Reddit submission listing", status=502)
+    data = payload[0].get("data")
+    if not isinstance(data, dict) or not isinstance(data.get("children"), list):
+        raise RedditRefreshError("Malformed Reddit submission children", status=502)
+    rows = _parse_listing_rows(data["children"], source_sort=source_sort)
+    return next((row for row in rows if row.get("reddit_post_id") == normalized_id), None)
 
 
 def _fetch_seed_rows(seed_post_urls: list[str]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -1824,133 +1623,19 @@ def _fetch_seed_rows(seed_post_urls: list[str]) -> tuple[list[dict[str, Any]], d
     return rows, diagnostics
 
 
-def _walk_comment_nodes(
-    nodes: list[dict[str, Any]],
-    *,
-    post_id: str,
-    depth: int,
-    flattened: list[dict[str, Any]],
-) -> None:
-    for node in nodes:
-        if not isinstance(node, dict):
-            continue
-        kind = node.get("kind")
-        data = _dict_value(node.get("data"))
-        if kind != "t1":
-            continue
-        comment_id = str(data.get("id") or "").strip()
-        if not comment_id:
-            continue
-        parent_fullname = str(data.get("parent_id") or "")
-        parent_comment_id = parent_fullname[3:] if parent_fullname.startswith("t1_") else None
-        created_at_utc = None
-        created_raw = data.get("created_utc")
-        try:
-            if created_raw is not None:
-                created_at_utc = datetime.fromtimestamp(float(created_raw), tz=UTC).isoformat().replace("+00:00", "Z")
-        except Exception:  # noqa: BLE001
-            created_at_utc = None
-        flattened.append(
-            {
-                "reddit_comment_id": comment_id,
-                "reddit_post_id": post_id,
-                "parent_comment_id": parent_comment_id,
-                "author": str(data.get("author") or "") or None,
-                "body": str(data.get("body") or ""),
-                "score": _safe_int(data.get("score")),
-                "depth": depth,
-                "created_at_utc": created_at_utc,
-                "raw_payload": data,
-            }
-        )
-        replies = data.get("replies")
-        if isinstance(replies, dict):
-            rep_data = replies.get("data") if isinstance(replies.get("data"), dict) else None
-            rep_children = rep_data.get("children") if isinstance(rep_data, dict) else None
-            if isinstance(rep_children, list) and rep_children:
-                _walk_comment_nodes(
-                    rep_children,
-                    post_id=post_id,
-                    depth=depth + 1,
-                    flattened=flattened,
-                )
-
-
 def _fetch_post_comments_tree(post_id: str) -> list[dict[str, Any]]:
-    base_urls = ["https://oauth.reddit.com", "https://www.reddit.com"]
-    supports_oauth = bool(_HTTP_CLIENT.client_id and _HTTP_CLIENT.client_secret)
-    if not supports_oauth:
-        base_urls = ["https://www.reddit.com"]
-
-    last_exc: Exception | None = None
-    for base_url in base_urls:
-        use_oauth = base_url.startswith("https://oauth")
-        url = f"{base_url}/comments/{post_id}.json"
-        for attempt in range(1, _HTTP_CLIENT.max_retries + 1):
-            try:
-                resp = _HTTP_CLIENT.session.get(
-                    url,
-                    params={
-                        "limit": _env_int(
-                            "REDDIT_COMMENT_LIMIT",
-                            REDDIT_COMMENT_LIMIT_DEFAULT,
-                            minimum=50,
-                            maximum=500,
-                        ),
-                        "depth": _env_int(
-                            "REDDIT_COMMENT_TREE_DEPTH",
-                            REDDIT_COMMENT_TREE_DEPTH_DEFAULT,
-                            minimum=1,
-                            maximum=20,
-                        ),
-                        "raw_json": 1,
-                    },
-                    headers=_HTTP_CLIENT._auth_headers(use_oauth=use_oauth),
-                    timeout=_HTTP_CLIENT.timeout_seconds,
-                )
-                if resp.status_code == 429:
-                    delay = _HTTP_CLIENT.rate_limit_delay
-                    retry_after = resp.headers.get("Retry-After")
-                    if retry_after:
-                        try:
-                            delay = max(delay, float(retry_after))
-                        except ValueError:
-                            pass
-                    if attempt >= _HTTP_CLIENT.max_retries:
-                        raise RedditRefreshError("Reddit rate limit hit, try again shortly.", status=429)
-                    time.sleep(delay + random.uniform(0, 0.35))
-                    continue
-                if resp.status_code >= 500 and attempt < _HTTP_CLIENT.max_retries:
-                    time.sleep((0.2 * (2 ** (attempt - 1))) + random.uniform(0, 0.1))
-                    continue
-                if resp.status_code >= 400:
-                    raise RedditRefreshError(
-                        f"Reddit comments fetch failed ({resp.status_code})",
-                        status=resp.status_code,
-                    )
-                payload = resp.json() if resp.content else []
-                if not isinstance(payload, list) or len(payload) < 2:
-                    return []
-                listing = payload[1].get("data") if isinstance(payload[1], dict) else None
-                children = listing.get("children") if isinstance(listing, dict) else []
-                if not isinstance(children, list):
-                    return []
-                flattened: list[dict[str, Any]] = []
-                _walk_comment_nodes(children, post_id=post_id, depth=0, flattened=flattened)
-                if _HTTP_CLIENT.page_cooldown > 0:
-                    time.sleep(_HTTP_CLIENT.page_cooldown)
-                return flattened
-            except RedditRefreshError:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                last_exc = exc
-                if attempt >= _HTTP_CLIENT.max_retries:
-                    break
-                time.sleep((0.2 * (2 ** (attempt - 1))) + random.uniform(0, 0.1))
-
-    if last_exc is not None:
-        raise RedditRefreshError(f"Failed to fetch post comments: {last_exc}", status=502) from last_exc
-    return []
+    result = _HTTP_CLIENT.get_comments(post_id)
+    if not result["complete"]:
+        evidence = result.get("evidence") or {}
+        errors = evidence.get("errors") or []
+        error = errors[0] if errors else {}
+        raise RedditRefreshError(
+            "Reddit comment tree is incomplete",
+            status=error.get("status") or evidence.get("status") or 502,
+            retry_after_seconds=error.get("retry_after_seconds"),
+            checkpoint=evidence.get("checkpoint"),
+        )
+    return result["comments"]
 
 
 _THUMBNAIL_SKIP_VALUES = {"self", "default", "nsfw", "spoiler", ""}
@@ -2798,11 +2483,14 @@ def _update_run(
 
 
 def create_or_reuse_refresh_run(*, payload: dict[str, Any]) -> dict[str, Any]:
-    normalized_payload = dict(payload)
+    from trr_backend.repositories import reddit_capture
+
+    if reddit_capture.enabled():
+        return reddit_capture.create_run(payload)
+    normalized_payload = reddit_capture.normalize_policy(payload)
     run_config_hash = str(normalized_payload.get("run_config_hash") or "").strip().lower()
-    if not run_config_hash:
-        run_config_hash = _build_run_config_hash(normalized_payload)
-        normalized_payload["run_config_hash"] = run_config_hash
+    run_config_hash = _build_run_config_hash(normalized_payload)
+    normalized_payload["run_config_hash"] = run_config_hash
 
     community_id = str(payload.get("community_id") or "").strip()
     season_id = str(payload.get("season_id") or "").strip()
@@ -3049,6 +2737,19 @@ def _claim_refresh_run_for_execution(
 
 def claim_next_refresh_run(*, worker_id: str | None = None) -> dict[str, Any] | None:
     normalized_worker = str(worker_id or "").strip() or _default_worker_id()
+    from trr_backend.repositories import reddit_capture
+
+    if reddit_capture.enabled():
+        candidates = pg.fetch_all(
+            "select id from social.reddit_refresh_runs where contract_version=2 "
+            "and control_state='active' and status in ('queued','running') "
+            "and coalesce(next_retry_at,now())<=now() order by priority,created_at limit 25"
+        )
+        for candidate in candidates:
+            claimed = reddit_capture.claim_run(str(candidate["id"]), normalized_worker)
+            if claimed:
+                return claimed
+        return None
     lease_seconds = _claim_lease_seconds()
     row = pg.fetch_one(
         """
@@ -3802,6 +3503,18 @@ def execute_refresh_run(
     worker_id: str | None = None,
     raise_on_failure: bool = True,
 ) -> dict[str, Any]:
+    from trr_backend.repositories import reddit_capture, reddit_execution
+
+    capture_request = (preclaimed_run or {}).get("request_payload") or (
+        pg.fetch_one("select request_payload from social.reddit_refresh_runs where id=%s", [run_id]) or {}
+    ).get("request_payload", {})
+    if reddit_capture.enabled() or capture_request.get("capture_contract_version") == 2:
+        manifest = reddit_capture.manifest_for_run(run_id)
+        if manifest:
+            run = preclaimed_run or reddit_capture.claim_run(run_id, worker_id or _default_worker_id())
+            if run is None:
+                return get_refresh_run(run_id)
+            return reddit_execution.execute(dict(run))
     run = (
         dict(preclaimed_run)
         if isinstance(preclaimed_run, dict)
@@ -4477,7 +4190,15 @@ def get_refresh_run(run_id: str) -> dict[str, Any]:
     request_payload = _dict_value(row.get("request_payload"))
 
     run_meta = _build_refresh_run_meta(row)
+    from trr_backend.repositories import reddit_capture
+
+    contract = (
+        reddit_capture.run_contract(run_id)
+        if request_payload.get("capture_contract_version") == 2
+        else {"contract_version": 1, "capture_status": "unknown"}
+    )
     return {
+        **contract,
         "run_id": row.get("id"),
         "community_id": row.get("community_id"),
         "season_id": row.get("season_id"),
