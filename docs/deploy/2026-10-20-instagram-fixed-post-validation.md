@@ -1198,3 +1198,36 @@ Private evidence is under `gap-investigation/`: baseline observations,
 `current-parent/result.json`, `popular/result.json`,
 `alternate-parent/result.json`, `child-order-chronological/result.json`,
 `child-order-page-size/result.json`, and `child-order-rest/result.json`.
+
+
+### Direct signed-in browser check (2026-10-21)
+
+The user requested direct inspection of both posts. The newly connected Chrome
+TRR profile showed Instagram account `thereality.report`. This was a browser UI
+comparison, not a worker credential snapshot or ingestion run. The visible totals
+remained photo 222 and reel 96. Neither comment view exposed an "other comments
+on Facebook" count or a Threads comment count.
+
+Both posts exposed a `Hidden by Instagram` section. The photo section contained
+22 top-level entries: 20 with visible comment permalink IDs and two GIF entries.
+All 20 IDs were already in the retained baseline. The GIF usernames
+`ooh_la_la_23` and `goodg00glymoogly` matched retained native parent records
+`18029668664695097` and `18139996450549826`, respectively. Thus these 22 hidden
+entries were already collected and do not explain the photo's gap of 38.
+
+The reel UI contained 74 parent comment permalink IDs, including all 71 collected
+parents, and its reply controls summed to 22. This reconciles 74 + 22 = 96,
+versus collected 71 + 20 = 91. Its hidden section had 29 parent entries, of which
+27 were already collected. The two missing hidden parents are
+`18134186251755697` and `18071023400572902`. The remaining missing parent,
+`18121868419915733` (`jennifer_lamon`), appeared outside the hidden section and
+had two replies. Expanding that thread directly exposed reply IDs
+`18007584374778421` and `18179727067429364`; all five identified missing IDs
+were absent from the retained collection. The reel's gap is therefore two hidden
+parents plus one ordinary parent and its two replies, not five Facebook comments.
+
+This identifies the reel discrepancy at the UI/collected-ID level; it does not
+fix or validate a production retrieval method. The photo gap remains unresolved.
+No scraper, runtime, worker credentials, schedule or ingestion records changed.
+Full-history ingestion remains gated. Private comparison evidence is
+`gap-investigation/browser-reel-comparison.json`.
