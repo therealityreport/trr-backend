@@ -1132,3 +1132,69 @@ Final private evidence: `modal-final-deploy.log`, `modal-final-history.json`,
 `local-final-retirement.json`, `frozen-final.json`, `probe/modal.result.json`,
 and `final-validation/audit-generation-6.json`, `transport-summary.json`,
 `drained-dispatch-receipt.json` and the generation-specific execution logs.
+
+
+### Follow-up count-gap investigation (2026-10-21 UTC)
+
+The requested anonymous-first investigation used the deployed c38 source and
+preserved both completed validation runs. Read-only comparison of their retained
+pages found identical comment-ID sets for all three posts. Every native edge was
+represented in the parsed/retained records; no parser, deduplication or storage
+loss was demonstrated. The 222/96 totals come from post detail, while the comment
+connections did not expose a usable per-thread expected reply count.
+
+Three independent anonymous parent views were fully paginated for the two gap
+posts. Each made 19 requests (two bootstraps and 17 comment pages), returned HTTP
+200, reached native exhaustion and produced exactly the baseline parent IDs:
+134 for `Dd37XeDly4U` and 71 for `Dd6m4XKDSQ1`. None added an ID.
+
+| Comparison | Request shape | Result |
+| --- | --- | --- |
+| Current logged-out parent query | Document `27837656105907150`, `/api/graphql`, `first:24` | Same parent IDs; empty geographic-blocking notices |
+| Popular parent ordering | Document `25516980651312394`, `sort_order:popular` | Same parent IDs |
+| Alternate parent document | Document `26113520058347588`, `sort_order:recent` | Same parent IDs |
+
+The current query identifies media as `POLARIS_<numeric media ID>`. The private
+comparison accepted only the exact expected prefixed or numeric identity and
+checked media type, resolving the earlier diagnostic identity rejection. This
+was not a production scraper change and did not recover additional comments.
+All returned current-query parents had `is_covered:false`; this says nothing
+about comments omitted from the response. No exposed counter established a
+Facebook/crosspost, moderation, deletion or visibility explanation.
+
+Two further anonymous comparisons used child document `36239935742272683` on
+the largest positive retained thread for each gap post. Each made four HTTP 200
+requests and changed one variable only. Chronological ordering (`true`, with
+`first:12`) and larger page size (`first:50`, chronology `false`) both returned
+the same 12 photo replies and three reel replies, with no new IDs and native
+`has_next_page:false` without a cursor. Increasing the requested page size did not expose additional replies in that
+sampled photo thread; it does not establish completeness of other threads.
+
+The final anonymous REST child-root comparison made two requests: bootstrap
+HTTP 200, then child endpoint HTTP 302. It stopped at `endpoint_redirect`, did
+not follow the redirect and did not attempt the second subject. No reply data
+was obtained from that endpoint; the redirect destination was not established
+by the safe report.
+
+The investigation made 67 source requests in total, used no authenticated
+cookies or proxy, and performed no canonical ingestion writes. Every completed
+probe retained the frozen original-run hash. Private diagnostics were reviewed
+and verified offline: seven parent-parser tests plus the affected signal test,
+ten child-comparison tests, and three REST tests plus the affected plan test.
+Passing checks on unchanged paths were reused.
+
+No evidence-backed production fix was identified. Coverage remains photo
+184/222 (gap 38), carousel 34/34, and reel 91/96 (gap 5). The full-history gate
+and `retrieval_not_passed` verdict remain intact; expected totals were not
+lowered. A pinned authenticated comparison was not available: all three required
+login snapshot environment fields were absent from the worker/repo configuration.
+No credential values were exposed. Browser inventory exposed no connected
+Chrome profile through the inspected Computer Use surface. These are access
+limits, not evidence that authenticated results would close the gaps.
+
+No backend runtime, app, SQL, schedules or deployment changed during this
+follow-up. Modal v89 and local c38 remain the previously verified runtime.
+Private evidence is under `gap-investigation/`: baseline observations,
+`current-parent/result.json`, `popular/result.json`,
+`alternate-parent/result.json`, `child-order-chronological/result.json`,
+`child-order-page-size/result.json`, and `child-order-rest/result.json`.
