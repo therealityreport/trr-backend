@@ -975,3 +975,60 @@ The local installed release matches the committed archive, and its imported defa
 All five existing schedules match the pre-deployment cron expressions and timezone. No schedule was added or changed, and no login, Decodo call, worker resume or backfill was performed. The original cancelled generation-8 run and full-history gate remain unchanged. Saved child lanes retain their original document/cursor contract; this repair changes the default for fresh lanes. Backend validation and runtime rollout passed. App code/build and SQL are not applicable to this internal query-selection repair. The exact primary query's server-side rejection cause remains unknown; this result does not establish an anonymous daily quota or full-history completeness.
 
 Private rollout evidence: `child-contract-20261020/modal-child-deploy.log`, `modal-child-readiness.json`, pre/post-deployment schedule snapshots, and `local-retirement-result.json`.
+
+
+## 2026-10-20: isolate rejected replies and remove local request-count quotas
+
+The user authorized the anonymous-first repair plan and explicitly removed the
+local 200/day and 50/tranche request-count limits. The shared request ledger,
+exclusive stream, request timeouts, and 15-minute execution boundary remain.
+Newer positive proof above selects the maintained anonymous `362`-first path;
+login and proxy comparisons are conditional diagnostics, not an automatic
+production credential fallback. No login or Decodo request was made by this repair.
+
+Backend source `9eab32f0bd2a50c8128580be16923aa0a92833ef` keeps native
+child `1675004` rejection local to replies, retains failed evidence, continues
+parents, and records durable reply retries at 5, 10, 20, 40, then 60 minutes.
+A longer server delay wins. HTTP 429 and authentication failures retain their
+existing protections. Genuine public rate rejection without a server instruction
+now starts at 60 seconds and doubles up to the configured gate cap. An explicit
+false alternate-trust setting leaves unknown-count empty child results pending.
+
+Independent review found and closed four issues before release: administrative
+retry metadata versus page-receipt equality, native-code digits in ordinary reply
+content, numeric native retry delays, and inconclusive anonymous diagnostics
+incorrectly enabling login. The final affected ingestion batch passed 283 tests;
+the diagnostic batch passed 28. Unchanged passing identity, budget, composition,
+network-lane and Modal scrub checks were reused. Ruff and staged diff checks
+passed. Workspace contract commit: `4d37146`.
+
+The byte-verified 2,543-file source archive has SHA-256
+`e55bf4b34aee3ad665b91714a0b40694fe4289aa8146d605af2df0e7f46340a6`.
+It deployed to live-verified `admin-56995 / trr-backend-jobs / main`, app
+`ap-DkLTRoSvqhbkGO7fHyHxrD`, as **v88**, tag
+`ig-reply-isolation-9eab32f0`, at 21:38:20 Eastern on October 20. The API
+cold-start canary returned HTTP 200 on attempt one. Explicit `--env main
+--probe-core-workers --strict-probes --json` readiness passed with `ok:true`,
+`core_ok:true`, all six runtime probes healthy, and no missing functions or
+blocking failures. The deployed browser probe still reports child query `362`.
+All five existing schedule expressions and timezones matched before and after.
+
+The local installed release matches the same source. Its relocated dependency
+entrypoints, imports, and LaunchAgent plist passed checks; the LaunchAgent remains
+unloaded. Modal v87 and local `7a1aed41`, with the prior plist, remain rollback
+options; provider v86 and its local source archive are also retained. The
+superseded local `9d7baa61` runnable copy moved to actual Trash after process,
+dependency and archive checks, leaving two runnable local releases.
+
+Runtime health does not establish source completeness. At this record boundary,
+a separate active chat owns run `82d0d542-7bbe-4764-879c-d3946af16c83` on
+source `7a1aed41` for the same three posts. This repair has held source requests
+to preserve exclusivity. Its new manifest is labelled `9eab32f0`; final live
+acceptance and the new Modal child-access source smoke remain pending. The
+original run `dbc80df9-0df7-43ca-9abc-2f1d1e393056` was read-only verified
+cancelled at generation 8. No schedule, full-history run, SQL schema or app
+change was introduced. TRR-APP build is not applicable.
+
+Private evidence: `~/.codex/tmp/trr-instagram-replies-01a15c0a/` contains the
+source manifest/archive, deployment log/history/readiness, pre/post schedule
+snapshots, frozen-run baseline, and local installation/retirement records.
