@@ -38,16 +38,23 @@ def build_client(*, require_oauth: bool = True, recovery_probe: bool = False, **
     )
     if not recovery_probe:
         get_json = client.get_json
+
         def guarded_json(*args, **options):
             try:
                 return get_json(*args, **options)
             except RedditTransportError as exc:
                 if exc.status in {401, 403}:
-                    reddit_capture.pg.execute_returning('''insert into social.reddit_request_budgets(identity_key,blocked)
+                    reddit_capture.pg.execute_returning(
+                        '''insert into social.reddit_request_budgets(identity_key,blocked)
                         values(%s,true) on conflict(identity_key) do update set blocked=true,updated_at=now()
-                        returning identity_key''', [identity])
-                    raise reddit_capture.IdentityBlockedError('Reddit OAuth identity blocked by authentication or authorization failure') from None
+                        returning identity_key''',
+                        [identity],
+                    )
+                    raise reddit_capture.IdentityBlockedError(
+                        'Reddit OAuth identity blocked by authentication or authorization failure'
+                    ) from None
                 raise
+
         client.get_json = guarded_json
     return client
 
@@ -337,6 +344,13 @@ class RedditHttpClient:
 
         def snapshot() -> dict[str, Any]:
             _resolve_depths(comments)
+            for queue in (pending, continuations):
+                for item in queue.values():
+                    parent = item["parent_id"]
+                    if parent == f"t3_{post_id}":
+                        item["depth"] = 0
+                    elif parent[3:] in comments:
+                        item["depth"] = comments[parent[3:]]["depth"] + 1
             return copy.deepcopy(
                 {
                     "version": 1,
@@ -421,10 +435,76 @@ class RedditHttpClient:
             save()
 
         attempted: set[str] = set()
-        while pending and evidence["expansion_requests"] < self.max_more_requests:
+        attempted_continuations: set[str] = set()
+        while (pending or continuations) and evidence["expansion_requests"] < self.max_more_requests:
             batch = [child_id for child_id in pending if child_id not in attempted][:100]
             if not batch:
-                break
+                parent = next((key for key in continuations if key not in attempted_continuations), None)
+                if parent is None:
+                    break
+                attempted_continuations.add(parent)
+                if not parent.startswith("t1_"):
+                    # A submission-level marker gives no comment subtree to request.
+                    continue
+                evidence["expansion_requests"] += 1
+                try:
+                    branch = self.get_json(
+                        f"/comments/{post_id}.json",
+                        params={
+                            "comment": parent[3:],
+                            "context": 0,
+                            "limit": int(_env_number("REDDIT_COMMENT_LIMIT", 500, 50, 500)),
+                            "depth": int(_env_number("REDDIT_COMMENT_TREE_DEPTH", 12, 1, 20)),
+                            "raw_json": 1,
+                        },
+                        expected_type=list,
+                        lane="morechildren",
+                    )
+                    if len(branch) != 2 or not any(
+                        node.get("kind") == "t3" and node.get("data", {}).get("id") == post_id
+                        for node in _listing_children(branch[0])
+                        if isinstance(node, dict) and isinstance(node.get("data"), dict)
+                    ):
+                        raise RedditTransportError("Reddit continuation does not match requested post")
+                    roots = _listing_children(branch[1])
+                    if (
+                        len(roots) != 1
+                        or not isinstance(roots[0], dict)
+                        or roots[0].get("kind") != "t1"
+                        or not isinstance(roots[0].get("data"), dict)
+                        or roots[0]["data"].get("id") != parent[3:]
+                    ):
+                        raise RedditTransportError("Reddit continuation did not return its requested parent")
+                    added, more, added_continuations = _parse_nodes(roots, post_id=post_id)
+                    anchor = added.get(parent[3:])
+                    if anchor is None:
+                        raise RedditTransportError("Reddit continuation did not return its requested parent")
+                    previous = comments.get(parent[3:])
+                    if previous is not None and anchor["parent_comment_id"] != previous["parent_comment_id"]:
+                        raise RedditTransportError("Reddit continuation changed its parent's identity")
+                    # The subtree's depth restarts at zero. Preserve its saved anchor,
+                    # then derive all descendant depths from canonical parent links.
+                    anchor["depth"] = previous["depth"] if previous else max(0, continuations[parent]["depth"] - 1)
+                    merged = copy.deepcopy(comments)
+                    merged.update(added)
+                    _resolve_depths(merged)
+                except RedditTransportError as exc:
+                    evidence["errors"].append(
+                        {"status": exc.status, "message": str(exc), "retry_after_seconds": exc.retry_after_seconds}
+                    )
+                    save()
+                    break
+                comments.update(merged)
+                # Only a validated subtree response can consume a continuation.
+                # A repeated marker stays unresolved and is retried on a later pass.
+                continuations.pop(parent)
+                continuations.update(added_continuations)
+                for child_id, metadata in more.items():
+                    pending.setdefault(child_id, metadata)
+                for comment_id in comments:
+                    pending.pop(comment_id, None)
+                save()
+                continue
             attempted.update(batch)
             evidence["expansion_requests"] += 1
             try:
@@ -447,7 +527,8 @@ class RedditHttpClient:
                     raise RedditTransportError("Malformed Reddit morechildren things")
                 # Parse atomically: malformed nodes must not consume pending child IDs.
                 added, more, added_continuations = _parse_nodes(data["things"], post_id=post_id, pending=pending)
-                merged = {**comments, **added}
+                merged = copy.deepcopy(comments)
+                merged.update(added)
                 _resolve_depths(merged)
             except RedditTransportError as exc:
                 evidence["errors"].append(

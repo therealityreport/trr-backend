@@ -480,7 +480,10 @@ def test_guard_and_checkpoint_run_in_requesting_thread() -> None:
 def test_continuation_without_ids_remains_unresolved_after_checkpoint_resume(count: int) -> None:
     continuation = more(parent="t1_a")
     continuation["data"]["count"] = count
-    session = Session(initial(comment("a", replies=listing(continuation))))
+    session = Session(
+        initial(comment("a", replies=listing(continuation))),
+        initial(comment("a", replies=listing(continuation))),
+    )
     checkpoints: list[dict[str, Any]] = []
     result = transport.RedditHttpClient(session=session).get_comments("post1", on_checkpoint=checkpoints.append)
     assert result["complete"] is False
@@ -490,9 +493,102 @@ def test_continuation_without_ids_remains_unresolved_after_checkpoint_resume(cou
     saved = checkpoints[-1]
     assert saved["pending_continuations"][0]["parent_id"] == "t1_a"
     assert saved["pending_continuations"][0]["depth"] == 1
-    resumed = transport.RedditHttpClient(session=Session()).get_comments("post1", saved)
+    resumed_session = Session(initial(comment("a", replies=listing(continuation))))
+    resumed = transport.RedditHttpClient(session=resumed_session).get_comments("post1", saved)
     assert resumed["complete"] is False
     assert resumed["evidence"]["checkpoint"]["pending_continuations"] == saved["pending_continuations"]
+    assert len(session.calls) == 2
+    assert resumed_session.calls[0]["params"]["comment"] == "a"
+
+
+def test_continuation_checkpoint_resumes_focused_subtree_and_nested_children() -> None:
+    first = transport.RedditHttpClient(
+        session=Session(initial(comment("a", replies=listing(more(parent="t1_a"))))), max_more_requests=0
+    ).get_comments("post1")
+    checkpoint = first["evidence"]["checkpoint"]
+    original = copy.deepcopy(checkpoint)
+    session = Session(
+        initial(
+            comment("a", depth=0, replies=listing(comment("b", "t1_a", depth=1, replies=listing(more(parent="t1_b")))))
+        ),
+        initial(comment("b", "t1_a", depth=0, replies=listing(more("c", parent="t1_b")))),
+        expanded(comment("c", "t1_b", depth=1)),
+    )
+    result = transport.RedditHttpClient(session=session).get_comments("post1", checkpoint)
+    assert result["complete"] is True
+    assert result["evidence"]["expansion_requests"] == 3
+    assert {r["reddit_comment_id"]: r["depth"] for r in result["comments"]} == {"a": 0, "b": 1, "c": 2}
+    assert session.calls[0]["params"]["comment"] == "a"
+    assert session.calls[0]["params"]["context"] == 0
+    assert session.calls[1]["params"]["comment"] == "b"
+    assert session.calls[2]["params"]["children"] == "c"
+    assert checkpoint == original
+
+
+def test_continuation_preserves_absolute_depth_and_saves_new_frontier() -> None:
+    nodes = comment("k", "t1_j", replies=listing(more(parent="t1_k")))
+    for number in range(9, -1, -1):
+        cid = chr(ord("a") + number)
+        parent = "t3_post1" if number == 0 else "t1_" + chr(ord("a") + number - 1)
+        nodes = comment(cid, parent, replies=listing(nodes))
+    checkpoints: list[dict[str, Any]] = []
+    result = transport.RedditHttpClient(
+        session=Session(
+            initial(nodes),
+            initial(
+                comment(
+                    "k", "t1_j", depth=0,
+                    replies=listing(comment("l", "t1_k", depth=1, replies=listing(more(parent="t1_l")))),
+                )
+            ),
+        ),
+        max_more_requests=1,
+    ).get_comments("post1", on_checkpoint=checkpoints.append)
+    assert result["complete"] is False
+    assert next(r for r in result["comments"] if r["reddit_comment_id"] == "l")["depth"] == 11
+    assert checkpoints[-1]["pending_continuations"][0]["parent_id"] == "t1_l"
+    assert checkpoints[-1]["pending_continuations"][0]["depth"] == 12
+
+
+@pytest.mark.parametrize(
+    "branch",
+    [
+        initial(),
+        initial(comment("other")),
+        Response([listing({"kind": "t3", "data": {"id": "anotherpost"}}), listing(comment("a"))]),
+        initial(comment("a", replies=listing(comment("b", "t1_a", link_id="t3_anotherpost")))),
+        initial(comment("a", "t1_b", replies=listing(comment("b", "t1_a")))),
+    ],
+)
+def test_invalid_continuation_keeps_original_comments_and_frontier(branch: Response) -> None:
+    checkpoints: list[dict[str, Any]] = []
+    result = transport.RedditHttpClient(
+        session=Session(initial(comment("a", replies=listing(more(parent="t1_a")))), branch)
+    ).get_comments("post1", on_checkpoint=checkpoints.append)
+    assert result["complete"] is False
+    assert [r["reddit_comment_id"] for r in result["comments"]] == ["a"]
+    assert checkpoints[-1]["pending_continuations"] == checkpoints[0]["pending_continuations"]
+    assert result["evidence"]["errors"][0]["status"] == 502
+
+
+def test_valid_empty_continuation_branch_is_complete() -> None:
+    result = transport.RedditHttpClient(
+        session=Session(initial(comment("a", replies=listing(more(parent="t1_a")))), initial(comment("a", replies="")))
+    ).get_comments("post1")
+    assert result["complete"] is True
+    assert result["evidence"]["pending_continuations_count"] == 0
+
+
+def test_http_failure_during_continuation_keeps_checkpoint_for_resume() -> None:
+    result = transport.RedditHttpClient(
+        session=Session(
+            initial(comment("a", replies=listing(more(parent="t1_a")))), Response({}, 503), Response({}, 503)
+        )
+    ).get_comments("post1")
+    assert result["complete"] is False
+    checkpoint = result["evidence"]["checkpoint"]
+    resumed = transport.RedditHttpClient(session=Session(initial(comment("a")))).get_comments("post1", checkpoint)
+    assert resumed["complete"] is True
 
 
 def test_expansion_continuation_and_later_http_failure_keep_both_queues() -> None:
