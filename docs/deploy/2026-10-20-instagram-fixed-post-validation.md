@@ -1231,3 +1231,63 @@ fix or validate a production retrieval method. The photo gap remains unresolved.
 No scraper, runtime, worker credentials, schedule or ingestion records changed.
 Full-history ingestion remains gated. Private comparison evidence is
 `gap-investigation/browser-reel-comparison.json`.
+
+
+### Authenticated diagnostic deployed; settlement rollout held (2026-10-21)
+
+Diagnostic source `0b6cceebef54a0f74040531900af179f50d97cde` was deployed as
+Modal v90, tag `ig-auth-proof-0b6cceeb`, to verified workspace `admin-56995`,
+app `trr-backend-jobs`, environment `main`. The deployment used an isolated,
+byte-verified archive (SHA-256
+`79191a58c89c56ad65e8b125b7ef2b8eed88583e8fd39bd5d86b5f7aafe7279b`).
+Its production ingestion files match the pre-change source `7435e49a`;
+settlement source and unrelated working-tree changes were excluded.
+API canary returned HTTP 200. Explicit-main strict readiness and all six core
+worker probes passed. All five deployed schedules match the captured baseline.
+Previous Modal v89 (`ig-public-noquota-c38d0717`) remains the recorded rollback.
+
+The single authenticated diagnostic returned `verdict=inconclusive`,
+`auth_state=unavailable`, and `stop_reason=credential_snapshot_unavailable`.
+It made zero Instagram requests and proved none of the six IDs. The shared
+`bravotv` ledger reserved all 12 requests without refund (total 1068 to 1080);
+the diagnostic tranche closed. The pre-existing open tranche
+`0ccb88557fed476cb9dd3991f310fffc` was preserved, so a globally empty tranche
+ledger is not claimed. No browser credentials were copied. The missing
+prerequisite is an available worker CredentialSnapshot for the pinned
+`livestnation` identity; live identity verification and all six IDs must pass
+before settlement rollout, unless the user explicitly revises that gate.
+
+Settlement candidate `71841b4e` is implemented, tested and committed, but is
+NOT deployed or installed. It adds typed count-parity/public-native-exhaustion
+settlement, ownership-fenced atomic checkpoint and receipt metadata, and
+inspection of the same qualifying fresh receipt. Production remains anonymous.
+Public gap settlement requires version-1 public Relay, durable root-start and
+native exhaustion, complete child lanes, valid counts/topology, and all existing
+source and commit guards. Authenticated REST still requires strict parity.
+`count_gap=max(expected_total-observed_total,0)` preserves observations above
+expected. Legacy receipts may have null settlement; new comment commits record
+basis, expected total, observed total and gap. `is_missing` means absent from a
+qualifying scan's visibility, not proven deleted from Instagram; the observation
+cutoff is unchanged. Residual gaps may reflect visibility differences or
+unresolved count semantics; no cause is assigned without evidence.
+
+Targeted diagnostic/Modal tests passed (115), followed by 19 probe tests after a
+local helper refactor. Settlement checks passed: initial 257 across comments,
+persistence, resume, transport and inspection; after final comments/inspection
+changes, 251 affected tests passed, with unchanged persistence evidence reused.
+Ruff passed for all 13 changed implementation/test files. Independent source
+review found no blocking findings. No SQL migration or app contract changed;
+TRR-APP build is not applicable. These checks establish source readiness only.
+
+No fresh fixed-post validation was started, because the authenticated prerequisite
+failed. No settlement readiness/smoke or runtime acceptance is claimed. Local
+release `c38d0717` remains installed with its LaunchAgent unloaded and rollback
+artifacts retained. The original frozen run and targets retain the full SHA-256
+`998a8bb7d8ddbd608105a5f9b492f256ea975c40f03613efbd35616394b4013f`;
+the database project binding was verified as `vwxfvzutyufrkhfgoeaa` before reads.
+The live multi-page child criterion remains unverified and the full-history gate
+remains closed. Historical gaps of 38, 0 and 5 are not fresh-scan requirements.
+Private evidence is retained under
+`~/.codex/tmp/trr-instagram-settlement-01a16023/`, including the diagnostic result,
+source manifest/archive, readiness report, schedule comparison and fingerprints.
+The isolated diagnostic source is retained for reproducible recovery of v90.
