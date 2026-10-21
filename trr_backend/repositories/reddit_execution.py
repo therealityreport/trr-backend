@@ -223,7 +223,9 @@ def media_capture(post: dict, execution: capture.Execution) -> None:
         try:
             asset = pg.fetch_one("select * from social.reddit_assets where source_url=%s and state='mirrored'", [url])
             if asset is None:
-                mirrored = mirror_url_to_s3(media_download_url(url), max_bytes=100 * 1024 * 1024, key_namespace="reddit")
+                mirrored = mirror_url_to_s3(
+                    media_download_url(url), max_bytes=100 * 1024 * 1024, key_namespace="reddit"
+                )
                 if mirrored.status not in {"mirrored", "skipped"} or not mirrored.hosted_key or not mirrored.hosted_url:
                     raise RuntimeError(mirrored.error or "Media upload did not succeed")
                 asset = {
