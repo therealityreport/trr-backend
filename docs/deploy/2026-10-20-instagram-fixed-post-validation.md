@@ -1450,3 +1450,84 @@ run was needed. Private evidence is in
 and the startup log. The next acceptance attempt must honor the persisted
 public lane, obtain actual native cursor continuation, and verify hosted media
 plus visible admin rendering before claiming these cells passed.
+
+## Repair and bounded rerun (2026-10-21, evening)
+
+The follow-up request was to fix the findings and rerun the bounded acceptance.
+Full-history ingestion remains disabled. The frozen original remains unchanged.
+
+Source repairs:
+
+- Existing commit `9a02149c` fixes media, avatar and profile fallback gates to use
+  the actual local or Modal public network lane. The installed local release
+  `325092c9` already contains the identical media modules. Thirty affected media
+  and pipeline tests passed; no redundant local reinstall was required.
+- `86777542` narrows searched Instagram comment profiles before full hydration and
+  comment aggregation. It preserves the existing rich search matcher, source
+  precedence and comment filter. Ten focused tests and thirteen related checks
+  passed. A live selected-post read returned one row in 26.99 seconds.
+- `f3d26caa` removes whole-row JSON conversion from owner matching and optional
+  fields in unfiltered comment-profile pages. Pagination, counts and sorting
+  remain global. Three focused and six existing checks passed, plus Ruff and
+  independent review. A live unfiltered read returned 25 rows, 8,058 total, in
+  12.73 seconds. These are single observations, not a performance benchmark.
+- Workspace commit `06ad556` replaces the billing guard's Python heredoc with
+  `python -c`, resolving a reproduced Bash 5.3.9 startup hang. Shell syntax,
+  synthetic old/new comparisons and the real guard passed. No billing policy
+  changed. The hybrid stack restarted with its existing hosts-sync opt-out;
+  browser inspection used the verified TRR Chrome profile.
+
+Bounded source results:
+
+| Capability | Fresh result |
+| --- | --- |
+| Multi-page child replies | Passed for `C_aw2xGs-Uf`, parent `17900330799028205`. Fresh traversal proved the parent. Two productive child pages returned 15 and 5 distinct replies under normal page-size-12 query provenance; the second request used the exact first-page cursor and reached native child exhaustion. |
+| Whole-post qualification for that probe | Not claimed. The diagnostic deliberately stopped after the selected child qualified. It used 72 requests/71 native pages, within 101/100 limits, and wrote no canonical or evidence rows. |
+| Older account discovery | Still unresolved. A bounded diagnostic using the maintained anonymous document transport sent bootstrap plus GraphQL; GraphQL returned HTTP 401 and `public_access_backoff`. Zero pages/cursors accepted. No listing transport change was promoted without successful evidence. |
+| Media-only comments | Both selected comments remain saved, active, and without text. Their native source URL is the known Instagram placeholder; no alternate real GIF URL was present in saved native data. |
+| Media mirroring | Run `df99e4c0-eafb-44c9-8085-a4b8f738d90e` executed after the prior cooldown, made 24 operations in one attempt, and ended unresolved with `media_source_placeholder`. It did not commit placeholder media as the real GIF. Hosted counts remain zero. |
+| Admin search | Visibly passed for `Dd37XeDly4U`: 134 parents, 50 replies, reported 222, gap 38. A private screenshot records the rendered row. Real GIF display remains unverified because real hosted assets are unavailable. |
+
+Two earlier reply diagnostics reached their explicit request bounds without
+qualifying the selected child; neither was treated as exhaustion. All new budget
+tranches closed. Final audit found zero active unresolved owners and zero
+uncertain dispatches. The shared ledger totals 1,507 requests. The original full
+hash remains `998a8bb7d8ddbd608105a5f9b492f256ea975c40f03613efbd35616394b4013f`.
+No authentication, proxy substitution, cooldown reset, SQL migration or full
+history run was used. Prior passing interruption/resume evidence was reused.
+
+Private evidence: `~/.codex/tmp/trr-instagram-settlement-01a16023/repair-rerun/`,
+including source archives/manifests, focused test and live-query logs, media and
+listing results, `reply-small-expanded/reply.result.json`, `admin-search.png`,
+and `final-audit.json`. Source restrictions and placeholder media remain open
+acceptance limitations; they are not represented as successful retrieval.
+
+The restarted local API also passed the unfiltered admin request with HTTP 200
+in 15.6 seconds. The browser displayed 25 rows and page 1 of 323;
+`admin-unfiltered.png` records this. The task-created browser tab was closed.
+There was no app source change or app build; the verification used the existing
+hybrid dev stack and updated backend source.
+
+Deployment sequence: frozen `86777542` first deployed as v95. Standard hybrid
+startup then reconciled the maintained working tree as v96, including the
+already-present unrelated TikTok changes. Its source-only container smoke
+confirmed the media/search modules, public lane keys, closed full-history gate
+and enabled Reddit v2 flag. The final release freezes `f3d26caa` plus the current
+63 tracked modified files to preserve that maintained deployed source. The
+manifest hashes every overlaid file; it does not treat those unrelated edits as
+this task's commits. Final tag: `ig-acceptance-f3d26caa`, explicitly deployed to
+`admin-56995 / trr-backend-jobs / main`. Deployment and API health canary passed;
+`verify_modal_readiness.py --env main` reported Core ready and Ready. Source
+archives and the preceding deployed version remain available for rollback.
+
+Final runtime identity is **v97**, tag `ig-acceptance-f3d26caa`, app
+`ap-DkLTRoSvqhbkGO7fHyHxrD` in `main`. A container started after that deployment
+matched all six frozen runtime module hashes, including the full analytics
+provider with the preserved overlay. The source-only smoke exited zero and
+confirmed the local/Modal public lane keys, closed full-history gate and enabled
+Reddit v2 flag, with zero source requests or database writes. Safe identity and
+smoke receipts are under `repair-rerun/final-release/`.
+The final live function metadata contains exactly the same five schedules as the
+retained baseline (cron and timezone). Comments, media, posts, recovery, general
+job and API consumers resolve to that same app in `main`. Schedule comparison
+and consumer-target receipts are retained beside the runtime smoke.
