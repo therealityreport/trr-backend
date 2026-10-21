@@ -1372,3 +1372,46 @@ and archive, deployment history/readiness, remote and local settlement smoke,
 local installation/retirement, fresh state and command receipt, and
 `final-audit.json`. The isolated source is retained to reproduce the deployed
 release and its verification.
+
+## Bounded anonymous capability acceptance (2026-10-21)
+
+The requested pass covers multi-page replies, older account discovery, and
+media-only comments through mirroring and admin display. It does not authorize
+full-history ingestion. Prior interruption/resume and fresh-repeat evidence is
+reused; this pass did not rerun those checks.
+
+Result: **incomplete; full-history gate remains closed**.
+
+| Capability | Current evidence | Result |
+| --- | --- | --- |
+| Older account discovery | The maintained anonymous `PublicListingSource` sent one bootstrap and one GraphQL request. GraphQL returned HTTP 401; the public policy recorded `public_access_backoff`. No native listing page or cursor was accepted. | Unverified |
+| Multi-page child replies | Saved native payload for `DWNNxnnDM7G` / parent `18041879645540008` reports 169 replies, above the normal 12-item child page size. This is a candidate, not fresh pagination proof. The local public lane cooldown prevented dependent live testing. | Held; no new child requests |
+| Media-only retrieval | `Dd37XeDly4U` comments `18029668664695097` and `18139996450549826` remain active, have no text and one source media URL each, and were last seen in accepted run `9ab92d4f-578d-4a42-b2d4-153d1ca6a478`. | Confirmed saved |
+| Media mirroring | Both comments have zero hosted media URLs. A single-photo media-only plan was prepared but not launched. Review found native media fallback gates use generic `public`, while the active backoff belongs to `public:local`; launching without a local-lane admission guard could miss that backoff. | Not executed; unresolved |
+| Admin display | Started the standard local hybrid stack and opened the TRR Chrome profile. The comments page rendered, but the filtered post read returned HTTP 503 with a database statement timeout. The shared development stack then restarted during inspection, and the browser snapshot timed out. No GIF rendering or hosted playback was verified. | Unverified |
+
+The persisted local public cooldown was `2026-10-21T22:26:25.831544Z`
+(6:26:25 PM Eastern). This is an earliest policy eligibility time, not proof that
+Instagram will accept the next request. No login, proxy substitution, cooldown
+reset, or schedule change was used. The native media lane mismatch is a source
+finding, not a deployed fix. The private media plan was reviewed before any
+application. Its corrected pre-creation local-lane guard was executed and
+returned `held/local_public_lane_cooldown`; no media run, object upload, or media
+canonical write was created. The harness also preserves cleanup/result evidence
+after post-creation failures; offline guard and cleanup checks passed.
+
+Final read-only audit: original frozen run/targets retain SHA-256
+`998a8bb7d8ddbd608105a5f9b492f256ea975c40f03613efbd35616394b4013f`; zero active
+unresolved target owners and zero uncertain dispatches; full-history intent is
+still rejected by the validation gate. The shared ledger rose from 1,345 to
+1,347 requests. This pass's tranche `9347a17ec51442c89635a943923f3511` is closed.
+The older historical open tranche remains untouched.
+
+Modal v91 and the installed local settlement release were not changed by this
+pass. No schema or app source change was made. No repeated test suite or recovery
+run was needed. Private evidence is in
+`~/.codex/tmp/trr-instagram-settlement-01a16023/bounded-acceptance/`, including
+`listing.result.json`, `reply-candidate.json`, `media.plan.json`, `final-audit.json`,
+and the startup log. The next acceptance attempt must honor the persisted
+public lane, obtain actual native cursor continuation, and verify hosted media
+plus visible admin rendering before claiming these cells passed.
