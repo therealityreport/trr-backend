@@ -6,7 +6,11 @@ import hashlib
 import html
 import logging
 import re
+from html.parser import HTMLParser
 from typing import Any
+from urllib.parse import urljoin, urlsplit
+
+import requests
 
 from trr_backend.db import pg
 from trr_backend.repositories import reddit_capture as capture
@@ -146,6 +150,57 @@ def media_references(post: dict, comments: list[dict]) -> list[dict]:
     return list(refs.values())
 
 
+def media_download_url(source_url: str) -> str:
+    """Resolve Tenor's GIF share links without treating their HTML as media."""
+    source = urlsplit(source_url)
+    if source.hostname not in {"tenor.com", "www.tenor.com"}:
+        return source_url
+    if source.scheme != "https":
+        raise RuntimeError("Tenor share URLs must use HTTPS")
+
+    class ImageMetadata(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.images: list[str] = []
+
+        def handle_starttag(self, tag, attrs):
+            attributes = dict(attrs)
+            if tag == "meta" and attributes.get("property") == "og:image":
+                self.images.append(attributes.get("content") or "")
+
+    def is_cdn(url: str) -> bool:
+        parsed = urlsplit(url)
+        return parsed.scheme == "https" and bool(re.fullmatch(r"(?:media\d*|c)\.tenor\.com", parsed.hostname or ""))
+
+    url = source_url
+    for _ in range(4):
+        with requests.get(url, timeout=20, allow_redirects=False, stream=True) as response:
+            if response.status_code in {301, 302, 303, 307, 308}:
+                destination = urljoin(url, response.headers.get("Location") or "")
+                if is_cdn(destination):
+                    return destination
+                parsed = urlsplit(destination)
+                if parsed.scheme != "https" or parsed.hostname not in {"tenor.com", "www.tenor.com"}:
+                    raise RuntimeError("Tenor share redirect is outside its media provider")
+                url = destination
+                continue
+            response.raise_for_status()
+            if response.headers.get("Content-Type", "").lower().startswith(("image/", "video/")):
+                return url
+            document = bytearray()
+            for chunk in response.iter_content(64 * 1024):
+                document.extend(chunk)
+                if len(document) > 2 * 1024 * 1024:
+                    raise RuntimeError("Tenor share metadata exceeds its size limit")
+            parser = ImageMetadata()
+            parser.feed(document.decode("utf-8", errors="replace"))
+            for image in parser.images:
+                if is_cdn(image):
+                    return image
+            raise RuntimeError("Tenor share page has no verified media URL")
+    raise RuntimeError("Tenor share redirect limit exhausted")
+
+
 def media_capture(post: dict, execution: capture.Execution) -> None:
     from trr_backend.media.s3_mirror import mirror_url_to_s3
 
@@ -168,7 +223,7 @@ def media_capture(post: dict, execution: capture.Execution) -> None:
         try:
             asset = pg.fetch_one("select * from social.reddit_assets where source_url=%s and state='mirrored'", [url])
             if asset is None:
-                mirrored = mirror_url_to_s3(url, max_bytes=50 * 1024 * 1024, key_namespace="reddit")
+                mirrored = mirror_url_to_s3(media_download_url(url), max_bytes=50 * 1024 * 1024, key_namespace="reddit")
                 if mirrored.status not in {"mirrored", "skipped"} or not mirrored.hosted_key or not mirrored.hosted_url:
                     raise RuntimeError(mirrored.error or "Media upload did not succeed")
                 asset = {
