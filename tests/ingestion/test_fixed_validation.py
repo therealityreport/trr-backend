@@ -89,16 +89,14 @@ def test_budget_persists_across_tranches_and_instances(tmp_path):
     for _tranche in range(4):
         budget = AccountBudget(path, "bravotv", clock=lambda: clock[0])
         with budget.stream():
-            for _ in range(50):
-                budget.consume()
-            with pytest.raises(ValidationPause, match="tranche_budget"):
+            for _ in range(75):
                 budget.consume()
     latest = AccountBudget(path, "bravotv", clock=lambda: clock[0])
-    with latest.stream(), pytest.raises(ValidationPause, match="daily_budget"):
+    with latest.stream():
         latest.consume()
-    assert latest.inspect()["rolling_24h_requests"] == 200
-    assert latest.inspect()["remaining_24h_requests"] == 0
-    assert len(latest.inspect()["request_events"]) == 200
+    assert latest.inspect()["rolling_24h_requests"] == 301
+    assert latest.inspect()["remaining_24h_requests"] is None
+    assert len(latest.inspect()["request_events"]) == 301
     clock[0] += 86401
     with latest.stream():
         latest.consume()
@@ -279,7 +277,7 @@ def test_cli_default_is_source_free_plan(tmp_path, capsys):
     assert not (tmp_path / "budget.sqlite").exists()
 
 
-def test_daily_budget_pauses_before_wire_without_source_completion(database, tmp_path):
+def test_prior_request_count_does_not_pause_before_wire(database, tmp_path):
     store, _ = database
     manifest, run = selected(database)
     budget = AccountBudget(tmp_path / "budget.sqlite", manifest.account)
@@ -294,7 +292,7 @@ def test_daily_budget_pauses_before_wire_without_source_completion(database, tmp
             def fetch(**callbacks):
                 callbacks["on_request"]()
                 sends.append("wire")
-                pytest.fail("Exhausted budget reached the wire")
+                raise RuntimeError("synthetic post-send interruption")
 
             return fetch
 
@@ -308,10 +306,9 @@ def test_daily_budget_pauses_before_wire_without_source_completion(database, tmp
         )
 
     result = run_tranche(store, manifest, run["run_id"], budget=budget, worker_factory=factory)
-    assert result["reason"] == "validation_daily_budget"
-    assert sends == []
-    assert all(row["outcome"] == "unresolved" and row["requests"] == 0 for row in result["state"]["targets"])
-    assert result["budget"]["rolling_24h_requests"] == 200
+    assert sends
+    assert all(row["outcome"] == "unresolved" for row in result["state"]["targets"])
+    assert result["budget"]["rolling_24h_requests"] > 200
 
 
 def test_production_cooldown_survives_tranche_and_cancellation(database, tmp_path):

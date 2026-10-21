@@ -150,7 +150,7 @@ def test_network_lane_requires_a_public_source_and_a_known_location(lane, public
 def test_public_backoff_steps_match_the_june_policy():
     steps = [public_backoff_seconds("public_access_backoff", n, default=900) for n in range(1, 7)]
     assert steps == [3600, 14400, 43200, 86400, 86400, 86400]
-    assert public_backoff_seconds("rate_limited", 1, default=900) == 7200
+    assert public_backoff_seconds("rate_limited", 1, default=900) == 60
     assert public_backoff_seconds("network_error", 5, default=900) == 900
 
 
@@ -170,10 +170,10 @@ def test_server_retry_after_wins_over_the_escalation_table():
     assert failure.retry_at == datetime(2026, 10, 19, 21, 2, tzinfo=UTC)
 
 
-def test_rate_limit_without_retry_after_waits_two_hours():
+def test_rate_limit_without_retry_after_starts_with_one_minute():
     lanes = _Lanes()
     failure, _ = _fail_once(lanes, "rate_limited")
-    assert failure.retry_at - lanes.now == timedelta(hours=2)
+    assert failure.retry_at - lanes.now == timedelta(minutes=1)
 
 
 def test_a_single_success_steps_escalation_down_one_level_on_network_lanes():

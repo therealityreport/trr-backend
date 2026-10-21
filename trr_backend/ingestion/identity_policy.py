@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import time
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
@@ -31,7 +32,6 @@ REQUEST_LIMIT = 180
 # socials/instagram/public_probe.py: a rejection is temporary only with
 # escalating waits, and a single success steps escalation down one level.
 PUBLIC_BACKOFF_STEPS_SECONDS = (3600, 4 * 3600, 12 * 3600, 24 * 3600)
-PUBLIC_RATE_LIMIT_DEFAULT_SECONDS = 2 * 3600
 NETWORK_LANES = frozenset({"modal", "local"})
 
 
@@ -41,7 +41,13 @@ def public_backoff_seconds(code: str, consecutive_failures: int, *, default: flo
         step = min(max(consecutive_failures, 1), len(PUBLIC_BACKOFF_STEPS_SECONDS)) - 1
         return PUBLIC_BACKOFF_STEPS_SECONDS[step]
     if code == "rate_limited":
-        return PUBLIC_RATE_LIMIT_DEFAULT_SECONDS
+        try:
+            cap = float(os.environ.get("SOCIAL_INSTAGRAM_PUBLIC_RATE_PAUSE_MAX_SECONDS", default))
+        except (TypeError, ValueError, OverflowError):
+            cap = default
+        if not math.isfinite(cap) or cap < 1:
+            cap = default
+        return min(60 * 2 ** min(max(consecutive_failures - 1, 0), 20), cap, default)
     return default
 
 
@@ -261,7 +267,7 @@ class SourceRequestGate:
                     reset = (
                         """consecutive_failures=greatest(consecutive_failures-1,0),
                         last_error_code=case when consecutive_failures>1 then last_error_code end"""
-                        if self.network_lane is not None
+                        if self.network_lane is not None and row.get("last_error_code") != "rate_limited"
                         else "consecutive_failures=0,last_error_code=null"
                     )
                     cur.execute(
@@ -346,7 +352,9 @@ class SourceRequestGate:
                 )
             else:
                 failures = int(row["consecutive_failures"]) + 1 if code == row.get("last_error_code") else 1
-                if self.network_lane is not None and not server_delay:
+                if (
+                    self.network_lane is not None or (self.public_only and code == "rate_limited")
+                ) and not server_delay:
                     delay = public_backoff_seconds(code, failures, default=delay)
                 blocked = bool(row["blocked"]) or (not self.public_only and code in AUTH_ERRORS)
                 opens = (

@@ -627,3 +627,35 @@ def test_public_expired_probe_cannot_change_replacement_and_duplicate_failure_co
     current.finish_failure()
     assert row(public_lanes, current)["probe_token"] is None
     assert row(public_lanes, current)["cooldown_until"] == failure.retry_at
+
+
+def test_public_rate_pause_escalates_with_cap_and_never_two_hours(monkeypatch):
+    from trr_backend.ingestion.identity_policy import public_backoff_seconds
+
+    assert [public_backoff_seconds("rate_limited", n, default=900) for n in range(1, 8)] == [
+        60,
+        120,
+        240,
+        480,
+        900,
+        900,
+        900,
+    ]
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_PUBLIC_RATE_PAUSE_MAX_SECONDS", "180")
+    assert public_backoff_seconds("rate_limited", 12, default=900) == 180
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_PUBLIC_RATE_PAUSE_MAX_SECONDS", "7200")
+    assert public_backoff_seconds("rate_limited", 12, default=900) == 900
+
+
+def test_public_rate_pause_server_delay_wins_and_success_resets(public_lanes, monkeypatch):
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_PUBLIC_RATE_PAUSE_MAX_SECONDS", "60")
+    lane = public_gate(public_lanes)
+    lane.before_request()
+    started = datetime.now(UTC)
+    failure = lane.finish_failure("rate_limited", retry_after_seconds=1234)
+    assert started + timedelta(seconds=1234) <= failure.retry_at <= datetime.now(UTC) + timedelta(seconds=1234)
+    change(public_lanes, lane, "cooldown_until=clock_timestamp()-interval '1 second',consecutive_failures=4")
+    healthy = public_gate(public_lanes)
+    healthy.before_request()
+    healthy.finish_success()
+    assert row(public_lanes, healthy)["consecutive_failures"] == 0

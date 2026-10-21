@@ -10,7 +10,8 @@ from __future__ import annotations
 import asyncio
 import copy
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from typing import Any
 
 from trr_backend.ingestion.comments import (
@@ -19,6 +20,7 @@ from trr_backend.ingestion.comments import (
     CommentSourceError,
     CursorStalledError,
     comment_page_failure,
+    native_child_rejection,
 )
 from trr_backend.socials.instagram.credential_guard import CredentialIdentityMismatch
 from trr_backend.socials.instagram.public_response import parse_public_retry_after
@@ -439,6 +441,13 @@ class PublicRelayResume:
             # parent's child root instead of borrowing the top query identity.
             return result
 
+        access = pages.get("reply_access") or {}
+        retry_at = access.get("next_attempt_at")
+        try:
+            deferred = bool(retry_at and datetime.fromisoformat(retry_at.replace("Z", "+00:00")) > datetime.now(UTC))
+        except (ValueError, TypeError):
+            raise CommentSourceError("Invalid reply access retry timestamp") from None
+        rejected_lanes = set(access.get("lanes") or [])
         top_lane = lanes.get("__top__") or {}
         top = lane_resume(top_lane, root=True)
         replies = {}
@@ -446,6 +455,9 @@ class PublicRelayResume:
             lane = lanes.get(parent.comment_id) or {}
             if parent.comment_id in restarts:
                 replies[parent.comment_id] = {"pending": True}
+                continue
+            if parent.comment_id in rejected_lanes:
+                replies[parent.comment_id] = {"pending": not deferred, "deferred": deferred}
                 continue
             item = lane_resume(lane, root=False)
             expected = (observed.get(parent.comment_id) or {}).get("expected_replies")
@@ -505,15 +517,28 @@ class PublicRelayCommentSource:
         if expected is None:
             expected = _count((checkpoint.get("comment_pages") or {}).get("expected"))
         if resume.top.get("exhausted") and not any(item.get("pending") for item in resume.replies.values()):
-            return CommentFetchSummary(expected_count=expected, full_observation=resume.from_root)
+            deferred = tuple(key for key, item in resume.replies.items() if item.get("deferred"))
+            return CommentFetchSummary(
+                expected_count=expected,
+                full_observation=resume.from_root,
+                reply_lanes_rejected=deferred,
+                reply_access_code="reply_access_rejected" if deferred else None,
+            )
 
         def before(kind):
             if kind not in {"relay_bootstrap", "graphql_comments", "graphql_replies"}:
                 _guard(_unsupported, kind)
             _guard(pre_source_request)
 
+        rejected_lanes = set()
+        reply_retry_after = None
+
         def observe(kind, payload):
             def retain():
+                nonlocal reply_retry_after
+                rejected_reply = kind == "graphql_replies" and native_child_rejection(payload)
+                if rejected_reply:
+                    rejected_lanes.add(str(payload.get("parent_comment_id") or ""))
                 failure = comment_page_failure(payload)
                 if failure is not None:
                     from trr_backend.ingestion.public_diagnostics import record_public_comment_failure_basis
@@ -528,11 +553,17 @@ class PublicRelayCommentSource:
                 try:
                     source_observer(kind, payload)
                 except CommentSourceError:
+                    if rejected_reply:
+                        return
                     if failure and source_failure_observer is not None:
                         source_failure_observer(
                             "public_access_backoff" if failure[0] == "source_auth_failed" else failure[0], delay
                         )
                     raise
+                if rejected_reply:
+                    if delay is not None:
+                        reply_retry_after = max(reply_retry_after or 0, delay)
+                    return
                 if failure:
                     if source_failure_observer is not None:
                         source_failure_observer(
@@ -579,6 +610,19 @@ class PublicRelayCommentSource:
                     persisted_top_level_comments=parents,
                 )
                 summary = _summary(result, expected=expected, from_root=resume.from_root, capped=False)
+                completed = set(
+                    ((getattr(result, "diagnostic_metadata", None) or {}).get("relay_comments") or {})
+                    .get("child_comments", {})
+                    .get("completed_parent_ids", [])
+                )
+                unresolved = rejected_lanes - completed
+                if unresolved:
+                    summary = replace(
+                        summary,
+                        reply_lanes_rejected=tuple(sorted(set(summary.reply_lanes_rejected) | unresolved)),
+                        reply_access_code="reply_access_rejected",
+                        reply_retry_after_seconds=reply_retry_after,
+                    )
                 failed = False
                 return summary
             finally:
@@ -683,9 +727,17 @@ def _summary(result: Any, *, expected: int | None, from_root: bool, capped: bool
     if not isinstance(replies, (list, tuple)) or any(not isinstance(item, Mapping) for item in replies):
         raise CommentSourceError("Fetcher reply checkpoints must be mappings")
     reason = getattr(result, "fetch_reason", None)
-    reason_failed = bool(reason and reason not in _SUCCESS_REASONS)
+    reason_failed = bool(reason and reason not in _SUCCESS_REASONS and reason != "reply_access_rejected")
     block_signal = getattr(result, "public_block_signal", "none")
-    blocked = bool(block_signal and block_signal != "none")
+    blocked = bool(block_signal and block_signal not in {"none", "reply_access_rejected"})
+    child = (metadata.get("relay_comments") or {}).get("child_comments") or {}
+    completed = set(child.get("completed_parent_ids", []))
+    rejected = tuple(
+        sorted(
+            {str(item["parent_id"]) for item in child.get("rejected_lanes", [])} - completed
+            | set(child.get("pending_parent_ids", []))
+        )
+    )
     # DTO success cannot certify native pagination; CommentActivity separately
     # requires the retained top/reply page and count proofs.
     return CommentFetchSummary(
@@ -700,4 +752,6 @@ def _summary(result: Any, *, expected: int | None, from_root: bool, capped: bool
         top_level_checkpoint=top,
         reply_checkpoints=tuple(_checkpoint(item, root=from_root) for item in replies if item),
         full_observation=from_root and not capped,
+        reply_lanes_rejected=rejected,
+        reply_access_code="reply_access_rejected" if rejected else None,
     )

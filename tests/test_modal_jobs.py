@@ -512,6 +512,34 @@ def test_probe_instagram_public_history_scrubs_auth_proxy_and_decodo_env(
     assert os.environ["DECODO_USERNAME"] == "decodo-user"
 
 
+def test_probe_instagram_child_reply_access_is_anonymous_and_restores_environment(monkeypatch):
+    from trr_backend.socials.instagram import child_reply_probe
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COOKIES_JSON", "private-cookies")
+    monkeypatch.setenv("TRR_INSTAGRAM_INGESTION_AUTH_USERNAME", "livestnation")
+    monkeypatch.setenv("DECODO_PASSWORD", "private-proxy")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example")
+
+    def fake_probe(shortcode, parent):
+        assert (shortcode, parent) == ("DY1vXi-kRBb", "17966467277918174")
+        for name in (
+            "SOCIAL_INSTAGRAM_COOKIES_JSON",
+            "TRR_INSTAGRAM_INGESTION_AUTH_USERNAME",
+            "DECODO_PASSWORD",
+            "HTTPS_PROXY",
+        ):
+            assert name not in os.environ
+        return {"requests": 3, "positive_reply_proof": False}
+
+    monkeypatch.setattr(child_reply_probe, "probe_child_reply_access", fake_probe)
+    result = modal_jobs.probe_instagram_child_reply_access.local("DY1vXi-kRBb", "17966467277918174")
+    assert result["auth_state"] == "public"
+    assert result["proxy_state"] == "none"
+    assert result["execution_backend"] == "modal"
+    assert os.environ["SOCIAL_INSTAGRAM_COOKIES_JSON"] == "private-cookies"
+    assert os.environ["DECODO_PASSWORD"] == "private-proxy"
+
+
 def test_probe_instagram_public_history_accepts_and_returns_resume_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

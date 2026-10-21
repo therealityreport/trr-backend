@@ -186,20 +186,8 @@ class AccountBudget:
         with self._db() as db:
             db.execute("begin immediate")
             started = db.execute("select started_at from tranches where id=?", (self.tranche,)).fetchone()[0]
-            count = db.execute("select count(*) from requests where tranche=?", (self.tranche,)).fetchone()[0]
-            recent = [
-                row[0]
-                for row in db.execute(
-                    "select sent_at from requests where account=? and sent_at>? order by sent_at",
-                    (self.account, now - 86400),
-                )
-            ]
             if now < started or now - started >= 900:
                 reason = "validation_time_budget"
-            elif count >= 50:
-                reason = "validation_tranche_budget"
-            elif len(recent) >= 200:
-                reason, retry_at = "validation_daily_budget", recent[-200] + 86400
             if reason:
                 db.execute("update tranches set pause_reason=? where id=?", (reason, self.tranche))
             else:
@@ -230,7 +218,7 @@ class AccountBudget:
         return {
             "account": self.account,
             "rolling_24h_requests": len(events),
-            "remaining_24h_requests": max(0, 200 - len(events)),
+            "remaining_24h_requests": None,
             "request_events": events,
             "tranches": tranches,
         }
@@ -390,10 +378,20 @@ def inspect_run(store, manifest, run_id):
         )
         retrievals = [dict(row) for row in cur.fetchall()]
         for row in retrievals:
+            target = next(
+                item for item in targets if item["stage"] == row["stage"] and item["target_key"] == row["target_key"]
+            )
+            reply_rejected = (target.get("checkpoint") or {}).get("last_error_code") == "reply_access_rejected"
             row["reason"] = (
                 "fresh_retrieval_committed"
                 if row["verified"]
-                else (row["outcome"] if row["outcome"] != "committed" else "missing_fresh_source_receipt")
+                else (
+                    "reply_access_rejected"
+                    if reply_rejected
+                    else row["outcome"]
+                    if row["outcome"] != "committed"
+                    else "missing_fresh_source_receipt"
+                )
             )
         passed = run["state"] == "completed" and bool(retrievals) and all(row["verified"] for row in retrievals)
         validation = {
@@ -448,7 +446,10 @@ class BoundedSource:
             original_observe(kind, payload, *args, **kwargs)
             # Production CommentActivity's observer returns only after _persist_page commits.
             lane = {"graphql_comments": "parent", "graphql_replies": "child"}.get(kind)
-            if self.comments and self.interrupt_after and lane == self.interrupt_after:
+            from trr_backend.ingestion.comments import comment_page_failure, native_child_rejection
+
+            successful_page = not comment_page_failure(payload) and not native_child_rejection(payload)
+            if self.comments and self.interrupt_after and lane == self.interrupt_after and successful_page:
                 self.pause = "validation_interrupted_" + lane
                 raise ValidationPause(self.pause, datetime.now(UTC))
 

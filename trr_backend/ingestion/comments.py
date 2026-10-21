@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -68,6 +69,9 @@ class CommentFetchSummary:
     top_level_checkpoint: dict[str, Any] | None = None
     reply_checkpoints: tuple[dict[str, Any], ...] = ()
     full_observation: bool = False
+    reply_lanes_rejected: tuple[str, ...] = ()
+    reply_access_code: str | None = None
+    reply_retry_after_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -88,6 +92,67 @@ class CommentSource(Protocol):
         source_observer: Callable[[str, Mapping[str, Any]], None],
         pre_source_request: Callable[[], None],
     ) -> CommentFetchSummary: ...
+
+
+def native_child_rejection(payload: Mapping[str, Any]) -> bool:
+    """Operation-local native denial; HTTP and authentication guards still win."""
+    pending = [payload]
+    native_code = False
+    while pending:
+        value = pending.pop()
+        if isinstance(value, list):
+            pending.extend(value)
+            continue
+        if not isinstance(value, Mapping) or any(value.get(key) for key in ("id", "pk", "comment_id", "text")):
+            continue
+        if any(type(value.get(key)) is int and value[key] >= 300 for key in ("http_status", "status_code")):
+            return False
+        message = " ".join(str(value.get(key) or "").lower() for key in ("message", "error_message", "error_type"))
+        if any(
+            value.get(key) for key in ("login_required", "auth_failed", "checkpoint_required", "challenge_required")
+        ) or any(
+            token in message
+            for token in ("login", "checkpoint", "challenge", "unauthorized", "forbidden", "authentication")
+        ):
+            return False
+        native_code = native_code or any(str(value.get(key)) == "1675004" for key in ("code", "error_code"))
+        pending.extend(
+            value[key]
+            for key in ("errors", "error", "extensions", "data", "graphql", "comments", "child_comments", *_CONNECTIONS)
+            if key in value
+        )
+    return native_code or payload.get("reply_access_untrusted") is True
+
+
+def _reply_access_retry(state, summary, now):
+    previous = state.get("reply_access") or {}
+    if previous.get("next_attempt_at"):
+        retry_at = datetime.fromisoformat(previous["next_attempt_at"].replace("Z", "+00:00"))
+        if retry_at > now:
+            return Failure("reply_access_rejected", retry_at=retry_at)
+    attempts = max(0, int(previous.get("attempts") or 0)) + 1
+    try:
+        cap = float(os.environ.get("SOCIAL_INSTAGRAM_PUBLIC_REPLY_RETRY_CAP_SECONDS", 3600))
+    except (ValueError, TypeError, OverflowError):
+        cap = 3600
+    if not math.isfinite(cap) or cap < 1:
+        cap = 3600
+    delay = min(300 * 2 ** min(attempts - 1, 10), cap)
+    server_delay = summary.reply_retry_after_seconds
+    if server_delay is not None and math.isfinite(server_delay) and server_delay >= 0:
+        delay = max(delay, server_delay)
+    try:
+        retry_at = now + timedelta(seconds=delay)
+    except OverflowError:
+        retry_at = datetime.max.replace(tzinfo=UTC)
+    state["reply_access"] = {
+        "code": summary.reply_access_code or "reply_access_rejected",
+        "rejected_at": utc_timestamp(now),
+        "attempts": attempts,
+        "next_attempt_at": utc_timestamp(retry_at),
+        "lanes": sorted(set(summary.reply_lanes_rejected)),
+    }
+    return Failure("reply_access_rejected", retry_at=retry_at)
 
 
 def _count(value: Any) -> int | None:
@@ -570,6 +635,7 @@ def _advance(state: dict[str, Any], page: CommentPage, *, scan_started_at: datet
 def _valid_source_summary(summary: CommentFetchSummary) -> bool:
     return not (
         summary.fetch_failed
+        or summary.reply_lanes_rejected
         or summary.auth_failed
         or summary.retryable
         or summary.top_level_checkpoint
@@ -681,7 +747,8 @@ class CommentActivity:
             if kind not in {"comments_api", "graphql_comments", "graphql_replies", "graphql_preview"}:
                 raise CommentSourceError("Unsupported source comment page kind")
             retained_payload = dict(payload)
-            if comment_page_failure(payload):
+            rejected_reply = kind == "graphql_replies" and native_child_rejection(payload)
+            if comment_page_failure(payload) or rejected_reply:
                 # Error messages are intentionally outside the evidence allowlist.
                 # Preserve a fixed failed-request fact so offline replay cannot
                 # discard that rejection while retaining terminal pagination.
@@ -693,6 +760,8 @@ class CommentActivity:
                 payload=retained_payload,
             )
             evidence_id = self.store.retain_evidence(**owned, evidence=evidence)
+            if rejected_reply:
+                return
             # Preview samples remain retained but cannot become full-comments rows.
             if kind == "graphql_preview":
                 return
@@ -715,6 +784,11 @@ class CommentActivity:
                         if value["parent"] != page.parent_comment_id
                     }
             _advance(updated, page, scan_started_at=attempt_started_at)
+            access = updated.get("reply_access")
+            if access and page.parent_comment_id and page.exhausted:
+                access["lanes"] = [identity for identity in access["lanes"] if identity != page.parent_comment_id]
+                if not access["lanes"]:
+                    updated.pop("reply_access")
             if not page.parent_comment_id and (page.started_from_root or "__top__" not in state["lanes"]):
                 updated["scan_root_evidence_id"] = evidence_id
             next_checkpoint = {**current_checkpoint, "comment_pages": updated}
@@ -756,6 +830,21 @@ class CommentActivity:
         )
         if not isinstance(summary, CommentFetchSummary):
             raise TypeError("Comment source must return a typed CommentFetchSummary")
+        if (
+            summary.reply_lanes_rejected
+            and not summary.fetch_failed
+            and not summary.auth_failed
+            and state["lanes"].get("__top__", {}).get("exhausted")
+        ):
+            failure = _reply_access_retry(state, summary, self.clock())
+            current_checkpoint = {**current_checkpoint, "comment_pages": state}
+            self.store.checkpoint_failure(**owned, failure=failure, checkpoint=current_checkpoint, requests=0)
+            return {
+                "outcome": Outcome.UNRESOLVED.value,
+                "checkpoint": current_checkpoint,
+                "complete": False,
+                "failure": failure,
+            }
         if retained is None:
             return {"outcome": Outcome.UNRESOLVED.value, "checkpoint": current_checkpoint, "complete": False}
         evidence_id, evidence, page = retained
@@ -858,7 +947,12 @@ class CommentActivity:
             # Legacy progress may lack the safe missing-row cutoff. Retain that
             # absence: it cannot settle or mark missing without a fresh root.
             receipt_state.pop("scan_started_at", None)
-        if set(nodes) != set(state["observed"]) or not pages or receipt_state != state:
+        # Reply retry administration is written when releasing a target, outside
+        # the atomic native-page receipt. Every page-derived field must still
+        # match its committed proof exactly.
+        receipt_proof = {key: value for key, value in receipt_state.items() if key != "reply_access"}
+        target_proof = {key: value for key, value in state.items() if key != "reply_access"}
+        if set(nodes) != set(state["observed"]) or not pages or receipt_proof != target_proof:
             raise CommentSourceError("Durable comment inventory lacks matching committed page proof")
         return tuple(nodes[key] for key in sorted(nodes)), proof
 

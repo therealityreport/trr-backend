@@ -983,7 +983,7 @@ def test_retained_26_parent_shape_compares_legacy_fetch_coverage_with_strict_rep
 
         result = asyncio.run(legacy())
         assert result.fetch_failed is False
-        assert len(result.comments) == 26 and children == [] and len(calls) == 3
+        assert len(result.comments) == 26 and children == [f"p{i}" for i in range(26)] and len(calls) == 29
     assert len(created) == 1
 
 
@@ -1284,3 +1284,220 @@ def test_fresh_public_june_request_and_unknown_child_probe(monkeypatch, count):
     fetch, _ = source(monkeypatch, handler, expected=1)
     fetch(shortcode="fixture", checkpoint={}, source_observer=lambda *args: None, pre_source_request=lambda: None)
     assert calls == ([None] if count == 0 else [None, "p"])
+
+
+@pytest.mark.parametrize("trusted", [False, True])
+@pytest.mark.parametrize("server_delay", [None, 1200, 7200])
+@pytest.mark.parametrize("delay_location", ["header", "payload", "both"])
+def test_native_child_rejection_isolated_from_parents_and_alternate_empty_trust(
+    database, monkeypatch, trusted, server_delay, delay_location
+):
+    from trr_backend.ingestion.composition import _GatedSource
+
+    store, tx, args = setup(database)
+    calls, rejected = [], []
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_PUBLIC_CHILD_ALT_DOC_TRUSTED", str(trusted).lower())
+    monkeypatch.setattr(
+        maintained,
+        "_post_child_comments_graphql_doc_attempts",
+        lambda: [
+            ("PolarisPostChildCommentsQuery", "34884685271179117"),
+            ("PolarisPostCommentsChildrenPaginationtQuery", "36239935742272683"),
+        ],
+    )
+
+    def handler(request):
+        if request.method == "GET":
+            return bootstrap()
+        fields, variables = body(request)
+        parent = variables.get("parent_comment_id")
+        calls.append((parent, fields["doc_id"], variables.get("after")))
+        if not parent:
+            if variables.get("after"):
+                return httpx.Response(200, json=page([actual_parent_shape("p2", 0)], count=2))
+            return httpx.Response(200, json=page([actual_parent_shape("p")], more=True, after="tail", count=2))
+        if fields["doc_id"] == "34884685271179117":
+            return httpx.Response(
+                200,
+                json={
+                    "errors": [{"code": 1675004, "message": "Rate limit exceeded"}],
+                    **({"retry_after": server_delay} if server_delay and delay_location in {"payload", "both"} else {}),
+                },
+                headers={"retry-after": str(37 if delay_location == "both" else server_delay)}
+                if server_delay and delay_location in {"header", "both"}
+                else {},
+            )
+        assert fields["doc_id"] == "36239935742272683" and variables.get("after") is None
+        return httpx.Response(200, json=page([], child=True))
+
+    class Gate:
+        request_count = 0
+        successes = 0
+
+        def before_request(self):
+            self.request_count += 1
+
+        def record_success(self):
+            self.successes += 1
+
+        def finish_failure(self, code=None, **kwargs):
+            rejected.append(code)
+            pytest.fail("Native child rejection poisoned the identity gate")
+
+    fetch, _ = source(monkeypatch, handler, expected=2)
+    gate = Gate()
+    result = CommentActivity(
+        store, _GatedSource(fetch, gate, failure_code="comment_fetch_failed"), clock=lambda: OBSERVED
+    ).execute(**args)
+    assert rejected == [] and gate.successes >= 2
+    assert [item[0] for item in calls] == ([None, None, "p"] if server_delay else [None, None, "p", "p"])
+    state = result["checkpoint"]["comment_pages"]
+    assert state["lanes"]["__top__"]["exhausted"] is True
+    assert len(state["observed"]) == 2
+    if trusted and not server_delay:
+        assert result["complete"] is True
+        assert state["lanes"]["p"]["exhausted"] is True
+    else:
+        assert result["complete"] is False and result["outcome"] == "unresolved"
+        assert result["failure"].code == "reply_access_rejected"
+        access = state["reply_access"]
+        assert access["attempts"] == 1 and access["lanes"] == ["p"]
+        assert datetime.fromisoformat(access["next_attempt_at"].replace("Z", "+00:00")) == OBSERVED + timedelta(
+            seconds=server_delay or 300
+        )
+        durable = existing.query(
+            tx, "select * from social.instagram_ingestion_targets where run_id=%s", (args["run_id"],)
+        )[0]
+        assert durable["checkpoint"]["comment_pages"]["reply_access"] == access
+        assert durable["blocked_reason"] is None
+        assert durable["checkpoint"]["last_error_code"] == "reply_access_rejected"
+    evidence = existing.query(
+        tx, "select payload from social.instagram_ingestion_evidence where run_id=%s", (args["run_id"],)
+    )
+    assert any(json.loads(row["payload"]).get("status") == "fail" for row in evidence)
+
+
+def test_native_child_rejection_circuit_retains_all_pending_lanes(monkeypatch):
+    calls, retained = [], []
+
+    def handler(request):
+        if request.method == "GET":
+            return bootstrap()
+        fields, variables = body(request)
+        parent = variables.get("parent_comment_id")
+        if parent is None:
+            return httpx.Response(200, json=page([actual_parent_shape(f"p{i}") for i in range(6)]))
+        calls.append((parent, fields["doc_id"]))
+        return httpx.Response(200, json={"errors": [{"code": 1675004, "message": "Rate limit exceeded"}]})
+
+    fetch, _ = source(monkeypatch, handler, expected=6)
+    summary = fetch(
+        shortcode="fixture",
+        checkpoint={},
+        source_observer=lambda *args: retained.append(args),
+        pre_source_request=lambda: None,
+        source_failure_observer=lambda *args: pytest.fail("child rejection reached shared gate"),
+    )
+    assert calls == [("p0", "36239935742272683"), ("p0", "34884685271179117"), ("p1", "36239935742272683")]
+    assert summary.reply_lanes_rejected == tuple(f"p{i}" for i in range(6))
+    assert summary.fetch_failed is False and summary.reply_access_code == "reply_access_rejected"
+    assert len([item for item in retained if item[0] == "graphql_replies"]) == 3
+
+
+def test_reply_rejection_resume_defers_then_restarts_child_root():
+    from types import SimpleNamespace
+
+    now = datetime.now(UTC)
+    checkpoint = {
+        "comment_pages": {
+            "adapter_family": "instagram_public_relay",
+            "adapter_version": 1,
+            "observed": {"p": {"expected_replies": None}},
+            "lanes": {
+                "p": {
+                    "exhausted": False,
+                    "relay_doc_id": "34884685271179117",
+                    "relay_friendly_name": "PolarisPostChildCommentsQuery",
+                    "sort_order": "popular",
+                    "page_size": 12,
+                    "cursors": ["old-tail"],
+                    "cursor_param": "after",
+                }
+            },
+            "reply_access": {"lanes": ["p"], "next_attempt_at": (now + timedelta(minutes=5)).isoformat()},
+        }
+    }
+    parents = [SimpleNamespace(comment_id="p", replies=[])]
+    deferred = PublicRelayResume.from_checkpoint(checkpoint, parents)
+    assert deferred.replies == {"p": {"pending": False, "deferred": True}}
+    checkpoint["comment_pages"]["reply_access"]["next_attempt_at"] = (now - timedelta(seconds=1)).isoformat()
+    ready = PublicRelayResume.from_checkpoint(checkpoint, parents)
+    assert ready.replies == {"p": {"pending": True, "deferred": False}}
+
+
+def test_rejected_reply_checkpoint_releases_reserves_and_resumes_to_completion(database, monkeypatch):
+    store, tx, args = setup(database)
+    attempt, calls = 0, []
+
+    def handler(request):
+        if request.method == "GET":
+            return bootstrap()
+        _, variables = body(request)
+        parent = variables.get("parent_comment_id")
+        calls.append((attempt, parent, variables.get("after")))
+        if parent is None:
+            assert attempt == 0, "Resumed a natively exhausted parent lane"
+            return httpx.Response(200, json=page([actual_parent_shape("p")], count=1))
+        if attempt == 0:
+            return httpx.Response(200, json={"errors": [{"code": 1675004, "message": "Rate limit exceeded"}]})
+        reply = actual_parent_shape("r")
+        reply.pop("parent_comment_id")
+        return httpx.Response(200, json=page([reply], child=True))
+
+    fetch, _ = source(monkeypatch, handler, expected=1)
+    first = CommentActivity(store, fetch, clock=lambda: OBSERVED).execute(**args)
+    assert first["outcome"] == "unresolved" and first["failure"].code == "reply_access_rejected"
+    durable = existing.query(tx, "select * from social.instagram_ingestion_targets where run_id=%s", (args["run_id"],))[
+        0
+    ]
+    assert durable["owner_token"] is None and durable["checkpoint"]["comment_pages"]["reply_access"]["attempts"] == 1
+    reserved = store.reserve(
+        args["run_id"], args["account"], generation=1, stage=Stage.COMMENTS, target_key=args["target_key"]
+    )
+    args["owner_token"] = str(reserved["owner_token"])
+    attempt = 1
+    result = CommentActivity(store, fetch, clock=lambda: OBSERVED + timedelta(minutes=10)).execute(**args)
+    assert result["complete"] is True and result["outcome"] == "committed"
+    assert "reply_access" not in result["checkpoint"]["comment_pages"]
+    assert [item for item in calls if item[0] == 1] == [(1, "p", None)]
+    assert set(result["checkpoint"]["comment_pages"]["observed"]) == {"p", "r"}
+
+
+@pytest.mark.parametrize(
+    "identity,text",
+    [
+        ("1231675004999", "ordinary reply"),
+        ("reply", "Native error 1675004 and Rate limit exceeded are ordinary words here"),
+    ],
+)
+def test_ordinary_child_content_cannot_become_native_request_rejection(monkeypatch, identity, text):
+    def handler(request):
+        if request.method == "GET":
+            return bootstrap()
+        _, variables = body(request)
+        if not variables.get("parent_comment_id"):
+            return httpx.Response(200, json=page([actual_parent_shape("p")]))
+        reply = actual_parent_shape(identity)
+        reply.pop("parent_comment_id")
+        reply["text"] = text
+        return httpx.Response(200, json=page([reply], child=True))
+
+    fetch, _ = source(monkeypatch, handler, expected=1)
+    summary = fetch(
+        shortcode="fixture",
+        checkpoint={},
+        source_observer=lambda *args: None,
+        pre_source_request=lambda: None,
+        source_failure_observer=lambda *args: pytest.fail("Ordinary reply poisoned the shared gate"),
+    )
+    assert summary.reply_lanes_rejected == () and summary.fetch_failed is False

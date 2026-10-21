@@ -441,7 +441,13 @@ class _GatedSource:
 
                 raise InvalidSourceError("Source response has no admitted source request")
             payload = next((arg for arg in args if isinstance(arg, Mapping)), kwargs.get("payload", {}))
-            if not payload.get("errors") and payload.get("status") in (None, "ok"):
+            from trr_backend.ingestion.comments import native_child_rejection
+
+            if (
+                not payload.get("errors")
+                and payload.get("status") in (None, "ok")
+                and not native_child_rejection(payload)
+            ):
                 self.gate.record_success()
 
         def rejected_response(code, retry_after_seconds):

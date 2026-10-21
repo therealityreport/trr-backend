@@ -184,10 +184,17 @@ class Worker:
                     if close:
                         close()
             if result.get("outcome") == "unresolved":
-                self.release(
-                    owned, Failure("observation_incomplete", retry_at=datetime.now(UTC) + timedelta(seconds=60))
-                )
-            source_settled = result.get("outcome", "committed") in {
+                failure = result.get("failure")
+                if not isinstance(failure, Failure):
+                    self.release(
+                        owned, Failure("observation_incomplete", retry_at=datetime.now(UTC) + timedelta(seconds=60))
+                    )
+                elif failure.code != "reply_access_rejected":
+                    self.release(owned, failure)
+            source_settled = (
+                isinstance(result.get("failure"), Failure) and result["failure"].code == "reply_access_rejected"
+            )
+            source_settled = source_settled or result.get("outcome", "committed") in {
                 Outcome.COMMITTED.value,
                 Outcome.CACHED.value,
                 Outcome.UNAVAILABLE.value,

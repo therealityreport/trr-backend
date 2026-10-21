@@ -13,6 +13,7 @@ ERROR_CODES = frozenset(
         "unauthorized",
         "forbidden",
         "rate_limited",
+        "reply_access_rejected",
         "redirect_login",
         "login_required",
         "challenge_required",

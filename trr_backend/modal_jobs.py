@@ -1653,6 +1653,52 @@ def probe_instagram_public_history(
 
 
 @app.function(
+    name="probe_instagram_child_reply_access",
+    image=_FUNCTION_IMAGE_BINDINGS["run_social_comments_job"],
+    secrets=_secrets,
+    retries=0,
+    timeout=120,
+    max_containers=1,
+)
+def probe_instagram_child_reply_access(shortcode: str, parent_comment_id: str) -> dict[str, object]:
+    """Anonymous, at most three sends; caller accounts for them before dispatch.
+
+    No schedule, database mutation, pagination, proxy, saved cookies or retry.
+    Only safe response metadata and public reply identifiers leave the worker.
+    """
+    from trr_backend.socials.instagram.child_reply_probe import probe_child_reply_access
+    from trr_backend.socials.instagram.public_probe import (
+        AUTH_ENV_VARS,
+        COOKIE_ENV_VARS,
+        DECODO_ENV_VARS,
+        PROXY_ENV_VARS,
+        PROXY_PROVIDER_ENV_VARS,
+    )
+
+    names = {
+        *AUTH_ENV_VARS,
+        *COOKIE_ENV_VARS,
+        *DECODO_ENV_VARS,
+        *PROXY_ENV_VARS,
+        *PROXY_PROVIDER_ENV_VARS,
+        "TRR_INSTAGRAM_INGESTION_AUTH_USERNAME",
+        "TRR_INSTAGRAM_INGESTION_AUTH_USER_ID",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    }
+    saved = {name: os.environ.pop(name) for name in names if name in os.environ}
+    try:
+        result = probe_child_reply_access(shortcode, parent_comment_id)
+        return {**result, "execution_backend": "modal", "auth_state": "public", "proxy_state": "none"}
+    finally:
+        os.environ.update(saved)
+
+
+@app.function(
     name=str(os.getenv("TRR_MODAL_GETTY_REMOTE_PROBE_FUNCTION") or "probe_getty_remote_access").strip()
     or "probe_getty_remote_access",
     image=_FUNCTION_IMAGE_BINDINGS["run_social_job"],

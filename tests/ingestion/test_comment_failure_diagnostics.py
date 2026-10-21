@@ -173,3 +173,51 @@ def test_async_context_does_not_leak_basis_to_other_attempt():
 
     assert asyncio.run(one())["bases"] == ["explicit_rate_true"]
     assert current_public_comment_failure_basis() is None
+
+
+def test_reply_access_failure_code_has_safe_public_projection():
+    reset_public_diagnostic()
+    record_public_diagnostic(
+        {
+            "event": "instagram_public_request_failed",
+            "error_code": "reply_access_rejected",
+            "status": 200,
+            "method": "POST",
+            "endpoint_category": "graphql",
+        }
+    )
+    assert current_public_diagnostic()["error_code"] == "reply_access_rejected"
+
+
+@pytest.mark.parametrize(
+    "payload,expected",
+    [
+        ({"errors": [{"code": 1675004}]}, True),
+        ({"errors": [{"extensions": {"error_code": 1675004}}]}, True),
+        ({"errors": [{"message": "Rate limit exceeded 1675004"}]}, False),
+        ({"errors": [{"code": 1675004, "message": "login_required"}]}, False),
+        ({"errors": [{"code": 1675004}], "status_code": 429}, False),
+        ({"errors": [{"message": "Rate limit exceeded"}], "comments": [{"pk": "1675004", "text": "1675004"}]}, False),
+    ],
+)
+def test_native_child_rejection_requires_native_code_and_preserves_http_auth(payload, expected):
+    from trr_backend.ingestion.comments import native_child_rejection
+
+    assert native_child_rejection(payload) is expected
+
+
+def test_reply_retry_backoff_cap_and_server_delay(monkeypatch):
+    from datetime import timedelta
+
+    from trr_backend.ingestion.comments import CommentFetchSummary, _reply_access_retry
+
+    state = {}
+    now = datetime(2026, 10, 20, tzinfo=UTC)
+    summary = CommentFetchSummary(reply_lanes_rejected=("p",))
+    for seconds in (300, 600, 1200, 2400, 3600, 3600):
+        failure = _reply_access_retry(state, summary, now)
+        assert failure.retry_at - now == timedelta(seconds=seconds)
+        now = failure.retry_at
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_PUBLIC_REPLY_RETRY_CAP_SECONDS", "60")
+    server = CommentFetchSummary(reply_lanes_rejected=("p",), reply_retry_after_seconds=7200)
+    assert _reply_access_retry({}, server, now).retry_at - now == timedelta(hours=2)
