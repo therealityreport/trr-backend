@@ -361,18 +361,23 @@ def inspect_run(store, manifest, run_id):
         validate_catalog(conn, manifest)
         cur.execute(
             """select t.stage,t.target_key,t.outcome,
-                (t.outcome='committed' and t.requests>0 and exists(
-                    select 1 from social.instagram_ingestion_receipts r
+                (t.outcome='committed' and t.requests>0 and fresh.receipt_id is not null) as verified,
+                fresh.canonical_identity->'settlement' as settlement
+                from social.instagram_ingestion_targets t
+                join social.instagram_ingestion_runs runs using(run_id)
+                left join lateral (
+                    select r.receipt_id,r.canonical_identity
+                    from social.instagram_ingestion_receipts r
                     join social.instagram_ingestion_evidence e
                         using(evidence_id,run_id,stage,target_key)
-                    where r.run_id=t.run_id and r.stage=t.stage and r.target_key=t.target_key
+                    where t.outcome='committed' and t.requests>0
+                        and r.run_id=t.run_id and r.stage=t.stage and r.target_key=t.target_key
                         and r.outcome='committed' and r.owner_generation=t.owner_generation
                         and r.observed_at=t.observed_at and e.captured_at=r.observed_at
                         and e.captured_at>=runs.created_at and e.payload is not null
                         and r.committed_at>=e.captured_at
-                )) as verified
-                from social.instagram_ingestion_targets t
-                join social.instagram_ingestion_runs runs using(run_id)
+                    order by r.committed_at desc,r.receipt_id desc limit 1
+                ) fresh on true
                 where t.run_id=%s order by t.stage,t.target_key""",
             (run_id,),
         )

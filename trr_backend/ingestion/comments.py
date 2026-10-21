@@ -14,7 +14,7 @@ from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol, TypedDict
 from uuid import uuid4
 
 from psycopg2.extras import RealDictCursor
@@ -656,15 +656,31 @@ def _scan_cutoff(state: Mapping[str, Any], *, captured_at: datetime) -> datetime
     return started.astimezone(UTC)
 
 
-def _complete(state: dict[str, Any], summary: CommentFetchSummary) -> bool:
+class CommentSettlement(TypedDict):
+    basis: Literal["count_parity", "public_native_exhaustion"]
+    expected_total: int
+    observed_total: int
+    count_gap: int
+
+
+def _settlement(state: dict[str, Any], summary: CommentFetchSummary) -> CommentSettlement | None:
     if not summary.full_observation or not _valid_source_summary(summary):
-        return False
+        return None
     expected = summary.expected_count if summary.expected_count is not None else state["expected"]
-    if _count(expected) is None or len(state["observed"]) < expected:
-        return False
+    if _count(expected) is None:
+        return None
     top = state["lanes"].get("__top__", {})
     if not top.get("exhausted") or any(lane.get("repeated") for lane in state["lanes"].values()):
-        return False
+        return None
+    observed_total = len(state["observed"])
+    count_gap = max(expected - observed_total, 0)
+    if count_gap and not (
+        state.get("adapter_family") == "instagram_public_relay"
+        and state.get("adapter_version") == 1
+        and top.get("started_from_root") is True
+        and top.get("exhausted") is True
+    ):
+        return None
     child_counts = Counter(item["parent"] for item in state["observed"].values())
     for identity, observed in state["observed"].items():
         # Unknown counts remain unknown. A separate native leaf or complete
@@ -672,7 +688,7 @@ def _complete(state: dict[str, Any], summary: CommentFetchSummary) -> bool:
         count = observed["expected_replies"]
         lane = state["lanes"].get(identity)
         if observed.get("unsupported_reply_topology"):
-            return False
+            return None
         if count is None:
             root_exhausted = (
                 state.get("adapter_family") == "instagram_public_relay"
@@ -683,12 +699,21 @@ def _complete(state: dict[str, Any], summary: CommentFetchSummary) -> bool:
                 and all(lane.get(key) for key in ("relay_doc_id", "relay_friendly_name", "sort_order", "page_size"))
             )
             if not observed.get("native_reply_leaf") and not root_exhausted:
-                return False
+                return None
         elif child_counts[identity] < count:
-            return False
+            return None
         if lane is not None and not lane.get("exhausted"):
-            return False
-    return True
+            return None
+    return {
+        "basis": "public_native_exhaustion" if count_gap else "count_parity",
+        "expected_total": expected,
+        "observed_total": observed_total,
+        "count_gap": count_gap,
+    }
+
+
+def _complete(state: dict[str, Any], summary: CommentFetchSummary) -> bool:
+    return _settlement(state, summary) is not None
 
 
 class CommentActivity:
@@ -860,8 +885,12 @@ class CommentActivity:
             )
             return {"outcome": Outcome.UNAVAILABLE.value, "checkpoint": current_checkpoint, "receipt": receipt}
         scan_cutoff = _scan_cutoff(state, captured_at=evidence.captured_at)
-        if scan_cutoff is None or not _complete(state, summary):
+        settlement = _settlement(state, summary)
+        if scan_cutoff is None or settlement is None:
             return {"outcome": Outcome.UNRESOLVED.value, "checkpoint": current_checkpoint, "complete": False}
+
+        state = {**state, "settlement": settlement}
+        current_checkpoint = {**current_checkpoint, "comment_pages": state}
 
         def finish(conn):
             # Only a proved full observation may advance missing-comment state.
@@ -874,13 +903,14 @@ class CommentActivity:
                     and not is_missing""",
                     (evidence.captured_at, post_id, list(state["observed"]), scan_cutoff),
                 )
-            return {"post_id": post_id, "observed_comment_ids": sorted(state["observed"])}
+            return {"post_id": post_id, "observed_comment_ids": sorted(state["observed"]), "settlement": settlement}
 
         receipt = self.store.commit_target(
             **owned,
             observed_at=evidence.captured_at,
             evidence_id=evidence_id,
             write_canonical=finish,
+            checkpoint=current_checkpoint,
         )
         return {
             "outcome": Outcome.COMMITTED.value,

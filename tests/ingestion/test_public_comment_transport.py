@@ -1501,3 +1501,73 @@ def test_ordinary_child_content_cannot_become_native_request_rejection(monkeypat
         source_failure_observer=lambda *args: pytest.fail("Ordinary reply poisoned the shared gate"),
     )
     assert summary.reply_lanes_rejected == () and summary.fetch_failed is False
+
+
+@pytest.mark.parametrize("interruption", [None, "parent", "child", "settlement"])
+def test_public_native_exhaustion_gap_settles_atomic_checkpoint_and_root_proven_resume(
+    database, monkeypatch, interruption
+):
+    store, tx, args = setup(database, seed_missing=True)
+    calls = []
+    attempt = 0
+
+    def handler(request):
+        if request.method == "GET":
+            calls.append((attempt, "bootstrap"))
+            return bootstrap()
+        _, variables = body(request)
+        child = variables.get("parent_comment_id")
+        calls.append((attempt, "child" if child else "parent"))
+        if child:
+            assert child == "p"
+            return httpx.Response(200, json=page([node("r")], child=True, count=1))
+        return httpx.Response(200, json=page([node("p", 1)], count=5))
+
+    fetch, _ = source(monkeypatch, handler, expected=5)
+    commit = store.commit_target
+    if interruption == "settlement":
+
+        def fail(**kwargs):
+            raise RuntimeError("settlement interrupted")
+
+        monkeypatch.setattr(store, "commit_target", fail)
+    persist = CommentActivity._persist_page
+
+    def interrupt(activity, *positional, **kwargs):
+        persist(activity, *positional, **kwargs)
+        lane = "child" if kwargs["page"].parent_comment_id else "parent"
+        if attempt == 0 and interruption == lane:
+            raise RuntimeError("page interrupted")
+
+    monkeypatch.setattr(CommentActivity, "_persist_page", interrupt)
+    if interruption:
+        with pytest.raises(RuntimeError, match="interrupted"):
+            CommentActivity(store, fetch, clock=lambda: OBSERVED).execute(**args)
+        before = existing.query(
+            tx, "select checkpoint,outcome from social.instagram_ingestion_targets where run_id=%s", (args["run_id"],)
+        )[0]
+        assert before["outcome"] == "unresolved" and "settlement" not in before["checkpoint"]["comment_pages"]
+        assert existing.query(
+            tx,
+            "select is_missing from social.instagram_comments where post_id=%s and comment_id='old'",
+            (args["post_id"],),
+        ) == [{"is_missing": False}]
+        resume_tests.retry(database, args, cancel=True)
+        monkeypatch.setattr(store, "commit_target", commit)
+        attempt = 1
+        fetch, _ = source(monkeypatch, handler, expected=5)
+    result = CommentActivity(store, fetch, clock=lambda: OBSERVED + timedelta(hours=1)).execute(**args)
+    settlement = {"basis": "public_native_exhaustion", "expected_total": 5, "observed_total": 2, "count_gap": 3}
+    assert result["complete"] and result["receipt"]["canonical_identity"]["settlement"] == settlement
+    durable = existing.query(
+        tx, "select checkpoint,outcome from social.instagram_ingestion_targets where run_id=%s", (args["run_id"],)
+    )[0]
+    assert durable["outcome"] == "committed" and durable["checkpoint"] == result["checkpoint"]
+    assert durable["checkpoint"]["comment_pages"]["settlement"] == settlement
+    assert existing.query(
+        tx, "select is_missing from social.instagram_comments where post_id=%s and comment_id='old'", (args["post_id"],)
+    ) == [{"is_missing": True}]
+    if interruption:
+        assert (1, "parent") not in calls
+        if interruption != "parent":
+            assert not any(index == 1 for index, _ in calls)

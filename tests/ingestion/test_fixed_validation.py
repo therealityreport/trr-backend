@@ -598,3 +598,84 @@ def test_source_unavailable_workflow_completion_is_not_validation_acceptance(dat
     assert output["validation"]["scope"] == "frozen_target_retrieval_only"
     assert output["validation"]["capability_matrix_acceptance"] == "not_evaluated"
     assert output["validation"]["passed"] is False
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("invalidated", ["commit_time", "requests", "outcome"])
+def test_inspection_settlement_comes_from_same_fresh_qualifying_receipt(database, legacy, invalidated):
+    from datetime import UTC, datetime
+
+    from trr_backend.ingestion.domain import Stage
+    from trr_backend.ingestion.evidence import Evidence
+
+    store, tx = database
+    manifest, run = selected(database)
+    post = manifest.posts[0]
+    owned = {
+        "run_id": run["run_id"],
+        "account": manifest.account,
+        "generation": run["generation"],
+        "stage": Stage.COMMENTS,
+        "target_key": post.shortcode,
+    }
+    owned["owner_token"] = str(store.reserve(**owned)["owner_token"])
+    store.acquire(**owned)
+    store.check_owner(**owned, record_request=True)
+    now = datetime.now(UTC)
+    evidence = Evidence.capture(
+        source_identity=f"instagram:comments:{post.shortcode}:comments_api",
+        captured_at=now,
+        parser_version="instagram-comments-v1",
+        payload={"comments": [], "comment_count": 0, "has_more_comments": False},
+    )
+    evidence_id = store.retain_evidence(**owned, evidence=evidence)
+    settlement = {"basis": "public_native_exhaustion", "expected_total": 3, "observed_total": 1, "count_gap": 2}
+    receipt = store.commit_target(
+        **owned,
+        observed_at=now,
+        evidence_id=evidence_id,
+        write_canonical=lambda _: {} if legacy else {"settlement": settlement},
+    )
+    with tx() as conn, conn.cursor() as cur:
+        # A newer decoy has the right target, but lacks this target's generation.
+        cur.execute(
+            """insert into social.instagram_ingestion_receipts
+            (receipt_id,run_id,stage,target_key,owner_token,owner_generation,evidence_id,observed_at,outcome,
+             canonical_identity,committed_at)
+            values(%s,%s,'comments',%s,%s,999,%s,%s,'committed',%s::jsonb,clock_timestamp()+interval '1 second')""",
+            (
+                str(uuid4()),
+                run["run_id"],
+                post.shortcode,
+                str(uuid4()),
+                evidence_id,
+                now,
+                json.dumps({"settlement": {"basis": "decoy"}}),
+            ),
+        )
+    status = inspect_run(store, manifest, run["run_id"])
+    row = next(item for item in status["validation"]["targets"] if item["stage"] == "comments")
+    assert row["verified"] and row["settlement"] == (None if legacy else settlement)
+    assert status["validation"]["passed"] is False
+    with tx() as conn, conn.cursor() as cur:
+        if invalidated == "commit_time":
+            cur.execute(
+                """update social.instagram_ingestion_receipts set committed_at=%s-interval '1 second'
+                where receipt_id=%s""",
+                (now, receipt["receipt_id"]),
+            )
+        elif invalidated == "requests":
+            cur.execute(
+                "update social.instagram_ingestion_targets set requests=0 where run_id=%s and stage='comments'",
+                (run["run_id"],),
+            )
+        else:
+            cur.execute(
+                """update social.instagram_ingestion_targets set outcome='unresolved'
+                where run_id=%s and stage='comments'""",
+                (run["run_id"],),
+            )
+    status = inspect_run(store, manifest, run["run_id"])
+    row = next(item for item in status["validation"]["targets"] if item["stage"] == "comments")
+    assert not row["verified"] and row["settlement"] is None
+    assert row["reason"] == ("unresolved" if invalidated == "outcome" else "missing_fresh_source_receipt")

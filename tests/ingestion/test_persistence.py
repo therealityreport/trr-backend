@@ -435,3 +435,54 @@ def test_retained_evidence_is_fenced_pinned_and_expired_without_losing_provenanc
         )
         payload, digest, captured = cur.fetchone()
         assert payload is None and digest == evidence.content_hash and captured == evidence.captured_at
+
+
+def test_terminal_checkpoint_receipt_and_canonical_write_are_atomic_and_idempotent(database):
+    store, tx = database
+    args = target(store, launch(store))
+    args["owner_token"] = str(store.reserve(**args)["owner_token"])
+    store.acquire(**args)
+    settlement = {"basis": "public_native_exhaustion", "expected_total": 3, "observed_total": 1, "count_gap": 2}
+
+    def write(conn):
+        with conn.cursor() as cur:
+            cur.execute("insert into social.test_canonical values(%s,1)", (args["run_id"],))
+        return {"settlement": settlement}
+
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute("""alter table social.instagram_ingestion_targets add constraint test_settlement_rollback
+            check (checkpoint->>'crash' is distinct from 'yes') not valid""")
+    try:
+        with pytest.raises(psycopg2.errors.CheckViolation):
+            store.commit_target(
+                **args,
+                observed_at=datetime.now(UTC),
+                write_canonical=write,
+                checkpoint={"settlement": settlement, "crash": "yes"},
+            )
+        with tx() as conn, conn.cursor() as cur:
+            cur.execute("select count(*) from social.test_canonical where run_id=%s", (args["run_id"],))
+            assert cur.fetchone()[0] == 0
+            cur.execute("select count(*) from social.instagram_ingestion_receipts where run_id=%s", (args["run_id"],))
+            assert cur.fetchone()[0] == 0
+            cur.execute(
+                "select outcome,checkpoint from social.instagram_ingestion_targets where run_id=%s", (args["run_id"],)
+            )
+            assert cur.fetchone() == ("unresolved", {})
+    finally:
+        with tx() as conn, conn.cursor() as cur:
+            cur.execute("alter table social.instagram_ingestion_targets drop constraint test_settlement_rollback")
+    first = store.commit_target(
+        **args, observed_at=datetime.now(UTC), write_canonical=write, checkpoint={"settlement": settlement}
+    )
+    repeated = store.commit_target(
+        **args, observed_at=datetime.now(UTC), write_canonical=write, checkpoint={"settlement": {"count_gap": 99}}
+    )
+    assert first == repeated and first["canonical_identity"]["settlement"] == settlement
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            "select outcome,checkpoint from social.instagram_ingestion_targets where run_id=%s", (args["run_id"],)
+        )
+        assert cur.fetchone() == ("committed", {"settlement": settlement})
+        cur.execute("select writes from social.test_canonical where run_id=%s", (args["run_id"],))
+        assert cur.fetchone()[0] == 1

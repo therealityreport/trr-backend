@@ -9,7 +9,7 @@ must use the supplied connection and perform only database work.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 from datetime import datetime
 from typing import Any
@@ -742,12 +742,14 @@ class Store:
         write_canonical: Callable[[Any], dict[str, Any]],
         evidence_id: str | None = None,
         outcome: Outcome = Outcome.COMMITTED,
+        checkpoint: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Commit canonical writes and their receipt atomically under the same fence.
 
         The canonical writer must enforce observation-time ordering at its row
         lock/upsert boundary. A later service layer supplies the lane-specific
         implementation; arbitrary transport work is forbidden in this callback.
+        An optional terminal checkpoint commits with the canonical write and receipt.
         """
         if outcome == Outcome.UNRESOLVED:
             raise ValueError("Unresolved work cannot receive a settlement receipt")
@@ -807,8 +809,16 @@ class Store:
             )
             cur.execute(
                 """update social.instagram_ingestion_targets set outcome=%s,observed_at=%s,
-                committed_at=clock_timestamp(),owner_expires_at=null where run_id=%s and stage=%s and target_key=%s""",
-                (outcome.value, observed_at, run_id, stage.value, target_key),
+                committed_at=clock_timestamp(),owner_expires_at=null,checkpoint=coalesce(%s::jsonb,checkpoint)
+                where run_id=%s and stage=%s and target_key=%s""",
+                (
+                    outcome.value,
+                    observed_at,
+                    stable_json(checkpoint) if checkpoint is not None else None,
+                    run_id,
+                    stage.value,
+                    target_key,
+                ),
             )
             cur.execute(
                 """update social.instagram_ingestion_runs set last_committed_at=clock_timestamp(),

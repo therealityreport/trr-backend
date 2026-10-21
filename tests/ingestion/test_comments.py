@@ -19,6 +19,7 @@ from trr_backend.ingestion.comments import (
     CommentActivity,
     CommentFetchSummary,
     CommentSourceError,
+    _settlement,
     parse_comment_evidence,
 )
 from trr_backend.ingestion.domain import LostOwnership, RunIntent, Stage
@@ -736,3 +737,127 @@ def test_missing_scan_start_after_legacy_tail_resume_never_marks_rows_missing(da
     rows = query(tx, "select is_missing from social.instagram_comments where post_id=%s", (args["post_id"],))
     assert len(rows) == 3 and not any(row["is_missing"] for row in rows)
     assert not query(tx, "select * from social.instagram_ingestion_receipts where run_id=%s", (args["run_id"],))
+
+
+def settlement_state():
+    return {
+        "expected": 3,
+        "adapter_family": "instagram_public_relay",
+        "adapter_version": 1,
+        "observed": {"p": {"parent": None, "expected_replies": 0}},
+        "lanes": {"__top__": {"exhausted": True, "started_from_root": True}},
+    }
+
+
+@pytest.mark.parametrize(
+    "expected,observed,basis,gap",
+    [
+        (1, 1, "count_parity", 0),
+        (0, 1, "count_parity", 0),
+        (3, 1, "public_native_exhaustion", 2),
+        (3, 0, "public_native_exhaustion", 3),
+    ],
+)
+def test_settlement_records_expected_and_observed_totals(expected, observed, basis, gap):
+    state = settlement_state()
+    if not observed:
+        state["observed"] = {}
+    assert _settlement(state, CommentFetchSummary(expected_count=expected, full_observation=True)) == {
+        "basis": basis,
+        "expected_total": expected,
+        "observed_total": observed,
+        "count_gap": gap,
+    }
+
+
+@pytest.mark.parametrize("expected", [None, -1, True, 3.0, "3"])
+def test_settlement_requires_known_nonnegative_integer_count(expected):
+    state = settlement_state()
+    state["expected"] = expected
+    assert _settlement(state, CommentFetchSummary(full_observation=True)) is None
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        {"full_observation": False},
+        {"fetch_failed": True},
+        {"auth_failed": True},
+        {"retryable": True},
+        {"top_level_checkpoint": {"after": "tail"}},
+        {"reply_checkpoints": ({"after": "tail"},)},
+        {"reply_lanes_rejected": ("p",)},
+    ],
+)
+def test_gap_settlement_preserves_source_summary_guards(failure):
+    summary = CommentFetchSummary(**({"expected_count": 3, "full_observation": True} | failure))
+    assert _settlement(settlement_state(), summary) is None
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "rest",
+        "adapter_version",
+        "root",
+        "top_pending",
+        "repeated",
+        "child_shortfall",
+        "unknown_child",
+        "child_pending",
+        "unsupported_topology",
+        "unknown_child_unproved_root",
+    ],
+)
+def test_gap_settlement_preserves_native_lane_and_topology_guards(mutation):
+    state = settlement_state()
+    top = state["lanes"]["__top__"]
+    if mutation == "rest":
+        state.pop("adapter_family")
+    elif mutation == "adapter_version":
+        state["adapter_version"] = 2
+    elif mutation == "root":
+        top.pop("started_from_root")
+    elif mutation == "top_pending":
+        top["exhausted"] = False
+    elif mutation == "repeated":
+        top["repeated"] = True
+    elif mutation == "child_shortfall":
+        state["observed"]["p"]["expected_replies"] = 1
+    elif mutation == "unknown_child":
+        state["observed"]["p"]["expected_replies"] = None
+    elif mutation == "child_pending":
+        state["lanes"]["p"] = {"exhausted": False}
+    elif mutation == "unsupported_topology":
+        state["observed"]["p"]["unsupported_reply_topology"] = True
+    else:
+        state["observed"]["p"]["expected_replies"] = None
+        state["lanes"]["p"] = {"exhausted": True, "started_from_root": True}
+    assert _settlement(state, CommentFetchSummary(expected_count=3, full_observation=True)) is None
+
+
+def test_gap_settlement_accepts_unknown_child_only_with_existing_native_root_proof():
+    state = settlement_state()
+    state["observed"]["p"]["expected_replies"] = None
+    state["lanes"]["p"] = {
+        "exhausted": True,
+        "started_from_root": True,
+        "relay_doc_id": "child",
+        "relay_friendly_name": "child",
+        "sort_order": "popular",
+        "page_size": 15,
+    }
+    assert _settlement(state, CommentFetchSummary(expected_count=3, full_observation=True))["count_gap"] == 2
+
+
+def test_rest_count_shortfall_stays_unresolved_and_does_not_mark_missing(database):
+    store, tx, args = setup(database, seed_missing=True)
+    result = CommentActivity(
+        store,
+        source([NATIVE["rest"]], CommentFetchSummary(expected_count=3, full_observation=True)),
+        clock=lambda: OBSERVED,
+    ).execute(**args)
+    assert result["complete"] is False and "settlement" not in result["checkpoint"]["comment_pages"]
+    assert query(
+        tx, "select is_missing from social.instagram_comments where post_id=%s and comment_id='old'", (args["post_id"],)
+    ) == [{"is_missing": False}]
