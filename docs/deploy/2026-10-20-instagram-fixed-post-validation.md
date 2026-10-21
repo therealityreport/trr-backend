@@ -1032,3 +1032,103 @@ change was introduced. TRR-APP build is not applicable.
 Private evidence: `~/.codex/tmp/trr-instagram-replies-01a15c0a/` contains the
 source manifest/archive, deployment log/history/readiness, pre/post schedule
 snapshots, frozen-run baseline, and local installation/retirement records.
+
+
+### Final public quota removal and v89 rollout
+
+The first new-source run exposed a second local request-count gate: the public
+identity policy still enforced 180 requests per 660 seconds. The user had
+explicitly removed local count limits, so source `c38d071757cd511e2440249f69693144a5d73a24`
+removes that gate for explicit public-only identities. Authenticated identities
+retain their existing policy. Public request accounting, source-directed waits,
+request deadlines, exclusive execution and cancellation remain. The affected
+identity/network batch passed 69 tests, and independent review closed the change.
+Workspace contract follow-up: `68531a6`.
+
+The byte-verified archive SHA-256 is
+`aa086f09ec32ee22adee6534d172ea697341d31e419a4407736216c924b7a212`.
+It deployed to `admin-56995 / trr-backend-jobs / main`, app
+`ap-DkLTRoSvqhbkGO7fHyHxrD`, as **v89**, tag `ig-public-noquota-c38d0717`,
+at 21:52:57 Eastern on October 20. The API canary returned HTTP 200 on attempt
+one, and explicit main-environment strict readiness passed all six runtime
+probes. The five existing schedules are unchanged. The local LaunchAgent points
+to the same verified release and remains unloaded. Local `9eab32f0` and Modal
+v88 remain available for rollback. Superseded local `7a1aed41` was moved to
+recoverable Trash after process, dependency and source-archive checks; exactly
+two runnable local releases remain.
+
+Run `c7748974-24ea-47d6-bb55-e5a0d341bf2a` on `9eab32f0` proved an
+intentional child-boundary interruption and resume: 134 parents and the first
+child receipt survived with matching retained evidence and canonical links.
+It later stopped at the now-removed identity count gate and is preserved
+cancelled at generation 6. No old-source run was repointed to new source.
+
+The new Modal child-access diagnostic executed once on v88, with three
+anonymous requests and no retry, login, proxy or ingestion writes. Bootstrap
+returned 200; query 348 returned native 1675004 and query 362 returned native
+1675030. This verifies the deployed diagnostic path, not successful Modal reply
+access. The local anonymous collection path continued to retrieve real replies;
+no authenticated or Decodo escalation was made.
+
+The final c38 validation later paused after 221 successful HTTP responses because
+the local collector waited on a stale libpq connection. A native process sample
+showed `PQexec -> PQgetResult -> pqWait -> poll`; a separate fresh connection
+showed no active server query other than the diagnostic itself. The run was
+fenced by an explicit cancel to generation 2 before its task-owned process was
+terminated. Resume used the same source and manifest with a fresh connection;
+all committed pages were retained. This was a connection recovery, not an
+Instagram rejection or a reset of reply evidence.
+
+The first recovery resume made zero source requests: Admission correctly counted
+the prior unresolved `sending` dispatch. Recovery retained the existing
+600-second cancelled-run drain guard and prepared the maintained
+`set_execution_placement(local -> local)` operator command under the restricted
+coordinator lease. This preserves the journal rather than deleting a dispatch
+or manufacturing a receipt. The guarded recovery is limited to this new run.
+
+The separately completed `7a1aed41` baseline run
+`82d0d542-7bbe-4764-879c-d3946af16c83` returned photo 134 parents/50 replies
+(184 versus fresh reported 222), carousel 34/34, and reel 71 parents/20 replies
+(91 versus fresh reported 96). Its retained-page integrity and canonical
+parent links passed, and all 239 parent reply threads reached native exhaustion.
+User-authorized coordination confirmed that no cause for the two count gaps was
+established. Filtering, inaccessible comments, count semantics and a different
+query issue remain hypotheses; this record does not choose one without evidence.
+
+### Final fixed-three result on c38d0717
+
+Recovery acquired the coordinator lease after its existing finite owner exited,
+expired the drained old dispatch through the maintained guarded API, and resumed
+without changing source or manifest. The final run
+`61fd77ab-bfae-47a7-b721-41effc898a62` is preserved cancelled at generation 6,
+with no collector left running. It made 263 observed anonymous HTTP requests,
+all HTTP 200 with no detected comment-source failure and no authentication
+headers or session cookies. The public run exceeded the removed 180-request gate.
+
+| Post | Parents | Replies | Collected total | Fresh reported total | Coverage |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `Dd37XeDly4U` | 134 | 50 | 184 | 222 | Unresolved; gap 38 |
+| `Dd60pnHl_ux` | 34 | 0 | 34 | 34 | Verified complete |
+| `Dd6m4XKDSQ1` | 71 | 20 | 91 | 96 | Unresolved; gap 5 |
+
+All parent lanes and all 239 queried child lanes reached native exhaustion.
+Retained-page replay, canonical identities and parent links passed on all three;
+there were no unfinished/repeated lanes, per-parent reply-count gaps, unknown
+reply topology proofs or unsupported nested topologies. The fresh run matches
+the prior independent baseline counts exactly. No fixed-post child thread needed
+multiple pages, so the requested live multi-page-child criterion remains
+unverified. Offline pagination and interruption/resume checks do not replace it.
+
+The final verdict is `retrieval_not_passed`, not complete retrieval. The two
+reported-total gaps remain unexplained despite native exhaustion, and were not
+converted into partial committed outcomes. The frozen original run and targets
+still match baseline SHA-256
+`998a8bb7d8ddbd608105a5f9b492f256ea975c40f03613efbd35616394b4013f`.
+The full-history gate remains intact. No schedules, authenticated collection,
+Decodo collection, app code/build, or SQL schema changes were introduced.
+
+Final private evidence: `modal-final-deploy.log`, `modal-final-history.json`,
+`modal-final-readiness.json`, `final-schedules.json`, `local-final-install.json`,
+`local-final-retirement.json`, `frozen-final.json`, `probe/modal.result.json`,
+and `final-validation/audit-generation-6.json`, `transport-summary.json`,
+`drained-dispatch-receipt.json` and the generation-specific execution logs.
