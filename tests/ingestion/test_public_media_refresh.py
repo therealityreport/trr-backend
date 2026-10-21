@@ -161,3 +161,61 @@ def test_public_avatar_refresh_uses_anonymous_profile_once_without_credentials(l
         "select requests,outcome from social.instagram_ingestion_targets where run_id=%s and stage='media'",
         (owned["run_id"],),
     ) == (1, "unresolved")
+
+
+@pytest.mark.parametrize("lane", ["local", "modal"])
+def test_public_refresh_gates_share_the_run_placement_lane(lanes, lane):
+    import hashlib
+
+    from trr_backend.ingestion.identity_policy import SourceRequestGate
+
+    store, _ = lanes
+    owned = owned_fixture(store)
+    node = native_payload(shortcode="AAAABC")["items"][0]
+    envelope = {"data": {"xdt_api__v1__media__shortcode__web_info": {"items": [node]}}}
+    detail_session = SequenceSession([], [{"body": html(envelope), "headers": {"content-type": "text/html"}}])
+    avatar_session = SequenceSession([], [{"payload": avatar_payload()}])
+    detail_gates, avatar_gates = [], []
+
+    def detail_factory(**kwargs):
+        detail_gates.append(kwargs["gate"])
+        return PublicDetailSource(**kwargs, session_factory=lambda: detail_session)
+
+    def avatar_gate_factory(**kwargs):
+        gate = SourceRequestGate(**kwargs)
+        avatar_gates.append(gate)
+        return gate
+
+    refresh = MediaRefresh(
+        store=store,
+        owned=owned,
+        owner_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        credential_provider=lambda: pytest.fail("public refresh selected authentication"),
+        public_only=True,
+        public_detail_source_factory=detail_factory,
+        avatar_source_factory=lambda **kw: AvatarProfileSource(**kw, session=avatar_session),
+        avatar_gate_factory=avatar_gate_factory,
+        network_lane=lane,
+    )
+    refresh.bind_snapshot(replace(fixture_snapshot(avatars=(AvatarSource("writer", AVATAR_OLD),)), shortcode="AAAABC"))
+    callbacks = {
+        "check_cancelled": lambda: store.check_owner(**owned),
+        "on_request": lambda: store.check_owner(**owned, record_request=True),
+    }
+    assert refresh(source_reference=source_reference(SOURCE), **callbacks) == FRESH
+    assert refresh(source_reference=source_reference(AVATAR_OLD), **callbacks) == AVATAR_FRESH
+    expected = hashlib.sha256(f"public:{lane}".encode()).hexdigest()
+    assert [gate.identity_key for gate in detail_gates + avatar_gates] == [expected, expected]
+    assert all(gate.network_lane == lane and gate.public_only for gate in detail_gates + avatar_gates)
+
+
+def test_network_lane_requires_public_media_refresh(lanes):
+    store, _ = lanes
+    with pytest.raises(ValueError, match="Network lanes apply only to public media refresh"):
+        MediaRefresh(
+            store=store,
+            owned=owned_fixture(store),
+            owner_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            credential_provider=lambda: {"raw_cookies": {}},
+            network_lane="local",
+        )

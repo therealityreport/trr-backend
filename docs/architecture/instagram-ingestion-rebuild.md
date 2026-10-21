@@ -2142,7 +2142,10 @@ Logged-out request lanes (`identity_policy.py`):
 
 - Public listing, detail and comment gates use `public:modal` or `public:local`
   from the run's execution placement, so the Mac and Modal never share a budget.
-  Avatar, profile and media gates keep the shared `public` lane.
+  Since 2026-10-21, public avatar, commenter-profile and media-refresh gates use
+  the same placement lane, so a Mac media run honours a Mac listing/comment
+  backoff. Authenticated gates keep their credential identity. The legacy shared
+  `public` row is no longer selected by v2 public runs.
 - Network lanes follow the June public backoff without Retry-After: rejection
   1 h → 4 h → 12 h → 24 h; 429 waits 2 h; a server Retry-After always wins. One
   success steps escalation down one level instead of resetting it.

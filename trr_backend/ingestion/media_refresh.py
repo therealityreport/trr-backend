@@ -123,9 +123,15 @@ class MediaRefresh:
         avatar_source_factory: Callable = AvatarProfileSource,
         avatar_gate_factory: Callable = SourceRequestGate,
         now: Callable = lambda: datetime.now(UTC),
+        network_lane: str | None = None,
     ):
         if Stage(owned["stage"]) != Stage.MEDIA:
             raise ValueError("Media refresh requires a media owner")
+        if network_lane is not None and not public_only:
+            raise ValueError("Network lanes apply only to public media refresh")
+        # Logged-out limits belong to the egress network: public fallback
+        # requests share the run placement's lane with listing and comments.
+        self.network_lane = network_lane
         self.store = store
         self.owned = {key: owned[key] for key in ("run_id", "account", "generation", "target_key", "owner_token")}
         self.owned["stage"] = Stage.MEDIA
@@ -217,6 +223,7 @@ class MediaRefresh:
             check_cancelled_in_transaction=lambda conn: self.store.check_owner(**self.owned, connection=conn),
             deadline=deadline,
             public_only=self.public_only,
+            **({"network_lane": self.network_lane} if self.network_lane is not None else {}),
         )
         permit, source, requests_count, success = None, None, 0, False
 
@@ -317,6 +324,7 @@ class MediaRefresh:
                 check_cancelled_in_transaction=lambda conn: self.store.check_owner(**self.owned, connection=conn),
                 deadline=deadline,
                 public_only=True,
+                network_lane=self.network_lane,
             )
             source = (self.public_detail_source_factory or PublicDetailSource)(
                 shortcode=self.owned["target_key"],

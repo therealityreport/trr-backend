@@ -20,7 +20,7 @@ from tests.ingestion.test_pipeline import base_database as base_database_fixture
 from tests.ingestion.test_pipeline import pipeline_database as pipeline_database_fixture
 from tests.ingestion.test_public_comment_transport import body, bootstrap, node, page
 from tests.ingestion.test_public_transport import html
-from trr_backend.ingestion import composition, media
+from trr_backend.ingestion import composition, media, public_http
 from trr_backend.ingestion.command_service import CommandService
 from trr_backend.ingestion.domain import SourceProfile
 from trr_backend.ingestion.listing import ROOT_FIELD
@@ -176,6 +176,9 @@ def test_public_composed_pipeline_commits_native_parent_reply_post_and_avatar_me
             super().close()
 
     monkeypatch.setattr(requests, "Session", SourceSession)
+    # Public details default to the guarded curl document session (e6fab2ce);
+    # route it through the same mocked source so no real transport is built.
+    monkeypatch.setattr(public_http, "PublicDocumentSession", SourceSession)
 
     def relay(request):
         source_calls.append(("httpx", request.method, request.url.path))

@@ -605,6 +605,7 @@ def _profile_provider(context, owned):
         check_cancelled=lambda: store.check_owner(**owned),
         check_cancelled_in_transaction=lambda conn: store.check_owner(**owned, connection=conn),
         deadline=deadline,
+        network_lane=_network_lane(context),
     )
     user_id = context["target"]["checkpoint"].get("user_id")
     if user_id:
@@ -623,6 +624,7 @@ def _media_storage(context, owned):
     from trr_backend.media.s3_mirror import build_public_object_url, get_hosted_media_storage_config
 
     config = get_hosted_media_storage_config()
+    public_only = _source_profile(context).access_mode == "public"
     session = boto3.Session(profile_name=config.profile_name) if config.profile_name else boto3.Session()
     options = {
         "region_name": config.region,
@@ -650,7 +652,8 @@ def _media_storage(context, owned):
             owned=owned,
             owner_expires_at=context["target"]["owner_expires_at"],
             credential_provider=lambda: _credentials(owned["account"]),
-            public_only=_source_profile(context).access_mode == "public",
+            public_only=public_only,
+            network_lane=_network_lane(context) if public_only else None,
         ),
     )
 
@@ -679,6 +682,7 @@ def _load_media(loader, store, context, owned, **callbacks):
         check_cancelled_in_transaction=lambda conn: store.check_owner(**owned, connection=conn),
         deadline=deadline,
         public_only=public_only,
+        network_lane=_network_lane(context) if public_only else None,
     )
     source = AvatarProfileSource(
         cookies=credentials["raw_cookies"], deadline=deadline, **({"public_only": True} if public_only else {})

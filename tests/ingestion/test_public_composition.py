@@ -112,11 +112,75 @@ def test_public_gate_is_shared_public_identity_and_reuses_owner_transaction(monk
     assert calls == [owned, dict(owned, connection=connection)]
 
 
-def test_public_avatar_resolution_uses_no_credentials(avatar_case):
+@pytest.mark.parametrize("placement", [None, "modal", "local"])
+def test_public_avatar_resolution_uses_no_credentials(avatar_case, placement):
     # The existing read/resolve/read fixture also asserts source closure and fencing.
     case = avatar_case
     case.context["run"]["intent"]["source_profile"] = asdict(SourceProfile.for_mode("public"))
+    if placement is not None:
+        case.context["run"]["execution_placement"] = placement
     assert composition._load_media(case.loader, case.store, case.context, case.owned, **case.callbacks) is case.result
     assert case.state.credentials == []
     assert case.state.sources[0].kwargs["cookies"] == {}
     assert case.state.gates[0]["public_only"] is True
+    # Logged-out avatar discovery shares the egress lane of listing/comments.
+    assert case.state.gates[0]["network_lane"] == (placement or "modal")
+
+
+def test_authenticated_avatar_resolution_keeps_no_network_lane(avatar_case):
+    case = avatar_case
+    case.context["run"]["execution_placement"] = "local"
+    assert composition._load_media(case.loader, case.store, case.context, case.owned, **case.callbacks) is case.result
+    assert case.state.gates[0]["public_only"] is False
+    assert case.state.gates[0]["network_lane"] is None
+
+
+@pytest.mark.parametrize("placement", ["modal", "local"])
+def test_public_commenter_profile_gate_uses_run_placement_lane(monkeypatch, placement):
+    from trr_backend.ingestion import avatar_transport, identity_policy
+
+    store = SimpleNamespace(transaction=object(), check_owner=lambda **kw: None)
+    monkeypatch.setattr(composition, "_worker_store", lambda ctx: store)
+    monkeypatch.setattr(identity_policy, "SourceRequestGate", lambda **kw: SimpleNamespace(**kw))
+    monkeypatch.setattr(avatar_transport, "AvatarProfileSource", lambda **kw: SimpleNamespace(**kw))
+    ctx = context("public")
+    ctx["run"]["execution_placement"] = placement
+    ctx["target"]["checkpoint"] = {}
+    _, gate = composition._profile_provider(ctx, {"account": "bravotv", "stage": "profiles", "target_key": "writer"})
+    assert gate.public_only is True and gate.cookies == {}
+    assert gate.network_lane == placement
+
+
+@pytest.mark.parametrize(
+    "mode,placement,lane",
+    [("public", "local", "local"), ("public", None, "modal"), ("authenticated", None, None)],
+)
+def test_media_storage_refresh_uses_run_placement_lane_only_when_public(monkeypatch, mode, placement, lane):
+    import boto3
+
+    from trr_backend.ingestion import media, media_refresh
+    from trr_backend.media import s3_mirror
+
+    captured = {}
+    config = SimpleNamespace(
+        profile_name=None,
+        region="auto",
+        endpoint_url=None,
+        access_key_id=None,
+        secret_access_key=None,
+        session_token=None,
+        bucket="bucket",
+        prefix="prefix",
+    )
+    monkeypatch.setattr(s3_mirror, "get_hosted_media_storage_config", lambda: config)
+    monkeypatch.setattr(boto3, "Session", lambda **kw: SimpleNamespace(client=lambda *a, **k: object()))
+    monkeypatch.setattr(composition, "_worker_store", lambda ctx: object())
+    monkeypatch.setattr(media_refresh, "MediaRefresh", lambda **kw: captured.update(kw) or "refresh")
+    monkeypatch.setattr(media, "MediaStorage", lambda **kw: kw)
+    ctx = context(mode)
+    if placement is not None:
+        ctx["run"]["execution_placement"] = placement
+    storage = composition._media_storage(ctx, {"account": "bravotv"})
+    assert storage["refresh"] == "refresh"
+    assert captured["public_only"] is (mode == "public")
+    assert captured["network_lane"] == lane
