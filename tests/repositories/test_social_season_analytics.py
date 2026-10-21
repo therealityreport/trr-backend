@@ -34904,7 +34904,9 @@ def test_youtube_community_post_media_mirror_adds_sha256_image_hashes(monkeypatc
             del fileobj, bucket, ExtraArgs
             uploads_seen.append(key)
 
-    monkeypatch.setattr(social_repo.requests, "get", lambda *_args, **_kwargs: _FakeStreamResponse())
+    monkeypatch.setattr(
+        "trr_backend.socials.media_url_safety.safe_requests_get", lambda *_args, **_kwargs: _FakeStreamResponse()
+    )
     monkeypatch.setattr(social_repo, "_find_social_media_reuse_asset_by_sha256", lambda **_kwargs: None)
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_client", lambda: _FakeS3Client())
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_bucket", lambda: "bucket")
@@ -34979,7 +34981,9 @@ def test_mirror_platform_media_reuses_exact_sha256_hosted_asset(monkeypatch: pyt
             "storage_key": "social/instagram/reused.jpg",
         }
 
-    monkeypatch.setattr(social_repo.requests, "get", lambda *_args, **_kwargs: _FakeStreamResponse())
+    monkeypatch.setattr(
+        "trr_backend.socials.media_url_safety.safe_requests_get", lambda *_args, **_kwargs: _FakeStreamResponse()
+    )
     monkeypatch.setattr(social_repo, "_find_social_media_reuse_asset_by_sha256", _fake_reuse_lookup)
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_client", lambda: _FakeS3Client())
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_bucket", lambda: "bucket")

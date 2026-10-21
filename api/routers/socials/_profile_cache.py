@@ -11,6 +11,7 @@ from threading import Lock
 from typing import Any
 
 from trr_backend.db.pg import database_service_unavailable_detail, is_database_service_unavailable_error
+from trr_backend.socials import shared_profile_cache
 
 from ._analytics_cache import (
     _clear_ttl_cache,
@@ -78,16 +79,19 @@ def _account_profile_cache_key(
 
 
 def _clear_account_profile_caches() -> None:
-    _clear_ttl_cache(_ACCOUNT_PROFILE_SUMMARY_CACHE, _ACCOUNT_PROFILE_SUMMARY_CACHE_LOCK)
-    _clear_ttl_cache(_ACCOUNT_PROFILE_DASHBOARD_CACHE, _ACCOUNT_PROFILE_DASHBOARD_CACHE_LOCK)
-    _clear_ttl_cache(_ACCOUNT_PROFILE_PROGRESS_CACHE, _ACCOUNT_PROFILE_PROGRESS_CACHE_LOCK)
-    _clear_ttl_cache(_ACCOUNT_PROFILE_POSTS_CACHE, _ACCOUNT_PROFILE_POSTS_CACHE_LOCK)
-    _clear_ttl_cache(_ACCOUNT_PROFILE_HASHTAGS_CACHE, _ACCOUNT_PROFILE_HASHTAGS_CACHE_LOCK)
-    _clear_ttl_cache(_ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE, _ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE_LOCK)
-    _clear_ttl_cache(_ACCOUNT_PROFILE_COLLABORATORS_CACHE, _ACCOUNT_PROFILE_COLLABORATORS_CACHE_LOCK)
-    _clear_ttl_cache(_ACCOUNT_PROFILE_CATALOG_FRESHNESS_CACHE, _ACCOUNT_PROFILE_CATALOG_FRESHNESS_CACHE_LOCK)
+    # Use the same lock order as reads/publication so an invalidated loader
+    # cannot refill a cache after a mutation or replace a newer result.
     with _ACCOUNT_PROFILE_SINGLEFLIGHT_LOCK:
+        _clear_ttl_cache(_ACCOUNT_PROFILE_SUMMARY_CACHE, _ACCOUNT_PROFILE_SUMMARY_CACHE_LOCK)
+        _clear_ttl_cache(_ACCOUNT_PROFILE_DASHBOARD_CACHE, _ACCOUNT_PROFILE_DASHBOARD_CACHE_LOCK)
+        _clear_ttl_cache(_ACCOUNT_PROFILE_PROGRESS_CACHE, _ACCOUNT_PROFILE_PROGRESS_CACHE_LOCK)
+        _clear_ttl_cache(_ACCOUNT_PROFILE_POSTS_CACHE, _ACCOUNT_PROFILE_POSTS_CACHE_LOCK)
+        _clear_ttl_cache(_ACCOUNT_PROFILE_HASHTAGS_CACHE, _ACCOUNT_PROFILE_HASHTAGS_CACHE_LOCK)
+        _clear_ttl_cache(_ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE, _ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE_LOCK)
+        _clear_ttl_cache(_ACCOUNT_PROFILE_COLLABORATORS_CACHE, _ACCOUNT_PROFILE_COLLABORATORS_CACHE_LOCK)
+        _clear_ttl_cache(_ACCOUNT_PROFILE_CATALOG_FRESHNESS_CACHE, _ACCOUNT_PROFILE_CATALOG_FRESHNESS_CACHE_LOCK)
         _ACCOUNT_PROFILE_SINGLEFLIGHT.clear()
+    shared_profile_cache.invalidate()
 
 
 def _resolve_account_profile_singleflight(
@@ -99,12 +103,24 @@ def _resolve_account_profile_singleflight(
     ttl_seconds: int | None = None,
     max_entries: int | None = None,
 ) -> dict[str, Any]:
-    if cache is not None and cache_lock is not None:
-        cached_payload = _get_ttl_cached_payload(cache, cache_lock, cache_key)
-        if cached_payload is not None:
-            return cached_payload
+    shared = shared_profile_cache.enabled_for(cache_key) and ttl_seconds is not None
+    ticket = None
+    if shared:
+        ticket, shared_payload = shared_profile_cache.begin(cache_key)
+        if shared_payload is not None:
+            return shared_payload
+        # Never refill an L1 cache when shared caching is selected, even on outage.
+        cache = None
+        cache_lock = None
+        if ticket is not None:
+            cache_key = (*cache_key, ticket.generation)
 
     with _ACCOUNT_PROFILE_SINGLEFLIGHT_LOCK:
+        if cache is not None and cache_lock is not None:
+            cached_payload = _get_ttl_cached_payload(cache, cache_lock, cache_key)
+            if cached_payload is not None:
+                return cached_payload
+
         in_flight = _ACCOUNT_PROFILE_SINGLEFLIGHT.get(cache_key)
         if in_flight is None:
             in_flight = Future()
@@ -119,15 +135,24 @@ def _resolve_account_profile_singleflight(
     try:
         payload = loader()
         resolved_payload = copy.deepcopy(payload)
-        if cache is not None and cache_lock is not None and ttl_seconds is not None and max_entries is not None:
-            _set_ttl_cached_payload(
-                cache,
-                cache_lock,
-                cache_key,
-                resolved_payload,
-                ttl_seconds=ttl_seconds,
-                max_entries=max_entries,
-            )
+        with _ACCOUNT_PROFILE_SINGLEFLIGHT_LOCK:
+            if (
+                _ACCOUNT_PROFILE_SINGLEFLIGHT.get(cache_key) is in_flight
+                and cache is not None
+                and cache_lock is not None
+                and ttl_seconds is not None
+                and max_entries is not None
+            ):
+                _set_ttl_cached_payload(
+                    cache,
+                    cache_lock,
+                    cache_key,
+                    resolved_payload,
+                    ttl_seconds=ttl_seconds,
+                    max_entries=max_entries,
+                )
+        if shared:
+            shared_profile_cache.publish(ticket, resolved_payload, ttl_seconds or 0)
         in_flight.set_result(copy.deepcopy(resolved_payload))
         return resolved_payload
     except Exception as exc:

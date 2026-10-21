@@ -17582,26 +17582,45 @@ def _find_social_media_reuse_asset_by_sha256(
             ):
                 continue
             posted_at_key = PLATFORM_POSTED_AT_COLUMN.get(candidate_platform) or "posted_at"
+            # Filter native columns so existing show/season indexes remain usable.
+            # Whole-row JSON conversion here also detoasted large raw payloads
+            # for every scanned row, even though reuse needs only the manifest.
+            scope_filters: list[str] = []
+            scope_params: list[str] = []
+            for column, value in (("season_id", season_id), ("show_id", show_id)):
+                if value and _platform_posts_has_column(candidate_platform, column):
+                    scope_filters.append(f"p.{column} = %s")
+                    scope_params.append(value)
+            if not scope_filters:
+                continue
+            timestamp_columns = [
+                column
+                for column in dict.fromkeys((posted_at_key, "posted_at", "published_at", "created_at"))
+                if _platform_posts_has_column(candidate_platform, column)
+            ]
+            timestamp_expressions = [f"p.{column}" for column in timestamp_columns]
+            if len(timestamp_expressions) > 1:
+                order_expression = f"coalesce({', '.join(timestamp_expressions)})"
+            elif timestamp_expressions:
+                order_expression = timestamp_expressions[0]
+            else:
+                order_expression = "p.id"
+            source_columns = [
+                column
+                for column in dict.fromkeys((PLATFORM_SOURCE_ID_COLUMN.get(candidate_platform), "source_id"))
+                if column and _platform_posts_has_column(candidate_platform, column)
+            ]
+            projection = ", ".join(["p.id::text as id", "p.asset_manifest", *(f"p.{c}" for c in source_columns)])
+            scope_expression = " or ".join(scope_filters)
             rows = pg.fetch_all(
                 f"""
-                select
-                  p.id::text as id,
-                  to_jsonb(p) as post_payload
+                select {projection}
                 from social.{table} p
-                where (
-                    (%s <> '' and coalesce(to_jsonb(p) ->> 'season_id', '') = %s)
-                    or (%s <> '' and coalesce(to_jsonb(p) ->> 'show_id', '') = %s)
-                  )
-                order by coalesce(
-                  to_jsonb(p) ->> %s,
-                  to_jsonb(p) ->> 'posted_at',
-                  to_jsonb(p) ->> 'published_at',
-                  to_jsonb(p) ->> 'created_at',
-                  ''
-                ) desc
+                where ({scope_expression})
+                order by {order_expression} desc nulls last
                 limit 200
                 """,
-                [season_id, season_id, show_id, show_id, posted_at_key],
+                scope_params,
             )
         except Exception:  # noqa: BLE001
             continue
