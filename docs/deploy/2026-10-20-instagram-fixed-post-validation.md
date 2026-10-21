@@ -962,3 +962,16 @@ The earlier empty alternate results were from different parents with unknown rep
 Evidence: private `child-contract-20261020/june-exact-primary-june/result.json` and private `child-contract-20261020/june-exact-secondary-june/result.json`. Both preserve the original cancelled generation-8 run and report verified final guards. No login, proxy, Decodo call, or schedule was used. Runtime rollout is tracked in the backend validation record.
 
 The maintained repair prefers the proven `36239935742272683` pair for fresh child lanes. Explicit overrides and pinned resume queries/cursors remain unchanged. Five focused fetcher cases and three runtime-probe tests passed, along with Ruff and diff checks. Independent review of the production change found no blockers; the lead reviewed the new fetcher tests. The runtime probe now reports its effective child-query pair without Instagram traffic. Deployment and installed-runtime verification follow below.
+
+
+### Verified child-query release
+
+Committed source `7a1aed419c4f3c71208d018a5b36952bf784c6fe` was deployed from its isolated archive (SHA-256 `eab854ad41edb33f482c7445938dcda5bdb91c54359319f017b777c8ee1ea3e7`) to live-verified `admin-56995 / trr-backend-jobs / main`, app `ap-DkLTRoSvqhbkGO7fHyHxrD`, as **v87**, tag `ig-child362-7a1aed41`, at 20:38:22 Eastern on October 20. The owner deployment command succeeded and the API cold-start canary returned HTTP 200 on its first attempt.
+
+The required `verify_modal_readiness.py --env main --probe-core-workers --strict-probes --json` passed with `ok:true`, `core_ok:true`, no missing functions or advisories, and six healthy runtime probes. The deployed browser-image probe reports `PolarisPostCommentsChildrenPaginationtQuery` / `36239935742272683` as its effective first child pair. Its missing/null/zero/positive count checks still pass. This runtime probe is state-free and sends no Instagram request; the separate live exact-thread control above proves actual anonymous reply retrieval.
+
+The local installed release matches the committed archive, and its imported default pair matches the deployed pair. The LaunchAgent points to this release and remains unloaded in both GUI and user domains. Modal v86, local `9d7baa61` and the prior LaunchAgent plist are retained for rollback. The superseded local `e6fab2ce` runnable copy was moved to actual Trash after process, installed-path and recovery-archive checks; its original diagnostic artifacts remain intact. Exactly two runnable local releases remain.
+
+All five existing schedules match the pre-deployment cron expressions and timezone. No schedule was added or changed, and no login, Decodo call, worker resume or backfill was performed. The original cancelled generation-8 run and full-history gate remain unchanged. Saved child lanes retain their original document/cursor contract; this repair changes the default for fresh lanes. Backend validation and runtime rollout passed. App code/build and SQL are not applicable to this internal query-selection repair. The exact primary query's server-side rejection cause remains unknown; this result does not establish an anonymous daily quota or full-history completeness.
+
+Private rollout evidence: `child-contract-20261020/modal-child-deploy.log`, `modal-child-readiness.json`, pre/post-deployment schedule snapshots, and `local-retirement-result.json`.
