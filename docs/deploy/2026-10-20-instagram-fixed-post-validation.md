@@ -1291,3 +1291,84 @@ Private evidence is retained under
 `~/.codex/tmp/trr-instagram-settlement-01a16023/`, including the diagnostic result,
 source manifest/archive, readiness report, schedule comparison and fingerprints.
 The isolated diagnostic source is retained for reproducible recovery of v90.
+
+
+### Anonymous-only settlement rollout accepted (2026-10-21)
+
+The user explicitly removed the authenticated six-ID prerequisite and authorized
+anonymous-only deployment and fresh fixed-post validation. This supersedes the
+rollout hold above. No login, credential substitution or authenticated source
+request was made. The diagnostic result remains inconclusive and is not used as
+comment-coverage proof. Production stays anonymous; the full-history gate stays
+closed and requires a separate decision.
+
+Current committed backend source
+`c1c159705b36860914817daedc647ef274fa15fd`, containing settlement implementation
+`71841b4e`, was exported and all 2,547 source files were byte-verified. Archive
+SHA-256: `591c1a4f4df7c7ac7d143c63875f9e84ef388040ed4ce5406308af66cffebebb`.
+Unrelated working-tree changes were excluded. The reviewed implementation and
+its passing targeted tests/Ruff checks were unchanged, so their evidence was
+reused rather than rerunning them.
+
+The release deployed to verified `admin-56995 / trr-backend-jobs / main`, app
+`ap-DkLTRoSvqhbkGO7fHyHxrD`, as **Modal v91**, tag
+`ig-public-settle-c1c15970`, at 16:48:15 Eastern. API canary returned HTTP 200.
+Explicit-main strict readiness passed with `ok:true`, `core_ok:true`, all six
+core worker probes healthy and no blocking/advisory failures. All five schedule
+expressions and timezones match the predeployment baseline. A state-free smoke
+inside newly deployed container `ta-01M5G3J7NQE2KW0P1XQRTZZ2MR` verified the
+source hashes of comments, persistence, inspection and the validation gate. It
+proved positive-gap public settlement, refusal of rejected replies and missing
+root proof, and a closed full-history gate, without source requests or DB writes.
+Modal v90 (`ig-auth-proof-0b6cceeb`) is the immediate rollback deployment;
+v89 (`ig-public-noquota-c38d0717`) remains the previous anonymous baseline.
+
+The matching local release is installed at the revision-named worker release
+path. All source bytes match the archive. The unchanged dependency environment
+passed `uv pip check` for 155 packages; relocated entrypoints and local settlement
+smoke passed. The LaunchAgent points to this release and remains unloaded in
+both user and GUI domains. Local `c38d0717` and the prior plist are retained for
+rollback. Superseded `9eab32f0` moved to actual recoverable Trash after source
+archive, process, registration and dependency checks, leaving two runnable local
+releases. The source archive and exact private Trash destination are recorded in
+`anonymous-rollout/local-retirement.json`.
+
+Fresh run **`9ab92d4f-578d-4a42-b2d4-153d1ca6a478`**, generation 1, completed
+with **`retrieval_passed`** and CLI exit 0. It used a new manifest and state file,
+the existing shared `bravotv` ledger, and the verified installed source. Manifest
+SHA-256: `22c3019b23dcb69dd8db6d75b8c01b7f432d426b59001fe1e328cff7b03ff010`.
+The approved Supabase binding `vwxfvzutyufrkhfgoeaa` and database candidates were
+verified before reads/writes. All six targets (three post details and three
+comment collections) committed on the first attempt with fresh matching evidence
+and receipts. Every comment checkpoint settlement matches its qualifying fresh
+receipt:
+
+| Post | Expected total | Observed total | Gap | Settlement basis |
+| --- | ---: | ---: | ---: | --- |
+| `Dd37XeDly4U` | 222 | 184 | 38 | `public_native_exhaustion` |
+| `Dd60pnHl_ux` | 34 | 34 | 0 | `count_parity` |
+| `Dd6m4XKDSQ1` | 96 | 91 | 5 | `public_native_exhaustion` |
+
+These are fresh observations, not required historical values. Passing means the
+frozen targets met the public retrieval policy; it does not prove universal
+comment coverage or establish the cause of residual gaps. Strict child-count,
+topology and native-exhaustion checks remain. No rejected lane was accepted to
+force this result. Live multi-page child capability remains unverified and the
+CLI capability matrix remains `not_evaluated`.
+
+The fresh validation used 265 source requests (147/38/77 for comments plus one
+post-detail request per post), in one tranche with one attempt per target. The
+ledger total moved from 1080 to 1345. Its tranche `dad3136de9ed4ff686ef424378359560` closed normally.
+Final checks found zero active target leases and zero uncertain dispatches.
+The pre-existing historical open tranche `0ccb88557fed476cb9dd3991f310fffc`
+remains preserved; it is not this validation's active stream. The original frozen
+run and targets still match full SHA-256
+`998a8bb7d8ddbd608105a5f9b492f256ea975c40f03613efbd35616394b4013f`.
+
+No SQL schema, proxy, schedule or app/API contract changed. TRR-APP build is not
+applicable. No full-history ingestion was enabled. Private evidence is under
+`~/.codex/tmp/trr-instagram-settlement-01a16023/anonymous-rollout/`: source manifest
+and archive, deployment history/readiness, remote and local settlement smoke,
+local installation/retirement, fresh state and command receipt, and
+`final-audit.json`. The isolated source is retained to reproduce the deployed
+release and its verification.
