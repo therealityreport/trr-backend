@@ -26,6 +26,8 @@ from trr_backend.ingestion.domain import Failure
 from trr_backend.socials.instagram.constants import AUTH_FATAL_MESSAGES
 from trr_backend.socials.instagram.detail_transport import AUTH_ERRORS
 
+# Keep rolling request accounting for every lane. Only authenticated lanes
+# enforce a local request-count admission cap; public lanes follow source waits.
 WINDOW_SECONDS = 660
 REQUEST_LIMIT = 180
 # Logged-out source lanes follow the June 2026 public backoff in
@@ -210,7 +212,7 @@ class SourceRequestGate:
             if cooldown and cooldown > now:
                 raise IdentityDeferred("identity_cooldown", cooldown)
             times = sorted(value for value in row["request_times"] if value > now - timedelta(seconds=WINDOW_SECONDS))
-            if len(times) >= REQUEST_LIMIT:
+            if not self.public_only and len(times) >= REQUEST_LIMIT:
                 raise IdentityDeferred("identity_budget", times[0] + timedelta(seconds=WINDOW_SECONDS))
             # Expired probes get a NEW token even for the same gate. Late results
             # from the abandoned lease can never own the replacement lease.

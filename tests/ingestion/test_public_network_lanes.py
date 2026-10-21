@@ -214,3 +214,20 @@ def test_lanes_do_not_share_cooldowns():
     modal = _gate(lanes, lane="modal")
     with pytest.raises(identity_policy.IdentityDeferred, match="identity_cooldown"):
         modal.before_request()
+
+
+@pytest.mark.parametrize("lane", [None, "local", "modal"])
+def test_public_requests_above_180_remain_accounted_and_obey_server_cooldown(lane):
+    lanes = _Lanes()
+    gate = _gate(lanes, lane=lane)
+    for _ in range(181):
+        gate.before_request()
+    assert gate.request_count == 181
+    assert len(lanes.rows[gate.identity_key]["request_times"]) == 181
+    failure = gate.finish_failure("rate_limited", retry_after_seconds=1200)
+    assert failure.retry_at == lanes.now + timedelta(seconds=1200)
+    deferred = _gate(lanes, lane=lane)
+    with pytest.raises(identity_policy.IdentityDeferred, match="identity_cooldown"):
+        deferred.before_request()
+    assert deferred.request_count == 0
+    assert len(lanes.rows[gate.identity_key]["request_times"]) == 181

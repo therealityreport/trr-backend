@@ -494,7 +494,7 @@ def test_public_mode_rejects_authentication_cookie_names_before_database_access(
         public_gate(lambda: pytest.fail("public credential rejection accessed database"), cookies={name: value})
 
 
-def test_public_mode_uses_existing_shared_identity_and_exact_request_window(public_lanes):
+def test_public_mode_keeps_shared_accounting_without_a_public_count_cap(public_lanes):
     first = public_gate(public_lanes)
     second = public_gate(public_lanes, cookies={"csrftoken": "synthetic-public-csrf"})
     compatible = SourceRequestGate(
@@ -510,9 +510,13 @@ def test_public_mode_uses_existing_shared_identity_and_exact_request_window(publ
     now = datetime.now(UTC)
     change(public_lanes, first, "request_times=%s", [now] * 179)
     second.before_request()
+    first.before_request()
+    assert len(row(public_lanes, first)["request_times"]) == 181
+    # A caller without explicit public-only mode keeps authenticated admission
+    # rules even when its no-cookie fallback hashes to the same identity.
     with pytest.raises(IdentityDeferred, match="identity_budget"):
-        first.before_request()
-    assert len(row(public_lanes, first)["request_times"]) == 180
+        compatible.before_request()
+    assert len(row(public_lanes, first)["request_times"]) == 181
     change(public_lanes, first, "request_times=%s", [now - timedelta(seconds=661)] * 180)
     first.before_request()
     assert len(row(public_lanes, first)["request_times"]) == 1
