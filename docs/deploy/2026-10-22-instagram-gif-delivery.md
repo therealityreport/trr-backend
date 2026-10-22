@@ -177,6 +177,72 @@ read-query policy. This control does not qualify January history or prove
 timeline exhaustion. Fresh anonymous pipeline and January acceptance remain
 unresolved; no full-history release follows from successful HTTP responses.
 
+## Ordered-grid schema and independent permalink date
+
+The execution owner's subsequent single guarded public-document GET returned
+HTTP 200 and 889,232 bytes. A bounded structured projection found 12 native media
+IDs and shortcodes under
+`data.xig_user_by_username.polaris_ordered_timeline_connection`, with explicit
+`has_next_page=true` and a hashed continuation cursor. These card nodes have no
+native timestamps. A separate named profile metadata object and timeline object
+must be bound by their same-document native profile IDs; the timeline object's
+missing username is an unknown binding input, not an account mismatch.
+
+Offline native-code inspection also established that profile-grid links can use
+`/bravotv/p/<code>/` or `/bravotv/reel/<code>/`. The earlier DOM selector checked
+only root `/p/` and `/reel/` prefixes. Its zero link count therefore cannot prove
+that profile permalinks were absent. The maintained shortcode regex handles
+profile-prefixed paths; current listing parsers do not accept the newly observed
+ordered-grid root as the frozen January timeline family.
+
+One separate maintained public-permalink GET for `Dex3DRREpub` matched native
+media ID `4013230860220406683`, shortcode and owner, and returned native `taken_at`
+`2026-10-22T02:00:01+00:00`. It used no authentication or proxy and made no
+canonical writes. This establishes an anonymous date for that card; it does not
+establish chronological grid ordering, pagination or January coverage.
+
+A private continuation candidate now projects this exact ordered-card schema
+separately, checks same-document named metadata binding, recognizes prefixed
+permalinks and permits one ordinary scroll to the document's existing bottom.
+It records actual scroll movement/bottom position, new bound IDs, connection
+hashes and cursor operations separately. It preserves missing timestamps and
+adds no bootloader or other endpoint permission. The focused installed-runtime
+fixture passed without external requests. Live continuation remains unverified.
+
+The single live continuation capture then returned 64 HTTP 200 responses and
+recognized all 12 profile-prefixed permalinks. One ordinary scroll was attempted,
+but before/after position stayed at zero and both document and viewport height
+were 1,080 pixels. No cursor operation or new bound media IDs appeared. Reaching
+the geometric bottom of a non-scrolling document does not prove pagination or
+source exhaustion. Account binding remained unknown, not mismatched. Offline
+review found that the private identity helper required `id` and `pk` to be
+identical numeric representations inside each object; the intended binding is
+between matching fields across same-document objects. The actual rejected field
+types were not retained, so this remains a helper limitation rather than a
+proven explanation of the native payload. No canonical writes or full-history
+release followed from the capture.
+
+The next private candidate changed only the demonstrated identity assumption,
+safe identity-type/scan-limit diagnostics and an exact naturally emitted
+same-origin HTTPS GET to `/ajax/bootloader-endpoint/`. Same-field identity values
+are hashed; differing `id` and `pk` representations no longer conflict merely
+because they differ across fields. Comparable same-field conflicts and ambiguous
+named account metadata remain unbound. The exact GET uses the same source gate,
+identity/fencing checks, account budget and 16-request document/API cap. POST,
+the alternate bootloader path and other endpoints remain blocked. Focused
+installed-runtime fixtures passed without external traffic.
+
+The execution owner's one capture admitted 11 document/API requests, including
+two exact module-loader GETs, and 55 assets. It closed its account tranche after
+96.566 seconds. The DOM then reported an explicit login dialog and the
+`login_or_challenge` guard closed the page before any scroll or interaction.
+The outer `local_failure`/closed-page result does not replace that recorded
+primary stop reason. Identity projection and the final screenshot did not run
+after the stop; their absence is not an identity mismatch. No canonical data was
+written and the full-history gate remained closed. This establishes a sign-in
+boundary for that browser path, not anonymous January retrieval or a reason to
+dismiss the dialog or repeat the same capture.
+
 Private current evidence references:
 
 - `trr-instagram-no-local-cooldown-01a16023/live-gif.json` and `live-core.json`.
@@ -202,5 +268,13 @@ Private current evidence references:
   control receipt and public-profile screenshot. The earlier 90-second result
   and log are preserved as
   `anonymous-profile-browser-normal-control.local-inspection-failure-1.*`.
+- `public-profile-document-schema.json` and `public-profile-permalink-date.json`
+  in that directory contain the two separately bounded source observations.
+- `ordered-continuation-ready.json` and `ordered-continuation.diff` contain the
+  private candidate's hashes, frozen controls dependency and focused proof.
+- `anonymous-profile-ordered-continuation.json` and
+  `anonymous-profile-ordered-bootloader.json` contain the separate bounded
+  continuation and login-guard outcomes; `ordered-bootloader-ready.json` records
+  the narrow follow-up's hashes and focused fixture proof.
 
 All paths above are under `/Users/thomashulihan/.codex/tmp/`.
