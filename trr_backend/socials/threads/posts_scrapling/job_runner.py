@@ -409,7 +409,9 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
         nonlocal fetcher_metadata, auth_metadata, stop_reason, persistence_state
 
         _raise_if_threads_auth_cooldown_active(account_handle)
-        session = resolve_threads_posts_session()
+        # Session resolution can validate cookies with sync Playwright, which raises
+        # "Sync API inside the asyncio loop" when called on this event-loop thread.
+        session = await asyncio.to_thread(resolve_threads_posts_session)
         auth_metadata = _safe_auth_context(session)
         proxy_config = select_threads_posts_proxy()
         fetcher = ThreadsPostsScraplingFetcher(
