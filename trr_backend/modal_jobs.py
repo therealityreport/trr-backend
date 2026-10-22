@@ -937,6 +937,9 @@ def probe_browser_image_runtime() -> dict[str, object]:
     timeout=60 * 60,
     min_containers=_API_MIN_CONTAINERS,
     max_containers=_API_MAX_CONTAINERS,
+    # Keep database round trips within the US; unconstrained placement can land
+    # in Asia and serialize seconds of network delay in the single profile pool.
+    region="us",
     env=_modal_api_runtime_env(),
 )
 # Live-status streams remain open; reserve shared input capacity for API requests

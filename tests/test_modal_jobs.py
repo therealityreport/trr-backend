@@ -972,6 +972,7 @@ def test_modal_deploy_schedules_are_disabled_by_default(monkeypatch: pytest.Monk
         assert "schedule" not in reloaded.sync_nbcumv_official_images._modal_function_options
         assert "schedule" not in reloaded.purge_stale_social_worker_heartbeats._modal_function_options
         assert reloaded.serve_backend_api._modal_function_options["min_containers"] == 1
+        assert reloaded.serve_backend_api._modal_function_options["region"] == "us"
         assert reloaded.run_admin_operation_v2._modal_function_options["min_containers"] == 0
     finally:
         monkeypatch.delitem(sys.modules, "modal", raising=False)
