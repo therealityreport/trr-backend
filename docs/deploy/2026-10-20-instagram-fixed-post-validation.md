@@ -1579,3 +1579,51 @@ closed, zero active owners, zero uncertain dispatches, budget ledger total 1,509
 and latest tranche closed. The prior two-request listing diagnostic accounts for
 the increase from 1,507. Private bounded procedure and evidence are retained in
 `discovery-gif-repair/HANDOFF.md` under the existing task evidence directory.
+
+## 2026-10-21: January scope, immediate retry, and parser deployment v103
+
+The user expanded the requested run to BravoTV Instagram posts in January 2026,
+then explicitly instructed skipping the cooldown. The prepared bounded intent is
+2026-01-01 inclusive through 2026-02-01 exclusive UTC, public source profile,
+serial detail/comment workers, and full-history disabled. A read-only inventory
+found 291 existing January catalog entries: 221 with owner `bravotv` and 70 with
+other owners. The canonical owner-filtered query found 221 BravoTV posts with
+hosted media. These counts are existing setup data, not fresh discovery evidence
+or a claim that all January posts were retrieved.
+
+One exclusive local-timer override was applied for the immediate bounded
+anonymous listing diagnostic. It preserved failure counts/generation and request
+accounting and reserved the shared probe; it did not change credentials, egress,
+provider authorization, or persistent retry policy. Instagram returned HTTP 401
+on the first `web_profile_info` GET. The diagnostic stopped after one request,
+zero listing pages and zero canonical writes. The resulting shared lane recorded
+its normal new public-access backoff. No repeated forced request was made. The
+January ingestion run was not started because fresh discovery/access remained
+unresolved. The two original GIF comments still have zero hosted media URLs.
+
+Current runtime inspection found v102, whose isolated release did not contain the
+Instagram parser candidate. The maintained checkout at `127ae455`, including its
+63 tracked worktree overlays, was frozen to preserve the newer deployed Reddit,
+cache and TikTok work. Instagram commit `08f51a1b` was deployed from that snapshot
+as **v103**, tag `ig-parser-08f51a1b-on-127ae455`, to workspace `admin-56995`,
+environment `main`, app `trr-backend-jobs` / `ap-DkLTRoSvqhbkGO7fHyHxrD`.
+
+The standard deployment wrapper's explicit-main readiness and API cold-start
+canary passed (HTTP 200, first attempt). A container started after v103 matched all
+11 expected Instagram module hashes and passed source-free GIF rendition and
+prefixed-JSON smoke checks. The full-history gate rejected the full-history
+intent in that deployed container. All 38 function metadata entries, five
+schedules, and six existing consumer function bindings remained unchanged.
+Rollback is the retained v102 deployment; the exact v103 archive and overlay
+manifest are retained in the task's private `january-2026/release` directory.
+The new anonymous listing adapter remains opt-in pending native success.
+
+Final audit: original frozen run unchanged; full-history gate closed; zero active
+owners and uncertain dispatches; account ledger 1,510, latest tranche closed;
+original GIF hosted counts both zero. This verifies deployment of the parser
+fixes, not successful January ingestion, older discovery, or real GIF mirroring.
+The existing scheduled follow-up now carries the January scope and immediate
+401 evidence; it must not repeat the same rejected endpoint while unchanged.
+TRR-APP build: not applicable (backend parser/deployment only). No schema or SQL
+ownership change was made. Private reports are under the task's `january-2026`
+evidence directory.
