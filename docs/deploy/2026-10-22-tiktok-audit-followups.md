@@ -1,9 +1,10 @@
 # TikTok audit follow-ups — 2026-10-22
 
 All five audit findings and the remaining bounded posts-ingestion blocker are
-repaired and deployed. Modal v120 completed a one-page canary and persisted 18
-canonical posts with zero comment rows. The earlier failed receipts below are
-retained as historical evidence.
+repaired and deployed. Modal v120 completed a two-page canary and upserted 34
+unique canonical posts with zero comment rows, reusing the 18 posts from its
+previous one-page canary. Earlier receipts below are retained as historical
+evidence.
 
 ## Initial audit rollout: v113–v116
 
@@ -178,3 +179,39 @@ Provider v119 remains the immediate pre-repair rollback artifact. No rollback wa
 needed. Exact source, manifest, independent review, test logs, source-preservation
 proof and safe deployed/database receipts are retained at
 `/Users/thomashulihan/.codex/tmp/trr-tiktok-posts-repair-01a16268/`.
+
+## Two-page pagination and deduplication canary
+
+The follow-up canary used the unchanged v120 deployed application in
+`admin-56995 / main / trr-backend-jobs`. Fourteen deployed module hashes matched
+the accepted release before any job creation. It used `bravotv`, `max_pages=2`,
+`ingest_mode=posts_only`, and a 60-post cap.
+
+- Run: `d6f9d1e6-1db3-40eb-8132-dff2896b4c84` — completed.
+- Job: `e24b20d7-805e-438c-8716-73d830d69775` — completed.
+- Native page 1 returned 18 posts; page 2 returned 16 posts. The first response's
+  next-cursor hash exactly matched the second request's cursor hash, and the two
+  request cursors differed. Both responses indicated more history; the worker
+  stopped at the requested two-page boundary and retained partial coverage.
+- The raw pages contained 34 distinct IDs with no overlap. All 34 accepted IDs
+  exactly matched the 34 canonical rows read back for the job. No duplicate
+  persisted video IDs were found.
+- All 18 posts from the earlier one-page canary retained their original canonical
+  row UUIDs. They were upserted in place; the second page contributed 16 additional
+  IDs to this canary's result. This verifies repeated-run identity reuse. The live
+  pages did not contain cross-page duplicates; the existing focused duplicate-ID
+  and duplicate-cursor checks remain the evidence for that input case.
+- An independent read-only database connection confirmed 34 canonical rows,
+  native author `bravotv` and post times on every row, zero comment rows, completed
+  job/run status, and the temporary worker stopped.
+
+A passive Python return observer recorded native callback IDs and cursor hashes.
+It changed no fetcher, response, or deployed application function. Cursor query
+values, cookies, credentials, and response bodies are excluded from the delivered
+receipt. No paid provider, proxy purchase, source repair, application deployment,
+permanent worker, or schedule change was needed. TRR-APP build and SQL/schema
+changes were not applicable. Unchanged passing source checks were reused.
+
+Safe native-page and independent database receipts:
+`/Users/thomashulihan/.codex/tmp/trr-tiktok-two-page-01a16268/` —
+`deployed-canary-receipt.json` and `final-persistence-receipt.json`.
