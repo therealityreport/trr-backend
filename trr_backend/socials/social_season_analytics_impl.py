@@ -28467,128 +28467,128 @@ def _ingest_youtube(
             platform="youtube",
         )
         skipped_synced = 0
-        with pg.db_connection() as comments_conn:
-            for video_index, row in enumerate(existing_posts, start=1):
-                vid_id = str(row.get("video_id") or "")
-                post_db_id = str(row.get("id") or "")
-                if not vid_id:
-                    continue
-                snapshot = snapshots.get(post_db_id)
-                expected = _expected_comment_count_for_platform("youtube", row, snapshot=snapshot)
-                decision = _decide_comment_refresh(
-                    sync_strategy=opts.sync_strategy,
-                    expected_count=expected,
-                    snapshot=snapshot,
-                    post_published_at=_coerce_dt(row.get("published_at")),
-                    refresh_policy=opts.comment_refresh_policy,
+        for row in existing_posts:
+            vid_id = str(row.get("video_id") or "")
+            post_db_id = str(row.get("id") or "")
+            if not vid_id:
+                continue
+            snapshot = snapshots.get(post_db_id)
+            expected = _expected_comment_count_for_platform("youtube", row, snapshot=snapshot)
+            decision = _decide_comment_refresh(
+                sync_strategy=opts.sync_strategy,
+                expected_count=expected,
+                snapshot=snapshot,
+                post_published_at=_coerce_dt(row.get("published_at")),
+                refresh_policy=opts.comment_refresh_policy,
+            )
+            if opts.youtube_force_comment_refresh:
+                decision = CommentRefreshDecision(should_refresh=True, reason="youtube_force_comment_refresh")
+            comment_refresh_reasons[decision.reason] += 1
+            if not decision.should_refresh:
+                skipped_synced += 1
+                videos_skipped_up_to_date += 1
+                _record_filter_sample(
+                    reason="up_to_date",
+                    title=str(row.get("text") or ""),
+                    video_id=vid_id,
                 )
-                if opts.youtube_force_comment_refresh:
-                    decision = CommentRefreshDecision(should_refresh=True, reason="youtube_force_comment_refresh")
-                comment_refresh_reasons[decision.reason] += 1
-                if not decision.should_refresh:
-                    skipped_synced += 1
-                    videos_skipped_up_to_date += 1
-                    _record_filter_sample(
-                        reason="up_to_date",
-                        title=str(row.get("text") or ""),
-                        video_id=vid_id,
-                    )
-                    continue
-                matched_video_count += 1
-                scraped_video_count += 1
-                youtube_comment_count_sync_targets.add(post_db_id)
-                activity["phase"] = "comments_fetch"
-                activity["posts_checked"] = scraped_video_count
-                activity["matched_posts"] = matched_video_count
-                if matched_video_count % 10 == 0:
-                    _touch_job_heartbeat(job_id)
-                _flush_progress()
-                fetch_failed = False
-                comments: list[Any] = []
-                fail_reason = ""
-                observed_comment_ids: set[str] = set()
-                local_comment_stats = _new_comment_persist_stats()
+                continue
+            matched_video_count += 1
+            scraped_video_count += 1
+            youtube_comment_count_sync_targets.add(post_db_id)
+            activity["phase"] = "comments_fetch"
+            activity["posts_checked"] = scraped_video_count
+            activity["matched_posts"] = matched_video_count
+            if matched_video_count % 10 == 0:
+                _touch_job_heartbeat(job_id)
+            _flush_progress()
+            fetch_failed = False
+            comments: list[Any] = []
+            fail_reason = ""
+            observed_comment_ids: set[str] = set()
+            local_comment_stats = _new_comment_persist_stats()
+            try:
+                comments = scraper.fetch_comments(
+                    vid_id,
+                    max_comments=opts.max_comments_per_post,
+                    fetch_replies=opts.fetch_replies,
+                    delay=0.5,
+                )
+                _trim_nested_comment_replies(comments, max_replies_per_post=_effective_reply_limit(opts))
+                fail_reason = str(getattr(scraper, "last_comment_fetch_reason", "") or "")
+                if fail_reason:
+                    comment_fail_reasons.add(fail_reason)
+                    if not comments:
+                        comment_errors += 1
+            except Exception:
+                fetch_failed = True
+                comment_errors += 1
+                comment_fail_reasons.add("fetch_exception")
+                logger.exception(
+                    "[youtube] Failed to fetch comments for video %s (video_id=%s)",
+                    post_db_id,
+                    vid_id,
+                )
+
+            if not fetch_failed:
                 try:
-                    comments = scraper.fetch_comments(
-                        vid_id,
-                        max_comments=opts.max_comments_per_post,
-                        fetch_replies=opts.fetch_replies,
-                        delay=0.5,
-                    )
-                    _trim_nested_comment_replies(comments, max_replies_per_post=_effective_reply_limit(opts))
-                    fail_reason = str(getattr(scraper, "last_comment_fetch_reason", "") or "")
-                    if fail_reason:
-                        comment_fail_reasons.add(fail_reason)
-                        if not comments:
-                            comment_errors += 1
+                    with pg.db_connection() as comments_conn:
+                        for comment in comments:
+                            _upsert_youtube_comment_tree(
+                                context,
+                                job_id=job_id,
+                                run_id=run_id,
+                                account=account,
+                                video_db_id=post_db_id,
+                                comment=comment,
+                                observed_comment_ids=observed_comment_ids,
+                                persist_stats=local_comment_stats,
+                                conn=comments_conn,
+                            )
+
+                        is_complete = _is_comment_fetch_complete(
+                            fetch_failed=False,
+                            fail_reason=fail_reason,
+                            auth_failed=bool(getattr(scraper, "comments_auth_failed", False)),
+                            fetched_count=len(comments),
+                            max_comments_per_post=opts.max_comments_per_post,
+                            expected_count=expected,
+                        )
+                        if is_complete:
+                            missing_marked += _mark_missing_comments_for_anchor(
+                                platform="youtube",
+                                anchor_id=post_db_id,
+                                observed_comment_ids=observed_comment_ids,
+                                conn=comments_conn,
+                            )
+                            _reconcile_post_comment_count(
+                                platform="youtube",
+                                post_db_id=post_db_id,
+                                conn=comments_conn,
+                            )
+                        else:
+                            incomplete_comment_fetches += 1
+                            comments_mark_missing_skipped += 1
                 except Exception:
                     fetch_failed = True
                     comment_errors += 1
-                    comment_fail_reasons.add("fetch_exception")
+                    comment_fail_reasons.add("persist_exception")
                     logger.exception(
-                        "[youtube] Failed to fetch comments for video %s (video_id=%s)",
+                        "[youtube] Failed to persist comments for video %s (video_id=%s)",
                         post_db_id,
                         vid_id,
                     )
 
-                if not fetch_failed:
-                    try:
-                        with _SavepointScope(conn=comments_conn, prefix="youtube_comments_stage", index=video_index):
-                            for comment in comments:
-                                _upsert_youtube_comment_tree(
-                                    context,
-                                    job_id=job_id,
-                                    run_id=run_id,
-                                    account=account,
-                                    video_db_id=post_db_id,
-                                    comment=comment,
-                                    observed_comment_ids=observed_comment_ids,
-                                    persist_stats=local_comment_stats,
-                                    conn=comments_conn,
-                                )
+            if fetch_failed:
+                incomplete_comment_fetches += 1
+                comments_mark_missing_skipped += 1
+                continue
 
-                            is_complete = _is_comment_fetch_complete(
-                                fetch_failed=False,
-                                fail_reason=fail_reason,
-                                auth_failed=bool(getattr(scraper, "comments_auth_failed", False)),
-                                fetched_count=len(comments),
-                                max_comments_per_post=opts.max_comments_per_post,
-                                expected_count=expected,
-                            )
-                            if is_complete:
-                                missing_marked += _mark_missing_comments_for_anchor(
-                                    platform="youtube",
-                                    anchor_id=post_db_id,
-                                    observed_comment_ids=observed_comment_ids,
-                                    conn=comments_conn,
-                                )
-                                _reconcile_post_comment_count(
-                                    platform="youtube",
-                                    post_db_id=post_db_id,
-                                    conn=comments_conn,
-                                )
-                            else:
-                                incomplete_comment_fetches += 1
-                                comments_mark_missing_skipped += 1
-                    except Exception:
-                        fetch_failed = True
-                        comment_errors += 1
-                        comment_fail_reasons.add("persist_exception")
-                        logger.exception(
-                            "[youtube] Failed to persist comments for video %s (video_id=%s)",
-                            post_db_id,
-                            vid_id,
-                        )
-
-                if fetch_failed:
-                    incomplete_comment_fetches += 1
-                    comments_mark_missing_skipped += 1
-                    continue
-
-                newest_comment_id, newest_comment_published_at, reply_checkpoint = (
-                    _youtube_comment_checkpoint_from_comments(comments)
-                )
-                try:
+            newest_comment_id, newest_comment_published_at, reply_checkpoint = (
+                _youtube_comment_checkpoint_from_comments(comments)
+            )
+            try:
+                with pg.db_connection() as comments_conn:
                     _save_youtube_video_sync_state(
                         context,
                         post_id=post_db_id,
@@ -28608,16 +28608,16 @@ def _ingest_youtube(
                         },
                         conn=comments_conn,
                     )
-                except Exception:
-                    logger.exception(
-                        "[youtube] Failed to persist video sync state for video %s (video_id=%s)",
-                        post_db_id,
-                        vid_id,
-                    )
+            except Exception:
+                logger.exception(
+                    "[youtube] Failed to persist video sync state for video %s (video_id=%s)",
+                    post_db_id,
+                    vid_id,
+                )
 
-                _merge_comment_persist_stats(comment_stats, local_comment_stats)
-                scraped_comment_count = int(comment_stats.get("comments_fetched") or 0)
-                _flush_progress()
+            _merge_comment_persist_stats(comment_stats, local_comment_stats)
+            scraped_comment_count = int(comment_stats.get("comments_fetched") or 0)
+            _flush_progress()
 
         if youtube_comment_count_sync_targets:
             with pg.db_connection() as conn:
@@ -28834,354 +28834,346 @@ def _ingest_youtube(
         )
 
         skipped_synced = 0
-        with pg.db_connection() as post_comments_conn:
-            for video_index, video in enumerate(videos, start=1):
-                total_scraped += 1
-                videos_scanned += 1
-                scraped_video_count = max(scraped_video_count, total_scraped)
-                activity["phase"] = "posts_filter"
-                activity["posts_checked"] = scraped_video_count
-                video_title = str(getattr(video, "title", "") or "")
-                video_id = str(getattr(video, "video_id", "") or "")
-                if not _youtube_video_matches_show_terms(
-                    title=video_title,
-                    description=getattr(video, "description", ""),
-                    tags=getattr(video, "tags", []),
-                    hashtags=hashtags,
-                    keywords=keywords,
-                ):
-                    skipped_keyword += 1
-                    videos_filtered_show_terms += 1
-                    _record_filter_sample(reason="show_terms_filtered", title=video_title, video_id=video_id)
+        for video in videos:
+            total_scraped += 1
+            videos_scanned += 1
+            scraped_video_count = max(scraped_video_count, total_scraped)
+            activity["phase"] = "posts_filter"
+            activity["posts_checked"] = scraped_video_count
+            video_title = str(getattr(video, "title", "") or "")
+            video_id = str(getattr(video, "video_id", "") or "")
+            if not _youtube_video_matches_show_terms(
+                title=video_title,
+                description=getattr(video, "description", ""),
+                tags=getattr(video, "tags", []),
+                hashtags=hashtags,
+                keywords=keywords,
+            ):
+                skipped_keyword += 1
+                videos_filtered_show_terms += 1
+                _record_filter_sample(reason="show_terms_filtered", title=video_title, video_id=video_id)
+                _flush_progress()
+                continue
+            if not _youtube_video_matches_owner_identity(
+                video,
+                expected_handle=canonical_owner_handle or account,
+                expected_channel_id=canonical_channel_id,
+            ):
+                videos_filtered_owner += 1
+                _record_filter_sample(reason="ownership_filtered", title=video_title, video_id=video_id)
+                _flush_progress()
+                continue
+            videos_matched_show_terms += 1
+            if post_limit and matched_video_count >= post_limit:
+                if require_both_surfaces and {"videos", "shorts"} - matched_surfaces_persisted:
+                    surface_cap_override_applied = True
+                else:
+                    break
+
+            existing_row = existing_post_lookup.get(video_id)
+            if (
+                _youtube_video_surface(video) == "shorts"
+                and existing_row
+                and _youtube_epochish_published_at(existing_row.get("published_at"))
+                and not _youtube_epochish_published_at(getattr(video, "published_at", None))
+            ):
+                shorts_epoch_rows_repaired += 1
+            if existing_row and opts.max_comments_per_post > 0:
+                existing_post_id = str(existing_row.get("id") or "")
+                snapshot = snapshots.get(existing_post_id)
+                expected_comment_count = _expected_comment_count_for_platform(
+                    "youtube",
+                    {"comments_count": int(getattr(video, "comments", 0) or 0)},
+                    snapshot=snapshot,
+                )
+                decision = _decide_comment_refresh(
+                    sync_strategy=opts.sync_strategy,
+                    expected_count=expected_comment_count,
+                    snapshot=snapshot,
+                    post_published_at=_coerce_dt(existing_row.get("published_at")),
+                    refresh_policy=opts.comment_refresh_policy,
+                )
+                if opts.youtube_force_comment_refresh:
+                    decision = CommentRefreshDecision(should_refresh=True, reason="youtube_force_comment_refresh")
+                comment_refresh_reasons[decision.reason] += 1
+                if not decision.should_refresh:
+                    skipped_synced += 1
+                    videos_skipped_up_to_date += 1
+                    _record_filter_sample(reason="up_to_date", title=video_title, video_id=video_id)
+                    activity["phase"] = "posts_skip_up_to_date"
                     _flush_progress()
                     continue
-                if not _youtube_video_matches_owner_identity(
-                    video,
-                    expected_handle=canonical_owner_handle or account,
-                    expected_channel_id=canonical_channel_id,
-                ):
-                    videos_filtered_owner += 1
-                    _record_filter_sample(reason="ownership_filtered", title=video_title, video_id=video_id)
-                    _flush_progress()
-                    continue
-                videos_matched_show_terms += 1
-                if post_limit and matched_video_count >= post_limit:
-                    if require_both_surfaces and {"videos", "shorts"} - matched_surfaces_persisted:
-                        surface_cap_override_applied = True
-                    else:
-                        break
 
-                existing_row = existing_post_lookup.get(video_id)
-                if (
-                    _youtube_video_surface(video) == "shorts"
-                    and existing_row
-                    and _youtube_epochish_published_at(existing_row.get("published_at"))
-                    and not _youtube_epochish_published_at(getattr(video, "published_at", None))
-                ):
-                    shorts_epoch_rows_repaired += 1
-                if existing_row and opts.max_comments_per_post > 0:
-                    existing_post_id = str(existing_row.get("id") or "")
-                    snapshot = snapshots.get(existing_post_id)
-                    expected_comment_count = _expected_comment_count_for_platform(
-                        "youtube",
-                        {"comments_count": int(getattr(video, "comments", 0) or 0)},
-                        snapshot=snapshot,
-                    )
-                    decision = _decide_comment_refresh(
-                        sync_strategy=opts.sync_strategy,
-                        expected_count=expected_comment_count,
-                        snapshot=snapshot,
-                        post_published_at=_coerce_dt(existing_row.get("published_at")),
-                        refresh_policy=opts.comment_refresh_policy,
-                    )
-                    if opts.youtube_force_comment_refresh:
-                        decision = CommentRefreshDecision(should_refresh=True, reason="youtube_force_comment_refresh")
-                    comment_refresh_reasons[decision.reason] += 1
-                    if not decision.should_refresh:
-                        skipped_synced += 1
-                        videos_skipped_up_to_date += 1
-                        _record_filter_sample(reason="up_to_date", title=video_title, video_id=video_id)
-                        activity["phase"] = "posts_skip_up_to_date"
-                        _flush_progress()
-                        continue
-
-                existing_sync_state = _load_youtube_video_sync_state(video_id=video_id)
-                existing_source_media = _as_text_list((existing_row or {}).get("media_urls"))
-                existing_thumbnail_url = str((existing_row or {}).get("thumbnail_url") or "").strip() or None
-                needs_media_resolution = bool(opts.youtube_force_media_refresh)
-                if not needs_media_resolution:
-                    needs_media_resolution = not existing_source_media or not existing_thumbnail_url
-                if not needs_media_resolution:
-                    needs_media_resolution = not str(getattr(video, "thumbnail_url", "") or "").strip()
-                if not needs_media_resolution and existing_sync_state:
-                    media_status = str((existing_sync_state or {}).get("media_resolution_status") or "").strip().lower()
-                    needs_media_resolution = media_status in {"missing_media", "missing_thumbnail", "failed", "partial"}
-                media_resolution_payload: dict[str, Any] | None = None
-                if needs_media_resolution and video_id:
-                    try:
-                        media_resolution_payload = _resolve_youtube_media_for_video_id(video_id=video_id)
-                        resolution_source = (
-                            str((media_resolution_payload or {}).get("source") or "").strip() or "unknown"
-                        )
-                        media_resolution_sources_used[resolution_source] += 1
-                        media_resolution_fallback_counts[resolution_source] += 1
-                    except Exception:
-                        logger.exception("[youtube] Media resolution failed for video_id=%s", video_id)
-                        media_resolution_payload = {
-                            "source": "resolve_exception",
-                            "media_urls": [],
-                            "thumbnail_url": str(getattr(video, "thumbnail_url", "") or "").strip() or None,
-                            "attempts": [],
-                            "media_asset_meta": {},
-                        }
-                resolved_media_urls = _normalize_unique_terms(
-                    [
-                        *existing_source_media,
-                        *[
-                            str(url).strip()
-                            for url in ((media_resolution_payload or {}).get("media_urls") or [])
-                            if str(url).strip()
-                        ],
-                    ]
-                )
-                resolved_thumbnail_url = (
-                    str((media_resolution_payload or {}).get("thumbnail_url") or "").strip()
-                    or str(getattr(video, "thumbnail_url", "") or "").strip()
-                    or existing_thumbnail_url
-                    or None
-                )
-                if resolved_thumbnail_url:
-                    video.thumbnail_url = resolved_thumbnail_url
-                if resolved_media_urls:
-                    video.media_urls = resolved_media_urls
-                    if _youtube_probable_short(
-                        duration_seconds=int(getattr(video, "duration_seconds", 0) or 0),
-                        url=str(getattr(video, "url", "") or ""),
-                        title=str(getattr(video, "title", "") or ""),
-                    ):
-                        video.url = f"https://www.youtube.com/shorts/{video_id}"
-                    elif not str(getattr(video, "url", "") or "").strip():
-                        video.url = f"https://www.youtube.com/watch?v={video_id}"
-
-                if _youtube_transcript_ingest_enabled() and _platform_posts_has_column("youtube", "transcript_text"):
-                    try:
-                        transcript_payload = scraper.fetch_transcript(video_id)
-                    except Exception:  # noqa: BLE001
-                        transcript_payload = {
-                            "text": "",
-                            "segments": [],
-                            "language": None,
-                            "source": None,
-                            "error": "fetch_exception",
-                        }
-                    video.transcript_text = str(transcript_payload.get("text") or "").strip() or None
-                    transcript_segments = transcript_payload.get("segments")
-                    video.transcript_segments = transcript_segments if isinstance(transcript_segments, list) else []
-                    video.transcript_language = transcript_payload.get("language")
-                    video.transcript_source = transcript_payload.get("source")
-                    video.transcript_error = transcript_payload.get("error")
-                    video.transcript_synced_at = _now_utc()
-                    if transcript_payload.get("error"):
-                        transcript_failed += 1
-                    else:
-                        transcript_synced += 1
-
-                upserted: dict[str, Any] | None = None
+            existing_sync_state = _load_youtube_video_sync_state(video_id=video_id)
+            existing_source_media = _as_text_list((existing_row or {}).get("media_urls"))
+            existing_thumbnail_url = str((existing_row or {}).get("thumbnail_url") or "").strip() or None
+            needs_media_resolution = bool(opts.youtube_force_media_refresh)
+            if not needs_media_resolution:
+                needs_media_resolution = not existing_source_media or not existing_thumbnail_url
+            if not needs_media_resolution:
+                needs_media_resolution = not str(getattr(video, "thumbnail_url", "") or "").strip()
+            if not needs_media_resolution and existing_sync_state:
+                media_status = str((existing_sync_state or {}).get("media_resolution_status") or "").strip().lower()
+                needs_media_resolution = media_status in {"missing_media", "missing_thumbnail", "failed", "partial"}
+            media_resolution_payload: dict[str, Any] | None = None
+            if needs_media_resolution and video_id:
                 try:
-                    with pg.db_connection() as conn:
-                        upserted = _upsert_youtube_video(
-                            context, job_id=job_id, account=account, video=video, conn=conn
+                    media_resolution_payload = _resolve_youtube_media_for_video_id(video_id=video_id)
+                    resolution_source = str((media_resolution_payload or {}).get("source") or "").strip() or "unknown"
+                    media_resolution_sources_used[resolution_source] += 1
+                    media_resolution_fallback_counts[resolution_source] += 1
+                except Exception:
+                    logger.exception("[youtube] Media resolution failed for video_id=%s", video_id)
+                    media_resolution_payload = {
+                        "source": "resolve_exception",
+                        "media_urls": [],
+                        "thumbnail_url": str(getattr(video, "thumbnail_url", "") or "").strip() or None,
+                        "attempts": [],
+                        "media_asset_meta": {},
+                    }
+            resolved_media_urls = _normalize_unique_terms(
+                [
+                    *existing_source_media,
+                    *[
+                        str(url).strip()
+                        for url in ((media_resolution_payload or {}).get("media_urls") or [])
+                        if str(url).strip()
+                    ],
+                ]
+            )
+            resolved_thumbnail_url = (
+                str((media_resolution_payload or {}).get("thumbnail_url") or "").strip()
+                or str(getattr(video, "thumbnail_url", "") or "").strip()
+                or existing_thumbnail_url
+                or None
+            )
+            if resolved_thumbnail_url:
+                video.thumbnail_url = resolved_thumbnail_url
+            if resolved_media_urls:
+                video.media_urls = resolved_media_urls
+                if _youtube_probable_short(
+                    duration_seconds=int(getattr(video, "duration_seconds", 0) or 0),
+                    url=str(getattr(video, "url", "") or ""),
+                    title=str(getattr(video, "title", "") or ""),
+                ):
+                    video.url = f"https://www.youtube.com/shorts/{video_id}"
+                elif not str(getattr(video, "url", "") or "").strip():
+                    video.url = f"https://www.youtube.com/watch?v={video_id}"
+
+            if _youtube_transcript_ingest_enabled() and _platform_posts_has_column("youtube", "transcript_text"):
+                try:
+                    transcript_payload = scraper.fetch_transcript(video_id)
+                except Exception:  # noqa: BLE001
+                    transcript_payload = {
+                        "text": "",
+                        "segments": [],
+                        "language": None,
+                        "source": None,
+                        "error": "fetch_exception",
+                    }
+                video.transcript_text = str(transcript_payload.get("text") or "").strip() or None
+                transcript_segments = transcript_payload.get("segments")
+                video.transcript_segments = transcript_segments if isinstance(transcript_segments, list) else []
+                video.transcript_language = transcript_payload.get("language")
+                video.transcript_source = transcript_payload.get("source")
+                video.transcript_error = transcript_payload.get("error")
+                video.transcript_synced_at = _now_utc()
+                if transcript_payload.get("error"):
+                    transcript_failed += 1
+                else:
+                    transcript_synced += 1
+
+            upserted: dict[str, Any] | None = None
+            try:
+                with pg.db_connection() as conn:
+                    upserted = _upsert_youtube_video(context, job_id=job_id, account=account, video=video, conn=conn)
+                    if upserted and (resolved_thumbnail_url or resolved_media_urls):
+                        _update_youtube_post_source_media_fields(
+                            post_id=str(upserted["id"]),
+                            thumbnail_url=resolved_thumbnail_url if resolved_thumbnail_url else FIELD_UNSET,
+                            media_urls=resolved_media_urls if resolved_media_urls else FIELD_UNSET,
+                            conn=conn,
                         )
-                        if upserted and (resolved_thumbnail_url or resolved_media_urls):
-                            _update_youtube_post_source_media_fields(
+                        if media_resolution_payload and media_resolution_payload.get("media_asset_meta"):
+                            _update_platform_post_media_asset_meta(
+                                platform="youtube",
                                 post_id=str(upserted["id"]),
-                                thumbnail_url=resolved_thumbnail_url if resolved_thumbnail_url else FIELD_UNSET,
-                                media_urls=resolved_media_urls if resolved_media_urls else FIELD_UNSET,
+                                media_asset_meta=dict(media_resolution_payload.get("media_asset_meta") or {}),
                                 conn=conn,
                             )
-                            if media_resolution_payload and media_resolution_payload.get("media_asset_meta"):
-                                _update_platform_post_media_asset_meta(
-                                    platform="youtube",
-                                    post_id=str(upserted["id"]),
-                                    media_asset_meta=dict(media_resolution_payload.get("media_asset_meta") or {}),
-                                    conn=conn,
-                                )
-                except Exception:
-                    comment_errors += 1
-                    comment_fail_reasons.add("persist_exception")
-                    logger.exception(
-                        "[youtube] Failed to upsert video video_id=%s",
-                        getattr(video, "video_id", "?"),
-                    )
-                    _flush_progress()
-                    continue
-
-                if not upserted:
-                    _flush_progress()
-                    continue
-                if not resolved_media_urls:
-                    rows_missing_media += 1
-                    media_completion_failures += 1
-                if not resolved_thumbnail_url:
-                    rows_missing_thumbnails += 1
-                    media_completion_failures += 1
-                matched_video_count += 1
-                if _youtube_video_surface(video) == "shorts":
-                    matched_shorts += 1
-                else:
-                    matched_videos += 1
-                matched_surfaces_persisted.add(_youtube_video_surface(video))
-                activity["phase"] = "posts_upsert"
-                activity["matched_posts"] = matched_video_count
-                youtube_comment_count_sync_targets.add(str(upserted["id"]))
-                upserted_for_mirror = dict(upserted)
-                if resolved_thumbnail_url:
-                    upserted_for_mirror["thumbnail_url"] = resolved_thumbnail_url
-                if resolved_media_urls:
-                    upserted_for_mirror["media_urls"] = list(resolved_media_urls)
-                _save_youtube_video_sync_state(
-                    context,
-                    post_id=str(upserted["id"]),
-                    video_id=video_id,
-                    source_scope=opts.source_scope,
-                    source_account=account,
-                    last_seen_at=_now_utc(),
-                    last_discovery_source=discovery_source,
-                    last_stats_checked_at=_now_utc(),
-                    media_resolution_status=(
-                        "ok"
-                        if resolved_media_urls and resolved_thumbnail_url
-                        else "missing_thumbnail"
-                        if resolved_media_urls and not resolved_thumbnail_url
-                        else "missing_media"
-                    ),
-                    media_resolution_source=str((media_resolution_payload or {}).get("source") or "").strip() or None,
-                    media_resolved_at=_now_utc() if media_resolution_payload else None,
-                    media_resolution_attempts=list((media_resolution_payload or {}).get("attempts") or []),
-                    diagnostics={
-                        "stage": "posts",
-                        "source_surface": _youtube_video_surface(video),
-                        "is_short": bool(getattr(video, "is_short", False)),
-                        "has_thumbnail": bool(resolved_thumbnail_url),
-                        "media_url_count": len(resolved_media_urls),
-                        "force_media_refresh": bool(opts.youtube_force_media_refresh),
-                    },
+            except Exception:
+                comment_errors += 1
+                comment_fail_reasons.add("persist_exception")
+                logger.exception(
+                    "[youtube] Failed to upsert video video_id=%s",
+                    getattr(video, "video_id", "?"),
                 )
                 _flush_progress()
+                continue
 
-                if stage == "posts":
-                    try:
-                        mirror_job_id = _enqueue_platform_media_mirror_job(
-                            context,
-                            platform="youtube",
-                            run_id=run_id,
-                            source_scope=opts.source_scope,
-                            account=account,
-                            post_row=upserted_for_mirror,
-                            week_index=None,
-                            parent_job_id=job_id,
-                            conn=None,
-                        )
-                        if mirror_job_id:
-                            mirror_jobs_enqueued += 1
-                    except Exception:  # noqa: BLE001
-                        mirror_job_enqueue_errors += 1
-                        logger.exception(
-                            "[youtube] Failed to enqueue media mirror job for video=%s video_id=%s",
-                            str(upserted.get("id") or ""),
-                            str(getattr(video, "video_id", "") or ""),
-                        )
+            if not upserted:
+                _flush_progress()
+                continue
+            if not resolved_media_urls:
+                rows_missing_media += 1
+                media_completion_failures += 1
+            if not resolved_thumbnail_url:
+                rows_missing_thumbnails += 1
+                media_completion_failures += 1
+            matched_video_count += 1
+            if _youtube_video_surface(video) == "shorts":
+                matched_shorts += 1
+            else:
+                matched_videos += 1
+            matched_surfaces_persisted.add(_youtube_video_surface(video))
+            activity["phase"] = "posts_upsert"
+            activity["matched_posts"] = matched_video_count
+            youtube_comment_count_sync_targets.add(str(upserted["id"]))
+            upserted_for_mirror = dict(upserted)
+            if resolved_thumbnail_url:
+                upserted_for_mirror["thumbnail_url"] = resolved_thumbnail_url
+            if resolved_media_urls:
+                upserted_for_mirror["media_urls"] = list(resolved_media_urls)
+            _save_youtube_video_sync_state(
+                context,
+                post_id=str(upserted["id"]),
+                video_id=video_id,
+                source_scope=opts.source_scope,
+                source_account=account,
+                last_seen_at=_now_utc(),
+                last_discovery_source=discovery_source,
+                last_stats_checked_at=_now_utc(),
+                media_resolution_status=(
+                    "ok"
+                    if resolved_media_urls and resolved_thumbnail_url
+                    else "missing_thumbnail"
+                    if resolved_media_urls and not resolved_thumbnail_url
+                    else "missing_media"
+                ),
+                media_resolution_source=str((media_resolution_payload or {}).get("source") or "").strip() or None,
+                media_resolved_at=_now_utc() if media_resolution_payload else None,
+                media_resolution_attempts=list((media_resolution_payload or {}).get("attempts") or []),
+                diagnostics={
+                    "stage": "posts",
+                    "source_surface": _youtube_video_surface(video),
+                    "is_short": bool(getattr(video, "is_short", False)),
+                    "has_thumbnail": bool(resolved_thumbnail_url),
+                    "media_url_count": len(resolved_media_urls),
+                    "force_media_refresh": bool(opts.youtube_force_media_refresh),
+                },
+            )
+            _flush_progress()
 
-                if opts.max_comments_per_post > 0:
-                    comments: list[Any] = []
-                    fail_reason = ""
-                    fetch_failed = False
-                    observed_comment_ids: set[str] = set()
-                    local_comment_stats = _new_comment_persist_stats()
+            if stage == "posts":
+                try:
+                    mirror_job_id = _enqueue_platform_media_mirror_job(
+                        context,
+                        platform="youtube",
+                        run_id=run_id,
+                        source_scope=opts.source_scope,
+                        account=account,
+                        post_row=upserted_for_mirror,
+                        week_index=None,
+                        parent_job_id=job_id,
+                        conn=None,
+                    )
+                    if mirror_job_id:
+                        mirror_jobs_enqueued += 1
+                except Exception:  # noqa: BLE001
+                    mirror_job_enqueue_errors += 1
+                    logger.exception(
+                        "[youtube] Failed to enqueue media mirror job for video=%s video_id=%s",
+                        str(upserted.get("id") or ""),
+                        str(getattr(video, "video_id", "") or ""),
+                    )
+
+            if opts.max_comments_per_post > 0:
+                comments: list[Any] = []
+                fail_reason = ""
+                fetch_failed = False
+                observed_comment_ids: set[str] = set()
+                local_comment_stats = _new_comment_persist_stats()
+                try:
+                    comments = scraper.fetch_comments(
+                        getattr(video, "video_id", ""),
+                        max_comments=opts.max_comments_per_post,
+                        fetch_replies=opts.fetch_replies,
+                        delay=0.5,
+                    )
+                    _trim_nested_comment_replies(comments, max_replies_per_post=_effective_reply_limit(opts))
+                    fail_reason = str(getattr(scraper, "last_comment_fetch_reason", "") or "")
+                    if fail_reason:
+                        comment_fail_reasons.add(fail_reason)
+                        if not comments:
+                            comment_errors += 1
+                except Exception:
+                    fetch_failed = True
+                    comment_errors += 1
+                    comment_fail_reasons.add("fetch_exception")
+                    logger.exception(
+                        "[youtube] Failed to fetch comments for video %s (video_id=%s)",
+                        upserted.get("id"),
+                        getattr(video, "video_id", "?"),
+                    )
+                    incomplete_comment_fetches += 1
+                    comments_mark_missing_skipped += 1
+
+                if not fetch_failed:
                     try:
-                        comments = scraper.fetch_comments(
-                            getattr(video, "video_id", ""),
-                            max_comments=opts.max_comments_per_post,
-                            fetch_replies=opts.fetch_replies,
-                            delay=0.5,
-                        )
-                        _trim_nested_comment_replies(comments, max_replies_per_post=_effective_reply_limit(opts))
-                        fail_reason = str(getattr(scraper, "last_comment_fetch_reason", "") or "")
-                        if fail_reason:
-                            comment_fail_reasons.add(fail_reason)
-                            if not comments:
-                                comment_errors += 1
+                        with pg.db_connection() as post_comments_conn:
+                            for comment in comments:
+                                _upsert_youtube_comment_tree(
+                                    context,
+                                    job_id=job_id,
+                                    run_id=run_id,
+                                    account=account,
+                                    video_db_id=str(upserted["id"]),
+                                    comment=comment,
+                                    observed_comment_ids=observed_comment_ids,
+                                    persist_stats=local_comment_stats,
+                                    conn=post_comments_conn,
+                                )
+
+                            is_complete = _is_comment_fetch_complete(
+                                fetch_failed=False,
+                                fail_reason=fail_reason,
+                                auth_failed=bool(getattr(scraper, "comments_auth_failed", False)),
+                                fetched_count=len(comments),
+                                max_comments_per_post=opts.max_comments_per_post,
+                                expected_count=int(getattr(video, "comments", 0) or 0),
+                            )
+                            if is_complete:
+                                missing_marked += _mark_missing_comments_for_anchor(
+                                    platform="youtube",
+                                    anchor_id=str(upserted["id"]),
+                                    observed_comment_ids=observed_comment_ids,
+                                    conn=post_comments_conn,
+                                )
+                                _reconcile_post_comment_count(
+                                    platform="youtube",
+                                    post_db_id=str(upserted["id"]),
+                                    conn=post_comments_conn,
+                                )
+                            else:
+                                incomplete_comment_fetches += 1
+                                comments_mark_missing_skipped += 1
                     except Exception:
                         fetch_failed = True
                         comment_errors += 1
-                        comment_fail_reasons.add("fetch_exception")
+                        comment_fail_reasons.add("persist_exception")
                         logger.exception(
-                            "[youtube] Failed to fetch comments for video %s (video_id=%s)",
+                            "[youtube] Failed to persist comments for video %s (video_id=%s)",
                             upserted.get("id"),
                             getattr(video, "video_id", "?"),
                         )
                         incomplete_comment_fetches += 1
                         comments_mark_missing_skipped += 1
 
-                    if not fetch_failed:
-                        try:
-                            with _SavepointScope(
-                                conn=post_comments_conn,
-                                prefix="youtube_post_comments",
-                                index=video_index,
-                            ):
-                                for comment in comments:
-                                    _upsert_youtube_comment_tree(
-                                        context,
-                                        job_id=job_id,
-                                        run_id=run_id,
-                                        account=account,
-                                        video_db_id=str(upserted["id"]),
-                                        comment=comment,
-                                        observed_comment_ids=observed_comment_ids,
-                                        persist_stats=local_comment_stats,
-                                        conn=post_comments_conn,
-                                    )
-
-                                is_complete = _is_comment_fetch_complete(
-                                    fetch_failed=False,
-                                    fail_reason=fail_reason,
-                                    auth_failed=bool(getattr(scraper, "comments_auth_failed", False)),
-                                    fetched_count=len(comments),
-                                    max_comments_per_post=opts.max_comments_per_post,
-                                    expected_count=int(getattr(video, "comments", 0) or 0),
-                                )
-                                if is_complete:
-                                    missing_marked += _mark_missing_comments_for_anchor(
-                                        platform="youtube",
-                                        anchor_id=str(upserted["id"]),
-                                        observed_comment_ids=observed_comment_ids,
-                                        conn=post_comments_conn,
-                                    )
-                                    _reconcile_post_comment_count(
-                                        platform="youtube",
-                                        post_db_id=str(upserted["id"]),
-                                        conn=post_comments_conn,
-                                    )
-                                else:
-                                    incomplete_comment_fetches += 1
-                                    comments_mark_missing_skipped += 1
-                        except Exception:
-                            fetch_failed = True
-                            comment_errors += 1
-                            comment_fail_reasons.add("persist_exception")
-                            logger.exception(
-                                "[youtube] Failed to persist comments for video %s (video_id=%s)",
-                                upserted.get("id"),
-                                getattr(video, "video_id", "?"),
-                            )
-                            incomplete_comment_fetches += 1
-                            comments_mark_missing_skipped += 1
-
-                    if not fetch_failed:
-                        newest_comment_id, newest_comment_published_at, reply_checkpoint = (
-                            _youtube_comment_checkpoint_from_comments(comments)
-                        )
+                if not fetch_failed:
+                    newest_comment_id, newest_comment_published_at, reply_checkpoint = (
+                        _youtube_comment_checkpoint_from_comments(comments)
+                    )
+                    with pg.db_connection() as post_comments_conn:
                         _save_youtube_video_sync_state(
                             context,
                             post_id=str(upserted["id"]),
@@ -29201,10 +29193,10 @@ def _ingest_youtube(
                             },
                             conn=post_comments_conn,
                         )
-                        _merge_comment_persist_stats(comment_stats, local_comment_stats)
-                        scraped_comment_count = int(comment_stats.get("comments_fetched") or 0)
-                        activity["phase"] = "comments_fetch"
-                        _flush_progress()
+                    _merge_comment_persist_stats(comment_stats, local_comment_stats)
+                    scraped_comment_count = int(comment_stats.get("comments_fetched") or 0)
+                    activity["phase"] = "comments_fetch"
+                    _flush_progress()
 
         if post_limit and matched_video_count > post_limit:
             surface_cap_override_applied = True
@@ -29667,259 +29659,242 @@ def _ingest_twitter(
             anchor_rows_iter = (
                 anchor_rows if opts.max_posts_per_target <= 0 else anchor_rows[: opts.max_posts_per_target]
             )
-            with pg.db_connection() as comments_conn:
-                for anchor_index, row in enumerate(anchor_rows_iter, start=1):
-                    tweet_id = str(row.get("tweet_id") or "")
-                    if not tweet_id:
-                        continue
-                    merged_summary = _fetch_and_apply_twitter_metric_summary(
+            for row in anchor_rows_iter:
+                tweet_id = str(row.get("tweet_id") or "")
+                if not tweet_id:
+                    continue
+                merged_summary = _fetch_and_apply_twitter_metric_summary(
+                    scraper=scraper,
+                    tweet_id=tweet_id,
+                    conn=None,
+                )
+                expected_replies = max(
+                    int(row.get("replies_count") or 0),
+                    _normalize_non_negative_int((merged_summary or {}).get("replies")),
+                )
+                expected_quotes = max(
+                    int(row.get("quotes") or 0),
+                    _normalize_non_negative_int((merged_summary or {}).get("quotes")),
+                )
+                expected = expected_replies + expected_quotes
+                reply_pages, quote_pages = _twitter_reply_quote_page_budgets(
+                    expected_replies=expected_replies,
+                    expected_quotes=expected_quotes,
+                )
+                decision = _decide_comment_refresh(
+                    sync_strategy=opts.sync_strategy,
+                    expected_count=expected,
+                    snapshot=snapshots.get(tweet_id),
+                    post_published_at=_coerce_dt(row.get("created_at")),
+                    refresh_policy=opts.comment_refresh_policy,
+                )
+                comment_refresh_reasons[decision.reason] += 1
+                if not decision.should_refresh:
+                    skipped_synced += 1
+                    continue
+                scraped_post_count += 1
+                activity["phase"] = "comments_fetch"
+                activity["posts_checked"] = scraped_post_count
+                activity["matched_posts"] = scraped_post_count
+                if scraped_post_count % 10 == 0:
+                    _touch_job_heartbeat(job_id)
+                _flush_progress()
+                fetch_failed = False
+                quote_fetch_failed = False
+                replies: list[Any] = []
+                quotes: list[Any] = []
+                fail_reason = ""
+                quote_fail_reason = ""
+                observed_comment_ids: set[str] = set()
+                local_comment_stats = _new_comment_persist_stats()
+                try:
+                    replies = _fetch_twitter_replies_compat(
                         scraper=scraper,
                         tweet_id=tweet_id,
-                        conn=None,
+                        delay=0.5,
+                        search_max_pages=reply_pages,
+                        twikit_max_pages=reply_pages,
+                    )[:per_post_limit]
+                    fail_reason = str(getattr(scraper, "last_reply_fetch_reason", "") or "")
+                    if fail_reason:
+                        comment_fail_reasons.add(fail_reason)
+                        if not replies:
+                            comment_errors += 1
+                except Exception:
+                    fetch_failed = True
+                    comment_errors += 1
+                    comment_fail_reasons.add("fetch_exception")
+                    logger.exception("[twitter] Failed to fetch replies for tweet %s", tweet_id)
+
+                try:
+                    quotes, missing_quote_method_reason = _fetch_twitter_quotes_compat(
+                        scraper=scraper,
+                        tweet_id=tweet_id,
+                        delay=0.5,
+                        max_pages=quote_pages,
                     )
-                    expected_replies = max(
-                        int(row.get("replies_count") or 0),
-                        _normalize_non_negative_int((merged_summary or {}).get("replies")),
-                    )
-                    expected_quotes = max(
-                        int(row.get("quotes") or 0),
-                        _normalize_non_negative_int((merged_summary or {}).get("quotes")),
-                    )
-                    expected = expected_replies + expected_quotes
-                    reply_pages, quote_pages = _twitter_reply_quote_page_budgets(
-                        expected_replies=expected_replies,
-                        expected_quotes=expected_quotes,
-                    )
-                    decision = _decide_comment_refresh(
-                        sync_strategy=opts.sync_strategy,
-                        expected_count=expected,
-                        snapshot=snapshots.get(tweet_id),
-                        post_published_at=_coerce_dt(row.get("created_at")),
-                        refresh_policy=opts.comment_refresh_policy,
-                    )
-                    comment_refresh_reasons[decision.reason] += 1
-                    if not decision.should_refresh:
-                        skipped_synced += 1
-                        continue
-                    scraped_post_count += 1
-                    activity["phase"] = "comments_fetch"
-                    activity["posts_checked"] = scraped_post_count
-                    activity["matched_posts"] = scraped_post_count
-                    if scraped_post_count % 10 == 0:
-                        _touch_job_heartbeat(job_id)
-                    _flush_progress()
-                    fetch_failed = False
-                    quote_fetch_failed = False
-                    replies: list[Any] = []
-                    quotes: list[Any] = []
-                    fail_reason = ""
-                    quote_fail_reason = ""
-                    observed_comment_ids: set[str] = set()
-                    local_comment_stats = _new_comment_persist_stats()
+                    quotes = quotes[:per_post_limit]
+                    quote_fail_reason = str(getattr(scraper, "last_quote_fetch_reason", "") or "")
+                    if missing_quote_method_reason:
+                        quote_fail_reason = missing_quote_method_reason
+                    if quote_fail_reason:
+                        quote_fail_reasons.add(quote_fail_reason)
+                        if not quotes:
+                            quote_errors += 1
+                except Exception:
+                    quote_fetch_failed = True
+                    quote_errors += 1
+                    quote_fail_reasons.add("fetch_exception")
+                    logger.exception("[twitter] Failed to fetch quotes for tweet %s", tweet_id)
+                quote_stats["quotes_fetched"] += len(quotes)
+
+                if not fetch_failed:
                     try:
-                        replies = _fetch_twitter_replies_compat(
-                            scraper=scraper,
-                            tweet_id=tweet_id,
-                            delay=0.5,
-                            search_max_pages=reply_pages,
-                            twikit_max_pages=reply_pages,
-                        )[:per_post_limit]
-                        fail_reason = str(getattr(scraper, "last_reply_fetch_reason", "") or "")
-                        if fail_reason:
-                            comment_fail_reasons.add(fail_reason)
-                            if not replies:
-                                comment_errors += 1
+                        with pg.db_connection() as comments_conn:
+                            for reply in replies:
+                                if not getattr(reply, "reply_to_tweet_id", None):
+                                    reply.reply_to_tweet_id = tweet_id
+                                reply.is_reply = True
+                                reply_id = str(getattr(reply, "tweet_id", "") or "")
+                                if reply_id:
+                                    observed_comment_ids.add(reply_id)
+                            persisted_replies = _upsert_tweet_batch(
+                                context,
+                                job_id=job_id,
+                                run_id=run_id,
+                                account=account,
+                                tweets=replies,
+                                persist_stats=local_comment_stats,
+                                conn=comments_conn,
+                            )
+                            for reply in replies:
+                                reply_id = str(getattr(reply, "tweet_id", "") or "")
+                                upserted_reply = persisted_replies.get(reply_id)
+                                if upserted_reply:
+                                    hydrated_replies += 1
+                                    try:
+                                        mirror_job_id = _enqueue_twitter_comment_media_mirror_job(
+                                            context,
+                                            run_id=run_id,
+                                            source_scope=opts.source_scope,
+                                            account=account,
+                                            comment_row=upserted_reply,
+                                            parent_job_id=job_id,
+                                            conn=comments_conn,
+                                        )
+                                        if mirror_job_id:
+                                            local_comment_stats["comment_media_mirror_jobs_enqueued"] = (
+                                                int(local_comment_stats.get("comment_media_mirror_jobs_enqueued") or 0)
+                                                + 1
+                                            )
+                                    except Exception:
+                                        local_comment_stats["comment_media_mirror_job_enqueue_errors"] = (
+                                            int(local_comment_stats.get("comment_media_mirror_job_enqueue_errors") or 0)
+                                            + 1
+                                        )
+                                        logger.exception(
+                                            "[twitter] Failed to enqueue comment media mirror for reply %s",
+                                            reply_id,
+                                        )
+
+                            filtered_quotes: list[Any] = []
+                            for quote in quotes:
+                                quote.is_reply = False
+                                quote.reply_to_tweet_id = None
+                                quote.is_quote = True
+                                if not getattr(quote, "quoted_tweet_id", None):
+                                    quote.quoted_tweet_id = tweet_id
+                                if str(getattr(quote, "quoted_tweet_id", "") or "") != tweet_id:
+                                    continue
+                                quote_id = str(getattr(quote, "tweet_id", "") or "")
+                                if quote_id:
+                                    observed_comment_ids.add(quote_id)
+                                filtered_quotes.append(quote)
+                            persisted_quotes = _upsert_tweet_batch(
+                                context,
+                                job_id=job_id,
+                                run_id=run_id,
+                                account=account,
+                                tweets=filtered_quotes,
+                                persist_stats=None,
+                                conn=comments_conn,
+                            )
+                            for quote in filtered_quotes:
+                                quote_id = str(getattr(quote, "tweet_id", "") or "")
+                                upserted_quote = persisted_quotes.get(quote_id)
+                                if upserted_quote:
+                                    hydrated_quotes += 1
+                                    quote_stats["quotes_upserted"] += 1
+                                    try:
+                                        mirror_job_id = _enqueue_twitter_comment_media_mirror_job(
+                                            context,
+                                            run_id=run_id,
+                                            source_scope=opts.source_scope,
+                                            account=account,
+                                            comment_row=upserted_quote,
+                                            parent_job_id=job_id,
+                                            conn=comments_conn,
+                                        )
+                                        if mirror_job_id:
+                                            local_comment_stats["comment_media_mirror_jobs_enqueued"] = (
+                                                int(local_comment_stats.get("comment_media_mirror_jobs_enqueued") or 0)
+                                                + 1
+                                            )
+                                    except Exception:
+                                        local_comment_stats["comment_media_mirror_job_enqueue_errors"] = (
+                                            int(local_comment_stats.get("comment_media_mirror_job_enqueue_errors") or 0)
+                                            + 1
+                                        )
+                                        logger.exception(
+                                            "[twitter] Failed to enqueue comment media mirror for quote %s",
+                                            quote_id,
+                                        )
+
+                            is_complete = _is_comment_fetch_complete(
+                                fetch_failed=False,
+                                fail_reason=fail_reason,
+                                quote_fail_reason=quote_fail_reason,
+                                auth_failed=bool(getattr(scraper, "comments_auth_failed", False)),
+                                fetched_count=(len(replies) + len(quotes)),
+                                quotes_fetched=len(quotes),
+                                max_comments_per_post=per_post_limit,
+                                expected_count=expected,
+                                expected_quotes=expected_quotes,
+                            )
+                            if is_complete:
+                                missing_marked += _mark_missing_comments_for_anchor(
+                                    platform="twitter",
+                                    anchor_id=tweet_id,
+                                    observed_comment_ids=observed_comment_ids,
+                                    conn=comments_conn,
+                                )
+                                _reconcile_post_comment_count(
+                                    platform="twitter",
+                                    post_db_id=tweet_id,
+                                    conn=comments_conn,
+                                )
+                            else:
+                                incomplete_comment_fetches += 1
+                                comments_mark_missing_skipped += 1
                     except Exception:
                         fetch_failed = True
                         comment_errors += 1
-                        comment_fail_reasons.add("fetch_exception")
-                        logger.exception("[twitter] Failed to fetch replies for tweet %s", tweet_id)
+                        comment_fail_reasons.add("persist_exception")
+                        logger.exception("[twitter] Failed to persist replies for tweet %s", tweet_id)
 
-                    try:
-                        quotes, missing_quote_method_reason = _fetch_twitter_quotes_compat(
-                            scraper=scraper,
-                            tweet_id=tweet_id,
-                            delay=0.5,
-                            max_pages=quote_pages,
-                        )
-                        quotes = quotes[:per_post_limit]
-                        quote_fail_reason = str(getattr(scraper, "last_quote_fetch_reason", "") or "")
-                        if missing_quote_method_reason:
-                            quote_fail_reason = missing_quote_method_reason
-                        if quote_fail_reason:
-                            quote_fail_reasons.add(quote_fail_reason)
-                            if not quotes:
-                                quote_errors += 1
-                    except Exception:
-                        quote_fetch_failed = True
-                        quote_errors += 1
-                        quote_fail_reasons.add("fetch_exception")
-                        logger.exception("[twitter] Failed to fetch quotes for tweet %s", tweet_id)
-                    quote_stats["quotes_fetched"] += len(quotes)
+                if fetch_failed:
+                    incomplete_comment_fetches += 1
+                    comments_mark_missing_skipped += 1
+                    continue
 
-                    if not fetch_failed:
-                        try:
-                            with _SavepointScope(
-                                conn=comments_conn,
-                                prefix="twitter_comments_stage",
-                                index=anchor_index,
-                            ):
-                                for reply in replies:
-                                    if not getattr(reply, "reply_to_tweet_id", None):
-                                        reply.reply_to_tweet_id = tweet_id
-                                    reply.is_reply = True
-                                    reply_id = str(getattr(reply, "tweet_id", "") or "")
-                                    if reply_id:
-                                        observed_comment_ids.add(reply_id)
-                                persisted_replies = _upsert_tweet_batch(
-                                    context,
-                                    job_id=job_id,
-                                    run_id=run_id,
-                                    account=account,
-                                    tweets=replies,
-                                    persist_stats=local_comment_stats,
-                                    conn=comments_conn,
-                                )
-                                for reply in replies:
-                                    reply_id = str(getattr(reply, "tweet_id", "") or "")
-                                    upserted_reply = persisted_replies.get(reply_id)
-                                    if upserted_reply:
-                                        hydrated_replies += 1
-                                        try:
-                                            mirror_job_id = _enqueue_twitter_comment_media_mirror_job(
-                                                context,
-                                                run_id=run_id,
-                                                source_scope=opts.source_scope,
-                                                account=account,
-                                                comment_row=upserted_reply,
-                                                parent_job_id=job_id,
-                                                conn=comments_conn,
-                                            )
-                                            if mirror_job_id:
-                                                local_comment_stats["comment_media_mirror_jobs_enqueued"] = (
-                                                    int(
-                                                        local_comment_stats.get("comment_media_mirror_jobs_enqueued")
-                                                        or 0
-                                                    )
-                                                    + 1
-                                                )
-                                        except Exception:
-                                            local_comment_stats["comment_media_mirror_job_enqueue_errors"] = (
-                                                int(
-                                                    local_comment_stats.get("comment_media_mirror_job_enqueue_errors")
-                                                    or 0
-                                                )
-                                                + 1
-                                            )
-                                            logger.exception(
-                                                "[twitter] Failed to enqueue comment media mirror for reply %s",
-                                                reply_id,
-                                            )
+                if quote_fetch_failed:
+                    quote_fail_reason = "fetch_exception"
+                    if quote_fail_reason:
+                        quote_fail_reasons.add(quote_fail_reason)
 
-                                filtered_quotes: list[Any] = []
-                                for quote in quotes:
-                                    quote.is_reply = False
-                                    quote.reply_to_tweet_id = None
-                                    quote.is_quote = True
-                                    if not getattr(quote, "quoted_tweet_id", None):
-                                        quote.quoted_tweet_id = tweet_id
-                                    if str(getattr(quote, "quoted_tweet_id", "") or "") != tweet_id:
-                                        continue
-                                    quote_id = str(getattr(quote, "tweet_id", "") or "")
-                                    if quote_id:
-                                        observed_comment_ids.add(quote_id)
-                                    filtered_quotes.append(quote)
-                                persisted_quotes = _upsert_tweet_batch(
-                                    context,
-                                    job_id=job_id,
-                                    run_id=run_id,
-                                    account=account,
-                                    tweets=filtered_quotes,
-                                    persist_stats=None,
-                                    conn=comments_conn,
-                                )
-                                for quote in filtered_quotes:
-                                    quote_id = str(getattr(quote, "tweet_id", "") or "")
-                                    upserted_quote = persisted_quotes.get(quote_id)
-                                    if upserted_quote:
-                                        hydrated_quotes += 1
-                                        quote_stats["quotes_upserted"] += 1
-                                        try:
-                                            mirror_job_id = _enqueue_twitter_comment_media_mirror_job(
-                                                context,
-                                                run_id=run_id,
-                                                source_scope=opts.source_scope,
-                                                account=account,
-                                                comment_row=upserted_quote,
-                                                parent_job_id=job_id,
-                                                conn=comments_conn,
-                                            )
-                                            if mirror_job_id:
-                                                local_comment_stats["comment_media_mirror_jobs_enqueued"] = (
-                                                    int(
-                                                        local_comment_stats.get("comment_media_mirror_jobs_enqueued")
-                                                        or 0
-                                                    )
-                                                    + 1
-                                                )
-                                        except Exception:
-                                            local_comment_stats["comment_media_mirror_job_enqueue_errors"] = (
-                                                int(
-                                                    local_comment_stats.get("comment_media_mirror_job_enqueue_errors")
-                                                    or 0
-                                                )
-                                                + 1
-                                            )
-                                            logger.exception(
-                                                "[twitter] Failed to enqueue comment media mirror for quote %s",
-                                                quote_id,
-                                            )
-
-                                is_complete = _is_comment_fetch_complete(
-                                    fetch_failed=False,
-                                    fail_reason=fail_reason,
-                                    quote_fail_reason=quote_fail_reason,
-                                    auth_failed=bool(getattr(scraper, "comments_auth_failed", False)),
-                                    fetched_count=(len(replies) + len(quotes)),
-                                    quotes_fetched=len(quotes),
-                                    max_comments_per_post=per_post_limit,
-                                    expected_count=expected,
-                                    expected_quotes=expected_quotes,
-                                )
-                                if is_complete:
-                                    missing_marked += _mark_missing_comments_for_anchor(
-                                        platform="twitter",
-                                        anchor_id=tweet_id,
-                                        observed_comment_ids=observed_comment_ids,
-                                        conn=comments_conn,
-                                    )
-                                    _reconcile_post_comment_count(
-                                        platform="twitter",
-                                        post_db_id=tweet_id,
-                                        conn=comments_conn,
-                                    )
-                                else:
-                                    incomplete_comment_fetches += 1
-                                    comments_mark_missing_skipped += 1
-                        except Exception:
-                            fetch_failed = True
-                            comment_errors += 1
-                            comment_fail_reasons.add("persist_exception")
-                            logger.exception("[twitter] Failed to persist replies for tweet %s", tweet_id)
-
-                    if fetch_failed:
-                        incomplete_comment_fetches += 1
-                        comments_mark_missing_skipped += 1
-                        continue
-
-                    if quote_fetch_failed:
-                        quote_fail_reason = "fetch_exception"
-                        if quote_fail_reason:
-                            quote_fail_reasons.add(quote_fail_reason)
-
-                    _merge_comment_persist_stats(comment_stats, local_comment_stats)
-                    scraped_reply_count = int(comment_stats.get("comments_fetched") or 0)
-                    _flush_progress()
+                _merge_comment_persist_stats(comment_stats, local_comment_stats)
+                scraped_reply_count = int(comment_stats.get("comments_fetched") or 0)
+                _flush_progress()
         scraped_reply_count = int(comment_stats.get("comments_fetched") or 0)
         if skipped_synced:
             logger.info("[twitter] Skipped %d tweets whose replies are already synced", skipped_synced)
@@ -30124,236 +30099,223 @@ def _ingest_twitter(
                 anchor_posts_iter = (
                     anchor_posts if opts.max_posts_per_target <= 0 else anchor_posts[: opts.max_posts_per_target]
                 )
-                with pg.db_connection() as comments_conn:
-                    for anchor_index, tweet in enumerate(anchor_posts_iter, start=1):
-                        tweet_id = str(getattr(tweet, "tweet_id", "") or "")
-                        if not tweet_id:
-                            continue
-                        expected_replies = _normalize_non_negative_int(getattr(tweet, "replies", 0))
-                        expected_quotes = _normalize_non_negative_int(getattr(tweet, "quotes", 0))
-                        reply_pages, quote_pages = _twitter_reply_quote_page_budgets(
-                            expected_replies=expected_replies,
-                            expected_quotes=expected_quotes,
+                for tweet in anchor_posts_iter:
+                    tweet_id = str(getattr(tweet, "tweet_id", "") or "")
+                    if not tweet_id:
+                        continue
+                    expected_replies = _normalize_non_negative_int(getattr(tweet, "replies", 0))
+                    expected_quotes = _normalize_non_negative_int(getattr(tweet, "quotes", 0))
+                    reply_pages, quote_pages = _twitter_reply_quote_page_budgets(
+                        expected_replies=expected_replies,
+                        expected_quotes=expected_quotes,
+                    )
+                    fetch_failed = False
+                    quote_fetch_failed = False
+                    fail_reason = ""
+                    quote_fail_reason = ""
+                    replies: list[Any] = []
+                    quotes: list[Any] = []
+                    observed_comment_ids: set[str] = set()
+                    local_comment_stats = _new_comment_persist_stats()
+                    try:
+                        replies = _fetch_twitter_replies_compat(
+                            scraper=scraper,
+                            tweet_id=tweet_id,
+                            delay=0.5,
+                            search_max_pages=reply_pages,
+                            twikit_max_pages=reply_pages,
+                        )[:per_post_limit]
+                        fail_reason = str(getattr(scraper, "last_reply_fetch_reason", "") or "")
+                        if fail_reason:
+                            comment_fail_reasons.add(fail_reason)
+                            if not replies:
+                                comment_errors += 1
+                    except Exception:
+                        fetch_failed = True
+                        comment_errors += 1
+                        comment_fail_reasons.add("fetch_exception")
+                        logger.exception("[twitter] Failed to fetch replies for tweet %s", tweet_id)
+                        incomplete_comment_fetches += 1
+                        comments_mark_missing_skipped += 1
+
+                    try:
+                        quotes, missing_quote_method_reason = _fetch_twitter_quotes_compat(
+                            scraper=scraper,
+                            tweet_id=tweet_id,
+                            delay=0.5,
+                            max_pages=quote_pages,
                         )
-                        fetch_failed = False
-                        quote_fetch_failed = False
-                        fail_reason = ""
-                        quote_fail_reason = ""
-                        replies: list[Any] = []
-                        quotes: list[Any] = []
-                        observed_comment_ids: set[str] = set()
-                        local_comment_stats = _new_comment_persist_stats()
+                        quotes = quotes[:per_post_limit]
+                        quote_fail_reason = str(getattr(scraper, "last_quote_fetch_reason", "") or "")
+                        if missing_quote_method_reason:
+                            quote_fail_reason = missing_quote_method_reason
+                        if quote_fail_reason:
+                            quote_fail_reasons.add(quote_fail_reason)
+                            if not quotes:
+                                quote_errors += 1
+                    except Exception:
+                        quote_fetch_failed = True
+                        quote_errors += 1
+                        quote_fail_reason = "fetch_exception"
+                        quote_fail_reasons.add(quote_fail_reason)
+                        logger.exception("[twitter] Failed to fetch quotes for tweet %s", tweet_id)
+                    quote_stats["quotes_fetched"] += len(quotes)
+
+                    if not fetch_failed:
                         try:
-                            replies = _fetch_twitter_replies_compat(
-                                scraper=scraper,
-                                tweet_id=tweet_id,
-                                delay=0.5,
-                                search_max_pages=reply_pages,
-                                twikit_max_pages=reply_pages,
-                            )[:per_post_limit]
-                            fail_reason = str(getattr(scraper, "last_reply_fetch_reason", "") or "")
-                            if fail_reason:
-                                comment_fail_reasons.add(fail_reason)
-                                if not replies:
-                                    comment_errors += 1
+                            with pg.db_connection() as comments_conn:
+                                for reply in replies:
+                                    if not getattr(reply, "reply_to_tweet_id", None):
+                                        reply.reply_to_tweet_id = tweet_id
+                                    reply.is_reply = True
+                                    reply_id = str(getattr(reply, "tweet_id", "") or "")
+                                    if reply_id:
+                                        observed_comment_ids.add(reply_id)
+                                persisted_replies = _upsert_tweet_batch(
+                                    context,
+                                    job_id=job_id,
+                                    run_id=run_id,
+                                    account=account,
+                                    tweets=replies,
+                                    persist_stats=local_comment_stats,
+                                    conn=comments_conn,
+                                )
+                                for reply in replies:
+                                    reply_id = str(getattr(reply, "tweet_id", "") or "")
+                                    upserted_reply = persisted_replies.get(reply_id)
+                                    if upserted_reply:
+                                        hydrated_replies += 1
+                                        try:
+                                            mirror_job_id = _enqueue_twitter_comment_media_mirror_job(
+                                                context,
+                                                run_id=run_id,
+                                                source_scope=opts.source_scope,
+                                                account=account,
+                                                comment_row=upserted_reply,
+                                                parent_job_id=job_id,
+                                                conn=comments_conn,
+                                            )
+                                            if mirror_job_id:
+                                                local_comment_stats["comment_media_mirror_jobs_enqueued"] = (
+                                                    int(
+                                                        local_comment_stats.get("comment_media_mirror_jobs_enqueued")
+                                                        or 0
+                                                    )
+                                                    + 1
+                                                )
+                                        except Exception:
+                                            local_comment_stats["comment_media_mirror_job_enqueue_errors"] = (
+                                                int(
+                                                    local_comment_stats.get("comment_media_mirror_job_enqueue_errors")
+                                                    or 0
+                                                )
+                                                + 1
+                                            )
+                                            logger.exception(
+                                                "[twitter] Failed to enqueue comment media mirror for reply %s",
+                                                reply_id,
+                                            )
+
+                                filtered_quotes: list[Any] = []
+                                for quote in quotes:
+                                    quote.is_reply = False
+                                    quote.reply_to_tweet_id = None
+                                    quote.is_quote = True
+                                    if not getattr(quote, "quoted_tweet_id", None):
+                                        quote.quoted_tweet_id = tweet_id
+                                    if str(getattr(quote, "quoted_tweet_id", "") or "") != tweet_id:
+                                        continue
+                                    quote_id = str(getattr(quote, "tweet_id", "") or "")
+                                    if quote_id:
+                                        observed_comment_ids.add(quote_id)
+                                    filtered_quotes.append(quote)
+                                persisted_quotes = _upsert_tweet_batch(
+                                    context,
+                                    job_id=job_id,
+                                    run_id=run_id,
+                                    account=account,
+                                    tweets=filtered_quotes,
+                                    persist_stats=None,
+                                    conn=comments_conn,
+                                )
+                                for quote in filtered_quotes:
+                                    quote_id = str(getattr(quote, "tweet_id", "") or "")
+                                    upserted_quote = persisted_quotes.get(quote_id)
+                                    if upserted_quote:
+                                        hydrated_quotes += 1
+                                        quote_stats["quotes_upserted"] += 1
+                                        try:
+                                            mirror_job_id = _enqueue_twitter_comment_media_mirror_job(
+                                                context,
+                                                run_id=run_id,
+                                                source_scope=opts.source_scope,
+                                                account=account,
+                                                comment_row=upserted_quote,
+                                                parent_job_id=job_id,
+                                                conn=comments_conn,
+                                            )
+                                            if mirror_job_id:
+                                                local_comment_stats["comment_media_mirror_jobs_enqueued"] = (
+                                                    int(
+                                                        local_comment_stats.get("comment_media_mirror_jobs_enqueued")
+                                                        or 0
+                                                    )
+                                                    + 1
+                                                )
+                                        except Exception:
+                                            local_comment_stats["comment_media_mirror_job_enqueue_errors"] = (
+                                                int(
+                                                    local_comment_stats.get("comment_media_mirror_job_enqueue_errors")
+                                                    or 0
+                                                )
+                                                + 1
+                                            )
+                                            logger.exception(
+                                                "[twitter] Failed to enqueue comment media mirror for quote %s",
+                                                quote_id,
+                                            )
+
+                                is_complete = _is_comment_fetch_complete(
+                                    fetch_failed=False,
+                                    fail_reason=fail_reason,
+                                    quote_fail_reason=quote_fail_reason,
+                                    auth_failed=bool(getattr(scraper, "comments_auth_failed", False)),
+                                    fetched_count=(len(replies) + len(quotes)),
+                                    quotes_fetched=len(quotes),
+                                    max_comments_per_post=per_post_limit,
+                                    expected_count=(expected_replies + expected_quotes),
+                                    expected_quotes=expected_quotes,
+                                )
+                                if is_complete:
+                                    missing_marked += _mark_missing_comments_for_anchor(
+                                        platform="twitter",
+                                        anchor_id=tweet_id,
+                                        observed_comment_ids=observed_comment_ids,
+                                        conn=comments_conn,
+                                    )
+                                    _reconcile_post_comment_count(
+                                        platform="twitter",
+                                        post_db_id=tweet_id,
+                                        conn=comments_conn,
+                                    )
+                                else:
+                                    incomplete_comment_fetches += 1
+                                    comments_mark_missing_skipped += 1
                         except Exception:
                             fetch_failed = True
                             comment_errors += 1
-                            comment_fail_reasons.add("fetch_exception")
-                            logger.exception("[twitter] Failed to fetch replies for tweet %s", tweet_id)
+                            comment_fail_reasons.add("persist_exception")
+                            logger.exception("[twitter] Failed to persist replies for tweet %s", tweet_id)
                             incomplete_comment_fetches += 1
                             comments_mark_missing_skipped += 1
 
-                        try:
-                            quotes, missing_quote_method_reason = _fetch_twitter_quotes_compat(
-                                scraper=scraper,
-                                tweet_id=tweet_id,
-                                delay=0.5,
-                                max_pages=quote_pages,
-                            )
-                            quotes = quotes[:per_post_limit]
-                            quote_fail_reason = str(getattr(scraper, "last_quote_fetch_reason", "") or "")
-                            if missing_quote_method_reason:
-                                quote_fail_reason = missing_quote_method_reason
-                            if quote_fail_reason:
-                                quote_fail_reasons.add(quote_fail_reason)
-                                if not quotes:
-                                    quote_errors += 1
-                        except Exception:
-                            quote_fetch_failed = True
-                            quote_errors += 1
-                            quote_fail_reason = "fetch_exception"
-                            quote_fail_reasons.add(quote_fail_reason)
-                            logger.exception("[twitter] Failed to fetch quotes for tweet %s", tweet_id)
-                        quote_stats["quotes_fetched"] += len(quotes)
-
-                        if not fetch_failed:
-                            try:
-                                with _SavepointScope(
-                                    conn=comments_conn,
-                                    prefix="twitter_posts_comments",
-                                    index=anchor_index,
-                                ):
-                                    for reply in replies:
-                                        if not getattr(reply, "reply_to_tweet_id", None):
-                                            reply.reply_to_tweet_id = tweet_id
-                                        reply.is_reply = True
-                                        reply_id = str(getattr(reply, "tweet_id", "") or "")
-                                        if reply_id:
-                                            observed_comment_ids.add(reply_id)
-                                    persisted_replies = _upsert_tweet_batch(
-                                        context,
-                                        job_id=job_id,
-                                        run_id=run_id,
-                                        account=account,
-                                        tweets=replies,
-                                        persist_stats=local_comment_stats,
-                                        conn=comments_conn,
-                                    )
-                                    for reply in replies:
-                                        reply_id = str(getattr(reply, "tweet_id", "") or "")
-                                        upserted_reply = persisted_replies.get(reply_id)
-                                        if upserted_reply:
-                                            hydrated_replies += 1
-                                            try:
-                                                mirror_job_id = _enqueue_twitter_comment_media_mirror_job(
-                                                    context,
-                                                    run_id=run_id,
-                                                    source_scope=opts.source_scope,
-                                                    account=account,
-                                                    comment_row=upserted_reply,
-                                                    parent_job_id=job_id,
-                                                    conn=comments_conn,
-                                                )
-                                                if mirror_job_id:
-                                                    local_comment_stats["comment_media_mirror_jobs_enqueued"] = (
-                                                        int(
-                                                            local_comment_stats.get(
-                                                                "comment_media_mirror_jobs_enqueued"
-                                                            )
-                                                            or 0
-                                                        )
-                                                        + 1
-                                                    )
-                                            except Exception:
-                                                local_comment_stats["comment_media_mirror_job_enqueue_errors"] = (
-                                                    int(
-                                                        local_comment_stats.get(
-                                                            "comment_media_mirror_job_enqueue_errors"
-                                                        )
-                                                        or 0
-                                                    )
-                                                    + 1
-                                                )
-                                                logger.exception(
-                                                    "[twitter] Failed to enqueue comment media mirror for reply %s",
-                                                    reply_id,
-                                                )
-
-                                    filtered_quotes: list[Any] = []
-                                    for quote in quotes:
-                                        quote.is_reply = False
-                                        quote.reply_to_tweet_id = None
-                                        quote.is_quote = True
-                                        if not getattr(quote, "quoted_tweet_id", None):
-                                            quote.quoted_tweet_id = tweet_id
-                                        if str(getattr(quote, "quoted_tweet_id", "") or "") != tweet_id:
-                                            continue
-                                        quote_id = str(getattr(quote, "tweet_id", "") or "")
-                                        if quote_id:
-                                            observed_comment_ids.add(quote_id)
-                                        filtered_quotes.append(quote)
-                                    persisted_quotes = _upsert_tweet_batch(
-                                        context,
-                                        job_id=job_id,
-                                        run_id=run_id,
-                                        account=account,
-                                        tweets=filtered_quotes,
-                                        persist_stats=None,
-                                        conn=comments_conn,
-                                    )
-                                    for quote in filtered_quotes:
-                                        quote_id = str(getattr(quote, "tweet_id", "") or "")
-                                        upserted_quote = persisted_quotes.get(quote_id)
-                                        if upserted_quote:
-                                            hydrated_quotes += 1
-                                            quote_stats["quotes_upserted"] += 1
-                                            try:
-                                                mirror_job_id = _enqueue_twitter_comment_media_mirror_job(
-                                                    context,
-                                                    run_id=run_id,
-                                                    source_scope=opts.source_scope,
-                                                    account=account,
-                                                    comment_row=upserted_quote,
-                                                    parent_job_id=job_id,
-                                                    conn=comments_conn,
-                                                )
-                                                if mirror_job_id:
-                                                    local_comment_stats["comment_media_mirror_jobs_enqueued"] = (
-                                                        int(
-                                                            local_comment_stats.get(
-                                                                "comment_media_mirror_jobs_enqueued"
-                                                            )
-                                                            or 0
-                                                        )
-                                                        + 1
-                                                    )
-                                            except Exception:
-                                                local_comment_stats["comment_media_mirror_job_enqueue_errors"] = (
-                                                    int(
-                                                        local_comment_stats.get(
-                                                            "comment_media_mirror_job_enqueue_errors"
-                                                        )
-                                                        or 0
-                                                    )
-                                                    + 1
-                                                )
-                                                logger.exception(
-                                                    "[twitter] Failed to enqueue comment media mirror for quote %s",
-                                                    quote_id,
-                                                )
-
-                                    is_complete = _is_comment_fetch_complete(
-                                        fetch_failed=False,
-                                        fail_reason=fail_reason,
-                                        quote_fail_reason=quote_fail_reason,
-                                        auth_failed=bool(getattr(scraper, "comments_auth_failed", False)),
-                                        fetched_count=(len(replies) + len(quotes)),
-                                        quotes_fetched=len(quotes),
-                                        max_comments_per_post=per_post_limit,
-                                        expected_count=(expected_replies + expected_quotes),
-                                        expected_quotes=expected_quotes,
-                                    )
-                                    if is_complete:
-                                        missing_marked += _mark_missing_comments_for_anchor(
-                                            platform="twitter",
-                                            anchor_id=tweet_id,
-                                            observed_comment_ids=observed_comment_ids,
-                                            conn=comments_conn,
-                                        )
-                                        _reconcile_post_comment_count(
-                                            platform="twitter",
-                                            post_db_id=tweet_id,
-                                            conn=comments_conn,
-                                        )
-                                    else:
-                                        incomplete_comment_fetches += 1
-                                        comments_mark_missing_skipped += 1
-                            except Exception:
-                                fetch_failed = True
-                                comment_errors += 1
-                                comment_fail_reasons.add("persist_exception")
-                                logger.exception("[twitter] Failed to persist replies for tweet %s", tweet_id)
-                                incomplete_comment_fetches += 1
-                                comments_mark_missing_skipped += 1
-
-                        if not fetch_failed:
-                            _merge_comment_persist_stats(comment_stats, local_comment_stats)
-                            scraped_reply_count = int(comment_stats.get("comments_fetched") or 0)
-                            activity["phase"] = "comments_fetch"
-                            _flush_progress()
-                        if quote_fetch_failed and not quote_fail_reason:
-                            quote_fail_reasons.add("fetch_exception")
+                    if not fetch_failed:
+                        _merge_comment_persist_stats(comment_stats, local_comment_stats)
+                        scraped_reply_count = int(comment_stats.get("comments_fetched") or 0)
+                        activity["phase"] = "comments_fetch"
+                        _flush_progress()
+                    if quote_fetch_failed and not quote_fail_reason:
+                        quote_fail_reasons.add("fetch_exception")
             scraped_reply_count = int(comment_stats.get("comments_fetched") or 0)
         if skipped_synced:
             logger.info("[twitter] Skipped %d posts already up-to-date", skipped_synced)
