@@ -29534,6 +29534,23 @@ def _upsert_tweet_batch(
     return persisted_by_tweet_id
 
 
+def _raise_if_twitter_search_exhausted(scraped_tweets: Sequence[Any], retrieval_meta: Mapping[str, Any]) -> None:
+    """Fail the season posts job when every Twitter search transport failed.
+
+    The scraper reports ``error_code``/``retryable`` in its retrieval metadata. Without
+    this check the job finished as ``completed`` with zero items and never retried.
+    """
+    error_code = str(retrieval_meta.get("error_code") or "").strip().lower()
+    if scraped_tweets or not error_code:
+        return
+    raise SharedStageRuntimeError(
+        f"Twitter search returned no tweets after all transports failed ({error_code}).",
+        error_code=error_code,
+        retryable=bool(retrieval_meta.get("retryable", True)),
+        runtime_metadata={"retrieval_meta": dict(retrieval_meta)},
+    )
+
+
 def _ingest_twitter(
     context: SeasonContext,
     *,
@@ -29943,6 +29960,7 @@ def _ingest_twitter(
         tweets = scraped_tweets if not post_limit else scraped_tweets[:post_limit]
         retrieval_meta.update(dict(getattr(scraper, "last_retrieval_meta", {}) or {}))
         logger.info("[twitter] Scraper returned %d tweets", len(tweets))
+        _raise_if_twitter_search_exhausted(scraped_tweets, retrieval_meta)
 
         existing_post_lookup: dict[str, dict[str, Any]] = {}
         snapshots: dict[str, CommentLifecycleSnapshot] = {}
