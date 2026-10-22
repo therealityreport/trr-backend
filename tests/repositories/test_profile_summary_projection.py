@@ -22,6 +22,7 @@ MIGRATIONS = [
     ROOT / "supabase/migrations/20261022042524_instagram_profile_summary_projection.sql",
     ROOT / "supabase/migrations/20261022042542_profile_recent_run_indexes.sql",
     ROOT / "supabase/migrations/20261022072404_instagram_profile_header_scalars.sql",
+    ROOT / "supabase/migrations/20261022191037_instagram_profile_catalog_accounts.sql",
 ]
 
 
@@ -35,7 +36,7 @@ def postgres():
     with tempfile.TemporaryDirectory(prefix="trr-summary-pg-", dir="/tmp") as scratch:
         data = str(Path(scratch) / "data")
         subprocess.run(
-            [initdb, "-D", data, "-A", "trust", "-U", "postgres", "--no-locale"],
+            [initdb, "-D", data, "-A", "trust", "-U", "postgres", "--no-locale", "--encoding=UTF8"],
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
@@ -386,3 +387,149 @@ def test_catalog_native_short_circuit_preserves_legacy_matching(database):
             assert matches[0] == matches[1], account
             if account == "bravotv":
                 assert len(matches[0]) == 7
+
+
+@pytest.mark.parametrize(
+    "source,owner,collaborators,raw",
+    [
+        (" @@BrAvOtV ", None, None, None),
+        (None, " @BrAvOtV ", None, []),
+        (None, None, None, "invalid-shape"),
+        (None, None, None, 7),
+        ("other", None, " @bravotv ", {}),
+        ("other", None, {"handle": "@bravotv"}, {}),
+        (None, None, [{"username": "", "handle": "bravotv"}], {}),
+        (None, None, [None, True, 123, {"name": "@bravotv"}], {}),
+        (None, None, {"username": ["bravotv"]}, {}),
+        (None, None, None, {"source_account": " @bravotv "}),
+        (None, None, None, {"owner_username": "bravotv"}),
+        (None, None, None, {"username": "bravotv", "comments_count": "9" * 30}),
+        (None, None, None, {"collaborators": ["@BravoTV", "bravotv"]}),
+        (None, None, None, {"collaborators_detail": {"user_name": " @bravotv "}}),
+        (None, None, None, {"collaborators_detail": True, "profile_tags": ["bravotv"]}),
+        ("bravotv", "bravotv", ["bravotv"], {"username": "bravotv"}),
+    ],
+)
+def test_catalog_accounts_preserve_membership_and_all_aggregates(
+    database, monkeypatch, source, owner, collaborators, raw
+):
+    with database.cursor() as cur:
+        # Native username/details exist only in this superset fixture. They must
+        # not become catalog identities, unlike their raw JSON counterparts.
+        cur.execute(
+            """insert into social.instagram_account_catalog_posts
+            (id,source_account,owner_username,username,collaborators,collaborators_detail,raw_data,
+             likes,comments_count,views,posted_at,assignment_status,caption,text,hashtags)
+            values (%s,%s,%s,'excluded',%s::jsonb,'["excluded"]',%s::jsonb,
+                    10,4,20,'2026-10-22Z','assigned','caption','text','["one","two"]')""",
+            [str(uuid4()), source, owner, json.dumps(collaborators), json.dumps(raw)],
+        )
+        predicate = repo._instagram_account_match_sql(
+            alias="p",
+            native_columns=frozenset({"source_account", "owner_username", "raw_data", "collaborators"}),
+            raw_data_sql="coalesce(p.profile_summary_raw_data,p.raw_data,'{}'::jsonb)",
+            short_circuit_direct=True,
+        )
+        for account in ["bravotv", "other", "123", "true", "excluded", "missing"]:
+            cur.execute("select id from social.instagram_account_catalog_posts p where " + predicate, [account])
+            legacy_ids = cur.fetchall()
+            cur.execute(
+                "select id from social.instagram_account_catalog_posts where profile_summary_accounts ? %s::text",
+                [account],
+            )
+            assert cur.fetchall() == legacy_ids, account
+            monkeypatch.setattr(repo, "_relation_columns", lambda *a, **k: {"profile_summary_raw_data"})
+            before = repo._shared_catalog_summary_totals("instagram", account)
+            monkeypatch.setattr(
+                repo, "_relation_columns", lambda *a, **k: {"profile_summary_raw_data", "profile_summary_accounts"}
+            )
+            assert repo._shared_catalog_summary_totals("instagram", account) == before, account
+
+
+def test_catalog_accounts_updates_and_mixed_backfill_are_exact(database, monkeypatch):
+    row_id = str(uuid4())
+    with database.cursor() as cur:
+        cur.execute(
+            """insert into social.instagram_account_catalog_posts(id,source_account,profile_summary_accounts)
+            values (%s,'bravotv','["forged"]'::jsonb)""",
+            [row_id],
+        )
+        updates = [
+            ("source_account", "other", "text", ["other"]),
+            ("owner_username", "@bravotv", "text", ["bravotv", "other"]),
+            ("collaborators", '["collab"]', "jsonb", ["bravotv", "collab", "other"]),
+            (
+                "raw_data",
+                '{"username":"rawowner","collaborators_detail":{"name":"detail"}}',
+                "jsonb",
+                ["bravotv", "collab", "detail", "other", "rawowner"],
+            ),
+            ("profile_summary_accounts", '["forged"]', "jsonb", ["bravotv", "collab", "detail", "other", "rawowner"]),
+        ]
+        for field, value, sql_type, expected in updates:
+            cur.execute(
+                f"update social.instagram_account_catalog_posts set {field}=%s::{sql_type} where id=%s", [value, row_id]
+            )
+            cur.execute(
+                "select profile_summary_accounts from social.instagram_account_catalog_posts where id=%s", [row_id]
+            )
+            assert cur.fetchone()[0] == expected, field
+        cur.execute("select profile_summary_accounts from social.instagram_account_catalog_posts where id=%s", [row_id])
+        assert cur.fetchone()[0] == ["bravotv", "collab", "detail", "other", "rawowner"]
+        cur.execute(
+            "alter table social.instagram_account_catalog_posts disable trigger trg_instagram_profile_catalog_accounts"
+        )
+        cur.execute(
+            """insert into social.instagram_account_catalog_posts(id,raw_data,likes,comments_count)
+            values (%s,'{"collaborators":["bravotv"]}',7,3)""",
+            [str(uuid4())],
+        )
+        cur.execute(
+            "alter table social.instagram_account_catalog_posts enable trigger trg_instagram_profile_catalog_accounts"
+        )
+        cur.execute("insert into social.instagram_account_catalog_posts(id) values (%s)", [str(uuid4())])
+        # Reapplying the additive migration must preserve all rows and NULL fallback.
+        cur.execute(MIGRATIONS[-1].read_text())
+    monkeypatch.setattr(repo, "_relation_columns", lambda *a, **k: {"profile_summary_raw_data"})
+    before = repo._shared_catalog_summary_totals("instagram", "bravotv")
+    assert before["catalog_total_posts"] == 2
+    monkeypatch.setattr(
+        repo, "_relation_columns", lambda *a, **k: {"profile_summary_raw_data", "profile_summary_accounts"}
+    )
+    assert repo._shared_catalog_summary_totals("instagram", "bravotv") == before
+    assert repo._shared_catalog_summary_totals("instagram", "missing")["catalog_total_posts"] == 0
+
+
+@pytest.mark.parametrize(
+    "identity",
+    ["x" * 16384, "é" * 8192, {"username": {"nested": "x" * 16384}}],
+    ids=["ascii", "multibyte", "nested-object"],
+)
+def test_catalog_oversized_identities_remain_writable_and_exact(database, monkeypatch, identity):
+    row_id = str(uuid4())
+    with database.cursor() as cur:
+        cur.execute(
+            """insert into social.instagram_account_catalog_posts(id,source_account,raw_data)
+            values (%s,'bravotv',%s::jsonb)""",
+            [row_id, json.dumps({"collaborators": [identity]})],
+        )
+        cur.execute("select profile_summary_accounts from social.instagram_account_catalog_posts where id=%s", [row_id])
+        accounts = cur.fetchone()[0]
+        long_identity = next(account for account in accounts if account != "bravotv")
+        assert len(long_identity.encode()) > 8191
+        # The indexed membership operator must also recheck the full long value.
+        cur.execute(
+            "select id::text from social.instagram_account_catalog_posts where profile_summary_accounts ? %s::text",
+            [long_identity],
+        )
+        assert cur.fetchall() == [(row_id,)]
+        cur.execute(
+            "update social.instagram_account_catalog_posts set collaborators=%s::jsonb where id=%s",
+            [json.dumps([identity]), row_id],
+        )
+    monkeypatch.setattr(repo, "_relation_columns", lambda *a, **k: {"profile_summary_raw_data"})
+    before = repo._shared_catalog_summary_totals("instagram", "bravotv")
+    monkeypatch.setattr(
+        repo, "_relation_columns", lambda *a, **k: {"profile_summary_raw_data", "profile_summary_accounts"}
+    )
+    assert repo._shared_catalog_summary_totals("instagram", "bravotv") == before

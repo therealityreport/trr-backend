@@ -32773,6 +32773,23 @@ def _shared_catalog_summary_totals(
         if table == "instagram_account_catalog_posts"
         else _shared_catalog_account_match_sql(platform, alias="p")
     )
+    source_sql = f"social.{table} p"
+    params = [normalized_account]
+    if table == "instagram_account_catalog_posts" and "profile_summary_accounts" in _relation_columns(
+        "social", table, conn=conn
+    ):
+        # Separate indexed identities from unbackfilled rows so the planner can
+        # skip JSON expansion entirely for maintained rows. The branches are
+        # disjoint, preserving one contribution per post even with many matches.
+        source_sql = f"""(
+            select * from social.{table} p
+            where p.profile_summary_accounts ? %s::text
+            union all
+            select * from social.{table} p
+            where p.profile_summary_accounts is null and ({account_match_clause})
+        ) p"""
+        account_match_clause = "true"
+        params.append(normalized_account)
     sql = f"""
             select
               count(*)::int as catalog_total_posts,
@@ -32787,15 +32804,15 @@ def _shared_catalog_summary_totals(
                 where nullif(trim(coalesce(caption, text, '')), '') is not null
               )::int as caption_rows,
               coalesce(sum(jsonb_array_length(coalesce(hashtags, '[]'::jsonb))), 0)::int as stored_hashtag_instances
-            from social.{table} p
+            from {source_sql}
             where {account_match_clause}
             """
     try:
         if conn is None:
-            row = pg.fetch_one(sql, [normalized_account]) or {}
+            row = pg.fetch_one(sql, params) or {}
         else:
             with pg.db_cursor(conn=conn, label="shared_catalog_summary_totals") as cur:
-                row = pg.fetch_one_with_cursor(cur, sql, [normalized_account]) or {}
+                row = pg.fetch_one_with_cursor(cur, sql, params) or {}
     except psycopg_errors.UndefinedTable:
         return {
             "catalog_total_posts": 0,
