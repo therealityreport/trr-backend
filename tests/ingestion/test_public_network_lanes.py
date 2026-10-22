@@ -307,6 +307,10 @@ class _StatusError(Exception):
         (_StatusError(500), None, False),
         (None, {"status": "ok", "data": {"user": None}}, True),
         (None, {"data": {"user": None}}, True),
+        (None, {"data": {"user": None}, "rate_limited": True}, False),
+        (None, {"data": {"user": None}, "login_required": True}, False),
+        (None, {"data": {"user": None}, "errors": [{"message": "login_required"}]}, False),
+        (None, {"data": {"user": None}, "errors": "malformed"}, False),
         (None, {"status": "fail", "data": {"user": None}}, False),
         (None, {"status": "ok", "data": {}}, False),
         (None, {"status": "ok", "data": {"user": {"username": "x"}}}, False),
@@ -315,3 +319,19 @@ class _StatusError(Exception):
 )
 def test_content_absence_detects_only_404_and_explicit_null_users(error, payload, expected):
     assert identity_policy.is_content_absence(error=error, payload=payload) is expected
+
+
+def test_404_with_server_delay_keeps_failure_handling():
+    error = _StatusError(404)
+    error.retry_after_seconds = 7200
+    assert not identity_policy.is_content_absence(error=error)
+
+
+@pytest.mark.parametrize("lane", ["local", "modal", None])
+def test_server_delay_applies_to_the_first_non_rate_failure(lane):
+    lanes = _Lanes()
+    gate = _gate(lanes, lane=lane)
+    failure = gate.record_failure("request_failed", retry_after_seconds=7200, permit=gate.before_request())
+    assert failure.retry_at == lanes.now + timedelta(seconds=7200)
+    with pytest.raises(identity_policy.IdentityDeferred):
+        _gate(lanes, lane=lane).before_request()

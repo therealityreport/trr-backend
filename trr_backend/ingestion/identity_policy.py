@@ -41,13 +41,21 @@ CONTENT_ABSENT_CODE = "source_content_absent"
 
 
 def is_content_absence(error: BaseException | None = None, payload: Any = None) -> bool:
-    """HTTP 404, or a complete native response whose user is explicitly null."""
+    """Clean HTTP 404 or null user; explicit failures and server waits win."""
+    if error is not None and (
+        getattr(error, "retry_after_seconds", None) is not None
+        or getattr(error, "error_code", None) not in (None, "request_failed", "parse_error")
+    ):
+        return False
     if error is not None and getattr(error, "status_code", None) == 404:
         return True
     if isinstance(payload, Mapping):
+        from trr_backend.socials.instagram.graphql_response import _top_failure
+
         data = payload.get("data")
         return (
-            payload.get("status") in (None, "ok")
+            _top_failure(payload) is None
+            and payload.get("errors") in (None, [])
             and isinstance(data, Mapping)
             and "user" in data
             and data["user"] is None
@@ -417,7 +425,10 @@ class SourceRequestGate:
                     delay = public_backoff_seconds(code, failures, default=delay)
                 blocked = bool(row["blocked"]) or (not self.public_only and code in AUTH_ERRORS)
                 opens = (
-                    code in {"rate_limited", "public_access_backoff"} or failures >= 3 or permit.probe_token is not None
+                    server_delay
+                    or code in {"rate_limited", "public_access_backoff"}
+                    or failures >= 3
+                    or permit.probe_token is not None
                 )
                 try:
                     cooldown = now + timedelta(seconds=delay) if opens else row.get("cooldown_until")

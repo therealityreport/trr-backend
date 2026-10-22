@@ -617,20 +617,25 @@ class ProfileActivity:
                         gate = None
                         raise
                     code = getattr(error, "error_code", "parse_error")
+                    retry_after = getattr(error, "retry_after_seconds", getattr(source, "retry_after_seconds", None))
                     # A missing/renamed handle is target-level, not egress health.
-                    absent = is_content_absence(error=error) or (
-                        isinstance(error, ProfileError)
-                        and error.code == "profile_source_capability_missing"
-                        and is_content_absence(payload=payload)
+                    # Never override the parser's failure classification or a
+                    # server-directed wait just because data.user is null.
+                    absent = retry_after is None and (
+                        is_content_absence(error=error)
+                        or (
+                            isinstance(error, ProfileError)
+                            and not hasattr(error, "error_code")
+                            and error.code == "profile_source_capability_missing"
+                            and is_content_absence(payload=payload)
+                        )
                     )
                     failure = (
                         gate.finish_content_absence(code)
                         if absent
                         else gate.finish_failure(
                             code,
-                            retry_after_seconds=getattr(
-                                error, "retry_after_seconds", getattr(source, "retry_after_seconds", None)
-                            ),
+                            retry_after_seconds=retry_after,
                         )
                     )
                     gate = None

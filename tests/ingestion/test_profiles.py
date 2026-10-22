@@ -461,7 +461,17 @@ def test_graphql_profile_cache_keeps_query_provenance_and_two_request_accounting
     assert cached["outcome"] == Outcome.CACHED
 
 
-def test_graphql_native_rate_failure_keeps_shared_gate_code(profiles_db):
+@pytest.mark.parametrize(
+    "payload,expected_code",
+    [
+        ({"rate_limited": True}, "rate_limited"),
+        ({"data": {"user": None}, "rate_limited": True}, "rate_limited"),
+        ({"data": {"user": None}, "errors": [{"message": "rate limit exceeded"}]}, "rate_limited"),
+        ({"data": {"user": None}, "errors": [{"message": "login_required"}]}, "public_access_backoff"),
+        ({"data": {"user": None}}, "parse_error"),
+    ],
+)
+def test_graphql_native_rate_failure_keeps_shared_gate_code(profiles_db, payload, expected_code):
     from tests.ingestion.test_profile_graphql import Session
     from trr_backend.ingestion.post_transport import SourceFailure
     from trr_backend.ingestion.profile_transport import PublicGraphQLProfileSource
@@ -475,20 +485,23 @@ def test_graphql_native_rate_failure_keeps_shared_gate_code(profiles_db):
             return response
 
     source = PublicGraphQLProfileSource(
-        user_id="101", deadline=time.monotonic() + 60, session=RateSession({"rate_limited": True})
+        user_id="101", deadline=time.monotonic() + 60, session=RateSession(payload)
     )
     with pytest.raises(SourceFailure) as caught:
         ProfileActivity(profiles_db[0], clock=lambda: NOW).execute(
-            **owned, provider=provider(profiles_db, owned, source), storage=lambda: pytest.fail("unexpected storage")
+            **owned,
+            provider=_lane_provider(profiles_db, owned, source),
+            storage=lambda: pytest.fail("unexpected storage"),
         )
-    assert caught.value.failure.code == "rate_limited"
+    public_code = "profile_source_capability_missing" if expected_code == "parse_error" else expected_code
+    assert caught.value.failure.code == public_code
     assert caught.value.failure.retry_at > datetime.now(UTC) + timedelta(seconds=7100)
     assert rows(profiles_db, "select count(*) as n from social.instagram_profiles") == [{"n": 0}]
     lane = rows(
         profiles_db,
         "select last_error_code,cooldown_until,clock_timestamp() as now from social.instagram_detail_request_lanes",
     )[0]
-    assert lane["last_error_code"] == "rate_limited"
+    assert lane["last_error_code"] == expected_code
     assert 7100 < (lane["cooldown_until"] - lane["now"]).total_seconds() <= 7200
     assert rows(profiles_db, "select requests from social.instagram_ingestion_targets") == [{"requests": 2}]
     assert rows(profiles_db, "select count(*) as n from social.instagram_ingestion_receipts") == [{"n": 0}]
