@@ -391,3 +391,46 @@ def test_simultaneous_unavailable_writes_deduplicate_nullable_registry_key(avata
     assert all(result.unavailable for result in results)
     assert len(registry(avatars, username)) == 1
     assert first_activity.gate.request_count == second_activity.gate.request_count == 0
+
+
+@pytest.mark.parametrize("case", ["http_404", "null_user", "http_500"])
+def test_missing_avatar_profiles_do_not_close_the_shared_local_lane(avatars, case):
+    import hashlib
+
+    store, tx = avatars
+    key = hashlib.sha256(b"public:local").hexdigest()
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute("delete from social.instagram_detail_request_lanes where identity_key=%s", (key,))
+
+    def fetch(*, username, pre_source_request):
+        pre_source_request()
+        if case == "null_user":
+            return {"status": "ok", "data": {"user": None}}
+        raise InstagramRequestFailure(
+            "request_failed", status_code=404 if case == "http_404" else 500, retryable=case == "http_500"
+        )
+
+    for _ in range(3):
+        owned, _ = owned_target(avatars)
+        gate = SourceRequestGate(
+            cookies={},
+            public_only=True,
+            network_lane="local",
+            transaction=tx,
+            check_cancelled=lambda owned=owned: store.check_owner(**owned, stage=Stage.MEDIA),
+            deadline=time.monotonic() + 120,
+        )
+        with pytest.raises(AvatarResolutionError):
+            AvatarResolutionActivity(store, gate=gate).execute(**owned, handles=["m" + uuid4().hex[:12]], fetch=fetch)
+    with tx() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            "select consecutive_failures,last_error_code,cooldown_until from social.instagram_detail_request_lanes "
+            "where identity_key=%s",
+            (key,),
+        )
+        lane = dict(cur.fetchone())
+        cur.execute("delete from social.instagram_detail_request_lanes where identity_key=%s", (key,))
+    if case == "http_500":
+        assert lane["consecutive_failures"] == 3 and lane["cooldown_until"] is not None
+    else:
+        assert lane == {"consecutive_failures": 0, "last_error_code": None, "cooldown_until": None}

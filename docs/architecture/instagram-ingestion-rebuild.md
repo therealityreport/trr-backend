@@ -2146,6 +2146,11 @@ Logged-out request lanes (`identity_policy.py`):
   the same placement lane, so a Mac media run honours a Mac listing/comment
   backoff. Authenticated gates keep their credential identity. The legacy shared
   `public` row is no longer selected by v2 public runs.
+- Since 2026-10-22, a profile/avatar lookup that returns HTTP 404 or a complete
+  response with `user: null` is lane-neutral on a network lane: the target still
+  fails, but the shared failure count, `last_error_code`, cooldown and backoff
+  ladder are unchanged, and a held probe lease is released. Other failures keep
+  the 3-identical-failure circuit. Credential lanes keep their accounting.
 - Network lanes follow the June public backoff without Retry-After: rejection
   1 h → 4 h → 12 h → 24 h; 429 waits 2 h; a server Retry-After always wins. One
   success steps escalation down one level instead of resetting it.

@@ -526,7 +526,7 @@ class ProfileActivity:
             error = ProfileError("profile_lookup_handle_unavailable")
             error.failure = Failure(error.code, identity_blocked=True)
             raise error from None
-        source = gate = objects = None
+        source = gate = objects = payload = None
         parsed = False
         sends = 0
         try:
@@ -608,7 +608,7 @@ class ProfileActivity:
             )
         except Exception as error:
             if gate is not None and not parsed:
-                from trr_backend.ingestion.identity_policy import IdentityDeferred
+                from trr_backend.ingestion.identity_policy import IdentityDeferred, is_content_absence
                 from trr_backend.ingestion.post_transport import SourceFailure
 
                 if not isinstance(error, (LostOwnership, IdentityDeferred)):
@@ -616,11 +616,22 @@ class ProfileActivity:
                         gate.finish_failure()
                         gate = None
                         raise
-                    failure = gate.finish_failure(
-                        getattr(error, "error_code", "parse_error"),
-                        retry_after_seconds=getattr(
-                            error, "retry_after_seconds", getattr(source, "retry_after_seconds", None)
-                        ),
+                    code = getattr(error, "error_code", "parse_error")
+                    # A missing/renamed handle is target-level, not egress health.
+                    absent = is_content_absence(error=error) or (
+                        isinstance(error, ProfileError)
+                        and error.code == "profile_source_capability_missing"
+                        and is_content_absence(payload=payload)
+                    )
+                    failure = (
+                        gate.finish_content_absence(code)
+                        if absent
+                        else gate.finish_failure(
+                            code,
+                            retry_after_seconds=getattr(
+                                error, "retry_after_seconds", getattr(source, "retry_after_seconds", None)
+                            ),
+                        )
                     )
                     gate = None
                     if isinstance(error, ProfileError) and not hasattr(error, "error_code"):

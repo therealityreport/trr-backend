@@ -19,7 +19,7 @@ from psycopg2.extras import RealDictCursor
 
 from trr_backend.ingestion.domain import Failure, LostOwnership, Stage
 from trr_backend.ingestion.evidence import Evidence
-from trr_backend.ingestion.identity_policy import IdentityDeferred, SourceRequestGate
+from trr_backend.ingestion.identity_policy import IdentityDeferred, SourceRequestGate, is_content_absence
 from trr_backend.ingestion.media import source_reference
 from trr_backend.ingestion.persistence import Store
 from trr_backend.socials.media_url_safety import (
@@ -238,10 +238,15 @@ class AvatarResolutionActivity:
                     raise
                 except Exception as exc:
                     if permit is not None:
-                        failure = self.gate.record_failure(
-                            getattr(exc, "error_code", "request_failed"),
-                            retry_after_seconds=getattr(exc, "retry_after_seconds", None),
-                            permit=permit,
+                        code = getattr(exc, "error_code", "request_failed")
+                        failure = (
+                            self.gate.record_content_absence(code, permit=permit)
+                            if is_content_absence(error=exc)
+                            else self.gate.record_failure(
+                                code,
+                                retry_after_seconds=getattr(exc, "retry_after_seconds", None),
+                                permit=permit,
+                            )
                         )
                         raise AvatarResolutionError(failure.code, failure=failure) from None
                     raise AvatarResolutionError("avatar_request_boundary_missing") from None
@@ -270,7 +275,11 @@ class AvatarResolutionActivity:
                     )
                 except AvatarResolutionError as exc:
                     if exc.code != "avatar_source_newer":
-                        health = self.gate.record_failure("parse_error", permit=permit)
+                        health = (
+                            self.gate.record_content_absence("parse_error", permit=permit)
+                            if is_content_absence(payload=payload)
+                            else self.gate.record_failure("parse_error", permit=permit)
+                        )
                         raise AvatarResolutionError(
                             exc.code,
                             failure=Failure(

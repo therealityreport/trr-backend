@@ -492,3 +492,64 @@ def test_graphql_native_rate_failure_keeps_shared_gate_code(profiles_db):
     assert 7100 < (lane["cooldown_until"] - lane["now"]).total_seconds() <= 7200
     assert rows(profiles_db, "select requests from social.instagram_ingestion_targets") == [{"requests": 2}]
     assert rows(profiles_db, "select count(*) as n from social.instagram_ingestion_receipts") == [{"n": 0}]
+
+
+def _lane_provider(database, owned, source):
+    store, tx = database
+    return lambda: (
+        source,
+        SourceRequestGate(
+            cookies={},
+            public_only=True,
+            transaction=tx,
+            check_cancelled=lambda: store.check_owner(**owned, stage=Stage.MEDIA),
+            deadline=time.monotonic() + 60,
+            network_lane="local",
+        ),
+    )
+
+
+def _local_lane(database):
+    import hashlib
+
+    found = rows(
+        database,
+        "select consecutive_failures,last_error_code,cooldown_until from social.instagram_detail_request_lanes "
+        "where identity_key=%s",
+        (hashlib.sha256(b"public:local").hexdigest(),),
+    )
+    return found[0] if found else None
+
+
+@pytest.mark.parametrize("case", ["http_404", "null_user", "http_500"])
+def test_missing_profiles_do_not_close_the_shared_local_lane(profiles_db, case):
+    from trr_backend.ingestion.post_transport import SourceFailure
+    from trr_backend.socials.instagram.request_client import InstagramRequestFailure
+
+    class Lookup(Source):
+        def __call__(self, *, username, pre_source_request):
+            pre_source_request()
+            if case == "null_user":
+                return {"status": "ok", "data": {"user": None}}
+            raise InstagramRequestFailure(
+                "request_failed", status_code=404 if case == "http_404" else 500, retryable=case == "http_500"
+            )
+
+    codes = []
+    for _ in range(3):
+        owned = owned_target(profiles_db)
+        source = Lookup(native())
+        with pytest.raises(SourceFailure) as caught:
+            ProfileActivity(profiles_db[0]).execute(
+                **owned, provider=_lane_provider(profiles_db, owned, source), storage=lambda: pytest.fail("storage")
+            )
+        codes.append(caught.value.failure.code)
+        assert source.closed
+    lane = _local_lane(profiles_db)
+    assert rows(profiles_db, "select count(*) as n from social.instagram_profiles") == [{"n": 0}]
+    if case == "http_500":
+        assert lane["consecutive_failures"] == 3 and lane["cooldown_until"] is not None
+        return
+    assert lane["consecutive_failures"] == 0 and lane["last_error_code"] is None
+    assert lane["cooldown_until"] is None
+    assert len(set(codes)) == 1

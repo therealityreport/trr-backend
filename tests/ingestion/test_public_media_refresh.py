@@ -219,3 +219,65 @@ def test_network_lane_requires_public_media_refresh(lanes):
             credential_provider=lambda: {"raw_cookies": {}},
             network_lane="local",
         )
+
+
+@pytest.mark.parametrize("case", ["http_404", "http_500"])
+def test_missing_avatar_refresh_is_neutral_for_the_local_lane(lanes, case):
+    import hashlib
+
+    from trr_backend.ingestion.post_transport import SourceFailure
+    from trr_backend.socials.instagram.request_client import InstagramRequestFailure
+
+    store, tx = lanes
+    key = hashlib.sha256(b"public:local").hexdigest()
+
+    def reset():
+        with tx() as conn, conn.cursor() as cur:
+            cur.execute("delete from social.instagram_detail_request_lanes where identity_key=%s", (key,))
+
+    reset()
+
+    class Missing:
+        def __init__(self, **kwargs):
+            pass
+
+        def __call__(self, *, username, pre_source_request):
+            pre_source_request()
+            raise InstagramRequestFailure(
+                "request_failed", status_code=404 if case == "http_404" else 500, retryable=case == "http_500"
+            )
+
+        def close(self):
+            pass
+
+    for _ in range(3):
+        owned = owned_fixture(store)
+        refresh = MediaRefresh(
+            store=store,
+            owned=owned,
+            owner_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            credential_provider=lambda: pytest.fail("public avatar selected authentication"),
+            public_only=True,
+            avatar_source_factory=Missing,
+            network_lane="local",
+        )
+        refresh.bind_snapshot(
+            replace(fixture_snapshot(avatars=(AvatarSource("writer", AVATAR_OLD),)), shortcode="AAAABC")
+        )
+        with pytest.raises((SourceFailure, MediaIncomplete)):
+            refresh(
+                source_reference=source_reference(AVATAR_OLD),
+                check_cancelled=lambda owned=owned: store.check_owner(**owned),
+                on_request=lambda owned=owned: store.check_owner(**owned, record_request=True),
+            )
+    lane = row(
+        tx,
+        "select consecutive_failures,last_error_code,cooldown_until from social.instagram_detail_request_lanes "
+        "where identity_key=%s",
+        (key,),
+    )
+    reset()
+    if case == "http_500":
+        assert lane[0] == 3 and lane[2] is not None
+    else:
+        assert lane == (0, None, None)

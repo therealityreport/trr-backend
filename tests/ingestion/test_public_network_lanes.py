@@ -231,3 +231,87 @@ def test_public_requests_above_180_remain_accounted_and_obey_server_cooldown(lan
         deferred.before_request()
     assert deferred.request_count == 0
     assert len(lanes.rows[gate.identity_key]["request_times"]) == 181
+
+
+def test_three_identical_non_rate_failures_close_the_whole_network_lane():
+    # Egress-health failures still trip the shared circuit for every stage.
+    lanes = _Lanes()
+    for _ in range(3):
+        failure, row = _fail_once(lanes, "request_failed", lane="local")
+    assert row["consecutive_failures"] == 3
+    assert failure.retry_at - lanes.now == timedelta(seconds=900)
+    listing = _gate(lanes, lane="local")
+    with pytest.raises(identity_policy.IdentityDeferred, match="identity_cooldown"):
+        listing.before_request()
+    assert _gate(lanes, lane="modal").before_request().request_number == 1
+
+
+@pytest.mark.parametrize("finish", [False, True])
+def test_content_absence_is_neutral_for_a_network_lane(finish):
+    lanes = _Lanes()
+    for _ in range(5):
+        gate = _gate(lanes, lane="local")
+        permit = gate.before_request()
+        if finish:
+            failure = gate.finish_content_absence("request_failed", permit=permit)
+        else:
+            failure = gate.record_content_absence("request_failed", permit=permit)
+            gate.finish_failure()
+        assert failure.code == identity_policy.CONTENT_ABSENT_CODE and failure.retry_at is None
+    row = lanes.rows[gate.identity_key]
+    assert row["consecutive_failures"] == 0 and row["last_error_code"] is None
+    assert row["cooldown_until"] is None and row["failure_generation"] == 0
+    # Listing and comments on the same egress remain admitted.
+    assert _gate(lanes, lane="local").before_request().request_number == 1
+
+
+def test_content_absence_releases_a_probe_without_resetting_the_backoff_ladder():
+    lanes = _Lanes()
+    for _ in range(3):
+        _fail_once(lanes, "unauthorized", lane="local")
+    gate = _gate(lanes, lane="local")
+    row = lanes.rows[gate.identity_key]
+    expired = lanes.now - timedelta(seconds=1)
+    row["cooldown_until"] = expired
+    permit = gate.before_request()
+    assert permit.probe_token and row["probe_token"] == permit.probe_token
+    gate.finish_content_absence("parse_error", permit=permit)
+    assert row["probe_token"] is None and row["probe_expires_at"] is None
+    assert row["consecutive_failures"] == 3 and row["last_error_code"] == "public_access_backoff"
+    assert row["cooldown_until"] == expired
+    # The next real rejection continues the June ladder at 24 h, not 1 h.
+    probe = _gate(lanes, lane="local")
+    failure = probe.record_failure("unauthorized", permit=probe.before_request())
+    assert failure.retry_at - lanes.now == timedelta(hours=24)
+
+
+def test_content_absence_keeps_original_accounting_on_lanes_without_network_scope():
+    lanes = _Lanes()
+    gate = _gate(lanes, lane=None)
+    failure = gate.record_content_absence("request_failed", permit=gate.before_request())
+    row = lanes.rows[gate.identity_key]
+    assert failure.code == "request_failed"
+    assert row["consecutive_failures"] == 1 and row["last_error_code"] == "request_failed"
+
+
+class _StatusError(Exception):
+    def __init__(self, status_code):
+        self.status_code = status_code
+
+
+@pytest.mark.parametrize(
+    "error,payload,expected",
+    [
+        (_StatusError(404), None, True),
+        (_StatusError(401), None, False),
+        (_StatusError(500), None, False),
+        (None, {"status": "ok", "data": {"user": None}}, True),
+        (None, {"data": {"user": None}}, True),
+        (None, {"status": "fail", "data": {"user": None}}, False),
+        (None, {"status": "ok", "data": {}}, False),
+        (None, {"status": "ok", "data": {"user": {"username": "x"}}}, False),
+        (None, None, False),
+    ],
+)
+def test_content_absence_detects_only_404_and_explicit_null_users(error, payload, expected):
+    assert identity_policy.is_content_absence(error=error, payload=payload) is expected

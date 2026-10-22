@@ -31,7 +31,7 @@ from trr_backend.ingestion.canonical import normalize_post_source
 from trr_backend.ingestion.credential_snapshot import AUTHORIZED_USERNAME
 from trr_backend.ingestion.domain import Failure, LostOwnership, Stage
 from trr_backend.ingestion.evidence import Evidence
-from trr_backend.ingestion.identity_policy import IdentityDeferred, SourceRequestGate
+from trr_backend.ingestion.identity_policy import IdentityDeferred, SourceRequestGate, is_content_absence
 from trr_backend.ingestion.media import MediaIncomplete, MediaSnapshot
 from trr_backend.ingestion.media import source_reference as public_reference
 from trr_backend.ingestion.post_transport import DetailSource, SourceFailure
@@ -226,6 +226,7 @@ class MediaRefresh:
             **({"network_lane": self.network_lane} if self.network_lane is not None else {}),
         )
         permit, source, requests_count, success = None, None, 0, False
+        payload = None
 
         def before_request():
             nonlocal permit, requests_count
@@ -275,8 +276,12 @@ class MediaRefresh:
                 if isinstance(error, (AvatarResolutionError, MediaIncomplete))
                 else getattr(error, "error_code", "request_failed")
             )
-            health = gate.record_failure(
-                code, retry_after_seconds=getattr(error, "retry_after_seconds", None), permit=permit
+            health = (
+                gate.record_content_absence(code, permit=permit)
+                if is_content_absence(error=error, payload=payload)
+                else gate.record_failure(
+                    code, retry_after_seconds=getattr(error, "retry_after_seconds", None), permit=permit
+                )
             )
             public_code = error.code if isinstance(error, AvatarResolutionError) else health.code
             raise SourceFailure(

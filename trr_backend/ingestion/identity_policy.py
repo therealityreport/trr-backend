@@ -35,6 +35,24 @@ REQUEST_LIMIT = 180
 # escalating waits, and a single success steps escalation down one level.
 PUBLIC_BACKOFF_STEPS_SECONDS = (3600, 4 * 3600, 12 * 3600, 24 * 3600)
 NETWORK_LANES = frozenset({"modal", "local"})
+# A lookup that proves only that one profile is absent says nothing about the
+# egress. On a network lane it must not move the shared health counters.
+CONTENT_ABSENT_CODE = "source_content_absent"
+
+
+def is_content_absence(error: BaseException | None = None, payload: Any = None) -> bool:
+    """HTTP 404, or a complete native response whose user is explicitly null."""
+    if error is not None and getattr(error, "status_code", None) == 404:
+        return True
+    if isinstance(payload, Mapping):
+        data = payload.get("data")
+        return (
+            payload.get("status") in (None, "ok")
+            and isinstance(data, Mapping)
+            and "user" in data
+            and data["user"] is None
+        )
+    return False
 
 
 def public_backoff_seconds(code: str, consecutive_failures: int, *, default: float) -> float:
@@ -322,6 +340,45 @@ class SourceRequestGate:
                 )
         self._finished, self._probe_token = True, None
         return self._last_failure
+
+    def record_content_absence(self, fallback_code: str, *, permit: RequestPermit | None = None) -> Failure:
+        return self._content_absence(self._permit(permit), fallback_code, finish=False)
+
+    def finish_content_absence(self, fallback_code: str, *, permit: RequestPermit | None = None) -> Failure | None:
+        if self._finished:
+            return self._last_failure
+        return self._content_absence(self._permit(permit), fallback_code, finish=True)
+
+    def _content_absence(self, permit: RequestPermit, fallback_code: str, *, finish: bool) -> Failure:
+        """Lane-neutral outcome: no failure count, no step-down, no cooldown.
+
+        Credential and legacy lanes keep their original failure accounting.
+        A probe lease held by this request is released so the next request
+        can probe again; cooldown_until and last_error_code stay untouched.
+        """
+        if self.network_lane is None:
+            return self._failure(permit, fallback_code, None, finish=finish)
+        if self._finished:
+            return self._last_failure or Failure("identity_gate_already_finished")
+        previous = self._failures.get(permit.request_number)
+        if previous is not None:
+            if finish:
+                self.finish_failure()
+            return previous
+        if permit.probe_token:
+            with self._locked() as (cur, _row, _now):
+                cur.execute(
+                    """update social.instagram_detail_request_lanes set probe_token=null,probe_expires_at=null
+                    where identity_key=%s and probe_token=%s""",
+                    (self.identity_key, permit.probe_token),
+                )
+            self._probe_token = None
+        failure = Failure(CONTENT_ABSENT_CODE)
+        self._failures[permit.request_number] = failure
+        self._last_failure = failure
+        if finish:
+            self._finished, self._probe_token = True, None
+        return failure
 
     def _failure(self, permit: RequestPermit, code: str, retry_after_seconds: float | None, *, finish: bool) -> Failure:
         # The independent listing/comments adapters expose this typed alias.
