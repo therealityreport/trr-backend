@@ -156,6 +156,27 @@ the exact installed browser constructor; the focused profile-decoding, auxiliary
 body, HTTP-stop and deadline/lease checks passed without external requests.
 This prepares a diagnostic candidate; it does not establish live acceptance.
 
+## Final normal-control result
+
+The execution owner accepted the 180-second repair and added only bounded root-key
+metadata plus an optional screenshot of the fixed anonymous profile. The final
+control closed after 107.696 seconds of account-budget activity, with the same
+nine document/API and 55 asset requests. All 64 recorded responses returned HTTP
+200. No response-inspection failure, deadline stop or lease loss occurred; the
+result reports zero canonical writes and a closed full-history gate. Its guard
+metrics record 347 checks taking 62.692 seconds in total.
+
+The DOM inspection ran and found no explicit login-required, private-profile or
+unavailable-profile message. A local inspection of the saved screenshot shows
+the public profile header, highlights and post-thumbnail grid behind a dark
+overlay with a placeholder card. Thus the profile is not visually empty. However,
+no recognized native profile-post connection, post IDs, timestamps, pagination
+cursors or permalink links were captured. Observed embedded root keys were
+`xig_user_by_username` and `__bbox`; no GraphQL operation was blocked by the final
+read-query policy. This control does not qualify January history or prove
+timeline exhaustion. Fresh anonymous pipeline and January acceptance remain
+unresolved; no full-history release follows from successful HTTP responses.
+
 Private current evidence references:
 
 - `trr-instagram-no-local-cooldown-01a16023/live-gif.json` and `live-core.json`.
@@ -176,5 +197,10 @@ Private current evidence references:
 - `anonymous-profile-normal-final-ready.json` and
   `anonymous-profile-normal-final-repair.diff` in that same directory record
   the private observer repair, exact hash and unchanged source-request bounds.
+- The final `anonymous-profile-browser-normal-control.json` and
+  `anonymous-profile-normal-final.png` in that directory contain the completed
+  control receipt and public-profile screenshot. The earlier 90-second result
+  and log are preserved as
+  `anonymous-profile-browser-normal-control.local-inspection-failure-1.*`.
 
 All paths above are under `/Users/thomashulihan/.codex/tmp/`.
