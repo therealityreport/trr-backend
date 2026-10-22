@@ -121,7 +121,7 @@ def test_apply_runtime_overrides_injects_canonical_modal_defaults(monkeypatch: p
     assert result["TRR_MODAL_MAINTENANCE_OWNER_REQUIRED"] == "1"
     assert result["TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED"] == "0"
     assert result["TRR_MODAL_RUNTIME_SCHEDULER_ENABLED"] == "1"
-    assert result["TRR_MODAL_API_MIN_CONTAINERS"] == "0"
+    assert result["TRR_MODAL_API_MIN_CONTAINERS"] == "1"
     assert result["TRR_MODAL_ADMIN_KEEP_WARM"] == "0"
     assert result["TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT"] == "8"
     assert result["TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT"] == "4"
@@ -194,7 +194,7 @@ def test_apply_runtime_overrides_resets_always_on_billing_values_by_default(
     )
 
     assert result["TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED"] == "0"
-    assert result["TRR_MODAL_API_MIN_CONTAINERS"] == "0"
+    assert result["TRR_MODAL_API_MIN_CONTAINERS"] == "1"
     assert result["TRR_MODAL_ADMIN_KEEP_WARM"] == "0"
 
 
