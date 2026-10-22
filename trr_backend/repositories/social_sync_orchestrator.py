@@ -2065,6 +2065,23 @@ def evaluate_sync_session(sync_session_id: str) -> dict[str, Any]:
             )
             return _serialize_sync_session(row)
 
+        # A scheduled retry must start once its backoff is due. This branch runs before
+        # retry scheduling: the current run is still the failed one, so scheduling first
+        # would reschedule the same backoff forever and the retry pass would never start.
+        if status == "pass_evaluating" and next_pass_available_at is not None and next_pass_available_at <= now_utc:
+            kickoff = _start_sync_pass(
+                sync_session_id,
+                pass_kind=current_pass_kind,  # retry same pass
+                pass_attempt=current_pass_attempt + 1,
+                pass_sequence=int(row.get("pass_sequence") or 0) + 1,
+                follow_up_reason="retry_after_backoff",
+                conn=lock_conn,
+            )
+            updated_row = _fetch_sync_session_row(sync_session_id, conn=lock_conn) or row
+            payload = _serialize_sync_session(updated_row)
+            payload["current_run_id"] = kickoff.get("run_id")
+            return payload
+
         if run_status == "failed" and _has_retryable_errors(str(current_run.get("id") or ""), conn=lock_conn):
             max_attempts = max(1, int(row.get("max_attempts_per_kind") or 3))
             if current_pass_attempt < max_attempts:
@@ -2083,20 +2100,6 @@ def evaluate_sync_session(sync_session_id: str) -> dict[str, Any]:
                     follow_up_reason="retry_scheduled",
                 )
                 return _serialize_sync_session(row)
-
-        if status == "pass_evaluating" and next_pass_available_at is not None and next_pass_available_at <= now_utc:
-            kickoff = _start_sync_pass(
-                sync_session_id,
-                pass_kind=current_pass_kind,  # retry same pass
-                pass_attempt=current_pass_attempt + 1,
-                pass_sequence=int(row.get("pass_sequence") or 0) + 1,
-                follow_up_reason="retry_after_backoff",
-                conn=lock_conn,
-            )
-            updated_row = _fetch_sync_session_row(sync_session_id, conn=lock_conn) or row
-            payload = _serialize_sync_session(updated_row)
-            payload["current_run_id"] = kickoff.get("run_id")
-            return payload
 
         if next_pass_kind and next_pass_kind != current_pass_kind:
             kickoff = _start_sync_pass(
