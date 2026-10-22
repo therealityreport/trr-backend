@@ -24172,7 +24172,7 @@ def _enqueue_platform_comment_media_mirror_job(
                   nullif(config->>'comment_db_id', ''),
                   case
                     when coalesce(config->>'post_id', '') <> '' and coalesce(config->>'comment_id', '') <> ''
-                      then concat(config->>'post_id', ':', config->>'comment_id')
+                      then (config->>'post_id') || ':' || (config->>'comment_id')
                     else null
                   end
                 )
@@ -30511,15 +30511,17 @@ def _upsert_facebook_comment_tree(
         persist_stats["comments_upserted"] = int(persist_stats.get("comments_upserted") or 0) + 1
     if row:
         try:
-            mirror_job_id = _enqueue_facebook_comment_media_mirror_job(
-                context,
-                run_id=run_id,
-                source_scope=source_scope,
-                account=account,
-                comment_row=row,
-                parent_job_id=job_id,
-                conn=conn,
-            )
+            # A failed enqueue must not poison the post transaction; roll back only its own statements.
+            with _SavepointScope(conn=conn, prefix="facebook_comment_media_mirror", index=1):
+                mirror_job_id = _enqueue_facebook_comment_media_mirror_job(
+                    context,
+                    run_id=run_id,
+                    source_scope=source_scope,
+                    account=account,
+                    comment_row=row,
+                    parent_job_id=job_id,
+                    conn=conn,
+                )
             if mirror_job_id and persist_stats is not None:
                 persist_stats["comment_media_mirror_jobs_enqueued"] = (
                     int(persist_stats.get("comment_media_mirror_jobs_enqueued") or 0) + 1
@@ -30888,15 +30890,17 @@ def _upsert_meta_threads_comment_tree(
         persist_stats["comments_upserted"] = int(persist_stats.get("comments_upserted") or 0) + 1
     if row:
         try:
-            mirror_job_id = _enqueue_threads_comment_media_mirror_job(
-                context,
-                run_id=run_id,
-                source_scope=source_scope,
-                account=account,
-                comment_row=row,
-                parent_job_id=job_id,
-                conn=conn,
-            )
+            # A failed enqueue must not poison the post transaction; roll back only its own statements.
+            with _SavepointScope(conn=conn, prefix="threads_comment_media_mirror", index=1):
+                mirror_job_id = _enqueue_threads_comment_media_mirror_job(
+                    context,
+                    run_id=run_id,
+                    source_scope=source_scope,
+                    account=account,
+                    comment_row=row,
+                    parent_job_id=job_id,
+                    conn=conn,
+                )
             if mirror_job_id and persist_stats is not None:
                 persist_stats["comment_media_mirror_jobs_enqueued"] = (
                     int(persist_stats.get("comment_media_mirror_jobs_enqueued") or 0) + 1
