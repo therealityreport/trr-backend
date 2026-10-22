@@ -122,6 +122,28 @@ and malformed source responses can leave coverage partial. Chronological listing
 boundary evidence can establish coverage even when search has separate limits.
 Inspect the manifest and targets before interpreting a terminal status.
 
+Comment capture follows both explicit `morechildren` IDs and no-ID "continue this
+thread" markers. Continuations fetch the focal parent with `context=0` and merge
+its subtree into the saved parent graph. Both frontiers share the request budget
+and durable version-1 checkpoints. Missing parents, malformed responses and
+repeated markers remain unresolved; a zero marker count is not exhaustion proof.
+Completion requires both frontiers to be empty. Report saved comment counts beside
+Reddit's reported counts, which can include content that the source does not return.
+
+Reddit media downloads have a finite 100 MiB per-file limit. Tenor GIF share URLs
+are resolved through HTTPS provider metadata before the binary download; their
+original URL remains the asset and target identity. The mirror still validates
+the actual content type and bytes. Files above the limit or invalid/unavailable
+responses remain visible as unresolved targets, rather than being recorded as saved.
+
+When replacing the worker release during a capture, checkpoint and pause affected
+runs before retiring their verified worker containers. A warm container can retain
+previously imported code after deployment. Resume through normal run controls and
+verify changed behavior on new workers. Preserve checkpoints and attempt history;
+use a linked retry for exhausted work after the parent run reaches a terminal state.
+Target setup can return large checkpoints without changing `updated_at`, so an
+unchanged progress timestamp alone does not establish a stalled worker.
+
 ## Configure schedules without accidental analysis
 
 Scheduling requires an IANA `timezone`, exact timezone-aware `episode_airtimes`,
