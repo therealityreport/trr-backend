@@ -15753,7 +15753,11 @@ def _instagram_account_jsonb_array_match_sql(*, alias: str, path_sql: str, accou
 
 
 def _instagram_account_match_sql(
-    *, alias: str = "p", native_columns: frozenset[str] | None = None, raw_data_sql: str | None = None
+    *,
+    alias: str = "p",
+    native_columns: frozenset[str] | None = None,
+    raw_data_sql: str | None = None,
+    short_circuit_direct: bool = False,
 ) -> str:
     """Match an Instagram row to an account through ownership or coauthor data.
 
@@ -15780,9 +15784,15 @@ def _instagram_account_match_sql(
         f"{raw_data} ->> 'owner_username'",
         f"{raw_data} ->> 'username'",
     ]
-    direct_array = ",\n                ".join(
+    direct_identities = [
         "nullif(ltrim(lower(trim(coalesce(" + expr + ", ''))), '@'), '')" for expr in direct_candidates
-    )
+    ]
+    direct_array = ",\n                ".join(direct_identities)
+    direct_match_sql = f"{account_ref} = any(array_remove(array[{direct_array}], null))"
+    if short_circuit_direct:
+        # Catalog rows usually match their native owner. OR can stop before
+        # loading raw JSON, while ANY must build every identity first.
+        direct_match_sql = "(" + " or ".join(f"{account_ref} = {identity}" for identity in direct_identities) + ")"
     collaborator_paths = [
         field_sql("collaborators"),
         field_sql("collaborators_detail"),
@@ -15801,14 +15811,7 @@ def _instagram_account_match_sql(
         exists (
           select 1
           from (select %s::text as account_handle) _ig_account_match
-          where {account_ref} = any(
-            array_remove(
-              array[
-                {direct_array}
-              ],
-              null
-            )
-          )
+          where {direct_match_sql}
           or {collaborator_match_sql}
         )
         """
@@ -34707,6 +34710,7 @@ def _shared_catalog_summary_totals(
             alias="p",
             native_columns=frozenset({"source_account", "owner_username", "raw_data", "collaborators"}),
             raw_data_sql=_instagram_profile_summary_raw_sql(table, conn=conn),
+            short_circuit_direct=True,
         )
         if table == "instagram_account_catalog_posts"
         else _shared_catalog_account_match_sql(platform, alias="p")

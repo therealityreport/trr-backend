@@ -345,3 +345,44 @@ def test_unbackfilled_header_and_empty_accounts_keep_results(database, monkeypat
     monkeypatch.setattr(repo, "_relation_columns", lambda *a, **k: {"profile_summary_header"})
     assert repo._instagram_social_account_lite_header_stats("bravotv") == before
     assert repo._instagram_social_account_lite_header_stats("missing")["totals"]["total_posts"] == 0
+
+
+def test_catalog_native_short_circuit_preserves_legacy_matching(database):
+    values = [
+        (" @@BrAvOtV ", None, None, None, {}),
+        (None, " @bravotv ", None, None, {}),
+        (None, None, "bravotv", None, {}),  # Not a native catalog identity.
+        ("other", None, None, '" @bravotv "', {}),
+        ("other", None, None, '{"handle":"bravotv"}', {}),
+        ("other", None, None, '[{"username":"","handle":"bravotv"}]', {}),
+        (None, None, None, "[null,true,123]", {}),
+        ("other", None, None, None, {"username": " @bravotv "}),
+        ("other", None, None, None, {"owner_username": "bravotv"}),
+        ("other", None, None, None, {"collaborators_detail": {"user_name": " @bravotv "}}),
+        ("other", None, None, None, {"profile_tags": ["bravotv"]}),
+    ]
+    with database.cursor() as cur:
+        for source, owner, username, collaborators, raw in values:
+            cur.execute(
+                """insert into social.instagram_account_catalog_posts
+                (id,source_account,owner_username,username,collaborators,raw_data)
+                values (%s,%s,%s,%s,%s::jsonb,%s::jsonb)""",
+                [str(uuid4()), source, owner, username, collaborators, json.dumps(raw)],
+            )
+        for account in ["bravotv", "other", "123", "true", "missing"]:
+            matches = []
+            for short_circuit in [False, True]:
+                predicate = repo._instagram_account_match_sql(
+                    alias="p",
+                    native_columns=frozenset({"source_account", "owner_username", "raw_data", "collaborators"}),
+                    raw_data_sql="coalesce(p.profile_summary_raw_data,p.raw_data,'{}'::jsonb)",
+                    short_circuit_direct=short_circuit,
+                )
+                cur.execute(
+                    "select id from social.instagram_account_catalog_posts p where " + predicate + " order by id",
+                    [account],
+                )
+                matches.append(cur.fetchall())
+            assert matches[0] == matches[1], account
+            if account == "bravotv":
+                assert len(matches[0]) == 7
