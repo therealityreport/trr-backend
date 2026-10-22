@@ -23,6 +23,7 @@ MIGRATIONS = [
     ROOT / "supabase/migrations/20261022042542_profile_recent_run_indexes.sql",
     ROOT / "supabase/migrations/20261022072404_instagram_profile_header_scalars.sql",
     ROOT / "supabase/migrations/20261022191037_instagram_profile_catalog_accounts.sql",
+    ROOT / "supabase/migrations/20261022202851_instagram_catalog_compact_summary.sql",
 ]
 
 
@@ -61,12 +62,13 @@ def postgres():
             conn = psycopg2.connect(host=scratch, user="postgres", dbname="postgres")
             conn.autocommit = True
             with conn.cursor() as cur:
-                cur.execute("create schema social")
+                cur.execute("create schema social; create role anon; create role authenticated")
                 for table in ("instagram_posts", "instagram_account_catalog_posts"):
+                    counter_type = "integer" if table == "instagram_account_catalog_posts" else "bigint"
                     cur.execute(f"""create table social.{table} (
                         id uuid primary key, source_account text, owner_username text, username text,
                         raw_data jsonb, collaborators jsonb, collaborators_detail jsonb,
-                        likes bigint, comments_count bigint, fb_comment_count bigint, views bigint,
+                        likes {counter_type}, comments_count {counter_type}, fb_comment_count bigint, views bigint,
                         posted_at timestamptz, shortcode text, media_urls jsonb, hosted_media_urls jsonb,
                         hosted_owner_profile_pic_url text, assignment_status text, caption text,
                         text text, hashtags jsonb)""")
@@ -93,7 +95,7 @@ def database(postgres, monkeypatch):
     with postgres.cursor() as cur:
         cur.execute(
             "truncate social.instagram_posts, social.instagram_account_catalog_posts, "
-            "social.instagram_post_comment_rollups"
+            "social.instagram_post_comment_rollups cascade"
         )
 
     def fetch(sql, params):
@@ -444,6 +446,8 @@ def test_catalog_accounts_preserve_membership_and_all_aggregates(
                 repo, "_relation_columns", lambda *a, **k: {"profile_summary_raw_data", "profile_summary_accounts"}
             )
             assert repo._shared_catalog_summary_totals("instagram", account) == before, account
+            monkeypatch.setattr(repo, "_relation_columns", lambda *a, **k: {"profile_summary_catalog_ready"})
+            assert repo._shared_catalog_summary_totals("instagram", account) == before, account
 
 
 def test_catalog_accounts_updates_and_mixed_backfill_are_exact(database, monkeypatch):
@@ -497,6 +501,8 @@ def test_catalog_accounts_updates_and_mixed_backfill_are_exact(database, monkeyp
         repo, "_relation_columns", lambda *a, **k: {"profile_summary_raw_data", "profile_summary_accounts"}
     )
     assert repo._shared_catalog_summary_totals("instagram", "bravotv") == before
+    monkeypatch.setattr(repo, "_relation_columns", lambda *a, **k: {"profile_summary_catalog_ready"})
+    assert repo._shared_catalog_summary_totals("instagram", "bravotv") == before
     assert repo._shared_catalog_summary_totals("instagram", "missing")["catalog_total_posts"] == 0
 
 
@@ -533,3 +539,317 @@ def test_catalog_oversized_identities_remain_writable_and_exact(database, monkey
         repo, "_relation_columns", lambda *a, **k: {"profile_summary_raw_data", "profile_summary_accounts"}
     )
     assert repo._shared_catalog_summary_totals("instagram", "bravotv") == before
+    monkeypatch.setattr(repo, "_relation_columns", lambda *a, **k: {"profile_summary_catalog_ready"})
+    assert repo._shared_catalog_summary_totals("instagram", "bravotv") == before
+
+
+def _assert_compact_catalog_parity(monkeypatch, accounts=("bravotv", "other", "missing")):
+    for account in accounts:
+        monkeypatch.setattr(repo, "_relation_columns", lambda *a, **k: set())
+        expected = repo._shared_catalog_summary_totals("instagram", account)
+        monkeypatch.setattr(repo, "_relation_columns", lambda *a, **k: {"profile_summary_catalog_ready"})
+        assert repo._shared_catalog_summary_totals("instagram", account) == expected, account
+
+
+@pytest.mark.parametrize(
+    "caption,text,hashtags",
+    [
+        (None, None, None),
+        (None, "fallback", []),
+        ("", "ignored", [None, {}, 1]),
+        ("   ", "ignored", []),
+        ("\t", None, ["a", "a"]),
+        ("caption", "other", ["one", "two"]),
+    ],
+)
+def test_compact_catalog_preserves_all_aggregate_inputs(database, monkeypatch, caption, text, hashtags):
+    with database.cursor() as cur:
+        for status, likes, comments, views, posted_at in [
+            ("assigned", 10, 4, 20, "2026-10-22Z"),
+            ("needs_review", -10, None, -20, "2026-10-21Z"),
+            ("unassigned", None, -3, None, None),
+            (None, 0, 0, 0, "2026-10-23Z"),
+        ]:
+            cur.execute(
+                """insert into social.instagram_account_catalog_posts
+                (id,source_account,likes,comments_count,views,posted_at,assignment_status,caption,text,hashtags)
+                values (%s,'bravotv',%s,%s,%s,%s,%s,%s,%s,%s::jsonb)""",
+                [
+                    str(uuid4()),
+                    likes,
+                    comments,
+                    views,
+                    posted_at,
+                    status,
+                    caption,
+                    text,
+                    json.dumps(hashtags) if hashtags is not None else None,
+                ],
+            )
+    _assert_compact_catalog_parity(monkeypatch)
+
+
+def test_compact_catalog_tracks_every_input_and_protects_markers(database, monkeypatch):
+    row_id = str(uuid4())
+    with database.cursor() as cur:
+        cur.execute(
+            """insert into social.instagram_account_catalog_posts
+            (id,source_account,profile_summary_catalog_ready,profile_summary_accounts)
+            values (%s,'bravotv',false,'["forged"]')""",
+            [row_id],
+        )
+        updates = [
+            ("likes", 12, "integer"),
+            ("comments_count", -3, "integer"),
+            ("views", 42, "bigint"),
+            ("posted_at", "2026-10-22Z", "timestamptz"),
+            ("assignment_status", "needs_review", "text"),
+            ("caption", "caption", "text"),
+            ("caption", None, "text"),
+            ("text", "fallback", "text"),
+            ("hashtags", '["one",null,{}]', "jsonb"),
+            ("source_account", "other", "text"),
+            ("owner_username", "bravotv", "text"),
+            ("collaborators", '["collab"]', "jsonb"),
+            ("raw_data", '{"username":"rawowner"}', "jsonb"),
+            ("profile_summary_accounts", '["forged"]', "jsonb"),
+            ("profile_summary_catalog_ready", False, "boolean"),
+            ("profile_summary_catalog_ready", None, "boolean"),
+        ]
+        for field, value, sql_type in updates:
+            cur.execute(
+                f"update social.instagram_account_catalog_posts set {field}=%s::{sql_type} where id=%s", [value, row_id]
+            )
+            _assert_compact_catalog_parity(monkeypatch, ("bravotv", "other", "collab", "rawowner", "forged"))
+            cur.execute(
+                "select profile_summary_catalog_ready from social.instagram_account_catalog_posts where id=%s", [row_id]
+            )
+            assert cur.fetchone()[0] is True, field
+        cur.execute("select xmin::text from social.instagram_profile_catalog_summary where post_id=%s", [row_id])
+        before_xmin = cur.fetchone()[0]
+        # An unrelated update must refresh missing inputs if needed, but should
+        # not rewrite an already identical projection tuple.
+        cur.execute("update social.instagram_account_catalog_posts set shortcode='unrelated' where id=%s", [row_id])
+        cur.execute("select xmin::text from social.instagram_profile_catalog_summary where post_id=%s", [row_id])
+        assert cur.fetchone()[0] == before_xmin
+        new_id = str(uuid4())
+        cur.execute("update social.instagram_account_catalog_posts set id=%s where id=%s", [new_id, row_id])
+        cur.execute("select post_id::text from social.instagram_profile_catalog_summary")
+        assert cur.fetchall() == [(new_id,)]
+        cur.execute("delete from social.instagram_account_catalog_posts where id=%s", [new_id])
+        cur.execute("select count(*) from social.instagram_profile_catalog_summary")
+        assert cur.fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("hashtags", [None, {}, "scalar", 7, True])
+def test_compact_catalog_malformed_hashtags_keep_source_writes_and_read_errors(database, monkeypatch, hashtags):
+    row_id = str(uuid4())
+    with database.cursor() as cur:
+        cur.execute(
+            """insert into social.instagram_account_catalog_posts
+            (id,source_account,hashtags,profile_summary_catalog_ready)
+            values (%s,'bravotv',%s::jsonb,true)""",
+            [row_id, json.dumps(hashtags)],
+        )
+        cur.execute(
+            "select profile_summary_catalog_ready from social.instagram_account_catalog_posts where id=%s", [row_id]
+        )
+        assert cur.fetchone()[0] is False
+        cur.execute("select count(*) from social.instagram_profile_catalog_summary")
+        assert cur.fetchone()[0] == 0
+    errors = []
+    for columns in (set(), {"profile_summary_catalog_ready"}):
+        monkeypatch.setattr(repo, "_relation_columns", lambda *a, _columns=columns, **k: _columns)
+        with pytest.raises(psycopg2.Error) as error:
+            repo._shared_catalog_summary_totals("instagram", "bravotv")
+        errors.append((error.value.pgcode, error.value.diag.message_primary))
+        assert repo._shared_catalog_summary_totals("instagram", "missing")["catalog_total_posts"] == 0
+    assert errors[0] == errors[1]
+    with database.cursor() as cur:
+        cur.execute("update social.instagram_account_catalog_posts set hashtags='[]' where id=%s", [row_id])
+    _assert_compact_catalog_parity(monkeypatch)
+    with database.cursor() as cur:
+        cur.execute(
+            "update social.instagram_account_catalog_posts set hashtags=%s::jsonb where id=%s",
+            [json.dumps(hashtags), row_id],
+        )
+        cur.execute("select count(*) from social.instagram_profile_catalog_summary")
+        assert cur.fetchone()[0] == 0
+
+
+def test_compact_catalog_unbackfilled_branches_and_table_absence(database, monkeypatch):
+    with database.cursor() as cur:
+        cur.execute(
+            "insert into social.instagram_account_catalog_posts(id,source_account,likes) values (%s,'bravotv',10)",
+            [str(uuid4())],
+        )
+        cur.execute(
+            "alter table social.instagram_account_catalog_posts disable trigger "
+            "trg_instagram_profile_catalog_summary_ready"
+        )
+        cur.execute(
+            "alter table social.instagram_account_catalog_posts disable trigger trg_instagram_profile_catalog_summary"
+        )
+        legacy_id = str(uuid4())
+        try:
+            cur.execute(
+                """insert into social.instagram_account_catalog_posts(id,raw_data,likes)
+                        values (%s,'{"collaborators":["bravotv","bravotv"]}',7)""",
+                [legacy_id],
+            )
+        finally:
+            cur.execute(
+                "alter table social.instagram_account_catalog_posts enable trigger "
+                "trg_instagram_profile_catalog_summary_ready"
+            )
+            cur.execute(
+                "alter table social.instagram_account_catalog_posts enable trigger "
+                "trg_instagram_profile_catalog_summary"
+            )
+        cur.execute(MIGRATIONS[-1].read_text())
+        cur.execute(
+            "select profile_summary_catalog_ready from social.instagram_account_catalog_posts where id=%s", [legacy_id]
+        )
+        assert cur.fetchone()[0] is None
+    _assert_compact_catalog_parity(monkeypatch)
+    assert repo._shared_catalog_summary_totals("instagram", "bravotv")["catalog_total_posts"] == 2
+    # An older schema is already exercised above; a partial rollout with the
+    # marker present and the projection table absent must also use the old path.
+    with database.cursor() as cur:
+        cur.execute("alter table social.instagram_profile_catalog_summary rename to compact_temporarily_unavailable")
+        try:
+            _assert_compact_catalog_parity(monkeypatch)
+        finally:
+            cur.execute(
+                "alter table social.compact_temporarily_unavailable rename to instagram_profile_catalog_summary"
+            )
+        cur.execute(
+            "update social.instagram_account_catalog_posts set profile_summary_catalog_ready=null where id=%s",
+            [legacy_id],
+        )
+        cur.execute("select count(*) from social.instagram_profile_catalog_summary")
+        assert cur.fetchone()[0] == 2
+    _assert_compact_catalog_parity(monkeypatch)
+
+
+@pytest.mark.parametrize("counter_type,maximum", [("integer", 2**31 - 1), ("bigint", 2**63 - 1)])
+def test_compact_catalog_preserves_native_counter_types_and_read_overflow(database, monkeypatch, counter_type, maximum):
+    with database.cursor() as cur:
+        cur.execute("begin")
+        try:
+            cur.execute("drop table social.instagram_profile_catalog_summary")
+            cur.execute(
+                f"alter table social.instagram_account_catalog_posts alter column likes type {counter_type}, "
+                f"alter column comments_count type {counter_type}"
+            )
+            cur.execute(MIGRATIONS[-1].read_text().replace("begin;", "").replace("commit;", ""))
+            cur.execute("""select format_type(atttypid,atttypmod) from pg_attribute
+                        where attrelid='social.instagram_profile_catalog_summary'::regclass
+                        and attname in ('likes','comments_count')""")
+            assert cur.fetchall() == [(counter_type,), (counter_type,)]
+            cur.execute(
+                """insert into social.instagram_account_catalog_posts(id,source_account,likes,comments_count,views)
+                        values (%s,'bravotv',%s,1,0)""",
+                [str(uuid4()), maximum],
+            )
+            errors = []
+            for columns in (set(), {"profile_summary_catalog_ready"}):
+                monkeypatch.setattr(repo, "_relation_columns", lambda *a, _columns=columns, **k: _columns)
+                cur.execute("savepoint read_error")
+                with pytest.raises(psycopg2.errors.NumericValueOutOfRange) as error:
+                    repo._shared_catalog_summary_totals("instagram", "bravotv")
+                errors.append((error.value.pgcode, error.value.diag.message_primary))
+                cur.execute("rollback to savepoint read_error")
+            assert errors[0] == errors[1]
+            cur.execute("update social.instagram_account_catalog_posts set comments_count=0")
+            _assert_compact_catalog_parity(monkeypatch)
+        finally:
+            cur.execute("rollback")
+
+
+def test_compact_catalog_aggregate_bigint_cast_errors_match(database, monkeypatch):
+    with database.cursor() as cur:
+        for _ in range(2):
+            cur.execute(
+                "insert into social.instagram_account_catalog_posts(id,source_account,views) values (%s,'bravotv',%s)",
+                [str(uuid4()), 2**63 - 1],
+            )
+    errors = []
+    for columns in (set(), {"profile_summary_catalog_ready"}):
+        monkeypatch.setattr(repo, "_relation_columns", lambda *a, _columns=columns, **k: _columns)
+        with pytest.raises(psycopg2.errors.NumericValueOutOfRange) as error:
+            repo._shared_catalog_summary_totals("instagram", "bravotv")
+        errors.append((error.value.pgcode, error.value.diag.message_primary))
+    assert errors[0] == errors[1]
+
+
+def test_compact_catalog_is_private_and_canonical_accounts_fill_missing_legacy_projection(database, monkeypatch):
+    with database.cursor() as cur:
+        cur.execute(
+            "select relrowsecurity from pg_class where oid='social.instagram_profile_catalog_summary'::regclass"
+        )
+        assert cur.fetchone()[0] is True
+        for role in ("anon", "authenticated"):
+            cur.execute(
+                "select has_table_privilege(%s,'social.instagram_profile_catalog_summary',"
+                "'select,insert,update,delete')",
+                [role],
+            )
+            assert cur.fetchone()[0] is False
+        cur.execute(
+            "alter table social.instagram_account_catalog_posts disable trigger trg_instagram_profile_catalog_accounts"
+        )
+        try:
+            cur.execute(
+                """insert into social.instagram_account_catalog_posts(id,raw_data)
+                        values (%s,'{"collaborators_detail":{"handle":"bravotv"}}')""",
+                [str(uuid4())],
+            )
+        finally:
+            cur.execute(
+                "alter table social.instagram_account_catalog_posts enable trigger "
+                "trg_instagram_profile_catalog_accounts"
+            )
+        cur.execute("select profile_summary_accounts from social.instagram_profile_catalog_summary")
+        assert cur.fetchone()[0] == ["bravotv"]
+    _assert_compact_catalog_parity(monkeypatch)
+
+
+def test_compact_catalog_preserves_non_owner_source_writer_permissions(database):
+    row_id = str(uuid4())
+    new_id = str(uuid4())
+    with database.cursor() as cur:
+        cur.execute("create role compact_source_writer")
+        cur.execute("grant usage on schema social to compact_source_writer")
+        cur.execute(
+            "grant select,insert,update,delete on social.instagram_account_catalog_posts to compact_source_writer"
+        )
+        cur.execute(
+            "select has_table_privilege('compact_source_writer',"
+            "'social.instagram_profile_catalog_summary','select,insert,update,delete'), "
+            "has_function_privilege('compact_source_writer','social.refresh_instagram_profile_catalog_summary()','execute')"
+        )
+        assert cur.fetchone() == (False, False)
+        cur.execute("set role compact_source_writer")
+        try:
+            cur.execute(
+                """insert into social.instagram_account_catalog_posts(id,source_account,likes)
+                values (%s,'bravotv',1)""",
+                [row_id],
+            )
+            cur.execute("update social.instagram_account_catalog_posts set likes=2 where id=%s", [row_id])
+            cur.execute("update social.instagram_account_catalog_posts set hashtags='{}' where id=%s", [row_id])
+            cur.execute(
+                "update social.instagram_account_catalog_posts set hashtags='[]',id=%s where id=%s", [new_id, row_id]
+            )
+        finally:
+            cur.execute("reset role")
+        cur.execute("select post_id::text,likes from social.instagram_profile_catalog_summary")
+        assert cur.fetchall() == [(new_id, 2)]
+        cur.execute("set role compact_source_writer")
+        try:
+            cur.execute("delete from social.instagram_account_catalog_posts where id=%s", [new_id])
+        finally:
+            cur.execute("reset role")
+        cur.execute("select count(*) from social.instagram_profile_catalog_summary")
+        assert cur.fetchone()[0] == 0

@@ -32775,12 +32775,33 @@ def _shared_catalog_summary_totals(
     )
     source_sql = f"social.{table} p"
     params = [normalized_account]
-    if table == "instagram_account_catalog_posts" and "profile_summary_accounts" in _relation_columns(
-        "social", table, conn=conn
+    caption_expr = "nullif(trim(coalesce(caption, text, '')), '') is not null"
+    hashtag_count_expr = "jsonb_array_length(coalesce(hashtags, '[]'::jsonb))"
+    catalog_columns = (
+        _relation_columns("social", table, conn=conn) if table == "instagram_account_catalog_posts" else set()
+    )
+    if "profile_summary_catalog_ready" in catalog_columns and _relation_exists(
+        "social.instagram_profile_catalog_summary", conn=conn
     ):
-        # Separate indexed identities from unbackfilled rows so the planner can
-        # skip JSON expansion entirely for maintained rows. The branches are
-        # disjoint, preserving one contribution per post even with many matches.
+        # Maintained rows read only the compact heap. Keep native counter types
+        # and evaluate engagement at read time to preserve addition overflow.
+        # NULL/unready source rows use the exact legacy predicate and errors.
+        source_sql = f"""(
+            select assignment_status, likes, comments_count, views, posted_at, has_caption, hashtag_count
+            from social.instagram_profile_catalog_summary p
+            where p.profile_summary_accounts ? %s::text
+            union all
+            select assignment_status, likes, comments_count, views, posted_at,
+                   {caption_expr} as has_caption, {hashtag_count_expr} as hashtag_count
+            from social.{table} p
+            where p.profile_summary_catalog_ready is distinct from true and ({account_match_clause})
+        ) p"""
+        account_match_clause = "true"
+        caption_expr = "has_caption"
+        hashtag_count_expr = "hashtag_count"
+        params.append(normalized_account)
+    elif "profile_summary_accounts" in catalog_columns:
+        # Compatibility with the earlier identity-only projection rollout.
         source_sql = f"""(
             select * from social.{table} p
             where p.profile_summary_accounts ? %s::text
@@ -32801,9 +32822,9 @@ def _shared_catalog_summary_totals(
               min({posted_at_column}) as catalog_first_post_at,
               max({posted_at_column}) as catalog_last_post_at,
               count(*) filter (
-                where nullif(trim(coalesce(caption, text, '')), '') is not null
+                where {caption_expr}
               )::int as caption_rows,
-              coalesce(sum(jsonb_array_length(coalesce(hashtags, '[]'::jsonb))), 0)::int as stored_hashtag_instances
+              coalesce(sum({hashtag_count_expr}), 0)::int as stored_hashtag_instances
             from {source_sql}
             where {account_match_clause}
             """
