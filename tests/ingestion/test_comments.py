@@ -861,3 +861,55 @@ def test_rest_count_shortfall_stays_unresolved_and_does_not_mark_missing(databas
     assert query(
         tx, "select is_missing from social.instagram_comments where post_id=%s and comment_id='old'", (args["post_id"],)
     ) == [{"is_missing": False}]
+
+
+def test_public_native_count_gap_preserves_unseen_saved_comments_and_media(database):
+    store, tx, args = setup(database, seed_missing=True)
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            """insert into social.instagram_comments
+            (post_id,comment_id,parent_comment_id,username,text,is_reply,scraped_at,media_urls,hosted_media_urls,raw_data)
+            select post_id,'old-child',id,'retained','Retained reply',true,'2026-01-01',
+                '["https://media.example/original.gif"]'::jsonb,'["https://media.example/hosted.gif"]'::jsonb,
+                '{"history":"retained"}'::jsonb from social.instagram_comments
+            where post_id=%s and comment_id='old'""",
+            (args["post_id"],),
+        )
+    saved_query = (
+        "select to_jsonb(c) as saved from social.instagram_comments c where post_id=%s "
+        "and comment_id in ('old','old-child') order by comment_id"
+    )
+    before = query(tx, saved_query, (args["post_id"],))
+    payload = copy.deepcopy(NATIVE["rest"])
+    payload["cursor_payload"] = {
+        "adapter_family": "instagram_public_relay",
+        "adapter_version": 1,
+        "source": "root",
+        "relay_doc_id": "fixture-top-doc",
+        "relay_friendly_name": "fixture-top-operation",
+        "sort_order": "popular",
+        "page_size": 15,
+    }
+    result = CommentActivity(
+        store,
+        source([payload], CommentFetchSummary(expected_count=4, full_observation=True)),
+        clock=lambda: OBSERVED,
+    ).execute(**args)
+    assert result["outcome"] == "committed"
+    assert result["receipt"]["canonical_identity"]["settlement"] == {
+        "basis": "public_native_exhaustion",
+        "expected_total": 4,
+        "observed_total": 2,
+        "count_gap": 2,
+    }
+    assert query(tx, saved_query, (args["post_id"],)) == before
+    observed = query(
+        tx,
+        "select comment_id,is_missing from social.instagram_comments where post_id=%s "
+        "and comment_id in ('parent1','reply1') order by comment_id",
+        (args["post_id"],),
+    )
+    assert observed == [
+        {"comment_id": "parent1", "is_missing": False},
+        {"comment_id": "reply1", "is_missing": False},
+    ]

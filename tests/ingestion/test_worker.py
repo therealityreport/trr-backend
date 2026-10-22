@@ -53,7 +53,31 @@ def test_failed_source_releases_attempt_with_latest_durable_checkpoint(database)
             from social.instagram_ingestion_targets where run_id=%s""",
             (args["run_id"],),
         )
-        assert cur.fetchone() == (1, 1, {"cursor": "after-page", "last_error_code": "activity_failed"}, None, True)
+        assert cur.fetchone() == (1, 1, {"cursor": "after-page", "last_error_code": "activity_failed"}, None, False)
+
+
+def test_immediate_operational_retries_preserve_the_finite_attempt_budget(database):
+    store, tx = database
+    args = target(store, launch(store))
+    reservation_args = dict(args)
+    calls = []
+
+    def source(**callbacks):
+        callbacks["on_request"]()
+        calls.append(1)
+        raise RuntimeError("synthetic source failure without Retry-After")
+
+    for _ in range(3):
+        args["owner_token"] = str(store.reserve(**reservation_args)["owner_token"])
+        assert worker(store, source).execute(args)["code"] == "activity_failed"
+    assert store.reserve(**reservation_args) is None and len(calls) == 3
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            "select attempts,max_attempts,requests,next_attempt_at,outcome from social.instagram_ingestion_targets "
+            "where run_id=%s and stage='post_details'",
+            (args["run_id"],),
+        )
+        assert cur.fetchone() == (3, 3, 3, None, "unresolved")
 
 
 def test_cancelled_reservation_never_constructs_source(database):
@@ -426,9 +450,10 @@ def test_unresolved_activity_finishes_failure_after_checkpoint_release(database,
         def finish_failure(self, error=None):
             with tx() as conn, conn.cursor() as cur:
                 cur.execute(
-                    "select owner_token from social.instagram_ingestion_targets where run_id=%s", (args["run_id"],)
+                    "select owner_token,next_attempt_at from social.instagram_ingestion_targets where run_id=%s",
+                    (args["run_id"],),
                 )
-                assert cur.fetchone()[0] is None
+                assert cur.fetchone() == (None, None)
             cleanup.append(error)
 
         def finish_success(self):

@@ -93,17 +93,28 @@ class MediaOwnershipCheck:
             self()
 
 
-def _retry_at(value: str | None) -> datetime:
+def _retry_at(value: str | None) -> datetime | None:
     now = datetime.now(UTC)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    value = value.strip()
+    if value.isascii() and value.isdigit():
+        # An explicit source delay may exceed datetime's range. Keep it closed
+        # rather than replacing that actual delay with a shorter local wait.
+        digits = value.lstrip("0") or "0"
+        if len(digits) > 12:
+            return datetime.max.replace(tzinfo=UTC)
+        try:
+            return now + timedelta(seconds=int(digits))
+        except OverflowError:
+            return datetime.max.replace(tzinfo=UTC)
     try:
-        if value and value.strip().isdigit():
-            return now + timedelta(seconds=max(1, int(value)))
-        stamp = parsedate_to_datetime(value or "")
+        stamp = parsedate_to_datetime(value)
         if stamp.tzinfo is not None and stamp > now:
             return stamp.astimezone(UTC)
     except (TypeError, ValueError, OverflowError):
         pass
-    return now + timedelta(seconds=30)
+    return None
 
 
 def source_reference(value: str) -> str:

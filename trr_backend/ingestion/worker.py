@@ -8,7 +8,7 @@ import os
 import sys
 import threading
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 from psycopg2.extras import RealDictCursor
@@ -39,7 +39,7 @@ def classify_failure(error: Exception) -> Failure:
         )
     # Raw exception text can contain signed URLs, cookies, or SQL parameters.
     # Retain a bounded class-independent code; evidence holds source content.
-    return Failure("activity_failed", retry_at=datetime.now(UTC) + timedelta(seconds=60))
+    return Failure("activity_failed")
 
 
 class Worker:
@@ -201,9 +201,7 @@ class Worker:
             if result.get("outcome") == "unresolved" and not result.get("ordered_held"):
                 failure = result.get("failure")
                 if not isinstance(failure, Failure):
-                    self.release(
-                        owned, Failure("observation_incomplete", retry_at=datetime.now(UTC) + timedelta(seconds=60))
-                    )
+                    self.release(owned, Failure("observation_incomplete"))
                 elif failure.code != "reply_access_rejected":
                     self.release(owned, failure)
             source_settled = (

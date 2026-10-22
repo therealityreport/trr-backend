@@ -50,7 +50,7 @@ _BOOL_FIELDS = frozenset({"is_verified", "is_private"})
 class ProfileError(ValueError):
     def __init__(self, code):
         self.code = code
-        self.failure = Failure(code, retry_at=datetime.now(UTC) + timedelta(seconds=60))
+        self.failure = Failure(code)
         super().__init__(code)
 
 

@@ -14,7 +14,7 @@ import time
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -158,7 +158,7 @@ class SourceRequestGate:
             self.check_cancelled()
         remaining = self.deadline - self.monotonic()
         if remaining <= 0:
-            raise IdentityDeferred("target_deadline", datetime.now(UTC) + timedelta(minutes=1))
+            raise IdentityDeferred("target_deadline", None)
         return remaining
 
     @contextmanager
@@ -183,13 +183,13 @@ class SourceRequestGate:
                 )
                 row = cur.fetchone()
                 if not row:
-                    raise IdentityDeferred("identity_lane_missing", datetime.now(UTC) + timedelta(minutes=1))
+                    raise IdentityDeferred("identity_lane_missing", None)
                 # Read the database clock after any row-lock wait.
                 cur.execute("select clock_timestamp() as current_time")
                 now = cur.fetchone()["current_time"]
                 yield cur, dict(row), now
         except psycopg2.Error:
-            raise IdentityDeferred("identity_policy_unavailable", datetime.now(UTC) + timedelta(minutes=1)) from None
+            raise IdentityDeferred("identity_policy_unavailable", None) from None
 
     def before_request(self) -> RequestPermit:
         if self._finished:
@@ -389,8 +389,10 @@ class SourceRequestGate:
             return previous
         with self._locked() as (cur, row, now):
             if not self._owns(row, permit, now):
+                expiry = row.get("probe_expires_at")
                 failure = Failure(
-                    "identity_probe_lost", retry_at=row.get("probe_expires_at") or now + timedelta(seconds=1)
+                    "identity_probe_lost",
+                    retry_at=expiry if row.get("probe_token") and expiry is not None and expiry > now else None,
                 )
             else:
                 failures = int(row["consecutive_failures"]) + 1 if code == row.get("last_error_code") else 1

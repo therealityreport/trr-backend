@@ -12,7 +12,7 @@ import logging
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 from psycopg2.extras import RealDictCursor
@@ -40,7 +40,7 @@ LOGGER = logging.getLogger(__name__)
 class AvatarResolutionError(ValueError):
     def __init__(self, code: str, *, failure: Failure | None = None):
         self.code = code
-        self.failure = failure or Failure(code, retry_at=datetime.now(UTC) + timedelta(minutes=1))
+        self.failure = failure if failure is not None else Failure(code)
         super().__init__(code)
 
 

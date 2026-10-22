@@ -99,7 +99,7 @@ class DetailTransport:
             self.check_cancelled()
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
-            raise DetailDeferred("target_deadline", datetime.now(UTC) + timedelta(minutes=1))
+            raise DetailDeferred("target_deadline", None)
         return remaining
 
     def _reserve(self) -> None:

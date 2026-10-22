@@ -886,16 +886,17 @@ class CommentActivity:
         current_checkpoint = {**current_checkpoint, "comment_pages": state}
 
         def finish(conn):
-            # Only a proved full observation may advance missing-comment state.
-            # The root request start is the missing-row cutoff. Rows observed
-            # during pagination are protected even if the last page is newer.
-            with conn.cursor() as cur:
-                cur.execute(
-                    """update social.instagram_comments set is_missing=true,missing_at=%s
-                    where post_id=%s and not (comment_id=any(%s)) and scraped_at<=%s
-                    and not is_missing""",
-                    (evidence.captured_at, post_id, list(state["observed"]), scan_cutoff),
-                )
+            # Native public exhaustion can still leave a known count gap. It
+            # cannot prove that unseen saved comments disappeared. Only count
+            # parity may reconcile missing rows, using the original scan cutoff.
+            if settlement["count_gap"] == 0:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """update social.instagram_comments set is_missing=true,missing_at=%s
+                        where post_id=%s and not (comment_id=any(%s)) and scraped_at<=%s
+                        and not is_missing""",
+                        (evidence.captured_at, post_id, list(state["observed"]), scan_cutoff),
+                    )
             return {"post_id": post_id, "observed_comment_ids": sorted(state["observed"]), "settlement": settlement}
 
         receipt = self.store.commit_target(

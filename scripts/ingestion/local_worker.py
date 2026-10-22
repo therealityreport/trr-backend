@@ -32,6 +32,34 @@ from trr_backend.ingestion.workflows import control_call
 
 ACTIVITY_TIMEOUT_SECONDS = 590
 WAIT_RECHECK_SECONDS = 5.0
+ABORT_EXIT_GRACE_SECONDS = 15.0
+
+
+class AbortExitGuard:
+    """Let abort cleanup finish, then exit even if foreground SQL never returns.
+
+    This only bounds shutdown after an actual abort. A healthy lease with a
+    separate stuck business connection does not trigger this guard.
+    """
+
+    def __init__(self, abort, *, force_exit=os._exit):
+        self.abort, self.force_exit = abort, force_exit
+        self.stopped = threading.Event()
+        self.thread = threading.Thread(target=self._watch, daemon=True, name="instagram-local-abort-exit")
+
+    def start(self):
+        self.thread.start()
+
+    def _watch(self):
+        while not self.stopped.wait(0.05):
+            if self.abort.is_set():
+                if not self.stopped.wait(ABORT_EXIT_GRACE_SECONDS):
+                    self.force_exit(125)
+                return
+
+    def close(self):
+        self.stopped.set()
+        self.thread.join(timeout=1)
 
 
 class Interrupted(Exception):  # noqa: N818 - control-flow signal, not an error
@@ -136,6 +164,8 @@ def main(argv=None):
     abort = threading.Event()
     stop_requested = threading.Event()
     previous = {}
+    exit_guard = AbortExitGuard(abort)
+    exit_guard.start()
 
     def request_stop(*_):
         stop_requested.set()
@@ -201,6 +231,9 @@ def main(argv=None):
             pg.close_pool()
         except Exception:  # noqa: BLE001 - shutdown must not mask the exit status
             pass
+        # Keep the independent guard armed through lease and pool cleanup: a
+        # blocked connection must not leave launchd supervising a dead worker.
+        exit_guard.close()
 
 
 if __name__ == "__main__":
