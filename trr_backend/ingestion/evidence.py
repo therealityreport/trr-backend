@@ -251,7 +251,11 @@ def _media_reference(value: str) -> str | None:
         if parts.scheme != "https" or not parts.hostname or parts.username or parts.password:
             return None
         host = parts.hostname.lower()
-        is_cdn = any(host == base or host.endswith("." + base) for base in ("cdninstagram.com", "fbcdn.net"))
+        # Native GIF attachments use this exact delivery host. Keep only the
+        # reviewed delivery keys; other fbsbx.com hosts retain no query fields.
+        is_cdn = host == "cdn.fbsbx.com" or any(
+            host == base or host.endswith("." + base) for base in ("cdninstagram.com", "fbcdn.net")
+        )
         query = "&".join(
             segment
             for segment in parts.query.split("&")
