@@ -1531,3 +1531,51 @@ The final live function metadata contains exactly the same five schedules as the
 retained baseline (cron and timezone). Comments, media, posts, recovery, general
 job and API consumers resolve to that same app in `main`. Schedule comparison
 and consumer-target receipts are retained beside the runtime smoke.
+
+## 2026-10-21: offline discovery/GIF repair and scheduled qualification
+
+The user authorized further older-post discovery and real GIF mirroring repairs,
+then chose preparation now and a bounded rerun after the public cooldown. The
+one-shot chat heartbeat `bounded-instagram-discovery-and-gif-rerun` is active for
+October 22 at 00:02 America/New_York (04:02 UTC). It must recheck the shared lane
+and must not bypass a later cooldown. Full-history ingestion remains disabled.
+
+The source candidate adds an **opt-in**, anonymous owner-timeline adapter. It uses
+native profile bootstrap identity and the anonymous continuation contract, with
+normal 12-item pages. Evidence retains the native root, account/profile identity,
+request cursor, and document phase; live parsing and replay reject error flags,
+identity mismatches, and bootstrap evidence presented as a continuation. The
+existing default listing adapter is unchanged until native qualification passes.
+The public transport now decodes both supported native JSON prefixes consistently.
+
+GIF evidence now retains `first_party_cdn_proxied_images`. All three comment media
+extractors select that branch's `fixed_height.url` when the branch is nonnull,
+while retaining both raw metadata branches. Null/missing preferred metadata keeps
+legacy fallback handling. Placeholder-byte rejection remains in force. This fixes
+a confirmed loss of native fields; it does not prove either original GIF is still
+available. Both original comment rows currently have zero hosted media URLs.
+
+Validation: 75 public transport checks passed, including the review regression
+cases; 11 focused GIF selection and empty-text DTO/replay checks passed; the
+existing unavailable-GIF rejection check passed. The 33 listing checks passed
+using their documented isolated-PostgreSQL invocation. An initial invocation
+without that harness was blocked by the global non-live connection guard; no
+production database was used by those tests. Ruff and diff whitespace checks pass.
+Two independent reviews found issues which were fixed and confirmed in fix-only
+reviews. Previously passing unrelated checks were reused.
+
+The prepared listing diagnostic is bounded to three native pages, five requests,
+and a 180-second request-boundary deadline. The scheduled fresh GIF qualification
+is bounded to the original two comment/GIF identities, 64 Instagram requests and
+300 seconds, followed by at most 12 CDN/storage requests and 120 seconds for two
+assets. Shared request budgets, cooldown, frozen-run guards, native cursors and
+immutable storage remain mandatory. Actual source availability, hosted bytes,
+canonical application and deployment must each be reported separately.
+
+No candidate deployment or new Instagram requests occurred during offline
+preparation. The prior verified runtime remains v97 until a later deployment is
+verified. Final preparation audit: frozen original unchanged, full-history gate
+closed, zero active owners, zero uncertain dispatches, budget ledger total 1,509,
+and latest tranche closed. The prior two-request listing diagnostic accounts for
+the increase from 1,507. Private bounded procedure and evidence are retained in
+`discovery-gif-repair/HANDOFF.md` under the existing task evidence directory.

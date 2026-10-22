@@ -23,7 +23,11 @@ from trr_backend.ingestion.post_transport import SourceFailure, _CallbackAbort, 
 from trr_backend.ingestion.providers import InvalidSourceError
 from trr_backend.ingestion.public_diagnostics import ERROR_CODES, record_public_diagnostic
 from trr_backend.socials.instagram.credential_guard import CredentialIdentityMismatch, PublicCookieIdentity
-from trr_backend.socials.instagram.public_response import PublicRequestClient, parse_public_retry_after
+from trr_backend.socials.instagram.public_response import (
+    PublicRequestClient,
+    decode_public_json,
+    parse_public_retry_after,
+)
 from trr_backend.socials.instagram.request_client import InstagramRequestFailure
 
 LOGGER = logging.getLogger(__name__)
@@ -143,16 +147,12 @@ class ObservedPublicSession:
                 raise SourceFailure(failure) from None
             # Decode only native JSON. Bootstrap HTML/tokens never enter evidence.
             payload = None
-            looks_json = "json" in response.headers.get(
-                "content-type", ""
-            ).lower() or response.text.lstrip().startswith(("{", "["))
-            if looks_json:
-                try:
-                    payload = response.json()
-                except ValueError:
-                    payload = None
-                if isinstance(payload, dict):
-                    self.on_payload(payload)
+            try:
+                payload = decode_public_json(response)
+            except ValueError:
+                pass
+            if isinstance(payload, dict):
+                self.on_payload(payload)
             try:
                 self.classifier._classify_response(response)
                 if str(method).upper() == "POST" and not isinstance(payload, dict):

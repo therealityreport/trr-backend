@@ -1032,6 +1032,9 @@ def _graphql_comment_reply_edges(node: Mapping[str, Any]) -> list[Mapping[str, A
 
 def _graphql_comment_media_urls(node: Mapping[str, Any]) -> list[str]:
     """Read explicit native attachments, without treating author/other URLs as media."""
+    from trr_backend.socials.instagram.comment_media_selection import select_comment_media
+
+    node = select_comment_media(node)
     containers = """
         media comment_media commentMedia comment_gif commentGif media_versions attachment attachments content preview
         image images image_versions2 candidates video_versions carousel_media sticker stickers sticker_asset

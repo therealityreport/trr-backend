@@ -18,6 +18,16 @@ _NUMBER = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?
 _MAX_DELAY = Decimal(str(sys.float_info.max))
 
 
+def decode_public_json(response):
+    """Decode native JSON with Instagram's optional anti-hijacking prefix."""
+    body = response.text.lstrip("\ufeff \t\r\n")
+    for prefix in ("for(;;);", "for (;;);"):
+        if body.startswith(prefix):
+            body = body[len(prefix) :].lstrip()
+            break
+    return json.loads(body)
+
+
 def parse_public_retry_after(value, now: datetime | None = None) -> float | None:
     """Keep valid server delays, including overflow, without leaking header text.
 
@@ -67,6 +77,8 @@ def _auth_path(value: str) -> str | None:
 def _structured_auth(payload) -> str | None:
     if not isinstance(payload, dict):
         return None
+    if payload.get("error") == 1357001:
+        return "login_required"
     for field in ("message", "error_type"):
         code = payload.get(field)
         if isinstance(code, str) and code.strip().lower() in AUTH_FATAL_MESSAGES:
@@ -170,7 +182,7 @@ class PublicRequestClient(InstagramRequestClient):
                 code = document.code
             else:
                 try:
-                    code = _structured_auth(response.json())
+                    code = _structured_auth(decode_public_json(response))
                 except ValueError:
                     pass
         if code:
@@ -185,7 +197,20 @@ class PublicRequestClient(InstagramRequestClient):
     @staticmethod
     def _json(response):
         try:
-            return InstagramRequestClient._json(response)
+            payload = decode_public_json(response)
+            if not isinstance(payload, dict):
+                raise ValueError("Expected JSON object")
+            code = _structured_auth(payload)
+            if code:
+                raise InstagramRequestFailure(code, status_code=response.status_code, retryable=False)
+            return payload
+        except ValueError as error:
+            raise InstagramRequestFailure(
+                "parse_error",
+                status_code=response.status_code,
+                retryable=True,
+                retry_after_seconds=parse_public_retry_after(response.headers.get("retry-after")),
+            ) from error
         except InstagramRequestFailure as error:
             error.retry_after_seconds = parse_public_retry_after(response.headers.get("retry-after"))
             raise

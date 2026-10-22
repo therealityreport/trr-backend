@@ -802,6 +802,9 @@ animated_image_url animatedImageUrl fixed_height_url fixedHeightUrl fixed_width_
 
 
 def _comment_media_urls(source: Mapping[str, Any]) -> list[str]:
+    from trr_backend.socials.instagram.comment_media_selection import select_comment_media
+
+    source = select_comment_media(source)
     urls: list[str] = []
 
     def append(value: Any) -> None:

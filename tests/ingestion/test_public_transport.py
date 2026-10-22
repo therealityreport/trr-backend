@@ -616,3 +616,148 @@ def test_explicit_authenticated_catalog_mode_still_selects_auth(monkeypatch):
     config = {"instagram_scrape_mode": "authenticated", "frontier_auth_allowed": True}
     monkeypatch.setattr(catalog_ingest, "_sync_core_overrides", lambda: None)
     assert catalog_ingest._shared_instagram_frontier_auth_validation(config) == (True, None)
+
+
+def anonymous_payload(*, cursor="native-next", username="bravotv", identity="123", private=False):
+    return {
+        "data": {
+            "user": {
+                "id": identity,
+                "username": username,
+                "is_private": private,
+                "edge_owner_to_timeline_media": {
+                    "edges": [{"node": {"id": "9", "shortcode": "ABC"}}],
+                    "page_info": {"has_next_page": cursor is not None, "end_cursor": cursor},
+                },
+            }
+        },
+        "status": "ok",
+    }
+
+
+def test_anonymous_listing_observes_bootstrap_and_native_continuation():
+    from trr_backend.ingestion.anonymous_listing import ANONYMOUS_DOC_ID, AnonymousListingSource
+    from trr_backend.ingestion.listing import parse_listing_page
+
+    bootstrap = anonymous_payload()
+    case = source_case(
+        AnonymousListingSource,
+        [
+            {"payload": bootstrap, "cookies": {"csrftoken": "anon"}},
+            {"body": "for(;;);" + json.dumps(anonymous_payload(cursor=None))},
+        ],
+        account="bravotv",
+    )
+    payload = listing_call(case, "native-input")
+    assert payload is case.retained[-1]
+    assert payload["relay_doc_id"] == ANONYMOUS_DOC_ID
+    assert not parse_listing_page(payload).has_next_page
+    assert case.events.count("count") == len(case.session.sent) == 2
+    form = parse_qs(case.session.sent[-1][0].body)
+    assert form["doc_id"] == [ANONYMOUS_DOC_ID]
+    variables = json.loads(form["variables"][0])
+    assert variables["id"] == 123 and variables["after"] == "native-input"
+    assert variables["first"] == variables["data"]["count"] == 12
+    assert set(form) == {"doc_id", "variables", "server_timestamps"}
+    retained = Evidence.capture(
+        source_identity="test", captured_at=datetime.now(UTC), parser_version=PARSER_VERSION, payload=payload
+    )
+    assert parse_listing_page(retained.read(pinned=True)) == parse_listing_page(payload)
+    assert case.session.closed
+
+
+@pytest.mark.parametrize(
+    "kwargs", [{"username": "other"}, {"identity": True}, {"identity": None}, {"private": True}, {"private": None}]
+)
+def test_anonymous_listing_rejects_profile_before_continuation(kwargs):
+    from trr_backend.ingestion.anonymous_listing import AnonymousListingSource
+
+    case = source_case(AnonymousListingSource, [{"payload": anonymous_payload(**kwargs)}], account="bravotv")
+    with pytest.raises(InvalidSourceError):
+        listing_call(case, "native-input")
+    assert len(case.session.sent) == 1 and case.session.closed
+
+
+@pytest.mark.parametrize("prefix", ["", "for(;;);", "\ufeff for (;;);\n"])
+def test_prefixed_public_auth_is_counted_and_rejected(prefix):
+    from trr_backend.ingestion.anonymous_listing import AnonymousListingSource
+
+    case = source_case(AnonymousListingSource, [{"body": prefix + '{"error":1357001}'}], account="bravotv")
+    with pytest.raises(SourceFailure) as error:
+        listing_call(case)
+    assert error.value.failure.code == "login_required"
+    assert len(case.session.sent) == case.events.count("count") == 1
+
+
+def test_anonymous_page_replays_native_root_without_source():
+    from trr_backend.ingestion.anonymous_listing import ANONYMOUS_FAMILY, ANONYMOUS_VERSION
+    from trr_backend.ingestion.replay import _listing
+
+    payload = anonymous_payload(cursor=None)
+    payload.update(
+        adapter_family=ANONYMOUS_FAMILY,
+        adapter_version=ANONYMOUS_VERSION,
+        page_size=12,
+        listing_profile_id="123",
+        listing_profile_username="bravotv",
+    )
+    payload["data"]["user"]["edge_owner_to_timeline_media"]["edges"][0]["node"]["owner"] = {"username": "bravotv"}
+    evidence = Evidence.capture(
+        source_identity="test", captured_at=datetime.now(UTC), parser_version=PARSER_VERSION, payload=payload
+    )
+    replay = _listing(evidence, account="bravotv", target_key="page:root", parser_version=PARSER_VERSION, pinned=True)
+    assert [item.post.shortcode for item in replay.posts] == ["ABC"]
+    assert replay.has_next_page is False
+
+
+@pytest.mark.parametrize("status", [401, 403, 429])
+def test_anonymous_access_failure_never_rotates_or_retries(status):
+    from trr_backend.ingestion.anonymous_listing import AnonymousListingSource
+
+    case = source_case(AnonymousListingSource, [{"status": status}], account="bravotv")
+    with pytest.raises(SourceFailure):
+        listing_call(case, "native")
+    assert case.events.count("count") == len(case.session.sent) == 1
+
+
+@pytest.mark.parametrize("failure", [{"rate_limited": True}, {"success": False}, {"error": 1357001}])
+def test_anonymous_native_page_cannot_mask_source_failure(failure):
+    from trr_backend.ingestion.anonymous_listing import AnonymousListingSource
+
+    payload = anonymous_payload(cursor=None)
+    payload.update(failure)
+    case = source_case(AnonymousListingSource, [{"payload": payload}], account="bravotv")
+    with pytest.raises((InvalidSourceError, SourceFailure)):
+        listing_call(case)
+
+
+@pytest.mark.parametrize("change", ["account", "private", "id", "target", "phase"])
+def test_anonymous_replay_revalidates_identity_and_request_binding(change):
+    from trr_backend.ingestion.anonymous_listing import ANONYMOUS_FAMILY, ANONYMOUS_VERSION
+    from trr_backend.ingestion.listing import page_target
+    from trr_backend.ingestion.replay import _listing
+
+    payload = anonymous_payload(cursor=None)
+    payload.update(
+        adapter_family=ANONYMOUS_FAMILY,
+        adapter_version=ANONYMOUS_VERSION,
+        page_size=12,
+        listing_profile_id="123",
+        listing_profile_username="bravotv",
+    )
+    target = "page:root"
+    if change == "account":
+        payload["data"]["user"]["username"] = "other"
+    if change == "private":
+        payload["data"]["user"]["is_private"] = True
+    if change == "id":
+        payload["data"]["user"]["id"] = "999"
+    if change == "target":
+        target = page_target("native-input")
+    if change == "phase":
+        payload["request_cursor"] = "native-input"
+    evidence = Evidence.capture(
+        source_identity="test", captured_at=datetime.now(UTC), parser_version=PARSER_VERSION, payload=payload
+    )
+    with pytest.raises(InvalidSourceError):
+        _listing(evidence, account="bravotv", target_key=target, parser_version=PARSER_VERSION, pinned=True)

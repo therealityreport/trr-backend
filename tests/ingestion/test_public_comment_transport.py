@@ -72,7 +72,11 @@ def test_retained_shape_gif_parent_observer_dto_and_fresh_reply_hydration(monkey
     native = {
         **actual_parent_shape("gif-parent"),
         "text": "",
-        "giphy_media_info": {"id": "fixture-gif", "images": {"fixed_height": {"url": gif_url}}},
+        "giphy_media_info": {
+            "id": "fixture-gif",
+            "first_party_cdn_proxied_images": {"fixed_height": {"url": gif_url}},
+            "images": {"fixed_height": {"url": "https://media.example/placeholder.gif"}},
+        },
     }
     state = {"version": 1, "observed": {}, "lanes": {}, "expected": None}
     retained, dtos, calls = [], [], []

@@ -17,7 +17,7 @@ from trr_backend.ingestion.canonical import normalize_post_source
 from trr_backend.ingestion.comments import COMMENT_PARSER_VERSION, CommentPage, parse_comment_evidence
 from trr_backend.ingestion.domain import Stage, utc_timestamp
 from trr_backend.ingestion.evidence import Evidence, sanitize_payload
-from trr_backend.ingestion.listing import ROOT_FIELD, parse_listing_page
+from trr_backend.ingestion.listing import ROOT_FIELD, is_anonymous_listing, parse_listing_page
 from trr_backend.ingestion.providers import PARSER_VERSION, InvalidSourceError, ParsedSource, parse_evidence
 from trr_backend.ingestion.queries import Queries
 from trr_backend.socials.instagram.graphql_response import PROVENANCE_KEY, classify_graphql_response
@@ -490,7 +490,7 @@ def _listing(evidence: Evidence, *, account: str, target_key: str, parser_versio
         raise InvalidSourceError("Requested listing replay parser version is unavailable")
     payload = evidence.read(pinned=pinned)
     data = payload.get("data")
-    if not isinstance(data, dict) or ROOT_FIELD not in data:
+    if not is_anonymous_listing(payload) and (not isinstance(data, dict) or ROOT_FIELD not in data):
         if (
             PROVENANCE_KEY in payload
             or payload.get("errors")
@@ -511,9 +511,13 @@ def _listing(evidence: Evidence, *, account: str, target_key: str, parser_versio
         )
         return ListingReplay(evidence.captured_at, (parsed,), None, None)
     decision = classify_graphql_response(payload)
-    if not decision.accepted and decision.reason not in {"graphql_empty_connection", "graphql_invalid_connection"}:
+    if (
+        not is_anonymous_listing(payload)
+        and not decision.accepted
+        and decision.reason not in {"graphql_empty_connection", "graphql_invalid_connection"}
+    ):
         raise InvalidSourceError("Listing source reported an unsuccessful response")
-    page = parse_listing_page(payload)
+    page = parse_listing_page(payload, account=account, target_key=target_key)
     posts = []
     seen = set()
     for node in page.posts:

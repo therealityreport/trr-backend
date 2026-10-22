@@ -4488,6 +4488,9 @@ class InstagramScraper:
 
     def _extract_comment_media_urls(self, data: dict[str, Any]) -> list[str]:
         """Extract media URLs from Instagram comment payloads when present."""
+        from trr_backend.socials.instagram.comment_media_selection import select_comment_media
+
+        data = select_comment_media(data)
         urls: list[str] = []
 
         def _append(candidate: Any) -> None:

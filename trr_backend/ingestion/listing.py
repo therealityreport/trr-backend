@@ -39,10 +39,36 @@ class ListingPage:
     end_cursor: str | None
 
 
-def parse_listing_page(payload: dict[str, Any]) -> ListingPage:
+def is_anonymous_listing(payload: dict[str, Any]) -> bool:
+    from trr_backend.ingestion.anonymous_listing import ANONYMOUS_FAMILY, ANONYMOUS_VERSION
+
+    return payload.get("adapter_family") == ANONYMOUS_FAMILY and payload.get("adapter_version") == ANONYMOUS_VERSION
+
+
+def parse_listing_page(payload: dict[str, Any], *, account=None, target_key=None) -> ListingPage:
     """Parse the maintained native GraphQL connection, without transport defaults."""
     data = payload.get("data")
     connection = data.get(ROOT_FIELD) if isinstance(data, dict) else None
+    anonymous = is_anonymous_listing(payload)
+    if anonymous:
+        from trr_backend.ingestion.anonymous_listing import ANONYMOUS_DOC_ID, validate_anonymous_listing
+
+        decision = classify_graphql_response(payload)
+        if not decision.accepted and decision.reason != "graphql_empty_connection":
+            raise InvalidSourceError("Anonymous listing source response is unresolved")
+        validate_anonymous_listing(payload, account=account, target_key=target_key)
+
+        if (
+            payload.get("errors")
+            or payload.get("error")
+            or payload.get("graphql_provenance")
+            or payload.get("status") not in (None, "ok")
+            or payload.get("relay_doc_id") not in (None, ANONYMOUS_DOC_ID)
+            or payload.get("page_size") != 12
+        ):
+            raise InvalidSourceError("Anonymous listing source response is unresolved")
+        user = data.get("user") if isinstance(data, dict) else None
+        connection = user.get("edge_owner_to_timeline_media") if isinstance(user, dict) else None
     if not isinstance(connection, dict):
         raise InvalidSourceError("Native listing connection is missing")
     edges = connection.get("edges")
@@ -61,7 +87,7 @@ def parse_listing_page(payload: dict[str, Any]) -> ListingPage:
     if info["has_next_page"] and end_cursor is None:
         raise InvalidSourceError("More listing pages require a cursor")
     decision = classify_graphql_response(payload)
-    if not decision.accepted:
+    if not anonymous and not decision.accepted:
         raise InvalidSourceError("Listing source response is unresolved: " + str(decision.reason))
     return ListingPage(tuple(posts), info["has_next_page"], end_cursor)
 
@@ -229,9 +255,13 @@ class ListingActivity:
             raise InvalidSourceError("Listing response was not retained before parsing")
         evidence, evidence_id = retained[returned.content_hash]
         decision = classify_graphql_response(payload)
-        if not decision.accepted and decision.reason not in {"graphql_empty_connection", "graphql_invalid_connection"}:
+        if (
+            not is_anonymous_listing(payload)
+            and not decision.accepted
+            and decision.reason not in {"graphql_empty_connection", "graphql_invalid_connection"}
+        ):
             raise InvalidSourceError("Listing source reported an unsuccessful response")
-        page = parse_listing_page(evidence.read(pinned=True))
+        page = parse_listing_page(evidence.read(pinned=True), account=account, target_key=target_key)
         if cursor is not None and page.end_cursor == cursor:
             raise InvalidSourceError("Listing cursor repeated; exhaustion is unproven")
         selected = {}
