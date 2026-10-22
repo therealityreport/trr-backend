@@ -1627,3 +1627,54 @@ The existing scheduled follow-up now carries the January scope and immediate
 TRR-APP build: not applicable (backend parser/deployment only). No schema or SQL
 ownership change was made. Private reports are under the task's `january-2026`
 evidence directory.
+
+## 2026-10-21 evening: dedicated session verified; authenticated comments unresolved
+
+The user authorized dedicated worker access for the bounded January 2026 run and
+both original GIF checks, selected Chrome's `codex` profile, and completed sign-in.
+A native identity response matched both the `livestnation` username and the
+snapshot's numeric identity. Credentials remain in the private task snapshot;
+no credential values or browser profile files are included in source or evidence.
+
+Authenticated listing returned three native pages with 99 distinct posts. The
+third page was wholly older than the second page; pinned posts explain the first
+page's date outlier. This establishes productive older discovery, not January
+coverage. The prepared January authenticated intent was not launched. The
+read-only setup inventory remains 291 catalog entries and 221 canonical BravoTV
+posts. Its existing REST comment-family intent must not be silently changed to
+another transport family.
+
+Authenticated comment qualification remains unresolved. The REST comment call
+returned non-JSON content. Subsequent Relay diagnostics returned native numeric
+error `1357054`; this is retained as incomplete source data, not proof of a new
+login failure or native exhaustion. The latest corrected WWW request used the
+current native endpoint, document, provider flags and document-derived Relay
+actor, but still returned that error. A later bounded attempt started from the
+native embedded bootstrap instead of requesting pagination without a cursor.
+It stopped after its one GET because bootstrap comment-data validation failed;
+that report does not identify the precise extraction failure. Neither attempt
+wrote canonical data. No cooldown, egress or account bypass was added.
+
+The opt-in diagnostic candidate now includes explicit-cookie WWW page transport
+and a bounded native bootstrap extractor. It preserves authentication/rate
+failures, counts sends through caller guards, rejects malformed pagination,
+prevents a parent root request through the pagination operation, and avoids double
+decoding compressed responses. Native browser preloader metadata confirms the
+container document and no `first` variable: the initial page size is therefore
+recorded as unknown, despite 15 observed browser comments. Pagination requests
+use the native continuation cursor and a requested size of 10.
+
+Independent review findings were repaired. Evidence includes 39 bootstrap tests,
+23 initial client tests plus focused new/error/root regression checks, Ruff, and
+scoped diff checks; unaffected passing checks were reused. These are candidate
+checks. The candidate is not integrated into worker composition or deployed, and
+its live bootstrap/comment qualification has not passed. The last verified
+runtime in this task remains v103; it was not redeployed in this step.
+
+Final audit: frozen original unchanged, full-history gate closed, zero active
+owners or uncertain dispatches, ledger total 1,531 and latest tranche closed.
+Both original GIF comment IDs still have zero hosted media URLs. January
+execution, original GIF retrieval/mirroring/display, and authenticated comment
+integration remain unfinished. Private diagnostics and the verified snapshot are
+under the task's `dedicated-auth` directory. The existing one-time follow-up must
+read that updated handoff and must not repeat an unchanged failing request.
