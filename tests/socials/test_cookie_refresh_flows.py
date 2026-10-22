@@ -1331,3 +1331,33 @@ def test_reconcile_private_paths_swallows_chmod_failure(
     monkeypatch.setattr(Path, "chmod", _raise_os_error)
 
     assert browser_cookie_refresh.reconcile_private_paths(tmp_path) == 0
+
+
+def test_cookie_payload_rejects_third_party_domains_that_share_a_suffix() -> None:
+    cookies = [
+        {"domain": ".x.com", "name": "auth_token", "value": "a"},
+        {"domain": "api.x.com", "name": "ct0", "value": "b"},
+        {"domain": "twitter.com", "name": "twid", "value": "c"},
+        {"domain": ".netflix.com", "name": "NetflixId", "value": "leak"},
+        {"domain": ".max.com", "name": "max_session", "value": "leak"},
+        {"domain": "notx.com", "name": "lookalike", "value": "leak"},
+    ]
+
+    payload = browser_cookie_refresh.cookie_payload(cookies, domains=twitter_cookie_refresh._TWITTER_COOKIE_DOMAINS)
+
+    assert payload == {"auth_token": "a", "ct0": "b", "twid": "c"}
+
+
+@pytest.mark.parametrize(
+    ("domain", "candidate", "expected"),
+    [
+        (".x.com", "x.com", True),
+        ("x.com", ".x.com", True),
+        ("api.x.com", "x.com", True),
+        (".netflix.com", "x.com", False),
+        ("notsocialblade.com", "socialblade.com", False),
+        ("", "x.com", False),
+    ],
+)
+def test_cookie_domain_matches_uses_dot_boundary(domain: str, candidate: str, expected: bool) -> None:
+    assert browser_cookie_refresh.cookie_domain_matches(domain, candidate) is expected

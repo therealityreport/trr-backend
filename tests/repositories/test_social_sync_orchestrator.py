@@ -872,3 +872,79 @@ def test_hold_sync_session_lock_uses_single_connection(monkeypatch) -> None:
         assert conn is seen_connections[0]
 
     assert len(seen_connections) == 1
+
+
+def test_evaluate_sync_session_starts_retry_pass_once_backoff_is_due(monkeypatch) -> None:
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    session_row: dict[str, object] = {
+        "id": "sync-1",
+        "season_id": "season-1",
+        "status": "pass_running",
+        "current_pass_kind": "posts_and_comments",
+        "current_pass_attempt": 1,
+        "pass_sequence": 1,
+        "max_attempts_per_kind": 3,
+        "retry_base_delay_seconds": 30,
+        "next_pass_available_at": None,
+    }
+    updates: list[dict[str, object]] = []
+    kickoffs: list[dict[str, object]] = []
+
+    @contextmanager
+    def fake_lock(_sync_session_id):
+        yield object()
+
+    def fake_state(_sync_session_id, *, conn):
+        del conn
+        return dict(session_row), {
+            "status": session_row["status"],
+            "current_run": {"id": "run-1", "status": "failed"},
+            "run_status": "failed",
+            "now_utc": now,
+            "next_pass_available_at": session_row["next_pass_available_at"],
+            "session_platforms": ["twitter"],
+            "date_start": now,
+            "date_end": now,
+        }
+
+    def fake_update(_sync_session_id, **fields):
+        fields.pop("conn", None)
+        updates.append(fields)
+        session_row.update(fields)
+        return dict(session_row)
+
+    def fake_start(_sync_session_id, **kwargs):
+        kwargs.pop("conn", None)
+        kickoffs.append(kwargs)
+        return {"run_id": "run-2"}
+
+    monkeypatch.setattr(orchestrator, "_fetch_sync_session_row", lambda _sid, conn=None: dict(session_row))
+    monkeypatch.setattr(orchestrator, "_hold_sync_session_lock", fake_lock)
+    monkeypatch.setattr(orchestrator, "_load_sync_session_evaluation_state", fake_state)
+    monkeypatch.setattr(orchestrator, "_build_completeness_snapshot", lambda **_kwargs: {"up_to_date": False})
+    monkeypatch.setattr(orchestrator, "_next_pass_kind_from_snapshot", lambda _snapshot: None)
+    monkeypatch.setattr(orchestrator, "_has_retryable_errors", lambda _run_id, conn=None: True)
+    monkeypatch.setattr(orchestrator, "_update_sync_session", fake_update)
+    monkeypatch.setattr(orchestrator, "_start_sync_pass", fake_start)
+    monkeypatch.setattr(orchestrator, "_serialize_sync_session", lambda row: dict(row or {}))
+
+    # First evaluation: the failed run is retryable, so a retry is scheduled after a backoff.
+    orchestrator.evaluate_sync_session("sync-1")
+    assert updates[-1]["status"] == "pass_evaluating"
+    assert updates[-1]["follow_up_reason"] == "retry_scheduled"
+    assert kickoffs == []
+
+    # Second evaluation after the backoff: the retry pass must start, not be rescheduled.
+    session_row["next_pass_available_at"] = now
+    result = orchestrator.evaluate_sync_session("sync-1")
+
+    assert len(updates) == 1
+    assert kickoffs == [
+        {
+            "pass_kind": "posts_and_comments",
+            "pass_attempt": 2,
+            "pass_sequence": 2,
+            "follow_up_reason": "retry_after_backoff",
+        }
+    ]
+    assert result["current_run_id"] == "run-2"

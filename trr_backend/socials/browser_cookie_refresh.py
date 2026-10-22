@@ -431,11 +431,24 @@ def open_cookie_refresh_context(
     return CookieRefreshBrowserContext(context=context, browser=browser)
 
 
+def cookie_domain_matches(domain: str, candidate: str) -> bool:
+    """Return True when a cookie domain equals a candidate domain or is a subdomain of it.
+
+    Matching on a dot boundary keeps third-party cookies such as ``.netflix.com``
+    out of an ``x.com`` jar, which a bare ``endswith`` check would let through.
+    """
+    normalized_domain = str(domain or "").strip().lower().lstrip(".")
+    normalized_candidate = str(candidate or "").strip().lower().lstrip(".")
+    if not normalized_domain or not normalized_candidate:
+        return False
+    return normalized_domain == normalized_candidate or normalized_domain.endswith("." + normalized_candidate)
+
+
 def cookie_payload(cookies: Sequence[Mapping[str, Any]], *, domains: tuple[str, ...]) -> dict[str, str]:
     payload: dict[str, str] = {}
     for cookie in cookies:
         domain = str(cookie.get("domain") or "").lower()
-        if domains and not any(domain.endswith(candidate.lower()) for candidate in domains):
+        if domains and not any(cookie_domain_matches(domain, candidate) for candidate in domains):
             continue
         name = str(cookie.get("name") or "").strip()
         value = str(cookie.get("value") or "")
