@@ -63396,6 +63396,34 @@ def _instagram_social_account_lite_header_stats(
     )
     reported_comments_expr = _instagram_reported_comments_sql("p", raw_data_sql=raw_data_sql)
     external_facebook_comments_expr = _instagram_external_facebook_comments_sql("p", raw_data_sql=raw_data_sql)
+    media_count_expr = "jsonb_array_length(coalesce(p.media_urls, '[]'::jsonb))"
+    hosted_media_count_expr = "jsonb_array_length(coalesce(p.hosted_media_urls, '[]'::jsonb))"
+    params = [normalized_account]
+    if "profile_summary_header" in _relation_columns("social", "instagram_posts", conn=conn):
+        # These exact per-post values are maintained with source writes. Old
+        # schemas, unfilled rows and malformed legacy values keep the fallback.
+        header = "p.profile_summary_header"
+        owner_match_clause = (
+            f"case when {header} is not null then {header} -> 'accounts' ? %s::text "
+            f"else ({owner_match_clause}) end"
+        )
+        params.append(normalized_account)
+        reported_comments_expr = (
+            f"case when {header} is not null then ({header} ->> 'reported_comments')::bigint "
+            f"else ({reported_comments_expr}) end"
+        )
+        external_facebook_comments_expr = (
+            f"case when {header} is not null then ({header} ->> 'facebook_comments')::bigint "
+            f"else ({external_facebook_comments_expr}) end"
+        )
+        media_count_expr = (
+            f"case when {header} is not null then ({header} ->> 'media_count')::int "
+            f"else {media_count_expr} end"
+        )
+        hosted_media_count_expr = (
+            f"case when {header} is not null then ({header} ->> 'hosted_media_count')::int "
+            f"else {hosted_media_count_expr} end"
+        )
     sql = f"""
             with filtered_posts as materialized (
               select
@@ -63405,8 +63433,8 @@ def _instagram_social_account_lite_header_stats(
                 {reported_comments_expr}::int as reported_comments,
                 {external_facebook_comments_expr}::int as external_facebook_comments,
                 coalesce(p.views, 0)::bigint as views,
-                coalesce(p.media_urls, '[]'::jsonb) as media_urls,
-                coalesce(p.hosted_media_urls, '[]'::jsonb) as hosted_media_urls,
+                {media_count_expr} as media_count,
+                {hosted_media_count_expr} as hosted_media_count,
                 nullif(p.hosted_owner_profile_pic_url, '') as hosted_owner_profile_pic_url
               from social.instagram_posts p
               where {owner_match_clause}
@@ -63422,9 +63450,9 @@ def _instagram_social_account_lite_header_stats(
                 count(*) filter (where reported_comments > 0)::int as retrieved_comment_posts,
                 coalesce(sum(reported_comments), 0)::int as retrieved_comments,
                 coalesce(sum(external_facebook_comments), 0)::int as external_facebook_comments,
-                coalesce(sum(jsonb_array_length(media_urls)), 0)::int as total_post_media_files,
+                coalesce(sum(media_count), 0)::int as total_post_media_files,
                 coalesce(
-                  sum(least(jsonb_array_length(hosted_media_urls), jsonb_array_length(media_urls))),
+                  sum(least(hosted_media_count, media_count)),
                   0
                 )::int as saved_post_media_files,
                 count(distinct hosted_owner_profile_pic_url)::int as saved_avatar_files
@@ -63482,10 +63510,10 @@ def _instagram_social_account_lite_header_stats(
             cross join comment_totals
             """
     if conn is None:
-        row = pg.fetch_one(sql, [normalized_account]) or {}
+        row = pg.fetch_one(sql, params) or {}
     else:
         with pg.db_cursor(conn=conn, label="instagram_lite_header_stats") as cur:
-            row = pg.fetch_one_with_cursor(cur, sql, [normalized_account]) or {}
+            row = pg.fetch_one_with_cursor(cur, sql, params) or {}
     totals = {
         "total_posts": _normalize_non_negative_int(row.get("total_posts")),
         "total_engagement": _normalize_non_negative_int(row.get("total_engagement")),

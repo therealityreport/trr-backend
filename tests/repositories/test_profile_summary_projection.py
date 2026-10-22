@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS = [
     ROOT / "supabase/migrations/20261022042524_instagram_profile_summary_projection.sql",
     ROOT / "supabase/migrations/20261022042542_profile_recent_run_indexes.sql",
+    ROOT / "supabase/migrations/20261022072404_instagram_profile_header_scalars.sql",
 ]
 
 
@@ -153,6 +154,10 @@ def test_projection_preserves_summary_results(database, monkeypatch, raw):
         repo._instagram_social_account_lite_header_stats("bravotv"),
     )
     assert after == before
+    monkeypatch.setattr(
+        repo, "_relation_columns", lambda *a, **k: {"profile_summary_raw_data", "profile_summary_header"}
+    )
+    assert repo._instagram_social_account_lite_header_stats("bravotv") == before[1]
 
 
 def test_trigger_updates_projection_and_ignores_supplied_derived_value(database):
@@ -194,3 +199,149 @@ def test_null_projection_falls_back_and_migrations_are_repeatable(database, monk
     monkeypatch.setattr(repo, "_relation_columns", lambda *a, **k: {"profile_summary_raw_data"})
     summary = repo._instagram_social_account_lite_header_stats("bravotv")
     assert summary["comments_saved_summary"]["retrieved_comments"] == 9
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "comments_count",
+        "comments",
+        "comment_count",
+        "commentsCount",
+        "edge_media_to_comment.count",
+        "edge_media_to_parent_comment.count",
+        "edge_media_preview_comment.count",
+        "media.comments_count",
+        "media.comments",
+        "media.comment_count",
+        "media.commentsCount",
+        "metrics.comments_count",
+        "metrics.comments",
+        "facebook_crosspost.comments_count",
+        "facebook_crosspost.fb_comment_count",
+        "fb_comment_count",
+    ],
+)
+def test_header_projection_preserves_each_count_path(database, monkeypatch, path):
+    raw = {}
+    nested = raw
+    parts = path.split(".")
+    for key in parts[:-1]:
+        nested[key] = {}
+        nested = nested[key]
+    nested[parts[-1]] = {"x123": None}
+    row_id = str(uuid4())
+    with database.cursor() as cur:
+        cur.execute(
+            """insert into social.instagram_posts
+            (id,source_account,raw_data,comments_count,fb_comment_count,shortcode,media_urls,hosted_media_urls)
+            values (%s,'bravotv',%s::jsonb,4,-2,'abc','["a","b"]','["a","b","c"]')""",
+            [row_id, json.dumps(raw)],
+        )
+        cur.execute("insert into social.instagram_post_comment_rollups values (%s,7,3)", [row_id])
+    monkeypatch.setattr(repo, "_relation_columns", lambda *a, **k: set())
+    before = repo._instagram_social_account_lite_header_stats("bravotv")
+    monkeypatch.setattr(repo, "_relation_columns", lambda *a, **k: {"profile_summary_header"})
+    after = repo._instagram_social_account_lite_header_stats("bravotv")
+    assert after == before
+    assert after["comments_saved_summary"]["retrieved_comments"] >= 123
+    assert after["media_coverage"]["saved_post_media_files"] == 2
+
+
+@pytest.mark.parametrize(
+    "field,value,account",
+    [
+        ("source_account", " @@BrAvOtV ", "bravotv"),
+        ("owner_username", " @@BrAvOtV ", "bravotv"),
+        ("username", " @@BrAvOtV ", "bravotv"),
+        ("collaborators", {"handle": " @@BrAvOtV "}, "bravotv"),
+        ("collaborators_detail", " @@BrAvOtV ", "bravotv"),
+        ("collaborators", [{"username": "", "handle": "bravotv"}], "bravotv"),
+        ("collaborators_detail", [None, True, 123], "123"),
+        ("raw_data", {"collaborators_detail": {"user_name": " @@BrAvOtV "}}, "bravotv"),
+        ("raw_data", {"profile_tags": ["bravotv"]}, "bravotv"),
+    ],
+)
+def test_header_projection_preserves_account_matching(database, monkeypatch, field, value, account):
+    with database.cursor() as cur:
+        sql_type = "jsonb" if field in {"collaborators", "collaborators_detail", "raw_data"} else "text"
+        bound = json.dumps(value) if sql_type == "jsonb" else value
+        cur.execute(
+            f"""insert into social.instagram_posts(id,{field},shortcode)
+            values (%s,%s::{sql_type},'abc')""",
+            [str(uuid4()), bound],
+        )
+    monkeypatch.setattr(repo, "_relation_columns", lambda *a, **k: set())
+    before = repo._instagram_social_account_lite_header_stats(account)
+    monkeypatch.setattr(repo, "_relation_columns", lambda *a, **k: {"profile_summary_header"})
+    assert repo._instagram_social_account_lite_header_stats(account) == before
+
+
+def test_header_projection_tracks_source_updates_and_rejects_supplied_value(database, monkeypatch):
+    row_id = str(uuid4())
+    with database.cursor() as cur:
+        cur.execute(
+            """insert into social.instagram_posts(id,source_account,shortcode,profile_summary_header)
+            values (%s,'bravotv','abc','{"reported_comments":999,"accounts":["fake"]}')""",
+            [row_id],
+        )
+        updates = [
+            ("source_account", "other", "text"),
+            ("owner_username", "bravotv", "text"),
+            ("username", "another", "text"),
+            ("collaborators", '["collab"]', "jsonb"),
+            ("collaborators_detail", '{"handle":"details"}', "jsonb"),
+            ("raw_data", '{"username":"rawowner","comments_count":15}', "jsonb"),
+            ("comments_count", 20, "bigint"),
+            ("fb_comment_count", -6, "bigint"),
+            ("media_urls", '["a","b"]', "jsonb"),
+            ("hosted_media_urls", '["a"]', "jsonb"),
+            ("profile_summary_header", '{"reported_comments":999}', "jsonb"),
+        ]
+        for field, value, sql_type in updates:
+            cur.execute(f"update social.instagram_posts set {field}=%s::{sql_type} where id=%s", [value, row_id])
+            monkeypatch.setattr(repo, "_relation_columns", lambda *a, **k: set())
+            before = repo._instagram_social_account_lite_header_stats("bravotv")
+            monkeypatch.setattr(repo, "_relation_columns", lambda *a, **k: {"profile_summary_header"})
+            assert repo._instagram_social_account_lite_header_stats("bravotv") == before, field
+        cur.execute("select profile_summary_header from social.instagram_posts where id=%s", [row_id])
+        header = cur.fetchone()[0]
+        assert header["reported_comments"] == 20
+        assert header["facebook_comments"] == 6
+        assert set(header["accounts"]) == {"other", "bravotv", "another", "collab", "details", "rawowner"}
+
+
+@pytest.mark.parametrize("raw,media", [({"comments_count": "9" * 30}, []), ({}, {}), ({}, None)])
+def test_bad_legacy_values_do_not_break_writes_and_keep_read_fallback(database, monkeypatch, raw, media):
+    row_id = str(uuid4())
+    with database.cursor() as cur:
+        cur.execute(
+            """insert into social.instagram_posts(id,source_account,shortcode,raw_data,media_urls)
+            values (%s,'bravotv','abc',%s::jsonb,%s::jsonb)""",
+            [row_id, json.dumps(raw), json.dumps(media)],
+        )
+        cur.execute("select profile_summary_header from social.instagram_posts where id=%s", [row_id])
+        assert cur.fetchone()[0] is None
+    errors = []
+    for columns in [set(), {"profile_summary_header"}]:
+        monkeypatch.setattr(repo, "_relation_columns", lambda *a, _columns=columns, **k: _columns)
+        with pytest.raises(psycopg2.Error) as error:
+            repo._instagram_social_account_lite_header_stats("bravotv")
+        errors.append(error.value.pgcode)
+    assert errors[0] == errors[1]
+
+
+def test_unbackfilled_header_and_empty_accounts_keep_results(database, monkeypatch):
+    with database.cursor() as cur:
+        cur.execute("alter table social.instagram_posts disable trigger trg_instagram_profile_header")
+        cur.execute(
+            """insert into social.instagram_posts(id,source_account,shortcode,comments_count)
+            values (%s,'bravotv','abc',9)""",
+            [str(uuid4())],
+        )
+        cur.execute("alter table social.instagram_posts enable trigger trg_instagram_profile_header")
+    monkeypatch.setattr(repo, "_relation_columns", lambda *a, **k: set())
+    before = repo._instagram_social_account_lite_header_stats("bravotv")
+    monkeypatch.setattr(repo, "_relation_columns", lambda *a, **k: {"profile_summary_header"})
+    assert repo._instagram_social_account_lite_header_stats("bravotv") == before
+    assert repo._instagram_social_account_lite_header_stats("missing")["totals"]["total_posts"] == 0
