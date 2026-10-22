@@ -41,13 +41,15 @@ def database(base_database):
             "20261016070100_instagram_ingestion_workflows.sql",
             "20261016173915_instagram_ingestion_execution_placement.sql",
             "20260911121000_instagram_detail_request_lanes.sql",
+            "20261022120000_instagram_server_retry_after.sql",
         ):
             cur.execute((ROOT / "supabase/migrations" / migration).read_text())
         cur.execute("""create table social.scrape_jobs(id uuid primary key,run_id uuid,platform text,
             config jsonb default '{}',metadata jsonb default '{}',job_type text,status text,
             worker_id text,claimed_at timestamptz,completed_at timestamptz,heartbeat_at timestamptz,
             started_at timestamptz,created_at timestamptz default clock_timestamp());
-            create table social.account_auth_cooldown(platform text,account_handle text,cooldown_until timestamptz);
+            create table social.account_auth_cooldown(platform text,account_handle text,cooldown_until timestamptz,
+            blocker_kind text default 'auth');
             create schema dbos; create role local_runtime login;
             grant usage on schema dbos to local_runtime;
         """)

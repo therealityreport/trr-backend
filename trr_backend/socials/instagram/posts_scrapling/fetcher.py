@@ -79,6 +79,7 @@ from trr_backend.socials.instagram.posts_scrapling.proxy import (
     build_posts_proxy_identity,
     posts_proxy_feature_flags,
 )
+from trr_backend.socials.instagram.public_response import parse_public_retry_after
 from trr_backend.socials.scrapling_transport import (
     build_stealthy_fetcher,
     resolve_scrapling_fetcher_options,
@@ -394,7 +395,7 @@ def _global_rate_limit_path(key: str) -> str:
 def _global_rate_cooldown_path(key: str) -> str:
     directory = os.path.join(tempfile.gettempdir(), "trr-instagram-posts-rate")
     os.makedirs(directory, exist_ok=True)
-    return os.path.join(directory, f"{_safe_rate_limit_key(key)}.cooldown")
+    return os.path.join(directory, f"{_safe_rate_limit_key(key)}.server-retry-after")
 
 
 def _read_monotonic_timestamp(handle: Any) -> float:
@@ -410,16 +411,25 @@ def _read_monotonic_timestamp(handle: Any) -> float:
     return max(0.0, timestamp)
 
 
+def _read_server_retry_deadline(handle: Any) -> float:
+    handle.seek(0)
+    try:
+        value = float(handle.read().strip())
+    except (TypeError, ValueError):
+        return 0.0
+    return value if math.isfinite(value) and value >= 0 else 0.0
+
+
 def _record_global_api_cooldown(*, key: str, delay_seconds: float) -> None:
     delay = max(0.0, float(delay_seconds or 0))
-    if delay <= 0:
+    if not math.isfinite(delay) or delay <= 0:
         return
-    cooldown_until = time.monotonic() + delay
+    cooldown_until = time.time() + delay
     path = _global_rate_cooldown_path(key)
     with open(path, "a+", encoding="utf-8") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
-            existing_until = _read_monotonic_timestamp(handle)
+            existing_until = _read_server_retry_deadline(handle)
             handle.seek(0)
             handle.truncate()
             handle.write(f"{max(existing_until, cooldown_until):.6f}")
@@ -506,8 +516,8 @@ def _try_advisory_lock_pace(*, key: str, delay_seconds: float) -> dict[str, Any]
     with open(cooldown_path, "a+", encoding="utf-8") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
-            cooldown_until = _read_monotonic_timestamp(handle)
-            cooldown_remaining = cooldown_until - time.monotonic()
+            cooldown_until = _read_server_retry_deadline(handle)
+            cooldown_remaining = cooldown_until - time.time()
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     if cooldown_remaining > 0:
@@ -552,8 +562,8 @@ def _pace_global_api_request(*, key: str, delay_seconds: float) -> dict[str, Any
     with open(cooldown_path, "a+", encoding="utf-8") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
-            cooldown_until = _read_monotonic_timestamp(handle)
-            remaining = cooldown_until - time.monotonic()
+            cooldown_until = _read_server_retry_deadline(handle)
+            remaining = cooldown_until - time.time()
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     if remaining > 0:
@@ -2561,16 +2571,9 @@ class InstagramPostsScraplingFetcher:
     @staticmethod
     def _retry_after_seconds(response: Any) -> float | None:
         headers = getattr(response, "headers", None) or {}
-        raw = None
         try:
-            raw = headers.get("retry-after") if hasattr(headers, "get") else None
-        except Exception:  # noqa: BLE001
-            raw = None
-        if raw is None:
-            return None
-        try:
-            return max(0.0, float(raw))
-        except (TypeError, ValueError):
+            return parse_public_retry_after(headers.get("retry-after"))
+        except (AttributeError, TypeError):
             return None
 
     async def _fetch_json_response(
@@ -2660,10 +2663,9 @@ class InstagramPostsScraplingFetcher:
                     retry_after=retry_after,
                 )
                 if status_code == 429:
-                    _record_global_api_cooldown(
-                        key=self._global_rate_limit_key,
-                        delay_seconds=max(sleep_seconds, self._api_delay_seconds),
-                    )
+                    if retry_after is not None:
+                        _record_global_api_cooldown(key=self._global_rate_limit_key, delay_seconds=retry_after)
+                    sleep_seconds = retry_after or 0.0
                 await asyncio.sleep(sleep_seconds)
                 continue
 

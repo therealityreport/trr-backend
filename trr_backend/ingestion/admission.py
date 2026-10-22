@@ -170,9 +170,9 @@ class Admission:
                   group by stage,platform,run_id,account
                 ) select coalesce((select jsonb_agg(counts) from counts),'[]'::jsonb) as counts,
                   (exists(select 1 from social.account_auth_cooldown where platform='instagram'
-                    and account_handle in (%s,'__identity__:instagram') and cooldown_until>clock_timestamp())
+                    and account_handle=%s and blocker_kind='checkpoint')
                   or exists(select 1 from social.instagram_detail_request_lanes where identity_key=%s
-                    and (blocked or cooldown_until>clock_timestamp()))) as blocked,
+                    and (blocked or server_retry_after_until>clock_timestamp()))) as blocked,
                   (select jsonb_build_object('run_id',run_id,'account',account,'state',state,'generation',generation,
                     'engine',engine,'workflow_version',workflow_version,'intent',intent)
                     from social.instagram_ingestion_runs where run_id=%s::uuid and account=%s) as run""",

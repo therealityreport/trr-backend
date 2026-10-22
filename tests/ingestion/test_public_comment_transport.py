@@ -847,6 +847,7 @@ def request_lanes(database):
     with transaction() as conn, conn.cursor() as cur:
         cur.execute(
             (existing.ROOT / "supabase/migrations/20260911121000_instagram_detail_request_lanes.sql").read_text()
+            + (existing.ROOT / "supabase/migrations/20261022120000_instagram_server_retry_after.sql").read_text()
         )
     return transaction
 
@@ -912,16 +913,23 @@ def test_public_cookie_violation_opens_real_gate_immediately_without_another_sen
         guarded(shortcode="ABC123", checkpoint={}, source_observer=lambda *args: None, pre_source_request=lambda: None)
     failure = caught.value.failure
     assert failure.code == "public_access_backoff" and not failure.identity_blocked
-    seconds = 900 if header is None else 37
-    assert started + timedelta(seconds=seconds) <= failure.retry_at <= datetime.now(UTC) + timedelta(seconds=seconds)
+    if header is None:
+        assert failure.retry_at is None
+    else:
+        assert started + timedelta(seconds=37) <= failure.retry_at <= datetime.now(UTC) + timedelta(seconds=37)
     row = existing.query(fresh_public_lanes, "select * from social.instagram_detail_request_lanes")[0]
     assert row["cooldown_until"] == failure.retry_at and row["failure_generation"] == 1
     assert not row["blocked"] and row["last_error_code"] == "public_access_backoff"
     assert len(row["request_times"]) == len(calls) == ["bootstrap", "parent", "child"].index(stage) + 1
-    with pytest.raises(IdentityDeferred, match="identity_cooldown"):
-        _GatedSource(fetch, gate(), failure_code="comment_fetch_failed")(
-            shortcode="ABC123", checkpoint={}, source_observer=lambda *args: None, pre_source_request=lambda: None
-        )
+    if header is None:
+        gate().before_request()  # Rejection does not invent a timed hold.
+        assert row["server_retry_after_until"] is None
+    else:
+        with pytest.raises(IdentityDeferred, match="identity_cooldown"):
+            _GatedSource(fetch, gate(), failure_code="comment_fetch_failed")(
+                shortcode="ABC123", checkpoint={}, source_observer=lambda *args: None, pre_source_request=lambda: None
+            )
+        assert row["server_retry_after_until"] == failure.retry_at
     assert len(calls) == ["bootstrap", "parent", "child"].index(stage) + 1
 
 
@@ -1366,9 +1374,13 @@ def test_native_child_rejection_isolated_from_parents_and_alternate_empty_trust(
         assert result["failure"].code == "reply_access_rejected"
         access = state["reply_access"]
         assert access["attempts"] == 1 and access["lanes"] == ["p"]
-        assert datetime.fromisoformat(access["next_attempt_at"].replace("Z", "+00:00")) == OBSERVED + timedelta(
-            seconds=server_delay or 300
-        )
+        if server_delay:
+            assert datetime.fromisoformat(access["next_attempt_at"].replace("Z", "+00:00")) == OBSERVED + timedelta(
+                seconds=server_delay
+            )
+            assert access["retry_source"] == "server_retry_after"
+        else:
+            assert access["next_attempt_at"] is None and access["retry_source"] is None
         durable = existing.query(
             tx, "select * from social.instagram_ingestion_targets where run_id=%s", (args["run_id"],)
         )[0]
@@ -1432,6 +1444,9 @@ def test_reply_rejection_resume_defers_then_restarts_child_root():
         }
     }
     parents = [SimpleNamespace(comment_id="p", replies=[])]
+    obsolete = PublicRelayResume.from_checkpoint(checkpoint, parents)
+    assert obsolete.replies == {"p": {"pending": True, "deferred": False}}
+    checkpoint["comment_pages"]["reply_access"]["retry_source"] = "server_retry_after"
     deferred = PublicRelayResume.from_checkpoint(checkpoint, parents)
     assert deferred.replies == {"p": {"pending": False, "deferred": True}}
     checkpoint["comment_pages"]["reply_access"]["next_attempt_at"] = (now - timedelta(seconds=1)).isoformat()

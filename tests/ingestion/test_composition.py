@@ -385,6 +385,9 @@ def test_immediate_rejection_persists_shared_identity_policy_before_next_invocat
         transaction,
         (
             Path(__file__).parents[2] / "supabase/migrations/20260911121000_instagram_detail_request_lanes.sql"
+        ).read_text()
+        + (
+            Path(__file__).parents[2] / "supabase/migrations/20261022120000_instagram_server_retry_after.sql"
         ).read_text(),
     )
     subject = uuid4().hex

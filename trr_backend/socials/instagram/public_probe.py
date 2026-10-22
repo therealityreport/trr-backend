@@ -53,12 +53,6 @@ AUTH_ENV_VARS = (
     "SOCIAL_INSTAGRAM_CHROME_PROFILE",
 )
 
-BACKOFF_SECONDS_BY_STATUS = {
-    401: (60 * 60, 4 * 60 * 60, 12 * 60 * 60, 24 * 60 * 60),
-    403: (2 * 60 * 60, 6 * 60 * 60, 24 * 60 * 60),
-    429: (2 * 60 * 60,),
-}
-
 BACKOFF_STOP_REASON_BY_STATUS = {
     401: "public_graphql_401_backoff_required",
     403: "public_graphql_403_backoff_required",
@@ -300,7 +294,7 @@ def run_public_probe(
 
         if not page_posts and not page.connection_found:
             terminal_stop_reason = _stop_reason_from_metadata(metadata, after_progress=bool(seen_shortcodes))
-            next_retry_after_seconds = _backoff_seconds_for_stop_reason(terminal_stop_reason, state=state)
+            next_retry_after_seconds = None
             _update_terminal_state(
                 state,
                 stop_reason=terminal_stop_reason,
@@ -935,23 +929,6 @@ def _stop_reason_from_metadata(metadata: Mapping[str, Any], *, after_progress: b
     return "public_empty_initial_page"
 
 
-def _backoff_seconds_for_stop_reason(stop_reason: str, *, state: dict[str, Any]) -> int | None:
-    status = None
-    for candidate_status, reason in BACKOFF_STOP_REASON_BY_STATUS.items():
-        if reason == stop_reason:
-            status = candidate_status
-            break
-    if status is None:
-        return None
-    attempts = state.setdefault("backoff_attempts", {})
-    attempt_index = max(0, int(attempts.get(stop_reason) or 0))
-    schedule = BACKOFF_SECONDS_BY_STATUS.get(status) or ()
-    attempts[stop_reason] = attempt_index + 1
-    if not schedule:
-        return None
-    return int(schedule[min(attempt_index, len(schedule) - 1)])
-
-
 def _update_terminal_state(
     state: dict[str, Any],
     *,
@@ -965,6 +942,8 @@ def _update_terminal_state(
     state["completed"] = bool(completed)
     state["partial"] = not completed
     state["updated_at"] = datetime.now(UTC).isoformat()
+    state.pop("next_retry_after_seconds", None)
+    state.pop("backoff_attempts", None)
     if retry_after_seconds is not None:
         state["next_retry_after_seconds"] = retry_after_seconds
 

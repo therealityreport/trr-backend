@@ -2313,8 +2313,8 @@ def test_fetch_rebuilds_http_client_after_429_before_retry() -> None:
     fetcher._rebuild_http_client.assert_awaited_once()
 
 
-def test_fetch_records_shared_cooldown_after_429() -> None:
-    """A 429 should slow sibling local workers, not only the current coroutine."""
+def test_fetch_429_without_server_header_creates_no_local_cooldown() -> None:
+    """A rejection without Retry-After must not create a local penalty timer."""
     fetcher = _build_fetcher()
     responses = [
         _mock_httpx_response(status_code=429),
@@ -2335,13 +2335,10 @@ def test_fetch_records_shared_cooldown_after_429() -> None:
             )
 
     assert result["failed"] is False
-    cooldown_mock.assert_called_once_with(
-        key=fetcher._global_rate_limit_key,
-        delay_seconds=pytest.approx(15.0, abs=0.01),
-    )
+    cooldown_mock.assert_not_called()
 
 
-def test_fetch_429_shared_cooldown_uses_env_floor_and_multiplier(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fetch_429_server_wait_ignores_obsolete_env_floor_and_multiplier(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENT_429_COOLDOWN_MIN_SEC", "3")
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENT_429_COOLDOWN_MULTIPLIER", "4")
     fetcher = _build_fetcher()
@@ -2366,7 +2363,7 @@ def test_fetch_429_shared_cooldown_uses_env_floor_and_multiplier(monkeypatch: py
     assert result["failed"] is False
     cooldown_mock.assert_called_once_with(
         key=fetcher._global_rate_limit_key,
-        delay_seconds=pytest.approx(8.0, abs=0.01),
+        delay_seconds=pytest.approx(2.0, abs=0.01),
     )
 
 
@@ -3388,9 +3385,10 @@ def test_advisory_api_pacing_uses_session_control_pool_and_waits_after_checkout(
             self.sql = sql
 
         def fetchone(self) -> dict[str, float]:
-            if "cooldown_until - now()" in self.sql:
+            if "server_retry_after_until - now()" in self.sql:
                 return {"cooldown_seconds": 3.0}
-            assert "coalesce(p.cooldown_until, now())" in self.sql
+            assert "coalesce(p.server_retry_after_until, now())" in self.sql
+            assert "cooldown_until = null" in self.sql
             return {"wait_seconds": 2.0}
 
     @contextmanager
@@ -3465,7 +3463,7 @@ def test_record_global_api_cooldown_extends_db_deadline_and_keeps_file_fallback(
         lambda: str(tmp_path),
     )
     monkeypatch.setattr(
-        "trr_backend.socials.instagram.comments_scrapling.fetcher.time.monotonic",
+        "trr_backend.socials.instagram.comments_scrapling.fetcher.time.time",
         lambda: 100.0,
     )
 
@@ -3474,9 +3472,9 @@ def test_record_global_api_cooldown_extends_db_deadline_and_keeps_file_fallback(
     assert calls == [("instagram-comments-rate-limit-cooldown", "session_control")]
     assert len(executed) == 1
     assert "greatest(" in executed[0][0]
-    assert "excluded.cooldown_until" in executed[0][0]
+    assert "excluded.server_retry_after_until" in executed[0][0]
     assert executed[0][1] == ("proxy-isolated-key", 5.0)
-    cooldown_file = tmp_path / "trr-instagram-comments-rate" / "proxy-isolated-key.cooldown"
+    cooldown_file = tmp_path / "trr-instagram-comments-rate" / "proxy-isolated-key.server-retry-after"
     assert float(cooldown_file.read_text(encoding="utf-8")) == 105.0
 
 
@@ -3497,13 +3495,13 @@ def test_record_global_api_cooldown_falls_back_to_file_when_db_is_unavailable(
         lambda: str(tmp_path),
     )
     monkeypatch.setattr(
-        "trr_backend.socials.instagram.comments_scrapling.fetcher.time.monotonic",
+        "trr_backend.socials.instagram.comments_scrapling.fetcher.time.time",
         lambda: 200.0,
     )
 
     _record_global_api_cooldown(key="db-fallback", delay_seconds=7.0)
 
-    cooldown_file = tmp_path / "trr-instagram-comments-rate" / "db-fallback.cooldown"
+    cooldown_file = tmp_path / "trr-instagram-comments-rate" / "db-fallback.server-retry-after"
     assert float(cooldown_file.read_text(encoding="utf-8")) == 207.0
 
 

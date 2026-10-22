@@ -33,6 +33,7 @@ def avatars(database):
     with tx() as conn, conn.cursor() as cur:
         cur.execute((root / "0189_social_avatar_registry_repair.sql").read_text())
         cur.execute((root / "20260911121000_instagram_detail_request_lanes.sql").read_text())
+        cur.execute((root / "20261022120000_instagram_server_retry_after.sql").read_text())
     return database
 
 
@@ -248,7 +249,8 @@ def test_source_calls_outside_transactions_keep_own_probe_across_multiple_reques
     activity.gate.before_request()
     with tx() as conn, conn.cursor() as cur:
         cur.execute(
-            "update social.instagram_detail_request_lanes set cooldown_until=clock_timestamp()-interval '1 sec'"
+            "update social.instagram_detail_request_lanes "
+            "set server_retry_after_until=clock_timestamp()-interval '1 sec'"
             " where identity_key=%s",
             (activity.gate.identity_key,),
         )
@@ -431,6 +433,6 @@ def test_missing_avatar_profiles_do_not_close_the_shared_local_lane(avatars, cas
         lane = dict(cur.fetchone())
         cur.execute("delete from social.instagram_detail_request_lanes where identity_key=%s", (key,))
     if case == "http_500":
-        assert lane["consecutive_failures"] == 3 and lane["cooldown_until"] is not None
+        assert lane["consecutive_failures"] == 3 and lane["cooldown_until"] is None
     else:
         assert lane == {"consecutive_failures": 0, "last_error_code": None, "cooldown_until": None}

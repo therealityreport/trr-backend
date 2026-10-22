@@ -2294,8 +2294,10 @@ def _job_posts_auth_cooldown_sql_exclusion(table_alias: str = "j") -> str:
                 from social.account_auth_cooldown ac
                 where ac.platform = lower(coalesce({table_alias}.platform, ''))
                   and ac.account_handle = {account_expr}
-                  and ac.cooldown_until is not null
-                  and ac.cooldown_until > now()
+                  and (
+                    (ac.platform = 'instagram' and ac.blocker_kind = 'checkpoint')
+                    or (ac.platform <> 'instagram' and ac.cooldown_until > now())
+                  )
               )
             )
     """

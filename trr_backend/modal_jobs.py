@@ -93,6 +93,14 @@ def _build_modal_stub_module():
         App = _ModalApp
 
         @staticmethod
+        def concurrent(**kwargs):
+            def _decorator(func):
+                func._modal_concurrency_options = dict(kwargs)
+                return func
+
+            return _decorator
+
+        @staticmethod
         def asgi_app(*_args, **_kwargs):
             def _decorator(func):
                 return func
@@ -931,6 +939,9 @@ def probe_browser_image_runtime() -> dict[str, object]:
     max_containers=_API_MAX_CONTAINERS,
     env=_modal_api_runtime_env(),
 )
+# Live-status streams remain open; reserve shared input capacity for API requests
+# without increasing the existing container or database connection limits.
+@modal.concurrent(max_inputs=16, target_inputs=8)
 @modal.asgi_app(label=_API_LABEL, custom_domains=_api_custom_domains())
 def serve_backend_api():
     from api.main import app as fastapi_app

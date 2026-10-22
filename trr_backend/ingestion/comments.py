@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -126,30 +125,24 @@ def native_child_rejection(payload: Mapping[str, Any]) -> bool:
 
 def _reply_access_retry(state, summary, now):
     previous = state.get("reply_access") or {}
-    if previous.get("next_attempt_at"):
+    if previous.get("retry_source") == "server_retry_after" and previous.get("next_attempt_at"):
         retry_at = datetime.fromisoformat(previous["next_attempt_at"].replace("Z", "+00:00"))
         if retry_at > now:
             return Failure("reply_access_rejected", retry_at=retry_at)
     attempts = max(0, int(previous.get("attempts") or 0)) + 1
-    try:
-        cap = float(os.environ.get("SOCIAL_INSTAGRAM_PUBLIC_REPLY_RETRY_CAP_SECONDS", 3600))
-    except (ValueError, TypeError, OverflowError):
-        cap = 3600
-    if not math.isfinite(cap) or cap < 1:
-        cap = 3600
-    delay = min(300 * 2 ** min(attempts - 1, 10), cap)
     server_delay = summary.reply_retry_after_seconds
+    retry_at = None
     if server_delay is not None and math.isfinite(server_delay) and server_delay >= 0:
-        delay = max(delay, server_delay)
-    try:
-        retry_at = now + timedelta(seconds=delay)
-    except OverflowError:
-        retry_at = datetime.max.replace(tzinfo=UTC)
+        try:
+            retry_at = now + timedelta(seconds=server_delay)
+        except OverflowError:
+            retry_at = datetime.max.replace(tzinfo=UTC)
     state["reply_access"] = {
         "code": summary.reply_access_code or "reply_access_rejected",
         "rejected_at": utc_timestamp(now),
         "attempts": attempts,
-        "next_attempt_at": utc_timestamp(retry_at),
+        "retry_source": "server_retry_after" if retry_at is not None else None,
+        "next_attempt_at": utc_timestamp(retry_at) if retry_at is not None else None,
         "lanes": sorted(set(summary.reply_lanes_rejected)),
     }
     return Failure("reply_access_rejected", retry_at=retry_at)

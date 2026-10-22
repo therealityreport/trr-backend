@@ -119,6 +119,9 @@ def lanes(database):
         tx,
         (
             Path(__file__).parents[2] / "supabase/migrations/20260911121000_instagram_detail_request_lanes.sql"
+        ).read_text()
+        + (
+            Path(__file__).parents[2] / "supabase/migrations/20261022120000_instagram_server_retry_after.sql"
         ).read_text(),
     )
     return store, tx

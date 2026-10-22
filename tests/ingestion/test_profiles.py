@@ -43,6 +43,7 @@ def profiles_db(pipeline_database):
         cur.execute("create table social.shared_account_sources(id uuid primary key)")
         cur.execute((ROOT / "supabase/migrations/20260428145222_instagram_queryable_profile_schema.sql").read_text())
         cur.execute((ROOT / "supabase/migrations/20260911121000_instagram_detail_request_lanes.sql").read_text())
+        cur.execute((ROOT / "supabase/migrations/20261022120000_instagram_server_retry_after.sql").read_text())
     return store, tx
 
 
@@ -484,9 +485,7 @@ def test_graphql_native_rate_failure_keeps_shared_gate_code(profiles_db, payload
             response.headers["retry-after"] = "7200"
             return response
 
-    source = PublicGraphQLProfileSource(
-        user_id="101", deadline=time.monotonic() + 60, session=RateSession(payload)
-    )
+    source = PublicGraphQLProfileSource(user_id="101", deadline=time.monotonic() + 60, session=RateSession(payload))
     with pytest.raises(SourceFailure) as caught:
         ProfileActivity(profiles_db[0], clock=lambda: NOW).execute(
             **owned,
@@ -561,7 +560,7 @@ def test_missing_profiles_do_not_close_the_shared_local_lane(profiles_db, case):
     lane = _local_lane(profiles_db)
     assert rows(profiles_db, "select count(*) as n from social.instagram_profiles") == [{"n": 0}]
     if case == "http_500":
-        assert lane["consecutive_failures"] == 3 and lane["cooldown_until"] is not None
+        assert lane["consecutive_failures"] == 3 and lane["cooldown_until"] is None
         return
     assert lane["consecutive_failures"] == 0 and lane["last_error_code"] is None
     assert lane["cooldown_until"] is None

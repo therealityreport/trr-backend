@@ -265,6 +265,9 @@ def test_public_composed_pipeline_commits_native_parent_reply_post_and_avatar_me
                 (
                     Path(__file__).parents[2] / "supabase/migrations/20260911121000_instagram_detail_request_lanes.sql"
                 ).read_text()
+                + (
+                    Path(__file__).parents[2] / "supabase/migrations/20261022120000_instagram_server_retry_after.sql"
+                ).read_text()
             )
         cur.execute("insert into core.shows values(%s)", (show_id,))
         cur.execute("insert into core.seasons(id,show_id,season_number) values(%s,%s,3)", (season_id, show_id))

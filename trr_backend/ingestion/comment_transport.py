@@ -442,7 +442,7 @@ class PublicRelayResume:
             return result
 
         access = pages.get("reply_access") or {}
-        retry_at = access.get("next_attempt_at")
+        retry_at = access.get("next_attempt_at") if access.get("retry_source") == "server_retry_after" else None
         try:
             deferred = bool(retry_at and datetime.fromisoformat(retry_at.replace("Z", "+00:00")) > datetime.now(UTC))
         except (ValueError, TypeError):

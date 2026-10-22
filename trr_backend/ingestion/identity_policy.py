@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import hashlib
 import math
-import os
 import time
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
@@ -24,16 +23,12 @@ from psycopg2.extras import RealDictCursor
 
 from trr_backend.ingestion.domain import Failure
 from trr_backend.socials.instagram.constants import AUTH_FATAL_MESSAGES
-from trr_backend.socials.instagram.detail_transport import AUTH_ERRORS
+from trr_backend.socials.instagram.detail_transport import AUTH_ERRORS, _server_retry_deadline
 
 # Keep rolling request accounting for every lane. Only authenticated lanes
 # enforce a local request-count admission cap; public lanes follow source waits.
 WINDOW_SECONDS = 660
 REQUEST_LIMIT = 180
-# Logged-out source lanes follow the June 2026 public backoff in
-# socials/instagram/public_probe.py: a rejection is temporary only with
-# escalating waits, and a single success steps escalation down one level.
-PUBLIC_BACKOFF_STEPS_SECONDS = (3600, 4 * 3600, 12 * 3600, 24 * 3600)
 NETWORK_LANES = frozenset({"modal", "local"})
 # A lookup that proves only that one profile is absent says nothing about the
 # egress. On a network lane it must not move the shared health counters.
@@ -63,22 +58,6 @@ def is_content_absence(error: BaseException | None = None, payload: Any = None) 
     return False
 
 
-def public_backoff_seconds(code: str, consecutive_failures: int, *, default: float) -> float:
-    """Wait for a logged-out network lane when the server sent no Retry-After."""
-    if code == "public_access_backoff":
-        step = min(max(consecutive_failures, 1), len(PUBLIC_BACKOFF_STEPS_SECONDS)) - 1
-        return PUBLIC_BACKOFF_STEPS_SECONDS[step]
-    if code == "rate_limited":
-        try:
-            cap = float(os.environ.get("SOCIAL_INSTAGRAM_PUBLIC_RATE_PAUSE_MAX_SECONDS", default))
-        except (TypeError, ValueError, OverflowError):
-            cap = default
-        if not math.isfinite(cap) or cap < 1:
-            cap = default
-        return min(60 * 2 ** min(max(consecutive_failures - 1, 0), 20), cap, default)
-    return default
-
-
 _SAFE_ERRORS = (
     AUTH_ERRORS
     | AUTH_FATAL_MESSAGES
@@ -101,7 +80,7 @@ _SAFE_ERRORS = (
 
 
 class IdentityDeferred(RuntimeError):  # noqa: N818 - domain vocabulary
-    def __init__(self, code: str, next_attempt_at: datetime, *, blocked: bool = False):
+    def __init__(self, code: str, next_attempt_at: datetime | None, *, blocked: bool = False):
         self.failure = Failure(code, retry_at=next_attempt_at, identity_blocked=blocked)
         self.error_code, self.next_attempt_at = code, next_attempt_at
         super().__init__(code)
@@ -131,9 +110,9 @@ class SourceRequestGate:
         monotonic: Callable[[], float] = time.monotonic,
         network_lane: str | None = None,
     ):
-        if not all(math.isfinite(value) for value in (deadline, cooldown_seconds, probe_seconds)):
+        if not all(math.isfinite(value) for value in (deadline, probe_seconds)):
             raise ValueError("Identity policy deadlines must be finite")
-        if cooldown_seconds < 1 or probe_seconds < 1:
+        if probe_seconds < 1:
             raise ValueError("Identity policy leases must be positive")
         if type(public_only) is not bool:
             raise ValueError("Identity public-only mode must be explicit")
@@ -155,7 +134,9 @@ class SourceRequestGate:
         self.public_only = public_only
         self.transaction, self.check_cancelled = transaction, check_cancelled
         self.check_cancelled_in_transaction = check_cancelled_in_transaction
-        self.deadline, self.cooldown_seconds, self.probe_seconds = deadline, cooldown_seconds, probe_seconds
+        # Retained constructor argument is inert for older callers. There is no
+        # local cooldown policy; only an explicit source Retry-After may wait.
+        self.deadline, self.probe_seconds = deadline, probe_seconds
         self.monotonic = monotonic
         self._owner_token = uuid4().hex
         self._probe_token: str | None = None
@@ -216,7 +197,7 @@ class SourceRequestGate:
         remaining = self._remaining()
         with self._locked(create=True, remaining=remaining) as (cur, row, now):
             self._remaining(connection=cur.connection)
-            cooldown = row.get("cooldown_until")
+            cooldown = row.get("server_retry_after_until")
             replacement = bool(
                 not self.public_only
                 and row["blocked"]
@@ -225,7 +206,9 @@ class SourceRequestGate:
             if row["blocked"] and not replacement:
                 code = row.get("last_error_code")
                 raise IdentityDeferred(
-                    code if code in _SAFE_ERRORS else "auth_blocked", now + timedelta(hours=24), blocked=True
+                    code if code in _SAFE_ERRORS else "auth_blocked",
+                    cooldown if cooldown and cooldown > now else None,
+                    blocked=True,
                 )
             active_probe = bool(
                 row.get("probe_token") and row.get("probe_expires_at") and row["probe_expires_at"] > now
@@ -233,8 +216,6 @@ class SourceRequestGate:
             own_probe = active_probe and row["probe_token"] == self._probe_token
             if active_probe and not own_probe:
                 raise IdentityDeferred("identity_probe_pending", row["probe_expires_at"])
-            if replacement:
-                cooldown = now  # An explicitly replaced fingerprint gets one shared probe.
             if cooldown and cooldown > now:
                 raise IdentityDeferred("identity_cooldown", cooldown)
             times = sorted(value for value in row["request_times"] if value > now - timedelta(seconds=WINDOW_SECONDS))
@@ -242,14 +223,20 @@ class SourceRequestGate:
                 raise IdentityDeferred("identity_budget", times[0] + timedelta(seconds=WINDOW_SECONDS))
             # Expired probes get a NEW token even for the same gate. Late results
             # from the abandoned lease can never own the replacement lease.
-            token = row["probe_token"] if own_probe else (uuid4().hex if cooldown or row.get("probe_token") else None)
+            token = (
+                row["probe_token"]
+                if own_probe
+                else (uuid4().hex if replacement or cooldown or row.get("probe_token") else None)
+            )
             lease_seconds = min(self.probe_seconds, self._remaining(connection=cur.connection))
             cur.execute(
                 """update social.instagram_detail_request_lanes set request_times=%s,
-                blocked=%s,cooldown_until=%s,probe_token=%s,probe_expires_at=%s where identity_key=%s""",
+                blocked=%s,cooldown_until=%s,server_retry_after_until=%s,
+                probe_token=%s,probe_expires_at=%s where identity_key=%s""",
                 (
                     times + [now],
                     False if replacement else row["blocked"],
+                    cooldown,
                     cooldown,
                     token,
                     now + timedelta(seconds=lease_seconds) if token else None,
@@ -290,20 +277,14 @@ class SourceRequestGate:
                 # An intermediate response is not proof of the complete target;
                 # keep its exclusive probe and cooldown marker until finish.
                 if not permit.probe_token or finish:
-                    # Network lanes step escalation down one level per success;
-                    # other lanes keep the original immediate reset.
-                    reset = (
-                        """consecutive_failures=greatest(consecutive_failures-1,0),
-                        last_error_code=case when consecutive_failures>1 then last_error_code end"""
-                        if self.network_lane is not None and row.get("last_error_code") != "rate_limited"
-                        else "consecutive_failures=0,last_error_code=null"
-                    )
+                    cooldown = _server_retry_deadline(now, row.get("server_retry_after_until"), None)
                     cur.execute(
-                        f"""update social.instagram_detail_request_lanes set {reset},
-                        cooldown_until=%s,blocked_fingerprint=%s,
+                        """update social.instagram_detail_request_lanes set consecutive_failures=0,last_error_code=null,
+                        cooldown_until=%s,server_retry_after_until=%s,blocked_fingerprint=%s,
                         probe_token=%s,probe_expires_at=%s where identity_key=%s""",
                         (
-                            None if permit.probe_token else row.get("cooldown_until"),
+                            cooldown,
+                            cooldown,
                             row.get("blocked_fingerprint") if row["blocked"] else None,
                             None if finish else row.get("probe_token"),
                             None if finish else row.get("probe_expires_at"),
@@ -406,12 +387,6 @@ class SourceRequestGate:
             if finish:
                 self.finish_failure()
             return previous
-        delay = self.cooldown_seconds
-        server_delay = (
-            retry_after_seconds is not None and math.isfinite(retry_after_seconds) and retry_after_seconds >= 0
-        )
-        if server_delay:
-            delay = retry_after_seconds
         with self._locked() as (cur, row, now):
             if not self._owns(row, permit, now):
                 failure = Failure(
@@ -419,40 +394,18 @@ class SourceRequestGate:
                 )
             else:
                 failures = int(row["consecutive_failures"]) + 1 if code == row.get("last_error_code") else 1
-                if (
-                    self.network_lane is not None or (self.public_only and code == "rate_limited")
-                ) and not server_delay:
-                    delay = public_backoff_seconds(code, failures, default=delay)
                 blocked = bool(row["blocked"]) or (not self.public_only and code in AUTH_ERRORS)
-                opens = (
-                    server_delay
-                    or code in {"rate_limited", "public_access_backoff"}
-                    or failures >= 3
-                    or permit.probe_token is not None
-                )
-                try:
-                    cooldown = now + timedelta(seconds=delay) if opens else row.get("cooldown_until")
-                except OverflowError:
-                    # A malformed/unbounded Retry-After can defer safely, but
-                    # cannot become a raw exception or reopen the source lane.
-                    cooldown = datetime.max.replace(tzinfo=UTC)
-                if (
-                    self.public_only
-                    and row.get("cooldown_until")
-                    and (cooldown is None or row["cooldown_until"] > cooldown)
-                ):
-                    # A concurrent/late public failure cannot shorten a server
-                    # delay already recorded by another admitted request.
-                    cooldown = row["cooldown_until"]
+                cooldown = _server_retry_deadline(now, row.get("server_retry_after_until"), retry_after_seconds)
                 failure = Failure(code, retry_at=cooldown, identity_blocked=blocked)
                 cur.execute(
                     """update social.instagram_detail_request_lanes set blocked=%s,last_error_code=%s,
-                    consecutive_failures=%s,cooldown_until=%s,failure_generation=failure_generation+1,
+                    consecutive_failures=%s,cooldown_until=%s,server_retry_after_until=%s,failure_generation=failure_generation+1,
                     blocked_fingerprint=%s,probe_token=%s,probe_expires_at=%s where identity_key=%s""",
                     (
                         blocked,
                         code,
                         failures,
+                        cooldown,
                         cooldown,
                         ((row.get("blocked_fingerprint") if row["blocked"] else None) or self.credential_fingerprint)
                         if blocked

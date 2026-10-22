@@ -30,6 +30,11 @@ def lanes(database):
                 Path(__file__).parents[2] / "supabase/migrations/20260911121000_instagram_detail_request_lanes.sql"
             ).read_text()
         )
+        cur.execute(
+            (
+                Path(__file__).parents[2] / "supabase/migrations/20261022120000_instagram_server_retry_after.sql"
+            ).read_text()
+        )
     return transaction
 
 
@@ -185,7 +190,12 @@ def change(transaction, lane, statement, *values):
 def cooled_gate(transaction, *, subject=None):
     lane = gate(transaction, subject=subject)
     lane.before_request()
-    change(transaction, lane, "cooldown_until=clock_timestamp()-interval '1 second'")
+    change(
+        transaction,
+        lane,
+        "server_retry_after_until=clock_timestamp()-interval '1 second',"
+        "cooldown_until=clock_timestamp()-interval '1 second'",
+    )
     return lane
 
 
@@ -259,7 +269,7 @@ def test_simultaneous_reservations_share_one_atomic_rate_budget(lanes):
     assert len(row(lanes, first)["request_times"]) == 180
 
 
-def test_concurrent_ordinary_failures_keep_maintained_three_failure_circuit(lanes):
+def test_concurrent_ordinary_failures_count_without_local_wait(lanes):
     subject = uuid4().hex
     gates = [gate(lanes, subject=subject) for _ in range(3)]
     for lane in gates:
@@ -268,8 +278,9 @@ def test_concurrent_ordinary_failures_keep_maintained_three_failure_circuit(lane
         failures = list(executor.map(lambda lane: lane.finish_failure("network_error"), gates))
     state = row(lanes, gates[0])
     assert state["failure_generation"] == state["consecutive_failures"] == 3
-    assert state["cooldown_until"] is not None
-    assert any(failure.retry_at is not None for failure in failures)
+    assert state["cooldown_until"] is state["server_retry_after_until"] is None
+    assert all(failure.retry_at is None for failure in failures)
+    gate(lanes, subject=subject).before_request()
 
 
 def test_auth_block_is_fingerprint_bound_and_explicit_replacement_gets_one_probe(lanes):
@@ -538,19 +549,17 @@ def test_public_mode_keeps_shared_accounting_without_a_public_count_cap(public_l
         "public_access_backoff",
     ],
 )
-def test_public_login_wall_opens_immediate_cooldown_without_permanent_auth_block(public_lanes, code):
+def test_public_login_wall_has_no_local_wait_or_permanent_auth_block(public_lanes, code):
     lane = public_gate(public_lanes)
     lane.before_request()
-    started = datetime.now(UTC)
     failure = lane.finish_failure(code)
     assert failure.code == "public_access_backoff" and not failure.identity_blocked
-    assert started + timedelta(seconds=900) <= failure.retry_at <= datetime.now(UTC) + timedelta(seconds=900)
+    assert failure.retry_at is None
     state = row(public_lanes, lane)
     assert not state["blocked"] and state["blocked_fingerprint"] is None
     assert state["last_error_code"] == "public_access_backoff" and state["failure_generation"] == 1
-    with pytest.raises(IdentityDeferred, match="identity_cooldown"):
-        public_gate(public_lanes).before_request()
-    assert len(row(public_lanes, lane)["request_times"]) == 1
+    public_gate(public_lanes).before_request()
+    assert len(row(public_lanes, lane)["request_times"]) == 2
 
 
 @pytest.mark.parametrize("retry_after", [120, float("nan"), -1, 1e300])
@@ -561,9 +570,10 @@ def test_public_backoff_preserves_retry_after_safety_and_overflow_fail_closed(pu
     failure = lane.finish_failure("public_access_backoff", retry_after_seconds=retry_after)
     if retry_after == 1e300:
         assert failure.retry_at == datetime.max.replace(tzinfo=UTC)
+    elif retry_after == 120:
+        assert started + timedelta(seconds=120) <= failure.retry_at <= datetime.now(UTC) + timedelta(seconds=120)
     else:
-        delay = 120 if retry_after == 120 else 900
-        assert started + timedelta(seconds=delay) <= failure.retry_at <= datetime.now(UTC) + timedelta(seconds=delay)
+        assert failure.retry_at is None
     assert not failure.identity_blocked and not row(public_lanes, lane)["blocked"]
 
 
@@ -614,7 +624,12 @@ def test_public_expired_probe_cannot_change_replacement_and_duplicate_failure_co
     initial = public_gate(public_lanes)
     initial.before_request()
     initial.finish_failure("public_access_backoff")
-    change(public_lanes, initial, "cooldown_until=clock_timestamp()-interval '1 second'")
+    change(
+        public_lanes,
+        initial,
+        "server_retry_after_until=clock_timestamp()-interval '1 second',"
+        "cooldown_until=clock_timestamp()-interval '1 second'",
+    )
     old = public_gate(public_lanes)
     old_permit = old.before_request()
     assert old_permit.probe_token
@@ -633,22 +648,15 @@ def test_public_expired_probe_cannot_change_replacement_and_duplicate_failure_co
     assert row(public_lanes, current)["cooldown_until"] == failure.retry_at
 
 
-def test_public_rate_pause_escalates_with_cap_and_never_two_hours(monkeypatch):
-    from trr_backend.ingestion.identity_policy import public_backoff_seconds
-
-    assert [public_backoff_seconds("rate_limited", n, default=900) for n in range(1, 8)] == [
-        60,
-        120,
-        240,
-        480,
-        900,
-        900,
-        900,
-    ]
-    monkeypatch.setenv("SOCIAL_INSTAGRAM_PUBLIC_RATE_PAUSE_MAX_SECONDS", "180")
-    assert public_backoff_seconds("rate_limited", 12, default=900) == 180
-    monkeypatch.setenv("SOCIAL_INSTAGRAM_PUBLIC_RATE_PAUSE_MAX_SECONDS", "7200")
-    assert public_backoff_seconds("rate_limited", 12, default=900) == 900
+def test_obsolete_local_pause_settings_cannot_reenable_waits(public_lanes, monkeypatch):
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_PUBLIC_RATE_PAUSE_MAX_SECONDS", "86400")
+    lane = public_gate(public_lanes, cooldown_seconds=86400)
+    for _ in range(5):
+        permit = lane.before_request()
+        assert lane.record_failure("rate_limited", permit=permit).retry_at is None
+    state = row(public_lanes, lane)
+    assert state["consecutive_failures"] == 5
+    assert state["cooldown_until"] is state["server_retry_after_until"] is None
 
 
 def test_public_rate_pause_server_delay_wins_and_success_resets(public_lanes, monkeypatch):
@@ -658,7 +666,12 @@ def test_public_rate_pause_server_delay_wins_and_success_resets(public_lanes, mo
     started = datetime.now(UTC)
     failure = lane.finish_failure("rate_limited", retry_after_seconds=1234)
     assert started + timedelta(seconds=1234) <= failure.retry_at <= datetime.now(UTC) + timedelta(seconds=1234)
-    change(public_lanes, lane, "cooldown_until=clock_timestamp()-interval '1 second',consecutive_failures=4")
+    change(
+        public_lanes,
+        lane,
+        "server_retry_after_until=clock_timestamp()-interval '1 second',"
+        "cooldown_until=clock_timestamp()-interval '1 second',consecutive_failures=4",
+    )
     healthy = public_gate(public_lanes)
     healthy.before_request()
     healthy.finish_success()

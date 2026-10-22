@@ -298,16 +298,16 @@ def test_probe_reports_2025_and_2026_target_posts(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("status", "reason", "retry_after"),
     [
-        (401, "public_graphql_401_backoff_required", 3600),
-        (403, "public_graphql_403_backoff_required", 7200),
-        (429, "public_graphql_429_backoff_required", 7200),
+        (401, "public_graphql_401_backoff_required", None),
+        (403, "public_graphql_403_backoff_required", None),
+        (429, "public_graphql_429_backoff_required", None),
     ],
 )
 def test_probe_maps_public_graphql_blocks_to_exact_backoff_stop_reasons(
     tmp_path: Path,
     status: int,
     reason: str,
-    retry_after: int,
+    retry_after: int | None,
 ) -> None:
     def fetch_page(_account: str, _cursor: str | None) -> PublicProbePage:
         return PublicProbePage(

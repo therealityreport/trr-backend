@@ -101,9 +101,11 @@ class _FakeCooldownStore:
         params = list(params or [])
         platform, account = params[0], params[1]
         row = self.rows.get((platform, account))
-        if row is None or row["cooldown_until"] is None:
+        if row is None:
             return None
-        if row["cooldown_until"] <= self.now:
+        if platform == "instagram":
+            return dict(row) if row["blocker_kind"] == "checkpoint" else None
+        if row["cooldown_until"] is None or row["cooldown_until"] <= self.now:
             return None
         return dict(row)
 
@@ -118,14 +120,14 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _FakeCooldownStore:
 
 
 def test_record_auth_block_sets_escalating_cooldown(store: _FakeCooldownStore) -> None:
-    first = auth_cooldown.record_auth_block("instagram", "acct", "http_401")
+    first = auth_cooldown.record_auth_block("facebook", "acct", "http_401")
     assert first is not None
     assert first.consecutive_auth_failures == 1
     assert first.blocker_kind == "auth"
     assert first.cooldown_until > store.now
     first_delay = (first.cooldown_until - store.now).total_seconds()
 
-    second = auth_cooldown.record_auth_block("instagram", "acct", "http_403")
+    second = auth_cooldown.record_auth_block("facebook", "acct", "http_403")
     assert second is not None
     assert second.consecutive_auth_failures == 2
     second_delay = (second.cooldown_until - store.now).total_seconds()
@@ -135,27 +137,27 @@ def test_record_auth_block_sets_escalating_cooldown(store: _FakeCooldownStore) -
 
 
 def test_get_active_cooldown_returns_only_future_deadline(store: _FakeCooldownStore) -> None:
-    assert auth_cooldown.get_active_cooldown("instagram", "acct") is None
+    assert auth_cooldown.get_active_cooldown("facebook", "acct") is None
 
-    auth_cooldown.record_auth_block("instagram", "acct", "http_401")
-    active = auth_cooldown.get_active_cooldown("instagram", "acct")
+    auth_cooldown.record_auth_block("facebook", "acct", "http_401")
+    active = auth_cooldown.get_active_cooldown("facebook", "acct")
     assert active is not None
     assert active.account_handle == "acct"
 
     # Advance time past the deadline → no longer active.
     store.now = active.cooldown_until + timedelta(seconds=1)
-    assert auth_cooldown.get_active_cooldown("instagram", "acct") is None
+    assert auth_cooldown.get_active_cooldown("facebook", "acct") is None
 
 
 def test_clear_cooldown_resets_auth_block(store: _FakeCooldownStore) -> None:
-    auth_cooldown.record_auth_block("instagram", "acct", "http_401")
-    assert auth_cooldown.get_active_cooldown("instagram", "acct") is not None
+    auth_cooldown.record_auth_block("facebook", "acct", "http_401")
+    assert auth_cooldown.get_active_cooldown("facebook", "acct") is not None
 
-    cleared = auth_cooldown.clear_cooldown("instagram", "acct")
+    cleared = auth_cooldown.clear_cooldown("facebook", "acct")
     assert cleared is True
-    assert auth_cooldown.get_active_cooldown("instagram", "acct") is None
+    assert auth_cooldown.get_active_cooldown("facebook", "acct") is None
     # Counter reset → a subsequent block starts again at 1.
-    again = auth_cooldown.record_auth_block("instagram", "acct", "http_401")
+    again = auth_cooldown.record_auth_block("facebook", "acct", "http_401")
     assert again is not None
     assert again.consecutive_auth_failures == 1
 
@@ -231,3 +233,13 @@ def test_cooldown_backoff_seconds_respects_env(monkeypatch: pytest.MonkeyPatch) 
     # attempt 10 would be 10 * 2**9 = 5120s but is capped at 100s (+/-25%).
     delay10 = auth_cooldown.cooldown_backoff_seconds(10)
     assert delay10 <= 125.0
+
+
+def test_instagram_failure_counters_never_create_a_timed_cooldown(store):
+    for count in range(1, 5):
+        recorded = auth_cooldown.record_auth_block("instagram", "acct", "http_401")
+        assert recorded.consecutive_auth_failures == count
+        assert recorded.cooldown_until == store.now
+        assert auth_cooldown.get_active_cooldown("instagram", "acct") is None
+    store.rows[("instagram", "acct")]["cooldown_until"] = store.now + timedelta(days=1)
+    assert auth_cooldown.get_active_cooldown("instagram", "acct") is None

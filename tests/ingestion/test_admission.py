@@ -26,9 +26,11 @@ def database(base_database):
             config jsonb not null default '{}',metadata jsonb not null default '{}',job_type text,
             status text,worker_id text,claimed_at timestamptz,completed_at timestamptz,
             heartbeat_at timestamptz,started_at timestamptz,created_at timestamptz default clock_timestamp());
-            create table social.account_auth_cooldown(platform text,account_handle text,cooldown_until timestamptz);
+            create table social.account_auth_cooldown(platform text,account_handle text,cooldown_until timestamptz,
+            blocker_kind text default 'auth');
         """)
         cur.execute((ROOT / "supabase/migrations/20260911121000_instagram_detail_request_lanes.sql").read_text())
+        cur.execute((ROOT / "supabase/migrations/20261022120000_instagram_server_retry_after.sql").read_text())
     return store, transaction
 
 
@@ -253,12 +255,13 @@ def test_frozen_requested_comments_count_is_a_per_run_dispatch_ceiling(database)
     assert subject.admit(candidate(database, "comments", comments_workers=2))
 
 
-def test_account_cooldown_and_exact_identity_block_are_scoped(database):
-    subject, _ = admission(database)
+def test_local_account_cooldown_is_ignored_but_exact_identity_block_and_server_wait_apply(database):
+    subject, _ = admission(database, identity_key="selected-identity")
     item = candidate(database)
     sql(
         database,
-        "insert into social.account_auth_cooldown values('instagram','unrelated',clock_timestamp()+interval '1 hour')",
+        "insert into social.account_auth_cooldown(platform,account_handle,cooldown_until) "
+        "values('instagram','unrelated',clock_timestamp()+interval '1 hour')",
     )
     sql(database, "insert into social.instagram_detail_request_lanes(identity_key,blocked) values('unrelated',true)")
     assert subject.admit(item)
@@ -268,11 +271,87 @@ def test_account_cooldown_and_exact_identity_block_are_scoped(database):
     assert own.admit(item)
     sql(
         database,
-        "insert into social.account_auth_cooldown values('instagram','bravotv',clock_timestamp()+interval '1 hour')",
+        "insert into social.account_auth_cooldown(platform,account_handle,cooldown_until) "
+        "values('instagram','bravotv',clock_timestamp()+interval '1 hour')",
+    )
+    assert subject.admit(item)
+    sql(
+        database,
+        "insert into social.instagram_detail_request_lanes(identity_key,server_retry_after_until) "
+        "values(%s,clock_timestamp()+interval '1 hour')",
+        (subject.identity_key,),
     )
     assert not subject.admit(item)
     with pytest.raises(Conflict):
         subject.validate_launch("bravotv", InstagramIngestionLaunchV2())
+
+
+def test_only_selected_account_explicit_checkpoint_blocks_admission(database):
+    subject, _ = admission(database)
+    item = candidate(database)
+    sql(
+        database,
+        "insert into social.account_auth_cooldown(platform,account_handle,blocker_kind) "
+        "values('instagram','unrelated','checkpoint')",
+    )
+    assert subject.admit(item)
+    sql(
+        database,
+        "insert into social.account_auth_cooldown(platform,account_handle,blocker_kind) "
+        "values('instagram','bravotv','checkpoint')",
+    )
+    assert not subject.admit(item)
+
+
+@pytest.mark.parametrize("server_seconds", [30, -30])
+def test_legacy_pace_reservation_cannot_extend_actual_server_wait(database, monkeypatch, server_seconds):
+    from uuid import uuid4
+
+    from psycopg2.extras import RealDictCursor
+
+    from trr_backend.db import pg
+    from trr_backend.socials.instagram.comments_scrapling import fetcher
+
+    key = uuid4().hex
+    sql(
+        database,
+        "create table if not exists social.ig_comment_rate_pace("
+        "rate_key text primary key,last_start timestamptz,cooldown_until timestamptz,"
+        "server_retry_after_until timestamptz)",
+    )
+    sql(
+        database,
+        "insert into social.ig_comment_rate_pace values("
+        "%s,clock_timestamp()+interval '4 hour',clock_timestamp()+interval '4 hour',"
+        "clock_timestamp()+make_interval(secs=>%s))",
+        (key, server_seconds),
+    )
+
+    @contextmanager
+    def cursor(*, conn, **_kwargs):
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            yield cur
+
+    monkeypatch.setattr(pg, "db_connection", lambda **_kwargs: database[1]())
+    monkeypatch.setattr(pg, "db_cursor", cursor)
+    monkeypatch.setattr(fetcher, "_wait_for_global_api_cooldown", lambda **_kwargs: True)
+    monkeypatch.setattr(fetcher, "_persisted_global_api_cooldown_remaining", lambda _key: 0)
+    waits = []
+    monkeypatch.setattr(fetcher.time, "sleep", waits.append)
+    result = fetcher._try_advisory_lock_pace(key=key, delay_seconds=0, deadline=None)
+    assert result["acquired"] and result["paced"]
+    saved = sql(
+        database,
+        "select extract(epoch from(last_start-clock_timestamp())),cooldown_until,"
+        "server_retry_after_until>clock_timestamp() from social.ig_comment_rate_pace where rate_key=%s",
+        (key,),
+    )[0]
+    assert saved[1] is None
+    if server_seconds > 0:
+        assert 25 < float(saved[0]) <= 30 and saved[2]
+        assert len(waits) == 1 and 25 < waits[0] <= 30
+    else:
+        assert float(saved[0]) <= 0 and not saved[2] and waits == []
 
 
 def test_probe_failure_and_bad_candidate_are_closed_without_mutating_state(database):

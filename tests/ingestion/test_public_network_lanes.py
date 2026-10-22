@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from trr_backend.ingestion import identity_policy
-from trr_backend.ingestion.identity_policy import SourceRequestGate, public_backoff_seconds
+from trr_backend.ingestion.identity_policy import SourceRequestGate
 
 
 class _Lanes:
@@ -25,6 +25,7 @@ class _Lanes:
                 "blocked": False,
                 "blocked_fingerprint": None,
                 "cooldown_until": None,
+                "server_retry_after_until": None,
                 "probe_token": None,
                 "probe_expires_at": None,
                 "consecutive_failures": 0,
@@ -58,39 +59,37 @@ class _Lanes:
                 elif text.startswith("select clock_timestamp()"):
                     self._result = {"current_time": lanes.now}
                 elif "set request_times=" in text:
-                    row = lanes.rows[params[5]]
+                    row = lanes.rows[params[6]]
                     row.update(
                         request_times=params[0],
                         blocked=params[1],
                         cooldown_until=params[2],
-                        probe_token=params[3],
-                        probe_expires_at=params[4],
+                        server_retry_after_until=params[3],
+                        probe_token=params[4],
+                        probe_expires_at=params[5],
                     )
                 elif "set blocked=%s,last_error_code=%s" in text:
-                    row = lanes.rows[params[7]]
+                    row = lanes.rows[params[8]]
                     row.update(
                         blocked=params[0],
                         last_error_code=params[1],
                         consecutive_failures=params[2],
                         cooldown_until=params[3],
-                        blocked_fingerprint=params[4],
-                        probe_token=params[5],
-                        probe_expires_at=params[6],
+                        server_retry_after_until=params[4],
+                        blocked_fingerprint=params[5],
+                        probe_token=params[6],
+                        probe_expires_at=params[7],
                         failure_generation=row["failure_generation"] + 1,
                     )
-                elif "cooldown_until=%s,blocked_fingerprint=%s" in text:
-                    row = lanes.rows[params[4]]
-                    if "greatest(consecutive_failures-1,0)" in text:
-                        old = row["consecutive_failures"]
-                        row["consecutive_failures"] = max(old - 1, 0)
-                        row["last_error_code"] = row["last_error_code"] if old > 1 else None
-                    else:
-                        row["consecutive_failures"], row["last_error_code"] = 0, None
+                elif "cooldown_until=%s,server_retry_after_until=%s,blocked_fingerprint=%s" in text:
+                    row = lanes.rows[params[5]]
+                    row["consecutive_failures"], row["last_error_code"] = 0, None
                     row.update(
                         cooldown_until=params[0],
-                        blocked_fingerprint=params[1],
-                        probe_token=params[2],
-                        probe_expires_at=params[3],
+                        server_retry_after_until=params[1],
+                        blocked_fingerprint=params[2],
+                        probe_token=params[3],
+                        probe_expires_at=params[4],
                     )
                 elif "set probe_token=null,probe_expires_at=null" in text:
                     row = lanes.rows[params[0]]
@@ -147,22 +146,14 @@ def test_network_lane_requires_a_public_source_and_a_known_location(lane, public
         _gate(_Lanes(), lane=lane, public_only=public_only, cookies={"csrftoken": "x"})
 
 
-def test_public_backoff_steps_match_the_june_policy():
-    steps = [public_backoff_seconds("public_access_backoff", n, default=900) for n in range(1, 7)]
-    assert steps == [3600, 14400, 43200, 86400, 86400, 86400]
-    assert public_backoff_seconds("rate_limited", 1, default=900) == 60
-    assert public_backoff_seconds("network_error", 5, default=900) == 900
-
-
-def test_logged_out_rejections_escalate_one_step_per_repeated_failure():
+def test_logged_out_rejections_never_synthesize_a_wait():
     lanes = _Lanes()
-    waits = []
     for _ in range(5):
         failure, row = _fail_once(lanes, "unauthorized")
-        assert failure.code == "public_access_backoff"
-        waits.append((failure.retry_at - lanes.now).total_seconds())
-    assert waits == [3600, 14400, 43200, 86400, 86400]
+        assert failure.code == "public_access_backoff" and failure.retry_at is None
+        assert row["server_retry_after_until"] is row["cooldown_until"] is None
     assert row["consecutive_failures"] == 5
+    assert _gate(lanes).before_request().request_number == 1
 
 
 def test_server_retry_after_wins_over_the_escalation_table():
@@ -170,13 +161,14 @@ def test_server_retry_after_wins_over_the_escalation_table():
     assert failure.retry_at == datetime(2026, 10, 19, 21, 2, tzinfo=UTC)
 
 
-def test_rate_limit_without_retry_after_starts_with_one_minute():
+def test_rate_limit_without_retry_after_has_no_wait():
     lanes = _Lanes()
     failure, _ = _fail_once(lanes, "rate_limited")
-    assert failure.retry_at - lanes.now == timedelta(minutes=1)
+    assert failure.retry_at is None
+    assert _gate(lanes).before_request().request_number == 1
 
 
-def test_a_single_success_steps_escalation_down_one_level_on_network_lanes():
+def test_success_resets_diagnostics_without_a_backoff_ladder():
     lanes = _Lanes()
     for _ in range(3):
         _fail_once(lanes, "unauthorized")
@@ -185,20 +177,19 @@ def test_a_single_success_steps_escalation_down_one_level_on_network_lanes():
     permit = gate.before_request()
     gate.finish_success(permit)
     row = lanes.rows[gate.identity_key]
-    assert row["consecutive_failures"] == 2
-    assert row["last_error_code"] == "public_access_backoff"
-    # The next rejection resumes at step three (12 h), not back at one hour.
+    assert row["consecutive_failures"] == 0
+    assert row["last_error_code"] is None
     failure, _ = _fail_once(lanes, "unauthorized")
-    assert failure.retry_at - lanes.now == timedelta(hours=12)
+    assert failure.retry_at is None
 
 
-def test_legacy_shared_public_lane_keeps_its_original_behaviour():
+def test_legacy_shared_public_lane_has_no_local_wait():
     lanes = _Lanes()
     gate = _gate(lanes, lane=None)
     key = gate.identity_key
     permit = gate.before_request()
     failure = gate.record_failure("unauthorized", permit=permit)
-    assert failure.retry_at - lanes.now == timedelta(seconds=900)
+    assert failure.retry_at is None
     lanes.rows[key].update(cooldown_until=None, consecutive_failures=3, last_error_code="public_access_backoff")
     gate = _gate(lanes, lane=None)
     gate.finish_success(gate.before_request())
@@ -208,7 +199,7 @@ def test_legacy_shared_public_lane_keeps_its_original_behaviour():
 
 def test_lanes_do_not_share_cooldowns():
     lanes = _Lanes()
-    _fail_once(lanes, "unauthorized", lane="modal")
+    _fail_once(lanes, "unauthorized", lane="modal", retry_after=120)
     local = _gate(lanes, lane="local")
     assert local.before_request().request_number == 1
     modal = _gate(lanes, lane="modal")
@@ -233,16 +224,14 @@ def test_public_requests_above_180_remain_accounted_and_obey_server_cooldown(lan
     assert len(lanes.rows[gate.identity_key]["request_times"]) == 181
 
 
-def test_three_identical_non_rate_failures_close_the_whole_network_lane():
-    # Egress-health failures still trip the shared circuit for every stage.
+def test_repeated_non_rate_failures_keep_accounting_without_a_wait():
     lanes = _Lanes()
     for _ in range(3):
         failure, row = _fail_once(lanes, "request_failed", lane="local")
     assert row["consecutive_failures"] == 3
-    assert failure.retry_at - lanes.now == timedelta(seconds=900)
+    assert failure.retry_at is None
     listing = _gate(lanes, lane="local")
-    with pytest.raises(identity_policy.IdentityDeferred, match="identity_cooldown"):
-        listing.before_request()
+    assert listing.before_request().request_number == 1
     assert _gate(lanes, lane="modal").before_request().request_number == 1
 
 
@@ -265,24 +254,24 @@ def test_content_absence_is_neutral_for_a_network_lane(finish):
     assert _gate(lanes, lane="local").before_request().request_number == 1
 
 
-def test_content_absence_releases_a_probe_without_resetting_the_backoff_ladder():
+def test_content_absence_releases_probe_without_changing_health_or_server_marker():
     lanes = _Lanes()
     for _ in range(3):
         _fail_once(lanes, "unauthorized", lane="local")
     gate = _gate(lanes, lane="local")
     row = lanes.rows[gate.identity_key]
     expired = lanes.now - timedelta(seconds=1)
-    row["cooldown_until"] = expired
+    row["cooldown_until"] = row["server_retry_after_until"] = expired
     permit = gate.before_request()
     assert permit.probe_token and row["probe_token"] == permit.probe_token
     gate.finish_content_absence("parse_error", permit=permit)
     assert row["probe_token"] is None and row["probe_expires_at"] is None
     assert row["consecutive_failures"] == 3 and row["last_error_code"] == "public_access_backoff"
     assert row["cooldown_until"] == expired
-    # The next real rejection continues the June ladder at 24 h, not 1 h.
+    # A later rejection without Retry-After introduces no wait.
     probe = _gate(lanes, lane="local")
     failure = probe.record_failure("unauthorized", permit=probe.before_request())
-    assert failure.retry_at - lanes.now == timedelta(hours=24)
+    assert failure.retry_at is None
 
 
 def test_content_absence_keeps_original_accounting_on_lanes_without_network_scope():
@@ -335,3 +324,31 @@ def test_server_delay_applies_to_the_first_non_rate_failure(lane):
     assert failure.retry_at == lanes.now + timedelta(seconds=7200)
     with pytest.raises(identity_policy.IdentityDeferred):
         _gate(lanes, lane=lane).before_request()
+
+
+@pytest.mark.parametrize("delay", [None, -1, float("nan"), float("inf"), True, "120"])
+def test_invalid_server_delays_and_legacy_configuration_cannot_create_waits(delay, monkeypatch):
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_PUBLIC_RATE_PAUSE_MAX_SECONDS", "86400")
+    lanes = _Lanes()
+    gate = _gate(lanes)
+    row = lanes.row(gate.identity_key)
+    row["cooldown_until"] = lanes.now + timedelta(days=10)
+    permit = gate.before_request()
+    assert row["cooldown_until"] is None and permit.probe_token is None
+    failure = gate.record_failure("rate_limited", retry_after_seconds=delay, permit=permit)
+    assert failure.retry_at is None
+    assert row["server_retry_after_until"] is row["cooldown_until"] is None
+    assert _gate(lanes).before_request().request_number == 1
+
+
+@pytest.mark.parametrize("lane", [None, "local", "modal"])
+@pytest.mark.parametrize("later_delay", [None, 0, 10])
+def test_actual_server_wait_is_monotonic_for_late_failures(lane, later_delay):
+    lanes = _Lanes()
+    first, late = _gate(lanes, lane=lane), _gate(lanes, lane=lane)
+    first_permit, late_permit = first.before_request(), late.before_request()
+    deadline = first.record_failure("rate_limited", retry_after_seconds=120, permit=first_permit).retry_at
+    result = late.record_failure("request_failed", retry_after_seconds=later_delay, permit=late_permit)
+    assert result.retry_at == deadline
+    assert lanes.row(first.identity_key)["server_retry_after_until"] == deadline
+    assert lanes.row(first.identity_key)["cooldown_until"] == deadline

@@ -108,8 +108,6 @@ _COMMENT_PAGINATION_MAX_SECONDS_DEFAULT = 600.0
 _REPLY_PAGINATION_MAX_SECONDS_DEFAULT = 180.0
 _REPLY_TAIL_TOTAL_MAX_SECONDS_PER_POST_DEFAULT = 180.0
 _COMMENT_REQUEST_DELAY_DEFAULT = 0.25
-_COMMENT_RATE_LIMIT_COOLDOWN_MIN_SECONDS_DEFAULT = 15.0
-_COMMENT_RATE_LIMIT_COOLDOWN_MULTIPLIER_DEFAULT = 2.0
 # Number of post-level attempts (job-runner attempt_count) that must each make
 # no new progress before a sub-target post is classified terminal-missing.
 _TERMINAL_MISSING_MIN_ATTEMPTS_DEFAULT = 3
@@ -2722,7 +2720,7 @@ def _global_rate_cooldown_path(key: str) -> str:
     safe_key = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in str(key or "instagram"))
     directory = os.path.join(tempfile.gettempdir(), "trr-instagram-comments-rate")
     os.makedirs(directory, exist_ok=True)
-    return os.path.join(directory, f"{safe_key}.cooldown")
+    return os.path.join(directory, f"{safe_key}.server-retry-after")
 
 
 def _read_monotonic_timestamp(handle: Any) -> float:
@@ -2738,9 +2736,18 @@ def _read_monotonic_timestamp(handle: Any) -> float:
     return max(0.0, timestamp)
 
 
+def _read_server_retry_deadline(handle: Any) -> float:
+    handle.seek(0)
+    try:
+        value = float(handle.read().strip())
+    except (TypeError, ValueError):
+        return 0.0
+    return value if math.isfinite(value) and value >= 0 else 0.0
+
+
 def _record_global_api_cooldown(*, key: str, delay_seconds: float) -> None:
     delay = max(0.0, float(delay_seconds or 0))
-    if delay <= 0:
+    if not math.isfinite(delay) or delay <= 0:
         return
     try:
         from trr_backend.db import pg
@@ -2749,12 +2756,12 @@ def _record_global_api_cooldown(*, key: str, delay_seconds: float) -> None:
             with pg.db_cursor(conn=conn) as cur:
                 cur.execute(
                     """
-                    insert into social.ig_comment_rate_pace as p (rate_key, last_start, cooldown_until)
+                    insert into social.ig_comment_rate_pace as p (rate_key, last_start, server_retry_after_until)
                     values (%s, now(), now() + make_interval(secs => %s))
                     on conflict (rate_key) do update
-                       set cooldown_until = greatest(
-                           coalesce(p.cooldown_until, '-infinity'::timestamptz),
-                           excluded.cooldown_until
+                       set server_retry_after_until = greatest(
+                           coalesce(p.server_retry_after_until, '-infinity'::timestamptz),
+                           excluded.server_retry_after_until
                        )
                     """,
                     (str(key or "instagram"), delay),
@@ -2765,11 +2772,11 @@ def _record_global_api_cooldown(*, key: str, delay_seconds: float) -> None:
     # Container-local fallback keeps this worker safe if Postgres later becomes
     # unavailable; the persisted row remains authoritative across containers.
     path = _global_rate_cooldown_path(key)
-    cooldown_until = time.monotonic() + delay
+    cooldown_until = time.time() + delay
     with open(path, "a+", encoding="utf-8") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
-            existing_until = _read_monotonic_timestamp(handle)
+            existing_until = _read_server_retry_deadline(handle)
             handle.seek(0)
             handle.truncate()
             handle.write(f"{max(existing_until, cooldown_until):.6f}")
@@ -2784,8 +2791,8 @@ def _wait_for_global_api_cooldown(*, key: str, deadline: float | None = None) ->
     with open(cooldown_path, "a+", encoding="utf-8") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
-            cooldown_until = _read_monotonic_timestamp(handle)
-            now = time.monotonic()
+            cooldown_until = _read_server_retry_deadline(handle)
+            now = time.time()
             remaining = cooldown_until - now
             if remaining > 0:
                 deadline_remaining = _deadline_remaining_seconds(deadline)
@@ -2836,7 +2843,7 @@ def _persisted_global_api_cooldown_remaining(key: str) -> float | None:
             with pg.db_cursor(conn=conn) as cur:
                 cur.execute(
                     """
-                    select extract(epoch from (cooldown_until - now()))::float8 as cooldown_seconds
+                    select extract(epoch from (server_retry_after_until - now()))::float8 as cooldown_seconds
                     from social.ig_comment_rate_pace
                     where rate_key = %s
                     """,
@@ -2896,10 +2903,11 @@ def _try_advisory_lock_pace(*, key: str, delay_seconds: float, deadline: float |
                     values (%s, now())
                     on conflict (rate_key) do update
                        set last_start = greatest(
-                           p.last_start + make_interval(secs => %s),
+                           (case when p.cooldown_until > now()
+                             then least(p.last_start, now()) else p.last_start end) + make_interval(secs => %s),
                            now(),
-                           coalesce(p.cooldown_until, now())
-                       )
+                           coalesce(p.server_retry_after_until, now())
+                       ), cooldown_until = null
                     returning extract(epoch from (last_start - now()))::float8 as wait_seconds
                     """,
                     (str(key or "instagram"), delay),
@@ -3263,18 +3271,6 @@ class InstagramCommentsScraplingFetcher:
             else 0.0
         )
         self._comment_sort_order = resolve_comment_sort_order()
-        self._rate_limit_cooldown_min_seconds = _resolve_positive_float_env(
-            "SOCIAL_INSTAGRAM_COMMENT_429_COOLDOWN_MIN_SEC",
-            _COMMENT_RATE_LIMIT_COOLDOWN_MIN_SECONDS_DEFAULT,
-            minimum=0.0,
-            maximum=300.0,
-        )
-        self._rate_limit_cooldown_multiplier = _resolve_positive_float_env(
-            "SOCIAL_INSTAGRAM_COMMENT_429_COOLDOWN_MULTIPLIER",
-            _COMMENT_RATE_LIMIT_COOLDOWN_MULTIPLIER_DEFAULT,
-            minimum=1.0,
-            maximum=10.0,
-        )
         # Per-egress pacing: in per_container scope, when there is no real proxy
         # fingerprint (the default public lane), fold a stable container token so
         # each container paces independently instead of all containers serializing
@@ -3419,8 +3415,6 @@ class InstagramCommentsScraplingFetcher:
                 "advisory_total_wait_ms": self._global_rate_limit_advisory_total_wait_ms,
                 "advisory_last_error": self._global_rate_limit_advisory_last_error,
             },
-            "rate_limit_cooldown_min_seconds": self._rate_limit_cooldown_min_seconds,
-            "rate_limit_cooldown_multiplier": self._rate_limit_cooldown_multiplier,
             "max_transient_retries": self._max_transient_retries,
             "reply_max_transient_retries": self._reply_max_transient_retries,
             "reply_tail_total_budget_seconds": self._reply_tail_total_budget_seconds,
@@ -9341,16 +9335,9 @@ class InstagramCommentsScraplingFetcher:
     @staticmethod
     def _retry_after_seconds(response: Any) -> float | None:
         headers = getattr(response, "headers", None) or {}
-        raw = None
         try:
-            raw = headers.get("retry-after") if hasattr(headers, "get") else None
-        except Exception:  # noqa: BLE001
-            raw = None
-        if raw is None:
-            return None
-        try:
-            return max(0.0, float(raw))
-        except (TypeError, ValueError):
+            return parse_public_retry_after(headers.get("retry-after"))
+        except (AttributeError, TypeError):
             return None
 
     async def _fetch_json_response(
@@ -9625,30 +9612,13 @@ class InstagramCommentsScraplingFetcher:
                 )
                 sleep_for = sleep_seconds
                 if status_code == 429:
-                    # The recorded cross-process cooldown is always the inflated
-                    # anti-ban value max(backoff*multiplier, floor) — other workers
-                    # honor it regardless of this response's Retry-After.
-                    cooldown_seconds = max(
-                        sleep_seconds * self._rate_limit_cooldown_multiplier,
-                        self._rate_limit_cooldown_min_seconds,
-                    )
-                    # Bug #9: wrap so a transient FS error can't turn a recoverable
-                    # 429 into a crash.
-                    try:
-                        _record_global_api_cooldown(
-                            key=self._global_rate_limit_key,
-                            delay_seconds=cooldown_seconds,
-                        )
-                    except OSError:
-                        logger.debug("failed to record global api cooldown", exc_info=True)
-                    # Bug #5: honor the cooldown IN-PROCESS (previously only the
-                    # short backoff was slept, and the file cooldown was skipped
-                    # entirely when the global throttle was disabled — so a 429
-                    # hammered IG). But when the server gave an explicit Retry-After
-                    # that hint is authoritative, so respect it rather than inflating
-                    # to the floor; only apply the floor when there is no hint.
-                    if retry_after is None:
-                        sleep_for = max(sleep_seconds, cooldown_seconds)
+                    # Only the server's explicit delay may hold other requests.
+                    if retry_after is not None:
+                        try:
+                            _record_global_api_cooldown(key=self._global_rate_limit_key, delay_seconds=retry_after)
+                        except OSError:
+                            logger.debug("failed to record server retry delay", exc_info=True)
+                    sleep_for = retry_after or 0.0
                 if not await _sleep_before_deadline(sleep_for, deadline):
                     return _deadline_response(attempt)
                 continue

@@ -206,18 +206,31 @@ def test_native_child_rejection_requires_native_code_and_preserves_http_auth(pay
     assert native_child_rejection(payload) is expected
 
 
-def test_reply_retry_backoff_cap_and_server_delay(monkeypatch):
+def test_reply_rejection_has_no_local_cooldown_even_with_obsolete_cap(monkeypatch):
+    from trr_backend.ingestion.comments import CommentFetchSummary, _reply_access_retry
+
+    state = {"reply_access": {"attempts": 5, "next_attempt_at": "2099-01-01T00:00:00+00:00"}}
+    now = datetime(2026, 10, 20, tzinfo=UTC)
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_PUBLIC_REPLY_RETRY_CAP_SECONDS", "3600")
+    summary = CommentFetchSummary(reply_lanes_rejected=("p",))
+    for attempt in range(6, 12):
+        failure = _reply_access_retry(state, summary, now)
+        assert failure.retry_at is None
+        assert state["reply_access"]["attempts"] == attempt
+        assert state["reply_access"]["next_attempt_at"] is None
+
+
+def test_reply_rejection_preserves_only_explicit_server_retry_after():
     from datetime import timedelta
 
     from trr_backend.ingestion.comments import CommentFetchSummary, _reply_access_retry
 
-    state = {}
     now = datetime(2026, 10, 20, tzinfo=UTC)
-    summary = CommentFetchSummary(reply_lanes_rejected=("p",))
-    for seconds in (300, 600, 1200, 2400, 3600, 3600):
-        failure = _reply_access_retry(state, summary, now)
-        assert failure.retry_at - now == timedelta(seconds=seconds)
-        now = failure.retry_at
-    monkeypatch.setenv("SOCIAL_INSTAGRAM_PUBLIC_REPLY_RETRY_CAP_SECONDS", "60")
-    server = CommentFetchSummary(reply_lanes_rejected=("p",), reply_retry_after_seconds=7200)
-    assert _reply_access_retry({}, server, now).retry_at - now == timedelta(hours=2)
+    state = {}
+    summary = CommentFetchSummary(reply_lanes_rejected=("p",), reply_retry_after_seconds=7200)
+    failure = _reply_access_retry(state, summary, now)
+    assert failure.retry_at == now + timedelta(hours=2)
+    assert state["reply_access"]["retry_source"] == "server_retry_after"
+    assert (
+        _reply_access_retry(state, CommentFetchSummary(reply_lanes_rejected=("p",)), now).retry_at == failure.retry_at
+    )

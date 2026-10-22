@@ -803,6 +803,7 @@ def test_detail_transport_shared_limits_against_isolated_postgres(monkeypatch, s
     import time
     import uuid
     from concurrent.futures import ThreadPoolExecutor
+    from pathlib import Path
     from threading import Event
 
     import psycopg2
@@ -824,6 +825,13 @@ def test_detail_transport_shared_limits_against_isolated_postgres(monkeypatch, s
         data_directory_row = cur.fetchone()
         assert data_directory_row is not None
         assert data_directory_row[0] == binding["host"] + "/data"
+
+    with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute(
+            (
+                Path(__file__).parents[3] / "supabase/migrations/20261022120000_instagram_server_retry_after.sql"
+            ).read_text()
+        )
 
     @contextmanager
     def connection(**_kwargs):
@@ -881,7 +889,7 @@ def test_detail_transport_shared_limits_against_isolated_postgres(monkeypatch, s
         if scenario == "invalid_probe":
             with connection() as conn, conn.cursor() as cur:
                 cur.execute(
-                    """insert into social.instagram_detail_request_lanes(identity_key,cooldown_until)
+                    """insert into social.instagram_detail_request_lanes(identity_key,server_retry_after_until)
                     values (%s, now() - interval '1 second')""",
                     [first.identity_key],
                 )
@@ -889,9 +897,8 @@ def test_detail_transport_shared_limits_against_isolated_postgres(monkeypatch, s
         for _ in range(count):
             with pytest.raises(InstagramRequestFailure, match="partial_required_fields"):
                 transport().fetch("CONTROLLED", validate=invalid)
-        with pytest.raises(DetailDeferred, match="identity_cooldown"):
-            transport().fetch("CONTROLLED")
-        assert len(sent) == len(attempts) == count
+        assert transport().fetch("CONTROLLED")["items"]
+        assert len(sent) == len(attempts) == count + 1
         return
     if scenario in {"cancel", "deadline"}:
         with pytest.raises((RuntimeError, DetailDeferred)):
@@ -908,7 +915,7 @@ def test_detail_transport_shared_limits_against_isolated_postgres(monkeypatch, s
     elif scenario == "probe":
         with connection() as conn, conn.cursor() as cur:
             cur.execute(
-                """insert into social.instagram_detail_request_lanes(identity_key,cooldown_until)
+                """insert into social.instagram_detail_request_lanes(identity_key,server_retry_after_until)
                 values (%s, now() - interval '1 second')""",
                 [first.identity_key],
             )
@@ -927,8 +934,13 @@ def test_detail_transport_shared_limits_against_isolated_postgres(monkeypatch, s
         with pytest.raises(InstagramRequestFailure, match="transport_timeout"):
             first.fetch("CONTROLLED", allow_public_fallback=True)
         assert len(sent) == 2 and attempts == [True, False]
+    elif scenario == "breaker":
+        for _ in range(5):
+            with pytest.raises(InstagramRequestFailure, match="parse_error"):
+                transport().fetch("CONTROLLED")
+        assert len(sent) == len(attempts) == 5
     else:
-        count = 3 if scenario == "breaker" else 1
+        count = 1
         last_error: InstagramRequestFailure | None = None
         for _ in range(count):
             with pytest.raises(InstagramRequestFailure):

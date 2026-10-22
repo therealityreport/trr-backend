@@ -31,6 +31,7 @@ from trr_backend.ingestion.workflow_store import PARTITION_SIZE
 from trr_backend.ingestion.workflows import control_call
 
 ACTIVITY_TIMEOUT_SECONDS = 590
+WAIT_RECHECK_SECONDS = 5.0
 
 
 class Interrupted(Exception):  # noqa: N818 - control-flow signal, not an error
@@ -75,7 +76,10 @@ def run_partition(item, *, store, scheduler, dispatch, abort):
             store.transition(item, latest[0]["owner_token"], "expired")
         if decision.get("stop"):
             return _complete(store, item, stop=decision["stop"])
-        if decision.get("sleep") and abort.wait(decision["sleep"]):
+        # Journaled waits can outlive their original target deadline after
+        # operator recovery. Recheck live scheduling state at the next ordinal;
+        # target and source gates still enforce any actual future server wait.
+        if decision.get("sleep") and abort.wait(min(decision["sleep"], WAIT_RECHECK_SECONDS)):
             raise Interrupted
     return _complete(store, item, stop=None)
 
