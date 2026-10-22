@@ -1,8 +1,11 @@
 # Native GIF delivery repair and bounded anonymous acceptance
 
 Status: GIF repair committed, independently reviewed, deployed and installed.
-Bounded anonymous acceptance has not passed: the first January listing activity
-returned HTTP 401. Full-history stays disabled.
+Bounded native-browser anonymous pagination is now verified for an ordered-grid
+candidate: 24 bound media IDs across two productive pages. The existing January
+listing activity returned HTTP 401 with its frozen source contract; normal-client
+compatibility, January coverage and canonical acceptance remain unverified.
+Full-history stays disabled.
 
 ## Repair
 
@@ -207,7 +210,8 @@ permalinks and permits one ordinary scroll to the document's existing bottom.
 It records actual scroll movement/bottom position, new bound IDs, connection
 hashes and cursor operations separately. It preserves missing timestamps and
 adds no bootloader or other endpoint permission. The focused installed-runtime
-fixture passed without external requests. Live continuation remains unverified.
+fixture passed without external requests. Live continuation at that stage was
+unverified; the later native proof is recorded below.
 
 The single live continuation capture then returned 64 HTTP 200 responses and
 recognized all 12 profile-prefixed permalinks. One ordinary scroll was attempted,
@@ -243,6 +247,45 @@ written and the full-history gate remained closed. This establishes a sign-in
 boundary for that browser path, not anonymous January retrieval or a reason to
 dismiss the dialog or repeat the same capture.
 
+## Optional public prompt and verified native continuation
+
+A separately reviewed wrapper used one unique visible enabled site-provided
+`Close` button on the exact public profile. The dialog disappeared, and no
+required-login or challenge indicator remained. The capture bound 12 native
+cards to same-document account metadata and moved from scroll position zero to
+1,603 on a 2,683-pixel document. The earlier dialog therefore was an optional
+promotion, not proof that authentication was required. All request, HTTP,
+identity, worker and second-dialog stops remained active.
+
+The screenshot showed a native `Show more posts from bravotv` button at the
+bottom. A separately reviewed one-click capture emitted the real anonymous
+continuation query and grew the DOM permalink inventory from 12 to 22. The
+private projector initially missed its IDs because the response root was
+`data.node`, rather than the initial document's `data.xig_user_by_username`.
+That parser limit was corrected only in the private qualification observer.
+
+The final native endpoint capture verified all of the following together:
+
+- Actual endpoint `/api/graphql`, without a trailing slash, and native operation
+  `PolarisLoggedOutDesktopWWWProfilePostsTabContentQuery_connection`, document
+  `28904005159232689`.
+- Anonymous viewer fields both zero, requested size 12 and native SEO crawler
+  provider flag false.
+- `data.node.polaris_ordered_timeline_connection` returned 12 edges, 12 valid
+  cards and 12 unique new native media IDs, with no overlap in that capture.
+- Same-document account identity hashes matched. The incoming cursor hash
+  exactly matched the initial page, and the outgoing cursor changed with
+  explicit `has_next_page=true`.
+- All 88 responses returned HTTP 200 within the existing bounds; zero canonical
+  writes, a closed account tranche and a closed full-history gate were recorded.
+
+These are productive native-browser pagination facts. All continuation card
+timestamps and pin flags remain missing, so the proof supplies no chronology,
+pin interpretation or January coverage. One verified public permalink timestamp
+remains separate evidence. The exact two-request public HTTP comparison is the
+next qualification step. The new ordered-grid contract has not been adopted by
+the production adapter or substituted into the frozen January run.
+
 Private current evidence references:
 
 - `trr-instagram-no-local-cooldown-01a16023/live-gif.json` and `live-core.json`.
@@ -276,5 +319,11 @@ Private current evidence references:
   `anonymous-profile-ordered-bootloader.json` contain the separate bounded
   continuation and login-guard outcomes; `ordered-bootloader-ready.json` records
   the narrow follow-up's hashes and focused fixture proof.
+- `anonymous-profile-public-close.json`, `anonymous-profile-public-more.json`
+  and `anonymous-profile-native-endpoint.json` contain the optional public Close,
+  native More and exact native page/cursor/endpoint outcomes respectively.
+- `public-more-de3105-preservation.json` records preserved result/screenshot
+  copies before subsequent captures. `native-node-ready.json` records the
+  private projection's focused fixture and frozen dependency hashes.
 
 All paths above are under `/Users/thomashulihan/.codex/tmp/`.
