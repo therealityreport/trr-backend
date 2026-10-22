@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import threading
 from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
@@ -2494,3 +2495,33 @@ def test_get_reddit_community_flair_detail_requires_flair_key() -> None:
             scope="all",
             season_id=None,
         )
+
+
+def test_media_presence_counts_legacy_and_v2_once_without_counting_empty_posts() -> None:
+    with sqlite3.connect(":memory:") as conn:
+        conn.execute("attach database ':memory:' as social")
+        conn.executescript("""
+          create table posts(reddit_post_id text);
+          create table social.reddit_media_mirrors(reddit_post_id text, status text);
+          create table social.reddit_assets(id text, state text);
+          create table social.reddit_asset_links(reddit_post_id text, asset_id text);
+          insert into posts values('legacy'),('v2'),('both'),('pending'),('empty');
+          insert into social.reddit_media_mirrors values('legacy','mirrored'),('both','mirrored');
+          insert into social.reddit_assets values('a','mirrored'),('b','mirrored'),('c','pending');
+          insert into social.reddit_asset_links values('v2','a'),('v2','b'),('both','a'),('pending','c');
+        """)
+        rows = conn.execute(f"""
+          select m.reddit_post_id,
+                 {reddit_refresh._reddit_media_presence_sql()} as has_media,
+                 {reddit_refresh._reddit_media_presence_sql(mirrored=True)} as has_mirrored_media
+          from posts m order by m.reddit_post_id
+        """).fetchall()
+    assert rows == [
+        ("both", 1, 1),
+        ("empty", 0, 0),
+        ("legacy", 1, 1),
+        ("pending", 1, 0),
+        ("v2", 1, 1),
+    ]
+    assert sum(row[1] for row in rows) == 4
+    assert sum(row[2] for row in rows) == 3

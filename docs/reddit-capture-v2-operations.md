@@ -130,6 +130,13 @@ repeated markers remain unresolved; a zero marker count is not exhaustion proof.
 Completion requires both frontiers to be empty. Report saved comment counts beside
 Reddit's reported counts, which can include content that the source does not return.
 
+If `morechildren` omits an explicit child, a guarded `/api/info` lookup can resolve
+an exact post/parent/comment match whose body is `[deleted]` or `[removed]`.
+These source stubs retain their parent graph and per-comment unavailable reason;
+they do not recover removed text. The lookup shares the expansion request budget.
+Absent, ordinary, malformed or mismatched results remain pending. Unavailable
+reason evidence is derived from saved markers and survives checkpoint resumption.
+
 Reddit media downloads have a finite 100 MiB per-file limit. Tenor GIF share URLs
 are resolved through HTTPS provider metadata before the binary download; their
 original URL remains the asset and target identity. The mirror still validates
@@ -143,6 +150,11 @@ verify changed behavior on new workers. Preserve checkpoints and attempt history
 use a linked retry for exhausted work after the parent run reaches a terminal state.
 Target setup can return large checkpoints without changing `updated_at`, so an
 unchanged progress timestamp alone does not establish a stalled worker.
+
+Media incidence reads include both legacy mirrors and v2 asset associations.
+The mirrored count requires a successful mirror in either ledger. A post is counted
+once even with multiple assets or both ledger types. Media incidence differs from
+capture completion: a media phase can finish successfully with zero source assets.
 
 ## Configure schedules without accidental analysis
 

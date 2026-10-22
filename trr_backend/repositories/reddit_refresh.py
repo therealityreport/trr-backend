@@ -4493,6 +4493,18 @@ def _classify_reddit_backfill_candidate(row: Mapping[str, Any]) -> tuple[bool, s
     return False, None
 
 
+def _reddit_media_presence_sql(*, mirrored: bool = False) -> str:
+    legacy_status = "and rmm.status = 'mirrored'" if mirrored else ""
+    asset_state = "and ra.state = 'mirrored'" if mirrored else ""
+    return f"""(
+      exists(select 1 from social.reddit_media_mirrors rmm
+             where rmm.reddit_post_id = m.reddit_post_id {legacy_status})
+      or exists(select 1 from social.reddit_asset_links ral
+                join social.reddit_assets ra on ra.id = ral.asset_id
+                where ral.reddit_post_id = m.reddit_post_id {asset_state})
+    )"""
+
+
 def _fetch_reddit_container_enrichment_coverage(
     *,
     community_id: str,
@@ -4520,11 +4532,7 @@ def _fetch_reddit_container_enrichment_coverage(
               from social.reddit_comments rc
               where rc.reddit_post_id = m.reddit_post_id
             ) as has_saved_comments,
-            exists(
-              select 1
-              from social.reddit_media_mirrors rmm
-              where rmm.reddit_post_id = m.reddit_post_id
-            ) as has_media
+            {_reddit_media_presence_sql()} as has_media
           from social.reddit_period_post_matches m
           join social.reddit_posts p on p.reddit_post_id = m.reddit_post_id
           where m.community_id = %s
@@ -5185,17 +5193,8 @@ def _fetch_reddit_analytics_extras(
                    from social.reddit_comments rc
                    where rc.reddit_post_id = m.reddit_post_id
                  ) as has_saved_comments,
-                 exists(
-                   select 1
-                   from social.reddit_media_mirrors rmm
-                   where rmm.reddit_post_id = m.reddit_post_id
-                 ) as has_media,
-                 exists(
-                   select 1
-                   from social.reddit_media_mirrors rmm
-                   where rmm.reddit_post_id = m.reddit_post_id
-                     and rmm.status = 'mirrored'
-                 ) as has_mirrored_media,
+                 {_reddit_media_presence_sql()} as has_media,
+                 {_reddit_media_presence_sql(mirrored=True)} as has_mirrored_media,
                  greatest(
                    coalesce(p.updated_at, 'epoch'::timestamptz),
                    coalesce(m.updated_at, 'epoch'::timestamptz)
@@ -5272,17 +5271,8 @@ def _fetch_reddit_analytics_extras(
                        from social.reddit_comments rc
                        where rc.reddit_post_id = m.reddit_post_id
                      ) as has_saved_comments,
-                     exists(
-                       select 1
-                       from social.reddit_media_mirrors rmm
-                       where rmm.reddit_post_id = m.reddit_post_id
-                     ) as has_media,
-                     exists(
-                       select 1
-                       from social.reddit_media_mirrors rmm
-                       where rmm.reddit_post_id = m.reddit_post_id
-                         and rmm.status = 'mirrored'
-                     ) as has_mirrored_media
+                     {_reddit_media_presence_sql()} as has_media,
+                     {_reddit_media_presence_sql(mirrored=True)} as has_mirrored_media
               from social.reddit_period_post_matches m
               join social.reddit_posts p on p.reddit_post_id = m.reddit_post_id
               where {analytics_where_sql}
