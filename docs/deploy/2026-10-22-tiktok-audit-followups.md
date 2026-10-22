@@ -1,10 +1,13 @@
 # TikTok audit follow-ups — 2026-10-22
 
-All five source findings are repaired and deployed. Live posts ingestion remains
-limited by TikTok responses: the bounded worker canary failed closed with no
-persisted posts. This is not a successful posts-ingestion acceptance result.
+All five audit findings and the remaining bounded posts-ingestion blocker are
+repaired and deployed. Modal v120 completed a one-page canary and persisted 18
+canonical posts with zero comment rows. The earlier failed receipts below are
+retained as historical evidence.
 
-## Scope and source
+## Initial audit rollout: v113–v116
+
+### Scope and source
 
 - Branch: `chore/repo-hygiene-2026-09-25`; original continuation baseline:
   `097e66e1ba3e593afac78968b4f07b44822e6984`.
@@ -68,7 +71,7 @@ project binding `vwxfvzutyufrkhfgoeaa` and used read-only transactions.
   recovery sweeps and thirteen completed executor-heartbeat calls, with no failed
   executions in the captured evidence.
 
-## Live canary and remaining limit
+## Initial failed canary: historical
 
 The browser-enabled worker used existing canonical credentials. The posts job
 used `max_pages=1`, `ingest_mode=posts_only`; its canonical fallback enforced a
@@ -89,10 +92,10 @@ used `max_pages=1`, `ingest_mode=posts_only`; its canonical fallback enforced a
   returned 403. Watch-page extraction also found a URL whose probe returned 403.
   The existing unofficial-API fallback returned one usable media asset.
 
-Successful posts persistence remains unverified because both public listing
-paths failed. No new signer, login flow, paid provider, proxy purchase, or
-historical repair was added. A later posts canary should run after the existing
-public transport works; changing its signing/provider strategy is separate work.
+At this initial checkpoint, successful posts persistence was unverified because
+both listing paths failed. The v120 repair and persisted acceptance below
+supersede that limit. The original failed job and zero-write receipt remain
+preserved.
 
 ## Rollback and evidence
 
@@ -108,3 +111,70 @@ Durable local evidence and the verified source archive:
 This contains safe runtime receipts, test logs, provider layout, source manifest,
 and the exact reviewed v113 source. Raw cookie values, proxy credentials, and
 sensitive subprocess output are excluded from the delivered evidence.
+
+## Posts-ingestion repair and acceptance: v120
+
+The live comparison isolated a session and transport boundary. The existing
+cookie-seeded browser produced non-JSON listing responses. An anonymous native
+browser received real post-list JSON. A read-only trial of current stable yt-dlp
+2026.10.21 still failed profile extraction, so the production dependency pin was
+retained.
+
+A bounded public browser fallback now runs after empty yt-dlp results, only when
+the job has an explicit page budget. It attaches no saved cookies, proxy or
+persistent profile, registers response capture before navigation, blocks comment
+API requests, and accepts items only when the native author matches the requested
+account. It ignores prefetched responses beyond the budget, deduplicates cursors
+and video IDs, enforces the post cap, and closes the browser after collection.
+No custom signer, paid provider, proxy purchase, login or cookie refresh was added.
+Unbounded fallback jobs retain their previous behavior.
+
+The worker persists through the existing canonical adapter. Its progress records
+actual native pages and partial coverage when the requested cap is reached.
+Required catalog-persistence and cancellation checks now apply consistently to
+early fallback exits as well as normal pagination. The independent review's two
+findings—an early-return persistence guard and early post-cap retention—were fixed
+in one batch. Fix-only review found no remaining blocker.
+
+Validation reused 24 passing affected cases plus two corrected retry-budget
+regression cases, for 26 affected scraper/worker cases. Five worker and import
+boundary checks passed separately; scoped Ruff and four-file formatting passed.
+No full suite or TRR-APP build was needed. No schema or SQL ownership changed.
+
+Release source: `tiktok-public-posts-3d8d96c5e674`, file-map SHA-256
+`3d8d96c5e6748fb1703abdba483f1e6b52595fd83926ee0786fe7e66395fd035`.
+The exact manifest is authoritative for the complete digest. The archive is based
+on verified Modal v119, `ig-ordered-public-9a093967b23d`, and retains all 2,656
+base files, including the accepted ordered Instagram adapter. Only four declared
+TikTok source/test paths differ or are added; all 2,658 candidate hashes were
+verified independently. Other unfinished checkout work remains preserved.
+
+Modal v120 deployed at 2026-10-22 14:07:27 Eastern to
+`admin-56995 / main / trr-backend-jobs`, app
+`ap-DkLTRoSvqhbkGO7fHyHxrD`. The supported deploy wrapper completed explicit-main
+readiness/provider checks and the API health canary returned 200 on its first
+attempt. All 38 function bindings, dispatch URLs/timeouts and five schedules
+match the pre-deploy snapshot. The deployed canary matched both repaired runtime
+module hashes and 12 preserved v119 module hashes before creating its job.
+
+### Successful persisted one-page canary
+
+- Public account: `bravotv`; `max_pages=1`, `ingest_mode=posts_only`.
+- Run: `4ea52164-f6eb-492d-874d-fc55cafdae64` — completed.
+- Job: `6fa12f04-f419-4531-b218-4547a2da4954` — completed.
+- Result: one native listing page, 18 posts found, 18 canonical posts upserted,
+  zero skipped posts, and a 30-post cap.
+- An independent read-only database connection confirmed 18
+  `social.tiktok_posts` rows tied to that exact job, all owned by `bravotv`, all
+  with native post times. It found zero `social.tiktok_comments` rows for the job.
+- Runtime metadata: `retrieval_mode=public_browser`,
+  `auth_mode=public_anonymous`, `pages_scanned=1`, `post_cap=30`,
+  `owner_rejections=0`, `stop_reason=max_pages`. The page budget intentionally
+  leaves profile coverage partial; job completion does not mean full history.
+- The temporary deployed worker processed the real claimed job and is confirmed
+  stopped in the database. No permanent worker or schedule configuration changed.
+
+Provider v119 remains the immediate pre-repair rollback artifact. No rollback was
+needed. Exact source, manifest, independent review, test logs, source-preservation
+proof and safe deployed/database receipts are retained at
+`/Users/thomashulihan/.codex/tmp/trr-tiktok-posts-repair-01a16268/`.
