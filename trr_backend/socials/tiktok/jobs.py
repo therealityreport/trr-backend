@@ -5,8 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from trr_backend.socials.pipelines.job_handler_types import FunctionPlatformJobHandler, PlatformJobHandler
-
-TIKTOK_POSTS_SCRAPLING_STAGE = "tiktok_posts_scrapling"
+from trr_backend.socials.tiktok.constants import TIKTOK_POSTS_SCRAPLING_STAGE
 
 
 def _run_posts_scrapling(job: dict[str, Any], *, worker_id: str | None = None) -> dict[str, Any]:

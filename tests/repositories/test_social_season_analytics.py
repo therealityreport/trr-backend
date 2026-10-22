@@ -8978,9 +8978,14 @@ def test_ingest_shared_accounts_uses_frontier_for_incomplete_instagram_full_hist
         lambda *_args, **kwargs: captured_run_configs.append(kwargs["config"]) or "catalog-run-fast-1",
     )
     monkeypatch.setattr(social_repo, "is_queue_enabled", lambda: False)
-    monkeypatch.setattr(social_repo, "_social_account_profile_total_posts", lambda *_args, **_kwargs: 16_667)
+
+    def _unexpected_expensive_profile_query(*_args: Any, **_kwargs: Any) -> int:
+        pytest.fail("Instagram launch planning must not query assigned profile totals")
+
+    monkeypatch.setattr(social_repo, "_social_account_profile_total_posts", _unexpected_expensive_profile_query)
     monkeypatch.setattr(social_repo, "_shared_catalog_total_posts", lambda *_args, **_kwargs: 16_137)
-    monkeypatch.setattr(social_repo, "_cached_live_profile_total_posts", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(social_repo, "_cached_live_profile_total_posts_cached_only", lambda *_args, **_kwargs: 16_667)
+    monkeypatch.setattr(social_repo, "_cached_live_profile_total_posts", _unexpected_expensive_profile_query)
     monkeypatch.setattr(social_repo, "_run_counter_columns_ready", lambda: False)
     monkeypatch.setattr(social_repo, "_update_run_summary", lambda run_id: {"run_id": run_id})
     monkeypatch.setattr(
@@ -34546,6 +34551,190 @@ def test_ingest_tiktok_comments_stage_does_not_count_failed_refresh_as_matched_p
     assert meta.get("incomplete_comment_fetches") == 1
 
 
+def _tiktok_ingest_context() -> SeasonContext:
+    return SeasonContext(
+        season_id="season-1",
+        show_id="show-rhoslc",
+        show_name="The Real Housewives of Salt Lake City",
+        show_slug="rhoslc",
+        season_number=6,
+        anchor_date=date(2025, 1, 1),
+    )
+
+
+class _ParkedCommentsTikTokScraper:
+    """Fake scraper whose direct comment API is parked; fetching comments is a test failure."""
+
+    comments_auth_failed = False
+    last_retrieval_meta: dict[str, object] = {}
+    last_comment_fetch_reason = ""
+
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    def _direct_comment_api_experiment_enabled(self) -> bool:
+        return False
+
+    def fetch_comments(self, *args, **kwargs):
+        raise AssertionError("fetch_comments must not be called while the comment API is parked")
+
+    def scrape(self, config, progress_cb=None):
+        class _Post:
+            video_id = "vid-1"
+            aweme_id = "vid-1"
+            username = "bravotv"
+            author_nickname = "Bravo"
+            description = "RHOSLC reunion clip"
+            hashtags = ["RHOSLC"]
+            mentions: list[str] = []
+            media_urls: list[str] = []
+            thumbnail_url = ""
+            likes = 10
+            comments = 40
+            shares = 0
+            views = 100
+            duration = 12
+            saves = 0
+            create_time = int(datetime(2026, 2, 15, tzinfo=UTC).timestamp())
+
+        return [_Post()]
+
+
+def test_ingest_tiktok_comments_stage_skips_once_when_comment_api_parked(monkeypatch) -> None:
+    load_calls: list[str] = []
+    monkeypatch.setattr("trr_backend.socials.tiktok.TikTokScraper", _ParkedCommentsTikTokScraper)
+    monkeypatch.setattr(social_repo, "_load_tiktok_cookies", lambda: {"sessionid": "cookie"})
+    monkeypatch.setattr(social_repo, "_touch_job_heartbeat", lambda _job_id: None)
+    monkeypatch.setattr(social_repo, "_update_job_progress", lambda *args, **kwargs: None)
+    monkeypatch.setattr(social_repo, "_load_show_cast_people", lambda _show_id: [])
+    monkeypatch.setattr(
+        social_repo,
+        "_load_existing_posts",
+        lambda platform, *_a, **_k: load_calls.append(platform) or [{"id": "db-1", "video_id": "vid-1"}],
+    )
+    opts = social_repo.IngestOptions(
+        platforms={"tiktok"},
+        source_scope="bravo",
+        sync_strategy="incremental",
+        max_posts_per_target=0,
+        max_comments_per_post=25,
+        max_replies_per_post=0,
+        fetch_replies=False,
+        ingest_mode="comments_only",
+        date_start=datetime(2026, 2, 1, tzinfo=UTC),
+        date_end=datetime(2026, 2, 28, tzinfo=UTC),
+    )
+
+    posts, comments, meta = social_repo._ingest_tiktok(
+        _tiktok_ingest_context(),
+        run_id="run-1",
+        account="bravotv",
+        hashtags=["RHOSLC"],
+        keywords=["RHOSLC"],
+        opts=opts,
+        job_id="job-1",
+        stage="comments",
+    )
+
+    assert (posts, comments) == (0, 0)
+    assert load_calls == []
+    assert meta["comments_skipped_reason"] == "direct_api_parked"
+    assert "comment_errors" not in meta
+    assert "incomplete_comment_fetches" not in meta
+    assert (meta.get("persist_counters") or {}).get("posts_upserted") == 0
+
+
+def test_ingest_tiktok_posts_stage_skips_parked_comments_without_error_inflation(monkeypatch) -> None:
+    enrichment_calls: list[str] = []
+    monkeypatch.setattr("trr_backend.socials.tiktok.TikTokScraper", _ParkedCommentsTikTokScraper)
+    monkeypatch.setattr(social_repo, "_load_tiktok_cookies", lambda: {"sessionid": "cookie"})
+    monkeypatch.setattr(social_repo, "_touch_job_heartbeat", lambda _job_id: None)
+    monkeypatch.setattr(social_repo, "_update_job_progress", lambda *args, **kwargs: None)
+    monkeypatch.setattr(social_repo, "_load_show_cast_people", lambda _show_id: [])
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda *a, **k: nullcontext(None))
+    monkeypatch.setattr(social_repo, "_upsert_tiktok_post", lambda *a, **k: {"id": "db-1"})
+    monkeypatch.setattr(social_repo, "_persist_tiktok_post_enrichment", lambda **_k: None)
+    monkeypatch.setattr(social_repo, "_persist_tiktok_sound_snapshot", lambda **_k: None)
+    monkeypatch.setattr(social_repo, "_enqueue_platform_media_mirror_job", lambda *a, **k: None)
+    monkeypatch.setattr(social_repo, "_save_ingest_checkpoint", lambda **_k: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_persist_tiktok_comment_enrichment",
+        lambda **kwargs: enrichment_calls.append(kwargs["post_id"]),
+    )
+    opts = social_repo.IngestOptions(
+        platforms={"tiktok"},
+        source_scope="bravo",
+        sync_strategy="full_refresh",
+        max_posts_per_target=100,
+        max_comments_per_post=25,
+        max_replies_per_post=0,
+        fetch_replies=False,
+        ingest_mode="posts_and_comments",
+        date_start=datetime(2026, 2, 1, tzinfo=UTC),
+        date_end=datetime(2026, 2, 28, tzinfo=UTC),
+    )
+
+    posts, comments, meta = social_repo._ingest_tiktok(
+        _tiktok_ingest_context(),
+        run_id="run-1",
+        account="bravotv",
+        hashtags=["RHOSLC"],
+        keywords=["RHOSLC"],
+        opts=opts,
+        job_id="job-1",
+        stage="posts",
+    )
+
+    assert posts == 1
+    assert comments == 0
+    assert (meta.get("persist_counters") or {}).get("posts_upserted") == 1
+    assert meta["comments_skipped_reason"] == "direct_api_parked"
+    assert "comment_errors" not in meta
+    assert "incomplete_comment_fetches" not in meta
+    assert enrichment_calls == []
+
+
+def test_ingest_tiktok_post_upsert_failure_is_not_a_comment_error(monkeypatch) -> None:
+    def _boom(*_a, **_k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr("trr_backend.socials.tiktok.TikTokScraper", _ParkedCommentsTikTokScraper)
+    monkeypatch.setattr(social_repo, "_load_tiktok_cookies", lambda: {"sessionid": "cookie"})
+    monkeypatch.setattr(social_repo, "_touch_job_heartbeat", lambda _job_id: None)
+    monkeypatch.setattr(social_repo, "_update_job_progress", lambda *args, **kwargs: None)
+    monkeypatch.setattr(social_repo, "_load_show_cast_people", lambda _show_id: [])
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda *a, **k: nullcontext(None))
+    monkeypatch.setattr(social_repo, "_upsert_tiktok_post", _boom)
+    monkeypatch.setattr(social_repo, "_save_ingest_checkpoint", lambda **_k: None)
+    opts = social_repo.IngestOptions(
+        platforms={"tiktok"},
+        source_scope="bravo",
+        sync_strategy="full_refresh",
+        max_posts_per_target=100,
+        max_comments_per_post=0,
+        max_replies_per_post=0,
+        fetch_replies=False,
+        ingest_mode="posts_only",
+        date_start=datetime(2026, 2, 1, tzinfo=UTC),
+        date_end=datetime(2026, 2, 28, tzinfo=UTC),
+    )
+
+    _posts, _comments, meta = social_repo._ingest_tiktok(
+        _tiktok_ingest_context(),
+        run_id="run-1",
+        account="bravotv",
+        hashtags=["RHOSLC"],
+        keywords=["RHOSLC"],
+        opts=opts,
+        job_id="job-1",
+        stage="posts",
+    )
+
+    assert meta["post_upsert_errors"] == 1
+    assert "comment_errors" not in meta
+
+
 def test_refresh_post_comments_instagram_returns_additive_completeness_fields(monkeypatch) -> None:
     marked_missing: list[str] = []
 
@@ -38662,9 +38851,13 @@ def test_build_shared_instagram_scraper_prefers_public_requests(monkeypatch: pyt
             *,
             cookies: dict[str, Any] | None = None,
             browser_account_id: str | None = None,
+            attach_auth_session: bool = True,
+            strict_public_credentials: bool = False,
         ) -> None:
             captured["cookies"] = cookies
             captured["browser_account_id"] = browser_account_id
+            captured["attach_auth_session"] = attach_auth_session
+            captured["strict_public_credentials"] = strict_public_credentials
 
     import trr_backend.socials.instagram as instagram_module
 
@@ -38675,6 +38868,8 @@ def test_build_shared_instagram_scraper_prefers_public_requests(monkeypatch: pyt
     assert isinstance(scraper, _FakeInstagramScraper)
     assert captured["cookies"] == {}
     assert captured["browser_account_id"] is None
+    assert captured["attach_auth_session"] is False
+    assert captured["strict_public_credentials"] is True
 
 
 def test_build_shared_instagram_scraper_authenticated_uses_loaded_cookies(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -52,15 +52,17 @@ from trr_backend.socials.scrapling_transport import (
     scrapling_fetcher_metadata,
     scrapling_runtime_metadata,
 )
+from trr_backend.socials.tiktok.constants import (
+    TIKTOK_POST_LIST_URL,
+    TIKTOK_POST_PAGE_SIZE,
+    TIKTOK_POST_PAGE_SIZE_MAX,
+    TIKTOK_POST_PAGE_SIZE_MIN,
+    TIKTOK_USER_DETAIL_URL,
+)
 from trr_backend.socials.tiktok.posts_scrapling.proxy import TikTokPostsProxyConfig
 
 logger = logging.getLogger("socials.tiktok.posts_scrapling.fetcher")
 
-TIKTOK_USER_DETAIL_URL = "https://www.tiktok.com/api/user/detail/"
-TIKTOK_POST_LIST_URL = "https://www.tiktok.com/api/post/item_list/"
-TIKTOK_POST_PAGE_SIZE = 30
-TIKTOK_POST_PAGE_SIZE_MIN = 10
-TIKTOK_POST_PAGE_SIZE_MAX = 50
 _SEC_UID_RE = re.compile(r'\\?"secUid\\?"\s*:\s*\\?"(?P<sec_uid>[^"\\]+)')
 _TIKTOK_SCRAPLING_OPTION_KEYS = frozenset(
     {

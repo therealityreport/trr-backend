@@ -148,9 +148,9 @@ def test_bug4_scraper_hoists_context_for_teardown() -> None:
     """
     import inspect
 
-    from trr_backend.socials.tiktok import scraper as tt_scraper
+    from trr_backend.socials.tiktok.transports import browser_intercept as tt_browser_intercept
 
-    source = inspect.getsource(tt_scraper)
+    source = inspect.getsource(tt_browser_intercept)
     # Both hoist declarations must precede the try/with playwright block.
     assert "context: Any | None = None" in source, "context should be hoisted to outer scope for finally-block access"
     assert "context.close()" in source, "finally block must explicitly close the Playwright context"

@@ -16,16 +16,14 @@ from urllib.parse import urlparse
 
 import requests
 
-DEFAULT_HTTP_CLIENT = "requests"
-DEFAULT_CURL_CFFI_IMPERSONATE = "chrome"
-RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
-
-# TikTok page-size assumptions. The scraper translates `max_pages` into a
-# `max_posts` budget by multiplying by this value. Keep in sync with the
-# actual TikTok feed page size; adjust only after verifying against fresh
-# responses (see trr_backend/socials/tiktok/scraper.py:_run_browser_intercept).
-TIKTOK_POSTS_PER_PAGE: int = 50
-TIKTOK_DEFAULT_MAX_POSTS: int = 10_000
+from trr_backend.socials.tiktok.constants import (
+    DEFAULT_CURL_CFFI_IMPERSONATE,
+    DEFAULT_HTTP_CLIENT,
+    RETRYABLE_STATUS_CODES,
+    TIKTOK_DEFAULT_MAX_POSTS,
+    TIKTOK_POSTS_PER_PAGE,
+)
+from trr_backend.socials.tiktok.errors import TikTokHttpRequestError
 
 
 class TikTokHttpResponse(Protocol):
@@ -44,14 +42,6 @@ class TikTokHttpResponse(Protocol):
     def json(self) -> Any: ...
 
     def raise_for_status(self) -> None: ...
-
-
-class TikTokHttpRequestError(RuntimeError):
-    """Transport-agnostic request failure."""
-
-    def __init__(self, message: str, *, response: Any | None = None) -> None:
-        super().__init__(message)
-        self.response = response
 
 
 @dataclass(frozen=True)
@@ -253,3 +243,18 @@ def build_tiktok_http_client(
     if normalized_name == "curl_cffi":
         return CurlCffiTikTokHttpClient(config=config)
     raise RuntimeError(f"Unsupported TikTok HTTP client: {normalized_name}")
+
+
+__all__ = [
+    "CurlCffiTikTokHttpClient",
+    "DEFAULT_CURL_CFFI_IMPERSONATE",
+    "DEFAULT_HTTP_CLIENT",
+    "RETRYABLE_STATUS_CODES",
+    "RequestsTikTokHttpClient",
+    "TIKTOK_DEFAULT_MAX_POSTS",
+    "TIKTOK_POSTS_PER_PAGE",
+    "TikTokHttpClient",
+    "TikTokHttpRequestError",
+    "TikTokHttpResponse",
+    "build_tiktok_http_client",
+]

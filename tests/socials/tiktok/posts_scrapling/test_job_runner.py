@@ -117,8 +117,9 @@ def test_canonical_fallback_uses_ytdlp_without_api_fallthrough(monkeypatch: pyte
         def scrape(self, _config: Any) -> list[Any]:
             raise AssertionError("canonical fallback must not call scrape()")
 
-        def _scrape_via_ytdlp(self, config: Any) -> list[Any]:
+        def _scrape_via_ytdlp(self, config: Any, **kwargs: Any) -> list[Any]:
             assert config.username == "bravotv"
+            assert kwargs.get("max_posts_hint") is None  # unbounded run stays uncapped
             self.last_retrieval_meta = {
                 "retrieval_mode": "ytdlp",
                 "fallback_chain": ["yt_dlp"],
@@ -142,6 +143,45 @@ def test_canonical_fallback_uses_ytdlp_without_api_fallthrough(monkeypatch: pyte
     assert metadata["fallback_chain"] == ["yt_dlp"]
     assert metadata["used"] is True
     assert metadata["trigger_reason"] == "non_json_response"
+
+
+def test_canonical_fallback_caps_ytdlp_at_job_page_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A one-page smoke job must not list and persist an entire account via yt-dlp."""
+    from trr_backend.socials.tiktok import scraper as scraper_module
+    from trr_backend.socials.tiktok.posts_scrapling import job_runner as jr
+
+    monkeypatch.setenv("SOCIAL_TIKTOK_POSTS_SCRAPLING_PAGE_SIZE", "30")
+    real_scraper_cls = scraper_module.TikTokScraper
+    captured: dict[str, Any] = {}
+
+    def _fake_run(cmd, **_kwargs):  # noqa: ANN001
+        captured["cmd"] = list(cmd)
+        lines = "\n".join(
+            f'{{"id": "{index}", "timestamp": {1_700_000_000 - index}, "title": "post {index}"}}'
+            for index in range(1, 81)
+        )
+        return SimpleNamespace(returncode=0, stdout=lines, stderr="")
+
+    def _scraper_factory(*, cookies: dict[str, Any]) -> Any:
+        instance = real_scraper_cls(cookies=cookies)
+        instance._has_ytdlp = lambda: True  # type: ignore[method-assign]
+        instance._find_ytdlp_cookie_file = lambda: None  # type: ignore[method-assign]
+        return instance
+
+    monkeypatch.setattr(scraper_module, "TikTokScraper", _scraper_factory)
+    monkeypatch.setattr(scraper_module.subprocess, "run", _fake_run)
+
+    posts, metadata = jr._scrape_canonical_tiktok_fallback_posts(  # noqa: SLF001
+        account_handle="bravotv",
+        cookies={},
+        max_pages=1,
+        trigger_reason="non_json_response",
+    )
+
+    assert len(posts) == 30
+    assert metadata["post_cap"] == 30
+    assert metadata["stop_reason"] == "max_posts_reached"
+    assert captured["cmd"][captured["cmd"].index("--playlist-end") + 1] == "30"
 
 
 @pytest.mark.parametrize("finish_accepted", [True, False])

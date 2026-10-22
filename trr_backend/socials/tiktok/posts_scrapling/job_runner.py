@@ -11,12 +11,16 @@ import contextlib
 import logging
 import os
 import time
-from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, cast
 
 from trr_backend.db import pg
 from trr_backend.socials.post_persist_truthfulness import apply_post_persist_truthfulness_metadata
+from trr_backend.socials.tiktok.errors import (
+    TikTokPostsScraplingCancelled,  # noqa: F401 - compatibility alias kept importable from this module
+    TikTokPostsScraplingCancelledError,
+    TikTokPostsScraplingRuntimeError,
+)
 from trr_backend.socials.tiktok.posts_scrapling.fetcher import (
     TikTokPostsScraplingFetcher,
     tiktok_posts_scrapling_page_size,
@@ -37,31 +41,6 @@ class _LifecycleProxy:
 
 lifecycle = _LifecycleProxy()
 
-
-@dataclass(slots=True)
-class TikTokPostsScraplingRuntimeError(Exception):
-    message: str
-    error_code: str
-    retryable: bool = False
-    runtime_metadata: dict[str, Any] | None = None
-
-    def __str__(self) -> str:
-        return self.message
-
-
-@dataclass(slots=True)
-class TikTokPostsScraplingCancelledError(Exception):
-    message: str
-    cancel_scope: str
-    job_status: str | None = None
-    run_status: str | None = None
-    runtime_metadata: dict[str, Any] | None = None
-
-    def __str__(self) -> str:
-        return self.message
-
-
-TikTokPostsScraplingCancelled = TikTokPostsScraplingCancelledError
 
 _OPERATION_TIMEOUT_SECONDS_DEFAULT = 240.0
 _CANONICAL_FALLBACK_TIMEOUT_SECONDS_DEFAULT = 0.0
@@ -130,19 +109,28 @@ def _scrape_canonical_tiktok_fallback_posts(
     from trr_backend.socials.tiktok.scraper import TikTokScrapeConfig, TikTokScraper
 
     scraper = TikTokScraper(cookies=cookies)
+    # yt-dlp has no pages, so translate the job's page budget into a post cap.
+    # Without this a one-page smoke job lists and persists the whole account.
+    post_cap = int(max_pages) * max(1, tiktok_posts_scrapling_page_size()) if max_pages else None
     config = TikTokScrapeConfig(
         username=account_handle,
         fast_mode=True,
-        max_pages=max(1, int(max_pages or 1)),
+        max_pages=max_pages,
         scrape_mode="ytdlp",
+        ytdlp_max_videos_hint=post_cap,
     )
-    posts = scraper._scrape_via_ytdlp(config)  # noqa: SLF001 - canonical fallback must not fall through to direct API.
+    posts = scraper._scrape_via_ytdlp(  # noqa: SLF001 - canonical fallback must not fall through to direct API.
+        config,
+        max_videos_hint=post_cap,
+        max_posts_hint=post_cap,
+    )
     metadata = dict(getattr(scraper, "last_retrieval_meta", {}) or {})
     metadata.update(
         {
             "used": True,
             "trigger_reason": str(trigger_reason or "").strip() or None,
             "posts_found": len(posts),
+            "post_cap": post_cap,
         }
     )
     return posts, metadata
