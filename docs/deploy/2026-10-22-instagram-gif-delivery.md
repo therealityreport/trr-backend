@@ -1,10 +1,11 @@
 # Native GIF delivery repair and bounded anonymous acceptance
 
 Status: GIF repair committed, independently reviewed, deployed and installed.
-Bounded native-browser anonymous pagination is now verified for an ordered-grid
-candidate: 24 bound media IDs across two productive pages. The existing January
-listing activity returned HTTP 401 with its frozen source contract; normal-client
-compatibility, January coverage and canonical acceptance remain unverified.
+Bounded anonymous pagination is now verified through both a native browser and
+the normal public HTTP client for an ordered-grid candidate: 24 bound media IDs
+across two productive pages. The existing January listing activity returned HTTP
+401 with its frozen source contract; date/pin policy, January coverage and
+canonical acceptance remain unverified.
 Full-history stays disabled.
 
 ## Repair
@@ -282,9 +283,32 @@ The final native endpoint capture verified all of the following together:
 These are productive native-browser pagination facts. All continuation card
 timestamps and pin flags remain missing, so the proof supplies no chronology,
 pin interpretation or January coverage. One verified public permalink timestamp
-remains separate evidence. The exact two-request public HTTP comparison is the
-next qualification step. The new ordered-grid contract has not been adopted by
+remains separate evidence. The exact two-request public HTTP comparison also
+passed, as recorded below. The new ordered-grid contract has not been adopted by
 the production adapter or substituted into the frozen January run.
+
+## Normal public HTTP transport qualification
+
+The execution owner ran exactly one fresh public profile GET and one native
+continuation POST to the observed `/api/graphql` endpoint using
+`PublicDocumentSession`. Both returned HTTP 200 without authentication, a proxy
+or a headless browser. The fresh document supplied the account identity and
+first cursor; no retained browser token or guessed endpoint was replayed.
+
+Independent closed-receipt and predicate review verified 12 edges, 12 complete
+cards and 12 unique IDs on each page; all continuation IDs were new, with zero
+overlap. Same-field identity hashes matched the fresh named account metadata.
+The incoming cursor matched the document page and the outgoing cursor advanced
+with explicit `has_next_page=true`. The final request boundary required zero
+viewer fields. The tranche closed after its two-request cap with no canonical
+writes and the full-history gate closed.
+
+This qualifies the native root/continuation transport for a production integration
+proposal. It does not adopt the candidate family, modify the existing run or
+establish dates, pin interpretation, ordering, January completeness, anonymous
+GIF source coverage or idempotent canonical persistence. All 24 native card
+timestamps and pin flags were missing. Production edits remain with the assigned
+integration owner pending review of the complete contract and date-policy batch.
 
 Private current evidence references:
 
@@ -325,5 +349,9 @@ Private current evidence references:
 - `public-more-de3105-preservation.json` records preserved result/screenshot
   copies before subsequent captures. `native-node-ready.json` records the
   private projection's focused fixture and frozen dependency hashes.
+- `trr-instagram-no-local-cooldown-01a16023/http-qualifier/ordered-public-http-result.json`
+  contains the accepted two-request public HTTP proof. Its private
+  `qualify_ordered_public_http.py` contains the reviewed page, account, cursor
+  and final anonymous wire-boundary predicates.
 
 All paths above are under `/Users/thomashulihan/.codex/tmp/`.
