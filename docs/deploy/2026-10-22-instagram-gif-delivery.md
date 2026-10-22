@@ -74,7 +74,9 @@ Generation 5, intent hash and checkpoint are preserved. The worker stopped with
 zero active owners and zero uncertain dispatches; no unchanged rejection loop
 was started. This is a verified failed source attempt, not successful discovery.
 
-The execution owner is qualifying a bounded same-contract HTTP-client comparison.
+The bounded same-contract HTTP-client comparison also returned HTTP 401 after
+at most two requests. Changing only the client transport did not qualify a
+production default change.
 No source-family, query-ID or cursor substitution is accepted from this report.
 The original GIF recovery and the offline repair do not prove fresh anonymous
 GIF source availability or complete January media persistence.
@@ -88,6 +90,37 @@ chronological profile history. They are not a qualified replacement for the
 frozen January profile-listing family. Earlier logged-out profile-query names
 were regex discoveries in loaded code, not observed successful profile requests.
 
+## Bounded fresh anonymous profile observation
+
+The execution owner ran a fresh ephemeral headless browser with no authenticated
+state, proxy or user profile. Approved native requests passed through the public
+source gate, coordinator lease and account budget. Limits remained six document/API
+requests, 80 static JavaScript requests and 90 seconds. No canonical or January
+control writes were permitted. Synthetic fixtures verified route bounds, identity
+rejection and delayed profile-response observation without external traffic.
+
+The corrected observer waited up to 18 seconds for profile readiness. It approved
+two document/API requests and 19 static JavaScript requests; all 21 responses
+returned HTTP 200. It observed a native logged-out story-highlights query, no
+profile-post query or post links, and a persistent loading indicator. It found no
+explicit login dialog, private-profile message or unavailable-profile message.
+Seventy-seven other requests were blocked under the existing allowlist. This
+result does not establish an empty profile or prove source absence.
+
+Blocked metadata included `fetchPolarisLoggedOutExperimentQuery`
+(`26916974064594035`). Retained code verifies a read-only query, but its inspected
+callers launch exposure/feature-wall requests without awaiting the result before
+returning existing feature settings. Other inspected callers concern mobile
+bio-links or displaying a logged-out call to action. The evidence does not
+establish a required profile-timeline dependency. The observer was not broadened
+and no synthetic dependency was invented from that assumption.
+
+Fresh anonymous listing qualification remains inconclusive. Exact accepted reply
+IDs, productive pagination and the previously recovered original GIF bytes remain
+valid prior evidence; they do not supply missing January discovery, anonymous
+attachment retrieval or idempotent January canonical commit receipts. Full-history
+ingestion remains disabled until all acceptance gates pass.
+
 Private current evidence references:
 
 - `trr-instagram-no-local-cooldown-01a16023/live-gif.json` and `live-core.json`.
@@ -98,5 +131,9 @@ Private current evidence references:
   `after-first-january-activity.json` and `integrated-retirement.json`.
 - This task's `acceptance-hints.json`, `logged-out-contract-reconstruction.json`
   and `same-family-transport-assessment.json`.
+- `trr-instagram-settlement-01a16023/headless-public/anonymous-profile-browser-qualification.json`
+  and its preserved `early-observation-1` predecessor.
+- This task's `experiment-dependency-assessment.json` records retained caller
+  locations, source hashes and the limits of the offline dependency finding.
 
 All paths above are under `/Users/thomashulihan/.codex/tmp/`.
