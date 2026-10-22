@@ -21632,12 +21632,69 @@ def test_catalog_recent_runs_header_resolves_terminal_attached_followups(monkeyp
             }
         ],
     )
-    monkeypatch.setattr(social_repo, "_load_media_followup_jobs_for_run", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(social_repo, "_load_media_followup_jobs_for_runs", lambda *_args, **_kwargs: {})
 
     rows = social_repo._catalog_recent_runs_header("instagram", "bravotv", limit=3)
 
     assert rows[0]["attached_followups"]["comments"]["status"] == "cancelled"
     assert rows[0]["attached_followups"]["media"]["status"] == "cancelled"
+
+
+def test_catalog_header_batches_followups_with_exact_payload_and_missing_children(monkeypatch):
+    conn = object()
+    configs = [
+        {"comments_run_id": "child", "attached_followups": {
+            "comments": {"run_id": "child"},
+            "media": {"source": "catalog_media_mirror", "enqueued_job_ids": ["job", "job"]}}},
+        {"comments_run_id": "child", "attached_followups": {
+            "media": {"source": "catalog_media_mirror"}}},
+        {"comments_run_id": "missing", "attached_followups": {
+            "comments": {"status": "queued"}, "media": {"source": "comments_media_followups"}}},
+    ]
+    statuses = {"child": "completed"}
+    jobs = [{"id": "job", "status": "running"}]
+    media = {"run-1": [{"id": "mirror", "status": "completed"}]}
+    monkeypatch.setattr(social_repo, "_load_scrape_run_status", lambda rid, **kw: statuses.get(rid))
+    monkeypatch.setattr(social_repo, "_load_scrape_jobs_for_ids", lambda ids, **kw: jobs)
+    monkeypatch.setattr(social_repo, "_load_media_followup_jobs_for_run", lambda rid, **kw: media.get(rid, []))
+    expected = [
+        social_repo._resolve_run_attached_followups(
+            run_config=config, run_id=f"run-{i}", run_status="completed", conn=conn
+        )
+        for i, config in enumerate(configs)
+    ]
+    rows = [{"run_id": f"run-{i}", "status": "completed", "run_config": config} for i, config in enumerate(configs)]
+    calls = []
+
+    def fetch(cur, sql, params):
+        calls.append(("header", params))
+        return rows
+
+    def batch(kind, values, *, conn):
+        assert conn is expected_conn
+        calls.append((kind, values))
+        return {"statuses": statuses, "jobs": jobs, "media": media}[kind]
+
+    expected_conn = conn
+    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda **kw: nullcontext(object()))
+    monkeypatch.setattr(social_repo.pg, "fetch_all_with_cursor", fetch)
+    monkeypatch.setattr(social_repo, "_load_scrape_run_statuses", lambda ids, **kw: batch("statuses", ids, **kw))
+    monkeypatch.setattr(social_repo, "_load_scrape_jobs_for_ids", lambda ids, **kw: batch("jobs", ids, **kw))
+    monkeypatch.setattr(social_repo, "_load_media_followup_jobs_for_runs", lambda ids, **kw: batch("media", ids, **kw))
+    monkeypatch.setattr(social_repo, "_load_scrape_run_status", lambda *a, **kw: pytest.fail("no scalar status reads"))
+    monkeypatch.setattr(
+        social_repo, "_load_media_followup_jobs_for_run", lambda *a, **kw: pytest.fail("no scalar media reads")
+    )
+    result = social_repo._catalog_recent_runs_header("instagram", "bravotv", conn=conn)
+    assert [row["attached_followups"] for row in result] == expected
+    assert calls[1:] == [("statuses", ["child", "missing"]), ("jobs", ["job"]), ("media", ["missing", "run-1"])]
+
+
+def test_catalog_header_without_followups_does_not_query_children(monkeypatch):
+    monkeypatch.setattr(social_repo.pg, "fetch_all", lambda *a, **kw: [{"run_id": "run", "run_config": {}}])
+    for helper in ["_load_scrape_run_statuses", "_load_scrape_jobs_for_ids", "_load_media_followup_jobs_for_runs"]:
+        monkeypatch.setattr(social_repo, helper, lambda *a, **kw: pytest.fail("no child queries without attachments"))
+    assert social_repo._catalog_recent_runs_header("instagram", "bravotv")[0]["attached_followups"] == {}
 
 
 def test_count_visible_failed_runs_interpolates_run_dismissal_predicate(monkeypatch: pytest.MonkeyPatch) -> None:

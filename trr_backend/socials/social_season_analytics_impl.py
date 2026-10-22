@@ -34126,6 +34126,40 @@ def _catalog_recent_runs_header(
                 rows = [dict(row) for row in pg.fetch_all_with_cursor(cur, sql, params)]
     except psycopg_errors.UndefinedTable:
         return []
+    comment_run_ids: set[str] = set()
+    media_job_ids: set[str] = set()
+    media_run_ids: set[str] = set()
+    for row in rows:
+        config = _metadata_dict(row.get("run_config"))
+        followups = _normalize_attached_followups(config.get("attached_followups"))
+        comments = dict(followups.get("comments") or {})
+        media = dict(followups.get("media") or {})
+        comment_run_id = str(comments.get("run_id") or "").strip() or str(config.get("comments_run_id") or "").strip()
+        if comment_run_id:
+            comment_run_ids.add(comment_run_id)
+        job_ids = {str(item).strip() for item in list(media.get("enqueued_job_ids") or []) if str(item).strip()}
+        if job_ids:
+            media_job_ids.update(job_ids)
+        else:
+            source = str(media.get("source") or "").strip().lower()
+            media_run_id = (
+                str(row.get("run_id") or "").strip()
+                if source == "catalog_media_mirror"
+                else comment_run_id
+                if source == "comments_media_followups"
+                else ""
+            )
+            if media_run_id:
+                media_run_ids.add(media_run_id)
+    # Include known missing children: otherwise the resolver repeats scalar reads.
+    run_status_by_id = dict.fromkeys(comment_run_ids, "")
+    if comment_run_ids:
+        run_status_by_id.update(_load_scrape_run_statuses(sorted(comment_run_ids), conn=conn))
+    media_jobs_by_id = {
+        str(row.get("id") or "").strip(): row
+        for row in (_load_scrape_jobs_for_ids(sorted(media_job_ids), conn=conn) if media_job_ids else [])
+    }
+    media_jobs_by_run_id = _load_media_followup_jobs_for_runs(sorted(media_run_ids), conn=conn) if media_run_ids else {}
     normalized_rows: list[dict[str, Any]] = []
     for row in rows:
         run_config = _metadata_dict(row.pop("run_config", None))
@@ -34149,6 +34183,9 @@ def _catalog_recent_runs_header(
             run_status=str(row.get("status") or "").strip().lower() or None,
             comments_run_id=row["comments_run_id"],
             conn=conn,
+            run_status_by_id=run_status_by_id,
+            media_jobs_by_id=media_jobs_by_id,
+            media_jobs_by_run_id=media_jobs_by_run_id,
         )
         normalized_rows.append(_lite_social_account_catalog_run(row))
     return normalized_rows
@@ -58668,8 +58705,16 @@ def _call_with_optional_conn(
     return loader(*args, conn=conn, **kwargs)
 
 
+@contextmanager
 def _social_account_profile_summary_connection(label: str):
-    return pg.db_read_connection(label=label, pool_name="social_profile")
+    started_at = time_module.perf_counter()
+    with pg.db_read_connection(label=label, pool_name="social_profile") as conn:
+        logger.info(
+            "Social profile connection acquired: label=%s elapsed_ms=%.1f",
+            label,
+            (time_module.perf_counter() - started_at) * 1000,
+        )
+        yield conn
 
 
 def _social_profile_perf_enabled() -> bool:
@@ -58693,7 +58738,7 @@ def _log_social_profile_perf(
     handle: str,
     breakdown: Mapping[str, float],
 ) -> None:
-    if not _social_profile_perf_enabled():
+    if route != "get_social_account_profile_summary" and not _social_profile_perf_enabled():
         return
     timings_ms = {key: float(value) for key, value in breakdown.items()}
     total_ms = sum(float(value) for value in breakdown.values())

@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
@@ -77,6 +78,7 @@ def _client() -> redis.Redis:
 
 
 def begin(key: tuple[Any, ...]) -> tuple[Ticket | None, dict[str, Any] | None]:
+    started_at = time.perf_counter()
     try:
         prefix = _prefix()
         client = _client()
@@ -100,11 +102,14 @@ def begin(key: tuple[Any, ...]) -> tuple[Ticket | None, dict[str, Any] | None]:
     except Exception:
         logger.warning("profile_cache read_unavailable")
         return None, None
+    finally:
+        logger.info("profile_cache phase=read elapsed_ms=%.1f", (time.perf_counter() - started_at) * 1000)
 
 
 def publish(ticket: Ticket | None, payload: dict[str, Any], ttl_seconds: int) -> None:
     if ticket is None or ttl_seconds <= 0:
         return
+    started_at = time.perf_counter()
     try:
         raw = _RESPONSE_ADAPTER.dump_json(payload)
         if len(raw) > MAX_PAYLOAD_BYTES:
@@ -122,6 +127,8 @@ def publish(ticket: Ticket | None, payload: dict[str, Any], ttl_seconds: int) ->
         logger.debug("profile_cache %s", "published" if accepted else "publication_rejected")
     except Exception:
         logger.warning("profile_cache write_unavailable")
+    finally:
+        logger.info("profile_cache phase=publish elapsed_ms=%.1f", (time.perf_counter() - started_at) * 1000)
 
 
 def invalidate() -> None:
