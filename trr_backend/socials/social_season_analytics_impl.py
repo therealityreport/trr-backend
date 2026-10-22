@@ -14115,9 +14115,9 @@ def _sql_json_text_non_negative_int(expr: str) -> str:
     return f"coalesce(nullif(regexp_replace(coalesce({expr}, ''), '[^0-9]', '', 'g'), '')::bigint, 0)"
 
 
-def _instagram_reported_comments_sql(alias: str = "p") -> str:
+def _instagram_reported_comments_sql(alias: str = "p", *, raw_data_sql: str | None = None) -> str:
     safe_alias = str(alias or "p").strip() or "p"
-    raw = f"coalesce({safe_alias}.raw_data, '{{}}'::jsonb)"
+    raw = raw_data_sql or f"coalesce({safe_alias}.raw_data, '{{}}'::jsonb)"
     raw_candidates = [
         f"{raw} ->> 'comments_count'",
         f"{raw} ->> 'comments'",
@@ -14141,9 +14141,10 @@ def _instagram_external_facebook_comments_sql(
     alias: str = "p",
     *,
     fb_comment_count_expr: str | None = None,
+    raw_data_sql: str | None = None,
 ) -> str:
     safe_alias = str(alias or "p").strip() or "p"
-    raw = f"coalesce({safe_alias}.raw_data, '{{}}'::jsonb)"
+    raw = raw_data_sql or f"coalesce({safe_alias}.raw_data, '{{}}'::jsonb)"
     raw_candidates = [
         fb_comment_count_expr if fb_comment_count_expr is not None else f"{safe_alias}.fb_comment_count::text",
         f"{raw} -> 'facebook_crosspost' ->> 'comments_count'",
@@ -15751,7 +15752,9 @@ def _instagram_account_jsonb_array_match_sql(*, alias: str, path_sql: str, accou
         """
 
 
-def _instagram_account_match_sql(*, alias: str = "p", native_columns: frozenset[str] | None = None) -> str:
+def _instagram_account_match_sql(
+    *, alias: str = "p", native_columns: frozenset[str] | None = None, raw_data_sql: str | None = None
+) -> str:
     """Match an Instagram row to an account through ownership or coauthor data.
 
     This intentionally ignores profile_tags. Tagged-post ownership is a separate
@@ -15767,7 +15770,7 @@ def _instagram_account_match_sql(*, alias: str = "p", native_columns: frozenset[
 
     # Known summary table shapes can avoid serializing large unrelated row fields.
     # Other callers retain the schema-tolerant whole-row JSON lookup.
-    raw_data = field_sql("raw_data")
+    raw_data = raw_data_sql or field_sql("raw_data")
     account_ref = "_ig_account_match.account_handle"
     direct_candidates = [
         field_sql("source_account", text=True),
@@ -34697,6 +34700,14 @@ def _shared_catalog_total_posts_for_window(
     return _normalize_non_negative_int(row.get("total"))
 
 
+def _instagram_profile_summary_raw_sql(table: str, *, alias: str = "p", conn: Any | None = None) -> str:
+    # Additive rollout: old schemas and rows awaiting backfill keep exact raw semantics.
+    columns = _relation_columns("social", table, conn=conn)
+    if "profile_summary_raw_data" in columns:
+        return f"coalesce({alias}.profile_summary_raw_data, {alias}.raw_data, '{{}}'::jsonb)"
+    return f"coalesce({alias}.raw_data, '{{}}'::jsonb)"
+
+
 def _shared_catalog_summary_totals(
     platform: str,
     account_handle: str,
@@ -34711,6 +34722,7 @@ def _shared_catalog_summary_totals(
         _instagram_account_match_sql(
             alias="p",
             native_columns=frozenset({"source_account", "owner_username", "raw_data", "collaborators"}),
+            raw_data_sql=_instagram_profile_summary_raw_sql(table, conn=conn),
         )
         if table == "instagram_account_catalog_posts"
         else _shared_catalog_account_match_sql(platform, alias="p")
@@ -63390,14 +63402,16 @@ def _instagram_social_account_lite_header_stats(
     conn: Any | None = None,
 ) -> dict[str, Any]:
     normalized_account = _normalize_social_account_profile_handle(account_handle)
+    raw_data_sql = _instagram_profile_summary_raw_sql("instagram_posts", conn=conn)
     owner_match_clause = _instagram_account_match_sql(
         alias="p",
         native_columns=frozenset(
             {"source_account", "owner_username", "username", "raw_data", "collaborators", "collaborators_detail"}
         ),
+        raw_data_sql=raw_data_sql,
     )
-    reported_comments_expr = _instagram_reported_comments_sql("p")
-    external_facebook_comments_expr = _instagram_external_facebook_comments_sql("p")
+    reported_comments_expr = _instagram_reported_comments_sql("p", raw_data_sql=raw_data_sql)
+    external_facebook_comments_expr = _instagram_external_facebook_comments_sql("p", raw_data_sql=raw_data_sql)
     sql = f"""
             with filtered_posts as materialized (
               select

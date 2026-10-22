@@ -17806,6 +17806,7 @@ def test_instagram_social_account_comments_saved_summary_clamps_retrieved_counts
 def test_instagram_social_account_lite_header_stats_uses_comment_rollups(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(social_repo, "_relation_columns", lambda *args, **kwargs: set())
     captured: dict[str, Any] = {}
 
     def _fake_fetch_one(sql: str, params: list[Any]) -> dict[str, Any]:
@@ -17834,8 +17835,8 @@ def test_instagram_social_account_lite_header_stats_uses_comment_rollups(
     assert "to_jsonb(p)" not in captured["sql"]
     for column in ("source_account", "owner_username", "username", "collaborators", "collaborators_detail"):
         assert f"p.{column}" in captured["sql"]
-    assert "p.raw_data ->> 'owner_username'" in captured["sql"]
-    assert "p.raw_data -> 'collaborators_detail'" in captured["sql"]
+    assert "coalesce(p.raw_data, '{}'::jsonb) ->> 'owner_username'" in captured["sql"]
+    assert "coalesce(p.raw_data, '{}'::jsonb) -> 'collaborators_detail'" in captured["sql"]
     assert "from social.instagram_post_comment_rollups r" in captured["sql"]
     assert "join filtered_posts fp on fp.id = r.post_id" in captured["sql"]
     assert "from social.instagram_comments c" not in captured["sql"]
@@ -18923,6 +18924,7 @@ def test_instagram_comments_coverage_diagnostics_separates_saved_media_and_job_b
 
 
 def test_shared_catalog_summary_totals_aliases_catalog_table(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(social_repo, "_relation_columns", lambda *args, **kwargs: set())
     captured: dict[str, Any] = {}
 
     def _fake_fetch_one(sql: str, params: list[Any] | None = None):  # noqa: ANN001
@@ -18957,8 +18959,8 @@ def test_shared_catalog_summary_totals_aliases_catalog_table(monkeypatch: pytest
     assert "p.collaborators_detail" not in captured["sql"]
     assert "null::text" in captured["sql"]
     assert "null::jsonb" in captured["sql"]
-    assert "p.raw_data ->> 'username'" in captured["sql"]
-    assert "p.raw_data -> 'collaborators_detail'" in captured["sql"]
+    assert "coalesce(p.raw_data, '{}'::jsonb) ->> 'username'" in captured["sql"]
+    assert "coalesce(p.raw_data, '{}'::jsonb) -> 'collaborators_detail'" in captured["sql"]
 
 
 def test_shared_catalog_summary_totals_preserves_non_instagram_predicate(monkeypatch: pytest.MonkeyPatch) -> None:
