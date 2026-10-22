@@ -934,3 +934,60 @@ def test_threads_job_runner_retries_incomplete_shared_catalog_persistence(
     assert finish["last_error_code"] == "threads_shared_catalog_persistence_incomplete"
     assert finish["metadata"]["persist_counters"]["posts_upserted"] == 1
     assert finish["metadata"]["persist_counters"]["required_shared_persistence_failures"] == 1
+
+
+def test_threads_job_runner_resolves_session_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_lifecycle: _FakeLifecycle,
+) -> None:
+    """Session resolution may run sync Playwright, which fails on a running event loop."""
+    import asyncio
+
+    from trr_backend.socials.threads.posts_scrapling import job_runner as jr
+
+    class _FakeFetcher:
+        runtime_metadata = {"transport": "test", "request_count": 1, "complete": True}
+
+        async def warmup(self, _account_handle: str) -> None:
+            return None
+
+        async def fetch_posts(self, _account_handle: str, *, max_pages: int | None = None) -> Any:
+            del max_pages
+            return jr.ThreadsPostsFetchResult(
+                posts=[_thread_post()],
+                fetch_failed=False,
+                auth_failed=False,
+                retryable=False,
+                fetch_reason=None,
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    _install_common_fakes(
+        monkeypatch,
+        jr,
+        fetcher=_FakeFetcher(),
+        persist_result=PersistedThreadsPosts(posts_upserted=1, posts_skipped=0),
+    )
+
+    def _resolve_like_sync_playwright() -> Any:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return SimpleNamespace(
+                raw_cookies={"sessionid": "raw-session-secret"},
+                cookies=[{"name": "sessionid", "value": "raw-session-secret", "domain": ".threads.com", "path": "/"}],
+                cookie_source="canonical",
+            )
+        raise RuntimeError("It looks like you are using Playwright Sync API inside the asyncio loop.")
+
+    monkeypatch.setattr(jr, "resolve_threads_posts_session", _resolve_like_sync_playwright)
+    monkeypatch.setattr(jr.pg, "fetch_one", _running_status_or_final_row)
+
+    jr.run_threads_posts_scrapling_job(
+        {"id": "job-1", "run_id": "run-1", "config": {"account": "bravotv"}},
+        worker_id="worker-1",
+    )
+
+    assert fake_lifecycle.finish_calls[-1]["status"] == "completed"
