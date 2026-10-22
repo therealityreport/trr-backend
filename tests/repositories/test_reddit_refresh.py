@@ -2150,14 +2150,16 @@ def test_fetch_reddit_analytics_extras_season_scope_filters_to_canonical_contain
 
     assert payload["coverage"]["tracked_post_count"] == 28
     assert payload["coverage"]["container_count"] == 3
-    assert payload["coverage"]["stale_container_count"] == 2
-    assert payload["coverage"]["recovered_container_count"] == 1
+    assert payload["coverage"]["stale_container_count"] == 1
+    assert payload["coverage"]["recovered_container_count"] == 0
+    assert payload["coverage"]["unknown_container_count"] == 3
     assert [item["container_key"] for item in payload["container_statuses"]] == [
         "period-preseason",
         "episode-1",
         "period-postseason",
     ]
-    assert payload["container_statuses"][2]["stale_reason_code"] == "no_previous_run"
+    assert payload["container_statuses"][2]["historical_stale_reason_code"] == "no_previous_run"
+    assert payload["container_statuses"][2]["stale"] is False
     assert payload["freshness"]["latest_run_status"] == "partial"
     assert any("canonical_container_key" in query for query, _params in fetch_one_calls)
     assert any("canonical_container_key" in query for query, _params in fetch_all_calls)
@@ -2525,3 +2527,68 @@ def test_media_presence_counts_legacy_and_v2_once_without_counting_empty_posts()
     ]
     assert sum(row[1] for row in rows) == 4
     assert sum(row[2] for row in rows) == 3
+
+
+def test_analytics_summary_uses_manual_interval_proof_without_faking_window_runs(monkeypatch):
+    from trr_backend.repositories import reddit_window_coverage
+
+    keys = ["period-preseason", "episode-1", "episode-2", "period-postseason"]
+    monkeypatch.setattr(reddit_refresh, "_column_exists", lambda *args: False)
+    monkeypatch.setattr(reddit_refresh, "_canonical_reddit_container_keys_for_season", lambda season_id: keys)
+    monkeypatch.setattr(reddit_refresh, "_canonical_reddit_match_window_ranges_for_season", lambda season_id: [])
+    monkeypatch.setattr(
+        reddit_refresh,
+        "_fetch_latest_refresh_runs_for_season",
+        lambda **kwargs: [
+            {
+                "id": "newer-failed",
+                "canonical_container_key": "episode-1",
+                "status": "failed",
+                "diagnostics": {},
+                "updated_at": datetime(2026, 10, 21, tzinfo=UTC),
+            }
+        ],
+    )
+    monkeypatch.setattr(reddit_refresh.pg, "fetch_one", lambda *args: {})
+    monkeypatch.setattr(reddit_refresh.pg, "fetch_all", lambda *args: [])
+    proof = {
+        "run_id": "manual-discovery",
+        "status": "completed",
+        "created_at": datetime(2026, 10, 2, tzinfo=UTC),
+        "completed_at": datetime(2026, 10, 2, 1, tzinfo=UTC),
+        "configuration": {
+            "requested_phases": ["discovery"],
+            "period_start": "2026-09-16T00:00:00Z",
+            "period_end": "2026-10-01T00:00:00Z",
+        },
+        "coverage": {
+            "scope": "window",
+            "state": "complete",
+            "chronological_boundary_proven": True,
+            "requested_start": "2026-09-16T00:00:00Z",
+            "requested_end": "2026-10-01T00:00:00Z",
+        },
+    }
+    monkeypatch.setattr(reddit_window_coverage, "fetch_proofs", lambda *args: [proof])
+    result = reddit_refresh._fetch_reddit_analytics_extras(
+        community_id="community",
+        season_id="season",
+        scope="season",
+        windows=[
+            {"key": "period-preseason", "start": "2026-09-09T00:00:00Z", "end": "2026-09-17T00:00:00Z"},
+            {"key": "episode-1", "start": "2026-09-17T00:00:00Z", "end": "2026-09-24T00:00:00Z"},
+            {"key": "episode-2", "start": "2099-10-01T00:00:00Z", "end": "2099-10-08T00:00:00Z"},
+        ],
+    )
+    assert result["coverage"]["covered_container_count"] == 1
+    assert result["coverage"]["partial_container_count"] == 1
+    assert result["coverage"]["upcoming_container_count"] == 1
+    assert result["coverage"]["unknown_container_count"] == 1
+    assert result["coverage"]["stale_container_count"] == 0
+    assert result["coverage"]["captured_container_count"] == 2
+    assert result["container_statuses"][1]["historical_stale"] is True
+    assert result["container_statuses"][1]["latest_run_id"] == "newer-failed"
+    assert result["container_statuses"][0]["latest_run_id"] is None
+    assert result["freshness"]["latest_coverage_run_id"] == "manual-discovery"
+    assert result["freshness"]["latest_run_status"] == "completed"
+    assert result["freshness"]["latest_canonical_run_timestamp"].startswith("2026-10-21")

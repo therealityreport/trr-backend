@@ -5154,6 +5154,7 @@ def _fetch_reddit_analytics_extras(
     community_id: str,
     scope: str,
     season_id: str | None = None,
+    windows: list[dict] | None = None,
 ) -> dict[str, Any]:
     normalized_scope = _normalize_analytics_scope(scope)
     has_detail_scraped_at = _column_exists("social", "reddit_posts", "detail_scraped_at")
@@ -5398,6 +5399,74 @@ def _fetch_reddit_analytics_extras(
                 }
             )
 
+    window_counts: dict[str, Any] = {}
+    latest_canonical_run_timestamp = latest_run_timestamp
+    proofs: list[dict] = []
+    if normalized_scope == "season" and season_id:
+        from trr_backend.repositories import reddit_window_coverage
+
+        proofs = reddit_window_coverage.fetch_proofs(community_id, season_id)
+    if windows is not None and normalized_scope == "season" and season_id:
+        if any(window["key"] not in canonical_container_keys for window in windows):
+            raise ValueError("windows must belong to this season")
+        provenance = reddit_window_coverage.classify_windows(windows, proofs)
+        previous = {item["container_key"]: item for item in container_statuses}
+        container_statuses = []
+        for key in canonical_container_keys:
+            evidence = provenance.get(key) or {"coverage_state": "unknown"}
+            item = dict(previous.get(key) or {"container_key": key})
+            # Retain historical diagnostics, but never call missing history or future windows stale.
+            item["historical_stale"] = bool(item.get("stale"))
+            item["historical_stale_reason_code"] = item.get("stale_reason_code")
+            item.update(evidence)
+            item["stale"] = bool(
+                item.get("latest_run_id")
+                and item.get("historical_stale")
+                and evidence["coverage_state"] not in {"covered", "upcoming"}
+            )
+            item["stale_reason_code"] = item.get("historical_stale_reason_code") if item["stale"] else None
+            container_statuses.append(item)
+        for state in ("covered", "partial", "uncovered", "upcoming", "unknown"):
+            window_counts[f"{state}_container_count"] = sum(
+                item["coverage_state"] == state for item in container_statuses
+            )
+        window_counts["captured_container_count"] = (
+            window_counts["covered_container_count"] + window_counts["partial_container_count"]
+        )
+        window_counts["recovered_container_count"] = window_counts["covered_container_count"]
+        window_counts["proven_through"] = max(
+            (item["covered_through"] for item in container_statuses if item.get("covered_through")),
+            default=None,
+            key=lambda value: _parse_iso(value),
+        )
+    elif normalized_scope == "season" and season_id:
+        # Without the caller's displayed bounds, date-based coverage cannot be established.
+        for item in container_statuses:
+            item["coverage_state"] = "unknown"
+            item["historical_stale"] = bool(item.get("stale"))
+            item["historical_stale_reason_code"] = item.get("stale_reason_code")
+            if not item.get("latest_run_id"):
+                item["stale"] = False
+                item["stale_reason_code"] = None
+        window_counts = {f"{state}_container_count": 0 for state in ("covered", "partial", "uncovered", "upcoming")}
+        window_counts.update(
+            unknown_container_count=len(container_statuses),
+            captured_container_count=0,
+            recovered_container_count=0,
+            proven_through=None,
+        )
+    latest_coverage_run_id = None
+    if normalized_scope == "season" and season_id:
+        qualified_ids = {run_id for _, _, run_id in reddit_window_coverage.qualifying_intervals(proofs)}
+        eligible = [proof for proof in proofs if proof.get("run_id") in qualified_ids]
+        if eligible:
+            latest = max(
+                eligible, key=lambda proof: _parse_iso(proof.get("created_at")) or datetime.min.replace(tzinfo=UTC)
+            )
+            latest_coverage_run_id = latest["run_id"]
+            latest_run_status = latest.get("status")
+            latest_run_timestamp = _iso_utc(_parse_iso(latest.get("completed_at") or latest.get("updated_at")))
+
     tracked_post_count = _safe_int(coverage_row.get("tracked_post_count"))
     detail_scraped_post_count = _safe_int(coverage_row.get("detail_scraped_post_count"))
     comment_saved_post_count = _safe_int(coverage_row.get("comment_saved_post_count"))
@@ -5408,7 +5477,8 @@ def _fetch_reddit_analytics_extras(
         "freshness": {
             "latest_data_timestamp": _iso_utc(_parse_iso(coverage_row.get("latest_data_timestamp"))),
             "latest_run_timestamp": latest_run_timestamp,
-            "latest_canonical_run_timestamp": latest_run_timestamp,
+            "latest_canonical_run_timestamp": latest_canonical_run_timestamp,
+            "latest_coverage_run_id": latest_coverage_run_id,
             "latest_run_status": latest_run_status,
         },
         "coverage": {
@@ -5436,6 +5506,7 @@ def _fetch_reddit_analytics_extras(
             "recovered_container_count": sum(1 for item in container_statuses if not bool(item.get("stale"))),
             "unmapped_post_count": unmapped_post_count,
             "unmapped_tracked_post_count": unmapped_tracked_post_count,
+            **window_counts,
         },
         "container_statuses": container_statuses,
     }
@@ -5446,6 +5517,7 @@ def get_reddit_community_analytics_summary(
     community_id: str,
     scope: str,
     season_id: str | None = None,
+    windows: list[dict] | None = None,
 ) -> dict[str, Any]:
     where_sql, where_params = _build_analytics_filters(
         community_id=community_id,
@@ -5491,6 +5563,7 @@ def get_reddit_community_analytics_summary(
         community_id=community_id,
         scope=scope,
         season_id=season_id,
+        windows=windows,
     )
     return {
         "scope": _normalize_analytics_scope(scope),

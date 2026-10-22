@@ -570,11 +570,16 @@ async def get_reddit_community_analytics_summary(
     community_id: UUID,
     scope: Literal["season", "all"] = Query(default="season"),
     season_id: UUID | None = Query(default=None),
+    windows: str | None = Query(default=None, max_length=12_000),
     _: InternalAdminUser = cast(Any, None),
 ) -> dict[str, Any]:
     from trr_backend.repositories.reddit_refresh import get_reddit_community_analytics_summary
+    from trr_backend.repositories.reddit_window_coverage import parse_windows
 
     try:
+        effective_windows = parse_windows(windows)
+        if effective_windows is not None and scope != "season":
+            raise ValueError("windows requires season scope")
         if scope == "season" and season_id is None:
             raise HTTPException(status_code=400, detail="season_id is required when scope=season")
         return await _run_admin_repo_call(
@@ -582,6 +587,7 @@ async def get_reddit_community_analytics_summary(
             community_id=str(community_id),
             scope=scope,
             season_id=str(season_id) if season_id else None,
+            **({"windows": effective_windows} if effective_windows is not None else {}),
         )
     except HTTPException:
         raise
