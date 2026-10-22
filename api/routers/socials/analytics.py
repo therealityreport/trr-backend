@@ -129,6 +129,29 @@ async def get_season_analytics_week_live_health(
         raise _to_social_read_http_exception(exc) from exc
 
 
+@router.get("/seasons/{season_id}/analytics/periods")
+async def get_season_analytics_periods(
+    season_id: UUID,
+    source_scope: Literal["bravo", "network", "creator", "community", "news"] = Query(default="network"),
+    timezone: str = Query(default="America/New_York"),
+    _: InternalAdminUser = cast("InternalAdminUser", None),
+) -> dict[str, Any]:
+    from trr_backend.socials.analytics import get_periods
+
+    try:
+        return await _run_admin_repo_call(
+            get_periods,
+            str(season_id),
+            source_scope=normalize_source_scope_param(source_scope),
+            timezone=timezone,
+        )
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to load season periods: season=%s", season_id)
+        raise _to_social_read_http_exception(exc) from exc
+
+
 @router.get("/seasons/{season_id}/analytics")
 async def get_season_analytics(
     season_id: UUID,
