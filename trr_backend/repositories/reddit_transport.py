@@ -45,13 +45,13 @@ def build_client(*, require_oauth: bool = True, recovery_probe: bool = False, **
             except RedditTransportError as exc:
                 if exc.status in {401, 403}:
                     reddit_capture.pg.execute_returning(
-                        '''insert into social.reddit_request_budgets(identity_key,blocked)
+                        """insert into social.reddit_request_budgets(identity_key,blocked)
                         values(%s,true) on conflict(identity_key) do update set blocked=true,updated_at=now()
-                        returning identity_key''',
+                        returning identity_key""",
                         [identity],
                     )
                     raise reddit_capture.IdentityBlockedError(
-                        'Reddit OAuth identity blocked by authentication or authorization failure'
+                        "Reddit OAuth identity blocked by authentication or authorization failure"
                     ) from None
                 raise
 
@@ -543,6 +543,29 @@ class RedditHttpClient:
             for comment_id in comments:
                 pending.pop(comment_id, None)
             save()
+            missing = {child_id: pending[child_id] for child_id in batch if child_id in pending}
+            if missing and evidence["expansion_requests"] < self.max_more_requests:
+                evidence["expansion_requests"] += 1
+                try:
+                    info = self.get_json(
+                        "/api/info.json",
+                        params={"id": ",".join(f"t1_{child_id}" for child_id in missing), "raw_json": 1},
+                        lane="morechildren",
+                    )
+                    stubs = _parse_unavailable_nodes(_listing_children(info), post_id=post_id, pending=missing)
+                    merged = copy.deepcopy(comments)
+                    merged.update(stubs)
+                    _resolve_depths(merged)
+                except RedditTransportError as exc:
+                    evidence["errors"].append(
+                        {"status": exc.status, "message": str(exc), "retry_after_seconds": exc.retry_after_seconds}
+                    )
+                    save()
+                    break
+                comments.update(merged)
+                for comment_id in stubs:
+                    pending.pop(comment_id, None)
+                save()
         if pending and not evidence["errors"]:
             evidence["errors"].append(
                 {
@@ -554,6 +577,11 @@ class RedditHttpClient:
         if continuations:
             evidence["errors"].append({"reason": "unresolved_continuations", "count": len(continuations)})
         evidence["pending_continuations_count"] = len(continuations)
+        evidence["unavailable_comments"] = [
+            {"comment_id": comment_id, "reason": row["body"][1:-1]}
+            for comment_id, row in sorted(comments.items())
+            if isinstance(row.get("body"), str) and row["body"] in {"[deleted]", "[removed]"}
+        ]
         evidence["checkpoint"] = snapshot()
         return {
             "comments": list(comments.values()),
@@ -571,6 +599,37 @@ def _listing_children(listing: Any) -> list[Any]:
     if not isinstance(data, dict) or not isinstance(data.get("children"), list):
         raise RedditTransportError("Malformed Reddit listing children")
     return data["children"]
+
+
+def _parse_unavailable_nodes(
+    nodes: list[Any], *, post_id: str, pending: dict[str, dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """Resolve only explicit source tombstones omitted by morechildren."""
+    stubs = []
+    seen = set()
+    for node in nodes:
+        if not isinstance(node, dict) or node.get("kind") != "t1" or not isinstance(node.get("data"), dict):
+            raise RedditTransportError("Malformed Reddit unavailable-comment lookup")
+        data = node["data"]
+        comment_id = _id(data.get("id"), prefix="t1_")
+        if (
+            data.get("id") != comment_id
+            or comment_id not in pending
+            or comment_id in seen
+            or data.get("link_id") != f"t3_{post_id}"
+            or data.get("parent_id") != pending[comment_id]["parent_id"]
+            or data.get("name") not in (None, f"t1_{comment_id}")
+        ):
+            raise RedditTransportError("Reddit unavailable-comment lookup changed the requested identity")
+        seen.add(comment_id)
+        if data.get("replies") not in (None, ""):
+            raise RedditTransportError("Reddit unavailable-comment lookup returned an unexpected subtree")
+        if not isinstance(data.get("body"), str):
+            raise RedditTransportError("Malformed Reddit unavailable-comment body")
+        if data.get("body") in {"[deleted]", "[removed]"}:
+            stubs.append(node)
+    added, _, _ = _parse_nodes(stubs, post_id=post_id, pending=pending)
+    return added
 
 
 def _parse_nodes(

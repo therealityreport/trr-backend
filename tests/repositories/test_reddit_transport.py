@@ -144,18 +144,18 @@ def test_failed_expansion_preserves_all_pending_children(response: Response) -> 
 
 
 def test_empty_expansion_is_unresolved_and_is_not_retried_forever() -> None:
-    session = Session(initial(more("a")), expanded())
+    session = Session(initial(more("a")), expanded(), Response(listing()))
     result = transport.RedditHttpClient(session=session).get_comments("post1")
     assert result["complete"] is False
     assert result["unresolved_ids"] == ["a"]
     assert result["evidence"]["errors"] == [{"reason": "children_not_returned"}]
-    assert len(session.calls) == 2
+    assert len(session.calls) == 3
 
 
 def test_missing_children_remain_pending_while_returned_children_are_saved() -> None:
-    result = transport.RedditHttpClient(session=Session(initial(more("a", "b")), expanded(comment("b")))).get_comments(
-        "post1"
-    )
+    result = transport.RedditHttpClient(
+        session=Session(initial(more("a", "b")), expanded(comment("b")), Response(listing()))
+    ).get_comments("post1")
     assert result["unresolved_ids"] == ["a"]
     assert [row["reddit_comment_id"] for row in result["comments"]] == ["b"]
 
@@ -537,7 +537,9 @@ def test_continuation_preserves_absolute_depth_and_saves_new_frontier() -> None:
             initial(nodes),
             initial(
                 comment(
-                    "k", "t1_j", depth=0,
+                    "k",
+                    "t1_j",
+                    depth=0,
                     replies=listing(comment("l", "t1_k", depth=1, replies=listing(more(parent="t1_l")))),
                 )
             ),
@@ -676,3 +678,122 @@ def test_legacy_comment_wrapper_returns_completed_shared_rows(monkeypatch: pytes
 
     monkeypatch.setattr(reddit_refresh, "_HTTP_CLIENT", Client())
     assert reddit_refresh._fetch_post_comments_tree("post1") == [{"reddit_comment_id": "a"}]
+
+
+def test_omitted_deleted_and_removed_stubs_resolve_with_parent_graph_and_resume_evidence() -> None:
+    session = Session(
+        initial(comment("root", replies=listing(more("a", "b", parent="t1_root")))),
+        expanded(),
+        Response(
+            listing(
+                comment("a", "t1_root", body="[removed]", link_id="t3_post1"),
+                comment("b", "t1_root", body="[deleted]", link_id="t3_post1"),
+            )
+        ),
+    )
+    lanes = []
+
+    @contextmanager
+    def guard(lane):
+        lanes.append(lane)
+        yield
+
+    result = transport.RedditHttpClient(session=session, request_guard=guard).get_comments("post1")
+    assert result["complete"] is True
+    assert result["source_unavailable"] is False
+    assert result["unresolved_ids"] == []
+    assert [(r["parent_comment_id"], r["depth"]) for r in result["comments"][1:]] == [("root", 1), ("root", 1)]
+    assert result["evidence"]["expansion_requests"] == 2
+    assert result["evidence"]["unavailable_comments"] == [
+        {"comment_id": "a", "reason": "removed"},
+        {"comment_id": "b", "reason": "deleted"},
+    ]
+    assert session.calls[2]["params"] == {"id": "t1_a,t1_b", "raw_json": 1}
+    assert lanes == ["request", "morechildren", "morechildren"]
+    checkpoint = copy.deepcopy(result["evidence"]["checkpoint"])
+    resumed = transport.RedditHttpClient(session=Session()).get_comments("post1", checkpoint)
+    assert resumed["complete"] is True
+    assert resumed["evidence"]["unavailable_comments"] == result["evidence"]["unavailable_comments"]
+    assert checkpoint == result["evidence"]["checkpoint"]
+
+
+@pytest.mark.parametrize(
+    "node",
+    [
+        comment("b", body="[removed]", link_id="t3_other"),
+        comment("b", "t1_other", body="[deleted]", link_id="t3_post1"),
+        comment("other", body="[removed]", link_id="t3_post1"),
+        comment("t1_b", body="[removed]", link_id="t3_post1"),
+        comment("B", body="[removed]", link_id="t3_post1"),
+        comment(" b ", body="[removed]", link_id="t3_post1"),
+        comment("b", body="[removed]", link_id="t3_post1", replies=listing(more("c", parent="t1_b"))),
+        {"kind": "more", "data": {"id": "b", "parent_id": "t3_post1", "children": []}},
+        comment("b", body=None, link_id="t3_post1"),
+    ],
+)
+def test_invalid_info_lookup_is_atomic_and_keeps_valid_morechildren_progress(node) -> None:
+    result = transport.RedditHttpClient(
+        session=Session(
+            initial(more("a", "b", "c")),
+            expanded(comment("c")),
+            Response(listing(comment("a", body="[removed]", link_id="t3_post1"), node)),
+        )
+    ).get_comments("post1")
+    assert result["complete"] is False
+    assert result["unresolved_ids"] == ["a", "b"]
+    assert [r["reddit_comment_id"] for r in result["comments"]] == ["c"]
+    assert result["evidence"]["errors"]
+
+
+def test_info_lookup_absent_and_normal_comments_remain_unresolved() -> None:
+    result = transport.RedditHttpClient(
+        session=Session(
+            initial(more("a", "b", "c")),
+            expanded(),
+            Response(listing(comment("a", body="[removed]", link_id="t3_post1"), comment("b", link_id="t3_post1"))),
+        )
+    ).get_comments("post1")
+    assert result["complete"] is False
+    assert result["unresolved_ids"] == ["b", "c"]
+    assert result["evidence"]["unavailable_comments"] == [{"comment_id": "a", "reason": "removed"}]
+
+
+def test_info_lookup_does_not_exceed_shared_expansion_budget() -> None:
+    session = Session(initial(more("a")), expanded())
+    result = transport.RedditHttpClient(session=session, max_more_requests=1).get_comments("post1")
+    assert result["complete"] is False
+    assert result["unresolved_ids"] == ["a"]
+    assert len(session.calls) == 2
+    assert result["evidence"]["expansion_requests"] == 1
+
+
+def test_failed_info_lookup_keeps_pending_ids_and_saved_expansion() -> None:
+    result = transport.RedditHttpClient(
+        session=Session(
+            initial(more("a", "b")),
+            expanded(comment("b")),
+            Response({}, 503),
+            Response({}, 503),
+        )
+    ).get_comments("post1")
+    assert result["complete"] is False
+    assert result["unresolved_ids"] == ["a"]
+    assert [r["reddit_comment_id"] for r in result["comments"]] == ["b"]
+    assert result["evidence"]["checkpoint"]["pending_children"][0]["id"] == "a"
+
+
+def test_duplicate_info_stub_identity_is_not_consumed() -> None:
+    result = transport.RedditHttpClient(
+        session=Session(
+            initial(more("a")),
+            expanded(),
+            Response(
+                listing(
+                    comment("a", body="[removed]", link_id="t3_post1"),
+                    comment("a", body="[deleted]", link_id="t3_post1"),
+                )
+            ),
+        )
+    ).get_comments("post1")
+    assert result["unresolved_ids"] == ["a"]
+    assert result["comments"] == []
