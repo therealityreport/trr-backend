@@ -121,6 +121,24 @@ valid prior evidence; they do not supply missing January discovery, anonymous
 attachment retrieval or idempotent January canonical commit receipts. Full-history
 ingestion remains disabled until all acceptance gates pass.
 
+A separate normal-render control then allowed ordinary public CDN assets and
+naturally generated native read queries, with no injected requests or changed
+forms. It retained the same identity, gate, lease, budget, January fencing and
+stop controls; bounds were 16 document/API requests plus 80 assets, 96 total,
+within 90 seconds. Its focused installed-runtime fixture verified CSS rendering,
+asset routing, query/continuation acceptance, mutation rejection and separation
+of auxiliary responses from recognized profile data. The original restricted
+operator and results were preserved.
+
+The execution owner ran that control once. At 08:37:58 UTC it closed its account
+tranche with nine document/API and 55 asset requests, 53 recorded HTTP 200
+responses, zero recognized profile posts and zero canonical writes. It stopped
+with `response_inspection_failed`; the outer browser failure was
+`TargetClosedError`. No final DOM snapshot was captured. This is a local observer
+failure and an inconclusive control, not evidence of timeline exhaustion or
+source absence. The full-history gate was verified closed. No production change
+or further source attempt follows automatically from this result.
+
 Private current evidence references:
 
 - `trr-instagram-no-local-cooldown-01a16023/live-gif.json` and `live-core.json`.
@@ -135,5 +153,8 @@ Private current evidence references:
   and its preserved `early-observation-1` predecessor.
 - This task's `experiment-dependency-assessment.json` records retained caller
   locations, source hashes and the limits of the offline dependency finding.
+- `trr-instagram-settlement-01a16023/headless-public/anonymous-profile-browser-normal-control.json`
+  and `anonymous-profile-normal-ready.json` retain the separate control result
+  and its focused fixture proof.
 
 All paths above are under `/Users/thomashulihan/.codex/tmp/`.
