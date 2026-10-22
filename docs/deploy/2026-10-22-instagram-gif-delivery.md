@@ -139,6 +139,23 @@ failure and an inconclusive control, not evidence of timeline exhaustion or
 source absence. The full-history gate was verified closed. No production change
 or further source attempt follows automatically from this result.
 
+Offline follow-up verified the durable account-budget tranche lasted exactly
+90.017296 seconds. Its 64 admitted requests spanned 83.619497 seconds; page-action
+DOM inspection never ran. This strongly supports the observer work deadline as
+the stopping layer. The old callback did not retain its inner exception class
+or stage, so the precise operation and database-guard cost remain unknown.
+
+A separate local fixture reproduced the old observer's single-JSON parsing failure
+on a multipart auxiliary response. That is a demonstrated local failure path,
+not proof of the native response format. The private control repair leaves
+auxiliary bodies unparsed while preserving HTTP auth/rate/Retry-After stops and
+strict profile-response validation. It adds safe stage/class/content-category,
+deadline/lease and guard-duration diagnostics. The finite work budget is extended
+to 180 seconds with the same 16/80/96 request caps. A 55-asset fixture passed with
+the exact installed browser constructor; the focused profile-decoding, auxiliary
+body, HTTP-stop and deadline/lease checks passed without external requests.
+This prepares a diagnostic candidate; it does not establish live acceptance.
+
 Private current evidence references:
 
 - `trr-instagram-no-local-cooldown-01a16023/live-gif.json` and `live-core.json`.
@@ -156,5 +173,8 @@ Private current evidence references:
 - `trr-instagram-settlement-01a16023/headless-public/anonymous-profile-browser-normal-control.json`
   and `anonymous-profile-normal-ready.json` retain the separate control result
   and its focused fixture proof.
+- `anonymous-profile-normal-final-ready.json` and
+  `anonymous-profile-normal-final-repair.diff` in that same directory record
+  the private observer repair, exact hash and unchanged source-request bounds.
 
 All paths above are under `/Users/thomashulihan/.codex/tmp/`.
