@@ -1,12 +1,115 @@
 # Native GIF delivery repair and bounded anonymous acceptance
 
-Status: GIF repair committed, independently reviewed, deployed and installed.
-Bounded anonymous pagination is now verified through both a native browser and
-the normal public HTTP client for an ordered-grid candidate: 24 bound media IDs
-across two productive pages. The existing January listing activity returned HTTP
-401 with its frozen source contract; date/pin policy, January coverage and
-canonical acceptance remain unverified.
+Status: GIF repair committed, independently reviewed and preserved in Modal v119,
+`ig-ordered-public-9a093967b23d`. The ordered public adapter is deployed and its
+container checks passed. The matching Mac release is installed, and the January
+successor is running through the normal daemon. At 11:11 UTC (07:11 EDT) it had
+three committed native listing pages, 36 retained native dates and 47 counted
+requests, with the fourth page active. Bounded
+anonymous pagination is verified through both a native browser and the normal
+public HTTP client: 24 bound media IDs across
+two productive pages. January coverage, canonical acceptance and fresh anonymous
+GIF retrieval remain unverified.
 Full-history stays disabled.
+
+## Reviewed ordered adapter and v119 release
+
+The complete independent review covered the 12-file ordered adapter batch and the
+three private January control/observation operators. One owner-proof defect was
+fixed: request-account fallback could supply an owner absent from the native
+detail response. The adapter now requires an actual unwrapped native owner,
+preserves collaborator ownership and joins native owner IDs to the listing card.
+The fix-only review accepted the change and reused its 15 passing affected checks;
+unchanged source checks were not repeated. No review findings remain.
+
+The operational recovery overlay retains the identical reviewed additive evidence
+reader. A narrow probe verified actual `Queries.evidence` readback of retained
+ordered SSR/API roots, pin facts, native detail owner/date, original capture clock
+and hashes. All three new-family source factories fail closed during recovery.
+The execution owner must hold and drain the successor before recovery, and restore
+the accepted candidate before new-family source execution or semantic replay.
+The older two-file v118 overlay is historical material only.
+
+Modal v119 was verified at 2026-10-22 10:49 UTC in
+`admin-56995 / main / trr-backend-jobs`. The frozen identity covers 2,656 files,
+based on HEAD `d65d1f9f1e8f4b05549e6b4c2b68bd115d967d04` plus the recorded maintained
+dirty source and reviewed patch. The deployment receipt records those inputs;
+the release is not represented by that Git commit alone.
+
+Readiness passed for explicit environment `main`; API health returned HTTP 200 on
+the first attempt. The actual API image `im-6BznD2aBD4LLE0uSdQSZV8` matched all 68
+expected module hashes and passed synthetic source-contract, native date/owner,
+page-limit, wait-policy and full-history guard checks. A fresh API container on
+the same image passed GIF signed-delivery retention, credential exclusion and
+look-alike host rejection. The 38 function bindings and five schedules remain
+unchanged. These smoke checks made zero Instagram requests or database writes;
+they do not prove fresh anonymous GIF retrieval or January completion.
+
+Compatible recovery identity: `ig-ordered-compatible-recovery-9a1e08cf15e0`.
+It preserves the four accepted newer maintained runtime repairs and the reviewed
+evidence reader. Recovery remains retained material, not an additional active
+worker. The execution owner owns worker continuation and January acceptance. No
+schema change or TRR-APP build is required for this backend-only release.
+
+Private rollout receipt:
+`/Users/thomashulihan/.codex/tmp/trr-instagram-ordered-01a16023/release/deployment-receipt.json`.
+Review and recovery proofs are in its parent task directory.
+
+## Installed release and first January successor activity
+
+The execution owner verified all 2,656 installed source files and relocated the
+41 virtual-environment entrypoints for the matching Mac release. The real
+successor plan passed before control changes. Old run
+`c5880efe-25cf-4aeb-999a-efc36a0b9701` is cancelled at generation 6 under an
+obsolete-contract hold; its original intent and non-lease target history are
+preserved. New ROOT run `2aef72ed-110c-4af9-b2b3-4a45da170a32` is generation 1,
+with intent hash
+`10746e1197ea8b5f7272a90c662a2d1ebfd6e36a8a01cda4be1c73be428b9fc4`.
+Only the source profile differs. The January window, tasks, force=false,
+one detail worker, one comment worker and disabled media followups remain intact.
+
+The first normal production activity exited successfully and stopped at the
+requested boundary. It committed one listing receipt and one discovery page
+after 13 counted source requests, with no retry deadline. At the 11:02:23 UTC
+observation, the successor was running with one unresolved continuation target,
+zero active owners and zero uncertain dispatches. One settled dispatch remains
+as audit history. The private read-only observer was corrected to distinguish
+these retained settled rows from active unresolved work; its narrow SQL review
+matched the existing execution guard. This changed no runtime or business state.
+
+No January detail targets or comment pages existed at that observation. The
+first page proves real native listing and per-card date hydration; it does not
+prove January coverage, downstream canonical idempotence or fresh anonymous GIF
+retrieval. Continuous worker state is owned by the execution chat. Full-history
+remains disabled.
+
+Private control and observation evidence:
+`/Users/thomashulihan/.codex/tmp/trr-instagram-settlement-01a16023/headless-public/`,
+specifically `january-ordered-successor.json`,
+`first-january-ordered-activity-result.json` and
+`after-first-january-ordered-activity.json`.
+
+The later `after-daemon-start.json` observation at 11:08:23 UTC verified the
+normal daemon online from the exact new release. It reported two committed
+listing receipts, two native discovery pages and 33 counted requests across
+three attempts, with the third page active. The native cursor advanced. No
+blocked reason, source error or retry deadline was present. January detail and
+comment targets remained zero while the run traversed the latest October posts.
+The daemon's PID, installed working directory and launch-agent definition were
+verified by its sole execution owner. The apparent process-argument discrepancy
+was the macOS Homebrew Python application path; no restart was needed. This is
+healthy bounded traversal, not completed January results. Full-history was still
+closed in the live observation.
+
+The `verified-date-traversal.json` receipt at 11:11:00 UTC (07:11 EDT) confirms
+continued progress: three committed native pages, 36 retained native card dates
+and 47 counted source requests, with a fourth listing attempt active. The oldest
+actual date was 2026-10-05T17:59:32Z; the newest was 2026-10-22T02:00:01Z.
+The worker remained online with no blocked reason, source error or retry
+deadline. No January targets existed yet. These are native date observations,
+not dates inferred from card IDs or a claim that ordered chronology is certified.
+January completion and fresh anonymous GIF acceptance remain open, and full-history
+remains disabled. Runtime continuation belongs to the execution owner.
 
 ## Repair
 

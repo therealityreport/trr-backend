@@ -75,6 +75,10 @@ class Worker:
             raise TypeError("Detail cache must return a typed eligibility decision")
         if not decision.eligible:
             return None
+        from trr_backend.ingestion.ordered_listing import is_ordered
+
+        if is_ordered(RunIntent.from_payload(context["run"]["intent"])) and decision.evidence_reference is None:
+            return None
         if decision.observed_at is None or decision.observed_at.utcoffset() is None:
             raise ValueError("Cache settlement requires its original source observation")
         if any(not decision.canonical_identity.get(key) for key in ("post_id", "catalog_post_id", "canonical_post_id")):
@@ -140,13 +144,24 @@ class Worker:
                 source = factory(context, owned)
             return source(**callbacks)
 
+        def fetch_listing_detail(**callbacks):
+            nonlocal source
+            if source is None:
+                source = self.listing_source(context, owned)
+            method = getattr(source, "fetch_detail", None)
+            if not callable(method):
+                raise ValueError("Ordered listing source has no serial permalink provider")
+            return method(**callbacks)
+
         try:
             context = self.context(owned)
             if deadline_callback:
                 deadline_callback(context["target"]["owner_expires_at"])
             if owned["stage"] == Stage.LISTING:
                 result = ListingActivity(self.store).execute(
-                    **args, fetch=lambda **kw: fetch(self.listing_source, **kw)
+                    **args,
+                    fetch=lambda **kw: fetch(self.listing_source, **kw),
+                    fetch_detail=fetch_listing_detail,
                 )
             elif owned["stage"] == Stage.DETAILS:
                 result = self.cached_detail(context, owned)
@@ -183,7 +198,7 @@ class Worker:
                     close = getattr(storage.client, "close", None)
                     if close:
                         close()
-            if result.get("outcome") == "unresolved":
+            if result.get("outcome") == "unresolved" and not result.get("ordered_held"):
                 failure = result.get("failure")
                 if not isinstance(failure, Failure):
                     self.release(

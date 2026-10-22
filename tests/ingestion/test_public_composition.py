@@ -73,6 +73,33 @@ def test_frozen_adapter_routing_ignores_worker_environment(monkeypatch, mode):
     assert captures[-1][1]["expected_count"] == 7
 
 
+def test_ordered_public_factory_uses_only_explicit_frozen_profile_and_same_gate(monkeypatch):
+    from trr_backend.ingestion import ordered_listing_transport
+
+    captured = []
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_SCRAPE_MODE", "authenticated")
+    monkeypatch.setattr(composition, "_public_source_parts", lambda *_: {"gate": "same-public-gate"})
+    monkeypatch.setattr(
+        composition, "_credentials", lambda *_: pytest.fail("ordered public family must not load credentials")
+    )
+    monkeypatch.setattr(
+        ordered_listing_transport,
+        "OrderedListingSource",
+        lambda **kw: captured.append(kw) or SimpleNamespace(**kw),
+    )
+    actual = context("public")
+    actual["run"]["intent"]["source_profile"] = asdict(SourceProfile.for_public_ordered())
+    actual["run"]["intent"].update(
+        scope="bounded_window", date_start="2026-01-01T00:00:00Z", date_end="2026-02-01T00:00:00Z"
+    )
+    actual["target"]["checkpoint"] = {"ordered_profile": {"id": "opaque-native-id", "pk": "123"}}
+    result = composition._listing(actual, {"account": "bravotv", "target_key": "page:root"})
+    assert result.gate == "same-public-gate"
+    assert captured == [
+        {"account": "bravotv", "profile": {"id": "opaque-native-id", "pk": "123"}, "gate": "same-public-gate"}
+    ]
+
+
 @pytest.mark.parametrize("value", [None, "public_first", "public", "logged_out", "no-login", ""])
 def test_new_launch_uses_maintained_public_default_and_aliases(monkeypatch, value):
     if value is None:

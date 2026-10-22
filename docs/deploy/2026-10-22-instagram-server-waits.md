@@ -1,6 +1,6 @@
 # Instagram server waits and January recovery — October 22, 2026
 
-Status at 07:48 UTC: the permanent removal of local Instagram penalty cooldowns is deployed and installed. January ingestion resumed past the obsolete wait but its first anonymous GraphQL POST returned HTTP 401. January is **not complete**. Full-history ingestion remains disabled. The worker/control owner is investigating the anonymous listing contract with the separate offline contract reconstruction owner; no repeated source request is authorized by this report.
+Status at 11:13 UTC: the permanent removal of local Instagram penalty cooldowns remains deployed and installed. Modal v119 and the matching Mac release now use the reviewed anonymous ordered-profile adapter. The normal worker is online and the January successor has committed four listing pages and receipts, with 59 counted requests and a fifth page active. There is no blocked reason or retry deadline. January is **not complete**: traversal is still in October and January downstream targets have not been created. Full-history ingestion remains disabled. The earlier HTTP 401 and zero-page state below are preserved historical evidence.
 
 ## Policy and source
 
@@ -39,7 +39,7 @@ Modal v117 (`ig-no-local-cooldown-api-e6c04618e3a7`) passed the required `main` 
 
 The frozen manifest, rather than a clean shared checkout revision, identifies the complete deployed source. Backend commit fa8c4f74 identifies only this task's owned changes. No TRR-APP build was needed: this change modifies backend source policy and runtime admission, with no app response-contract change.
 
-## January execution and preservation
+## Historical January execution through 07:48 UTC
 
 Existing run: `c5880efe-25cf-4aeb-999a-efc36a0b9701`, generation 5, immutable intent hash `12148e35aeae0182696be90e610584e95d0cf67532c24c4320c458bb6cb2afb7`. Scope remains January 1 inclusive through February 1 exclusive, 2026 UTC; anonymous public local execution; details/comments/media selected; one details worker, one comments worker; media followups false.
 
@@ -66,3 +66,53 @@ The 37 unrelated job-runner/auto-public test failures reproduced with the unchan
 Private operational receipts are under `/Users/thomashulihan/.codex/tmp/trr-instagram-no-local-cooldown-01a16023/`: `migration-applied.json`, `january-timer-reconciled.json`, `live-core.json`, `live-gif.json`, `release-api/deploy.log`, `release-api/api-closure.json`, `release-current/manifest.json`, `release-current/preservation.json`, and `release-current/live-modal-delta.json`. The matching adopted source is `/Users/thomashulihan/.codex/tmp/trr-reddit-periods-01a16033/source`.
 
 Worker-owner receipts are under `/Users/thomashulihan/.codex/tmp/trr-instagram-settlement-01a16023/headless-public/`: `integrated-control-before.json`, `first-january-activity-result.json`, and `after-first-january-activity.json`. The first activity result, raw provider rejection, and zero-page outcome remain failure evidence, not successful ingestion.
+
+## Ordered public rollout and verified continuation
+
+The recovery replaced the obsolete listing contract with an explicit new root. It did not reinterpret an old cursor or change the public-mode default. The new frozen family is `instagram_profile_ordered_public`, source contract 2 / adapter 1; details and comments retain their existing public families. This family requires an explicit bounded date window.
+
+Native grid cards establish membership. Separate retained native permalink evidence establishes dates and actual owners; the adapter does not add fabricated timestamps to grid responses. Partial hydration survives a retry without advancing the cursor. Cache reuse requires original retained evidence, matching identities, valid freshness and force policy, and original capture clocks. Out-of-window captures do not write canonical posts or downstream targets.
+
+The traversal is capped at 1,024 committed native pages. The accepted window boundary requires observed January membership followed by three fully dated, monotone pages entirely before January 1, excluding known pins. Missing pin facts remain unknown. Its evidence label is `ordered_window_crossing_heuristic_v1`; it is not certified chronology or provider exhaustion. An access boundary, missing proof, repeated cursor or page cap remains unresolved.
+
+### Source, review and deployment
+
+The maintained-source candidate is `ig-ordered-public-9a093967b23d`, with 2,656 files and file-map SHA-256 `9a093967b23d8597c5586336f429ab157d167ea1a348dac897b121258dc95230`. It records HEAD `d65d1f9f1e8f4b05549e6b4c2b68bd115d967d04`, owned patch `a198846217e039c83cc0bc1e76af883e865ce3238fda06363395d6f7e9dc7a47`, and the complete preserved dirty scope. The full manifest identifies the deployed combined source; a scoped local commit alone does not identify all previously accepted authentication and attachment work.
+
+The candidate preserves all 2,645 prior release paths, with 21 classified changes and 11 declared additions. Four newer maintained runtime files include six reviewed repairs: due sync retry, cookie domain boundaries, Threads session resolution off the event loop, Twitter search error propagation, comment-mirror conflict/savepoint handling, and per-anchor Twitter/YouTube transactions. Eighteen focused checks and Ruff passed. Reversing those six patches from private copies exactly reproduced the prior four runtime files. One read-only metadata query against verified `trr-core` confirmed the existing comment-mirror unique index is valid, ready, and matches the corrected expression and predicate. No schema or data mutation was needed for this adapter rollout.
+
+Independent review found one native-owner proof gap. The fix reads the actual unwrapped native detail node without a request-account fallback, rejects missing or mismatched required owner identities, and preserves actual collaborator owners. Fifteen affected checks passed, including wrapped and missing-owner cases and affected PostgreSQL/cache/worker paths. The fix-only review and narrow recovery follow-up found no remaining issue. Passing checks on unchanged inputs were reused.
+
+Modal **v119**, tag `ig-ordered-public-9a093967b23d`, deployed at 10:44:24 UTC to `admin-56995/main/trr-backend-jobs`, app `ap-DkLTRoSvqhbkGO7fHyHxrD`. The required deployment wrapper completed `verify_modal_readiness.py --json --env main` successfully and the health canary returned 200 on its first attempt. All 38 function bindings and five schedules match the prior provider snapshot; the accepted deployment flags are unchanged.
+
+Actual deployed API image `im-6BznD2aBD4LLE0uSdQSZV8` matched 68 expected module hashes and passed the new source-family, native date/owner, page-cap, server-wait and full-history guards. A fresh API container on the same image passed GIF selection, signed delivery URL retention, credential exclusion and lookalike-host checks. These runtime smokes made zero Instagram requests and zero database writes. Container start times, app membership, API-function health logs and actual image/source hashes bind this proof to v119; no locally built `Image.run` result is claimed as deployed proof.
+
+### Installed worker and successor
+
+The matching Mac release has all 2,656 source files verified and 41 virtual-environment entrypoints relocated. The normal launchd worker started at 11:05:02 UTC, PID 71400, with the exact release as its working directory. The macOS process image resolves to Homebrew `Python.app`; the installed script path, working directory and source hashes establish the release identity. No restart was made for the earlier absolute-argv false negative.
+
+The predecessor `c5880efe-25cf-4aeb-999a-efc36a0b9701` is cancelled at generation 6 and held with `superseded_public_ordered_contract`. Its original intent and non-lease target history remain preserved. The clean successor is `2aef72ed-110c-4af9-b2b3-4a45da170a32`, generation 1, intent hash `10746e1197ea8b5f7272a90c662a2d1ebfd6e36a8a01cda4be1c73be428b9fc4`. Only the source profile differs from the original January choices: network scope, January 1 inclusive to February 1 exclusive UTC, force false, details/comments/media selected, one detail and one comment worker, comment media follow-ups false, and attempt budgets 12/12/3.
+
+The first normal installed-worker activity committed a real listing page with 13 counted requests, one receipt, one discovery page and 12 native detail dates. It stopped at the planned boundary. A committed target retains its owner token as receipt provenance; `local_dispatch_status` treats an exact receipt or settled outcome as settled before dispatch. The normal daemon replayed the journal without refetching the root. No manual clearing or retry was needed.
+
+| Observed time | Verified result |
+| --- | --- |
+| 11:09:30 UTC | Root unchanged at one attempt / 13 requests; second page committed at one attempt / 14 requests; third page active at one attempt / 12 requests. All target blocked reasons and retry deadlines null. Two committed pages contain 24 native IDs; the newest committed page added 12 with zero overlap. |
+| 11:11 UTC | Three committed pages and 36 retained per-card dates were read through `Evidence.read` and the native parser. Dates span October 5 at 17:59:32 UTC through October 22 at 02:00:01 UTC. Total requests 47, with the fourth page active. |
+| 11:13:13 UTC | Worker online; four committed listing pages, discovery pages and receipts; 59 requests; fifth target active. No blocked or retry fields. Full-history gate closed. |
+
+The observer's earlier `errors` count grouped all unresolved targets, including healthy active work. It was not an error count: blocked reason, last error code and retry deadline were null. The private read-only observer now separates unresolved activity from settled receipt history; no business code or stored run state was changed for that correction.
+
+January membership has not yet been observed. Details, comments and media targets for January remain zero while listing traverses October. The coverage remains unsealed, `provider_exhausted=false`, and `chronology_certified=false`. These pages prove resumed production execution, not January completion.
+
+### Recovery and remaining verification
+
+The compatible recovery archive and complete manifest are verified. They preserve the four newer runtime repairs and retain the identical reviewed additive evidence sanitizer. Actual `Queries.evidence` and `Evidence.read` checks against synthetic stored SSR/API roots, pin facts and native detail dates passed. The parent must hold and drain the successor before applying recovery. Run rows, frozen intents, cursors and evidence remain preserved; new-family execution and semantic replay/apply stay disabled until the accepted candidate is restored. Raw v118 alone is historical recovery material, not a direct operational rollback.
+
+The obsolete v112 worker was checked for process, working-directory and plist references, then moved to actual Trash. The new installed release and prior e609 release are the only two runnable copies. The verified compatible recovery material remains available separately.
+
+The January owner remains the sole runtime controller while active. The existing quiet 15-minute heartbeat follows the exact successor, coordinates authorized diagnosis and recovery, and continues until actual January canonical posts, comments/replies and selected media are verified. It must not restart the predecessor, duplicate native requests, invent cooldown timers or enable full-history ingestion.
+
+Backend/API rollout verification passed. TRR-APP build: not applicable; the internal source family does not change the app API projection. No direct-SQL ownership changed. No browser was used for this rollout verification.
+
+Current release receipts: `/Users/thomashulihan/.codex/tmp/trr-instagram-ordered-01a16023/release/manifest.json`, `deployment-receipt.json`, `preservation.json`, and `recovery-manifest.json`. Source review, focused check logs, index metadata proof and recovery inspection proof are in the parent task directory. Current runtime receipts are under `/Users/thomashulihan/.codex/tmp/trr-instagram-settlement-01a16023/headless-public/`: `january-ordered-successor.json`, `january-ordered-daemon-start.json`, `after-daemon-start.json`, `daemon-continuation-proof.json`, `verified-date-traversal.json`, `latest-runtime-progress.json`, and `integrated-rollout-status.json`.

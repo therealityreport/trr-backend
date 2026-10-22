@@ -170,6 +170,80 @@ class DetailCache:
     def __init__(self, read_connection: Callable):
         self.read_connection = read_connection
 
+    def lookup_listing_card(self, run_id: str, account: str, *, card, now: datetime):
+        """Strict retained-detail proof for an already natively enumerated card.
+
+        Unlike the ordinary detail target cache, this read precedes downstream
+        target creation. Eligibility alone is insufficient: a readable original
+        capture must bind the card's native ID, shortcode and actual owner.
+        """
+        from trr_backend.ingestion.ordered_listing import date_proof, is_ordered
+        from trr_backend.ingestion.providers import InvalidSourceError
+
+        current = _time(now)
+        with self.read_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """select r.intent,to_jsonb(p) as post,to_jsonb(s) as sidecar,
+                p.id as post_id,c.id as catalog_post_id,q.id as canonical_post_id
+                from social.instagram_ingestion_runs r
+                left join social.instagram_posts p on p.shortcode=%s
+                    and lower(ltrim(trim(coalesce(nullif(p.source_account,''),p.username)), '@'))=r.account
+                left join social.instagram_post_payloads s on s.post_id=p.id
+                left join social.instagram_account_catalog_posts c on c.source_id=%s
+                    and lower(ltrim(trim(c.source_account), '@'))=r.account
+                left join social.social_post_legacy_refs l on l.platform='instagram'
+                    and l.legacy_schema='social' and l.legacy_table='instagram_posts'
+                    and l.legacy_pk=p.id::text and l.legacy_source_id=%s
+                left join social.social_posts q on q.platform='instagram' and q.id=l.post_id
+                    and q.source_id=%s
+                where r.run_id=%s and r.account=%s""",
+                (card.shortcode, card.shortcode, card.shortcode, card.shortcode, run_id, account),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise LookupError("Listing run not found for this account")
+            intent = RunIntent.from_payload(row["intent"])
+            if not is_ordered(intent) or intent.account != account:
+                raise ValueError("Listing date cache requires the exact ordered source contract")
+            decision = detail_eligibility(
+                post=row["post"],
+                sidecar=row["sidecar"],
+                intent=intent,
+                now=current,
+                canonical_identity={key: row[key] for key in ("post_id", "catalog_post_id", "canonical_post_id")},
+            )
+            if not decision.eligible:
+                return None
+            cur.execute(
+                """select e.*,r.state as source_run_state from social.instagram_ingestion_evidence e
+                join social.instagram_ingestion_runs r using(run_id)
+                where r.account=%s and e.source_identity=%s and e.stage in ('post_details','listing')
+                    and e.captured_at=%s and e.payload is not null
+                order by (e.run_id=%s) desc,e.evidence_id limit 8""",
+                (account, f"instagram:post:{card.shortcode}", decision.observed_at, run_id),
+            )
+            for retained in cur.fetchall():
+                reference = _evidence_reference(retained, target_key=card.shortcode, now=current)
+                if reference is None:
+                    continue
+                reference.update(stage=retained["stage"], target_key=retained["target_key"])
+                evidence = Evidence(
+                    source_identity=retained["source_identity"],
+                    captured_at=retained["captured_at"],
+                    parser_version=retained["parser_version"],
+                    payload_json=retained["payload"],
+                    content_hash=retained["content_hash"],
+                    schema_version=retained["schema_version"],
+                )
+                try:
+                    evidence.read(now=current)
+                    return date_proof(
+                        card, evidence, reference, account=account, canonical_identity=decision.canonical_identity
+                    )
+                except (InvalidSourceError, ReplayUnavailable, ValueError):
+                    continue
+            return None
+
     def lookup(
         self,
         run_id: str,
@@ -214,17 +288,23 @@ class DetailCache:
             )
             if not decision.eligible:
                 return decision
+            from trr_backend.ingestion.ordered_listing import is_ordered
+
+            ordered = is_ordered(intent)
             cur.execute(
                 """select e.*,r.state as source_run_state from social.instagram_ingestion_evidence e
                 join social.instagram_ingestion_runs r using(run_id)
-                where r.account=%s and e.stage='post_details' and e.target_key=%s
+                where r.account=%s and ((e.stage='post_details' and e.target_key=%s)
+                    or (%s and e.stage='listing' and e.source_identity=%s))
                     and e.captured_at=%s and e.payload is not null
                 order by (e.run_id=%s) desc,e.evidence_id limit 8""",
-                (account, target_key, decision.observed_at, run_id),
+                (account, target_key, ordered, f"instagram:post:{target_key}", decision.observed_at, run_id),
             )
             for retained in cur.fetchall():
                 reference = _evidence_reference(retained, target_key=target_key, now=current)
                 if reference:
+                    if ordered:
+                        reference.update(stage=retained["stage"], target_key=retained["target_key"])
                     return DetailCacheDecision(
                         decision.eligible,
                         decision.reason,

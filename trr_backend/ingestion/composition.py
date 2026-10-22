@@ -546,6 +546,16 @@ def _listing(context, owned):
     from trr_backend.ingestion.post_transport import ScraplingListingSource
 
     if _source_profile(context).access_mode == "public":
+        from trr_backend.ingestion.domain import SourceProfile
+
+        if _source_profile(context) == SourceProfile.for_public_ordered():
+            from trr_backend.ingestion.ordered_listing_transport import OrderedListingSource
+
+            return OrderedListingSource(
+                account=owned["account"],
+                profile=context["target"]["checkpoint"].get("ordered_profile"),
+                **_public_source_parts(context, owned),
+            )
         from trr_backend.ingestion.public_transport import PublicListingSource
 
         return PublicListingSource(account=owned["account"], **_public_source_parts(context, owned))

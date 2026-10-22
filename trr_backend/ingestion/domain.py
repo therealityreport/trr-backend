@@ -78,11 +78,21 @@ class SourceProfile:
                 "instagram_comments_rest",
             ),
         }
+        ordered_public = (
+            self.access_mode == "public"
+            and (self.listing_family, self.details_family, self.comments_family)
+            == ("instagram_profile_ordered_public", "instagram_permalink_public", "instagram_public_relay")
+            and type(self.source_contract_version) is int
+            and self.source_contract_version == 2
+        )
         if (
             self.access_mode not in families
-            or (self.listing_family, self.details_family, self.comments_family) != families[self.access_mode]
+            or (
+                not ordered_public
+                and (self.listing_family, self.details_family, self.comments_family) != families[self.access_mode]
+            )
             or type(self.source_contract_version) is not int
-            or self.source_contract_version != 1
+            or (self.source_contract_version != 1 and not ordered_public)
             or type(self.adapter_version) is not int
             or self.adapter_version != 1
         ):
@@ -102,6 +112,17 @@ class SourceProfile:
                 "instagram_comments_rest",
             )
         raise ValueError("Unsupported Instagram access mode")
+
+    @classmethod
+    def for_public_ordered(cls) -> SourceProfile:
+        """Explicit root-start contract; never a changed public-mode default."""
+        return cls(
+            "public",
+            "instagram_profile_ordered_public",
+            "instagram_permalink_public",
+            "instagram_public_relay",
+            source_contract_version=2,
+        )
 
 
 @dataclass(frozen=True)
@@ -154,6 +175,10 @@ class RunIntent:
             object.__setattr__(self, "date_end", None)
         if self.date_start and self.date_end and self.date_start >= self.date_end:
             raise ValueError("date_start must precede date_end")
+        if self.source_profile == SourceProfile.for_public_ordered() and (
+            self.scope != "bounded_window" or self.date_start is None or self.date_end is None
+        ):
+            raise ValueError("Ordered public listing requires an explicit bounded date window")
         if not 1 <= self.metadata_ttl_days <= 365 or self.metrics_ttl_hours != 24 or self.policy_version != 1:
             raise ValueError("Unsupported freshness policy")
         if self.detail_worker_count is not None and not 1 <= self.detail_worker_count <= 12:

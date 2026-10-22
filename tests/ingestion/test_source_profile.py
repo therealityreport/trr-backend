@@ -1,6 +1,7 @@
 """Frozen transport selection and historical intent compatibility."""
 
 from dataclasses import FrozenInstanceError, asdict
+from datetime import UTC, datetime
 
 import pytest
 from test_command_service import launch, persisted, service
@@ -37,6 +38,30 @@ def test_historical_intent_retains_exact_payload_and_digest():
     assert restored.payload() == original
     assert restored.digest == fingerprint(original)
     assert restored.effective_source_profile == SourceProfile.for_mode("authenticated")
+
+
+def test_ordered_profile_is_explicit_versioned_and_does_not_change_public_default():
+    old = SourceProfile.for_mode("public")
+    profile = SourceProfile.for_public_ordered()
+    assert old.listing_family == "instagram_profile_graphql_public"
+    assert old.source_contract_version == old.adapter_version == 1
+    assert profile.listing_family == "instagram_profile_ordered_public"
+    assert profile.source_contract_version == 2 and profile.adapter_version == 1
+    assert profile.details_family == old.details_family and profile.comments_family == old.comments_family
+    original = RunIntent(account="bravotv", source_profile=old)
+    ordered = RunIntent(
+        account="bravotv",
+        source_profile=profile,
+        scope="bounded_window",
+        date_start=datetime(2026, 1, 1, tzinfo=UTC),
+        date_end=datetime(2026, 2, 1, tzinfo=UTC),
+    )
+    assert RunIntent.from_payload(ordered.payload()) == ordered
+    assert ordered.digest != original.digest
+    with pytest.raises(ValueError):
+        SourceProfile(**(asdict(profile) | {"source_contract_version": 1}))
+    with pytest.raises(ValueError):
+        RunIntent(account="bravotv", source_profile=profile)
 
 
 @pytest.mark.parametrize("mode", ["public", "authenticated"])
@@ -101,3 +126,22 @@ def test_api_projects_internal_profile_without_changing_frozen_intent(database, 
     assert persisted(database, created.run_id) == before
     internal = subject.queries.progress(str(created.run_id), "bravotv")
     assert internal["intent"]["source_profile"] == asdict(SourceProfile.for_mode(mode))
+
+
+def test_ordered_successor_profile_reads_through_queries_and_api_without_changing_projection(database):
+    profile = SourceProfile.for_public_ordered()
+    subject = service(database, source_profile=profile)
+    created = launch(
+        subject,
+        {
+            "backfill_scope": "bounded_window",
+            "date_start": "2026-01-01T00:00:00Z",
+            "date_end": "2026-02-01T00:00:00Z",
+        },
+    )
+    internal = subject.queries.progress(str(created.run_id), "bravotv")
+    public = subject.progress("bravotv", created.run_id)
+    assert internal["intent"]["source_profile"] == asdict(profile)
+    assert "source_profile" not in public.intent.model_dump()
+    assert public.intent_hash == RunIntent.from_payload(internal["intent"]).digest
+    assert public.intent.force is False

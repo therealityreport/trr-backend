@@ -180,6 +180,12 @@ hosted_url content_hash
 """.split()
 )
 
+# Versioned ordered public-profile source fragments. No document bootstrap,
+# request form, viewer state or response headers enter this content projection.
+CONTENT_KEYS |= frozenset(
+    {"xig_user_by_username", "polaris_ordered_timeline_connection", "pinned", "is_pinned_to_profile"}
+)
+
 CONTENT_KEYS |= frozenset(
     """
 media_result outcome post_fields asset_manifest originals cover display_variants selection_policy

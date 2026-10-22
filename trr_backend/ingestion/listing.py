@@ -194,6 +194,7 @@ class ListingActivity:
         target_key: str,
         owner_token: str,
         fetch: Callable[..., dict[str, Any]],
+        fetch_detail: Callable | None = None,
     ) -> dict[str, Any]:
         owned = {
             "run_id": run_id,
@@ -227,6 +228,12 @@ class ListingActivity:
         cursor = checkpoint["cursor"]
         if target_key != ("page:root" if cursor is None else page_target(cursor)):
             raise Conflict("Listing page identity differs from its cursor checkpoint")
+        from trr_backend.ingestion.ordered_listing import OrderedListingActivity, is_ordered
+
+        if is_ordered(intent):
+            return OrderedListingActivity(self.store, writer=self.writer, clock=self.clock).execute(
+                owned=owned, run=run, intent=intent, target=target, fetch=fetch, fetch_detail=fetch_detail
+            )
         retained: dict[str, tuple[Evidence, str]] = {}
 
         def source_observer(payload: dict[str, Any], metadata: dict[str, Any] | None = None):
