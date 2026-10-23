@@ -22,6 +22,10 @@ def database(base_database):
     store, transaction = base_database
     with transaction() as conn, conn.cursor() as cur:
         cur.execute((ROOT / "supabase/migrations/20261016070100_instagram_ingestion_workflows.sql").read_text())
+        cur.execute(
+            (ROOT / "supabase/migrations/20261016173915_instagram_ingestion_execution_placement.sql").read_text()
+        )
+        cur.execute((ROOT / "supabase/migrations/20261023140000_instagram_execution_policy.sql").read_text())
         cur.execute("""create table social.scrape_jobs(id uuid primary key,run_id uuid,platform text,
             config jsonb not null default '{}',metadata jsonb not null default '{}',job_type text,
             status text,worker_id text,claimed_at timestamptz,completed_at timestamptz,
@@ -29,6 +33,7 @@ def database(base_database):
             create table social.account_auth_cooldown(platform text,account_handle text,cooldown_until timestamptz,
             blocker_kind text default 'auth');
         """)
+        cur.execute((ROOT / "supabase/migrations/20261023141000_instagram_admission_candidates.sql").read_text())
         cur.execute((ROOT / "supabase/migrations/20260911121000_instagram_detail_request_lanes.sql").read_text())
         cur.execute((ROOT / "supabase/migrations/20261022120000_instagram_server_retry_after.sql").read_text())
     return store, transaction
@@ -506,3 +511,76 @@ def test_full_history_validation_gate_denies_dispatch_before_capacity_probe(data
     subject, probes = admission(database)
     assert not subject.admit(dict(run, account="bravotv", stage="post_details", target_key="candidate"))
     assert probes == []
+
+
+@pytest.mark.parametrize("lease", ["malformed", " "])
+def test_old_terminal_malformed_lease_remains_fail_closed(database, lease):
+    item = candidate(database, stage="comments")
+    legacy(
+        database,
+        "comments",
+        status="completed",
+        metadata={"dispatch": {"remote_invocation_status": "unknown", "lease_expires_at": lease}},
+    )
+    set_legacy_activity(database, hours_ago=25)
+    subject, probes = admission(database)
+    assert not subject.admit(item)
+    with pytest.raises(ServiceUnavailableError):
+        subject.validate_launch("bravotv", InstagramIngestionLaunchV2())
+    assert probes == []
+
+
+def test_candidate_prefilter_preserves_busy_counts_with_large_history(database):
+    sql(
+        database,
+        """insert into social.scrape_jobs(id,platform,config,status,metadata,created_at)
+        select gen_random_uuid(),'instagram','{"stage":"comments"}'::jsonb,'completed',
+          jsonb_build_object('payload',repeat(md5(n::text),100),
+            'dispatch',jsonb_build_object('remote_invocation_id','old','remote_invocation_status','unknown')),
+          clock_timestamp()-interval '25 hours' from generate_series(1,2000) n""",
+    )
+    legacy(database, "comments", count=2, status="RuNnInG")
+    legacy(database, "comments", status="unexpected", metadata={"dispatch": _HISTORICAL_DISPATCHES[1]})
+    legacy(database, "comments", platform="youtube")
+    subject, _ = admission(database)
+    counts = subject._snapshot("bravotv")["counts"]
+    assert sum(row["total"] for row in counts) == 4
+    assert sum(row["total"] for row in counts if row["platform"] == "instagram") == 3
+    assert sql(database, "select count(*) from social.scrape_jobs") == [(2004,)]
+
+
+def test_current_local_policy_allows_two_but_preserves_physical_cap(database):
+    from trr_backend.ingestion.execution_policy import ExecutionPolicy
+
+    item = candidate(database, stage="comments", comments_workers=1)
+    sql(
+        database,
+        "update social.instagram_ingestion_runs set execution_placement='local' where run_id=%s",
+        (item["run_id"],),
+    )
+    original = sql(
+        database, "select intent_hash from social.instagram_ingestion_runs where run_id=%s", (item["run_id"],)
+    )[0][0]
+    ExecutionPolicy(database[1]).set_limits(
+        item["run_id"],
+        item["account"],
+        expected_generation=1,
+        expected_intent_hash=original,
+        expected_revision=0,
+        comments_parallelism=2,
+        idempotency_key=str(uuid4()),
+        initiated_by="test",
+    )
+    reserve((test_persistence.Store(database[1], execution_placement="local"), database[1]), item)
+    subject, _ = admission(database)
+    assert subject.admit(item)
+    capped, probes = admission(database, env={"TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT": "1"})
+    assert not capped.admit(item)
+    assert probes == []
+    reserve((test_persistence.Store(database[1], execution_placement="local"), database[1]), item)
+    assert not subject.admit(item)
+    assert sql(
+        database,
+        "select intent_hash,intent->>'comments_worker_count' from social.instagram_ingestion_runs where run_id=%s",
+        (item["run_id"],),
+    ) == [(original, "1")]

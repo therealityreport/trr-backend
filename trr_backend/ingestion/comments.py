@@ -281,22 +281,31 @@ def _find_connection(payload: Mapping[str, Any]) -> tuple[str, Mapping[str, Any]
     return None
 
 
+def _native_reply_count(source: Mapping[str, Any], *, strict: bool) -> int | None:
+    values = [
+        source[key]
+        for key in ("child_comment_count", "childCommentCount", "repliesCount", "reply_count", "replies_count")
+        if key in source
+    ]
+    thread = source.get("edge_threaded_comments")
+    if isinstance(thread, dict) and "count" in thread:
+        values.append(thread["count"])
+    if strict and any(value is not None and _count(value) is None for value in values):
+        raise CommentSourceError("Native public reply count must be a nonnegative integer or null")
+    return max((value for value in values if _count(value) is not None), default=None)
+
+
 def _node(source: Any, parent: str | None = None, *, strict_counts: bool = False) -> dict[str, Any]:
     if not isinstance(source, dict):
         raise CommentSourceError("Comment node is not an object")
     if source.get("source_snapshot_type", "full_comments_scrape") != "full_comments_scrape":
         raise CommentSourceError("Comment samples cannot become full-comments observations")
     result = dict(source)
-    if strict_counts and any(
-        key in source and source[key] is not None and _count(source[key]) is None
-        for key in ("child_comment_count", "childCommentCount", "repliesCount", "reply_count", "replies_count")
-    ):
-        raise CommentSourceError("Native public reply count must be a nonnegative integer or null")
-    if "child_comment_count" not in result:
-        for alias in ("childCommentCount", "repliesCount"):
-            if _count(source.get(alias)) is not None:
-                result["child_comment_count"] = source[alias]
-                break
+    reply_count = _native_reply_count(source, strict=strict_counts)
+    if reply_count is not None:
+        # Normalize only this extraction view. Retained evidence and the other
+        # native aliases keep their original values, including explicit nulls.
+        result["child_comment_count"] = reply_count
     if source.get("created_at") is None and source.get("created_at_utc") is not None:
         result["created_at"] = source["created_at_utc"]
     liked = source.get("edge_liked_by")
@@ -318,8 +327,6 @@ def _node(source: Any, parent: str | None = None, *, strict_counts: bool = False
         if not isinstance(edges, list) or any(not isinstance(edge, dict) or "node" not in edge for edge in edges):
             raise CommentSourceError("Native reply connection is malformed")
         children = [edge["node"] for edge in edges]
-        if _count(thread.get("count")) is not None:
-            result["child_comment_count"] = thread["count"]
     if not isinstance(children, list):
         raise CommentSourceError("Native reply list is malformed")
     result["replies"] = [_node(child, str(identity), strict_counts=strict_counts) for child in children]

@@ -1,13 +1,14 @@
 """Durable Mac worker: disposable PG, stubbed activity, no live services."""
 
 import threading
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
+from uuid import uuid4
 
 import pytest
 
 from api.schemas.v2.instagram_ingestion import InstagramIngestionLaunchV2
-from scripts.ingestion.local_worker import LocalDispatch, run_worker
+from scripts.ingestion.local_worker import LocalDispatch, run_partition, run_worker
 from tests.ingestion import test_local_execution as local_execution
 from tests.ingestion.test_local_execution import fixture_run, owned, resume_local, sql
 from trr_backend.ingestion.admission import Admission
@@ -18,18 +19,27 @@ from trr_backend.ingestion.composition import (
     WORKFLOW_VERSION,
     local_worker_online,
 )
-from trr_backend.ingestion.domain import Conflict, SourceProfile, fingerprint
+from trr_backend.ingestion.domain import Conflict, LostOwnership, RunIntent, SourceProfile, Stage, fingerprint
 from trr_backend.ingestion.persistence import Store
 from trr_backend.ingestion.workflow_store import WorkflowStore
 from trr_backend.ingestion.workflows import Scheduler
 
 # Reuse the local-placement disposable database and its per-test truncation.
 base_database = local_execution.base_database
-database = local_execution.database
 clean = local_execution.clean
 
 
-def _worker(database, execute, *, abort, stop, on_cycle=None):
+@pytest.fixture(scope="module")
+def database(base_database):
+    local_database = local_execution.database.__wrapped__(base_database)
+    with local_database[2]() as conn, conn.cursor() as cur:
+        cur.execute(
+            (local_execution.ROOT / "supabase/migrations/20261023140000_instagram_execution_policy.sql").read_text()
+        )
+    return local_database
+
+
+def _worker(database, execute, *, abort, stop, on_cycle=None, effective_comments_limit=None):
     _, local, tx = database
     admission = Admission(read_connection=tx, environ={}, fresh_session_probe=lambda **kw: {"available": True})
     dispatch = LocalDispatch(execute, abort)
@@ -44,7 +54,323 @@ def _worker(database, execute, *, abort, stop, on_cycle=None):
         stop_requested=stop,
         poll_seconds=0.01,
         on_cycle=on_cycle,
+        effective_comments_limit=effective_comments_limit,
     )
+
+
+def _comment_run(database, count, limit):
+    store = database[0]
+    intent = RunIntent(
+        account="bravotv",
+        scope="bounded_window",
+        date_start=datetime(2026, 1, 1, tzinfo=UTC),
+        date_end=datetime(2026, 2, 1, tzinfo=UTC),
+        selected_tasks=(Stage.COMMENTS,),
+        comments_worker_count=limit,
+        source_profile=SourceProfile.for_mode("public"),
+    )
+    run = store.start(
+        intent,
+        idempotency_key=str(uuid4()),
+        engine="dbos",
+        workflow_version=WORKFLOW_VERSION,
+        initiated_by="offline-test",
+    )
+    store.discover(
+        run["run_id"],
+        "bravotv",
+        generation=1,
+        stage=Stage.COMMENTS,
+        target_keys=[f"comment-post-{index}" for index in range(count)],
+        max_attempts=12,
+        cursor_state={},
+        expected_cursor_state={},
+        page_id="fixture-comments",
+        seal=True,
+    )
+    sql(
+        database,
+        """update social.instagram_ingestion_manifests set discovery_complete=true,
+        sealed_at=clock_timestamp() where stage='listing'""",
+    )
+    cancelled = store.control(run["run_id"], "bravotv", action="cancel", idempotency_key=str(uuid4()))
+    request = local_execution.LocalRequest(run["run_id"], intent.digest, cancelled["generation"], "modal")
+    current = resume_local(database, request)
+    return database[1].seed(dict(current, account="bravotv"))
+
+
+@pytest.mark.parametrize("limit", [2, 4])
+def test_comment_children_overlap_but_admission_and_policy_remain_serial(database, limit):
+    _comment_run(database, limit * 2, limit)
+    local = database[1]
+    abort, stop = threading.Event(), threading.Event()
+    barrier = threading.Barrier(limit)
+    lock = threading.Lock()
+    running, peak, calls = set(), [], []
+    owner = threading.get_ident()
+
+    def policy(item):
+        assert threading.get_ident() == owner
+        return limit
+
+    def execute(reservation, **kwargs):
+        assert kwargs["abort"] is abort and kwargs["timeout_seconds"] == 590
+        args = owned(reservation)
+        local.acquire(**args)
+        with lock:
+            running.add(reservation["owner_token"])
+            peak.append(len(running))
+            calls.append(reservation["target_key"])
+        try:
+            barrier.wait(timeout=10)
+            local.commit_target(**args, observed_at=datetime.now(UTC), write_canonical=lambda _: {"post_id": "stable"})
+            return {"outcome": "committed", "stage": "comments"}
+        finally:
+            with lock:
+                running.remove(reservation["owner_token"])
+
+    admission = Admission(read_connection=database[2], environ={}, fresh_session_probe=lambda **kw: {"available": True})
+
+    def admit(item):
+        assert threading.get_ident() == owner
+        return admission.admit(item)
+
+    dispatch = LocalDispatch(execute, abort)
+    scheduler = Scheduler(local, admit=admit, dispatch=dispatch, reconcile=lambda _: "unknown")
+    summary = run_worker(
+        store=local,
+        scheduler=scheduler,
+        dispatch=dispatch,
+        lease=nullcontext(),
+        abort=abort,
+        workflow_version=WORKFLOW_VERSION,
+        stop_requested=stop,
+        poll_seconds=0.01,
+        on_cycle=_stop_when_idle(abort, stop),
+        effective_comments_limit=policy,
+    )
+    assert summary["status"] == "stopped" and max(peak) == limit and not running
+    assert len(calls) == len(set(calls)) == limit * 2
+    assert sql(database, "select attempts,outcome from social.instagram_ingestion_targets order by target_key") == [
+        (1, "committed")
+    ] * (limit * 2)
+    assert not dispatch.active and dispatch.pool is None
+
+
+def test_comment_registry_deduplicates_and_keeps_original_partition_for_expiry():
+    abort, release, entered, reaped = (threading.Event() for _ in range(4))
+    calls, transitions = [], []
+
+    def execute(reservation, **kwargs):
+        calls.append(reservation["owner_token"])
+        entered.set()
+        assert release.wait(5)
+        reaped.set()
+        return {"outcome": "unresolved"}
+
+    class Store:
+        def transition(self, item, token, state):
+            assert reaped.is_set()
+            transitions.append((item, token, state))
+
+    store = Store()
+    dispatch = LocalDispatch(execute, abort)
+    first = {"execution_id": "partition-0", "generation": 1}
+    reservation = {"owner_token": "same-token", "stage": "comments"}
+    try:
+        dispatch.bind(first, 2)
+        dispatch(reservation)
+        assert entered.wait(5)
+        dispatch(reservation)
+        dispatch.bind({"execution_id": "partition-1", "generation": 1}, 2)
+        assert len(dispatch.active) == 1 and not transitions
+        release.set()
+        dispatch.drain(store, finish=True)
+        dispatch(reservation)
+        assert calls == ["same-token"]
+        assert transitions == [(first, "same-token", "expired")]
+    finally:
+        release.set()
+        dispatch.close(store)
+
+
+def test_comment_registry_does_not_queue_and_lower_limit_drains_existing_children():
+    abort, release = threading.Event(), threading.Event()
+
+    def execute(*args, **kwargs):
+        assert release.wait(5)
+        return {"outcome": "committed"}
+
+    dispatch = LocalDispatch(execute, abort)
+    try:
+        dispatch.bind({"generation": 1}, 2)
+        for token in ("one", "two"):
+            dispatch({"owner_token": token, "stage": "comments"})
+        dispatch.bind({"generation": 1}, 1)
+        with pytest.raises(RuntimeError, match="no available slot"):
+            dispatch({"owner_token": "never-queued", "stage": "comments"})
+        assert dispatch.submitted == {"one", "two"} and not abort.is_set()
+        release.set()
+        dispatch.drain(object(), finish=True)
+        assert not dispatch.active
+    finally:
+        release.set()
+        dispatch.close(object())
+
+
+def test_partition_continuation_keeps_live_comment_registry(monkeypatch):
+    monkeypatch.setattr("scripts.ingestion.local_worker.PARTITION_SIZE", 1)
+    abort, release, entered, reaped = (threading.Event() for _ in range(4))
+    transitions = []
+
+    def execute(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        reaped.set()
+        return {"outcome": "unresolved"}
+
+    class Store:
+        def decision(self, *args):
+            return {"kind": "wait", "seconds": 1}
+
+        def transition(self, item, token, state):
+            assert reaped.is_set()
+            transitions.append((item["execution_id"], token, state))
+
+        def complete_partition(self, *args, **kwargs):
+            pass
+
+    class Scheduler:
+        clock = staticmethod(lambda: datetime.now(UTC))
+
+        def tick(self, item, ordinal):
+            if item["execution_id"] == "partition-0":
+                dispatch({"owner_token": "continued", "stage": "comments"})
+                assert entered.wait(5)
+                return {"ready": True}
+            assert "continued" in dispatch.active and not abort.is_set()
+            release.set()
+            return {"stop": "completed"}
+
+    dispatch = LocalDispatch(execute, abort)
+    store, scheduler = Store(), Scheduler()
+    try:
+        for number, expected in ((0, "continued"), (1, "stopped")):
+            assert (
+                run_partition(
+                    {"execution_id": f"partition-{number}"},
+                    store=store,
+                    scheduler=scheduler,
+                    dispatch=dispatch,
+                    abort=abort,
+                    effective_comments_limit=lambda _: 2,
+                )
+                == expected
+            )
+        assert transitions == [("partition-0", "continued", "expired")]
+        assert not abort.is_set() and not dispatch.active
+    finally:
+        release.set()
+        dispatch.close(store)
+
+
+def test_policy_fence_aborts_and_reaps_comment_child_before_lease_release():
+    abort, entered, reaped = (threading.Event() for _ in range(3))
+
+    def execute(*args, **kwargs):
+        entered.set()
+        assert abort.wait(5)
+        reaped.set()
+        return {"outcome": "fenced"}
+
+    class Store:
+        execution_placement = "local"
+        seed = None
+
+        def dispatch_pending(self, *args, **kwargs):
+            pass
+
+        def dispatch_partitions(self, submit, **kwargs):
+            return submit({"generation": 1})
+
+        def transition(self, *args):
+            assert reaped.is_set()
+            raise LostOwnership("old generation")
+
+    dispatch = LocalDispatch(execute, abort)
+    dispatch.bind({"generation": 1}, 2)
+    dispatch({"owner_token": "owned", "stage": "comments"})
+    assert entered.wait(5)
+
+    @contextmanager
+    def lease():
+        try:
+            yield
+        finally:
+            assert reaped.is_set() and not dispatch.active
+
+    def stale(item):
+        raise LostOwnership("stale policy generation")
+
+    with pytest.raises(LostOwnership, match="stale policy"):
+        run_worker(
+            store=Store(),
+            scheduler=None,
+            dispatch=dispatch,
+            lease=lease(),
+            abort=abort,
+            workflow_version=WORKFLOW_VERSION,
+            effective_comments_limit=stale,
+        )
+
+
+def test_phase_change_waits_for_comment_reaping_before_noncomment_reservation():
+    abort, release, entered, reaped = (threading.Event() for _ in range(4))
+    order = []
+
+    def execute(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        order.append("reaped")
+        reaped.set()
+        return {"outcome": "committed"}
+
+    class Store:
+        def decision(self, *args):
+            release.set()
+            return {"kind": "target", "stage": "media"}
+
+        def complete_partition(self, *args, **kwargs):
+            order.append("complete")
+
+    class Scheduler:
+        clock = staticmethod(lambda: datetime.now(UTC))
+
+        def tick(self, *args):
+            assert reaped.is_set() and not dispatch.active
+            order.append("noncomment-reservation")
+            return {"stop": "completed"}
+
+    dispatch = LocalDispatch(execute, abort)
+    dispatch.bind({"generation": 1}, 2)
+    dispatch({"owner_token": "comment", "stage": "comments"})
+    assert entered.wait(5)
+    try:
+        assert (
+            run_partition(
+                {"generation": 1},
+                store=Store(),
+                scheduler=Scheduler(),
+                dispatch=dispatch,
+                abort=abort,
+                effective_comments_limit=lambda _: 2,
+            )
+            == "stopped"
+        )
+        assert order == ["reaped", "noncomment-reservation", "complete"]
+    finally:
+        release.set()
+        dispatch.close(Store())
 
 
 def _commit(local, calls, abort):

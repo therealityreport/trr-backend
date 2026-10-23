@@ -40,6 +40,14 @@ _STAGE_ENVS = {
     "media_mirror": ("SOCIAL_WORKER_POOL_MEDIA_MIRROR", 6),
 }
 _TERMINAL = "('completed','failed','cancelled','terminated','error')"
+_LEGACY_ACTIVITY = "coalesce(completed_at,heartbeat_at,started_at,claimed_at,created_at)"
+# Match the cast-free expression index. Any lease text remains a candidate so
+# malformed metadata still reaches the original fail-closed busy predicate.
+_LEGACY_MUST_INSPECT = f"""(
+    lower(coalesce(status,'')) not in ('completed','failed','cancelled')
+    or {_LEGACY_ACTIVITY} is null
+    or nullif(metadata->'dispatch'->>'lease_expires_at','') is not null
+)"""
 
 
 def _read_connection():
@@ -112,7 +120,12 @@ class Admission:
         # lease metadata fails the whole read closed rather than disappearing.
         with self.read_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                f"""with legacy as (
+                f"""with legacy_candidate_ids as materialized (
+                  select id from social.scrape_jobs where {_LEGACY_MUST_INSPECT} is true
+                  union all
+                  select id from social.scrape_jobs where {_LEGACY_MUST_INSPECT} is false
+                    and {_LEGACY_ACTIVITY}>=statement_timestamp()-interval '2 hours'
+                ), legacy as materialized (
                   select 'legacy:'||id::text as identity,run_id::text,lower(coalesce(platform,'')) as platform,
                     lower(coalesce(config->>'stage',metadata->>'stage',job_type,'')) as raw_stage,
                     lower(ltrim(coalesce(config->>'account',config->>'account_handle',config->>'source_account',
@@ -120,7 +133,7 @@ class Admission:
                     lower(coalesce(status,'')) as status,worker_id,claimed_at,
                     coalesce(completed_at,heartbeat_at,started_at,claimed_at,created_at) as last_activity_at,
                     metadata->'dispatch' as dispatch
-                  from social.scrape_jobs
+                  from social.scrape_jobs j join legacy_candidate_ids c using(id)
                 ), legacy_busy as (
                   select identity,run_id,platform,account,
                     case when raw_stage in ('comments','comments_scrapling') then 'comments'
@@ -174,8 +187,12 @@ class Admission:
                   or exists(select 1 from social.instagram_detail_request_lanes where identity_key=%s
                     and (blocked or server_retry_after_until>clock_timestamp()))) as blocked,
                   (select jsonb_build_object('run_id',run_id,'account',account,'state',state,'generation',generation,
-                    'engine',engine,'workflow_version',workflow_version,'intent',intent)
-                    from social.instagram_ingestion_runs where run_id=%s::uuid and account=%s) as run""",
+                    'engine',engine,'workflow_version',workflow_version,'intent',intent,
+                    'intent_hash',intent_hash,'execution_placement',
+                    coalesce(to_jsonb(r)->>'execution_placement','modal'),
+                    'execution_policy',(select to_jsonb(ep) from social.instagram_ingestion_execution_policies ep
+                      where ep.run_id=r.run_id))
+                    from social.instagram_ingestion_runs r where run_id=%s::uuid and account=%s) as run""",
                 (account, self.identity_key, run_id, account),
             )
             row = cur.fetchone()
@@ -266,6 +283,10 @@ class Admission:
                 if stage == "shared_account_posts"
                 else (intent.comments_worker_count if stage == "comments" else None)
             )
+            if stage == "comments":
+                from trr_backend.ingestion.execution_policy import effective_comments_limit_from_run
+
+                requested = effective_comments_limit_from_run(run, run.get("execution_policy"))
             return self._fits(snapshot, stage, account, run_id=run_id, requested=requested) and self._probe()
         except Exception:
             return False

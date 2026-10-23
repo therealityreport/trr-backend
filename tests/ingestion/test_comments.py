@@ -1080,3 +1080,109 @@ def test_page_checkpoint_serialized_once_after_custom_writer_mutation(database, 
         (evidence_id,),
     )[0]
     assert saved["page_checkpoint"] == saved["target_checkpoint"] == checkpoint
+
+
+def native_count_page(counts, *, thread=None):
+    node = {"pk": "p", "text": "Parent", "user": {"pk": "u", "username": "public"}, **counts}
+    if thread is not None:
+        node["edge_threaded_comments"] = thread
+    payload = {
+        "comments": [node],
+        "comment_count": 1,
+        "has_more_comments": False,
+        "cursor_payload": {
+            "adapter_family": "instagram_public_relay",
+            "adapter_version": 1,
+            "source": "root",
+            "relay_doc_id": "parent-doc",
+            "relay_friendly_name": "parent-operation",
+            "sort_order": "popular",
+            "page_size": 15,
+        },
+    }
+    before = copy.deepcopy(payload)
+    retained = evidence(payload)
+    page = parse_comment_evidence(retained, pinned=True)
+    assert payload == before and retained.read(pinned=True) == before
+    return page
+
+
+@pytest.mark.parametrize("alias", ["childCommentCount", "repliesCount", "reply_count", "replies_count"])
+def test_null_primary_reply_count_does_not_hide_known_zero_or_require_child_root(alias):
+    from types import SimpleNamespace
+
+    from trr_backend.ingestion.comment_transport import PublicRelayResume
+    from trr_backend.ingestion.comments import _advance
+
+    page = native_count_page({"child_comment_count": None, alias: 0})
+    assert page.source_payloads[0]["child_comment_count"] == 0
+    assert page.source_payloads[0][alias] == 0
+    state = {"version": 1, "observed": {}, "lanes": {}, "expected": None}
+    _advance(state, page, scan_started_at=OBSERVED)
+    assert state["observed"]["p"]["expected_replies"] == 0
+    assert _settlement(state, CommentFetchSummary(expected_count=1, full_observation=True)) is not None
+    resume = PublicRelayResume.from_checkpoint({"comment_pages": state}, [SimpleNamespace(comment_id="p", replies=[])])
+    assert resume.replies["p"]["pending"] is False
+
+
+def test_greatest_native_reply_count_preserves_positive_obligation_and_raw_aliases():
+    from trr_backend.ingestion.comments import _advance
+
+    page = native_count_page(
+        {"child_comment_count": 0, "childCommentCount": None, "repliesCount": 3, "reply_count": 2},
+        thread={"count": 1, "edges": [], "page_info": {"has_next_page": False}},
+    )
+    raw = page.source_payloads[0]
+    assert raw["child_comment_count"] == 3
+    assert raw["childCommentCount"] is None and raw["repliesCount"] == 3 and raw["reply_count"] == 2
+    assert raw["edge_threaded_comments"]["count"] == 1
+    state = {"version": 1, "observed": {}, "lanes": {}, "expected": None}
+    _advance(state, page, scan_started_at=OBSERVED)
+    assert state["observed"]["p"]["expected_replies"] == 3
+    assert _settlement(state, CommentFetchSummary(expected_count=1, full_observation=True)) is None
+
+
+@pytest.mark.parametrize("counts", [{}, {"child_comment_count": None, "repliesCount": None}])
+def test_missing_or_null_native_reply_count_stays_unknown(counts):
+    from types import SimpleNamespace
+
+    from trr_backend.ingestion.comment_transport import PublicRelayResume
+    from trr_backend.ingestion.comments import _advance
+
+    page = native_count_page(counts)
+    state = {"version": 1, "observed": {}, "lanes": {}, "expected": None}
+    _advance(state, page, scan_started_at=OBSERVED)
+    assert state["observed"]["p"]["expected_replies"] is None
+    assert _settlement(state, CommentFetchSummary(expected_count=1, full_observation=True)) is None
+    resume = PublicRelayResume.from_checkpoint({"comment_pages": state}, [SimpleNamespace(comment_id="p", replies=[])])
+    assert resume.replies["p"]["pending"] is True
+
+
+@pytest.mark.parametrize("value", [True, -1, "2", 2.0])
+@pytest.mark.parametrize(
+    "field", ["child_comment_count", "childCommentCount", "repliesCount", "reply_count", "replies_count", "thread"]
+)
+def test_strict_native_reply_counts_reject_malformed_alias_even_with_valid_zero(field, value):
+    counts = {"child_comment_count": 0}
+    thread = None
+    if field == "thread":
+        thread = {"count": value, "edges": [], "page_info": {"has_next_page": False}}
+    else:
+        counts[field] = value
+    with pytest.raises(CommentSourceError, match="Native public reply count"):
+        native_count_page(counts, thread=thread)
+
+
+def test_known_zero_reply_count_does_not_hide_partial_child_cursor():
+    from trr_backend.ingestion.comments import _advance
+
+    page = native_count_page(
+        {"child_comment_count": None, "repliesCount": 0},
+        thread={"count": None, "edges": [], "page_info": {"has_next_page": True, "end_cursor": "child-tail"}},
+    )
+    state = {"version": 1, "observed": {}, "lanes": {}, "expected": None}
+    _advance(state, page, scan_started_at=OBSERVED)
+    assert state["observed"]["p"]["expected_replies"] == 0
+    assert state["lanes"]["p"]["exhausted"] is False
+    assert state["lanes"]["p"]["cursors"] == ["child-tail"]
+    assert _settlement(state, CommentFetchSummary(expected_count=1, full_observation=True)) is None
