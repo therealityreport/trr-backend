@@ -7967,7 +7967,8 @@ def test_get_shared_account_sources_filters_platforms_in_sql(monkeypatch: pytest
     assert payload["sources"][0]["platform"] == "instagram"
 
 
-def test_ingest_shared_accounts_creates_shared_scrape_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("platform", ["instagram", "tiktok"])
+def test_ingest_shared_accounts_creates_shared_scrape_jobs(monkeypatch: pytest.MonkeyPatch, platform: str) -> None:
     created_jobs: list[dict[str, Any]] = []
 
     monkeypatch.setattr(social_repo, "_assert_social_queue_schema_ready", lambda: None)
@@ -7980,7 +7981,7 @@ def test_ingest_shared_accounts_creates_shared_scrape_jobs(monkeypatch: pytest.M
             "sources": [
                 {
                     "id": "shared-source-1",
-                    "platform": "instagram",
+                    "platform": platform,
                     "account_handle": "bravotv",
                     "scrape_priority": 100,
                 }
@@ -8008,7 +8009,7 @@ def test_ingest_shared_accounts_creates_shared_scrape_jobs(monkeypatch: pytest.M
     monkeypatch.setattr(social_repo, "_create_job", _fake_create_job)
     monkeypatch.setattr(social_repo, "list_shared_review_queue", lambda **_kwargs: {"count": 0, "items": []})
 
-    payload = social_repo.ingest_shared_accounts(platforms=["instagram"], source_scope="bravo")
+    payload = social_repo.ingest_shared_accounts(platforms=[platform], source_scope="bravo")
 
     assert payload["run_id"] == "shared-run-1"
     assert payload["ingest_mode"] == "shared_account_async"
@@ -8016,6 +8017,9 @@ def test_ingest_shared_accounts_creates_shared_scrape_jobs(monkeypatch: pytest.M
     assert created_jobs[0]["job_type"] == social_repo.SHARED_ACCOUNT_POSTS_JOB_TYPE
     assert created_jobs[0]["config"]["pipeline_ingest_mode"] == social_repo.SHARED_ACCOUNT_ASYNC_INGEST_MODE
     assert "max_posts_per_target" not in created_jobs[0]["config"]
+
+    assert created_jobs[0]["stage"] == social_repo.SHARED_ACCOUNT_POSTS_STAGE
+    assert created_jobs[0]["config"]["stage"] == social_repo.SHARED_ACCOUNT_POSTS_STAGE
 
 
 def test_ingest_shared_accounts_catalog_mode_filters_supported_platforms(monkeypatch: pytest.MonkeyPatch) -> None:

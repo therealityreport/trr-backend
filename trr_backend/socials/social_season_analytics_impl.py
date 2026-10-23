@@ -6849,8 +6849,8 @@ def _normalize_platform_name(value: Any) -> str:
 
 def _shared_account_posts_stage_for_platform(platform: Any) -> str:
     normalized_platform = _normalize_platform_name(platform)
-    if normalized_platform == "tiktok":
-        return TIKTOK_POSTS_SCRAPLING_STAGE
+    # Catalog jobs must reach the shared executor and its resumable listing.
+    # The explicit TikTok posts-only launcher owns the dedicated Scrapling lane.
     if normalized_platform == "threads":
         return THREADS_POSTS_SCRAPLING_STAGE
     return SHARED_ACCOUNT_POSTS_STAGE
