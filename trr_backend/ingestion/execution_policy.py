@@ -16,7 +16,7 @@ from psycopg2.extras import RealDictCursor
 from trr_backend.ingestion.domain import Conflict, LostOwnership, RunIntent, fingerprint, stable_json, utc_timestamp
 from trr_backend.ingestion.persistence import Store, _row, _transaction
 
-_LIMITS = frozenset({1, 2, 4})
+_LIMITS = frozenset({1, 2, 4, 6, 8})
 _OPERATION = "set_execution_limits"
 
 
@@ -142,7 +142,7 @@ class ExecutionPolicy:
         if type(expected_revision) is not int or expected_revision < 0:
             raise ValueError("Expected policy revision must be a nonnegative integer")
         if type(comments_parallelism) is not int or comments_parallelism not in _LIMITS:
-            raise ValueError("Comments parallelism must be 1, 2, or 4")
+            raise ValueError("Comments parallelism must be 1, 2, 4, 6, or 8")
         if expected_placement != "local":
             raise ValueError("Execution limits may be changed only for local runs")
         if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 200 or not idempotency_key.strip():

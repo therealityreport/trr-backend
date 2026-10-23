@@ -36,6 +36,11 @@ def database(base_database):
         cur.execute(
             (local_execution.ROOT / "supabase/migrations/20261023140000_instagram_execution_policy.sql").read_text()
         )
+        cur.execute(
+            (
+                local_execution.ROOT / "supabase/migrations/20261023180000_instagram_execution_policy_six_eight.sql"
+            ).read_text()
+        )
     return local_database
 
 
@@ -99,7 +104,7 @@ def _comment_run(database, count, limit):
     return database[1].seed(dict(current, account="bravotv"))
 
 
-@pytest.mark.parametrize("limit", [2, 4])
+@pytest.mark.parametrize("limit", [2, 4, 6, 8])
 def test_comment_children_overlap_but_admission_and_policy_remain_serial(database, limit):
     _comment_run(database, limit * 2, limit)
     local = database[1]
@@ -129,7 +134,15 @@ def test_comment_children_overlap_but_admission_and_policy_remain_serial(databas
             with lock:
                 running.remove(reservation["owner_token"])
 
-    admission = Admission(read_connection=database[2], environ={}, fresh_session_probe=lambda **kw: {"available": True})
+    admission = Admission(
+        read_connection=database[2],
+        environ={
+            "SOCIAL_WORKER_POOL_COMMENTS": str(limit),
+            "TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT": str(limit),
+            "SOCIAL_CATALOG_RUN_IN_FLIGHT_CAP": str(limit),
+        },
+        fresh_session_probe=lambda **kw: {"available": True},
+    )
 
     def admit(item):
         assert threading.get_ident() == owner
@@ -194,7 +207,8 @@ def test_comment_registry_deduplicates_and_keeps_original_partition_for_expiry()
         dispatch.close(store)
 
 
-def test_comment_registry_does_not_queue_and_lower_limit_drains_existing_children():
+@pytest.mark.parametrize("initial,lower", [(2, 1), (8, 6)])
+def test_comment_registry_does_not_queue_and_lower_limit_drains_existing_children(initial, lower):
     abort, release = threading.Event(), threading.Event()
 
     def execute(*args, **kwargs):
@@ -203,13 +217,14 @@ def test_comment_registry_does_not_queue_and_lower_limit_drains_existing_childre
 
     dispatch = LocalDispatch(execute, abort)
     try:
-        dispatch.bind({"generation": 1}, 2)
-        for token in ("one", "two"):
+        dispatch.bind({"generation": 1}, initial)
+        tokens = {str(index) for index in range(initial)}
+        for token in tokens:
             dispatch({"owner_token": token, "stage": "comments"})
-        dispatch.bind({"generation": 1}, 1)
+        dispatch.bind({"generation": 1}, lower)
         with pytest.raises(RuntimeError, match="no available slot"):
             dispatch({"owner_token": "never-queued", "stage": "comments"})
-        assert dispatch.submitted == {"one", "two"} and not abort.is_set()
+        assert dispatch.submitted == tokens and not abort.is_set()
         release.set()
         dispatch.drain(object(), finish=True)
         assert not dispatch.active

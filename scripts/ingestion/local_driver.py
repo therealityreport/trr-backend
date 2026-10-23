@@ -98,6 +98,8 @@ class CoordinatorLease:
         self.monitor = None
         self.watchdog = None
         self.last_heartbeat = None
+        self.acquired = False
+        self.previous_idle_timeout = None
 
     def __enter__(self):
         self.connection = self.connect()
@@ -107,6 +109,7 @@ class CoordinatorLease:
                 cur.execute("select pg_try_advisory_lock(%s,%s)", (self.config.lock_namespace, self.config.lock_key))
                 if not cur.fetchone()[0]:
                     raise Conflict("The existing ingestion coordinator lease is busy")
+                self.acquired = True
                 cur.execute("""select current_user,rolsuper,has_schema_privilege(current_user,'dbos','USAGE'),
                     has_schema_privilege(current_user,'dbos','CREATE'),
                     exists(select 1 from pg_namespace where nspname='dbos' and nspowner=(
@@ -115,6 +118,11 @@ class CoordinatorLease:
                 role, superuser, usage, create, owner = cur.fetchone()
                 if role != self.config.runtime_role or superuser or owner or create or not usage:
                     raise Conflict("Restricted pre-migrated coordinator runtime role required")
+                # Session poolers can retain the backend after a frontend dies.
+                # Keep server-side expiry armed until this exact lease releases.
+                cur.execute("select current_setting('idle_session_timeout')")
+                self.previous_idle_timeout = cur.fetchone()[0]
+                cur.execute("select set_config('idle_session_timeout','5000ms',false)")
             self.last_heartbeat = self.clock()
             self.monitor = threading.Thread(target=self._monitor, daemon=True, name="instagram-local-lease")
             self.watchdog = threading.Thread(
@@ -127,8 +135,51 @@ class CoordinatorLease:
             self.stop.set()
             if self.watchdog and self.watchdog.is_alive():
                 self.watchdog.join(timeout=1)
-            self.connection.close()
+            self._close_connection()
             raise
+
+    def _close_connection(self):
+        def cleanup():
+            try:
+                # Never queue SQL behind a heartbeat stuck on the same connection.
+                if self.acquired and not (self.monitor and self.monitor.is_alive()):
+                    with self.connection.cursor() as cur:
+                        cur.execute(
+                            "select pg_advisory_unlock(%s,%s)", (self.config.lock_namespace, self.config.lock_key)
+                        )
+                        if not cur.fetchone()[0]:
+                            raise RuntimeError("Coordinator lease release was not confirmed")
+                        # Session acquisitions stack: one successful unlock can
+                        # leave an older pooled acquisition on this backend.
+                        cur.execute(
+                            """select exists(select 1 from pg_locks
+                            where locktype='advisory' and granted and pid=pg_backend_pid()
+                            and database=(select oid from pg_database where datname=current_database())
+                            and classid=%s::oid and objid=%s::oid and objsubid=2)""",
+                            (self.config.lock_namespace, self.config.lock_key),
+                        )
+                        if cur.fetchone()[0]:
+                            raise RuntimeError("Coordinator lease remains held on this backend")
+                        self.acquired = False
+                        if self.previous_idle_timeout is not None:
+                            cur.execute(
+                                "select set_config('idle_session_timeout',%s,false)", (self.previous_idle_timeout,)
+                            )
+            except Exception:
+                # Leave server expiry armed on uncertainty; cleanup cannot mask
+                # the original failure or defeat the independent abort guard.
+                self.abort.set()
+            finally:
+                try:
+                    self.connection.close()
+                except Exception:
+                    self.abort.set()
+
+        cleanup_thread = threading.Thread(target=cleanup, daemon=True, name="instagram-local-lease-cleanup")
+        cleanup_thread.start()
+        cleanup_thread.join(timeout=self.heartbeat_timeout)
+        if cleanup_thread.is_alive():
+            self.abort.set()
 
     def _monitor(self):
         while not self.stop.wait(0.1):
@@ -158,7 +209,7 @@ class CoordinatorLease:
         if self.monitor:
             self.monitor.join(timeout=2)
         if self.connection:
-            self.connection.close()
+            self._close_connection()
 
 
 def run_local(request, *, store, admit, execute, lease, abort, clock=time.monotonic):

@@ -423,6 +423,161 @@ def test_shared_session_lease_busy_and_loss_sets_abort(database, register_isolat
             assert abort.wait(2)
 
 
+@pytest.mark.parametrize(
+    "failure", [None, "busy", "role", "setup", "unlock", "stuck_unlock", "remaining_grant", "grant_query"]
+)
+def test_lease_pooled_session_cleanup_is_exact_restored_and_bounded(failure):
+    commands, closed = [], threading.Event()
+    release = threading.Event()
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def execute(self, query, args=()):
+            self.query = query
+            commands.append((query, args))
+            if "5000ms" in query and failure == "setup":
+                raise RuntimeError("unsupported setting")
+            if "from pg_locks" in query and failure == "grant_query":
+                raise OSError("uncertain grant query")
+            if "pg_advisory_unlock" in query:
+                if failure == "unlock":
+                    raise OSError("lost transport")
+                if failure == "stuck_unlock":
+                    release.wait(5)
+
+        def fetchone(self):
+            if "pg_try_advisory_lock" in self.query:
+                return (failure != "busy",)
+            if "pg_advisory_unlock" in self.query:
+                return (True,)
+            if "current_setting" in self.query:
+                return ("17s",)
+            if "from pg_locks" in self.query:
+                return (failure == "remaining_grant",)
+            return ("wrong" if failure == "role" else "local_runtime", False, True, False, False)
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+        def close(self):
+            closed.set()
+
+    abort = threading.Event()
+    lease = CoordinatorLease(
+        Connection,
+        RuntimeConfig("unused", WORKFLOW_VERSION, runtime_role="local_runtime"),
+        abort,
+        heartbeat_timeout=0.1,
+    )
+    try:
+        if failure in {"busy", "role", "setup"}:
+            with pytest.raises((Conflict, RuntimeError)):
+                lease.__enter__()
+        else:
+            with lease:
+                pass
+        unlocks = [(q, args) for q, args in commands if "pg_advisory_unlock" in q]
+        assert len(unlocks) == (0 if failure == "busy" else 1)
+        if unlocks:
+            assert unlocks[0][1] == (lease.config.lock_namespace, lease.config.lock_key)
+        restores = [(q, args) for q, args in commands if args == ("17s",)]
+        assert bool(restores) == (failure in {None, "setup"})
+        if restores:
+            assert commands.index(unlocks[0]) < commands.index(restores[0])
+        assert abort.is_set() == (failure in {"unlock", "stuck_unlock", "remaining_grant", "grant_query"})
+        if failure != "stuck_unlock":
+            assert closed.is_set()
+    finally:
+        release.set()
+        assert closed.wait(1)
+
+
+def test_lease_idle_expiry_releases_abandoned_pooled_backend(database, register_isolated_postgres):
+    with database[2]() as conn:
+        dsn = conn.dsn
+        endpoint = {"host": conn.info.host, "port": conn.info.port, "dbname": conn.info.dbname, "user": "local_runtime"}
+    connections = []
+
+    def connect():
+        connection = psycopg2.connect(dsn, user="local_runtime")
+        connections.append(connection)
+        return connection
+
+    config = RuntimeConfig(dsn, WORKFLOW_VERSION, runtime_role="local_runtime")
+    lease = CoordinatorLease(connect, config, threading.Event())
+    with register_isolated_postgres(**endpoint):
+        try:
+            lease.__enter__()
+            with lease.connection.cursor() as cur:
+                cur.execute("show idle_session_timeout")
+                assert cur.fetchone() == ("5s",)
+            # Model a lost frontend whose pooled backend remains connected:
+            # stop heartbeats without invoking unlock or connection close.
+            lease.stop.set()
+            lease.monitor.join(1)
+            lease.watchdog.join(1)
+            time.sleep(5.2)
+            with CoordinatorLease(connect, config, threading.Event()):
+                pass
+        finally:
+            for connection in connections:
+                connection.close()
+
+
+@pytest.mark.parametrize("stacked", [False, True])
+def test_lease_release_restores_surviving_pooled_session(database, register_isolated_postgres, stacked):
+    with database[2]() as conn:
+        dsn = conn.dsn
+        endpoint = {"host": conn.info.host, "port": conn.info.port, "dbname": conn.info.dbname, "user": "local_runtime"}
+    with register_isolated_postgres(**endpoint):
+        connection = psycopg2.connect(dsn, user="local_runtime")
+        connection.autocommit = True
+
+        class PooledFrontend:
+            autocommit = True
+
+            def cursor(self):
+                return connection.cursor()
+
+            def close(self):
+                pass  # Session pooler keeps this backend available to another frontend.
+
+        config = RuntimeConfig(dsn, WORKFLOW_VERSION, runtime_role="local_runtime")
+        abort = threading.Event()
+        try:
+            with connection.cursor() as cur:
+                cur.execute("set idle_session_timeout='17s'")
+                if stacked:
+                    cur.execute("select pg_try_advisory_lock(%s,%s)", (config.lock_namespace, config.lock_key))
+                    assert cur.fetchone() == (True,)
+            with CoordinatorLease(PooledFrontend, config, abort) as lease:
+                pass
+            with connection.cursor() as cur:
+                cur.execute("show idle_session_timeout")
+                assert cur.fetchone() == ("5s" if stacked else "17s",)
+                cur.execute(
+                    """select exists(select 1 from pg_locks where locktype='advisory' and granted
+                    and pid=pg_backend_pid() and classid=%s::oid and objid=%s::oid and objsubid=2
+                    and database=(select oid from pg_database where datname=current_database()))""",
+                    (config.lock_namespace, config.lock_key),
+                )
+                assert cur.fetchone() == (stacked,)
+            assert abort.is_set() is stacked
+            assert lease.acquired is stacked
+            if not stacked:
+                # Another independently connected consumer can immediately acquire.
+                with CoordinatorLease(lambda: psycopg2.connect(dsn, user="local_runtime"), config, threading.Event()):
+                    pass
+        finally:
+            connection.close()
+
+
 def test_runtime_local_abort_kills_and_reaps_child(monkeypatch):
     from trr_backend.ingestion import runtime
 
@@ -726,13 +881,14 @@ def test_heartbeat_failure_aborts_reaps_activity_and_cancels_before_lease_cleanu
         abort,
         heartbeat_timeout=0.5,
     )
-    admission = Admission(read_connection=database[2], environ={}, fresh_session_probe=lambda **_: {"available": True})
     before = time.monotonic()
     try:
         result = run_local(
             request,
             store=database[1],
-            admit=admission.admit,
+            # This regression owns heartbeat/reaping, not production admission
+            # policy for the deliberately synthetic run.
+            admit=lambda _: True,
             execute=runtime.run_ingestion_activity,
             lease=lease,
             abort=abort,

@@ -81,7 +81,7 @@ class LocalDispatch:
 
     def bind(self, item, limit):
         limit = 1 if limit is None else limit
-        if type(limit) is not int or limit not in {1, 2, 4}:
+        if type(limit) is not int or limit not in {1, 2, 4, 6, 8}:
             raise ValueError("Unsupported local comments limit")
         self.item, self.limit = dict(item), limit
 
@@ -131,7 +131,7 @@ class LocalDispatch:
             if self.item is None or len(self.active) >= self.limit:
                 raise RuntimeError("Local comments dispatch has no available slot")
             if self.pool is None:
-                self.pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="instagram-local-comment")
+                self.pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="instagram-local-comment")
             future = self.pool.submit(
                 self.execute,
                 reservation,

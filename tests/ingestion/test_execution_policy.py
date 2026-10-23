@@ -27,6 +27,7 @@ def database(base_database):
             (ROOT / "supabase/migrations/20261016173915_instagram_ingestion_execution_placement.sql").read_text()
         )
         cur.execute((ROOT / "supabase/migrations/20261023140000_instagram_execution_policy.sql").read_text())
+        cur.execute((ROOT / "supabase/migrations/20261023180000_instagram_execution_policy_six_eight.sql").read_text())
     return ExecutionPolicy(transaction), Store(transaction, execution_placement="local"), transaction
 
 
@@ -143,6 +144,43 @@ def test_policy_raises_from_one_to_two_to_four_without_changing_business_state(d
         audit = [row[0] for row in cur.fetchall()]
     assert len(audit) == 3  # Original launch plus two policy commands only.
     assert [entry["revision"] for entry in audit if entry.get("operation") == "set_execution_limits"] == [1, 2]
+
+
+def test_six_eight_policy_preserves_intent_and_revision_fences(database):
+    policy, item, setter = seed(database)
+    before = business_snapshot(database, item["run_id"])
+    for revision, limit in enumerate((4, 6, 8)):
+        command = dict(setter, expected_revision=revision, comments_parallelism=limit, idempotency_key=str(uuid4()))
+        result = policy.set_limits(**command)
+        assert result["revision"] == revision + 1 and result["comments_parallelism"] == limit
+        assert policy.set_limits(**command) == result
+        run, row = records(database, item["run_id"])
+        assert policy.effective_comments_limit(item) == effective_comments_limit_from_run(run, row) == limit
+        assert business_snapshot(database, item["run_id"]) == before
+        with pytest.raises(Conflict, match="revision changed"):
+            policy.set_limits(**dict(command, idempotency_key=str(uuid4())))
+        with pytest.raises(LostOwnership):
+            policy.effective_comments_limit(dict(item, generation=2))
+
+
+@pytest.mark.parametrize("limit", [0, 3, 5, 7, 9, True])
+def test_expanded_limits_reject_unsupported_values_in_python_and_sql(database, limit):
+    policy, item, setter = seed(database)
+    with pytest.raises(ValueError, match="parallelism"):
+        policy.set_limits(**dict(setter, comments_parallelism=limit))
+    assert records(database, item["run_id"])[1] is None
+    policy.set_limits(**setter)
+    run, row = records(database, item["run_id"])
+    with pytest.raises(Conflict, match="malformed"):
+        effective_comments_limit_from_run(run, dict(row, comments_parallelism=limit))
+    if type(limit) is int:
+        with pytest.raises(psycopg2.errors.CheckViolation):
+            with database[2]() as conn, conn.cursor() as cur:
+                cur.execute(
+                    "update social.instagram_ingestion_execution_policies set comments_parallelism=%s where run_id=%s",
+                    (limit, item["run_id"]),
+                )
+    assert policy.effective_comments_limit(item) == 2
 
 
 def test_idempotent_replays_and_command_namespace_conflicts(database):
