@@ -1503,6 +1503,12 @@ def _author_hash(author: str) -> str:
     return hashlib.sha256(author.strip().casefold().encode()).hexdigest()
 
 
+def _account_identity(value: Any) -> str:
+    """Placeholder authors describe content state, never a shared account."""
+    author = str(value or "").strip()
+    return "" if author.casefold() in {"[deleted]", "[removed]"} else author
+
+
 def _redact_author(post_id: str, comment_id: str | None, conn: Any) -> set[str]:
     lock_content(post_ids=sorted(_account_affected_ids(post_id, comment_id, conn)), conn=conn)
     if comment_id:
@@ -1513,8 +1519,8 @@ def _redact_author(post_id: str, comment_id: str | None, conn: Any) -> set[str]:
         )
     else:
         source = pg.fetch_one("select author from social.reddit_posts where reddit_post_id=%s", [post_id], conn=conn)
-    author = str((source or {}).get("author") or "").strip()
-    if author and author not in {"[deleted]", "[removed]"}:
+    author = _account_identity((source or {}).get("author"))
+    if author:
         pg.execute(
             "insert into social.reddit_author_tombstones(author_hash,evidence) values(%s,%s::jsonb) "
             "on conflict do nothing",
@@ -1643,8 +1649,8 @@ def _account_affected_ids(post_id: str, comment_id: str | None, conn: Any) -> se
         )
     else:
         source = pg.fetch_one("select author from social.reddit_posts where reddit_post_id=%s", [post_id], conn=conn)
-    author = str((source or {}).get("author") or "").strip()
-    if not author or author in {"[deleted]", "[removed]"}:
+    author = _account_identity((source or {}).get("author"))
+    if not author:
         return {post_id}
     rows = pg.fetch_all(
         "select p.reddit_post_id from social.reddit_posts p join social.reddit_lifecycle_enrollment e "

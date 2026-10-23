@@ -893,3 +893,54 @@ def test_media_upload_without_database_commit_retries_existing_object(database, 
     assert reddit_execution.execute(capture.claim_run(run_id, "retry"))["status"] == "completed"
     assert len(uploads) == 2
     assert pg.fetch_one("select count(*) as n from social.reddit_asset_links")["n"] == 1
+
+
+@pytest.mark.parametrize("author", ["[deleted]", "[removed]", "", None, "RealAccount"])
+@pytest.mark.parametrize("comment_id", [None, "scope-comment"])
+def test_author_redaction_stays_within_locked_account_scope(database, monkeypatch, author, comment_id):
+    for post_id in ("scope-a", "scope-b"):
+        add_post(post_id, author=author, raw_payload={"author": author, "selftext": "preserved"})
+        pg.execute(
+            "insert into social.reddit_lifecycle_enrollment(reddit_post_id,reason) values(%s,'new_capture')",
+            [post_id],
+        )
+        pg.execute(
+            "insert into social.reddit_comments(reddit_post_id,reddit_comment_id,author,body,raw_payload) "
+            "values(%s,%s,%s,'preserved',%s::jsonb)",
+            [
+                post_id,
+                "scope-comment" if post_id == "scope-a" else "other-comment",
+                author,
+                json.dumps({"author": author, "body": "preserved"}),
+            ],
+        )
+    locked = set()
+    original_lock = workflows.lock_content
+
+    def record_lock(*, post_ids, conn):
+        locked.update(post_ids)
+        original_lock(post_ids=post_ids, conn=conn)
+
+    monkeypatch.setattr(workflows, "lock_content", record_lock)
+    with pg.transaction() as conn:
+        affected = workflows._redact_author("scope-a", comment_id, conn)
+    expected = {"scope-a", "scope-b"} if author == "RealAccount" else {"scope-a"}
+    assert affected == locked == expected
+    other = pg.fetch_one("select author,raw_payload from social.reddit_posts where reddit_post_id='scope-b'")
+    other_comment = pg.fetch_one(
+        "select author,body,raw_payload from social.reddit_comments where reddit_comment_id='other-comment'"
+    )
+    assert other["author"] == (None if author == "RealAccount" else author)
+    assert other_comment["author"] == (None if author == "RealAccount" else author)
+    assert other_comment["body"] == "preserved"
+    if author != "RealAccount":
+        assert other["raw_payload"] == {"author": author, "selftext": "preserved"}
+        assert other_comment["raw_payload"] == {"author": author, "body": "preserved"}
+    target_table = "reddit_comments" if comment_id else "reddit_posts"
+    target_column = "reddit_comment_id" if comment_id else "reddit_post_id"
+    target = pg.fetch_one(
+        f"select author from social.{target_table} where {target_column}=%s", [comment_id or "scope-a"]
+    )
+    assert target["author"] is None
+    count = pg.fetch_one("select count(*) as n from social.reddit_author_tombstones")["n"]
+    assert count == (1 if author == "RealAccount" else 0)
