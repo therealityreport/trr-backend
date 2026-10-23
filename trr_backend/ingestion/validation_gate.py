@@ -21,8 +21,8 @@ class _ValidationGate:
         require_allowed_intent(intent)
         return super().start(intent, **kwargs)
 
-    def _execution_run(self, cur, run_id, account):
-        run = super()._execution_run(cur, run_id, account)
+    def _execution_run(self, cur, run_id, account, *, shared_fence=False):
+        run = super()._execution_run(cur, run_id, account, shared_fence=shared_fence)
         require_allowed_intent(RunIntent.from_payload(run["intent"]))
         return run
 

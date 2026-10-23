@@ -156,6 +156,9 @@ class SourceRequestGate:
             self.check_cancelled_in_transaction(connection)
         else:
             self.check_cancelled()
+        return self._deadline_remaining()
+
+    def _deadline_remaining(self) -> float:
         remaining = self.deadline - self.monotonic()
         if remaining <= 0:
             raise IdentityDeferred("target_deadline", None)
@@ -228,7 +231,16 @@ class SourceRequestGate:
                 if own_probe
                 else (uuid4().hex if replacement or cooldown or row.get("probe_token") else None)
             )
-            lease_seconds = min(self.probe_seconds, self._remaining(connection=cur.connection))
+            # The transactional fence above holds its ownership locks through
+            # this update. Recheck only elapsed time under those same locks.
+            # Legacy callbacks do not supply that proof, so retain their final
+            # cancellation check for compatibility.
+            remaining = (
+                self._deadline_remaining()
+                if self.check_cancelled_in_transaction is not None
+                else self._remaining(connection=cur.connection)
+            )
+            lease_seconds = min(self.probe_seconds, remaining)
             cur.execute(
                 """update social.instagram_detail_request_lanes set request_times=%s,
                 blocked=%s,cooldown_until=%s,server_retry_after_until=%s,

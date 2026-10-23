@@ -56,8 +56,8 @@ class Store:
         if run.get("execution_placement", "modal") != self.execution_placement:
             raise LostOwnership("Run belongs to a different execution placement")
 
-    def _execution_run(self, cur, run_id: str, account: str) -> dict[str, Any]:
-        run = self._run(cur, run_id, account)
+    def _execution_run(self, cur, run_id: str, account: str, *, shared_fence: bool = False) -> dict[str, Any]:
+        run = self._run(cur, run_id, account, shared_fence=shared_fence)
         self.check_placement(run)
         return run
 
@@ -165,11 +165,15 @@ class Store:
         return execution_id
 
     @staticmethod
-    def _run(cur, run_id: str, account: str) -> dict[str, Any]:
+    def _run(cur, run_id: str, account: str, *, shared_fence: bool = False) -> dict[str, Any]:
+        # Shared fences allow independent targets to write while still blocking
+        # run control updates. Callers that mutate the run retain FOR UPDATE;
+        # upgrading multiple shared fences to writers could deadlock.
+        lock_clause = "for share" if shared_fence else "for update"
         run = _row(
             cur,
-            """select * from social.instagram_ingestion_runs
-            where run_id=%s and account=%s for update""",
+            f"""select * from social.instagram_ingestion_runs
+            where run_id=%s and account=%s {lock_clause}""",
             (run_id, account),
         )
         if not run:
@@ -637,7 +641,7 @@ class Store:
             nullcontext(connection) if connection is not None else self.transaction() as conn,
             conn.cursor(cursor_factory=RealDictCursor) as cur,
         ):
-            run = self._execution_run(cur, run_id, account)
+            run = self._execution_run(cur, run_id, account, shared_fence=stage == Stage.COMMENTS)
             if run["generation"] != generation or run["state"] not in {"queued", "running"}:
                 raise LostOwnership("Run execution is no longer current")
             target = _row(
@@ -673,7 +677,7 @@ class Store:
         # constructed dataclass. Expiry is irrelevant while an active run pins it.
         evidence.read(pinned=True)
         with self.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-            run = self._execution_run(cur, run_id, account)
+            run = self._execution_run(cur, run_id, account, shared_fence=stage == Stage.COMMENTS)
             if run["generation"] != generation or run["state"] not in {"queued", "running"}:
                 raise LostOwnership("Run execution is no longer current")
             target = _row(

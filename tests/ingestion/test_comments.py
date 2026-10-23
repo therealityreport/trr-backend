@@ -4,9 +4,11 @@ import copy
 import json
 import socket
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event
 from uuid import UUID, uuid4
 
 import psycopg2
@@ -1186,3 +1188,120 @@ def test_known_zero_reply_count_does_not_hide_partial_child_cursor():
     assert state["lanes"]["p"]["exhausted"] is False
     assert state["lanes"]["p"]["cursors"] == ["child-tail"]
     assert _settlement(state, CommentFetchSummary(expected_count=1, full_observation=True)) is None
+
+
+def parallel_page_inputs(database):
+    store, tx, first = setup(database)
+    second = {**first, "target_key": "parallel" + uuid4().hex}
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            """insert into social.instagram_ingestion_targets(run_id,stage,target_key,max_attempts)
+            values(%s,'comments',%s,12)""",
+            (first["run_id"], second["target_key"]),
+        )
+        cur.execute(
+            "insert into social.instagram_posts(shortcode,username) values(%s,'bravotv') returning id",
+            (second["target_key"],),
+        )
+        second["post_id"] = str(cur.fetchone()[0])
+    second["owner_token"] = str(
+        store.reserve(second["run_id"], "bravotv", generation=1, stage=Stage.COMMENTS, target_key=second["target_key"])[
+            "owner_token"
+        ]
+    )
+    result = []
+    for args in (first, second):
+        owned = {key: value for key, value in args.items() if key != "post_id"}
+        owned["stage"] = Stage.COMMENTS
+        store.acquire(**owned)
+        retained = evidence({"comments": [], "has_more_comments": False, "comment_count": 0})
+        evidence_id = store.retain_evidence(**owned, evidence=retained)
+        result.append(
+            (
+                owned,
+                {
+                    "post_id": args["post_id"],
+                    "evidence": retained,
+                    "evidence_id": evidence_id,
+                    "page": parse_comment_evidence(retained, pinned=True),
+                    "expected_checkpoint": {},
+                    "checkpoint": {"page_marker": args["target_key"]},
+                    "metadata_writes_enabled": True,
+                    "assignment": None,
+                },
+            )
+        )
+    return store, tx, result
+
+
+def test_default_comment_pages_on_independent_posts_commit_concurrently(database):
+    _, tx, pages = parallel_page_inputs(database)
+    held, release = Event(), Event()
+
+    @contextmanager
+    def hold_transaction():
+        with tx() as conn:
+            yield conn
+            held.set()
+            assert release.wait(5)
+
+    @contextmanager
+    def bounded_transaction():
+        with tx() as conn:
+            with conn.cursor() as cur:
+                cur.execute("set local statement_timeout='2s'")
+            yield conn
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(CommentActivity(Store(hold_transaction))._persist_page, pages[0][0], **pages[0][1])
+        try:
+            assert held.wait(3)
+            second = pool.submit(CommentActivity(Store(bounded_transaction))._persist_page, pages[1][0], **pages[1][1])
+            second.result(timeout=3)
+        finally:
+            release.set()
+        first.result(timeout=3)
+    saved = query(
+        tx, "select checkpoint from social.instagram_ingestion_comment_pages where run_id=%s", (pages[0][0]["run_id"],)
+    )
+    assert {row["checkpoint"]["page_marker"] for row in saved} == {owned["target_key"] for owned, _ in pages}
+
+
+def test_custom_comment_writer_keeps_exclusive_run_fence(database):
+    store, tx, pages = parallel_page_inputs(database)
+    called = []
+
+    def writer(conn, **kwargs):
+        called.append(True)
+        with conn.cursor() as cur:
+            cur.execute(
+                "update social.instagram_ingestion_runs set updated_at=clock_timestamp() where run_id=%s",
+                (kwargs["run_id"],),
+            )
+        return {"post_id": kwargs["post_id"], "comment_ids": {}}
+
+    @contextmanager
+    def bounded_transaction():
+        with tx() as conn:
+            with conn.cursor() as cur:
+                cur.execute("set local lock_timeout='100ms'")
+            yield conn
+
+    with tx() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        store._execution_run(cur, pages[0][0]["run_id"], "bravotv", shared_fence=True)
+        # A custom writer must block before callback invocation, not obtain a
+        # shared fence and later attempt an unsafe run-lock upgrade.
+        with pytest.raises(psycopg2.errors.LockNotAvailable):
+            CommentActivity(Store(bounded_transaction), writer=writer)._persist_page(pages[1][0], **pages[1][1])
+        assert not called
+    CommentActivity(store, writer=writer)._persist_page(pages[1][0], **pages[1][1])
+    assert called == [True]
+
+
+def test_default_comment_page_shared_fence_preserves_full_history_gate(database):
+    from trr_backend.ingestion.domain import Conflict
+    from trr_backend.ingestion.validation_gate import ValidationStore
+
+    _, tx, pages = parallel_page_inputs(database)
+    with pytest.raises(Conflict, match="fixed-post retrieval"):
+        CommentActivity(ValidationStore(tx))._persist_page(pages[0][0], **pages[0][1])

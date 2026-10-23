@@ -1019,7 +1019,13 @@ class CommentActivity:
     ) -> None:
         """Canonical page, receipt and checkpoint share Store's lock/fence order."""
         with self.store.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-            run = self.store._run(cur, owned["run_id"], owned["account"])
+            if self.writer is write_comments:
+                # The production writer changes only post-scoped comment rows.
+                # Arbitrary custom writers may update the run and must retain
+                # an exclusive fence rather than upgrade a shared row lock.
+                run = self.store._execution_run(cur, owned["run_id"], owned["account"], shared_fence=True)
+            else:
+                run = self.store._run(cur, owned["run_id"], owned["account"])
             if run["generation"] != owned["generation"] or run["state"] not in {"queued", "running"}:
                 raise LostOwnership("Comment page belongs to a superseded execution")
             cur.execute(

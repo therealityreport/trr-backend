@@ -102,6 +102,70 @@ def test_single_connection_pool_reuses_gate_transaction_for_owner_fence(one_conn
         assert cur.fetchone() == (1, 1)
 
 
+def test_locked_owner_fence_is_checked_once_after_lane_wait(one_connection):
+    store, transaction, _ = one_connection
+    owned = owned_target(store)
+    calls = []
+
+    def before_wait():
+        calls.append("before_wait")
+        store.check_owner(**owned)
+
+    def after_wait(connection):
+        calls.append("after_wait")
+        store.check_owner(**owned, connection=connection)
+
+    lane = gate(transaction, check_cancelled=before_wait, check_cancelled_in_transaction=after_wait)
+    permit = lane.before_request()
+    assert calls == ["before_wait", "after_wait"]
+    assert permit.request_number == lane.request_count == 1
+    assert len(row(transaction, lane)["request_times"]) == 1
+    # The caller's actual pre-send accounting still runs separately.
+    store.check_owner(**owned, record_request=True)
+    with transaction() as conn, conn.cursor() as cur:
+        cur.execute(
+            "select attempts,requests from social.instagram_ingestion_targets where run_id=%s", (owned["run_id"],)
+        )
+        assert cur.fetchone() == (1, 1)
+
+
+@pytest.mark.parametrize("expire_at", [2, 3])
+def test_locked_owner_fence_rechecks_deadline_and_rolls_back(one_connection, expire_at):
+    store, transaction, _ = one_connection
+    owned = owned_target(store)
+    calls, ticks = [], []
+
+    def clock():
+        ticks.append(len(ticks) + 1)
+        return 10 if len(ticks) >= expire_at else 0
+
+    def before_wait():
+        calls.append("before_wait")
+        store.check_owner(**owned)
+
+    def after_wait(connection):
+        calls.append("after_wait")
+        store.check_owner(**owned, connection=connection)
+
+    lane = gate(
+        transaction,
+        check_cancelled=before_wait,
+        check_cancelled_in_transaction=after_wait,
+        deadline=10,
+        monotonic=clock,
+    )
+    with pytest.raises(IdentityDeferred, match="target_deadline"):
+        lane.before_request()
+    assert calls == ["before_wait", "after_wait"]
+    assert len(ticks) == expire_at
+    assert lane.request_count == 0 and row(transaction, lane) == {}
+    with transaction() as conn, conn.cursor() as cur:
+        cur.execute(
+            "select attempts,requests from social.instagram_ingestion_targets where run_id=%s", (owned["run_id"],)
+        )
+        assert cur.fetchone() == (1, 0)
+
+
 def test_cancellation_while_identity_lock_waits_rolls_back_same_connection_fence(one_connection, lanes):
     store, transaction, backend_pid = one_connection
     owned = owned_target(store)

@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event
 from uuid import uuid4
 
 import psycopg2
@@ -125,6 +126,188 @@ def target(store, run):
         "stage": Stage.DETAILS,
         "target_key": "post1",
     }
+
+
+def parallel_owned_targets(store, *, stage=Stage.COMMENTS):
+    run = launch(store)
+    store.discover(
+        run["run_id"],
+        "bravotv",
+        generation=1,
+        stage=stage,
+        target_keys=["parallel1", "parallel2"],
+        max_attempts=3,
+        cursor_state={},
+        expected_cursor_state={},
+        page_id="parallel",
+        seal=True,
+    )
+    owned = []
+    for key in ("parallel1", "parallel2"):
+        args = {
+            "run_id": run["run_id"],
+            "account": "bravotv",
+            "generation": 1,
+            "stage": stage,
+            "target_key": key,
+        }
+        args["owner_token"] = str(store.reserve(**args)["owner_token"])
+        store.acquire(**args)
+        owned.append(args)
+    return run, owned
+
+
+def fence_operation(store, owned, operation):
+    if operation == "check_owner":
+        return store.check_owner(**owned, record_request=True)
+    return store.retain_evidence(
+        **owned,
+        evidence=Evidence.capture(
+            source_identity="instagram:post:" + owned["target_key"],
+            captured_at=datetime.now(UTC),
+            parser_version="v1",
+            payload={"pk": owned["target_key"]},
+        ),
+    )
+
+
+@pytest.mark.parametrize("operation", ["check_owner", "retain_evidence"])
+def test_independent_target_fences_overlap_without_run_lock_upgrade(database, operation):
+    store, tx = database
+    _, owned = parallel_owned_targets(store)
+    held, release = Event(), Event()
+
+    @contextmanager
+    def hold_transaction():
+        with tx() as conn:
+            yield conn
+            held.set()
+            assert release.wait(5), "test did not release the first target transaction"
+
+    @contextmanager
+    def bounded_transaction():
+        with tx() as conn:
+            with conn.cursor() as cur:
+                cur.execute("set local statement_timeout='2s'")
+            yield conn
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(fence_operation, Store(hold_transaction), owned[0], operation)
+        try:
+            assert held.wait(3), "first target did not reach its fenced write"
+            second = pool.submit(fence_operation, Store(bounded_transaction), owned[1], operation)
+            second.result(timeout=3)
+        finally:
+            release.set()
+        first.result(timeout=3)
+
+
+@pytest.mark.parametrize("operation", ["check_owner", "retain_evidence"])
+@pytest.mark.parametrize("change", ["state", "generation"])
+def test_shared_target_fence_blocks_run_changes_then_rejects_late_work(database, operation, change):
+    store, tx = database
+    run, owned = parallel_owned_targets(store)
+    held, release = Event(), Event()
+
+    @contextmanager
+    def hold_transaction():
+        with tx() as conn:
+            yield conn
+            held.set()
+            assert release.wait(5), "test did not release the shared run fence"
+
+    update = (
+        "update social.instagram_ingestion_runs set state='cancelled' where run_id=%s"
+        if change == "state"
+        else "update social.instagram_ingestion_runs set generation=generation+1 where run_id=%s"
+    )
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        first = pool.submit(fence_operation, Store(hold_transaction), owned[0], operation)
+        try:
+            assert held.wait(3)
+            with pytest.raises(psycopg2.errors.LockNotAvailable):
+                with tx() as conn, conn.cursor() as cur:
+                    cur.execute("set local lock_timeout='100ms'")
+                    cur.execute(update, (run["run_id"],))
+        finally:
+            release.set()
+        first.result(timeout=3)
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(update, (run["run_id"],))
+    for method in ("check_owner", "retain_evidence"):
+        with pytest.raises(LostOwnership, match="no longer current"):
+            fence_operation(store, owned[1], method)
+
+
+@pytest.mark.parametrize("operation", ["check_owner", "retain_evidence"])
+def test_shared_fence_preserves_placement_and_full_history_validation(database, operation):
+    from trr_backend.ingestion.validation_gate import ValidationStore
+
+    store, tx = database
+    _, owned = parallel_owned_targets(store)
+    with pytest.raises(LostOwnership, match="different execution placement"):
+        fence_operation(Store(tx, execution_placement="local"), owned[0], operation)
+    # Unguarded setup models a historical full-history run. The shared route
+    # must still dispatch through ValidationStore's existing execution gate.
+    with pytest.raises(Conflict, match="fixed-post retrieval"):
+        fence_operation(ValidationStore(tx), owned[0], operation)
+
+
+def test_listing_external_owner_fence_stays_exclusive_and_ordered_hold_completes(database):
+    from psycopg2.extras import RealDictCursor
+
+    from trr_backend.ingestion.ordered_listing import OrderedListingActivity
+
+    store, tx = database
+    run, owned = parallel_owned_targets(store, stage=Stage.LISTING)
+
+    @contextmanager
+    def bounded_transaction():
+        with tx() as conn:
+            with conn.cursor() as cur:
+                cur.execute("set local lock_timeout='100ms'")
+            yield conn
+
+    with tx() as conn:
+        store.check_owner(**owned[0], connection=conn)
+        # Targets differ: this must block on the already-exclusive run fence,
+        # before a second holder can reach a later run-write upgrade.
+        with pytest.raises(psycopg2.errors.LockNotAvailable):
+            Store(bounded_transaction).check_owner(**owned[1])
+    held = OrderedListingActivity(Store(bounded_transaction), writer=None, clock=lambda: datetime.now(UTC))._hold(
+        owned[0], {}, {}, "ordered_test_hold"
+    )
+    assert held["ordered_held"] is True
+    with tx() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("select state from social.instagram_ingestion_runs where run_id=%s", (run["run_id"],))
+        assert cur.fetchone()["state"] == "blocked"
+        cur.execute(
+            """select blocked_reason,owner_token from social.instagram_ingestion_targets
+            where run_id=%s and stage='listing' and target_key=%s""",
+            (run["run_id"], owned[0]["target_key"]),
+        )
+        assert dict(cur.fetchone()) == {"blocked_reason": "ordered_test_hold", "owner_token": None}
+    with pytest.raises(LostOwnership):
+        store.check_owner(**owned[1])
+
+
+def test_non_comment_evidence_keeps_exclusive_run_fence(database):
+    from psycopg2.extras import RealDictCursor
+
+    store, tx = database
+    run, owned = parallel_owned_targets(store, stage=Stage.DETAILS)
+
+    @contextmanager
+    def bounded_transaction():
+        with tx() as conn:
+            with conn.cursor() as cur:
+                cur.execute("set local lock_timeout='100ms'")
+            yield conn
+
+    with tx() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        store._execution_run(cur, run["run_id"], "bravotv", shared_fence=True)
+        with pytest.raises(psycopg2.errors.LockNotAvailable):
+            fence_operation(Store(bounded_transaction), owned[0], "retain_evidence")
 
 
 def test_atomic_idempotent_launch_and_payload_conflict(database):
