@@ -525,6 +525,27 @@ def test_local_launch_requires_the_public_profile(database):
     assert sql(database, "select count(*) from social.instagram_ingestion_runs") == [(0,)]
 
 
+def test_explicit_authenticated_relay_local_launch_freezes_family_and_placement(database):
+    service = _service(database)
+    service.source_profile = SourceProfile.for_authenticated_relay()
+    payload = InstagramIngestionLaunchV2(
+        execution_placement="local",
+        backfill_scope="bounded_window",
+        date_start="2026-01-01T00:00:00Z",
+        date_end="2026-02-01T00:00:00Z",
+        detail_worker_count=1,
+        comments_worker_count=1,
+        comments_enable_media_followups=False,
+    )
+    service.launch("bravotv", payload, idempotency_key="local-www", initiated_by="offline-test")
+    saved = sql(database, "select execution_placement,intent from social.instagram_ingestion_runs")[0]
+    assert saved[0] == "local"
+    assert saved[1]["source_profile"]["comments_family"] == "instagram_authenticated_www_relay"
+    assert saved[1]["date_start"].startswith("2026-01-01")
+    assert saved[1]["comments_enable_media_followups"] is False
+    assert Store(database[2]).dispatch_pending(lambda _: pytest.fail("Modal claimed local work")) == 0
+
+
 def test_default_modal_launch_keeps_its_historical_command_fingerprint(database):
     payload = InstagramIngestionLaunchV2(selected_tasks=["comments", "media"])
     _service(database).launch("bravotv", payload, idempotency_key="modal-1", initiated_by="offline-test")

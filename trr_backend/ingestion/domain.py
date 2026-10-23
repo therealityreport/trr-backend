@@ -78,6 +78,11 @@ class SourceProfile:
                 "instagram_comments_rest",
             ),
         }
+        authenticated_relay = self.access_mode == "authenticated" and (
+            self.listing_family,
+            self.details_family,
+            self.comments_family,
+        ) == ("instagram_posts_authenticated", "instagram_detail_authenticated", "instagram_authenticated_www_relay")
         ordered_public = (
             self.access_mode == "public"
             and (self.listing_family, self.details_family, self.comments_family)
@@ -88,7 +93,8 @@ class SourceProfile:
         if (
             self.access_mode not in families
             or (
-                not ordered_public
+                not authenticated_relay
+                and not ordered_public
                 and (self.listing_family, self.details_family, self.comments_family) != families[self.access_mode]
             )
             or type(self.source_contract_version) is not int
@@ -112,6 +118,15 @@ class SourceProfile:
                 "instagram_comments_rest",
             )
         raise ValueError("Unsupported Instagram access mode")
+
+    @classmethod
+    def for_authenticated_relay(cls) -> SourceProfile:
+        return cls(
+            "authenticated",
+            "instagram_posts_authenticated",
+            "instagram_detail_authenticated",
+            "instagram_authenticated_www_relay",
+        )
 
     @classmethod
     def for_public_ordered(cls) -> SourceProfile:

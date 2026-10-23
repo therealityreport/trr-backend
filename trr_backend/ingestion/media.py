@@ -153,6 +153,8 @@ class CommentMedia:
     media_urls: tuple[str, ...] = field(repr=False)
     storage_source_key: str = ""
     observed_at: datetime | None = None
+    attachment_refresh: Any | None = field(default=None, repr=False)
+    attachment_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -252,6 +254,18 @@ class MediaSnapshot:
                 raise MediaIncomplete("preserved_comment_storage_key_required")
             if comment.observed_at is not None and comment.observed_at.utcoffset() is None:
                 raise MediaIncomplete("original_comment_observation_required")
+            if comment.attachment_refresh is not None:
+                proof = comment.attachment_refresh
+                proof.validate()
+                if (proof.row_id, proof.comment_id, proof.post_id, proof.shortcode) != (
+                    comment.row_id,
+                    comment.comment_id,
+                    self.post_id,
+                    self.shortcode,
+                ) or tuple(map(source_reference, comment.media_urls)) != (source_reference(proof.source_url),):
+                    raise MediaIncomplete("attachment_refresh_identity_mismatch")
+            if comment.attachment_version is not None and not re.fullmatch(r"[a-f0-9]{64}", comment.attachment_version):
+                raise MediaIncomplete("attachment_version_invalid")
         comments = {comment.comment_id for comment in self.comments}
         if any(not re.fullmatch(r"[A-Za-z0-9._]{1,30}", handle) for handle in self.unavailable_avatars):
             raise MediaIncomplete("invalid_unavailable_avatar_identity")
@@ -847,6 +861,66 @@ def write_avatar_version(
     }
 
 
+def write_comment_media(
+    conn: Any, *, run_id: str, post_id: str, observed_at: datetime, comments: tuple, comment_fields: Mapping
+) -> None:
+    """Apply comment media under the caller's transaction and ownership fence."""
+    if conn is None or conn.autocommit:
+        raise CanonicalWriteError("Comment media write requires an explicit transaction")
+    for comment in comments:
+        row = _locked(
+            conn,
+            "instagram_comments",
+            {"id": comment.row_id, "post_id": post_id, "comment_id": comment.comment_id},
+        )
+        if not row:
+            raise CanonicalWriteError("Media comment identity differs from snapshot")
+        comment_observed_at = comment.observed_at or observed_at
+        _newer(comment_observed_at, row)
+        _media_observation_guard(comment_observed_at, row.get("raw_data") or {})
+        raw = dict(row.get("raw_data") or {})
+        retained = raw.get("ingestion_attachment") or {}
+        proof = comment.attachment_refresh
+        same_proof = proof is not None and retained == proof.to_payload()
+        if retained.get("evidence_sha256") != comment.attachment_version and not same_proof:
+            raise CanonicalWriteError("Comment attachment version changed")
+        if proof is not None:
+            from trr_backend.ingestion.comment_attachment_refresh import (
+                attachment_baseline,
+                validate_attachment_order,
+            )
+
+            proof.validate()
+            if same_proof:
+                if raw.get("giphy_media_info") != proof.giphy_media_info or [
+                    source_reference(url) for url in row.get("media_urls") or []
+                ] != [source_reference(proof.source_url)]:
+                    raise CanonicalWriteError("Applied comment attachment differs from proof")
+            else:
+                if attachment_baseline(row) != proof.baseline_sha256:
+                    raise CanonicalWriteError("Comment attachment baseline changed")
+                validate_attachment_order(row, proof.captured_at)
+            raw["ingestion_attachment"] = proof.to_payload()
+            raw["giphy_media_info"] = dict(proof.giphy_media_info)
+        elif [source_reference(url) for url in row.get("media_urls") or []] != [
+            source_reference(url) for url in comment.media_urls
+        ]:
+            raise CanonicalWriteError("Comment media inventory changed")
+        changes = dict(comment_fields[comment.comment_id])
+        if proof is not None:
+            changes["media_urls"] = [source_reference(proof.source_url)]
+        changes.update(
+            media_mirror_last_attempt_at=datetime.now(UTC),
+            media_mirror_last_job_id=run_id,
+            media_mirror_attempt_count=int(row.get("media_mirror_attempt_count") or 0) + 1,
+            raw_data={
+                **raw,
+                "ingestion_media": {"version": MEDIA_VERSION, "observed_at": utc_timestamp(comment_observed_at)},
+            },
+        )
+        _update(conn, "instagram_comments", comment.row_id, changes)
+
+
 def write_media(
     conn: Any, *, run_id: str, account: str, target_key: str, observed_at: datetime, result: MediaResult
 ) -> dict[str, Any]:
@@ -944,32 +1018,14 @@ def write_media(
         if position == 0:
             changed["hosted_thumbnail_url"] = fields["hosted_thumbnail_url"]
         _update(conn, "social_post_media_assets", str(asset["id"]), changed)
-    for comment in source.comments:
-        row = _locked(
-            conn,
-            "instagram_comments",
-            {"id": comment.row_id, "post_id": source.post_id, "comment_id": comment.comment_id},
-        )
-        if not row:
-            raise CanonicalWriteError("Media comment identity differs from snapshot")
-        comment_observed_at = comment.observed_at or observed_at
-        _newer(comment_observed_at, row)
-        _media_observation_guard(comment_observed_at, row.get("raw_data") or {})
-        if [source_reference(url) for url in row.get("media_urls") or []] != [
-            source_reference(url) for url in comment.media_urls
-        ]:
-            raise CanonicalWriteError("Comment media inventory changed")
-        changes = dict(result.comment_fields[comment.comment_id])
-        changes.update(
-            media_mirror_last_attempt_at=datetime.now(UTC),
-            media_mirror_last_job_id=run_id,
-            media_mirror_attempt_count=int(row.get("media_mirror_attempt_count") or 0) + 1,
-            raw_data={
-                **(row.get("raw_data") or {}),
-                "ingestion_media": {"version": MEDIA_VERSION, "observed_at": utc_timestamp(comment_observed_at)},
-            },
-        )
-        _update(conn, "instagram_comments", comment.row_id, changes)
+    write_comment_media(
+        conn,
+        run_id=run_id,
+        post_id=source.post_id,
+        observed_at=observed_at,
+        comments=source.comments,
+        comment_fields=result.comment_fields,
+    )
     for avatar in sorted(result.avatars, key=lambda item: (item["username"], item["source_url"])):
         write_avatar_version(
             conn,
@@ -1052,6 +1108,8 @@ class MediaActivity:
                         "media_urls": list(c.media_urls),
                         "storage_source_key": c.storage_source_key,
                         "observed_at": utc_timestamp(c.observed_at or snapshot.observed_at),
+                        **({"attachment_refresh": c.attachment_refresh.to_payload()} if c.attachment_refresh else {}),
+                        **({"attachment_version": c.attachment_version} if c.attachment_version else {}),
                     }
                     for c in snapshot.comments
                 ],

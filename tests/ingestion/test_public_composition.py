@@ -121,6 +121,28 @@ def test_invalid_source_mode_fails_closed_before_run_creation(monkeypatch):
         composition._configured_source_profile()
 
 
+def test_authenticated_www_relay_is_explicit_opt_in_and_worker_uses_frozen_family(monkeypatch):
+    from trr_backend.ingestion import authenticated_comment_transport
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_SCRAPE_MODE", "authenticated")
+    monkeypatch.setenv("TRR_INSTAGRAM_INGESTION_AUTH_COMMENTS_TRANSPORT", "www_relay")
+    assert composition._configured_source_profile() == SourceProfile.for_authenticated_relay()
+    captures = []
+    monkeypatch.setattr(
+        authenticated_comment_transport,
+        "AuthenticatedRelayCommentSource",
+        lambda **kw: captures.append(kw) or "www-source",
+    )
+    monkeypatch.setattr(composition, "_credentials", lambda account: {"raw_cookies": {}})
+    monkeypatch.setattr(composition, "_gate_source", lambda source, *a, **kw: source)
+    ctx = context("authenticated")
+    ctx["run"]["intent"]["source_profile"] = asdict(SourceProfile.for_authenticated_relay())
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_SCRAPE_MODE", "public_first")
+    assert composition._comments(ctx, {"account": "bravotv"}) == "www-source"
+    assert captures[0]["expected_count"] == 7
+    assert composition._configured_source_profile() == SourceProfile.for_mode("public")
+
+
 def test_public_gate_is_shared_public_identity_and_reuses_owner_transaction(monkeypatch):
     from trr_backend.ingestion import identity_policy
 

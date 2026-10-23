@@ -18,6 +18,12 @@ from uuid import uuid4
 
 from psycopg2.extras import RealDictCursor
 
+from trr_backend.ingestion.authenticated_relay_contract import (
+    AUTH_RELAY_FAMILY,
+    BINDING_KEYS,
+    continuation_matches,
+    valid_provenance,
+)
 from trr_backend.ingestion.canonical import normalize_comment_source, write_comments
 from trr_backend.ingestion.domain import Conflict, Failure, LostOwnership, Outcome, Stage, stable_json, utc_timestamp
 from trr_backend.ingestion.evidence import Evidence
@@ -362,9 +368,17 @@ def parse_comment_evidence(
     if payload.get("source_snapshot_type") == "native_rest_list_v1":
         payload = _native_list_page(payload)
     provenance = payload.get("cursor_payload")
-    if isinstance(provenance, dict) and provenance.get("adapter_family") not in (None, "instagram_public_relay"):
+    if isinstance(provenance, dict) and provenance.get("adapter_family") not in (
+        None,
+        "instagram_public_relay",
+        AUTH_RELAY_FAMILY,
+    ):
         raise CommentSourceError("Native comment evidence uses an unsupported adapter family")
-    if isinstance(provenance, dict) and provenance.get("adapter_family") == "instagram_public_relay":
+    if isinstance(provenance, dict) and provenance.get("adapter_family") == AUTH_RELAY_FAMILY:
+        if not valid_provenance(provenance, parent=payload.get("parent_comment_id") is not None):
+            raise CommentSourceError("Authenticated Relay page has invalid cursor provenance")
+        provenance = dict(provenance)
+    elif isinstance(provenance, dict) and provenance.get("adapter_family") == "instagram_public_relay":
         required = {
             "adapter_family",
             "adapter_version",
@@ -531,11 +545,12 @@ def _progress(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
 def _advance(state: dict[str, Any], page: CommentPage, *, scan_started_at: datetime) -> None:
     provenance = page.cursor_provenance
     if provenance is not None:
-        if state.get("adapter_family") not in (None, "instagram_public_relay") or (
+        family = provenance["adapter_family"]
+        if state.get("adapter_family") not in (None, family) or (
             state["lanes"] and state.get("adapter_family") is None
         ):
             raise CommentSourceError("Comment cursor adapter family changed")
-        state["adapter_family"] = "instagram_public_relay"
+        state["adapter_family"] = family
         state["adapter_version"] = 1
         lane_key = page.parent_comment_id or "__top__"
         previous_lane = state["lanes"].get(lane_key) or {}
@@ -546,19 +561,23 @@ def _advance(state: dict[str, Any], page: CommentPage, *, scan_started_at: datet
                 previous_lane.get("exhausted")
                 or not previous_cursors
                 or previous_cursors[-1] != request_cursor
-                or any(
-                    previous_lane.get(key) != provenance[key]
-                    for key in ("relay_doc_id", "relay_friendly_name", "sort_order", "page_size")
+                or (
+                    not continuation_matches(previous_lane, provenance, parent=page.parent_comment_id is not None)
+                    if family == AUTH_RELAY_FAMILY
+                    else any(
+                        previous_lane.get(key) != provenance[key]
+                        for key in ("relay_doc_id", "relay_friendly_name", "sort_order", "page_size")
+                    )
                 )
             ):
-                raise CommentSourceError("Public Relay continuation does not match its durable query lane")
+                raise CommentSourceError("Relay continuation does not match its durable query lane")
         elif page.parent_comment_id:
             # An embedded child cursor has no proved child-query identity. A
             # child root request establishes that binding without replacing the
             # top scan or treating retained inventory as a fresh observation.
             state["lanes"].pop(lane_key, None)
-    elif state.get("adapter_family") == "instagram_public_relay":
-        raise CommentSourceError("Public Relay page lacks its cursor provenance")
+    elif state.get("adapter_family") in {"instagram_public_relay", AUTH_RELAY_FAMILY}:
+        raise CommentSourceError("Relay page lacks its cursor provenance")
     if page.started_from_root and not page.parent_comment_id and "__top__" in state["lanes"]:
         # A deliberate root restart begins a fresh observation manifest. Earlier
         # canonical rows and immutable page receipts remain durable; they cannot
@@ -586,6 +605,8 @@ def _advance(state: dict[str, Any], page: CommentPage, *, scan_started_at: datet
         lane.update(
             {key: provenance[key] for key in ("relay_doc_id", "relay_friendly_name", "sort_order", "page_size")}
         )
+        if provenance["adapter_family"] == AUTH_RELAY_FAMILY:
+            lane.update({key: provenance[key] for key in BINDING_KEYS})
         if page.parent_comment_id and page.expected_count is not None and page.parent_comment_id in state["observed"]:
             parent = state["observed"][page.parent_comment_id]
             parent["expected_replies"] = max(parent.get("expected_replies") or 0, page.expected_count)
@@ -691,12 +712,16 @@ def _settlement(state: dict[str, Any], summary: CommentFetchSummary) -> CommentS
             return None
         if count is None:
             root_exhausted = (
-                state.get("adapter_family") == "instagram_public_relay"
+                state.get("adapter_family") in {"instagram_public_relay", AUTH_RELAY_FAMILY}
                 and state.get("adapter_version") == 1
                 and lane is not None
                 and lane.get("started_from_root") is True
                 and lane.get("exhausted") is True
-                and all(lane.get(key) for key in ("relay_doc_id", "relay_friendly_name", "sort_order", "page_size"))
+                and all(lane.get(key) for key in ("relay_doc_id", "relay_friendly_name", "sort_order"))
+                and (
+                    bool(lane.get("page_size"))
+                    or (state.get("adapter_family") == AUTH_RELAY_FAMILY and lane.get("page_size") is None)
+                )
             )
             if not observed.get("native_reply_leaf") and not root_exhausted:
                 return None
@@ -840,7 +865,7 @@ class CommentActivity:
             )
             current_checkpoint, state = next_checkpoint, updated
             retained = (evidence_id, evidence, page)
-            if state.get("adapter_family") == "instagram_public_relay" and any(
+            if state.get("adapter_family") in {"instagram_public_relay", AUTH_RELAY_FAMILY} and any(
                 lane.get("repeated") and key not in current_checkpoint.get("public_lane_restarts", {})
                 for key, lane in state["lanes"].items()
             ):

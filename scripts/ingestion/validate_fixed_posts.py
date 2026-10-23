@@ -87,7 +87,11 @@ def main(argv=None):
                         "manifest_hash": manifest.digest,
                         "intent_hash": manifest.intent().digest,
                         "posts": [p.shortcode for p in manifest.posts],
-                        "source_profile": "public",
+                        "source_profile": (
+                            "public"
+                            if manifest.intent().effective_source_profile.access_mode == "public"
+                            else manifest.intent().effective_source_profile.comments_family
+                        ),
                         "scope": manifest.intent().scope,
                     }
                 )

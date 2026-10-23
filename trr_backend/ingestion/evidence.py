@@ -162,6 +162,7 @@ isCovered isRanked commentIndex api_phase isEdited isPinned metaAiCommentType ch
 likedByMediaCoauthors cursor_min_id cursor_param cursor_payload comment_filter_param
 cursorMinId cursorParam cursorPayload commentFilterParam min_id max_id after before
 adapter_family adapter_version request_cursor relay_doc_id relay_friendly_name sort_order page_size
+relay_logged_in relay_threads_style
 listing_profile_id listing_profile_username
 detail_snapshot version source observed_at coverage_version media_complete caption_present
 likes_present comments_present media_count
@@ -177,6 +178,8 @@ animated_image_url animatedImageUrl fixed_height_url fixedHeightUrl fixed_width_
 storage_source_key post_id canonical_post_id row_id show_id season_number week_index expected_media_count
 comments_complete avatars_complete avatars role source_url unavailable_avatars avatar_url_explicitly_missing
 hosted_url content_hash
+gif_media_id is_sticker attachment_refresh attachment_version ingestion_attachment native_gif_id captured_at
+baseline_sha256 evidence_sha256 source_identity kind
 """.split()
 )
 

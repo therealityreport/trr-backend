@@ -7,6 +7,7 @@ from trr_backend.ingestion.authenticated_relay import (
     AUTH_RELAY_FAMILY,
     CHILD_DOCUMENT,
     PARENT_DOCUMENT,
+    PARENT_ROOT_DOCUMENT,
     WWW_RELAY_URL,
     AuthenticatedRelayPageClient,
     WwwRelayContext,
@@ -21,6 +22,22 @@ def document(*, actor="222", user="0", logged=True, threads=False, token="docume
         ["RelayAPIConfigDefaults", [], {"actorID": actor}, 1],
         ["DTSGInitialData", [], {"token": token}, 1],
         ["LSD", [], {"token": "lsd-secret"}, 1],
+        [
+            "SiteData",
+            [],
+            {
+                "haste_session": "fixture-session",
+                "pr": 1,
+                "client_revision": 101,
+                "hsi": "123",
+                "comet_env": 7,
+                "__spin_r": 101,
+                "__spin_b": "trunk",
+                "__spin_t": 123,
+            },
+            1,
+        ],
+        ["SprinkleConfig", [], {"param_name": "jazoest", "should_randomize": False, "version": 2}, 1],
     ]
     box = {"define": definitions}
     if extra is not None:
@@ -95,6 +112,8 @@ def test_native_page_uses_www_endpoint_and_retains_only_cursor_provenance():
         source.bootstrap("Abc123")
         payload = source.page(media_id="333", cursor="native-next")
     assert len(requests) == len(counts) == 2
+    assert requests[0].headers["accept"] == "text/html,application/xhtml+xml"
+    assert "x-requested-with" not in requests[0].headers
     assert str(requests[-1].url) == WWW_RELAY_URL
     assert requests[-1].headers["x-fb-friendly-name"] == PARENT_DOCUMENT[1]
     assert "x-root-field-name" not in requests[-1].headers
@@ -358,3 +377,51 @@ def test_parent_root_cannot_be_requested_as_a_pagination_query():
         with pytest.raises(ValueError, match="native_parent_root_requires_bootstrap_page"):
             source.page(media_id="333")
     assert len(sends) == 1
+
+
+def test_bootstrap_diagnostic_exposes_only_safe_structural_reason():
+    html = document() + '<link rel="canonical" href="https://www.instagram.com/p/Wrong/?token=private-token">'
+    source, client = make_client(lambda request: httpx.Response(200, text=html))
+    with client:
+        source.bootstrap("Abc123")
+        with pytest.raises(SourceFailure):
+            source.root_page()
+    assert source.last_diagnostic == {"phase": "comments_bootstrap", "reason": "document_url_mismatch"}
+    assert "private-token" not in json.dumps(source.last_diagnostic)
+
+
+def test_context_diagnostic_exposes_only_static_reason():
+    source, client = make_client(lambda request: httpx.Response(200, text="<html>private-token</html>"))
+    with client, pytest.raises(SourceFailure):
+        source.bootstrap("Abc123")
+    assert source.last_diagnostic == {
+        "phase": "relay_context",
+        "reason": "native_relay_context_missing_or_conflicting",
+    }
+
+
+def test_client_rendered_root_uses_container_operation_without_pagination_variables():
+    from urllib.parse import parse_qs
+
+    sends, observed = [], []
+
+    def handler(request):
+        sends.append(request)
+        return httpx.Response(200, text=document()) if request.method == "GET" else httpx.Response(200, json=page())
+
+    source, client = make_client(handler, observer=lambda *args: observed.append(args))
+    with client:
+        source.bootstrap("Abc123")
+        payload = source.fetch_root_page(media_id="333")
+    form = parse_qs(sends[-1].content.decode())
+    assert len(sends) == 2
+    assert (form["doc_id"][0], form["fb_api_req_friendly_name"][0]) == PARENT_ROOT_DOCUMENT
+    assert json.loads(form["variables"][0]) == {
+        "media_id": "333",
+        "__relay_internal__pv__PolarisIsLoggedInrelayprovider": True,
+        "__relay_internal__pv__PolarisThreadsStyleCommentsEnabledrelayprovider": False,
+    }
+    assert payload["cursor_payload"]["page_size"] is None
+    assert payload["cursor_payload"]["request_cursor"] is None
+    assert payload["cursor_payload"]["relay_doc_id"] == PARENT_ROOT_DOCUMENT[0]
+    assert "secret" not in json.dumps(observed)

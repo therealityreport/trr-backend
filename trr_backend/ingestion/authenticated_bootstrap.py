@@ -23,15 +23,24 @@ _MAX_ITEMS = 10_000
 class AuthenticatedBootstrapError(ValueError):
     """The bound document cannot prove one complete initial connection."""
 
-    def __init__(self, *, failure_code: str = "source_incomplete", retry_after_seconds: float | None = None):
+    def __init__(
+        self,
+        *,
+        failure_code: str = "source_incomplete",
+        retry_after_seconds: float | None = None,
+        reason: str = "invalid_structure",
+    ):
+        self.reason = reason
         self.failure_code = failure_code
         self.retry_after_seconds = retry_after_seconds
         super().__init__("native_comments_bootstrap_invalid")
 
 
-def _invalid(*, failure_code="source_incomplete", retry_after_seconds=None):
+def _invalid(*, failure_code="source_incomplete", retry_after_seconds=None, reason="invalid_structure"):
     # Never put source text, URLs, tokens or exception details in this channel.
-    return AuthenticatedBootstrapError(failure_code=failure_code, retry_after_seconds=retry_after_seconds)
+    return AuthenticatedBootstrapError(
+        failure_code=failure_code, retry_after_seconds=retry_after_seconds, reason=reason
+    )
 
 
 class _Document(_DocumentJsonScripts):
@@ -50,7 +59,7 @@ class _Document(_DocumentJsonScripts):
 
 def _bind_url(value, shortcode):
     if not isinstance(value, str) or not value or value != value.strip():
-        raise _invalid()
+        raise _invalid(reason="document_url_mismatch")
     try:
         parts = urlsplit(value)
         if (
@@ -59,12 +68,12 @@ def _bind_url(value, shortcode):
             or parts.query
             or parts.fragment
         ):
-            raise _invalid()
+            raise _invalid(reason="document_url_mismatch")
         match = re.fullmatch(r"/(?:[A-Za-z0-9._]{1,30}/)?(?:p|reel|tv)/([A-Za-z0-9_-]{1,40})/?", parts.path)
         if match is None or match[1] != shortcode:
-            raise _invalid()
+            raise _invalid(reason="document_url_mismatch")
     except ValueError:
-        raise _invalid() from None
+        raise _invalid(reason="document_url_mismatch") from None
 
 
 def _connection(result):
@@ -91,6 +100,7 @@ def _connection(result):
         or result.get("error") is not None
         or result.get("status") not in (None, "ok")
         or "incremental" in result
+        or "hasNext" in result
     ):
         raise _invalid()
     data = result.get("data")
@@ -155,10 +165,10 @@ def extract_parent_bootstrap(html: str, *, shortcode: str, document_url: str) ->
                     len(outer) != 4
                     or outer[2] is not None
                     or not isinstance(outer[3], list)
-                    or len(outer[3]) != 1
+                    or len(outer[3]) not in (1, 3)
                     or not isinstance(outer[3][0], dict)
                 ):
-                    raise _invalid()
+                    raise _invalid(reason="serverjs_call_shape_invalid")
                 box = outer[3][0].get("__bbox")
                 if not isinstance(box, dict):
                     raise _invalid()
@@ -172,7 +182,7 @@ def extract_parent_bootstrap(html: str, *, shortcode: str, document_url: str) ->
                     if not isinstance(inner, list) or inner[:2] != ["RelayPrefetchedStreamCache", "next"]:
                         continue
                     if len(inner) != 4 or inner[2] != [] or not isinstance(inner[3], list) or len(inner[3]) != 2:
-                        raise _invalid()
+                        raise _invalid(reason="relay_call_shape_invalid")
                     preloader, wrapped = inner[3]
                     if not isinstance(preloader, str) or not preloader.startswith(CONTAINER_PRELOADER_PREFIX):
                         continue
@@ -185,16 +195,16 @@ def extract_parent_bootstrap(html: str, *, shortcode: str, document_url: str) ->
                         or type(frame.get("sequence_number")) is not int
                         or frame["sequence_number"] != 0
                     ):
-                        raise _invalid()
+                        raise _invalid(reason="comments_stream_incomplete")
                     matches.append(_connection(frame.get("result")))
                     if len(matches) > 1:
-                        raise _invalid()
+                        raise _invalid(reason="comments_preloader_ambiguous")
         if len(matches) != 1:
-            raise _invalid()
+            raise _invalid(reason="comments_preloader_missing")
         payload = sanitize_payload({"data": {PARENT_CONNECTION: matches[0]}})
         _connection(payload)
         return payload
     except AuthenticatedBootstrapError:
         raise
     except (ValueError, RecursionError, UnicodeError):
-        raise _invalid() from None
+        raise _invalid(reason="document_decoding_failed") from None

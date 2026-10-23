@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Durable Mac worker for logged-out Instagram ingestion runs placed on `local`.
+"""Durable Mac worker for explicitly supported Instagram runs placed on `local`.
 
 It runs until stopped (launchd keeps it alive; see
 scripts/ingestion/launchd/com.trr.instagram-local-worker.plist). It holds its own

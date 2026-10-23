@@ -1678,3 +1678,67 @@ execution, original GIF retrieval/mirroring/display, and authenticated comment
 integration remain unfinished. Private diagnostics and the verified snapshot are
 under the task's `dedicated-auth` directory. The existing one-time follow-up must
 read that updated handoff and must not repeat an unchanged failing request.
+
+
+## 2026-10-22: both original GIF attachments saved and verified
+
+The two original comments on `Dd37XeDly4U` now have native-proven, hosted GIF
+attachments. The attachment-only run `77da3e31-dc7b-4ee9-8d33-da7b45a858ef`
+committed and reconciled to `completed`. Its receipt is explicitly
+`kind=comment_attachments`; it is not a full post-media or comments-completion
+receipt. The normal complete comment-inventory check remains required.
+
+| Comment ID | Native GIF ID | Bytes | Frames | SHA-256 |
+| --- | --- | ---: | ---: | --- |
+| 18029668664695097 | 1072011872270984 | 1137321 | 43 | 073befce4d4989ff2b52ce238f282c24568c5f18a4efa69b36413b96dc0c3a3e |
+| 18139996450549826 | 1016439864742805 | 971412 | 35 | b9e0c51e13178b126edd4a7285b4cadd39ff83988eed58a80d15f794f64a7bb8 |
+
+Both hosted downloads matched the retained native files byte for byte. Both are
+200-by-200 animated GIFs and do not match the placeholder. TRR's saved-comments
+dialog rendered each hosted image with `complete=true` and natural dimensions
+200-by-200. Private screenshots retain both display checks.
+
+The successful apply used the two cached native assets, two storage HEAD calls,
+and no Instagram or CDN source requests. Verification used two hosted reads.
+All 184 saved comment identities, scrape/last-seen timestamps, last-seen run IDs,
+and missing/deleted states matched the pre-apply inventory. The frozen original
+run remained unchanged, and the account-budget tranche closed.
+
+The maintained implementation adds `CommentAttachmentActivity`, which loads the
+full normal snapshot and then hosts and writes only the selected proof-bearing
+comment attachments. It reuses the comment writer's locked identity, chronology,
+version and compare-and-swap checks. It does not write post or avatar fields.
+Earlier full-media attempts were cancelled: one stopped before media operations
+on a nested database-pool guard, and another stored both GIFs but stopped on an
+unrelated avatar download before canonical commit. Their evidence is retained.
+The private driver now reuses the held transaction for its frozen-run check and
+rejects uncached source URLs.
+
+The final deployed runtime is Modal `v111`, tag
+`ig-attachments-only-4bfc6762`, in workspace `admin-56995`, environment `main`, app
+`trr-backend-jobs` (`ap-DkLTRoSvqhbkGO7fHyHxrD`). Deployment readiness and the API
+cold-start health check passed. All 25 selected live module hashes matched the
+frozen candidate. All 38 function bindings and five schedules were unchanged.
+The matching local source identity is `f06b63c89b9b-overlay-4bfc6762afa1`; all
+2,599 installed file hashes and the same 25-module smoke passed.
+
+An intermediate deployment, v109, used an older base. It was corrected by v110,
+which restored the newer v107 Reddit and v108 summary work. v111 was built from
+that verified v110 source and preserves those changes and the v106 ingestion
+integration. Provider rollback is unavailable on this plan; exact frozen source
+is retained for redeployment. The previous local release
+`f06b63c89b9b-overlay-7867fc631421` is retained for rollback. Obsolete local copies
+were moved to actual Trash, leaving two runnable copies.
+
+Validation reused the prior 75 proof tests and 152 affected checks. After the
+writer extraction, 13 affected integration/inventory tests passed; the new
+attachment-only activity passed 10 focused tests. Scoped Ruff and whitespace
+checks passed. Independent complete-batch review had no remaining findings.
+No app source or SQL schema change was required.
+
+The maintenance window was returned after all repair processes finished. The
+coordinating chat resumed January at generation 5 with its intent and checkpoints
+preserved, and owns that run. Full-history ingestion remains disabled even though
+both original GIF checks now pass. Private release, apply, byte and display
+receipts remain under this task's `attachment-only-release` and
+`dedicated-auth/gif-release` directories; they contain no shared credentials.

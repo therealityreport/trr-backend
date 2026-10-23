@@ -157,9 +157,15 @@ def _row(conn: Any, table: str, keys: Mapping[str, Any]) -> dict[str, Any]:
         return dict(cur.fetchone() or {})
 
 
-def _upsert(conn: Any, table: str, payload: Mapping[str, Any], conflict: Sequence[str]) -> dict[str, Any]:
+def _upsert(
+    conn: Any, table: str, payload: Mapping[str, Any], conflict: Sequence[str], *, repair_created_at: bool = False
+) -> dict[str, Any]:
+    if repair_created_at and table != "instagram_comments":
+        raise CanonicalWriteError("Native creation-date repair is limited to comments")
     columns = list(payload)
     updates = [key for key in columns if key not in {*conflict, "id", "first_seen_at", "created_at"}]
+    if repair_created_at:
+        updates.append("created_at")
     query = sql.SQL("insert into social.{} ({}) values ({}) on conflict ({}) do update set {} returning *").format(
         sql.Identifier(table),
         sql.SQL(",").join(map(sql.Identifier, columns)),
@@ -1108,7 +1114,52 @@ def write_comments(
                     raise CanonicalWriteError("Reply parent is absent from this post")
             payload["parent_comment_id"] = parent_db_id
             payload.update(assignment or {})
+            # Only a real native date can replace a missing/epoch legacy value.
+            # Decide before merging so retained raw data or a DTO fallback cannot
+            # masquerade as a newly observed source timestamp. Rows are locked.
+            native_created_at = _time(_first(source, "created_at", "timestamp"))
+            post_created_at = _time(post.get("posted_at"))
+            repair_created_at = bool(
+                existing
+                and _time(existing.get("created_at")) in (None, datetime(1970, 1, 1, tzinfo=UTC))
+                and native_created_at is not None
+                and post_created_at is not None
+                and post_created_at <= native_created_at <= observed_at
+            )
             payload = _merge(existing, payload)
+            # Empty text is valid for native GIF-only comments, and deleted or
+            # unavailable authors need not have a username. The merge omits
+            # empty fields to preserve existing observations; first inserts
+            # still need these NOT NULL columns without inventing content.
+            payload.setdefault("username", "")
+            payload.setdefault("text", "")
+            if repair_created_at:
+                payload["created_at"] = native_created_at
+            attachment = (existing.get("raw_data") or {}).get("ingestion_attachment")
+            if attachment:
+                captured = _time(attachment.get("captured_at"))
+                if captured is None:
+                    raise CanonicalWriteError("Comment attachment observation is invalid")
+                if observed_at <= captured:
+                    # A full-inventory replay may update ordinary comment fields,
+                    # but cannot replace a separately observed newer attachment.
+                    for column in (
+                        "media_urls",
+                        "hosted_media_urls",
+                        "media_mirror_status",
+                        "media_mirror_error",
+                        "media_mirror_last_attempt_at",
+                        "media_mirror_last_job_id",
+                        "media_mirror_attempt_count",
+                    ):
+                        if column in existing:
+                            payload[column] = existing[column]
+                    for attachment_key in _COMMENT_ATTACHMENT_KEYS:
+                        payload["raw_data"].pop(attachment_key, None)
+                        if attachment_key in (existing.get("raw_data") or {}):
+                            payload["raw_data"][attachment_key] = existing["raw_data"][attachment_key]
+                else:
+                    payload["raw_data"].pop("ingestion_attachment", None)
             if not payload.get("comment_url") and post.get("shortcode"):
                 payload["comment_url"] = f"https://www.instagram.com/p/{post['shortcode']}/c/{key}/"
             if not metadata_writes_enabled:
@@ -1136,7 +1187,9 @@ def write_comments(
                     )
                 if cursor:
                     payload["cursor_payload"] = cursor
-            row = _upsert(conn, "instagram_comments", payload, ["post_id", "comment_id"])
+            row = _upsert(
+                conn, "instagram_comments", payload, ["post_id", "comment_id"], repair_created_at=repair_created_at
+            )
             identities[key] = str(row["id"])
             if row.get("media_urls"):
                 media.append(
@@ -1153,3 +1206,15 @@ def write_comments(
         "observed_comment_ids": sorted(identities),
         "media": media,
     }
+
+
+_COMMENT_ATTACHMENT_KEYS = (
+    frozenset(_COMMENT_MEDIA_CONTAINERS)
+    | frozenset(_COMMENT_MEDIA_URL_KEYS)
+    | frozenset(
+        """
+ingestion_attachment ingestion_media media_urls hosted_media_urls giphy_media_info giphyMediaInfo
+comment_media commentMedia comment_gif commentGif media_versions attachment attachments gif gif_media gifMedia
+""".split()
+    )
+)

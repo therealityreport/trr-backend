@@ -68,6 +68,11 @@ def test_explicit_known_get_url_binds_document_without_optional_metadata():
     assert len(extract(document(entry(), metadata=False))["data"][PARENT_CONNECTION]["edges"]) == 15
 
 
+def test_native_serverjs_timing_arguments_do_not_hide_first_argument_preload():
+    html = document(entry()).replace("}]]}", '}, null, "timing"]]}')
+    assert len(extract(html)["data"][PARENT_CONNECTION]["edges"]) == 15
+
+
 @pytest.mark.parametrize("changed", ["canonical", "og:url"])
 def test_conflicting_document_metadata_is_rejected(changed):
     html = document(entry())
@@ -109,6 +114,8 @@ def test_multiple_missing_or_wrong_preloader_is_rejected(entries):
         "auth_failure",
         "rate_limited",
         "incremental",
+        "has_next_true",
+        "has_next_false",
         "missing_connection",
         "missing_cursor",
         "bad_flag",
@@ -134,6 +141,8 @@ def test_incomplete_or_malformed_native_frame_is_rejected(change):
         value["result"]["rate_limited"] = True
     elif change == "incremental":
         value["result"]["incremental"] = []
+    elif change in {"has_next_true", "has_next_false"}:
+        value["result"]["hasNext"] = change == "has_next_true"
     elif change == "missing_connection":
         value["result"]["data"] = {}
     elif change == "missing_cursor":

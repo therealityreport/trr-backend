@@ -29,6 +29,19 @@ ROOT = Path(__file__).resolve().parents[2]
 _CREATED_RUNS = []
 
 
+def test_authenticated_manifest_is_explicit_and_preserves_legacy_public_hash_shape():
+    from trr_backend.ingestion.domain import SourceProfile
+
+    post = FixedPost("Abc123", "123_456", str(uuid4()), "https://www.instagram.com/p/Abc123/", "bravotv")
+    public = FixedManifest("fixture", "bravotv", (post,))
+    assert "source_profile" not in public.payload()
+    assert FixedManifest.from_payload(public.payload()).digest == public.digest
+    authenticated = replace(public, source_profile=SourceProfile.for_authenticated_relay())
+    assert authenticated.digest != public.digest
+    assert FixedManifest.from_payload(authenticated.payload()) == authenticated
+    assert authenticated.intent().effective_source_profile.comments_family == "instagram_authenticated_www_relay"
+
+
 @pytest.fixture(autouse=True)
 def cleanup_test_owned_runs():
     yield

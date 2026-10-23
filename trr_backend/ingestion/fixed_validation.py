@@ -60,6 +60,7 @@ class FixedManifest:
     date_start: str = "2026-09-01T00:00:00+00:00"
     date_end: str = "2026-10-01T00:00:00+00:00"
     stages: tuple[str, ...] = (Stage.DETAILS.value, Stage.COMMENTS.value)
+    source_profile: SourceProfile | None = None
 
     def __post_init__(self):
         if (
@@ -69,6 +70,8 @@ class FixedManifest:
             or len({post.shortcode for post in self.posts}) != len(self.posts)
             or len({post.catalog_post_id for post in self.posts}) != len(self.posts)
             or self.stages != (Stage.DETAILS.value, Stage.COMMENTS.value)
+            or self.source_profile
+            not in (None, SourceProfile.for_mode("public"), SourceProfile.for_authenticated_relay())
         ):
             raise ValueError("Frozen source revision, unique posts and exact details/comments stages required")
         if self.intent().account != self.account:
@@ -88,11 +91,14 @@ class FixedManifest:
             detail_worker_count=1,
             comments_worker_count=1,
             comments_enable_media_followups=False,
-            source_profile=SourceProfile.for_mode("public"),
+            source_profile=self.source_profile or SourceProfile.for_mode("public"),
         )
 
     def payload(self):
-        return json.loads(stable_json(asdict(self)))
+        data = asdict(self)
+        if self.source_profile is None:
+            data.pop("source_profile")  # Preserve existing public manifest hashes.
+        return json.loads(stable_json(data))
 
     @property
     def digest(self):
@@ -104,6 +110,8 @@ class FixedManifest:
         data["posts"] = tuple(FixedPost(**post) for post in data["posts"])
         if "stages" in data:
             data["stages"] = tuple(data["stages"])
+        if "source_profile" in data:
+            data["source_profile"] = SourceProfile(**data["source_profile"])
         return cls(**data)
 
 

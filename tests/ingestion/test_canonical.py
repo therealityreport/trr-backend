@@ -370,6 +370,96 @@ def test_comment_tree_post_scope_ranked_merge_and_lifecycle(database):
             )
 
 
+@pytest.mark.parametrize(
+    "saved,native,repair",
+    [
+        (None, OBSERVED - timedelta(hours=1), True),
+        (datetime(1970, 1, 1, tzinfo=UTC), OBSERVED - timedelta(hours=1), True),
+        (OBSERVED - timedelta(hours=2), OBSERVED - timedelta(hours=1), False),
+        (datetime(1970, 1, 1, tzinfo=UTC), None, False),
+        (datetime(1970, 1, 1, tzinfo=UTC), OBSERVED - timedelta(days=2), False),
+        (datetime(1970, 1, 1, tzinfo=UTC), OBSERVED + timedelta(hours=1), False),
+    ],
+)
+def test_comment_native_date_repairs_only_missing_or_epoch_without_losing_reply(database, saved, native, repair):
+    with database() as conn:
+        ids = post(conn, source={**CAPTURE["post"], "shortcode": "DateRepair" + uuid4().hex[:8]})
+        run_id = str(uuid4())
+        with conn.cursor() as cur:
+            cur.execute("insert into social.scrape_runs values(%s)", (run_id,))
+        parent = {"comment_id": "date-parent", "username": "parent", "text": "Parent"}
+        reply = {"comment_id": "date-reply", "username": "reply", "text": "Reply", "parent_comment_id": "date-parent"}
+
+        def write(raw, observed):
+            return write_comments(
+                conn,
+                run_id=run_id,
+                account="fixture_account",
+                observed_at=observed,
+                post_id=ids["post_id"],
+                comments=[normalize_comment_source(item) for item in raw],
+                source_payloads=raw,
+            )
+
+        write([parent, reply], OBSERVED - timedelta(minutes=1))
+        with conn.cursor() as cur:
+            cur.execute(
+                "update social.instagram_comments set created_at=%s where post_id=%s and comment_id=%s",
+                (saved, ids["post_id"], "date-reply"),
+            )
+        before = load(conn, "instagram_comments", post_id=ids["post_id"], comment_id="date-reply")
+        if native is not None:
+            reply["created_at"] = int(native.timestamp())
+        write([reply], OBSERVED)
+        after = load(conn, "instagram_comments", post_id=ids["post_id"], comment_id="date-reply")
+        assert after["created_at"] == (native if repair else saved)
+        for key in ("id", "first_seen_at", "parent_comment_id", "parent_comment_external_id", "reply_depth"):
+            assert after[key] == before[key]
+        assert after["last_seen_at"] == OBSERVED
+
+
+def test_new_gif_only_comments_and_unknown_authors_persist_without_erasing_known_fields(database):
+    with database() as conn:
+        ids = post(conn, source={**CAPTURE["post"], "shortcode": "EmptyCommentFields"})
+        run_id = str(uuid4())
+        with conn.cursor() as cur:
+            cur.execute("insert into social.scrape_runs values(%s)", (run_id,))
+        raw = [
+            {
+                "comment_id": "gif-parent",
+                "username": "known",
+                "text": "",
+                "comment_gif": {"url": "https://cdn.example/gif.mp4"},
+            },
+            {"comment_id": "unknown-reply", "text": "Reply", "parent_comment_id": "gif-parent"},
+        ]
+
+        def write(observed):
+            return write_comments(
+                conn,
+                run_id=run_id,
+                account="fixture_account",
+                observed_at=observed,
+                post_id=ids["post_id"],
+                comments=[normalize_comment_source(item) for item in raw],
+                source_payloads=raw,
+            )
+
+        result = write(OBSERVED)
+        parent = load(conn, "instagram_comments", post_id=ids["post_id"], comment_id="gif-parent")
+        reply = load(conn, "instagram_comments", post_id=ids["post_id"], comment_id="unknown-reply")
+        assert result["observed_comment_ids"] == ["gif-parent", "unknown-reply"]
+        assert parent["text"] == "" and parent["username"] == "known"
+        assert parent["media_urls"] == ["https://cdn.example/gif.mp4"]
+        assert reply["username"] == "" and reply["text"] == "Reply"
+        assert reply["parent_comment_id"] == parent["id"]
+        raw[0]["username"] = ""
+        raw[1]["text"] = ""
+        write(OBSERVED + timedelta(minutes=1))
+        assert load(conn, "instagram_comments", id=parent["id"])["username"] == "known"
+        assert load(conn, "instagram_comments", id=reply["id"])["text"] == "Reply"
+
+
 def test_comment_permalink_uses_loaded_post_and_preserves_supplied_current_links(database):
     raw = copy.deepcopy(CAPTURE["comment"])
     raw.pop("comment_url")
@@ -842,10 +932,25 @@ def test_new_detail_observation_replaces_its_complete_proof(database, new_refere
     if new_reference is not None:
         new_proof["evidence_reference"] = new_reference
     with database() as conn:
-        ids = post(conn, source={**CAPTURE["post"], "shortcode": shortcode,
-                                "detail_snapshot": old_proof, "preserved": {"old": True}})
-        post(conn, source={**CAPTURE["post"], "shortcode": shortcode,
-                           "detail_snapshot": new_proof, "preserved": {"new": True}}, observed=new_time)
+        ids = post(
+            conn,
+            source={
+                **CAPTURE["post"],
+                "shortcode": shortcode,
+                "detail_snapshot": old_proof,
+                "preserved": {"old": True},
+            },
+        )
+        post(
+            conn,
+            source={
+                **CAPTURE["post"],
+                "shortcode": shortcode,
+                "detail_snapshot": new_proof,
+                "preserved": {"new": True},
+            },
+            observed=new_time,
+        )
         for table, key, identity in (
             ("instagram_posts", "id", ids["post_id"]),
             ("instagram_post_payloads", "post_id", ids["post_id"]),

@@ -155,6 +155,7 @@ class MediaSnapshotLoader:
         generation: int | None = None,
         check_cancelled: Callable[[], None] | None = None,
         on_request: Callable[[], None] | None = None,
+        attachment_refreshes: tuple = (),
     ) -> MediaSnapshot:
         # Database reads do not consume source-request accounting. The callback
         # remains accepted so this method can be bound directly to MediaActivity.
@@ -207,7 +208,24 @@ class MediaSnapshotLoader:
             # Completion covers every active comment. Only rows with media (or
             # selected author avatars) are media work; do not rewrite thousands
             # of text-only comments or retain them again as media evidence.
-            media_comments = [row for row in comments if _urls(row.get("media_urls")) or self.include_comment_avatars]
+            refreshes = {proof.row_id: proof for proof in attachment_refreshes}
+            if len(refreshes) != len(attachment_refreshes):
+                raise MediaIncomplete("duplicate_attachment_refresh")
+            from trr_backend.ingestion.comment_attachment_refresh import attachment_baseline, validate_attachment_order
+
+            for proof in attachment_refreshes:
+                proof.validate()
+                row = next((row for row in comments if str(row["id"]) == proof.row_id), None)
+                if row is None or proof.post_id != str(post["id"]) or proof.shortcode != target_key:
+                    raise MediaIncomplete("attachment_refresh_identity_mismatch")
+                validate_attachment_order(row, proof.captured_at)
+                if attachment_baseline(row) != proof.baseline_sha256:
+                    raise MediaIncomplete("attachment_refresh_baseline_changed")
+            media_comments = [
+                row
+                for row in comments
+                if _urls(row.get("media_urls")) or self.include_comment_avatars or str(row["id"]) in refreshes
+            ]
             retained_keys = self._retained_keys(cur, account, target_key, media_comments)
             sidecar = _mapping(post.get("payload_sidecar"))
             raw = {**_mapping(post.get("raw_data")), **_mapping(sidecar.get("raw_data"))}
@@ -245,9 +263,13 @@ class MediaSnapshotLoader:
                     CommentMedia(
                         str(row["comment_id"]),
                         str(row["id"]),
-                        _urls(row.get("media_urls")),
+                        (refreshes[str(row["id"])].source_url,)
+                        if str(row["id"]) in refreshes
+                        else _urls(row.get("media_urls")),
                         _source_key(row, retained_keys),
                         _time(row.get("scraped_at")),
+                        refreshes.get(str(row["id"])),
+                        _mapping(_mapping(row.get("raw_data")).get("ingestion_attachment")).get("evidence_sha256"),
                     )
                     for row in media_comments
                 ),

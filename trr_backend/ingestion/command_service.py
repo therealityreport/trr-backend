@@ -175,8 +175,14 @@ class CommandService:
             raise ServiceUnavailableError("New-run routing requires an enabled service and capacity validator")
         if payload.apply_run_id is not None:
             raise Conflict("apply_run_id is not supported by the rebuilt launch command")
-        if placement == "local" and (self.source_profile is None or self.source_profile.access_mode != "public"):
-            raise Conflict("Mac (local) runs require the explicitly public source profile")
+        if placement == "local" and not (
+            self.source_profile is not None
+            and (
+                self.source_profile.access_mode == "public"
+                or self.source_profile == SourceProfile.for_authenticated_relay()
+            )
+        ):
+            raise Conflict("Mac (local) runs require the explicitly public or authenticated WWW Relay source profile")
         # The capacity adapter validates the existing worker-count and canary
         # confirmation rules. It must raise on rejection; no defaults bypass it.
         self.capacity(account, payload.model_copy(deep=True))

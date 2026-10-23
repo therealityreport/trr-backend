@@ -336,6 +336,11 @@ def _configured_source_profile():
     if mode in _PUBLIC_MODE_ALIASES:
         return SourceProfile.for_mode("public")
     if mode in _AUTHENTICATED_MODE_ALIASES:
+        comments_transport = os.getenv("TRR_INSTAGRAM_INGESTION_AUTH_COMMENTS_TRANSPORT", "rest")
+        if comments_transport == "www_relay":
+            return SourceProfile.for_authenticated_relay()
+        if comments_transport != "rest":
+            raise ServiceUnavailableError("Unsupported authenticated Instagram comments transport")
         return SourceProfile.for_mode("authenticated")
     raise ServiceUnavailableError("Unsupported Instagram source mode")
 
@@ -595,6 +600,11 @@ def _comments(context, owned):
             source, context, owned, {"raw_cookies": {}}, failure_code="comment_fetch_failed", public_only=True
         )
     credentials = _credentials(owned["account"])
+    if _source_profile(context).comments_family == "instagram_authenticated_www_relay":
+        from trr_backend.ingestion.authenticated_comment_transport import AuthenticatedRelayCommentSource
+
+        source = AuthenticatedRelayCommentSource(**credentials, expected_count=context["post"]["comments_count"])
+        return _gate_source(source, context, owned, credentials, failure_code="comment_fetch_failed")
     source = ScraplingCommentSource(**credentials, expected_count=context["post"]["comments_count"])
     return _gate_source(source, context, owned, credentials, failure_code="comment_fetch_failed")
 

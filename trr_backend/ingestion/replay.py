@@ -167,6 +167,8 @@ def serialize_media_result(result: MediaResult) -> dict[str, Any]:
                 "media_urls": list(item.media_urls),
                 "storage_source_key": item.storage_source_key,
                 "observed_at": utc_timestamp(item.observed_at or snapshot.observed_at),
+                **({"attachment_refresh": item.attachment_refresh.to_payload()} if item.attachment_refresh else {}),
+                **({"attachment_version": item.attachment_version} if item.attachment_version else {}),
             }
             for item in snapshot.comments
         ],
@@ -248,9 +250,15 @@ def _decode_media_result(payload: dict[str, Any]) -> MediaResult:
                     tuple(item["media_urls"]),
                     item["storage_source_key"],
                     _timestamp(item["observed_at"]),
+                    _attachment_refresh(item.get("attachment_refresh")),
+                    item.get("attachment_version"),
                 )
                 for item in payload["comments"]
-                if _object(item, required="comment_id row_id media_urls storage_source_key observed_at")
+                if _object(
+                    item,
+                    required="comment_id row_id media_urls storage_source_key observed_at",
+                    optional="attachment_refresh attachment_version",
+                )
             ),
             avatars=tuple(
                 AvatarSource(
@@ -687,3 +695,11 @@ class Replay:
             Stage.LISTING: PARSER_VERSION,
         }[Stage(retained["stage"])]
         return prepare_replay(evidence_id, account, retained, parser_version=parser_version or current)[0]
+
+
+def _attachment_refresh(payload):
+    if payload is None:
+        return None
+    from trr_backend.ingestion.comment_attachment_refresh import AttachmentRefresh
+
+    return AttachmentRefresh.from_payload(payload)

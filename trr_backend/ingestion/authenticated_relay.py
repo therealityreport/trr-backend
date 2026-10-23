@@ -13,19 +13,22 @@ from typing import Any
 
 import httpx
 
+from trr_backend.ingestion.authenticated_relay_contract import (
+    AUTH_RELAY_FAMILY,
+    CHILD_DOCUMENT,
+    CHILD_ROOT_DOCUMENT,
+    PARENT_DOCUMENT,
+    PARENT_ROOT_DOCUMENT,
+)
 from trr_backend.ingestion.comments import CommentSourceError, comment_page_failure
 from trr_backend.ingestion.domain import Failure
 from trr_backend.ingestion.post_transport import SourceFailure
 from trr_backend.socials.instagram.credential_guard import PinnedCookieIdentity
 from trr_backend.socials.instagram.graphql_response import _primitive_failure
-from trr_backend.socials.instagram.posts_scrapling.fetcher import _DocumentJsonScripts, _extract_page_tokens
+from trr_backend.socials.instagram.posts_scrapling.fetcher import _DocumentJsonScripts
 from trr_backend.socials.instagram.public_response import decode_public_json, parse_public_retry_after
 
 WWW_RELAY_URL = "https://www.instagram.com/api/graphql"
-PARENT_ROOT_DOCUMENT = ("29631174456466007", "PolarisPostCommentsContainerQuery")
-PARENT_DOCUMENT = ("28915717348095854", "PolarisPostCommentsPaginationQuery")
-CHILD_DOCUMENT = ("28694573636831179", "PolarisPostCommentsChildrenPaginationtQuery")
-AUTH_RELAY_FAMILY = "instagram_authenticated_www_relay"
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
 _MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -92,8 +95,11 @@ class WwwRelayContext:
             or not re.fullmatch(r"[0-9]{1,40}", user)
         ):
             raise ValueError("native_relay_actor_binding_invalid")
-        tokens = _extract_page_tokens(html)
-        if not tokens.get("fb_dtsg") or not tokens.get("lsd"):
+        tokens = {
+            "fb_dtsg": _module(html, "DTSGInitialData").get("token"),
+            "lsd": _module(html, "LSD").get("token"),
+        }
+        if any(not isinstance(value, str) or not value.strip() for value in tokens.values()):
             raise ValueError("native_relay_tokens_missing")
         logged_in, threads = _provider(html, "4150"), _provider(html, "23962")
         if not logged_in:
@@ -104,26 +110,56 @@ class WwwRelayContext:
             "__a": "1",
             "__d": "www",
             "__req": "1",
-            "__comet_req": "7",
             "fb_api_caller_class": "RelayModern",
             "server_timestamps": "true",
         }
-        for key in ("fb_dtsg", "lsd", "__spin_r", "__spin_b", "__spin_t", "__hs"):
-            if tokens.get(key):
-                form[key] = tokens[key]
-        if tokens.get("hsi"):
-            form["__hsi"] = tokens["hsi"]
-        form["jazoest"] = "2" + str(sum(map(ord, form["fb_dtsg"])))
+        form.update(tokens)
+        site = _module(html, "SiteData")
+        # Match the document's getAsyncParams mapping. Client revision and DPR
+        # were absent from the former hand-built request envelope.
+        for wire, native in {
+            "__hs": "haste_session",
+            "dpr": "pr",
+            "__rev": "client_revision",
+            "__hsi": "hsi",
+            "__comet_req": "comet_env",
+        }.items():
+            value = site.get(native)
+            if type(value) not in (str, int, float) or not str(value).strip() or len(str(value)) > 500:
+                raise ValueError("native_relay_site_context_invalid")
+            form[wire] = str(value)
+        for key in ("__spin_r", "__spin_b", "__spin_t"):
+            if key in site:
+                value = site[key]
+                if type(value) not in (str, int) or not str(value).strip():
+                    raise ValueError("native_relay_site_context_invalid")
+                form[key] = str(value)
+        sprinkle = _module(html, "SprinkleConfig")
+        if sprinkle.get("param_name") != "jazoest" or type(sprinkle.get("should_randomize")) is not bool:
+            raise ValueError("native_relay_sprinkle_invalid")
+        numeric = str(sum(map(ord, form["fb_dtsg"])))
+        if not sprinkle["should_randomize"]:
+            version = sprinkle.get("version")
+            if type(version) not in (str, int) or not re.fullmatch(r"[0-9]{1,8}", str(version)):
+                raise ValueError("native_relay_sprinkle_invalid")
+            numeric = str(version) + numeric
+        form["jazoest"] = numeric
         return cls(form, logged_in, threads)
 
-    def request(self, *, media_id: str, cursor: str | None, parent_id: str | None = None):
+    def request(self, *, media_id: str, cursor: str | None, parent_id: str | None = None, initial: bool = False):
         if not re.fullmatch(r"[1-9][0-9]{0,39}", media_id) or (
             parent_id is not None and not re.fullmatch(r"[1-9][0-9]{0,39}", parent_id)
         ):
             raise ValueError("native_relay_media_or_parent_invalid")
         if cursor is not None and (not isinstance(cursor, str) or not cursor):
             raise ValueError("native_relay_cursor_invalid")
-        doc, name = CHILD_DOCUMENT if parent_id else PARENT_DOCUMENT
+        if initial and cursor is not None:
+            raise ValueError("native_relay_initial_cursor_invalid")
+        doc, name = (
+            (CHILD_ROOT_DOCUMENT if parent_id else PARENT_ROOT_DOCUMENT)
+            if initial
+            else (CHILD_DOCUMENT if parent_id else PARENT_DOCUMENT)
+        )
         variables = {
             "media_id": media_id,
             "after": cursor,
@@ -137,12 +173,21 @@ class WwwRelayContext:
             variables.update(parent_comment_id=parent_id, is_chronological=None)
         else:
             variables["sort_order"] = "popular"
+        if initial:
+            # The native initial operation supplies media/parent/provider
+            # variables only. Pagination arguments belong to the next query.
+            for key in ("after", "before", "first", "last", "sort_order", "is_chronological"):
+                variables.pop(key, None)
         return {
             **self.form,
             "doc_id": doc,
             "fb_api_req_friendly_name": name,
             "variables": json.dumps(variables, separators=(",", ":")),
         }
+
+    def root_request(self, *, media_id: str):
+        """Native container operation for a valid document without a preload."""
+        return self.request(media_id=media_id, cursor=None, initial=True)
 
 
 class AuthenticatedRelayPageClient:
@@ -165,6 +210,7 @@ class AuthenticatedRelayPageClient:
         self._referer = None
         self._bootstrap_html = None
         self._shortcode = None
+        self.last_diagnostic = None
 
     def close(self):
         if self._own_client:
@@ -179,13 +225,22 @@ class AuthenticatedRelayPageClient:
         self._cookies = self._identity.prepare_jar(self._client.cookies, self._cookies)
         headers = {
             "user-agent": USER_AGENT,
-            "accept": "*/*",
-            "origin": "https://www.instagram.com",
             "referer": self._referer,
-            "x-csrftoken": self._cookies["csrftoken"],
-            "x-ig-app-id": "936619743392459",
-            "x-requested-with": "XMLHttpRequest",
         }
+        if method == "GET":
+            # This is a navigation document, not an XMLHttpRequest. The WWW
+            # server can omit native preloads for an AJAX-shaped GET.
+            headers.update({"accept": "text/html,application/xhtml+xml", "sec-fetch-dest": "document"})
+        else:
+            headers.update(
+                {
+                    "accept": "*/*",
+                    "origin": "https://www.instagram.com",
+                    "x-csrftoken": self._cookies["csrftoken"],
+                    "x-ig-app-id": "936619743392459",
+                    "x-requested-with": "XMLHttpRequest",
+                }
+            )
         if data:
             headers.update({"x-fb-friendly-name": data["fb_api_req_friendly_name"], "x-fb-lsd": data["lsd"]})
         self._before()
@@ -228,7 +283,22 @@ class AuthenticatedRelayPageClient:
             self._context = WwwRelayContext.from_html(response.text)
             self._bootstrap_html = response.text
             self._shortcode = shortcode
-        except (ValueError, RecursionError):
+        except (ValueError, RecursionError) as error:
+            reason = str(error)
+            allowed = {
+                "native_relay_context_invalid",
+                "native_relay_context_missing_or_conflicting",
+                "native_relay_actor_binding_invalid",
+                "native_relay_tokens_missing",
+                "native_relay_provider_missing_or_conflicting",
+                "native_relay_not_authenticated",
+                "native_relay_site_context_invalid",
+                "native_relay_sprinkle_invalid",
+            }
+            self.last_diagnostic = {
+                "phase": "relay_context",
+                "reason": reason if reason in allowed else "invalid_structure",
+            }
             self._failure("source_incomplete")
 
     def page(self, *, media_id, cursor=None, parent_id=None):
@@ -236,7 +306,11 @@ class AuthenticatedRelayPageClient:
             raise ValueError("native_relay_bootstrap_required")
         if parent_id is None and cursor is None:
             raise ValueError("native_parent_root_requires_bootstrap_page")
-        form = self._context.request(media_id=media_id, cursor=cursor, parent_id=parent_id)
+        initial = parent_id is not None and cursor is None
+        form = self._context.request(media_id=media_id, cursor=cursor, parent_id=parent_id, initial=initial)
+        return self._query(form, media_id=media_id, cursor=cursor, parent_id=parent_id, initial=initial)
+
+    def _query(self, form, *, media_id, cursor, parent_id, initial):
         response = self._send("POST", WWW_RELAY_URL, data=form)
         try:
             payload = decode_public_json(response)
@@ -244,43 +318,63 @@ class AuthenticatedRelayPageClient:
             self._failure("parse_error")
         if not isinstance(payload, dict):
             self._failure("parse_error")
-        payload["cursor_payload"] = {
+        payload["cursor_payload"] = self._provenance(
+            media_id=media_id, cursor=cursor, parent_id=parent_id, initial=initial
+        )
+        if parent_id:
+            payload["parent_comment_id"] = parent_id
+        return self._accept_payload(payload, parent_id=parent_id)
+
+    def _provenance(self, *, media_id, cursor, parent_id, initial):
+        from trr_backend.ingestion.authenticated_relay_contract import operation
+
+        doc, name = operation(parent=parent_id is not None, initial=initial)
+        return {
             "adapter_family": AUTH_RELAY_FAMILY,
             "adapter_version": 1,
             "source": "resume" if cursor else "root",
             "request_cursor": cursor,
-            "relay_doc_id": form["doc_id"],
-            "relay_friendly_name": form["fb_api_req_friendly_name"],
+            "relay_doc_id": doc,
+            "relay_friendly_name": name,
             "sort_order": "native_default" if parent_id else "popular",
-            "page_size": 5 if parent_id else 10,
+            "page_size": None if initial else (5 if parent_id else 10),
+            "media_id": media_id,
+            "relay_logged_in": self._context.logged_in,
+            "relay_threads_style": self._context.threads_style,
         }
-        if parent_id:
-            payload["parent_comment_id"] = parent_id
-        return self._accept_payload(payload, parent_id=parent_id)
+
+    def fetch_root_page(self, *, media_id):
+        """Fetch the observed initial container operation for client-rendered pages."""
+        if self._context is None:
+            raise ValueError("native_relay_bootstrap_required")
+        form = self._context.root_request(media_id=media_id)
+        return self._query(form, media_id=media_id, cursor=None, parent_id=None, initial=True)
 
     def root_page(self):
         if self._context is None or self._bootstrap_html is None:
             raise ValueError("native_relay_bootstrap_required")
         from trr_backend.ingestion.authenticated_bootstrap import AuthenticatedBootstrapError, extract_parent_bootstrap
+        from trr_backend.socials.instagram.child_reply_probe import media_id_from_shortcode
+
+        media_id = media_id_from_shortcode(self._shortcode)
 
         try:
             payload = extract_parent_bootstrap(
                 self._bootstrap_html, shortcode=self._shortcode, document_url=self._referer
             )
         except AuthenticatedBootstrapError as error:
+            self.last_diagnostic = {"phase": "comments_bootstrap", "reason": error.reason}
+            if error.reason == "comments_preloader_missing":
+                # A valid logged-in document can lazy-load comments. Request
+                # the native initial container, never the pagination operation.
+                return self.fetch_root_page(media_id=media_id)
             self._failure(error.failure_code, error.retry_after_seconds)
         except (ValueError, RecursionError):
             self._failure("source_incomplete")
-        payload["cursor_payload"] = {
-            "adapter_family": AUTH_RELAY_FAMILY,
-            "adapter_version": 1,
-            "source": "root",
-            "request_cursor": None,
-            "relay_doc_id": PARENT_ROOT_DOCUMENT[0],
-            "relay_friendly_name": PARENT_ROOT_DOCUMENT[1],
-            "sort_order": "popular",
-            "page_size": None,  # Native preloader omits first; server chooses the initial size.
-        }
+        return self._accept_root(payload, media_id=media_id)
+
+    def _accept_root(self, payload, *, media_id):
+        payload["cursor_payload"] = self._provenance(media_id=media_id, cursor=None, parent_id=None, initial=True)
         return self._accept_payload(payload, parent_id=None)
 
     def _accept_payload(self, payload, *, parent_id):
@@ -295,14 +389,6 @@ class AuthenticatedRelayPageClient:
                 else "source_incomplete",
                 failure[1] if failure else None,
             )
-        try:
-            self._observe("graphql_replies" if parent_id else "graphql_comments", payload)
-        except CommentSourceError:
-            if failure:
-                self._failure(*failure)
-            raise
-        if failure:
-            self._failure(*failure)
         root = (
             "xdt_api__v1__media__media_id__comments__parent_comment_id__child_comments__connection"
             if parent_id
@@ -310,11 +396,12 @@ class AuthenticatedRelayPageClient:
         )
         data = payload.get("data")
         connection = data.get(root) if isinstance(data, dict) else None
-        if not isinstance(connection, dict):
-            self._failure("source_incomplete")
-        edges, info = connection.get("edges"), connection.get("page_info")
+        edges = connection.get("edges") if isinstance(connection, dict) else None
+        info = connection.get("page_info") if isinstance(connection, dict) else None
         if (
-            not isinstance(edges, list)
+            "incremental" in payload
+            or "hasNext" in payload
+            or not isinstance(edges, list)
             or any(
                 not isinstance(edge, dict) or not isinstance(edge.get("node"), dict) or not edge["node"]
                 for edge in edges
@@ -326,5 +413,18 @@ class AuthenticatedRelayPageClient:
                 and (not isinstance(info.get("end_cursor"), str) or not info["end_cursor"].strip())
             )
         ):
-            self._failure("source_incomplete")
+            failure = failure or ("source_incomplete", None)
+        # The observer retains evidence and can commit rows/checkpoints. Seal
+        # every rejected envelope before that boundary, including transport
+        # markers and stream/structure facts removed by evidence projection.
+        # Replay must never turn a rejected terminal-looking page into success.
+        observed_payload = {**payload, "status": "fail"} if failure else payload
+        try:
+            self._observe("graphql_replies" if parent_id else "graphql_comments", observed_payload)
+        except CommentSourceError:
+            if failure:
+                self._failure(*failure)
+            raise
+        if failure:
+            self._failure(*failure)
         return payload
