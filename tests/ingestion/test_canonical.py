@@ -672,6 +672,36 @@ def test_detail_snapshot_and_metadata_timestamp_preservation(database):
         assert load(conn, "instagram_posts", id=ids["post_id"])["scraped_at"] == OBSERVED + timedelta(hours=1)
 
 
+@pytest.mark.parametrize("new_reference", [None, {"evidence_id": "new-capture", "captured_at": "new-time"}])
+def test_new_detail_observation_replaces_its_complete_proof(database, new_reference):
+    shortcode = "ProofReplacement" + ("NoRef" if new_reference is None else "NewRef")
+    old_proof = {
+        "version": 1,
+        "coverage_version": 2,
+        "observed_at": OBSERVED.isoformat(),
+        "evidence_reference": {"evidence_id": "old-capture", "captured_at": "old-time"},
+        "old_only_coverage": True,
+    }
+    new_time = OBSERVED + timedelta(hours=1)
+    new_proof = {"version": 1, "coverage_version": 2, "observed_at": new_time.isoformat()}
+    if new_reference is not None:
+        new_proof["evidence_reference"] = new_reference
+    with database() as conn:
+        ids = post(conn, source={**CAPTURE["post"], "shortcode": shortcode,
+                                "detail_snapshot": old_proof, "preserved": {"old": True}})
+        post(conn, source={**CAPTURE["post"], "shortcode": shortcode,
+                           "detail_snapshot": new_proof, "preserved": {"new": True}}, observed=new_time)
+        for table, key, identity in (
+            ("instagram_posts", "id", ids["post_id"]),
+            ("instagram_post_payloads", "post_id", ids["post_id"]),
+            ("instagram_account_catalog_posts", "id", ids["catalog_post_id"]),
+            ("instagram_account_catalog_post_payloads", "catalog_post_id", ids["catalog_post_id"]),
+        ):
+            row = load(conn, table, **{key: identity})
+            assert row["raw_data"]["detail_snapshot"] == new_proof
+            assert row["raw_data"]["preserved"] == {"old": True, "new": True}
+
+
 def test_native_comment_media_owner_and_reported_reply_count(database):
     raw = {
         "pk": "native-media-comment",

@@ -125,7 +125,12 @@ def _merge(existing: Mapping[str, Any], incoming: Mapping[str, Any]) -> dict[str
     for key, value in incoming.items():
         if not _present(value):
             continue
-        if isinstance(value, Mapping) and isinstance(result.get(key), Mapping):
+        # Coverage and its original capture reference form one observation.
+        # A newer proof must never inherit a nested reference from an older
+        # capture when the incoming proof omits that optional reference.
+        if key == "detail_snapshot" and isinstance(value, Mapping):
+            value = dict(value)
+        elif isinstance(value, Mapping) and isinstance(result.get(key), Mapping):
             value = _merge(result[key], value)
         result[key] = value
     return result
