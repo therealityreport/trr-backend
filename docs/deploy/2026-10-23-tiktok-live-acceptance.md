@@ -111,7 +111,10 @@ The replacement reached 32 persisted posts in the live UI. This proves further
 catalog persistence, not complete history. The user-requested cancellation test
 used its visible Cancel Run button and native Chrome confirmation in the verified
 TRR profile. The UI displayed “Cancelled run 8f5faa4e”; an independent database
-read confirmed `status=cancelled`. The stale predecessor summary remains visible after cancellation and can still
+read confirmed `status=cancelled`. The cancel HTTP request itself timed out with
+504 after 10 seconds; the UI reconciled the committed cancellation afterward.
+All jobs in the three catalog test runs are now completed or cancelled, with
+none queued/running. The stale predecessor summary remains visible after cancellation and can still
 show the original run as queued even though both runs are cancelled in the database.
 This remaining summary/cache inconsistency is not resolved; no new backfill was
 started afterward.
