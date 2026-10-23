@@ -138,6 +138,8 @@ class Admission:
                 ), legacy_busy as (
                   select identity,run_id,platform,account,
                     case when raw_stage in ('comments','comments_scrapling') then 'comments'
+                         when raw_stage in ('posts_scrapling','tiktok_posts_scrapling',
+                           'threads_posts_scrapling') then 'posts'
                          when raw_stage in ('media_mirror','instagram_media_mirror','comment_media_mirror')
                            then 'media_mirror'
                          when raw_stage in ('posts','shared_account_discovery','shared_account_posts',

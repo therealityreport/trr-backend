@@ -260,6 +260,27 @@ def test_frozen_requested_comments_count_is_a_per_run_dispatch_ceiling(database)
     assert subject.admit(candidate(database, "comments", comments_workers=2))
 
 
+@pytest.mark.parametrize("stage", ["posts_scrapling", "tiktok_posts_scrapling", "threads_posts_scrapling"])
+@pytest.mark.parametrize("status", ["running", "completed"])
+def test_scrapling_posts_count_against_posts_capacity_without_blocking_comments(database, stage, status):
+    legacy(
+        database, stage, platform="tiktok", status=status,
+        metadata={"dispatch": {"remote_invocation_id": "draining-call", "remote_invocation_status": "running"}},
+    )
+    subject, _ = admission(database, env={"TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT": "1"})
+    snapshot = subject._snapshot("bravotv")
+    assert snapshot["counts"][0]["stage"] == "posts"
+    assert snapshot["counts"][0]["total"] == 1
+    assert not subject.admit(candidate(database, "listing"))
+    assert subject.admit(candidate(database, "comments"))
+
+
+def test_unrecognized_legacy_stage_still_blocks_admission(database):
+    legacy(database, "unrecognized_provider_stage", platform="tiktok")
+    subject, _ = admission(database)
+    assert not subject.admit(candidate(database, "comments"))
+
+
 def test_local_account_cooldown_is_ignored_but_exact_identity_block_and_server_wait_apply(database):
     subject, _ = admission(database, identity_key="selected-identity")
     item = candidate(database)
