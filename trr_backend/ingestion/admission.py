@@ -49,6 +49,14 @@ _LEGACY_MUST_INSPECT = f"""(
     or nullif(metadata->'dispatch'->>'lease_expires_at','') is not null
 )"""
 
+_LEGACY_PROJECTION = """select 'legacy:'||id::text as identity,run_id::text,lower(coalesce(platform,'')) as platform,
+                    lower(coalesce(config->>'stage',metadata->>'stage',job_type,'')) as raw_stage,
+                    lower(ltrim(coalesce(config->>'account',config->>'account_handle',config->>'source_account',
+                      config->>'username',''),'@')) as account,
+                    lower(coalesce(status,'')) as status,worker_id,claimed_at,
+                    coalesce(completed_at,heartbeat_at,started_at,claimed_at,created_at) as last_activity_at,
+                    metadata->'dispatch' as dispatch"""
+
 
 def _read_connection():
     from trr_backend.db import pg
@@ -120,20 +128,13 @@ class Admission:
         # lease metadata fails the whole read closed rather than disappearing.
         with self.read_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                f"""with legacy_candidate_ids as materialized (
-                  select id from social.scrape_jobs where {_LEGACY_MUST_INSPECT} is true
+                f"""with legacy as materialized (
+                  {_LEGACY_PROJECTION}
+                  from social.scrape_jobs where {_LEGACY_MUST_INSPECT} is true
                   union all
-                  select id from social.scrape_jobs where {_LEGACY_MUST_INSPECT} is false
+                  {_LEGACY_PROJECTION}
+                  from social.scrape_jobs where {_LEGACY_MUST_INSPECT} is false
                     and {_LEGACY_ACTIVITY}>=statement_timestamp()-interval '2 hours'
-                ), legacy as materialized (
-                  select 'legacy:'||id::text as identity,run_id::text,lower(coalesce(platform,'')) as platform,
-                    lower(coalesce(config->>'stage',metadata->>'stage',job_type,'')) as raw_stage,
-                    lower(ltrim(coalesce(config->>'account',config->>'account_handle',config->>'source_account',
-                      config->>'username',''),'@')) as account,
-                    lower(coalesce(status,'')) as status,worker_id,claimed_at,
-                    coalesce(completed_at,heartbeat_at,started_at,claimed_at,created_at) as last_activity_at,
-                    metadata->'dispatch' as dispatch
-                  from social.scrape_jobs j join legacy_candidate_ids c using(id)
                 ), legacy_busy as (
                   select identity,run_id,platform,account,
                     case when raw_stage in ('comments','comments_scrapling') then 'comments'
