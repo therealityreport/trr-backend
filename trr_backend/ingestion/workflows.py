@@ -63,6 +63,8 @@ class Scheduler:
         if kind == "reconcile" or decision.get("owner_token"):
             reservation = control_call(self.store.reservation, item, decision["owner_token"])
         else:
+            if kind == "target" and control_call(self.store.candidate_settled, item, decision):
+                return {"ready": True}
             # Admission is outside SQL transactions and before any reservation.
             try:
                 admitted = self.admit(dict(item, **decision))

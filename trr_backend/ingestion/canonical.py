@@ -1064,7 +1064,22 @@ def write_comments(
 
     for comment, source in zip(comments, source_payloads, strict=True):
         visit(comment, source, None, 0)
-    baseline = {key: _row(conn, "instagram_comments", {"post_id": post_id, "comment_id": key}) for key in records}
+    external_parents = {parent for _, _, parent, _ in records.values() if parent and parent not in records}
+    lookup_ids = sorted(set(records) | external_parents)
+    locked = {}
+    if lookup_ids:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """select * from social.instagram_comments
+                where post_id=%s and comment_id=any(%s::text[])
+                order by comment_id for update""",
+                (post_id, lookup_ids),
+            )
+            locked = {row["comment_id"]: dict(row) for row in cur.fetchall()}
+    # External parents provide identities only; their newer captures must not
+    # reject an older page that does not observe or rewrite those parent rows.
+    baseline = {key: locked.get(key, {}) for key in records}
+    parent_ids = {key: locked[key]["id"] for key in external_parents if key in locked}
     _reject_older(observed_at, *baseline.values())
     identities: dict[str, str] = {}
     media: list[dict[str, Any]] = []
@@ -1088,7 +1103,7 @@ def write_comments(
             )
             parent_db_id = identities.get(parent or "")
             if parent and not parent_db_id:
-                parent_db_id = _row(conn, "instagram_comments", {"post_id": post_id, "comment_id": parent}).get("id")
+                parent_db_id = parent_ids.get(parent)
                 if not parent_db_id:
                     raise CanonicalWriteError("Reply parent is absent from this post")
             payload["parent_comment_id"] = parent_db_id

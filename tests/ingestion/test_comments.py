@@ -7,7 +7,7 @@ import subprocess
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import psycopg2
 import pytest
@@ -913,3 +913,170 @@ def test_public_native_count_gap_preserves_unseen_saved_comments_and_media(datab
         {"comment_id": "parent1", "is_missing": False},
         {"comment_id": "reply1", "is_missing": False},
     ]
+
+
+def seed_resume_pages(database):
+    store, tx, args = setup(database)
+    old_root = copy.deepcopy(NATIVE["rest"])
+    old_root.update(has_more_comments=True, next_max_id="old-tail", cursor_payload={"source": "root"})
+    current_root = copy.deepcopy(old_root)
+    current_root["next_max_id"] = "current-tail"
+    tail = {"comments": [], "has_more_comments": True, "next_max_id": "final-tail", "comment_count": 2}
+    activity = CommentActivity(
+        store,
+        source([old_root, current_root, tail], CommentFetchSummary(expected_count=2, fetch_failed=True)),
+        clock=lambda: OBSERVED,
+    )
+    result = activity.execute(**args)
+    pages = query(
+        tx,
+        "select * from social.instagram_ingestion_comment_pages where run_id=%s order by committed_at,page_id",
+        (args["run_id"],),
+    )
+    # All three pages share a commit time. Only the ordered UUID boundary may
+    # distinguish the superseded page from the current root and its tail.
+    page_id_base = uuid4().int & ~0xFFFF
+    with tx() as conn, conn.cursor() as cur:
+        for position, page in enumerate(pages, 1):
+            cur.execute(
+                "update social.instagram_ingestion_comment_pages set committed_at=%s,page_id=%s where page_id=%s",
+                (OBSERVED, str(UUID(int=page_id_base + position)), page["page_id"]),
+            )
+    owned = {key: value for key, value in args.items() if key != "post_id"}
+    owned["stage"] = Stage.COMMENTS
+    return activity, tx, owned, result["checkpoint"]["comment_pages"], pages
+
+
+def test_resume_fetches_only_current_root_evidence_and_one_final_checkpoint(database, monkeypatch):
+    import trr_backend.ingestion.comments as comments_module
+
+    activity, _, owned, state, pages = seed_resume_pages(database)
+    fetched = []
+    checkpoints = []
+
+    class TrackingCursor(RealDictCursor):
+        def fetchall(self):
+            rows = super().fetchall()
+            if self.description and "payload" in {field.name for field in self.description}:
+                fetched.extend(rows)
+            return rows
+
+        def fetchone(self):
+            row = super().fetchone()
+            if self.description and [field.name for field in self.description] == ["checkpoint"]:
+                checkpoints.append(row)
+            return row
+
+    monkeypatch.setattr(comments_module, "RealDictCursor", TrackingCursor)
+    nodes, proof = activity._resume_inventory(owned, state)
+    assert {node.source_payload["pk"] for node in nodes} == {"parent1", "reply1"}
+    assert [str(row["evidence_id"]) for row in fetched] == [str(page["evidence_id"]) for page in pages[1:]]
+    expected_fields = {
+        "evidence_id",
+        "source_identity",
+        "captured_at",
+        "parser_version",
+        "payload",
+        "content_hash",
+        "schema_version",
+    }
+    assert all(set(row) == expected_fields for row in fetched)
+    assert len(checkpoints) == 1 and checkpoints[0]["checkpoint"] == pages[-1]["checkpoint"]
+    assert proof[0] == str(pages[-1]["evidence_id"])
+
+
+@pytest.mark.parametrize("root_kind", ["missing", "other_target"])
+def test_resume_root_must_belong_to_exact_target(database, root_kind):
+    activity, _, owned, state, _ = seed_resume_pages(database)
+    if root_kind == "other_target":
+        _, _, _, other_state, _ = seed_resume_pages(database)
+        state["scan_root_evidence_id"] = other_state["scan_root_evidence_id"]
+    else:
+        state["scan_root_evidence_id"] = str(uuid4())
+    with pytest.raises(CommentSourceError, match="Durable scan root lacks committed evidence"):
+        activity._resume_inventory(owned, state)
+
+
+@pytest.mark.parametrize("corruption", ["content_hash", "final_checkpoint", "parent_identity"])
+def test_resume_still_rejects_current_scan_corruption(database, corruption):
+    activity, tx, owned, state, pages = seed_resume_pages(database)
+    if corruption == "content_hash":
+        with tx() as conn, conn.cursor() as cur:
+            cur.execute(
+                "update social.instagram_ingestion_evidence set content_hash=%s where evidence_id=%s",
+                ("0" * 64, pages[1]["evidence_id"]),
+            )
+        expected = "Evidence content hash mismatch"
+    elif corruption == "final_checkpoint":
+        with tx() as conn, conn.cursor() as cur:
+            cur.execute(
+                "update social.instagram_ingestion_comment_pages set checkpoint='{}'::jsonb where evidence_id=%s",
+                (pages[-1]["evidence_id"],),
+            )
+        expected = "Durable comment inventory lacks matching committed page proof"
+    else:
+        state["observed"]["reply1"]["parent"] = "wrong-parent"
+        expected = "Retained resume inventory changed parent identity"
+    with pytest.raises(ValueError, match=expected):
+        activity._resume_inventory(owned, state)
+
+
+def test_resume_without_root_keeps_legacy_full_history_and_scan_cutoff_behavior(database):
+    activity, tx, owned, state, pages = seed_resume_pages(database)
+    state.pop("scan_root_evidence_id")
+    state.pop("scan_started_at")
+    checkpoint = copy.deepcopy(pages[-1]["checkpoint"])
+    checkpoint["comment_pages"].pop("scan_root_evidence_id")
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            "update social.instagram_ingestion_comment_pages set checkpoint=%s::jsonb where evidence_id=%s",
+            (json.dumps(checkpoint), pages[-1]["evidence_id"]),
+        )
+    nodes, proof = activity._resume_inventory(owned, state)
+    assert len(nodes) == 2 and proof[0] == str(pages[-1]["evidence_id"])
+
+
+def test_page_checkpoint_serialized_once_after_custom_writer_mutation(database, monkeypatch):
+    import trr_backend.ingestion.comments as comments_module
+
+    store, tx, args = setup(database)
+    owned = {key: value for key, value in args.items() if key != "post_id"}
+    owned["stage"] = Stage.COMMENTS
+    store.acquire(**owned)
+    retained = evidence(NATIVE["rest"])
+    evidence_id = store.retain_evidence(**owned, evidence=retained)
+    checkpoint = {"writer_marker": None}
+    calls = []
+    original = comments_module.stable_json
+
+    def serialize(value):
+        if value is checkpoint:
+            calls.append(copy.deepcopy(value))
+        return original(value)
+
+    def writer(conn, **kwargs):
+        checkpoint["writer_marker"] = "after-writer"
+        return {"post_id": args["post_id"], "comment_ids": {}}
+
+    monkeypatch.setattr(comments_module, "stable_json", serialize)
+    activity = CommentActivity(store, writer=writer)
+    activity._persist_page(
+        owned,
+        post_id=args["post_id"],
+        evidence=retained,
+        evidence_id=evidence_id,
+        page=parse_comment_evidence(retained, pinned=True),
+        expected_checkpoint={},
+        checkpoint=checkpoint,
+        metadata_writes_enabled=True,
+        assignment=None,
+    )
+    assert calls == [{"writer_marker": "after-writer"}]
+    saved = query(
+        tx,
+        """select p.checkpoint as page_checkpoint,t.checkpoint as target_checkpoint
+        from social.instagram_ingestion_comment_pages p join social.instagram_ingestion_targets t
+        using(run_id,stage,target_key) where p.evidence_id=%s""",
+        (evidence_id,),
+    )[0]
+    assert saved["page_checkpoint"] == saved["target_checkpoint"] == checkpoint

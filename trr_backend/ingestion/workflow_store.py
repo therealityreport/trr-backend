@@ -246,6 +246,20 @@ class WorkflowStore(Store):
             )
             return result
 
+    def candidate_settled(self, item, decision):
+        """Skip admission for an old unbound candidate whose target has settled."""
+        with self.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            self._current(cur, item)
+            target = _row(
+                cur,
+                """select outcome from social.instagram_ingestion_targets
+                where run_id=%s and stage=%s and target_key=%s""",
+                (item["run_id"], decision["stage"], decision["target_key"]),
+            )
+            if not target:
+                raise LostOwnership("Candidate target is missing")
+            return target["outcome"] != "unresolved"
+
     def reserve_decision(self, item, decision, *, ordinal=None):
         """Use Store.reserve in this same transaction, journal before leaving it."""
         with self.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:

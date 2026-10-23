@@ -918,21 +918,38 @@ class CommentActivity:
     ) -> tuple[tuple[CommentResumeNode, ...], tuple[str, Evidence, CommentPage] | None]:
         if not state["lanes"]:
             return (), None
+        root_id = state.get("scan_root_evidence_id")
         with self.store.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            page_args = [owned["run_id"], owned["target_key"]]
+            root_filter = ""
+            if root_id:
+                cur.execute(
+                    """select committed_at,page_id from social.instagram_ingestion_comment_pages
+                    where run_id=%s and target_key=%s and stage='comments' and evidence_id::text=%s""",
+                    (owned["run_id"], owned["target_key"], root_id),
+                )
+                root = cur.fetchone()
+                if root is None:
+                    raise CommentSourceError("Durable scan root lacks committed evidence")
+                root_filter = "and (p.committed_at,p.page_id)>=(%s,%s)"
+                page_args.extend((root["committed_at"], root["page_id"]))
             cur.execute(
-                """select e.*,p.checkpoint from social.instagram_ingestion_comment_pages p
+                f"""select e.evidence_id,e.source_identity,e.captured_at,e.parser_version,
+                e.payload,e.content_hash,e.schema_version from social.instagram_ingestion_comment_pages p
                 join social.instagram_ingestion_evidence e using(evidence_id,run_id,stage,target_key)
-                where p.run_id=%s and p.target_key=%s and p.stage='comments'
+                where p.run_id=%s and p.target_key=%s and p.stage='comments' {root_filter}
                 order by p.committed_at,p.page_id""",
-                (owned["run_id"], owned["target_key"]),
+                page_args,
             )
             pages = cur.fetchall()
-        root_id = state.get("scan_root_evidence_id")
-        if root_id:
-            root_index = next((index for index, row in enumerate(pages) if str(row["evidence_id"]) == root_id), None)
-            if root_index is None:
-                raise CommentSourceError("Durable scan root lacks committed evidence")
-            pages = pages[root_index:]
+            final_checkpoint = {}
+            if pages:
+                cur.execute(
+                    """select checkpoint from social.instagram_ingestion_comment_pages
+                    where run_id=%s and target_key=%s and stage='comments' and evidence_id=%s""",
+                    (owned["run_id"], owned["target_key"], pages[-1]["evidence_id"]),
+                )
+                final_checkpoint = cur.fetchone()["checkpoint"]
         nodes: dict[str, CommentResumeNode] = {}
         proof = None
         for row in pages:
@@ -966,7 +983,7 @@ class CommentActivity:
 
             for comment, raw in zip(page.comments, page.source_payloads, strict=True):
                 visit(comment, raw)
-        receipt_state = _progress(pages[-1]["checkpoint"]) if pages else {}
+        receipt_state = _progress(final_checkpoint) if pages else {}
         if "scan_started_at" not in state:
             # Legacy progress may lack the safe missing-row cutoff. Retain that
             # absence: it cannot settle or mark missing without a fresh root.
@@ -1021,6 +1038,7 @@ class CommentActivity:
                 metadata_writes_enabled=metadata_writes_enabled,
                 assignment=assignment,
             )
+            serialized_checkpoint = stable_json(checkpoint)
             cur.execute(
                 """insert into social.instagram_ingestion_comment_pages
                 (page_id,run_id,stage,target_key,owner_generation,evidence_id,observed_at,content_hash,
@@ -1038,11 +1056,11 @@ class CommentActivity:
                     page.next_cursor,
                     page.exhausted,
                     stable_json(identity),
-                    stable_json(checkpoint),
+                    serialized_checkpoint,
                 ),
             )
             cur.execute(
                 """update social.instagram_ingestion_targets set checkpoint=%s::jsonb
                 where run_id=%s and stage='comments' and target_key=%s""",
-                (stable_json(checkpoint), owned["run_id"], owned["target_key"]),
+                (serialized_checkpoint, owned["run_id"], owned["target_key"]),
             )

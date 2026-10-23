@@ -139,6 +139,101 @@ def test_capacity_sealed_phase_order_and_no_get_mutations(database):
     assert scheduler(database).tick(part, 3) == {"stop": "completed"}
 
 
+@pytest.mark.parametrize("denial", [False, "raise"])
+def test_unbound_settled_candidate_replay_skips_admission_without_mutating_history(database, denial):
+    store, _ = database
+    run, part = run_fixture(database, 2)
+    denied = scheduler(database, admit=lambda _: False)
+    assert denied.tick(part, 0) == {"sleep": 5.0}
+    original = store.decision(part, 0, datetime.now(UTC))
+    assert original == {"kind": "target", "stage": "post_details", "target_key": "post0000"}
+    # Another ordinal owns the actual reservation and successful worker receipt.
+    assert scheduler(database).tick(part, 1) == {"ready": True}
+
+    def snapshot():
+        return {
+            table: sql(
+                database,
+                f"select to_jsonb(t) from social.{table} t where {column}=%s order by to_jsonb(t)::text",
+                (value,),
+            )
+            for table, column, value in (
+                ("instagram_ingestion_targets", "run_id", run["run_id"]),
+                ("instagram_ingestion_receipts", "run_id", run["run_id"]),
+                ("instagram_ingestion_dispatches", "run_id", run["run_id"]),
+                ("instagram_ingestion_decisions", "execution_id", part["execution_id"]),
+                ("instagram_ingestion_runs", "run_id", run["run_id"]),
+            )
+        }
+
+    before = snapshot()
+    admission_calls = []
+
+    def admit(item):
+        admission_calls.append(item)
+        if denial == "raise":
+            raise RuntimeError("admission unavailable")
+        return False
+
+    replay = scheduler(database, admit=admit)
+    assert replay.tick(part, 0) == {"ready": True}
+    assert not admission_calls
+    assert snapshot() == before
+    assert store.decision(part, 0, datetime.now(UTC)) == original
+    # Replaying an old candidate must not prevent the next unrelated target.
+    assert scheduler(database).tick(part, 2) == {"ready": True}
+    assert sql(
+        database,
+        """select target_key,attempts,outcome from social.instagram_ingestion_targets
+        where run_id=%s order by target_key""",
+        (run["run_id"],),
+    ) == [("post0000", 1, "committed"), ("post0001", 1, "committed")]
+
+
+def test_candidate_settled_keeps_unresolved_admission_and_execution_fences(database):
+    store, _ = database
+    _, part = run_fixture(database)
+    decision = store.decision(part, 0, datetime.now(UTC))
+    assert store.candidate_settled(part, decision) is False
+    calls = []
+    assert scheduler(database, admit=lambda item: calls.append(item) or False).tick(part, 0) == {"sleep": 5.0}
+    assert len(calls) == 1
+    assert sql(
+        database,
+        "select attempts,owner_token from social.instagram_ingestion_targets where run_id=%s",
+        (part["run_id"],),
+    ) == [(0, None)]
+    with pytest.raises(LostOwnership, match="Candidate target is missing"):
+        store.candidate_settled(part, dict(decision, target_key="absent"))
+    with pytest.raises(LostOwnership, match="Candidate target is missing"):
+        store.candidate_settled(part, dict(decision, stage="comments"))
+    with pytest.raises(LostOwnership, match="generation"):
+        store.candidate_settled(dict(part, generation=2), decision)
+    other, _ = run_fixture(database)
+    with pytest.raises(LostOwnership, match="different"):
+        scheduler(database).tick(dict(part, run_id=other["run_id"]), 0)
+
+
+def test_candidate_settles_after_check_still_uses_ordinary_safe_reservation(database):
+    store, _ = database
+    run, part = run_fixture(database)
+    assert scheduler(database, admit=lambda _: False).tick(part, 0) == {"sleep": 5.0}
+
+    def admit(_):
+        # The pre-admission check saw unresolved work; another invocation settles
+        # it before this original decision tries to reserve it.
+        assert scheduler(database).tick(part, 1) == {"ready": True}
+        return True
+
+    assert scheduler(database, admit=admit).tick(part, 0) == {"sleep": 0.01}
+    assert sql(
+        database, "select attempts,outcome from social.instagram_ingestion_targets where run_id=%s", (run["run_id"],)
+    ) == [(1, "committed")]
+    assert sql(
+        database, "select count(*) from social.instagram_ingestion_receipts where run_id=%s", (run["run_id"],)
+    ) == [(1,)]
+
+
 def test_ambiguous_dispatch_reconciles_receipt_and_does_not_duplicate(database):
     store, _ = database
     run, part = run_fixture(database)

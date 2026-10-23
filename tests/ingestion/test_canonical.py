@@ -96,6 +96,44 @@ def load(conn, table, **keys):
         return dict(cur.fetchone() or {})
 
 
+class CommentQueryRecorder:
+    """Observe the real isolated SQL without changing transaction behavior."""
+
+    def __init__(self, connection):
+        self.connection = connection
+        self.reads = []
+        self.writes = []
+
+    def __getattr__(self, name):
+        return getattr(self.connection, name)
+
+    def cursor(self, *args, **kwargs):
+        cursor = self.connection.cursor(*args, **kwargs)
+        recorder = self
+
+        class Cursor:
+            def __enter__(self):
+                cursor.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return cursor.__exit__(*args)
+
+            def __getattr__(self, name):
+                return getattr(cursor, name)
+
+            def execute(self, query, params=None):
+                rendered = query if isinstance(query, str) else query.as_string(recorder.connection)
+                statement = " ".join(rendered.lower().replace('"', "").split())
+                if "from social.instagram_comments" in statement:
+                    recorder.reads.append((statement, params))
+                elif "insert into social.instagram_comments" in statement:
+                    recorder.writes.append((statement, params))
+                return cursor.execute(query, params)
+
+        return Cursor()
+
+
 def post(conn, *, source=None, observed=OBSERVED, run_id=None):
     source = copy.deepcopy(source or CAPTURE["post"])
     if run_id is None:
@@ -463,6 +501,123 @@ def test_native_carousel_queryable_shape_and_hidden_metrics(database):
         )
         catalog = load(conn, "instagram_account_catalog_posts", id=ids["catalog_post_id"])
         assert (catalog["likes"], catalog["comments_count"], catalog["views"]) == (44, 6, 90)
+
+
+def test_comment_baselines_and_external_parents_use_one_post_scoped_locked_read(database):
+    with database() as conn:
+        ids = post(conn, source={**CAPTURE["post"], "shortcode": "BatchLookupFixture"})
+        other = post(conn, source={**CAPTURE["post"], "shortcode": "BatchLookupOtherPost"})
+        run_id = str(uuid4())
+        with conn.cursor() as cur:
+            cur.execute("insert into social.scrape_runs values(%s)", (run_id,))
+
+        def write(connection, post_id, raw, observed):
+            return write_comments(
+                connection,
+                run_id=run_id,
+                account="fixture_account",
+                observed_at=observed,
+                post_id=post_id,
+                comments=[normalize_comment_source(item) for item in raw],
+                source_payloads=raw,
+            )
+
+        parents = [{"comment_id": key, "username": "parent", "text": key} for key in ("z-parent", "a-parent")]
+        # Parent versions are references, not observations in this reply page.
+        parent_ids = write(conn, ids["post_id"], parents, OBSERVED + timedelta(hours=2))["comment_ids"]
+        foreign_ids = write(conn, other["post_id"], parents, OBSERVED + timedelta(hours=3))["comment_ids"]
+        replies = [
+            {"comment_id": f"reply-{index}", "username": "reply", "text": str(index), "parent_comment_id": parent}
+            for index, parent in enumerate(("z-parent", "a-parent", "z-parent", "a-parent"))
+        ]
+        initial = write(conn, ids["post_id"], replies, OBSERVED)
+        before = {key: load(conn, "instagram_comments", post_id=ids["post_id"], comment_id=key) for key in parent_ids}
+        recorder = CommentQueryRecorder(conn)
+        result = write(recorder, ids["post_id"], replies, OBSERVED + timedelta(hours=1))
+        assert len(recorder.reads) == 1
+        statement, params = recorder.reads[0]
+        assert "post_id=%s" in statement and "comment_id=any(" in statement
+        assert "order by comment_id for update" in statement
+        assert params == (ids["post_id"], sorted([*initial["comment_ids"], *parent_ids]))
+        assert len(recorder.writes) == len(replies)
+        assert result == initial
+        for raw in replies:
+            row = load(conn, "instagram_comments", post_id=ids["post_id"], comment_id=raw["comment_id"])
+            parent = raw["parent_comment_id"]
+            assert str(row["parent_comment_id"]) == parent_ids[parent]
+            assert str(row["parent_comment_id"]) != foreign_ids[parent]
+            assert row["parent_comment_external_id"] == parent and row["reply_depth"] == 1
+            assert row["text"] == raw["text"] and row["scraped_at"] == OBSERVED + timedelta(hours=1)
+        for key in parent_ids:
+            assert load(conn, "instagram_comments", post_id=ids["post_id"], comment_id=key) == before[key]
+
+
+def test_comment_batch_keeps_stale_page_missing_parent_and_cycle_errors(database):
+    with database() as conn:
+        ids = post(conn, source={**CAPTURE["post"], "shortcode": "BatchErrorsFixture"})
+        other = post(conn, source={**CAPTURE["post"], "shortcode": "BatchErrorsOtherPost"})
+        run_id = str(uuid4())
+        with conn.cursor() as cur:
+            cur.execute("insert into social.scrape_runs values(%s)", (run_id,))
+
+        def write(connection, post_id, raw, observed=OBSERVED):
+            return write_comments(
+                connection,
+                run_id=run_id,
+                account="fixture_account",
+                observed_at=observed,
+                post_id=post_id,
+                comments=[normalize_comment_source(item) for item in raw],
+                source_payloads=raw,
+            )
+
+        raw = [{"comment_id": "stale", "username": "author", "text": "current"}]
+        write(conn, ids["post_id"], raw, OBSERVED + timedelta(hours=1))
+        recorder = CommentQueryRecorder(conn)
+        with pytest.raises(OlderObservation):
+            write(recorder, ids["post_id"], raw)
+        assert not recorder.writes
+
+        parent = [{"comment_id": "foreign-only", "username": "author", "text": "parent"}]
+        write(conn, other["post_id"], parent)
+        reply = [{"comment_id": "missing-parent-reply", "parent_comment_id": "foreign-only", "text": "reply"}]
+        recorder = CommentQueryRecorder(conn)
+        with pytest.raises(CanonicalWriteError, match="Reply parent is absent from this post"):
+            write(recorder, ids["post_id"], reply)
+        assert len(recorder.reads) == 1 and not recorder.writes
+
+        cycle = [
+            {"comment_id": "cycle-a", "parent_comment_id": "cycle-b", "text": "A"},
+            {"comment_id": "cycle-b", "parent_comment_id": "cycle-a", "text": "B"},
+        ]
+        recorder = CommentQueryRecorder(conn)
+        with pytest.raises(CanonicalWriteError, match="Comment parent cycle"):
+            write(recorder, ids["post_id"], cycle)
+        assert len(recorder.reads) == 1 and not recorder.writes
+
+
+def test_empty_comment_page_keeps_transaction_and_post_guards(database):
+    kwargs = {
+        "run_id": str(uuid4()),
+        "account": "fixture_account",
+        "observed_at": OBSERVED,
+        "comments": [],
+        "source_payloads": [],
+    }
+    with pytest.raises(CanonicalWriteError, match="non-autocommit"):
+        write_comments(None, post_id=str(uuid4()), **kwargs)
+    with database() as conn:
+        with pytest.raises(CanonicalWriteError, match="Comment parent post does not exist"):
+            write_comments(conn, post_id=str(uuid4()), **kwargs)
+        ids = post(conn, source={**CAPTURE["post"], "shortcode": "EmptyBatchFixture"})
+        recorder = CommentQueryRecorder(conn)
+        assert write_comments(recorder, post_id=ids["post_id"], **kwargs) == {
+            "post_id": ids["post_id"],
+            "comment_ids": {},
+            "observed_comment_ids": [],
+            "media": [],
+        }
+        assert not recorder.reads and not recorder.writes
 
 
 def test_comment_metadata_disabled_preserves_hosted_and_rejects_missing_parent(database):
