@@ -578,6 +578,19 @@ def _scrape_shared_tiktok_posts(
     _sync_core_overrides()
     from trr_backend.socials.tiktok import TikTokScrapeConfig, TikTokScraper
 
+    if _shared_catalog_mode(config):
+        from trr_backend.socials.tiktok.shared_catalog.public_listing import scrape_catalog
+
+        return scrape_catalog(
+            core=_core,
+            hydrate=_room_callable("_hydrate_shared_tiktok_catalog_post", _hydrate_shared_tiktok_catalog_post),
+            run_id=run_id,
+            account_handle=account_handle,
+            config=config,
+            job_id=job_id,
+            progress_cb=progress_cb,
+        )
+
     scraper_kwargs: dict[str, Any] = {"cookies": _load_tiktok_cookies()}
     direct_comment_override = _shared_tiktok_catalog_direct_comment_override(config)
     if direct_comment_override is not None:

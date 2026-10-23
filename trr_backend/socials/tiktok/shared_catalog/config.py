@@ -77,7 +77,7 @@ def _shared_tiktok_catalog_effective_tasks(config: Mapping[str, Any]) -> set[str
         config.get("effective_selected_tasks")
     ) or _normalize_optional_social_account_catalog_backfill_selected_tasks(config.get("selected_tasks"))
     if tasks:
-        return set(tasks)
+        return set(tasks) - {"comments"}
     if not _shared_catalog_mode(config):
         return set()
     task_hint_present = any(
@@ -99,13 +99,12 @@ def _shared_tiktok_catalog_effective_tasks(config: Mapping[str, Any]) -> set[str
         inferred.append("comments")
     if not bool(config.get("details_refresh_skip_media_followups")):
         inferred.append("media")
-    return set(_normalize_optional_social_account_catalog_backfill_selected_tasks(inferred) or inferred)
+    return set(_normalize_optional_social_account_catalog_backfill_selected_tasks(inferred) or inferred) - {"comments"}
 
 
 def _shared_tiktok_catalog_comments_enabled(config: Mapping[str, Any]) -> bool:
-    return "comments" in _room_callable(
-        "_shared_tiktok_catalog_effective_tasks", _shared_tiktok_catalog_effective_tasks
-    )(config) and bool(config.get("tiktok_comments_in_posts_stage"))
+    # Temporary policy also applies to configurations already queued.
+    return False
 
 
 def _shared_tiktok_catalog_direct_comment_override(config: Mapping[str, Any]) -> bool | None:

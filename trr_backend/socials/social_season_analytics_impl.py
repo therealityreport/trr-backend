@@ -44628,7 +44628,8 @@ def ingest_shared_accounts(
         row
         for row in sources
         if (
-            (_normalize_platform_name(row.get("platform")) or "")
+            (_normalize_platform_name(row.get("platform")) or "") != "tiktok"
+            and (_normalize_platform_name(row.get("platform")) or "")
             and (_normalize_account_handle(row.get("account_handle")) or str(row.get("account_handle") or "").strip())
             and (
                 (
@@ -45133,6 +45134,7 @@ def ingest_shared_accounts(
                     normalized_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE
                     and (full_history_partition_enabled or bounded_frontier_direct)
                     and not force_tiktok_local_inline_direct
+                    and platform != "tiktok"
                     and (
                         _shared_account_catalog_frontier_supported(
                             platform=platform,

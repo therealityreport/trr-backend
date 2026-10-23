@@ -1753,8 +1753,8 @@ def test_post_social_account_catalog_backfill_tiktok(client: TestClient, monkeyp
     worker_guard.assert_called_once_with(required_execution_backend="modal", platform="tiktok")
     assert mocked_begin.call_args.kwargs["platform"] == "tiktok"
     assert mocked_begin.call_args.kwargs["account_handle"] == "bravotv"
-    assert mocked_begin.call_args.kwargs["selected_tasks"] == ["post_details", "comments", "media"]
-    assert mocked_finalize.call_args.kwargs["selected_tasks"] == ["post_details", "comments", "media"]
+    assert mocked_begin.call_args.kwargs["selected_tasks"] == ["post_details", "media"]
+    assert mocked_finalize.call_args.kwargs["selected_tasks"] == ["post_details", "media"]
 
 
 def test_post_social_account_catalog_remediate_drift_cancels_and_requeues(

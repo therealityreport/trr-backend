@@ -1702,6 +1702,11 @@ def begin_social_account_catalog_backfill_launch(
         catalog_action="backfill",
     )
     launch_group_id = str(uuid4())
+    if normalized_platform == "tiktok":
+        if selected_tasks is None:
+            selected_tasks = ["post_details", "media"]
+        elif any(str(task).strip().lower() == "comments" for task in selected_tasks):
+            raise SocialIngestValidationError("TIKTOK_COMMENTS_DISABLED", "TikTok comments are currently disabled.")
     normalized_selected_tasks = _normalize_social_account_catalog_backfill_selected_tasks(selected_tasks)
     budget_decision = (
         _instagram_backfill_budget_decision(normalized_account, enable_cap4_canary=enable_cap4_canary)
@@ -2471,6 +2476,11 @@ def launch_social_account_catalog_backfill(
     coverage_ms = 0.0
     catalog_launch_ms = 0.0
     comments_launch_ms = 0.0
+    if normalized_platform == "tiktok":
+        if selected_tasks is None:
+            selected_tasks = ["post_details", "media"]
+        elif any(str(task).strip().lower() == "comments" for task in selected_tasks):
+            raise SocialIngestValidationError("TIKTOK_COMMENTS_DISABLED", "TikTok comments are currently disabled.")
     normalized_selected_tasks = _normalize_social_account_catalog_backfill_selected_tasks(selected_tasks)
     normalized_comment_anchor_source_ids, _comment_anchor_overflow_platforms = _normalize_comment_anchor_source_ids(
         comment_anchor_source_ids,

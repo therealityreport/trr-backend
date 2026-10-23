@@ -1,6 +1,12 @@
 # TikTok Posts Scrapling — Signature Gap Decision
 
-**Status:** Open. Requires decision before committing more engineering to the TikTok Scrapling lane.
+**Status (2026-10-23):** Superseded for public post listing by the anonymous native-browser transport. The historical direct-httpx signature gap below remains diagnostic context, not a recommendation to purchase a provider or proxy.
+
+The shared catalog now captures TikTok's own `/api/post/item_list/` responses while scrolling the public profile. It supplies no saved login cookies, blocks comment endpoints, and uses no custom signer. Each accepted page is persisted and materialized before its checkpoint advances. Retries replay the profile, skip only committed IDs, and preserve newly surfaced posts around shifted page boundaries. Checkpoints are scoped to the same run, dates, and selected tasks, and writes are fenced to the current worker claim.
+
+Admin TikTok backfill defaults to `post_details` and `media`. Explicit `comments` selection is rejected with `TIKTOK_COMMENTS_DISABLED`; queued catalog configs cannot enable comments. A page/time limit, missing frontier, parse failure, rejected owner, or shortfall against the known full-history total remains incomplete. Public profile HTTP 200 alone never establishes coverage.
+
+Deployment and live acceptance evidence: [October 22–23 follow-ups](../deploy/2026-10-22-tiktok-audit-followups.md).
 
 ## Problem
 

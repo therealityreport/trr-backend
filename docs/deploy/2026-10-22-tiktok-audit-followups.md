@@ -215,3 +215,68 @@ changes were not applicable. Unchanged passing source checks were reused.
 Safe native-page and independent database receipts:
 `/Users/thomashulihan/.codex/tmp/trr-tiktok-two-page-01a16268/` —
 `deployed-canary-receipt.json` and `final-persistence-receipt.json`.
+
+
+## October 23 continuation — incomplete acceptance
+
+Current live provider history identified v131, `ig-stall-scale-0422708b505d`,
+in `admin-56995 / main / trr-backend-jobs`. Both accepted TikTok runtime module
+hashes still matched in the browser container. No application source or deployment
+was changed during this continuation; the newer Instagram changes were preserved.
+
+- Local anonymous native-browser five-page checks returned 81 unique `bravotv`
+  posts and 80 unique `bravowwhl` posts. Each stopped at `max_pages`, rejected zero
+  account owners, and reported one unsuccessful response. These are retrieval
+  checks, not database-persistence acceptance.
+- A subsequent 25-page `bravotv` check returned zero accepted pages, two failed
+  responses, and `public_listing_incomplete`, despite profile HTTP 200. Full-history
+  acceptance remains open; a successful profile load is not listing success.
+- The remote persisted canary first failed to initialize the database pool.
+  A subsequent direct connection succeeded. A retry with a process-local smaller
+  pool created run `665a571b-8a72-4615-8099-6023379c32d3` but ended without a job or
+  terminal receipt. Readback found zero jobs for that run. The task-owned queued
+  run was cancelled and its idle worker marked stopped. Neither remote attempt
+  establishes persistence success. The exact cause of interrupted container exec
+  remains unverified.
+- Media validation for `7699538168709762318` and `7699553575608798478` each found
+  one usable asset through the existing unofficial API. Both yt-dlp and watch-page
+  URLs failed CDN validation with 403. Hosted-media persistence was not tested.
+- Source inspection found that the admin TikTok full-history action uses the
+  shared catalog path, whereas the accepted canary uses the posts-only Scrapling
+  lane. Admin defaults still contain comments. No admin backfill was launched;
+  comments stayed disabled in every executed listing check.
+
+Remaining: repair and verify persisted execution on the current runtime; establish
+reliable full-history continuation through the actual catalog entrypoint; exclude
+comments from the requested admin workflow and verify launch/progress/cancellation;
+verify hosted media persistence; reconcile the older signature-gap recommendation
+with the anonymous browser fallback. The older signature-gap file already has
+unrelated edits and was preserved. This record does not mark those tasks complete.
+
+Evidence: `/Users/thomashulihan/.codex/tmp/trr-tiktok-finish-01a16977/`, including
+`deeper-public.json`, `media-probes.json`, and private remote diagnostic/cleanup
+receipts. No paid provider or purchased proxy was added. No schema changes were
+made. TRR-APP build was not applicable to this diagnostic continuation.
+
+
+## October 23 implementation — deployed, live acceptance blocked
+
+Implemented anonymous native-browser listing in the actual shared TikTok catalog path, replacing legacy partition selection for new TikTok catalog jobs. Each page commits catalog/materialized posts before a claim-fenced version-2 checkpoint. Retries preserve new IDs around shifted page boundaries, skip only committed IDs, keep native and saved counts separate, and bind checkpoints to the same run, task settings, account, and dates. Cancellation is checked per post; periodic progress maintains the worker heartbeat. Browser errors, malformed items, owner mismatches, missing frontiers, and expected-total shortfalls remain incomplete.
+
+Comments are disabled in backend catalog execution, API omitted-task defaults, both launchers, and app defaults. Explicit selection returns `TIKTOK_COMMENTS_DISABLED`. Queued catalog configurations cannot re-enable fetching. No paid provider or proxy was added, and no schema changed.
+
+Independent review found four defects in the initial candidate; all were fixed and the reviewer accepted the fixes. Passing checks cover 21 transport/catalog cases, 12 selected repository cases, one API route case, five unchanged posts-lane launcher cases, and eight TikTok app cases. Passing results were reused when relevant source was unchanged. Ruff and diff whitespace checks passed on task changes. No full app production build or frontend deployment was performed.
+
+The reviewed release overlays seven backend files onto the verified v131 archive (`ig-stall-scale-0422708b505d`), preserving every other deployed file, including Instagram. Final deployment is **v133**, tag `tiktok-catalog-e94d19d07ec9`, environment `main`, workspace `admin-56995`, app `trr-backend-jobs`. Source identity is HEAD `fa58bede4cebc0fc925bf4619cb92e2efa3e2538` plus the seven-file overlay in the private manifest. The prior archive/tag is retained for rollback. Intermediate v132 passed API health; final v133 passed Modal function/provider readiness but returned HTTP 503 on health with `reason=session_pool_capacity`.
+
+Live limitations and reconciliation:
+
+- Two local queue launch attempts hit Supabase `EMAXCONNSESSION`: all 15 session slots were occupied. Direct-lane resolution was attempted; that connection failed and its session fallback encountered the same cap. The error occurred before run creation. Independent Supabase readback found **zero runs** with initiator `tiktok_durable_canary_20261023`, so no orphan cleanup is required.
+- The existing deployed API returned saved TikTok catalog posts with HTTP 200 before the final cold-start health failure. This proves a read path only, not new-run persistence or full-history coverage. No full-history launch was submitted after health became degraded.
+- Supabase read-only inspection confirmed the three selected posts (`7699534476111547662`, `7699538168709762318`, `7699553575608798478`) exist but have empty hosted-media arrays and no media-mirror job. Hosted-media acceptance remains open.
+- Connected browser sessions did not identify the required TRR friendly profile. Browser policy blocked the profile-inspection URL. No alternate-profile account operation or security-policy workaround was attempted. Live admin rendering/launch/cancel verification remains open; the eight app behavior tests passed.
+- Shared sessions, Instagram processes, pool limits, and provider subscriptions were not changed to manufacture acceptance. The database capacity condition predated the TikTok launches and also affects API health. Runtime acceptance must be repeated after capacity is safely restored.
+
+Remaining order: (1) restore usable database capacity within shared-runtime ownership, then persisted five-page `bravotv` and `bravowwhl` canaries; (2) actual catalog retry/full-history coverage; (3) live admin launch/progress/cancel with the TRR browser identity; (4) mirror and verify the three persisted videos, including repeat-run identity reuse. Source implementation and deployment are delivered; these live acceptance items are not complete.
+
+Evidence directory: `/Users/thomashulihan/.codex/tmp/trr-tiktok-finish-01a16977/`. The release manifest contains exact hashes and rollback identity. Private deployment, readiness, API, and database failure logs are retained there; they are not publication artifacts.

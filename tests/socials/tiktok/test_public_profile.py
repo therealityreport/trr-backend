@@ -133,3 +133,94 @@ def test_public_listing_retains_posts_when_cap_precedes_page_budget(monkeypatch)
     assert metadata["pages_scanned"] == 1
     assert metadata["post_cap"] == 20
     assert metadata["stop_reason"] == "max_posts_reached"
+
+
+def test_page_sink_commits_before_next_page_and_survives_browser_failure(monkeypatch):
+    _install_browser(monkeypatch, [("0", {"statusCode": 0, "itemList": [_item()], "hasMore": True})], fail=True)
+    committed = []
+    posts, metadata = module.scrape_public_profile_posts(
+        account_handle="bravotv",
+        max_pages=2,
+        page_size=30,
+        on_page=lambda posts, checkpoint: committed.append(([p.video_id for p in posts], checkpoint)),
+    )
+    assert committed[0][0] == ["123"]
+    assert [p.video_id for p in posts] == ["123"]
+    assert metadata["partial"] is True
+
+
+def test_persistence_failure_is_propagated_and_stops_capture(monkeypatch):
+    _install_browser(monkeypatch, [("0", {"statusCode": 0, "itemList": [_item()], "hasMore": True})])
+
+    def fail(posts, checkpoint):
+        raise RuntimeError("database unavailable")
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        module.scrape_public_profile_posts(account_handle="bravotv", max_pages=1, page_size=30, on_page=fail)
+
+
+def test_resume_skips_only_committed_ids(monkeypatch):
+    _install_browser(
+        monkeypatch,
+        [
+            ("0", {"statusCode": 0, "itemList": [_item()], "hasMore": True}),
+            ("100", {"statusCode": 0, "itemList": [_item("456")], "hasMore": False}),
+        ],
+    )
+    saved = []
+    posts, metadata = module.scrape_public_profile_posts(
+        account_handle="bravotv",
+        max_pages=1,
+        page_size=30,
+        checkpoint_ids=["123"],
+        persisted_ids=["123"],
+        on_page=lambda posts, checkpoint: saved.extend(p.video_id for p in posts),
+    )
+    assert saved == ["456"]
+    assert metadata["checkpoint_reached"] is True
+    assert metadata["partial"] is False
+
+
+def test_missing_checkpoint_never_claims_complete(monkeypatch):
+    _install_browser(monkeypatch, [("0", {"statusCode": 0, "itemList": [_item()], "hasMore": False})])
+    saved = []
+    _, metadata = module.scrape_public_profile_posts(
+        account_handle="bravotv",
+        max_pages=1,
+        page_size=30,
+        checkpoint_ids=["999"],
+        on_page=lambda posts, checkpoint: saved.extend(posts),
+    )
+    assert [post.video_id for post in saved] == ["123"]
+    assert metadata["stop_reason"] == "checkpoint_not_reached"
+    assert metadata["partial"] is True
+
+
+def test_shifted_replay_preserves_new_posts_on_both_sides_of_frontier(monkeypatch):
+    _install_browser(
+        monkeypatch,
+        [
+            ("0", {"statusCode": 0, "itemList": [_item("999"), _item("123")], "hasMore": True}),
+            ("100", {"statusCode": 0, "itemList": [_item("456"), _item("789")], "hasMore": False}),
+        ],
+    )
+    saved = []
+    _, metadata = module.scrape_public_profile_posts(
+        account_handle="bravotv",
+        max_pages=5,
+        page_size=30,
+        checkpoint_ids=["123", "456"],
+        persisted_ids=["123", "456"],
+        on_page=lambda posts, checkpoint: saved.extend(p.video_id for p in posts),
+    )
+    assert saved == ["999", "789"]
+    assert metadata["partial"] is False
+
+
+def test_terminal_parse_failure_is_never_complete(monkeypatch):
+    bad = _item()
+    bad["createTime"] = "invalid"
+    _install_browser(monkeypatch, [("0", {"statusCode": 0, "itemList": [bad], "hasMore": False})])
+    _, metadata = module.scrape_public_profile_posts(account_handle="bravotv", max_pages=1, page_size=30)
+    assert metadata["partial"] is True
+    assert metadata["response_failures"] == 1

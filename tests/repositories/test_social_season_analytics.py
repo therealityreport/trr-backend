@@ -12582,29 +12582,29 @@ def test_launch_social_account_catalog_backfill_tiktok_runs_all_selected_tasks_i
         "tiktok",
         "bravowwhl",
         source_scope="bravo",
-        selected_tasks=["post_details", "comments", "media"],
+        selected_tasks=["post_details", "media"],
     )
 
     assert payload["run_id"] == "catalog-run-tiktok-1"
     assert payload["catalog_run_id"] == "catalog-run-tiktok-1"
     assert payload["comments_run_id"] is None
-    assert payload["selected_tasks"] == ["post_details", "comments", "media"]
-    assert payload["effective_selected_tasks"] == ["post_details", "comments", "media"]
+    assert payload["selected_tasks"] == ["post_details", "media"]
+    assert payload["effective_selected_tasks"] == ["post_details", "media"]
     assert payload["attached_followups"] == {}
-    assert payload["stage_graph"]["comments"]["status"] == "queued"
+    assert payload["stage_graph"]["comments"]["status"] == "skipped"
     assert len(catalog_calls) == 1
     assert catalog_calls[0]["catalog_action"] == "backfill"
     assert catalog_calls[0]["catalog_action_scope"] == "full_history"
-    assert catalog_calls[0]["selected_tasks"] == ["post_details", "comments", "media"]
-    assert catalog_calls[0]["effective_selected_tasks"] == ["post_details", "comments", "media"]
+    assert catalog_calls[0]["selected_tasks"] == ["post_details", "media"]
+    assert catalog_calls[0]["effective_selected_tasks"] == ["post_details", "media"]
     assert catalog_calls[0]["details_refresh_skip_detail_fetch"] is False
     assert catalog_calls[0]["details_refresh_skip_media_followups"] is False
-    assert catalog_calls[0]["tiktok_comments_in_posts_stage"] is True
-    assert catalog_calls[0]["tiktok_direct_comment_api_override"] is True
+    assert catalog_calls[0]["tiktok_comments_in_posts_stage"] is False
+    assert catalog_calls[0]["tiktok_direct_comment_api_override"] is False
     assert "max_posts_per_target" not in catalog_calls[0]
-    assert merged_config_updates[-1]["selected_tasks"] == ["post_details", "comments", "media"]
-    assert merged_config_updates[-1]["effective_selected_tasks"] == ["post_details", "comments", "media"]
-    assert merged_config_updates[-1]["stage_graph"]["comments"]["status"] == "queued"
+    assert merged_config_updates[-1]["selected_tasks"] == ["post_details", "media"]
+    assert merged_config_updates[-1]["effective_selected_tasks"] == ["post_details", "media"]
+    assert merged_config_updates[-1]["stage_graph"]["comments"]["status"] == "skipped"
 
 
 def test_launch_social_account_catalog_backfill_tiktok_sync_recent_preserves_action_scope(
@@ -12639,17 +12639,17 @@ def test_launch_social_account_catalog_backfill_tiktok_sync_recent_preserves_act
     )
 
     assert payload["run_id"] == "catalog-run-tiktok-sync-recent-1"
-    assert payload["selected_tasks"] == ["post_details", "comments", "media"]
-    assert payload["effective_selected_tasks"] == ["post_details", "comments", "media"]
+    assert payload["selected_tasks"] == ["post_details", "media"]
+    assert payload["effective_selected_tasks"] == ["post_details", "media"]
     assert payload["catalog_action"] == "sync_recent"
     assert payload["catalog_action_scope"] == "recent_window"
     assert len(catalog_calls) == 1
     assert catalog_calls[0]["catalog_action"] == "sync_recent"
     assert catalog_calls[0]["catalog_action_scope"] == "recent_window"
-    assert catalog_calls[0]["selected_tasks"] == ["post_details", "comments", "media"]
-    assert catalog_calls[0]["effective_selected_tasks"] == ["post_details", "comments", "media"]
-    assert catalog_calls[0]["tiktok_comments_in_posts_stage"] is True
-    assert catalog_calls[0]["tiktok_direct_comment_api_override"] is True
+    assert catalog_calls[0]["selected_tasks"] == ["post_details", "media"]
+    assert catalog_calls[0]["effective_selected_tasks"] == ["post_details", "media"]
+    assert catalog_calls[0]["tiktok_comments_in_posts_stage"] is False
+    assert catalog_calls[0]["tiktok_direct_comment_api_override"] is False
 
 
 def test_sync_recent_social_account_catalog_uses_coordinated_launcher(
@@ -49832,6 +49832,24 @@ def test_scrape_shared_posts_for_account_forwards_progress_cb_to_tiktok(
 def test_scrape_shared_tiktok_posts_emits_catalog_persist_progress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(social_repo, "_hydrate_shared_tiktok_catalog_post", lambda **kwargs: {"id": "materialized"})
+    from trr_backend.socials.tiktok.shared_catalog import public_listing
+
+    monkeypatch.setattr(
+        public_listing.pg, "fetch_one", lambda sql, params: {"status": "running", "config": {}, "id": "job-1"}
+    )
+    monkeypatch.setattr(social_repo, "_shared_account_expected_total_posts_from_config", lambda *a, **k: 0)
+
+    def fake_public_listing(**kwargs):
+        posts = [
+            SimpleNamespace(
+                video_id="123", create_time=1780000000, comments=0, author_nickname=None, user_avatar_url=None
+            )
+        ]
+        kwargs["on_page"](posts, {"pages_scanned": 1, "checkpoint_ids": ["123"]})
+        return posts, {"partial": False, "native_exhausted": True, "pages_scanned": 1}
+
+    monkeypatch.setattr(public_listing, "scrape_public_profile_posts", fake_public_listing)
     progress_events: list[dict[str, Any]] = []
 
     class FakeTikTokScraper:
@@ -49876,16 +49894,10 @@ def test_scrape_shared_tiktok_posts_emits_catalog_persist_progress(
         progress_cb=progress_events.append,
     )
 
-    assert [event["phase"] for event in progress_events] == [
-        "scrape_api_page",
-        "persist_catalog_posts",
-        "persist_catalog_posts",
-    ]
-    assert progress_events[-1]["saved_posts"] == 2
-    assert progress_events[-1]["posts_checked"] == 12
-    assert len(rows) == 2
-    assert retrieval_meta["persist_counters"]["posts_upserted"] == 2
-    assert retrieval_meta["total_posts"] == 10_100
+    assert progress_events[-1]["phase"] == "persist_catalog_posts"
+    assert progress_events[-1]["saved_posts"] == 1
+    assert len(rows) == 1
+    assert retrieval_meta["persist_counters"]["posts_upserted"] == 1
 
 
 def test_prioritize_shared_tiktok_posts_for_comment_gaps_prefers_largest_gap(
@@ -49922,6 +49934,23 @@ def test_prioritize_shared_tiktok_posts_for_comment_gaps_prefers_largest_gap(
 def test_scrape_shared_tiktok_posts_hydrates_selected_catalog_tasks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from trr_backend.socials.tiktok.shared_catalog import public_listing
+
+    monkeypatch.setattr(
+        public_listing.pg, "fetch_one", lambda sql, params: {"status": "running", "config": {}, "id": "job-1"}
+    )
+    monkeypatch.setattr(social_repo, "_shared_account_expected_total_posts_from_config", lambda *a, **k: 0)
+
+    def fake_public_listing(**kwargs):
+        posts = [
+            SimpleNamespace(
+                video_id="123", create_time=1780000000, comments=0, author_nickname=None, user_avatar_url=None
+            )
+        ]
+        kwargs["on_page"](posts, {"pages_scanned": 1, "checkpoint_ids": ["123"]})
+        return posts, {"partial": False, "native_exhausted": True, "pages_scanned": 1}
+
+    monkeypatch.setattr(public_listing, "scrape_public_profile_posts", fake_public_listing)
     constructor_calls: list[dict[str, Any]] = []
     comment_fetch_calls: list[dict[str, Any]] = []
     materialized_posts: list[dict[str, Any]] = []
@@ -50030,34 +50059,17 @@ def test_scrape_shared_tiktok_posts_hydrates_selected_catalog_tasks(
     )
 
     assert rows == [{"source_id": "video-1", "comments_count": 1}]
-    assert constructor_calls[0]["direct_comment_api_enabled_override"] is True
     assert materialized_posts == [{"id": "post-1", "comments_count": 1}]
     assert media_jobs and media_jobs[0]["platform"] == "tiktok"
-    assert len(comment_fetch_calls) == 1
-    comment_fetch_call = dict(comment_fetch_calls[0])
-    assert callable(comment_fetch_call.pop("progress_callback"))
-    assert comment_fetch_call == {
-        "video_id": "video-1",
-        "username": "thetraitorsus",
-        "max_comments": None,
-        "max_replies_per_comment": None,
-        "fetch_replies": True,
-        "delay": 0.35,
-        "fast_mode": True,
-        "reply_fetch_deadline_seconds": 180,
-    }
-    assert retrieval_meta["persist_counters"]["posts_upserted"] == 1
-    assert retrieval_meta["persist_counters"]["materialized_posts_upserted"] == 1
-    assert retrieval_meta["persist_counters"]["media_mirror_jobs_enqueued"] == 1
-    assert retrieval_meta["persist_counters"]["comments_upserted"] == 1
-    assert retrieval_meta["persist_counters"]["comments_fetched"] == 1
-    assert any(event.get("phase") == "fetch_tiktok_comments_page" for event in progress_events)
-    assert progress_events[-1]["phase"] == "persist_catalog_posts"
+    assert comment_fetch_calls == []
+    assert retrieval_meta["persist_counters"]["comments_upserted"] == 0
 
 
 def test_hydrate_shared_tiktok_catalog_post_times_out_comment_fetch_without_failing_post(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(social_repo, "_shared_tiktok_catalog_comments_enabled", lambda config: True)
+
     class FakeTikTokScraper:
         comments_auth_failed = False
         last_comment_fetch_reason = ""
@@ -50111,6 +50123,7 @@ def test_hydrate_shared_tiktok_catalog_post_times_out_comment_fetch_without_fail
 def test_hydrate_shared_tiktok_catalog_post_skips_already_complete_comments(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(social_repo, "_shared_tiktok_catalog_comments_enabled", lambda config: True)
     fetch_calls: list[str] = []
     counters: dict[str, int] = {}
     progress_events: list[dict[str, Any]] = []
@@ -50163,6 +50176,7 @@ def test_hydrate_shared_tiktok_catalog_post_skips_already_complete_comments(
 def test_hydrate_shared_tiktok_catalog_post_does_not_mark_missing_after_partial_tiktok_fetch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(social_repo, "_shared_tiktok_catalog_comments_enabled", lambda config: True)
     marked_missing: list[set[str]] = []
     counters: dict[str, int] = {}
 
@@ -50242,117 +50256,42 @@ def test_hydrate_shared_tiktok_catalog_post_does_not_mark_missing_after_partial_
     assert marked_missing == []
 
 
-def test_scrape_shared_tiktok_posts_single_runner_fallback_bypasses_partition_api_path(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    partitioned_calls: list[dict[str, Any]] = []
+@pytest.mark.parametrize("strategy", ["single_runner_fallback", "full_history_cursor_breakpoints"])
+def test_scrape_shared_tiktok_posts_legacy_strategies_use_durable_public_listing(monkeypatch, strategy):
+    from trr_backend.socials.tiktok.shared_catalog import public_listing
 
-    def fake_partitioned(**kwargs: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        partitioned_calls.append(kwargs)
-        return [], {"retrieval_mode": "api_partition", "posts_checked": 0}
+    calls = []
 
-    class FakeTikTokScraper:
-        def __init__(self, *, cookies: Any) -> None:
-            self.cookies = cookies
-            self.last_retrieval_meta = {
-                "pages_scanned": 2,
-                "posts_checked": 8,
-                "total_posts": 10_100,
-                "profile_snapshot": {"username": "bravotv", "display_name": "BravoTV"},
-            }
+    def scrape_catalog(**kwargs):
+        calls.append(kwargs)
+        return [{"source_id": "123"}], {"source": "public_browser", "total_posts": 10100}
 
-        def scrape(self, _config: Any, progress_cb=None) -> list[SimpleNamespace]:
-            assert _config.scrape_mode == "ytdlp"
-            assert _config.ytdlp_max_videos_hint == 10_100
-            if progress_cb:
-                progress_cb(
-                    {
-                        "phase": "scrape_api_page",
-                        "pages_scanned": 2,
-                        "posts_checked": 8,
-                        "matched_posts": 1,
-                    }
-                )
-            return [SimpleNamespace(video_id="123", author_nickname=None, user_avatar_url=None)]
-
-    monkeypatch.setattr(social_repo, "_scrape_shared_tiktok_posts_partitioned", fake_partitioned)
-    monkeypatch.setattr("trr_backend.socials.tiktok.TikTokScraper", FakeTikTokScraper)
-    monkeypatch.setattr(social_repo, "_load_tiktok_cookies", lambda: [])
-    monkeypatch.setattr(social_repo, "_shared_catalog_progress_interval_posts", lambda: 50)
+    monkeypatch.setattr(public_listing, "scrape_catalog", scrape_catalog)
     monkeypatch.setattr(
-        social_repo,
-        "_upsert_shared_catalog_post",
-        lambda **kwargs: {"source_id": getattr(kwargs["post"], "video_id", None)},
+        social_repo, "_scrape_shared_tiktok_posts_partitioned", lambda **kwargs: pytest.fail("legacy partition")
     )
-
-    rows, retrieval_meta = social_repo._scrape_shared_tiktok_posts(
+    rows, metadata = social_repo._scrape_shared_tiktok_posts(
         run_id="run-1",
         account_handle="bravotv",
+        job_id="job-1",
         config={
             "pipeline_ingest_mode": social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
-            "partition_strategy": social_repo.CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
-            "runner_strategy": "single_runner_fallback",
-            "discovery_total_posts": 10_100,
+            "runner_strategy": strategy,
+            "discovery_total_posts": 10100,
         },
-        job_id="job-1",
-        progress_cb=None,
     )
-
-    assert partitioned_calls == []
-    assert len(rows) == 1
-    assert retrieval_meta["persist_counters"]["posts_upserted"] == 1
-    assert retrieval_meta["total_posts"] == 10_100
+    assert rows == [{"source_id": "123"}]
+    assert metadata["source"] == "public_browser"
+    assert calls[0]["config"]["discovery_total_posts"] == 10100
 
 
-def test_scrape_shared_tiktok_posts_cursor_breakpoints_still_bypass_partition_path(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    partitioned_calls: list[dict[str, Any]] = []
-
-    def fake_partitioned(**kwargs: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        partitioned_calls.append(kwargs)
-        return [], {"retrieval_mode": "api_partition", "posts_checked": 0}
-
-    class FakeTikTokScraper:
-        def __init__(self, *, cookies: Any) -> None:
-            self.last_retrieval_meta = {
-                "pages_scanned": 2,
-                "posts_checked": 8,
-                "total_posts": 10_100,
-                "profile_snapshot": {"username": "bravotv", "display_name": "BravoTV"},
-            }
-
-        def scrape(self, _config: Any, progress_cb=None) -> list[SimpleNamespace]:
-            assert _config.scrape_mode == "ytdlp"
-            assert _config.ytdlp_max_videos_hint == 10_100
-            return [SimpleNamespace(video_id="123", author_nickname=None, user_avatar_url=None)]
-
-    monkeypatch.setattr(social_repo, "_scrape_shared_tiktok_posts_partitioned", fake_partitioned)
-    monkeypatch.setattr("trr_backend.socials.tiktok.TikTokScraper", FakeTikTokScraper)
-    monkeypatch.setattr(social_repo, "_load_tiktok_cookies", lambda: [])
-    monkeypatch.setattr(social_repo, "_shared_catalog_progress_interval_posts", lambda: 50)
-    monkeypatch.setattr(
-        social_repo,
-        "_upsert_shared_catalog_post",
-        lambda **kwargs: {"source_id": getattr(kwargs["post"], "video_id", None)},
-    )
-
-    rows, retrieval_meta = social_repo._scrape_shared_tiktok_posts(
-        run_id="run-1",
-        account_handle="bravotv",
-        config={
-            "pipeline_ingest_mode": social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
-            "partition_strategy": social_repo.CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
-            "runner_strategy": "full_history_cursor_breakpoints",
-            "discovery_total_posts": 10_100,
-        },
-        job_id="job-1",
-        progress_cb=None,
-    )
-
-    assert partitioned_calls == []
-    assert len(rows) == 1
-    assert retrieval_meta["persist_counters"]["posts_upserted"] == 1
+@pytest.mark.parametrize(
+    "launcher", ["begin_social_account_catalog_backfill_launch", "launch_social_account_catalog_backfill"]
+)
+def test_tiktok_launch_rejects_comments_before_dispatch(monkeypatch, launcher):
+    monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *args: None)
+    with pytest.raises(social_repo.SocialIngestValidationError, match="disabled"):
+        getattr(social_repo, launcher)("tiktok", "bravotv", selected_tasks=["post_details", "comments"])
 
 
 def test_bootstrap_shared_tiktok_account_context_tolerates_profile_enrichment_failures(
