@@ -1162,9 +1162,15 @@ def _graphql_comment_to_instagram_comment(
             date_time = ""
 
     reply_edge = _graphql_comment_reply_edge(node)
-    reply_count = _safe_non_negative_int(reply_edge.get("count")) if reply_edge else None
-    if reply_count is None:
-        reply_count = _safe_non_negative_int(node.get("child_comment_count"))
+    native_counts = [
+        _safe_non_negative_int(node.get(key))
+        for key in ("child_comment_count", "childCommentCount", "repliesCount", "reply_count", "replies_count")
+    ]
+    if reply_edge:
+        native_counts.append(_safe_non_negative_int(reply_edge.get("count")))
+    # Match retained native parsing and resume hydration. A sparse zero alias
+    # cannot suppress a larger count supplied by the same source observation.
+    reply_count = max((count for count in native_counts if count is not None), default=None)
     reply_nodes = _graphql_comment_reply_edges(node)
     replies: list[InstagramComment] = []
     for reply_node in reply_nodes:
@@ -1188,11 +1194,7 @@ def _graphql_comment_to_instagram_comment(
         else str(phase or first_present("phase", "comment_phase", "commentPhase", "source_phase") or "").strip()
         or "parent"
     )
-    child_comment_count = _safe_non_negative_int(
-        first_present("child_comment_count", "childCommentCount", "repliesCount", "reply_count", "replies_count")
-    )
-    if child_comment_count is None and reply_count is not None:
-        child_comment_count = reply_count
+    child_comment_count = reply_count
     cursor_payload = first_present("cursor_payload", "cursorPayload")
     if not isinstance(cursor_payload, Mapping):
         cursor_payload = {}
@@ -1514,17 +1516,22 @@ def _merge_unique_comments(
     extra_comments: list[InstagramComment],
     *,
     max_comments: int,
+    dedupe_content: bool = True,
 ) -> int:
     seen = {str(comment.comment_id or "").strip() for comment in comments if str(comment.comment_id or "").strip()}
-    seen_signatures = {
-        signature
-        for signature in (_comment_content_signature(comment) for comment in comments)
-        if signature is not None
-    }
+    seen_signatures = (
+        {
+            signature
+            for signature in (_comment_content_signature(comment) for comment in comments)
+            if signature is not None
+        }
+        if dedupe_content
+        else set()
+    )
     appended = 0
     for comment in extra_comments:
         comment_id = str(comment.comment_id or "").strip()
-        signature = _comment_content_signature(comment)
+        signature = _comment_content_signature(comment) if dedupe_content else None
         if (comment_id and comment_id in seen) or (signature is not None and signature in seen_signatures):
             continue
         comments.append(comment)
@@ -6771,7 +6778,12 @@ class InstagramCommentsScraplingFetcher:
                             fetch_replies=fetch_replies,
                         )
                     else:
-                        appended = _merge_unique_comments(comments, page_comments, max_comments=max_comments)
+                        appended = _merge_unique_comments(
+                            comments,
+                            page_comments,
+                            max_comments=max_comments,
+                            dedupe_content=not strict_native_exhaustion,
+                        )
                     next_cursor = str(page_metadata.get("end_cursor") or "").strip() or None
                     page_summary = {
                         "doc_id": normalized_doc_id,
@@ -7238,6 +7250,7 @@ class InstagramCommentsScraplingFetcher:
                             },
                             timeout=child_post_timeout,
                         )
+                        self._record_response_bytes(response)
                         if strict_native_exhaustion:
                             self._observe_source_failure(response)
                             self._prepare_credentials(public_client.cookies)
@@ -7389,7 +7402,9 @@ class InstagramCommentsScraplingFetcher:
                             existing_ids=existing_reply_ids,
                         )
                     else:
-                        appended = _merge_unique_comments(child_comments, page_comments, max_comments=0)
+                        appended = _merge_unique_comments(
+                            child_comments, page_comments, max_comments=0, dedupe_content=not strict_native_exhaustion
+                        )
                     next_cursor = str(page_metadata.get("end_cursor") or "").strip() or None
                     if len(metadata["pages"]) < _STATUS_ONLY_METADATA_MAX_ITEMS:
                         metadata["pages"].append(

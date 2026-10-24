@@ -222,6 +222,61 @@ def actual_parent_shape(identity, count=None):
     }
 
 
+def test_strict_relay_keeps_identical_text_with_distinct_native_ids(database, monkeypatch):
+    store, tx, args = setup(database)
+    calls = []
+
+    def handler(request):
+        if request.method == "GET":
+            return bootstrap()
+        _, variables = body(request)
+        parent, cursor = variables.get("parent_comment_id"), variables.get("after")
+        calls.append((parent, cursor))
+        if parent is None:
+            parents = [{**actual_parent_shape(key), "text": "same text"} for key in ("p1", "p2")]
+            return httpx.Response(200, json=page(parents))
+        if parent == "p1":
+            replies = [{**node(key), "text": "same reply"} for key in ("r1", "r2", "r1")]
+            # Native duplicate rows are malformed within one page. Repeat r1
+            # across pages instead, as Instagram can overlap a cursor boundary.
+            if cursor is None:
+                return httpx.Response(200, json=page(replies[:1], child=True, more=True, after="tail"))
+            assert cursor == "tail"
+            return httpx.Response(200, json=page(replies[1:], child=True))
+        assert parent == "p2"
+        return httpx.Response(200, json=page([], child=True))
+
+    fetch, created = source(monkeypatch, handler, expected=4)
+    result = CommentActivity(store, fetch, clock=lambda: OBSERVED).execute(**args)
+    assert result["complete"] and result["receipt"]["outcome"] == "committed"
+    assert calls == [(None, None), ("p1", None), ("p1", "tail"), ("p2", None)]
+    saved = existing.query(tx, "select comment_id from social.instagram_comments where post_id=%s", (args["post_id"],))
+    assert {row["comment_id"] for row in saved} == {"p1", "p2", "r1", "r2"}
+    assert set(result["checkpoint"]["comment_pages"]["observed"]) == {"p1", "p2", "r1", "r2"}
+    assert created[0]._request_count_by_host["www.instagram.com"] == 5  # Bootstrap, parent, three child responses.
+
+
+@pytest.mark.parametrize("alias", ["childCommentCount", "repliesCount", "reply_count", "replies_count"])
+def test_fresh_public_parent_uses_largest_native_reply_count(database, monkeypatch, alias):
+    store, tx, args = setup(database)
+    calls = []
+
+    def handler(request):
+        if request.method == "GET":
+            return bootstrap()
+        _, variables = body(request)
+        parent = variables.get("parent_comment_id")
+        calls.append(parent)
+        payload = page([node("p", 0, **{alias: 1})]) if parent is None else page([node("r")], child=True)
+        return httpx.Response(200, json=payload)
+
+    fetch, _ = source(monkeypatch, handler, expected=2)
+    result = CommentActivity(store, fetch, clock=lambda: OBSERVED).execute(**args)
+    assert result["complete"] and calls == [None, "p"]
+    saved = existing.query(tx, "select comment_id from social.instagram_comments where post_id=%s", (args["post_id"],))
+    assert {row["comment_id"] for row in saved} == {"p", "r"}
+
+
 def setup(database, *, seed_missing=False, bounded=False):
     """Reuse canonical fixtures while freezing a public run at creation."""
     from uuid import uuid4
@@ -1179,7 +1234,7 @@ def test_public_zero_primary_with_positive_reply_alias_never_settles(database, m
     result = CommentActivity(store, fetch, clock=lambda: OBSERVED).execute(**args)
     assert result["complete"] is False
     observed = result["checkpoint"]["comment_pages"]["observed"]["r"]
-    assert observed["expected_replies"] == 0 and observed["native_reply_leaf"] is False
+    assert observed["expected_replies"] == 1 and observed["native_reply_leaf"] is False
     assert observed["unsupported_reply_topology"] is True
     assert (
         existing.query(
@@ -1585,7 +1640,7 @@ def test_public_native_exhaustion_gap_settles_atomic_checkpoint_and_root_proven_
     assert durable["checkpoint"]["comment_pages"]["settlement"] == settlement
     assert existing.query(
         tx, "select is_missing from social.instagram_comments where post_id=%s and comment_id='old'", (args["post_id"],)
-    ) == [{"is_missing": True}]
+    ) == [{"is_missing": False}]
     if interruption:
         assert (1, "parent") not in calls
         if interruption != "parent":

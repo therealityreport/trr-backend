@@ -587,8 +587,13 @@ def _advance(state: dict[str, Any], page: CommentPage, *, scan_started_at: datet
         state["scan_started_at"] = utc_timestamp(scan_started_at)
 
     def advance_lane(key: str, cursor: str | None, exhausted: bool, param: str | None) -> None:
-        lane = state["lanes"].setdefault(key, {"cursors": [], "exhausted": False, "repeated": False})
-        seen = lane.setdefault("cursor_keys", [])
+        # Page preparation shares untouched records with its prior checkpoint.
+        # Copy the changed lane and its lists before adding native progress.
+        lane = dict(state["lanes"].get(key) or {"cursors": [], "exhausted": False, "repeated": False})
+        lane["cursors"] = list(lane.get("cursors") or [])
+        lane["cursor_keys"] = list(lane.get("cursor_keys") or [])
+        state["lanes"][key] = lane
+        seen = lane["cursor_keys"]
         if cursor:
             cursor_key = f"{param}:{cursor}"
             if cursor_key in seen:
@@ -608,8 +613,9 @@ def _advance(state: dict[str, Any], page: CommentPage, *, scan_started_at: datet
         if provenance["adapter_family"] == AUTH_RELAY_FAMILY:
             lane.update({key: provenance[key] for key in BINDING_KEYS})
         if page.parent_comment_id and page.expected_count is not None and page.parent_comment_id in state["observed"]:
-            parent = state["observed"][page.parent_comment_id]
+            parent = dict(state["observed"][page.parent_comment_id])
             parent["expected_replies"] = max(parent.get("expected_replies") or 0, page.expected_count)
+            state["observed"][page.parent_comment_id] = parent
     if page.started_from_root:
         state["lanes"][page.parent_comment_id or "__top__"]["started_from_root"] = True
     if page.expected_count is not None and not page.parent_comment_id:
@@ -816,7 +822,10 @@ class CommentActivity:
             if kind == "graphql_preview":
                 return
             page = parse_comment_evidence(evidence, pinned=True)
-            updated = _progress({"comment_pages": state})
+            # These records contain native IDs/counts, not mutable source DTOs.
+            # _advance replaces changed records; copying the two maps avoids a
+            # JSON round-trip of every prior comment for each empty reply page.
+            updated = {**state, "observed": dict(state["observed"]), "lanes": dict(state["lanes"])}
             from trr_backend.ingestion.lane_restart import pending_restarts
 
             restarts = dict(pending_restarts(current_checkpoint))
@@ -836,8 +845,10 @@ class CommentActivity:
             _advance(updated, page, scan_started_at=attempt_started_at)
             access = updated.get("reply_access")
             if access and page.parent_comment_id and page.exhausted:
-                access["lanes"] = [identity for identity in access["lanes"] if identity != page.parent_comment_id]
-                if not access["lanes"]:
+                remaining = [identity for identity in access["lanes"] if identity != page.parent_comment_id]
+                if remaining:
+                    updated["reply_access"] = {**access, "lanes": remaining}
+                else:
                     updated.pop("reply_access")
             if not page.parent_comment_id and (page.started_from_root or "__top__" not in state["lanes"]):
                 updated["scan_root_evidence_id"] = evidence_id
@@ -1078,11 +1089,18 @@ class CommentActivity:
             )
             serialized_checkpoint = stable_json(checkpoint)
             cur.execute(
-                """insert into social.instagram_ingestion_comment_pages
+                """with progress as (
+                  update social.instagram_ingestion_targets set checkpoint=%s::jsonb
+                  where run_id=%s and stage='comments' and target_key=%s
+                  returning checkpoint
+                ) insert into social.instagram_ingestion_comment_pages
                 (page_id,run_id,stage,target_key,owner_generation,evidence_id,observed_at,content_hash,
                  parent_comment_id,next_cursor,exhausted,canonical_identity,checkpoint)
-                values(%s,%s,'comments',%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb)""",
+                select %s,%s,'comments',%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,progress.checkpoint from progress""",
                 (
+                    serialized_checkpoint,
+                    owned["run_id"],
+                    owned["target_key"],
                     str(uuid4()),
                     owned["run_id"],
                     owned["target_key"],
@@ -1094,11 +1112,7 @@ class CommentActivity:
                     page.next_cursor,
                     page.exhausted,
                     stable_json(identity),
-                    serialized_checkpoint,
                 ),
             )
-            cur.execute(
-                """update social.instagram_ingestion_targets set checkpoint=%s::jsonb
-                where run_id=%s and stage='comments' and target_key=%s""",
-                (serialized_checkpoint, owned["run_id"], owned["target_key"]),
-            )
+            if cur.rowcount != 1:
+                raise LostOwnership("Comment page checkpoint did not retain its receipt")

@@ -1050,6 +1050,13 @@ def test_page_checkpoint_serialized_once_after_custom_writer_mutation(database, 
     checkpoint = {"writer_marker": None}
     calls = []
     original = comments_module.stable_json
+    sent_checkpoints = []
+
+    class TrackingCursor(RealDictCursor):
+        def execute(self, sql, params=None):
+            if params:
+                sent_checkpoints.extend(value for value in params if value == '{"writer_marker":"after-writer"}')
+            return super().execute(sql, params)
 
     def serialize(value):
         if value is checkpoint:
@@ -1061,6 +1068,7 @@ def test_page_checkpoint_serialized_once_after_custom_writer_mutation(database, 
         return {"post_id": args["post_id"], "comment_ids": {}}
 
     monkeypatch.setattr(comments_module, "stable_json", serialize)
+    monkeypatch.setattr(comments_module, "RealDictCursor", TrackingCursor)
     activity = CommentActivity(store, writer=writer)
     activity._persist_page(
         owned,
@@ -1074,6 +1082,7 @@ def test_page_checkpoint_serialized_once_after_custom_writer_mutation(database, 
         assignment=None,
     )
     assert calls == [{"writer_marker": "after-writer"}]
+    assert len(sent_checkpoints) == 1
     saved = query(
         tx,
         """select p.checkpoint as page_checkpoint,t.checkpoint as target_checkpoint
@@ -1082,6 +1091,29 @@ def test_page_checkpoint_serialized_once_after_custom_writer_mutation(database, 
         (evidence_id,),
     )[0]
     assert saved["page_checkpoint"] == saved["target_checkpoint"] == checkpoint
+
+    # A receipt insert can fail after its CTE updated the target. The whole
+    # transaction must roll back to the previously committed checkpoint.
+    activity.writer = lambda conn, **kwargs: {"post_id": args["post_id"], "comment_ids": {}}
+    checkpoint["writer_marker"] = "must-roll-back"
+    with pytest.raises(psycopg2.errors.UniqueViolation):
+        activity._persist_page(
+            owned,
+            post_id=args["post_id"],
+            evidence=retained,
+            evidence_id=evidence_id,
+            page=parse_comment_evidence(retained, pinned=True),
+            expected_checkpoint=saved["target_checkpoint"],
+            checkpoint=checkpoint,
+            metadata_writes_enabled=True,
+            assignment=None,
+        )
+    assert (
+        query(tx, "select checkpoint from social.instagram_ingestion_targets where run_id=%s", (args["run_id"],))[0][
+            "checkpoint"
+        ]
+        == saved["target_checkpoint"]
+    )
 
 
 def native_count_page(counts, *, thread=None):
