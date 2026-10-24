@@ -67,7 +67,8 @@ def test_media_boundary_drains_six_comments_and_recovery_precedes_finalization(m
 
     recovery_calls = []
 
-    def recover(item):
+    def recover(item, *, stop):
+        assert stop == "completed"
         recovery_calls.append(True)
         return len(recovery_calls) == 1
 

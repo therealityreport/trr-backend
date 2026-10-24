@@ -155,9 +155,19 @@ def test_january_completion_replay_sees_reopened_work(database, monkeypatch):
         "intent_hash": intent.digest,
         "source_revision": "fixture",
     }
-    result = enqueue_next_recovery(store, **kwargs)
-    assert result["target_key"] == args["target_key"]
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            """insert into social.instagram_ingestion_targets
+            (run_id,stage,target_key,max_attempts,blocked_reason)
+            values(%s,'comments','blocked-other',3,'source_payload_invalid')""",
+            (args["run_id"],),
+        )
     assert enqueue_next_recovery(store, **kwargs) == {"status": "work_pending"}
+    # A separately blocked source does not prevent bounded recovery of a
+    # completed gap, and its block is never cleared by that operation.
+    result = enqueue_next_recovery(store, **kwargs, blocked_stage=True)
+    assert result["target_key"] == args["target_key"]
+    assert enqueue_next_recovery(store, **kwargs, blocked_stage=True) == {"status": "work_pending"}
     commands = fixtures.query(
         tx,
         """select count(*) n from social.instagram_ingestion_commands

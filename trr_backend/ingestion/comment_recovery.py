@@ -49,7 +49,7 @@ def unchanged_passes(checkpoint, outcome):
     return 0 if improved else count + 1
 
 
-def enqueue_next_recovery(store, *, run_id, account, generation, intent_hash, source_revision):
+def enqueue_next_recovery(store, *, run_id, account, generation, intent_hash, source_revision, blocked_stage=False):
     """One bounded control step at a drained January worker completion boundary.
 
     The worker remains the only execution owner. No timer, monitor, provider
@@ -75,8 +75,11 @@ def enqueue_next_recovery(store, *, run_id, account, generation, intent_hash, so
             raise Conflict("Automatic recovery requires the exact frozen public January binding")
         cur.execute(
             """select target_key from social.instagram_ingestion_targets
-            where run_id=%s and outcome='unresolved' limit 1""",
-            (run_id,),
+            where run_id=%s and outcome='unresolved' and (%s=false or
+                (stage='comments' and blocked_reason is null and attempts<max_attempts
+                 and (next_attempt_at is null or next_attempt_at<=clock_timestamp())
+                 and (owner_expires_at is null or owner_expires_at<=clock_timestamp()))) limit 1""",
+            (run_id, blocked_stage),
         )
         if cur.fetchone():
             # A completion decision may be replayed after its recovery command

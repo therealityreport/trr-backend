@@ -63,3 +63,36 @@ Deployment and current progress are appended after provider/local verification.
 TRR-APP build: not applicable (backend-only/internal worker contracts). No schema
 migration or new SQL ownership boundary; existing ingestion control/persistence
 owners implement the new command. Full-history remains disabled.
+
+## Live selection correction
+
+First rollout v141 passed deployment/readiness and 654 packaged Python hashes,
+then local handover at 00:38:33 Eastern preserved the six-worker policy. A
+read-only live per-post eligibility check exposed a 15-second statement timeout:
+full comment equality/metadata scans were correlated before LIMIT. EXPLAIN
+confirmed those scans. The correction selects at most eight cheap candidates,
+then applies the same exact proofs. A persisted administrative keyset cursor
+advances even past ineligible posts and wraps, preserving source cursor state and
+seals. Six affected checks passed. Live read-only candidate selection returned
+`DS-H2Lhj9BN` in 1.052 seconds with the same 15-second limit, no writes and no
+source requests.
+
+The completion hook also handles a separately blocked stage: bounded recovery
+can reopen a completed comment gap while preserving the other block. Cached
+completion/blocked decisions cannot finish over newly eligible recovered work.
+The certifier runs after terminal completed or blocked state and produces an
+explicit acceptance or limitation report. Empty output left by interruption is
+archived, not mistaken for a complete report; worker startup resumes missing
+certification under its own coordinator lease. Group abort/timeout/order and
+artifact preservation tests passed. The local worker uses the verified R2 public
+base; the shared cloud storage secret was not changed for unrelated consumers.
+
+Blocked phases also perform the bounded media scan without waiting for six new
+comment submissions. A versioned full-cycle origin/wrapped marker covers a saved
+middle cursor, so newly ready earlier posts cannot be skipped at termination.
+The eight-proof cap remains; later work is journaled as a wait. Seven blocked-scan
+checks and five full-cycle affected checks passed (overlapping evidence).
+Fix-only independent review closed the cursor-starvation finding. A read-only
+full snapshot for the live candidate also loaded successfully with two comment
+attachments and one selected avatar. The worker was drained during query repair;
+its saved run state and source progress were preserved.

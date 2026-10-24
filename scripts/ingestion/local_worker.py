@@ -263,12 +263,12 @@ def run_partition(
             dispatch.drain(store, finish=True)
             if abort.is_set():
                 raise Interrupted
-            if decision["stop"] == "completed" and before_finalize is not None and before_finalize(item):
+            if before_finalize is not None and before_finalize(item, stop=decision["stop"]):
                 # The journaled completion choice precedes a fenced recovery
                 # command. The next ordinal sees the newly reopened target.
                 continue
             result = _complete(store, item, stop=decision["stop"])
-            if result == "stopped" and decision["stop"] == "completed" and on_completed is not None:
+            if result == "stopped" and on_completed is not None:
                 on_completed(item)
             return result
         # Journaled waits can outlive their original target deadline after
@@ -396,7 +396,7 @@ def main(argv=None):
         scheduler = Scheduler(store, admit=Admission().admit, dispatch=dispatch, reconcile=lambda _: "unknown")
         recovery_run = os.getenv("TRR_INSTAGRAM_JANUARY_RECOVERY_RUN_ID", "").strip()
 
-        def before_finalize(item):
+        def before_finalize(item, *, stop):
             if not recovery_run or item["run_id"] != recovery_run:
                 return False
             from trr_backend.ingestion.comment_recovery import enqueue_next_recovery
@@ -408,6 +408,7 @@ def main(argv=None):
                 generation=item["generation"],
                 intent_hash=os.environ["TRR_INSTAGRAM_JANUARY_RECOVERY_INTENT_HASH"],
                 source_revision=os.environ["TRR_INSTAGRAM_JANUARY_RECOVERY_SOURCE_REVISION"],
+                blocked_stage=stop == "blocked",
             )
             if result:
                 print(json.dumps({"status": "public_recovery_queued", **result}), flush=True)
@@ -472,7 +473,7 @@ def main(argv=None):
                     (recovery_run, os.environ["TRR_INSTAGRAM_JANUARY_RECOVERY_INTENT_HASH"]),
                 )
                 row = cur.fetchone()
-            if row and row[2] == "completed":
+            if row and row[2] in {"completed", "blocked"}:
                 certify_completed({"run_id": recovery_run, "account": row[0], "generation": row[1]})
 
         print(json.dumps({"status": "started", "execution_placement": "local"}), flush=True)

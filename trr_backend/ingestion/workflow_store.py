@@ -23,7 +23,7 @@ class WorkflowStore(Store):
             return self._eligible_media(cur, run, item, now)
 
     @staticmethod
-    def _eligible_media(cur, run, item, now):
+    def _eligible_media(cur, run, item, now, *, advance_cursor=False, full_cycle=False):
         from trr_backend.ingestion.domain import RunIntent
         from trr_backend.ingestion.media import MediaIncomplete
         from trr_backend.ingestion.media_snapshot import MediaSnapshotLoader
@@ -35,59 +35,83 @@ class WorkflowStore(Store):
         if selection is not None and selection.get("stage") != Stage.MEDIA.value:
             return None
         selection_keys = selection["target_keys"] if selection else None
-        cur.execute(
-            """select t.target_key,p.* from social.instagram_ingestion_targets t
-            join social.instagram_ingestion_manifests m on m.run_id=t.run_id and m.stage=t.stage
-            join social.instagram_posts p on p.shortcode=t.target_key
-                and lower(coalesce(nullif(p.source_account,''),p.username))=%s
-            join lateral (
-                select q.* from social.instagram_ingestion_receipts q
-                join social.instagram_ingestion_runs r using(run_id)
-                join social.instagram_ingestion_manifests cm on cm.run_id=q.run_id and cm.stage=q.stage
-                join social.instagram_ingestion_targets ct
-                    on ct.run_id=q.run_id and ct.stage=q.stage and ct.target_key=q.target_key
-                where q.stage='comments' and q.target_key=t.target_key and r.account=%s
-                and (%s=false or (q.run_id=t.run_id and ct.outcome in ('committed','cached_satisfied')
-                    and q.owner_generation=ct.owner_generation)) and cm.discovery_complete
-                and q.outcome in ('committed','cached_satisfied')
-                order by q.observed_at desc,q.committed_at desc limit 1
-            ) q on true
-            where t.run_id=%s and t.stage='media' and m.discovery_complete and t.outcome='unresolved'
-            and t.blocked_reason is null and t.attempts<t.max_attempts
-            and (t.owner_expires_at is null or t.owner_expires_at<=%s)
-            and (t.next_attempt_at is null or t.next_attempt_at<=%s)
-            and (%s::text[] is null or t.target_key=any(%s))
-            and q.canonical_identity->>'post_id'=p.id::text and q.observed_at>=p.scraped_at
-            and jsonb_typeof(q.canonical_identity->'observed_comment_ids')='array'
-            and array(select jsonb_array_elements_text(case
-                when jsonb_typeof(q.canonical_identity->'observed_comment_ids')='array'
-                then q.canonical_identity->'observed_comment_ids' else '[]'::jsonb end) order by 1)
-                =array(select c.comment_id from social.instagram_comments c
-                    where c.post_id=p.id and not c.is_missing and c.deleted_at is null order by c.comment_id)
-            and not exists(select 1 from social.instagram_comments c where c.post_id=p.id
-                and not c.is_missing and c.deleted_at is null
-                and (c.source_snapshot_type is distinct from 'full_comments_scrape' or c.scraped_at>q.observed_at
-                    or (nullif(c.source_account,'') is not null and lower(c.source_account)<>%s)))
-            and (%s=false or exists(select 1 from social.instagram_ingestion_receipts d
-                where d.run_id=t.run_id and d.stage='post_details' and d.target_key=t.target_key
-                and d.outcome in ('committed','cached_satisfied') and d.observed_at=p.scraped_at
-                and d.canonical_identity->>'post_id'=p.id::text))
-            order by t.attempts,t.target_key limit 50""",
-            (
-                run["account"],
-                run["account"],
-                Stage.COMMENTS in intent.selected_tasks,
-                item["run_id"],
-                now,
-                now,
-                selection_keys,
-                selection_keys,
-                run["account"],
-                Stage.DETAILS in intent.selected_tasks,
-            ),
+        manifest = _row(
+            cur,
+            """select cursor_state,discovery_complete from social.instagram_ingestion_manifests
+            where run_id=%s and stage='media'""",
+            (item["run_id"],),
         )
-        candidates = [dict(row) for row in cur.fetchall()]
-        for post in candidates:
+        if not manifest or not manifest["discovery_complete"]:
+            return None
+        cursor = manifest["cursor_state"].get("media_readiness_after", "")
+        if not isinstance(cursor, str):
+            cursor = ""
+
+        def candidates_after(after, *, peek=False, upper=None, limit=8):
+            # Limit cheap target/receipt candidates before loading any native-ID
+            # inventories. Exact source proof is checked for at most eight posts.
+            cur.execute(
+                f"""select {"t.target_key" if peek else "t.target_key,p.*"}
+                from social.instagram_ingestion_targets t
+                join social.instagram_posts p on p.shortcode=t.target_key
+                    and lower(coalesce(nullif(p.source_account,''),p.username))=%s
+                where t.run_id=%s and t.stage='media' and t.outcome='unresolved'
+                and t.target_key>%s and t.blocked_reason is null and t.attempts<t.max_attempts
+                and (%s::text is null or t.target_key<=%s)
+                and (t.owner_expires_at is null or t.owner_expires_at<=%s)
+                and (t.next_attempt_at is null or t.next_attempt_at<=%s)
+                and (%s::text[] is null or t.target_key=any(%s))
+                and exists(select 1 from social.instagram_ingestion_receipts q
+                    join social.instagram_ingestion_runs r using(run_id)
+                    join social.instagram_ingestion_manifests cm on cm.run_id=q.run_id and cm.stage=q.stage
+                    join social.instagram_ingestion_targets ct
+                        on ct.run_id=q.run_id and ct.stage=q.stage and ct.target_key=q.target_key
+                    where q.stage='comments' and q.target_key=t.target_key and r.account=%s
+                    and (%s=false or (q.run_id=t.run_id and ct.outcome in ('committed','cached_satisfied')
+                        and q.owner_generation=ct.owner_generation)) and cm.discovery_complete
+                    and q.outcome in ('committed','cached_satisfied') and q.observed_at>=p.scraped_at)
+                and (%s=false or exists(select 1 from social.instagram_ingestion_receipts d
+                    where d.run_id=t.run_id and d.stage='post_details' and d.target_key=t.target_key
+                    and d.outcome in ('committed','cached_satisfied') and d.observed_at=p.scraped_at
+                    and d.canonical_identity->>'post_id'=p.id::text))
+                order by t.target_key limit %s""",
+                (
+                    run["account"],
+                    item["run_id"],
+                    after,
+                    upper,
+                    upper,
+                    now,
+                    now,
+                    selection_keys,
+                    selection_keys,
+                    run["account"],
+                    Stage.COMMENTS in intent.selected_tasks,
+                    Stage.DETAILS in intent.selected_tasks,
+                    1 if peek else limit,
+                ),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+        def checked(key):
+            if advance_cursor:
+                cur.execute(
+                    """update social.instagram_ingestion_manifests
+                    set cursor_state=jsonb_set(cursor_state,'{media_readiness_after}',to_jsonb(%s::text),true)
+                    where run_id=%s and stage='media'""",
+                    (key, item["run_id"]),
+                )
+
+        def cycle_state(value):
+            if advance_cursor:
+                cur.execute(
+                    """update social.instagram_ingestion_manifests
+                    set cursor_state=(cursor_state-'media_readiness_cycle') || %s::jsonb
+                    where run_id=%s and stage='media'""",
+                    (stable_json({"media_readiness_cycle": value} if value is not None else {}), item["run_id"]),
+                )
+
+        def prove(post):
             key = post["target_key"]
             cur.execute(
                 """select * from social.instagram_comments where post_id=%s and not is_missing
@@ -109,8 +133,63 @@ class WorkflowStore(Store):
                     selected=Stage.COMMENTS in intent.selected_tasks,
                 )
             except MediaIncomplete:
-                continue
+                return None
             return {"kind": "target", "stage": Stage.MEDIA.value, "target_key": key}
+
+        if full_cycle and advance_cursor:
+            cycle = manifest["cursor_state"].get("media_readiness_cycle")
+            if not (
+                isinstance(cycle, dict)
+                and cycle.get("version") == 1
+                and isinstance(cycle.get("origin"), str)
+                and type(cycle.get("wrapped")) is bool
+            ):
+                cycle = {"version": 1, "origin": cursor, "wrapped": False}
+            remaining = 8
+            while True:
+                upper = cycle["origin"] if cycle["wrapped"] else None
+                candidates = candidates_after(cursor, upper=upper, limit=remaining)
+                for post in candidates:
+                    result = prove(post)
+                    cursor = post["target_key"]
+                    checked(cursor)
+                    remaining -= 1
+                    if result:
+                        cycle_state(None)
+                        return result
+                if remaining == 0 and candidates_after(cursor, upper=upper, peek=True):
+                    cycle_state(cycle)
+                    return {"kind": "wait", "seconds": 0.01}
+                if cycle["wrapped"] or not cycle["origin"]:
+                    cycle_state(None)
+                    return None
+                # Finish the unvisited prefix within this decision's remaining
+                # proof budget, or persist its bounded continuation.
+                cycle["wrapped"] = True
+                cursor = ""
+                checked(cursor)
+                if remaining == 0:
+                    if candidates_after(cursor, upper=cycle["origin"], peek=True):
+                        cycle_state(cycle)
+                        return {"kind": "wait", "seconds": 0.01}
+                    cycle_state(None)
+                    return None
+
+        cycle_state(None)  # ordinary media turns supersede an old terminal scan
+        candidates = candidates_after(cursor)
+        if not candidates and cursor:
+            candidates = candidates_after("")
+        if not candidates:
+            checked("")
+        for post in candidates:
+            result = prove(post)
+            checked(post["target_key"])
+            if result:
+                return result
+        if advance_cursor and len(candidates) == 8 and candidates_after(candidates[-1]["target_key"], peek=True):
+            # Keep the blocked-phase scan alive across journaled ordinals. The
+            # peek loads no inventory and consumes none of the eight proofs.
+            return {"kind": "wait", "seconds": 0.01}
         return None
 
     def _current(self, cur, item):
@@ -336,10 +415,19 @@ class WorkflowStore(Store):
                             # Receipts may arrive before lease expiry. Poll active
                             # workers while preserving exact persisted cooldowns.
                             result = {"kind": "wait", "seconds": min(1.0, seconds) if summary["active"] else seconds}
-            if item.get("prefer_media") and phase and phase["stage"] in {"comments", "media"}:
-                # The execution owner requests exactly one turn after draining
-                # its comment batch. Ordinary decisions keep comments priority.
-                result = self._eligible_media(cur, run, item, now) or result
+            if (
+                (item.get("prefer_media") or result["kind"] == "blocked")
+                and phase
+                and phase["stage"] in {"comments", "media"}
+            ):
+                # A drained batch can yield one media turn. A blocked phase
+                # must also exhaust bounded media scans before terminal recovery.
+                result = (
+                    self._eligible_media(
+                        cur, run, item, now, advance_cursor=True, full_cycle=result["kind"] == "blocked"
+                    )
+                    or result
+                )
             cur.execute(
                 """insert into social.instagram_ingestion_decisions(execution_id,ordinal,decision)
                 values(%s,%s,%s::jsonb)""",

@@ -7,6 +7,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from psycopg2.extras import RealDictCursor
 
 from tests.ingestion.test_media import OBSERVED, SOURCE, execute
 from tests.ingestion.test_media import database as database_fixture
@@ -29,6 +30,17 @@ def snapshot_database(media_database):
         cur.execute("alter table core.seasons add column show_id uuid,add column season_number integer")
         cur.execute("alter table social.scrape_jobs add column config jsonb")
     return media_database
+
+
+@pytest.fixture(scope="module")
+def snapshot_workflow_database(snapshot_database):
+    with snapshot_database[1]() as conn, conn.cursor() as cur:
+        cur.execute(
+            (
+                Path(__file__).parents[2] / "supabase/migrations/20261016070100_instagram_ingestion_workflows.sql"
+            ).read_text()
+        )
+    return snapshot_database
 
 
 def run(store, *, account="fixture_account", selected=(Stage.MEDIA,)):
@@ -413,15 +425,11 @@ def test_reopened_own_comments_and_stale_receipt_generation_block_media(snapshot
     assert store.eligible_media(item, now) is None
 
 
-def test_media_turn_is_durable_and_comments_keep_priority_between_batch_boundaries(snapshot_database):
+def test_media_turn_is_durable_and_comments_keep_priority_between_batch_boundaries(snapshot_workflow_database):
+    snapshot_database = snapshot_workflow_database
     owned, _, _, _ = seed(snapshot_database, selected_comments=True)
     _, tx = snapshot_database
     with tx() as conn, conn.cursor() as cur:
-        cur.execute(
-            (
-                Path(__file__).parents[2] / "supabase/migrations/20261016070100_instagram_ingestion_workflows.sql"
-            ).read_text()
-        )
         cur.execute(
             """insert into social.instagram_ingestion_targets(run_id,stage,target_key,max_attempts)
             values(%s,'comments','another-post',3)""",
@@ -476,6 +484,200 @@ def test_selected_details_require_exact_current_post_receipt(snapshot_database):
         **detail_owned, owner_token=token, observed_at=OBSERVED, write_canonical=lambda _: {"post_id": ids["post_id"]}
     )
     assert load(snapshot_database, owned).inventory_fingerprint
+
+
+def _seed_media_readiness_page(snapshot_database):
+    fixtures = [seed(snapshot_database, selected_comments=True) for _ in range(9)]
+    owned = fixtures[0][0]
+    _, tx = snapshot_database
+    store = WorkflowStore(tx)
+    item = {**owned, "engine": "dbos", "workflow_version": "fixture"}
+    ordered = sorted(fixtures, key=lambda fixture: fixture[0]["target_key"])
+    with tx() as conn, conn.cursor() as cur:
+        for other, _, _, _ in fixtures[1:]:
+            cur.execute(
+                """insert into social.instagram_ingestion_targets
+                (run_id,stage,target_key,outcome,attempts,max_attempts,owner_generation,observed_at,committed_at)
+                select %s,stage,target_key,outcome,attempts,max_attempts,owner_generation,observed_at,committed_at
+                from social.instagram_ingestion_targets where run_id=%s and stage in ('comments','media')""",
+                (owned["run_id"], other["run_id"]),
+            )
+            cur.execute(
+                """insert into social.instagram_ingestion_receipts
+                (receipt_id,run_id,stage,target_key,owner_token,owner_generation,observed_at,outcome,canonical_identity)
+                select %s,%s,stage,target_key,owner_token,owner_generation,observed_at,outcome,canonical_identity
+                from social.instagram_ingestion_receipts where run_id=%s and stage='comments'""",
+                (str(uuid4()), owned["run_id"], other["run_id"]),
+            )
+        for _, ids, _, _ in ordered[:-1]:
+            cur.execute("update social.instagram_comments set is_missing=true where post_id=%s", (ids["post_id"],))
+        cur.execute(
+            """update social.instagram_ingestion_manifests set cursor_state='{"preserved":"value"}'::jsonb
+            where run_id=%s and stage='media' returning discovery_complete,sealed_at""",
+            (owned["run_id"],),
+        )
+        original_seal = cur.fetchone()
+    return owned, tx, store, item, ordered, original_seal
+
+
+def test_media_readiness_pages_bound_proofs_and_wrap_without_starving_later_posts(snapshot_database, monkeypatch):
+    owned, tx, store, item, ordered, original_seal = _seed_media_readiness_page(snapshot_database)
+    first_key, last_key = ordered[0][0]["target_key"], ordered[-1][0]["target_key"]
+
+    checked = []
+    completion = MediaSnapshotLoader._completion
+
+    def prove(*args, **kwargs):
+        checked.append(args[3])
+        return completion(*args, **kwargs)
+
+    monkeypatch.setattr(MediaSnapshotLoader, "_completion", staticmethod(prove))
+    now = OBSERVED + timedelta(days=1)
+
+    def state():
+        with tx() as conn, conn.cursor() as cur:
+            cur.execute(
+                """select cursor_state,discovery_complete,sealed_at from social.instagram_ingestion_manifests
+                where run_id=%s and stage='media'""",
+                (owned["run_id"],),
+            )
+            cursor, complete, sealed_at = cur.fetchone()
+            assert cursor["preserved"] == "value" and (complete, sealed_at) == original_seal
+            return cursor.get("media_readiness_after")
+
+    def advance():
+        checked.clear()
+        with tx() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            result = store._eligible_media(cur, store._current(cur, item), item, now, advance_cursor=True)
+        assert len(checked) <= 8
+        return result
+
+    assert store.eligible_media(item, now) is None
+    assert len(checked) == 8 and state() is None  # read-only inspection never advances administrative state
+    assert advance() == {"kind": "wait", "seconds": 0.01}
+    assert len(checked) == 8 and state() == ordered[7][0]["target_key"]
+    checked.clear()
+    assert store.eligible_media(item, now)["target_key"] == last_key
+    assert len(checked) == 1 and state() == ordered[7][0]["target_key"]
+    assert advance()["target_key"] == last_key and state() == last_key
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            "update social.instagram_comments set is_missing=false where post_id=%s", (ordered[0][1]["post_id"],)
+        )
+    assert advance()["target_key"] == first_key and state() == first_key
+
+
+def test_blocked_comments_scan_media_across_ordinals_without_prefer_flag(snapshot_workflow_database, monkeypatch):
+    owned, tx, store, item, ordered, _ = _seed_media_readiness_page(snapshot_workflow_database)
+    with tx() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """insert into social.instagram_ingestion_targets(run_id,stage,target_key,max_attempts,blocked_reason)
+            values(%s,'comments','unrelated-blocked',3,'public_source_unavailable')""",
+            (owned["run_id"],),
+        )
+        cur.execute(
+            """update social.instagram_ingestion_manifests set discovery_complete=true,sealed_at=clock_timestamp()
+            where run_id=%s and stage='listing'""",
+            (owned["run_id"],),
+        )
+        gap = {"basis": "public_native_exhaustion", "expected_total": 9, "observed_total": 1, "count_gap": 8}
+        cur.execute(
+            """update social.instagram_ingestion_receipts set canonical_identity=canonical_identity ||
+            jsonb_build_object('settlement',%s::jsonb) where run_id=%s and stage='comments' and target_key=%s""",
+            (json.dumps(gap), owned["run_id"], ordered[-1][0]["target_key"]),
+        )
+        current = store._current(cur, item)
+    part = store.seed(current)
+    checked = []
+    completion = MediaSnapshotLoader._completion
+
+    def prove(*args, **kwargs):
+        checked.append(args[3])
+        return completion(*args, **kwargs)
+
+    monkeypatch.setattr(MediaSnapshotLoader, "_completion", staticmethod(prove))
+    now = OBSERVED + timedelta(days=1)
+    assert store.decision(part, 0, now) == {"kind": "wait", "seconds": 0.01}
+    assert len(checked) == 8
+    checked.clear()
+    expected = {"kind": "target", "stage": "media", "target_key": ordered[-1][0]["target_key"]}
+    assert store.decision(part, 1, now) == expected
+    assert len(checked) == 1
+    checked.clear()
+    assert store.decision(part, 0, now) == {"kind": "wait", "seconds": 0.01} and checked == []
+    assert load(snapshot_workflow_database, {**owned, "target_key": expected["target_key"]}).comment_settlement == gap
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            "update social.instagram_comments set is_missing=true where post_id=%s",
+            (ordered[-1][1]["post_id"],),
+        )
+    checked.clear()
+    assert store.decision(part, 2, now) == {"kind": "wait", "seconds": 0.01} and len(checked) == 8
+    checked.clear()
+    assert store.decision(part, 3, now) == {"kind": "blocked"} and len(checked) == 1
+
+
+def test_blocked_media_cycle_checks_new_ready_prefix_and_all_invalid_cycle_terminates(
+    snapshot_workflow_database, monkeypatch
+):
+    owned, tx, store, item, ordered, _ = _seed_media_readiness_page(snapshot_workflow_database)
+    first_key = ordered[0][0]["target_key"]
+    with tx() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """insert into social.instagram_ingestion_targets(run_id,stage,target_key,max_attempts,blocked_reason)
+            values(%s,'comments','unrelated-blocked',3,'public_source_unavailable')""",
+            (owned["run_id"],),
+        )
+        cur.execute(
+            """update social.instagram_ingestion_manifests set discovery_complete=true,sealed_at=clock_timestamp()
+            where run_id=%s and stage='listing'""",
+            (owned["run_id"],),
+        )
+        cur.execute(
+            """update social.instagram_ingestion_manifests set cursor_state=jsonb_set(
+            cursor_state,'{media_readiness_after}',to_jsonb(%s::text),true) where run_id=%s and stage='media'""",
+            (ordered[4][0]["target_key"], owned["run_id"]),
+        )
+        cur.execute(
+            "update social.instagram_comments set is_missing=true where post_id=%s", (ordered[-1][1]["post_id"],)
+        )
+        cur.execute(
+            "update social.instagram_comments set is_missing=false where post_id=%s", (ordered[0][1]["post_id"],)
+        )
+        current = store._current(cur, item)
+    part = store.seed(current)
+    checked = []
+    completion = MediaSnapshotLoader._completion
+
+    def prove(*args, **kwargs):
+        checked.append(args[3])
+        return completion(*args, **kwargs)
+
+    monkeypatch.setattr(MediaSnapshotLoader, "_completion", staticmethod(prove))
+    now = OBSERVED + timedelta(days=1)
+    assert store.decision(part, 0, now) == {"kind": "target", "stage": "media", "target_key": first_key}
+    assert len(checked) == 5  # four invalid suffix posts, then the newly ready prefix
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            "update social.instagram_comments set is_missing=true where post_id=%s", (ordered[0][1]["post_id"],)
+        )
+    checked.clear()
+    assert store.decision(part, 1, now) == {"kind": "wait", "seconds": 0.01} and len(checked) == 8
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            "select cursor_state from social.instagram_ingestion_manifests where run_id=%s and stage='media'",
+            (owned["run_id"],),
+        )
+        assert cur.fetchone()[0]["media_readiness_cycle"] == {"version": 1, "origin": first_key, "wrapped": True}
+    checked.clear()
+    assert store.decision(part, 2, now) == {"kind": "blocked"} and len(checked) == 1
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            "select cursor_state from social.instagram_ingestion_manifests where run_id=%s and stage='media'",
+            (owned["run_id"],),
+        )
+        state = cur.fetchone()[0]
+        assert "media_readiness_cycle" not in state and state["preserved"] == "value"
 
 
 def test_repeatable_read_only_snapshot_accepts_pool_setup_without_network_callbacks(snapshot_database):
