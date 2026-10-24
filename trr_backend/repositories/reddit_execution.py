@@ -241,7 +241,7 @@ def media_capture(post: dict, execution: capture.Execution) -> None:
                     [pid],
                     conn=conn,
                 )
-                if deleted or (
+                if (deleted and ref["reddit_comment_id"] is None) or (
                     ref["reddit_comment_id"]
                     and capture._one(
                         "select id from social.reddit_comment_tombstones where id=%s",

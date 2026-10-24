@@ -420,7 +420,7 @@ def test_redaction_erases_canonical_raw_and_diagnostic_copies(monkeypatch):
     assert any("body_html=null" in query and "raw_payload='{}'" in query for query, _ in writes)
 
 
-def test_comment_tombstones_filter_deleted_comments_and_deleted_post_reimports(monkeypatch):
+def test_comment_tombstones_preserve_public_comments_under_deleted_posts(monkeypatch):
     answers = iter([[{"id": "removed"}], [{"reddit_post_id": "deleted-post"}]])
     monkeypatch.setattr(workflows.pg, "fetch_all", lambda *a, **k: next(answers))
     rows = [
@@ -428,7 +428,7 @@ def test_comment_tombstones_filter_deleted_comments_and_deleted_post_reimports(m
         {"reddit_comment_id": "new", "reddit_post_id": "deleted-post", "body": "sensitive"},
         {"reddit_comment_id": "survives", "reddit_post_id": "p", "body": "body"},
     ]
-    assert workflows.filter_comment_tombstones(rows) == [rows[2]]
+    assert workflows.filter_comment_tombstones(rows) == rows[1:]
 
 
 def test_deleted_author_reimport_scrubs_identity_and_preserves_body(monkeypatch):

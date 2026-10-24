@@ -308,7 +308,7 @@ def due_dispatcher(*, now: datetime | None = None, limit: int = 100) -> list[dic
     enrolled = pg.fetch_all(
         "select e.reddit_post_id,m.community_id,m.season_id from "
         "social.reddit_lifecycle_enrollment e join social.reddit_period_post_matches m "
-        "using(reddit_post_id) where e.state='active' and e.next_check_at<=%s "
+        "using(reddit_post_id) where e.state in ('active','deleted','removed') and e.next_check_at<=%s "
         "group by e.reddit_post_id,m.community_id,m.season_id limit %s",
         [current, limit],
     )
@@ -1020,7 +1020,7 @@ def _lifecycle(
                 )
         enrolled = pg.fetch_all(
             "select reddit_post_id from social.reddit_lifecycle_enrollment where "
-            "reddit_post_id=any(%s::text[]) and state='active'",
+            "reddit_post_id=any(%s::text[]) and state in ('active','deleted','removed')",
             [post_ids],
             conn=conn,
         )
@@ -1099,7 +1099,7 @@ def _lifecycle(
         pg.execute(
             "update social.reddit_lifecycle_enrollment set last_checked_at=now(),"
             "next_check_at=now()+interval '24 hours',updated_at=now() "
-            "where reddit_post_id=any(%s::text[]) and state='active'",
+            "where reddit_post_id=any(%s::text[]) and state in ('active','deleted','removed')",
             [checked],
             conn=conn,
         )
@@ -1121,10 +1121,14 @@ def _lifecycle(
 def _redact_source(post_id: str, comment_id: str | None, signal: str, conn: Any) -> None:
     lock_content(post_ids=[post_id], conn=conn)
     marker = f"[{signal}]"
-    # Raw post snapshots can contain nested discussion data; discard all raw snapshots for the post.
+    # Post snapshots and nested replies can duplicate deleted content. Preserve each
+    # independent comment snapshot, but discard nested copies of its replies.
     pg.execute("update social.reddit_posts set raw_payload='{}'::jsonb where reddit_post_id=%s", [post_id], conn=conn)
     pg.execute(
-        "update social.reddit_comments set raw_payload='{}'::jsonb where reddit_post_id=%s", [post_id], conn=conn
+        "update social.reddit_comments set raw_payload=raw_payload-'replies' "
+        "where reddit_post_id=%s and raw_payload ? 'replies'",
+        [post_id],
+        conn=conn,
     )
     if comment_id:
         pg.execute(
@@ -1141,23 +1145,10 @@ def _redact_source(post_id: str, comment_id: str | None, signal: str, conn: Any)
         )
     else:
         pg.execute(
-            "insert into social.reddit_comment_tombstones(id,signal,evidence) "
-            "select reddit_comment_id,%s,%s::jsonb from social.reddit_comments where reddit_post_id=%s "
-            "on conflict(id) do nothing",
-            [signal, _json({"source": "reddit", "explicit": True}), post_id],
-            conn=conn,
-        )
-        pg.execute(
             "update social.reddit_posts set title=%s,selftext=%s,author=null,author_flair_text=null,"
             "raw_payload='{}'::jsonb,thumbnail=null,media_metadata='{}'::jsonb,poll_data=null,"
             "content_url=null,url=null,updated_at=now() where reddit_post_id=%s",
             [marker, marker, post_id],
-            conn=conn,
-        )
-        pg.execute(
-            "update social.reddit_comments set author=null,body=%s,body_html=null,author_flair_text=null,"
-            "raw_payload='{}'::jsonb,gildings='{}'::jsonb,updated_at=now() where reddit_post_id=%s",
-            [marker, post_id],
             conn=conn,
         )
         pg.execute(
@@ -1168,26 +1159,27 @@ def _redact_source(post_id: str, comment_id: str | None, signal: str, conn: Any)
     assets = pg.fetch_all(
         "select distinct a.id,a.hosted_key from social.reddit_assets a "
         "join social.reddit_asset_links l on l.asset_id=a.id where l.reddit_post_id=%s "
-        "and (%s::text is null or l.reddit_comment_id=%s)",
-        [post_id, comment_id, comment_id],
+        "and l.reddit_comment_id is not distinct from %s::text",
+        [post_id, comment_id],
         conn=conn,
     )
     mirrors = pg.fetch_all(
         "select id,hosted_key from social.reddit_media_mirrors where reddit_post_id=%s "
-        "and (%s::text is null or reddit_comment_id=%s) for update",
-        [post_id, comment_id, comment_id],
+        "and reddit_comment_id is not distinct from %s::text for update",
+        [post_id, comment_id],
         conn=conn,
     )
     pg.execute(
-        "delete from social.reddit_asset_links where reddit_post_id=%s and (%s::text is null or reddit_comment_id=%s)",
-        [post_id, comment_id, comment_id],
+        "delete from social.reddit_asset_links where reddit_post_id=%s "
+        "and reddit_comment_id is not distinct from %s::text",
+        [post_id, comment_id],
         conn=conn,
     )
     pg.execute(
         "update social.reddit_media_mirrors set hosted_key=null,hosted_url=null,source_url='[removed]',"
         "status='skipped',error_message=null,updated_at=now() where reddit_post_id=%s "
-        "and (%s::text is null or reddit_comment_id=%s)",
-        [post_id, comment_id, comment_id],
+        "and reddit_comment_id is not distinct from %s::text",
+        [post_id, comment_id],
         conn=conn,
     )
     for asset in assets:
@@ -1583,21 +1575,13 @@ def filter_comment_tombstones(rows: list[dict[str, Any]], *, conn: Any = None) -
     if not rows:
         return []
     ids = [str(row["reddit_comment_id"]) for row in rows]
-    posts = sorted({str(row["reddit_post_id"]) for row in rows})
     tombstones = pg.fetch_all(
         "select id from social.reddit_comment_tombstones where id=any(%s::text[])", [ids], conn=conn
     )
-    deleted_posts = pg.fetch_all(
-        "select reddit_post_id from social.reddit_lifecycle_enrollment where "
-        "reddit_post_id=any(%s::text[]) and state in ('deleted','removed')",
-        [posts],
-        conn=conn,
-    )
     removed = {row["id"] for row in tombstones}
-    deleted = {row["reddit_post_id"] for row in deleted_posts}
     retained = []
     for row in rows:
-        if row["reddit_comment_id"] in removed or row["reddit_post_id"] in deleted:
+        if row["reddit_comment_id"] in removed:
             continue
         raw = row.get("raw_payload")
         if isinstance(raw, dict) and "replies" in raw:

@@ -973,3 +973,123 @@ def test_snapshot_redaction_does_not_rewrite_already_scrubbed_targets(database, 
         workflows._redact_snapshots("post1", conn)
     after = pg.fetch_all("select id,xmin::text as version from social.reddit_work_targets where run_id=%s", [run_id])
     assert {row["id"]: row["version"] for row in after} == {row["id"]: row["version"] for row in rows}
+
+
+@pytest.mark.parametrize("signal", ["deleted", "removed"])
+def test_parent_redaction_preserves_public_comments_and_comment_media(database, signal):
+    add_post()
+    _associate(database, "post1")
+    pg.execute("insert into social.reddit_lifecycle_enrollment(reddit_post_id,reason) values('post1','new_capture')")
+    for cid in ("public", "gone"):
+        pg.execute(
+            "insert into social.reddit_comments(reddit_post_id,reddit_comment_id,body,author,raw_payload) "
+            "values('post1',%s,'public text','reader',%s::jsonb)",
+            [cid, json.dumps({"body": "public text", "author": "reader"})],
+        )
+    for cid in (None, "public", "gone"):
+        key = cid or "post"
+        asset = pg.execute_returning(
+            "insert into social.reddit_assets(source_url,media_type,state,hosted_key,hosted_url) "
+            "values(%s,'image','mirrored',%s,%s) returning id",
+            ["https://fixture/" + key, "reddit/" + key, "https://host/" + key],
+        )[0]
+        pg.execute(
+            "insert into social.reddit_asset_links(asset_id,reddit_post_id,reddit_comment_id,association_key) "
+            "values(%s,'post1',%s,%s)",
+            [asset["id"], cid, key],
+        )
+        pg.execute(
+            "insert into social.reddit_media_mirrors(reddit_post_id,reddit_comment_id,source_url,media_type,"
+            "hosted_key,hosted_url,status) values('post1',%s,%s,'image',%s,%s,'mirrored')",
+            [cid, "https://fixture/" + key, "reddit/" + key, "https://host/" + key],
+        )
+    with pg.transaction() as conn:
+        workflows._redact_source("post1", None, signal, conn)
+    public = pg.fetch_one("select * from social.reddit_comments where reddit_comment_id='public'")
+    assert public["body"] == "public text" and public["author"] == "reader"
+    assert public["raw_payload"] == {"body": "public text", "author": "reader"}
+    assert pg.fetch_all("select * from social.reddit_comment_tombstones") == []
+    assert {r["reddit_comment_id"] for r in pg.fetch_all("select * from social.reddit_asset_links")} == {
+        "public",
+        "gone",
+    }
+    deleted = []
+    workflows.drain_object_deletions(object_deleter=deleted.append)
+    assert deleted == ["reddit/post"]
+    assert pg.fetch_one(
+        "select status,hosted_key from social.reddit_media_mirrors where reddit_comment_id='public'"
+    ) == {"status": "mirrored", "hosted_key": "reddit/public"}
+    pg.execute("update social.reddit_lifecycle_enrollment set state=%s where reddit_post_id='post1'", [signal])
+    row = {"reddit_post_id": "post1", "reddit_comment_id": "public", "body": "public text"}
+    assert workflows.filter_comment_tombstones([row]) == [row]
+    # A later explicit comment deletion still acts on that comment under a deleted parent.
+    job = workflows.enqueue_job(
+        community_id=database.community, season_id=database.season, kind="lifecycle", payload={"post_ids": ["post1"]}
+    )
+    result = workflows.execute_job(
+        str(job["id"]),
+        lifecycle_provider=lambda ids: [
+            {
+                "reddit_post_id": ids[0],
+                "reddit_comment_id": "gone",
+                "source": "reddit",
+                "explicit": True,
+                "signal": "deleted",
+                "checked": True,
+            }
+        ],
+        object_deleter=deleted.append,
+    )
+    assert result["checked"] == result["enrolled"] == 1
+    assert pg.fetch_one("select body from social.reddit_comments where reddit_comment_id='gone'")["body"] == "[deleted]"
+    assert workflows.filter_comment_tombstones([row]) == [row]
+    assert (
+        pg.fetch_one("select body from social.reddit_comments where reddit_comment_id='public'")["body"]
+        == "public text"
+    )
+    assert set(deleted) == {"reddit/post", "reddit/gone"}
+    assert pg.fetch_one("select state,next_check_at>now() as rescheduled from social.reddit_lifecycle_enrollment")[
+        "rescheduled"
+    ]
+
+
+@pytest.mark.parametrize("parent_state", ["deleted", "removed"])
+def test_media_writer_accepts_public_reply_under_deleted_parent(database, monkeypatch, parent_state):
+    from trr_backend.media import s3_mirror
+    from trr_backend.repositories import reddit_execution
+
+    post = add_post()
+    _associate(database, "post1")
+    pg.execute(
+        "insert into social.reddit_lifecycle_enrollment(reddit_post_id,reason,state) values('post1','new_capture',%s)",
+        [parent_state],
+    )
+    for cid in ("public", "gone"):
+        pg.execute(
+            "insert into social.reddit_comments(reddit_post_id,reddit_comment_id,body) values('post1',%s,'text')", [cid]
+        )
+    pg.execute("insert into social.reddit_comment_tombstones(id,signal,evidence) values('gone','deleted','{}')")
+    refs = [
+        {"source_url": "https://fixture/" + (cid or "post") + ".jpg", "media_type": "image", "reddit_comment_id": cid}
+        for cid in (None, "public", "gone")
+    ]
+    monkeypatch.setattr(reddit_execution, "media_references", lambda *a: refs)
+    monkeypatch.setattr(
+        s3_mirror,
+        "mirror_url_to_s3",
+        lambda url, **kw: SimpleNamespace(
+            status="mirrored",
+            hosted_key="reddit/" + url.rsplit("/", 1)[1],
+            hosted_url=url,
+            sha256="fixture",
+            content_type="image/jpeg",
+            size_bytes=5,
+        ),
+    )
+    run = owned(database, requested_phases=["media"])
+    capture.ensure_target(str(run["id"]), "media", "post1", post_id="post1")
+    reddit_execution.media_capture(post, capture.Execution(run))
+    links = pg.fetch_all("select reddit_comment_id from social.reddit_asset_links")
+    assert links == [{"reddit_comment_id": "public"}]
+    children = [r for r in capture.list_targets(str(run["id"])) if r["target_key"] != "post1"]
+    assert sorted(r["state"] for r in children) == ["committed", "source_unavailable", "source_unavailable"]
