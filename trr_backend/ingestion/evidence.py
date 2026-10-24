@@ -197,6 +197,7 @@ object_count variant_count cdn_url_count comment_results tagged_profiles format 
 sha256 source_role variant_key generated_at hosted_thumbnail_url hosted_media_urls media_mirror_status
 media_mirror_error profile_pic_mirror_status profile_pic_mirror_error hosted_owner_profile_pic_url
 hosted_author_profile_pic_url
+inventory_fingerprint result_inventory_fingerprint comment_settlement basis expected_total observed_total count_gap
 """.split()
 )
 

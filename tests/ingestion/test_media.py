@@ -15,7 +15,7 @@ from PIL import Image
 
 from tests.ingestion.test_persistence import database as database_fixture
 from trr_backend.ingestion.canonical import OlderObservation, normalize_post_source, write_post
-from trr_backend.ingestion.domain import LostOwnership, RunIntent, Stage
+from trr_backend.ingestion.domain import Failure, LostOwnership, RunIntent, Stage
 from trr_backend.ingestion.evidence import Evidence
 from trr_backend.ingestion.media import (
     AvatarSource,
@@ -25,8 +25,11 @@ from trr_backend.ingestion.media import (
     MediaOwnershipCheck,
     MediaSnapshot,
     MediaStorage,
+    invalidate_media_inventory,
+    inventory_fingerprint,
     legacy_comment_source_key,
     mirror_snapshot,
+    read_inventory_fingerprint,
     write_avatar_version,
     write_media,
 )
@@ -140,6 +143,103 @@ def snapshot(**kwargs):
 
 def noop():
     pass
+
+
+def test_inventory_fingerprint_tracks_text_only_topology_but_excludes_hosted_outputs():
+    post = {"id": "post", "shortcode": "proof", "scraped_at": OBSERVED, "media_urls": [SOURCE]}
+    row = {"id": "row", "comment_id": "comment", "parent_comment_id": None, "media_urls": []}
+    original = inventory_fingerprint(post, [row])
+    assert inventory_fingerprint({**post, "hosted_media_urls": ["https://media.example/hosted.png"]}, [row]) == original
+    assert inventory_fingerprint({**post, "media_urls": [SOURCE + "&new-signature=ignored"]}, [row]) == original
+    assert inventory_fingerprint(post, [{**row, "parent_comment_id": "parent"}]) != original
+    assert inventory_fingerprint(post, [row, {**row, "id": "row2", "comment_id": "second"}]) != original
+
+
+def test_new_text_only_comment_fences_media_result_and_receipt(media_database):
+    owned, token, source = launch_media(media_database)
+    _, tx = media_database
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            """insert into social.instagram_comments(id,comment_id,post_id,username,text,scraped_at,last_seen_at)
+            values(%s,'new-text-only',%s,'reader','new source',%s,%s)""",
+            (str(uuid4()), source.post_id, OBSERVED, OBSERVED),
+        )
+    with pytest.raises(ValueError, match="inventory fingerprint changed"):
+        execute(media_database, owned, token, source)
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute("select count(*) from social.instagram_ingestion_receipts where run_id=%s", (owned["run_id"],))
+        assert cur.fetchone()[0] == 0
+
+
+def test_inventory_invalidation_retains_receipts_evidence_attempts_and_checkpoint(media_database):
+    owned, token, source = launch_media(media_database)
+    receipt = execute(media_database, owned, token, source)
+    store, tx = media_database
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            """update social.instagram_ingestion_targets set checkpoint='{"preserved":"proof"}'::jsonb,
+            blocked_reason='old-block' where run_id=%s""",
+            (owned["run_id"],),
+        )
+        invalidate_media_inventory(cur, owned["run_id"], owned["target_key"])
+        cur.execute(
+            """select outcome,attempts,max_attempts,owner_token,blocked_reason,checkpoint
+            from social.instagram_ingestion_targets where run_id=%s""",
+            (owned["run_id"],),
+        )
+        outcome, attempts, budget, owner, blocked, checkpoint = cur.fetchone()
+        assert (outcome, attempts, owner, blocked) == ("unresolved", 1, None, "old-block")
+        assert budget >= attempts + 12 and checkpoint["preserved"] == "proof"
+        assert checkpoint["media_inventory_invalidations"][0]["blocked_reason"] == "old-block"
+        cur.execute(
+            "select receipt_id,evidence_id from social.instagram_ingestion_receipts where run_id=%s", (owned["run_id"],)
+        )
+        assert tuple(map(str, cur.fetchone())) == (str(receipt["receipt_id"]), str(receipt["evidence_id"]))
+    assert store.reserve(**owned) is None
+
+
+def test_inventory_invalidation_preserves_source_retry_after_and_prevents_early_media_requests(media_database):
+    owned, token, source = launch_media(media_database)
+    store, tx = media_database
+    store.acquire(**owned, owner_token=token)
+    deadline = datetime.now(UTC) + timedelta(hours=2)
+    store.checkpoint_failure(
+        **owned,
+        owner_token=token,
+        failure=Failure(code="media_http_429", retry_at=deadline),
+        checkpoint={"source": "public_cdn"},
+        requests=0,
+    )
+    with tx() as conn, conn.cursor() as cur:
+        invalidate_media_inventory(cur, owned["run_id"], owned["target_key"])
+        cur.execute(
+            """select outcome,next_attempt_at,checkpoint,requests from social.instagram_ingestion_targets
+            where run_id=%s and stage='media' and target_key=%s""",
+            (owned["run_id"], owned["target_key"]),
+        )
+        outcome, retained_deadline, checkpoint, requests = cur.fetchone()
+    assert outcome == "unresolved" and retained_deadline == deadline and requests == 0
+    assert checkpoint["last_error_code"] == "media_http_429"
+    assert datetime.fromisoformat(checkpoint["media_inventory_invalidations"][0]["next_attempt_at"]) == deadline
+    assert store.reserve(**owned) is None
+    guarded_storage = storage(opener=lambda *args, **kwargs: pytest.fail("Media requested source before Retry-After"))
+    with pytest.raises(LostOwnership):
+        MediaActivity(store, storage=guarded_storage).execute(
+            **owned,
+            owner_token=token,
+            load=lambda **callbacks: source,
+        )
+    # Move the isolated fixture beyond its deadline. The ordinary reservation
+    # predicate then permits the next media activity without an invalidation bypass.
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            """update social.instagram_ingestion_targets set next_attempt_at=clock_timestamp()-interval '1 second'
+            where run_id=%s and stage='media' and target_key=%s""",
+            (owned["run_id"], owned["target_key"]),
+        )
+    replacement = store.reserve(**owned)
+    assert replacement is not None and str(replacement["owner_token"]) != token
+    assert execute(media_database, owned, str(replacement["owner_token"]), source)["outcome"] == "committed"
 
 
 def test_exact_source_reuse_downloads_once_and_preserves_distinct_manifest_roles():
@@ -494,6 +594,8 @@ def launch_media(database, *, comments=False):
                 AvatarSource("commenter", SOURCE, "comment", "comment1"),
             ),
         )
+    with tx() as conn:
+        source = replace(source, inventory_fingerprint=read_inventory_fingerprint(conn, source.post_id))
     return owned, token, source
 
 

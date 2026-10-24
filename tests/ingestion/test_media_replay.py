@@ -12,7 +12,7 @@ import requests
 from tests.ingestion import test_media
 from tests.ingestion.test_replay_commands import command, rows, target_state
 from trr_backend.ingestion.domain import Conflict, LostOwnership, ReplayUnavailable
-from trr_backend.ingestion.evidence import Evidence
+from trr_backend.ingestion.evidence import Evidence, sanitize_payload
 from trr_backend.ingestion.media import AvatarSource, CommentMedia, legacy_comment_source_key, mirror_snapshot
 from trr_backend.ingestion.providers import InvalidSourceError
 from trr_backend.ingestion.queries import Queries
@@ -80,6 +80,45 @@ def summary_payload():
         test_media.snapshot(), test_media.storage(), check=test_media.noop, request=test_media.noop
     )
     return serialize_media_result(result)
+
+
+def test_fingerprint_and_count_gap_survive_sanitizer_without_viewer_state():
+    fingerprint = {"version": "instagram-media-inventory-v1", "sha256": "a" * 64}
+    settlement = {"basis": "public_native_exhaustion", "expected_total": 9, "observed_total": 1, "count_gap": 8}
+    payload = sanitize_payload(
+        {
+            "inventory_fingerprint": fingerprint,
+            "comment_settlement": settlement,
+            "sessionid": "private",
+            "viewer_state": {"id": "private"},
+        }
+    )
+    assert payload == {"inventory_fingerprint": fingerprint, "comment_settlement": settlement}
+
+
+def test_offline_result_cannot_apply_to_changed_comment_inventory(replay_database):
+    owned, source, evidence = retained(replay_database, comments=False)
+    store, tx = replay_database
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            """insert into social.instagram_comments(id,comment_id,post_id,username,text,scraped_at,last_seen_at)
+            values(%s,'after-snapshot',%s,'reader','new inventory',%s,%s)""",
+            (str(uuid4()), source.post_id, source.observed_at, source.observed_at),
+        )
+    with pytest.raises(Conflict, match="canonical data contract"):
+        command(
+            ReplayCommands(store),
+            UUID(owned["run_id"]),
+            evidence,
+            MEDIA_RESULT_REPLAY_VERSION,
+            apply=True,
+            account="fixture_account",
+        )
+    assert rows(
+        replay_database,
+        "select count(*) from social.instagram_ingestion_replay_receipts where run_id=%s",
+        (owned["run_id"],),
+    ) == [(0,)]
 
 
 @pytest.mark.parametrize("summary_kind", ["physical", "legacy"])

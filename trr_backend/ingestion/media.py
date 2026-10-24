@@ -31,7 +31,7 @@ from psycopg2 import sql
 from psycopg2.extras import Json, RealDictCursor
 
 from trr_backend.ingestion.canonical import CanonicalWriteError, OlderObservation
-from trr_backend.ingestion.domain import Failure, LostOwnership, Outcome, Stage, utc_timestamp
+from trr_backend.ingestion.domain import Failure, LostOwnership, Outcome, Stage, stable_json, utc_timestamp
 from trr_backend.ingestion.evidence import Evidence
 from trr_backend.ingestion.persistence import Store
 from trr_backend.media.s3_mirror import (
@@ -53,6 +53,7 @@ from trr_backend.socials.media_url_safety import (
 )
 
 MEDIA_VERSION = "instagram-media-v1"
+MEDIA_INVENTORY_VERSION = "instagram-media-inventory-v1"
 _POLICY = MediaUrlSafetyPolicy(allowed_hosts_for_platform("instagram"), allow_test_hosts=False, resolve_dns=False)
 _EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".mov", ".m4v", ".webm"}
 # Instagram's static xg_5YoVlvjp.gif renders "Content unavailable". A valid
@@ -135,6 +136,165 @@ def legacy_comment_source_key(row_id: str, media_urls: tuple[str, ...]) -> str:
     return "unknown-" + hashlib.sha256(seed.encode("utf-8", "ignore")).hexdigest()[:24]
 
 
+def inventory_fingerprint(post: Mapping[str, Any], comments: list[dict]) -> dict[str, str]:
+    """Bind source inventory, including text-only rows, independently of hosted outputs.
+
+    CDN signatures are transport credentials, not a new source identity. Source
+    observations and attachment topology still invalidate a changed inventory.
+    """
+
+    def clean(value):
+        if isinstance(value, datetime):
+            return utc_timestamp(value)
+        if isinstance(value, UUID):
+            return str(value)
+        if isinstance(value, str) and value.startswith("https://"):
+            return source_reference(value)
+        if isinstance(value, Mapping):
+            return {key: clean(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [clean(item) for item in value]
+        return value
+
+    raw = {**(post.get("raw_data") or {}), **((post.get("payload_sidecar") or {}).get("raw_data") or {})}
+    post_columns = (
+        "id",
+        "shortcode",
+        "scraped_at",
+        "media_urls",
+        "thumbnail_url",
+        "source_account",
+        "username",
+        "owner_username",
+        "owner_profile_pic_url",
+        "owner_profile_pic_url_hd",
+        "profile_tags",
+        "collaborators",
+        "mentions",
+        "tagged_users_detail",
+        "collaborators_detail",
+        "child_posts_data",
+    )
+    raw_columns = (
+        "owner_detail",
+        "owner",
+        "user",
+        "profile_tags",
+        "collaborators",
+        "mentions",
+        "tagged_users_detail",
+        "collaborators_detail",
+        "carousel_media_count",
+        "detail_snapshot",
+    )
+    comment_columns = (
+        "id",
+        "comment_id",
+        "parent_comment_id",
+        "scraped_at",
+        "source_account",
+        "source_snapshot_type",
+        "media_urls",
+        "username",
+        "author_profile_pic_url",
+        "author_profile_pic_url_hd",
+    )
+    material = clean(
+        {
+            "version": MEDIA_INVENTORY_VERSION,
+            "post": {key: post.get(key) for key in post_columns},
+            "source": {key: raw.get(key) for key in raw_columns},
+            "children": (post.get("payload_sidecar") or {}).get("child_posts_data")
+            or post.get("child_posts_data")
+            or [],
+            "comments": [
+                {key: row.get(key) for key in comment_columns}
+                for row in sorted(comments, key=lambda row: (str(row["comment_id"]), str(row["id"])))
+            ],
+        }
+    )
+    return {"version": MEDIA_INVENTORY_VERSION, "sha256": hashlib.sha256(stable_json(material).encode()).hexdigest()}
+
+
+def projected_inventory_fingerprint(post, comments, attachment_refreshes) -> dict[str, str]:
+    """Project only verified attachment source changes onto the complete inventory."""
+    from trr_backend.ingestion.comment_attachment_refresh import attachment_baseline, validate_attachment_order
+
+    projected = {str(row["id"]): dict(row) for row in comments}
+    seen = set()
+    for proof in attachment_refreshes:
+        proof.validate()
+        row = projected.get(proof.row_id)
+        if (
+            proof.row_id in seen
+            or row is None
+            or proof.post_id != str(post["id"])
+            or proof.shortcode != post["shortcode"]
+            or proof.comment_id != str(row["comment_id"])
+        ):
+            raise CanonicalWriteError("Comment attachment inventory projection identity differs")
+        seen.add(proof.row_id)
+        retained = (row.get("raw_data") or {}).get("ingestion_attachment")
+        if retained == proof.to_payload():
+            if tuple(map(source_reference, row.get("media_urls") or [])) != (source_reference(proof.source_url),):
+                raise CanonicalWriteError("Applied comment attachment inventory projection differs")
+        else:
+            try:
+                validate_attachment_order(row, proof.captured_at)
+            except ValueError as error:
+                raise CanonicalWriteError("Comment attachment inventory projection version changed") from error
+            if attachment_baseline(row) != proof.baseline_sha256:
+                raise CanonicalWriteError("Comment attachment inventory projection baseline changed")
+        row["media_urls"] = [source_reference(proof.source_url)]
+    return inventory_fingerprint(post, list(projected.values()))
+
+
+def read_inventory_fingerprint(conn, post_id: str, *, attachment_refreshes: tuple = ()) -> dict[str, str]:
+    """Read after the caller's post identity lock; no source or hosted writes."""
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """select p.*,to_jsonb(b) as payload_sidecar from social.instagram_posts p
+            left join social.instagram_post_payloads b on b.post_id=p.id where p.id=%s""",
+            (post_id,),
+        )
+        post = cur.fetchone()
+        if not post:
+            raise CanonicalWriteError("Media source post is missing")
+        cur.execute(
+            """select * from social.instagram_comments where post_id=%s and not is_missing
+            and deleted_at is null order by comment_id,id""",
+            (post_id,),
+        )
+        comments = [dict(row) for row in cur.fetchall()]
+        if attachment_refreshes:
+            return projected_inventory_fingerprint(post, comments, attachment_refreshes)
+        return inventory_fingerprint(post, comments)
+
+
+def invalidate_media_inventory(cur, run_id: str, target_key: str) -> None:
+    """Fence media before taking the post lock; retain receipts and checkpoints.
+
+    Call in the source writer's transaction before its post advisory/row lock,
+    matching commit_target's media-target -> post ordering.
+    Source backoff and safety blocks survive a new inventory; only their owning
+    recovery path can clear them.
+    """
+    cur.execute(
+        """update social.instagram_ingestion_targets set
+        checkpoint=checkpoint || jsonb_build_object('media_inventory_invalidations',
+            coalesce(checkpoint->'media_inventory_invalidations','[]'::jsonb) || jsonb_build_array(
+                jsonb_build_object('at',clock_timestamp(),'outcome',outcome,'owner_token',owner_token,
+                    'next_attempt_at',next_attempt_at,'blocked_reason',blocked_reason))),
+        outcome='unresolved',observed_at=null,committed_at=null,owner_token=null,owner_started_at=null,
+        owner_expires_at=null,
+        max_attempts=greatest(max_attempts,attempts+12)
+        where run_id=%s and stage='media' and target_key=%s
+        and (outcome<>'unresolved' or owner_token is not null or next_attempt_at is not null
+            or blocked_reason is not null)""",
+        (run_id, target_key),
+    )
+
+
 @dataclass(frozen=True)
 class AvatarSource:
     username: str
@@ -178,6 +338,9 @@ class MediaSnapshot:
     existing_manifest: Mapping[str, Any] = field(default_factory=dict, repr=False)
     include_comment_avatars: bool = False
     unavailable_avatars: tuple[str, ...] = ()
+    inventory_fingerprint: Mapping[str, str] | None = None
+    result_inventory_fingerprint: Mapping[str, str] | None = None
+    comment_settlement: Mapping[str, Any] = field(default_factory=dict)
 
     def storage_keys(self) -> dict[str, str]:
         keys = dict(self.preserved_storage_keys)
@@ -203,6 +366,13 @@ class MediaSnapshot:
         return keys
 
     def validate(self) -> None:
+        for fingerprint in (self.inventory_fingerprint, self.result_inventory_fingerprint):
+            if fingerprint is not None and (
+                set(fingerprint) != {"version", "sha256"}
+                or fingerprint.get("version") != MEDIA_INVENTORY_VERSION
+                or not re.fullmatch(r"[a-f0-9]{64}", fingerprint.get("sha256", ""))
+            ):
+                raise MediaIncomplete("invalid_media_inventory_fingerprint")
         if self.observed_at.tzinfo is None or self.observed_at.utcoffset() is None:
             raise MediaIncomplete("original_observation_required")
         if not self.post_id or not self.canonical_post_id or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", self.shortcode):
@@ -946,10 +1116,26 @@ def write_media(
     _newer(observed_at, post, canonical)
     _media_observation_guard(observed_at, post.get("asset_manifest") or {})
     _media_observation_guard(observed_at, sidecar.get("asset_manifest") or {})
+    if source.inventory_fingerprint is None:
+        raise CanonicalWriteError("Media inventory fingerprint is required for canonical apply")
+    refreshes = tuple(comment.attachment_refresh for comment in source.comments if comment.attachment_refresh)
+    current_fingerprint = read_inventory_fingerprint(conn, source.post_id)
+    if refreshes:
+        projected = read_inventory_fingerprint(conn, source.post_id, attachment_refreshes=refreshes)
+        if projected != source.result_inventory_fingerprint:
+            raise CanonicalWriteError("Attachment result inventory fingerprint changed")
+    elif source.result_inventory_fingerprint is not None:
+        raise CanonicalWriteError("Alternate inventory fingerprint requires exact attachment proofs")
+    if current_fingerprint != source.inventory_fingerprint and (
+        not refreshes or current_fingerprint != source.result_inventory_fingerprint
+    ):
+        raise CanonicalWriteError("Media inventory fingerprint changed")
     identities = {
         "post_id": source.post_id,
         "canonical_post_id": source.canonical_post_id,
         "shortcode": source.shortcode,
+        "inventory_fingerprint": dict(source.inventory_fingerprint),
+        "comment_settlement": dict(source.comment_settlement),
     }
     if result.outcome == Outcome.UNAVAILABLE:
         if source.unavailable is None:
@@ -1035,6 +1221,9 @@ def write_media(
             content_hash=avatar["sha256"],
             observed_at=datetime.fromisoformat(avatar["observed_at"]),
         )
+    identities["inventory_fingerprint"] = read_inventory_fingerprint(conn, source.post_id)
+    if refreshes and identities["inventory_fingerprint"] != source.result_inventory_fingerprint:
+        raise CanonicalWriteError("Applied attachment inventory fingerprint differs from exact projection")
     return identities
 
 
@@ -1087,6 +1276,9 @@ class MediaActivity:
             parser_version=MEDIA_VERSION,
             payload={
                 "shortcode": target_key,
+                "inventory_fingerprint": snapshot.inventory_fingerprint,
+                "result_inventory_fingerprint": snapshot.result_inventory_fingerprint,
+                "comment_settlement": dict(snapshot.comment_settlement),
                 "ingestion_media": {"version": MEDIA_VERSION, "observed_at": utc_timestamp(snapshot.observed_at)},
                 "media_urls": list(snapshot.media_urls),
                 "thumbnail_url": snapshot.thumbnail_url,

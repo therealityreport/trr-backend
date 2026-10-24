@@ -11,7 +11,7 @@ import json
 import math
 from collections import Counter
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol, TypedDict
 from uuid import uuid4
@@ -891,6 +891,10 @@ class CommentActivity:
         )
         if not isinstance(summary, CommentFetchSummary):
             raise TypeError("Comment source must return a typed CommentFetchSummary")
+        recovery = current_checkpoint.get("public_recovery") or {}
+        original_expected = (recovery.get("baseline") or {}).get("expected_total")
+        if type(original_expected) is int:
+            summary = replace(summary, expected_count=max(original_expected, summary.expected_count or 0))
         if (
             summary.reply_lanes_rejected
             and not summary.fetch_failed
@@ -932,7 +936,7 @@ class CommentActivity:
             # Native public exhaustion can still leave a known count gap. It
             # cannot prove that unseen saved comments disappeared. Only count
             # parity may reconcile missing rows, using the original scan cutoff.
-            if settlement["count_gap"] == 0:
+            if settlement["count_gap"] == 0 and not recovery.get("preserve_saved_rows"):
                 with conn.cursor() as cur:
                     cur.execute(
                         """update social.instagram_comments set is_missing=true,missing_at=%s
@@ -1076,6 +1080,12 @@ class CommentActivity:
                 raise LostOwnership("Comment page writer lost target ownership")
             if target["checkpoint"] != expected_checkpoint:
                 raise Conflict("Comment checkpoint advanced concurrently")
+            if page.comments:
+                from trr_backend.ingestion.media import invalidate_media_inventory
+
+                # Match media commit's target-before-post lock ordering. The
+                # canonical writer takes the shared post advisory/row lock.
+                invalidate_media_inventory(cur, owned["run_id"], owned["target_key"])
             identity = self.writer(
                 conn,
                 run_id=owned["run_id"],

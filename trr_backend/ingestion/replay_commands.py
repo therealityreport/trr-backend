@@ -199,6 +199,10 @@ class ReplayCommands:
         post = cur.fetchone()
         if not post:
             raise Conflict("Comment replay requires its existing canonical parent post")
+        from trr_backend.ingestion.media import invalidate_media_inventory
+
+        if parsed.comments:
+            invalidate_media_inventory(cur, run_id, bound["target_key"])
         identity = self.comment_writer(
             conn,
             run_id=run_id,

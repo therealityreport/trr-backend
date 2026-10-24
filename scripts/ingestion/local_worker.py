@@ -19,8 +19,10 @@ from __future__ import annotations
 import json
 import os
 import signal
+import subprocess
 import sys
 import threading
+import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
@@ -33,6 +35,56 @@ from trr_backend.ingestion.workflows import control_call
 
 ACTIVITY_TIMEOUT_SECONDS = 590
 WAIT_RECHECK_SECONDS = 5.0
+
+
+def retained_certification(path):
+    """Keep complete reports; archive interrupted output for a fresh invocation."""
+    if not path.exists():
+        return False
+    try:
+        value = json.loads(path.read_text())
+        if (
+            isinstance(value, dict)
+            and type(value.get("final_acceptance")) is bool
+            and isinstance(value.get("gates"), dict)
+        ):
+            return True
+    except (ValueError, UnicodeError):
+        pass
+    path.rename(path.with_name(f"{path.stem}.interrupted-{os.getpid()}-{time.time_ns()}{path.suffix}"))
+    return False
+
+
+def run_owned_certification(command, log, abort, *, timeout_seconds=3600):
+    """One private child group; abort/timeout reaps certifier and decoders."""
+    child = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        while child.poll() is None:
+            if abort.is_set():
+                raise Interrupted
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(command[0], timeout_seconds)
+            abort.wait(0.1)
+        return child.returncode
+    finally:
+        # The group can contain decoder descendants after its leader exits.
+        # Kill only the session created above, before AbortExitGuard's 15s cap.
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            child.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        child.wait(timeout=3)
+
+
 ABORT_EXIT_GRACE_SECONDS = 15.0
 
 
@@ -78,6 +130,7 @@ class LocalDispatch:
         self.pool = None
         self.item = None
         self.limit = 1
+        self.comments_submitted = 0
 
     def bind(self, item, limit):
         limit = 1 if limit is None else limit
@@ -141,6 +194,7 @@ class LocalDispatch:
             )
             self.active[token] = (dict(self.item), future)
             self.submitted.add(token)
+            self.comments_submitted += 1
             return None
         if self.active:
             raise RuntimeError("Non-comment dispatch cannot overlap comment children")
@@ -156,9 +210,26 @@ class LocalDispatch:
         return None
 
 
-def run_partition(item, *, store, scheduler, dispatch, abort, effective_comments_limit=None):
+def run_partition(
+    item,
+    *,
+    store,
+    scheduler,
+    dispatch,
+    abort,
+    effective_comments_limit=None,
+    before_finalize=None,
+    on_completed=None,
+):
     """Mirror DBOSAdapter.partition without the SDK; return how the partition ended."""
+    batch_start = getattr(dispatch, "comments_submitted", 0)
     for ordinal in range(PARTITION_SIZE):
+        batch_limit = effective_comments_limit(item) if effective_comments_limit else 1
+        prefer_media = getattr(dispatch, "comments_submitted", 0) - batch_start >= (batch_limit or 1)
+        decision_item = dict(item, prefer_media=True) if prefer_media else item
+        if prefer_media:
+            dispatch.drain(store, finish=True)
+            batch_start = getattr(dispatch, "comments_submitted", 0)
         while True:
             dispatch.bind(item, effective_comments_limit(item) if effective_comments_limit else 1)
             dispatch.drain(store)
@@ -168,7 +239,7 @@ def run_partition(item, *, store, scheduler, dispatch, abort, effective_comments
                 break
             dispatch.wait()
         if dispatch.active:
-            candidate = control_call(store.decision, item, ordinal, scheduler.clock())
+            candidate = control_call(store.decision, decision_item, ordinal, scheduler.clock())
             if candidate.get("stage") not in {None, "comments"} or candidate["kind"] in {"complete", "blocked"}:
                 # A committed comment child can still be finishing/reaping.
                 # Drain before reserving the next phase or completing this one.
@@ -177,7 +248,7 @@ def run_partition(item, *, store, scheduler, dispatch, abort, effective_comments
                     raise Interrupted
         dispatch.latest = None
         try:
-            decision = scheduler.tick(item, ordinal)
+            decision = scheduler.tick(decision_item, ordinal)
         except LostOwnership:
             if dispatch.active:
                 abort.set()
@@ -192,7 +263,14 @@ def run_partition(item, *, store, scheduler, dispatch, abort, effective_comments
             dispatch.drain(store, finish=True)
             if abort.is_set():
                 raise Interrupted
-            return _complete(store, item, stop=decision["stop"])
+            if decision["stop"] == "completed" and before_finalize is not None and before_finalize(item):
+                # The journaled completion choice precedes a fenced recovery
+                # command. The next ordinal sees the newly reopened target.
+                continue
+            result = _complete(store, item, stop=decision["stop"])
+            if result == "stopped" and decision["stop"] == "completed" and on_completed is not None:
+                on_completed(item)
+            return result
         # Journaled waits can outlive their original target deadline after
         # operator recovery. Recheck live scheduling state at the next ordinal;
         # target and source gates still enforce any actual future server wait.
@@ -223,6 +301,9 @@ def run_worker(
     poll_seconds=5.0,
     on_cycle=None,
     effective_comments_limit=None,
+    before_finalize=None,
+    on_completed=None,
+    on_started=None,
 ):
     """Serve local runs until abort. Returns a JSON-safe summary.
 
@@ -233,6 +314,8 @@ def run_worker(
     partitions = 0
     with lease:
         try:
+            if on_started is not None:
+                on_started()
             while not abort.is_set():
                 # New runs: seed partition 0 only; dispatch_partitions runs it.
                 store.dispatch_pending(store.seed, engine="dbos", workflow_version=workflow_version)
@@ -244,6 +327,8 @@ def run_worker(
                         dispatch=dispatch,
                         abort=abort,
                         effective_comments_limit=effective_comments_limit,
+                        before_finalize=before_finalize,
+                        on_completed=on_completed,
                     ),
                     limit=1,
                     workflow_version=workflow_version,
@@ -309,6 +394,87 @@ def main(argv=None):
         policy = ExecutionPolicy(transaction=transaction) if callable(transaction) else None
         dispatch = LocalDispatch(run_ingestion_activity, abort)
         scheduler = Scheduler(store, admit=Admission().admit, dispatch=dispatch, reconcile=lambda _: "unknown")
+        recovery_run = os.getenv("TRR_INSTAGRAM_JANUARY_RECOVERY_RUN_ID", "").strip()
+
+        def before_finalize(item):
+            if not recovery_run or item["run_id"] != recovery_run:
+                return False
+            from trr_backend.ingestion.comment_recovery import enqueue_next_recovery
+
+            result = enqueue_next_recovery(
+                store,
+                run_id=recovery_run,
+                account=item["account"],
+                generation=item["generation"],
+                intent_hash=os.environ["TRR_INSTAGRAM_JANUARY_RECOVERY_INTENT_HASH"],
+                source_revision=os.environ["TRR_INSTAGRAM_JANUARY_RECOVERY_SOURCE_REVISION"],
+            )
+            if result:
+                print(json.dumps({"status": "public_recovery_queued", **result}), flush=True)
+            return result is not None
+
+        def certify_completed(item):
+            if item["run_id"] != recovery_run:
+                return
+            output = os.getenv("TRR_INSTAGRAM_JANUARY_CERTIFICATION_OUTPUT", "").strip()
+            if not output:
+                return
+            artifact = Path(output)
+            if retained_certification(artifact):
+                # A durable artifact is never overwritten by lifecycle replay.
+                print(json.dumps({"status": "certification_artifact_retained", "path": output}), flush=True)
+                return
+            command = [
+                sys.executable,
+                str(Path(__file__).with_name("certify_january.py")),
+                "--run-id",
+                recovery_run,
+                "--intent-hash",
+                os.environ["TRR_INSTAGRAM_JANUARY_RECOVERY_INTENT_HASH"],
+                "--generation",
+                str(item["generation"]),
+                "--account",
+                item["account"],
+                "--date-start",
+                "2026-01-01T00:00:00Z",
+                "--date-end",
+                "2026-02-01T00:00:00Z",
+                "--binding",
+                os.environ["TRR_INSTAGRAM_JANUARY_BINDING"],
+                "--storage-binding",
+                os.environ["TRR_INSTAGRAM_JANUARY_STORAGE_BINDING"],
+                "--expected-storage-binding-sha256",
+                os.environ["TRR_INSTAGRAM_JANUARY_STORAGE_BINDING_SHA256"],
+                "--output",
+                output,
+            ]
+            # Known maintained command only; one bounded child, reaped before
+            # this worker resumes. No cron or separate monitoring process.
+            log_path = artifact.with_suffix(f".{os.getpid()}-{time.time_ns()}.log")
+            try:
+                with log_path.open("x") as log:
+                    log_path.chmod(0o600)
+                    returncode = run_owned_certification(command, log, abort)
+                print(
+                    json.dumps({"status": "certification_finished", "returncode": returncode, "path": output}),
+                    flush=True,
+                )
+            except subprocess.TimeoutExpired:
+                print(json.dumps({"status": "certification_timeout", "log": str(log_path)}), flush=True)
+
+        def resume_certification():
+            if not recovery_run:
+                return
+            with store.transaction() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """select account,generation,state from social.instagram_ingestion_runs
+                    where run_id=%s and intent_hash=%s and execution_placement='local'""",
+                    (recovery_run, os.environ["TRR_INSTAGRAM_JANUARY_RECOVERY_INTENT_HASH"]),
+                )
+                row = cur.fetchone()
+            if row and row[2] == "completed":
+                certify_completed({"run_id": recovery_run, "account": row[0], "generation": row[1]})
+
         print(json.dumps({"status": "started", "execution_placement": "local"}), flush=True)
         result = run_worker(
             store=store,
@@ -319,6 +485,9 @@ def main(argv=None):
             workflow_version=WORKFLOW_VERSION,
             stop_requested=stop_requested,
             effective_comments_limit=policy.effective_comments_limit if policy else None,
+            before_finalize=before_finalize if recovery_run else None,
+            on_completed=certify_completed if recovery_run else None,
+            on_started=resume_certification if recovery_run else None,
             on_cycle=lambda ran: ran and print(json.dumps({"status": "partition", "count": ran}), flush=True),
         )
         print(json.dumps(result), flush=True)

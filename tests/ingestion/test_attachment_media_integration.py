@@ -9,7 +9,7 @@ from psycopg2.extras import RealDictCursor
 from tests.ingestion import test_media as fixtures
 from trr_backend.ingestion.canonical import CanonicalWriteError
 from trr_backend.ingestion.comment_attachment_refresh import parse_targeted_rest_attachment
-from trr_backend.ingestion.media import mirror_snapshot
+from trr_backend.ingestion.media import mirror_snapshot, read_inventory_fingerprint
 from trr_backend.ingestion.replay import _decode_media_result, serialize_media_result
 
 database = fixtures.database
@@ -46,6 +46,14 @@ def prepare(database):
     )
     comment = replace(source.comments[0], comment_id="123", media_urls=(GIF,), attachment_refresh=proof)
     source = replace(source, comments=(comment,), avatars=(), include_comment_avatars=False)
+    with database[1]() as conn:
+        source = replace(
+            source,
+            inventory_fingerprint=read_inventory_fingerprint(conn, source.post_id),
+            result_inventory_fingerprint=read_inventory_fingerprint(
+                conn, source.post_id, attachment_refreshes=(proof,)
+            ),
+        )
     return owned, token, source, row
 
 
@@ -56,6 +64,7 @@ def test_attachment_round_trip_and_commit_preserves_inventory_observation(media_
     assert decoded.snapshot.comments[0].attachment_refresh == source.comments[0].attachment_refresh
     receipt = fixtures.execute(media_database, owned, token, source)
     assert receipt["outcome"] == "committed"
+    assert receipt["canonical_identity"]["inventory_fingerprint"] == source.result_inventory_fingerprint
     with media_database[1]() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("select * from social.instagram_comments where id=%s", (before["id"],))
         row = dict(cur.fetchone())
@@ -64,6 +73,15 @@ def test_attachment_round_trip_and_commit_preserves_inventory_observation(media_
     assert row["media_urls"] == [GIF]
     assert len(row["hosted_media_urls"]) == 1
     assert row["raw_data"]["ingestion_attachment"]["native_gif_id"] == "456"
+
+
+def test_arbitrary_alternate_inventory_fingerprint_cannot_authorize_attachment_apply(media_database):
+    owned, token, source, _ = prepare(media_database)
+    source = replace(
+        source, result_inventory_fingerprint={"version": "instagram-media-inventory-v1", "sha256": "a" * 64}
+    )
+    with pytest.raises(CanonicalWriteError, match="inventory fingerprint"):
+        fixtures.execute(media_database, owned, token, source)
 
 
 @pytest.mark.parametrize("change", ["baseline", "version"])

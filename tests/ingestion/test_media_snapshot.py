@@ -3,6 +3,7 @@
 import json
 from contextlib import contextmanager
 from datetime import datetime, timedelta
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -15,6 +16,7 @@ from trr_backend.ingestion.domain import LostOwnership, RunIntent, Stage
 from trr_backend.ingestion.evidence import Evidence
 from trr_backend.ingestion.media import MEDIA_VERSION, MediaIncomplete
 from trr_backend.ingestion.media_snapshot import AvatarSourcesMissing, MediaSnapshotLoader
+from trr_backend.ingestion.workflow_store import WorkflowStore
 
 database = database_fixture
 media_database = media_database_fixture
@@ -345,7 +347,7 @@ def test_prior_receipt_from_other_account_cannot_certify_inventory(snapshot_data
         load(snapshot_database, owned)
 
 
-def test_selected_comments_wait_for_other_unresolved_targets(snapshot_database):
+def test_selected_comments_admit_own_inventory_despite_other_unresolved_targets(snapshot_database):
     owned, _, _, _ = seed(snapshot_database, selected_comments=True)
     # Preserve the sealed discovery set and make a previously discovered target
     # unresolved to model a different post still being processed in this stage.
@@ -356,8 +358,124 @@ def test_selected_comments_wait_for_other_unresolved_targets(snapshot_database):
             values(%s,'comments','another-post',3)""",
             (owned["run_id"],),
         )
-    with pytest.raises(MediaIncomplete, match="selected_comments_stage_unresolved"):
+    snapshot = load(snapshot_database, owned)
+    assert snapshot.comments_complete
+    assert snapshot.inventory_fingerprint["version"] == "instagram-media-inventory-v1"
+
+
+def test_per_post_media_retains_public_exhaustion_count_gap(snapshot_database):
+    owned, _, _, _ = seed(snapshot_database, selected_comments=True)
+    _, tx = snapshot_database
+    settlement = {"basis": "public_native_exhaustion", "expected_total": 9, "observed_total": 1, "count_gap": 8}
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            """update social.instagram_ingestion_receipts set canonical_identity=canonical_identity ||
+            jsonb_build_object('settlement',%s::jsonb) where run_id=%s and stage='comments'""",
+            (json.dumps(settlement), owned["run_id"]),
+        )
+    assert load(snapshot_database, owned).comment_settlement == settlement
+
+
+def test_reopened_own_comments_and_stale_receipt_generation_block_media(snapshot_database):
+    owned, _, _, _ = seed(snapshot_database, selected_comments=True)
+    _, tx = snapshot_database
+    store = WorkflowStore(tx)
+    item = {**owned, "engine": "dbos", "workflow_version": "fixture"}
+    now = OBSERVED + timedelta(days=1)
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            """insert into social.instagram_ingestion_targets(run_id,stage,target_key,max_attempts)
+            values(%s,'comments','unrelated-unresolved',3)""",
+            (owned["run_id"],),
+        )
+    assert load(snapshot_database, owned).comments_complete
+    assert store.eligible_media(item, now)["target_key"] == owned["target_key"]
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            """update social.instagram_ingestion_targets set outcome='unresolved',observed_at=null,
+            committed_at=null,owner_token=null,owner_started_at=null,owner_expires_at=null
+            where run_id=%s and stage='comments' and target_key=%s""",
+            (owned["run_id"], owned["target_key"]),
+        )
+    with pytest.raises(MediaIncomplete, match="complete_comment_inventory_proof_required"):
         load(snapshot_database, owned)
+    assert store.eligible_media(item, now) is None
+    # A settled target still cannot borrow an old generation's otherwise exact receipt.
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            """update social.instagram_ingestion_targets set outcome='committed',observed_at=%s,
+            committed_at=clock_timestamp(),owner_generation=owner_generation+1
+            where run_id=%s and stage='comments' and target_key=%s""",
+            (OBSERVED + timedelta(minutes=3), owned["run_id"], owned["target_key"]),
+        )
+    with pytest.raises(MediaIncomplete, match="complete_comment_inventory_proof_required"):
+        load(snapshot_database, owned)
+    assert store.eligible_media(item, now) is None
+
+
+def test_media_turn_is_durable_and_comments_keep_priority_between_batch_boundaries(snapshot_database):
+    owned, _, _, _ = seed(snapshot_database, selected_comments=True)
+    _, tx = snapshot_database
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            (
+                Path(__file__).parents[2] / "supabase/migrations/20261016070100_instagram_ingestion_workflows.sql"
+            ).read_text()
+        )
+        cur.execute(
+            """insert into social.instagram_ingestion_targets(run_id,stage,target_key,max_attempts)
+            values(%s,'comments','another-post',3)""",
+            (owned["run_id"],),
+        )
+        cur.execute(
+            """update social.instagram_ingestion_manifests set discovery_complete=true,sealed_at=clock_timestamp()
+            where run_id=%s and stage='listing'""",
+            (owned["run_id"],),
+        )
+        cur.execute("select * from social.instagram_ingestion_runs where run_id=%s", (owned["run_id"],))
+        run_row = dict(zip([column.name for column in cur.description], cur.fetchone(), strict=True))
+    store = WorkflowStore(tx)
+    part = store.seed(run_row)
+    now = OBSERVED + timedelta(days=1)
+    assert store.decision(part, 0, now)["stage"] == "comments"
+    expected = {"kind": "target", "stage": "media", "target_key": owned["target_key"]}
+    assert store.eligible_media(part, now) == expected
+    assert store.decision({**part, "prefer_media": True}, 1, now) == expected
+    assert store.decision(part, 1, now) == expected  # replay keeps the recorded choice
+    assert store.decision(part, 2, now)["stage"] == "comments"
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            "update social.instagram_comments set is_missing=true where post_id in "
+            "(select id from social.instagram_posts where shortcode=%s)",
+            (owned["target_key"],),
+        )
+    assert store.eligible_media(part, now) is None
+
+
+def test_selected_details_require_exact_current_post_receipt(snapshot_database):
+    owned, ids, _, _ = seed(snapshot_database, selected_comments=True)
+    store, tx = snapshot_database
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            """update social.instagram_ingestion_runs set intent=jsonb_set(intent,'{selected_tasks}',
+            '["post_details","comments","media"]'::jsonb) where run_id=%s""",
+            (owned["run_id"],),
+        )
+        cur.execute(
+            "insert into social.instagram_ingestion_manifests(run_id,stage) values(%s,'post_details')",
+            (owned["run_id"],),
+        )
+    detail_owned = discover(
+        store, {"run_id": owned["run_id"], "generation": owned["generation"]}, Stage.DETAILS, owned["target_key"]
+    )
+    with pytest.raises(MediaIncomplete, match="complete_detail_inventory_proof_required"):
+        load(snapshot_database, owned)
+    token = str(store.reserve(**detail_owned)["owner_token"])
+    store.acquire(**detail_owned, owner_token=token)
+    store.commit_target(
+        **detail_owned, owner_token=token, observed_at=OBSERVED, write_canonical=lambda _: {"post_id": ids["post_id"]}
+    )
+    assert load(snapshot_database, owned).inventory_fingerprint
 
 
 def test_repeatable_read_only_snapshot_accepts_pool_setup_without_network_callbacks(snapshot_database):

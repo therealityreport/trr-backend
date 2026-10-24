@@ -29,6 +29,129 @@ base_database = local_execution.base_database
 clean = local_execution.clean
 
 
+def test_media_boundary_drains_six_comments_and_recovery_precedes_finalization(monkeypatch):
+    monkeypatch.setattr("scripts.ingestion.local_worker.PARTITION_SIZE", 10)
+    events = []
+    abort = threading.Event()
+
+    class Dispatch:
+        active = {}
+        latest = None
+        comments_submitted = 0
+        limit = 6
+
+        def bind(self, item, limit):
+            self.limit = limit
+
+        def drain(self, store, *, finish=False):
+            if finish:
+                events.append("drained")
+
+        def wait(self, *args):
+            pass
+
+    class FakeStore:
+        def complete_partition(self, item, **kwargs):
+            events.append(kwargs["stop_state"])
+
+    class FakeScheduler:
+        def tick(self, item, ordinal):
+            if ordinal < 6:
+                dispatch.comments_submitted += 1
+                return {"ready": True}
+            if ordinal == 6:
+                assert item["prefer_media"] and events[-1] == "drained"
+                events.append("media")
+                return {"ready": True}
+            return {"stop": "completed"}
+
+    recovery_calls = []
+
+    def recover(item):
+        recovery_calls.append(True)
+        return len(recovery_calls) == 1
+
+    dispatch = Dispatch()
+    result = run_partition(
+        {},
+        store=FakeStore(),
+        scheduler=FakeScheduler(),
+        dispatch=dispatch,
+        abort=abort,
+        effective_comments_limit=lambda _: 6,
+        before_finalize=recover,
+        on_completed=lambda _: events.append("certify"),
+    )
+    assert result == "stopped" and len(recovery_calls) == 2
+    assert "media" in events and events[-2:] == ["completed", "certify"]
+
+
+@pytest.mark.parametrize("cause", ["abort", "timeout"])
+def test_certification_interruption_reaps_decoder_group(tmp_path, cause):
+    import json
+    import os
+    import subprocess
+    import sys
+    import time
+
+    from scripts.ingestion.local_worker import Interrupted, run_owned_certification
+
+    identities = tmp_path / "owned-child-pids.json"
+    code = """import subprocess,sys,os,signal,json,time
+from pathlib import Path
+p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'])
+def stop(*_):
+ p.wait(timeout=2)
+ raise SystemExit(0)
+signal.signal(signal.SIGTERM,stop)
+Path(sys.argv[1]).write_text(json.dumps([os.getpid(),p.pid]))
+time.sleep(60)
+"""
+    abort = threading.Event()
+    errors = []
+    with (tmp_path / "owned.log").open("w") as log:
+
+        def execute():
+            try:
+                run_owned_certification(
+                    [sys.executable, "-c", code, str(identities)],
+                    log,
+                    abort,
+                    timeout_seconds=2 if cause == "timeout" else 30,
+                )
+            except (Interrupted, subprocess.TimeoutExpired) as error:
+                errors.append(type(error))
+
+        thread = threading.Thread(target=execute)
+        thread.start()
+        deadline = time.monotonic() + 5
+        while not identities.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert identities.exists()
+        if cause == "abort":
+            abort.set()
+        thread.join(8)
+        assert not thread.is_alive()
+    assert errors == [Interrupted if cause == "abort" else subprocess.TimeoutExpired]
+    for pid in json.loads(identities.read_text()):
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+
+
+def test_interrupted_certification_artifact_is_preserved_and_can_resume(tmp_path):
+    import json
+
+    from scripts.ingestion.local_worker import retained_certification
+
+    output = tmp_path / "certificate.json"
+    output.write_text("")  # The CLI reserved output before it was interrupted.
+    assert retained_certification(output) is False and not output.exists()
+    archived = list(tmp_path.glob("certificate.interrupted-*.json"))
+    assert len(archived) == 1 and archived[0].read_text() == ""
+    output.write_text(json.dumps({"final_acceptance": False, "gates": {"source_count_parity": "blocked"}}))
+    assert retained_certification(output) is True and output.exists()
+
+
 @pytest.fixture(scope="module")
 def database(base_database):
     local_database = local_execution.database.__wrapped__(base_database)

@@ -25,7 +25,9 @@ from trr_backend.ingestion.media import (
     CommentMedia,
     MediaIncomplete,
     MediaSnapshot,
+    inventory_fingerprint,
     legacy_comment_source_key,
+    projected_inventory_fingerprint,
     source_reference,
 )
 
@@ -202,7 +204,8 @@ class MediaSnapshotLoader:
                 (post["id"],),
             )
             comments = [dict(row) for row in cur.fetchall()]
-            self._completion(
+            self._details(cur, run_id, target_key, post, selected=Stage.DETAILS in intent.selected_tasks)
+            settlement = self._completion(
                 cur, run_id, account, target_key, post, comments, selected=Stage.COMMENTS in intent.selected_tasks
             )
             # Completion covers every active comment. Only rows with media (or
@@ -279,11 +282,32 @@ class MediaSnapshotLoader:
                 existing_manifest=manifest,
                 include_comment_avatars=self.include_comment_avatars,
                 unavailable_avatars=unavailable_avatars,
+                inventory_fingerprint=inventory_fingerprint(post, comments),
+                result_inventory_fingerprint=projected_inventory_fingerprint(post, comments, attachment_refreshes)
+                if attachment_refreshes
+                else None,
+                comment_settlement=settlement,
             )
             snapshot.validate()
         if check_cancelled:
             check_cancelled()
         return snapshot
+
+    @staticmethod
+    def _details(cur, run_id: str, target_key: str, post: Mapping, *, selected: bool):
+        if not selected:
+            return
+        cur.execute(
+            """select canonical_identity,observed_at from social.instagram_ingestion_receipts
+            where run_id=%s and stage='post_details' and target_key=%s
+            and outcome in ('committed','cached_satisfied') order by committed_at desc limit 1""",
+            (run_id, target_key),
+        )
+        receipt = cur.fetchone()
+        if not receipt or str(_mapping(receipt["canonical_identity"]).get("post_id")) != str(post["id"]):
+            raise MediaIncomplete("complete_detail_inventory_proof_required")
+        if _time(receipt["observed_at"]) != _time(post["scraped_at"]):
+            raise MediaIncomplete("persisted_detail_inventory_changed")
 
     @staticmethod
     def _completion(
@@ -293,23 +317,18 @@ class MediaSnapshotLoader:
             """select q.*,r.run_id as source_run_id from social.instagram_ingestion_receipts q
             join social.instagram_ingestion_runs r using(run_id)
             join social.instagram_ingestion_manifests m on m.run_id=q.run_id and m.stage=q.stage
+            join social.instagram_ingestion_targets t
+                on t.run_id=q.run_id and t.stage=q.stage and t.target_key=q.target_key
             where r.account=%s and q.stage='comments' and q.target_key=%s and m.discovery_complete
             and q.outcome in ('committed','cached_satisfied')
-            and (%s=false or r.run_id=%s)
+            and (%s=false or (r.run_id=%s and t.outcome in ('committed','cached_satisfied')
+                and q.owner_generation=t.owner_generation))
             order by q.observed_at desc,q.committed_at desc limit 1""",
             (account, target_key, selected, run_id),
         )
         receipt = cur.fetchone()
         if not receipt:
             raise MediaIncomplete("complete_comment_inventory_proof_required")
-        if selected:
-            cur.execute(
-                """select count(*) as unresolved from social.instagram_ingestion_targets
-                where run_id=%s and stage='comments' and outcome='unresolved'""",
-                (run_id,),
-            )
-            if cur.fetchone()["unresolved"]:
-                raise MediaIncomplete("selected_comments_stage_unresolved")
         identity = _mapping(receipt.get("canonical_identity"))
         observed = identity.get("observed_comment_ids")
         if str(identity.get("post_id")) != str(post["id"]) or not isinstance(observed, list):
@@ -326,6 +345,7 @@ class MediaSnapshotLoader:
                 raise MediaIncomplete("comment_inventory_account_mismatch")
             if row.get("source_snapshot_type") != "full_comments_scrape" or _time(row.get("scraped_at")) > stamp:
                 raise MediaIncomplete("comment_inventory_has_unproved_source")
+        return _mapping(identity.get("settlement"))
 
     @staticmethod
     def _retained_keys(cur, account: str, target_key: str, comments: list[dict]) -> dict[str, str]:

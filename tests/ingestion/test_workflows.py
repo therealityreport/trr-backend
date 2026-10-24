@@ -568,7 +568,7 @@ def test_live_uncertain_or_accepted_owner_does_not_serialize_eligible_target(dat
     assert active.tick(active_part, 2) == {"sleep": 1.0}
 
 
-def test_real_dbos_bounded_runtime_restricted_role_and_partition_history(database):
+def test_real_dbos_bounded_runtime_restricted_role_and_partition_history(database, register_isolated_postgres):
     pytest.importorskip("dbos")
     from dbos import DBOS
 
@@ -600,7 +600,10 @@ def test_real_dbos_bounded_runtime_restricted_role_and_partition_history(databas
         rival.autocommit = True
         with rival.cursor() as cur:
             cur.execute("select pg_advisory_lock(%s,%s)", (48112, 20261016))
-            assert adapter.run_bounded(lambda: psycopg2.connect(runtime_url)) == "busy"
+            with register_isolated_postgres(
+                host=values["host"], port=int(values["port"]), dbname=values["dbname"], user=role
+            ):
+                assert adapter.run_bounded(lambda: psycopg2.connect(runtime_url)) == "busy"
             cur.execute("select pg_advisory_unlock(%s,%s)", (48112, 20261016))
     child_code = """
 import sys
@@ -684,7 +687,7 @@ DBOSAdapter(scheduler,config).run_bounded(lambda:psycopg2.connect(sys.argv[2]))
     recovery_run, recovery_partition = run_fixture(database)
     sql(
         database,
-        """update social.instagram_ingestion_targets set next_attempt_at=clock_timestamp()+interval '5 seconds'
+        """update social.instagram_ingestion_targets set next_attempt_at=clock_timestamp()+interval '12 seconds'
         where run_id=%s""",
         (recovery_run["run_id"],),
     )
@@ -708,7 +711,10 @@ DBOSAdapter(scheduler,config).run_bounded(lambda:psycopg2.connect(sys.argv[2]))
     ) == [(1,)]
     # The first process is gone before replacement. Its lease must be released,
     # and its native persisted sleep is recovered by the same logical executor.
-    with psycopg2.connect(runtime_url) as lease:
+    with (
+        register_isolated_postgres(host=values["host"], port=int(values["port"]), dbname=values["dbname"], user=role),
+        psycopg2.connect(runtime_url) as lease,
+    ):
         lease.autocommit = True
         with lease.cursor() as cur:
             cur.execute("select pg_try_advisory_lock(%s,%s)", (48112, 20261016))

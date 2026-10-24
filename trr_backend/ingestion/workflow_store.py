@@ -16,6 +16,103 @@ PHASE_ORDER = "case stage when 'listing' then 0 when 'post_details' then 1 when 
 
 
 class WorkflowStore(Store):
+    def eligible_media(self, item, now: datetime):
+        """One per-post proved candidate, for a drained comments batch boundary."""
+        with self.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            run = self._current(cur, item)
+            return self._eligible_media(cur, run, item, now)
+
+    @staticmethod
+    def _eligible_media(cur, run, item, now):
+        from trr_backend.ingestion.domain import RunIntent
+        from trr_backend.ingestion.media import MediaIncomplete
+        from trr_backend.ingestion.media_snapshot import MediaSnapshotLoader
+
+        intent = RunIntent.from_payload(run["intent"])
+        if Stage.MEDIA not in intent.selected_tasks:
+            return None
+        selection = run.get("execution_selection")
+        if selection is not None and selection.get("stage") != Stage.MEDIA.value:
+            return None
+        selection_keys = selection["target_keys"] if selection else None
+        cur.execute(
+            """select t.target_key,p.* from social.instagram_ingestion_targets t
+            join social.instagram_ingestion_manifests m on m.run_id=t.run_id and m.stage=t.stage
+            join social.instagram_posts p on p.shortcode=t.target_key
+                and lower(coalesce(nullif(p.source_account,''),p.username))=%s
+            join lateral (
+                select q.* from social.instagram_ingestion_receipts q
+                join social.instagram_ingestion_runs r using(run_id)
+                join social.instagram_ingestion_manifests cm on cm.run_id=q.run_id and cm.stage=q.stage
+                join social.instagram_ingestion_targets ct
+                    on ct.run_id=q.run_id and ct.stage=q.stage and ct.target_key=q.target_key
+                where q.stage='comments' and q.target_key=t.target_key and r.account=%s
+                and (%s=false or (q.run_id=t.run_id and ct.outcome in ('committed','cached_satisfied')
+                    and q.owner_generation=ct.owner_generation)) and cm.discovery_complete
+                and q.outcome in ('committed','cached_satisfied')
+                order by q.observed_at desc,q.committed_at desc limit 1
+            ) q on true
+            where t.run_id=%s and t.stage='media' and m.discovery_complete and t.outcome='unresolved'
+            and t.blocked_reason is null and t.attempts<t.max_attempts
+            and (t.owner_expires_at is null or t.owner_expires_at<=%s)
+            and (t.next_attempt_at is null or t.next_attempt_at<=%s)
+            and (%s::text[] is null or t.target_key=any(%s))
+            and q.canonical_identity->>'post_id'=p.id::text and q.observed_at>=p.scraped_at
+            and jsonb_typeof(q.canonical_identity->'observed_comment_ids')='array'
+            and array(select jsonb_array_elements_text(case
+                when jsonb_typeof(q.canonical_identity->'observed_comment_ids')='array'
+                then q.canonical_identity->'observed_comment_ids' else '[]'::jsonb end) order by 1)
+                =array(select c.comment_id from social.instagram_comments c
+                    where c.post_id=p.id and not c.is_missing and c.deleted_at is null order by c.comment_id)
+            and not exists(select 1 from social.instagram_comments c where c.post_id=p.id
+                and not c.is_missing and c.deleted_at is null
+                and (c.source_snapshot_type is distinct from 'full_comments_scrape' or c.scraped_at>q.observed_at
+                    or (nullif(c.source_account,'') is not null and lower(c.source_account)<>%s)))
+            and (%s=false or exists(select 1 from social.instagram_ingestion_receipts d
+                where d.run_id=t.run_id and d.stage='post_details' and d.target_key=t.target_key
+                and d.outcome in ('committed','cached_satisfied') and d.observed_at=p.scraped_at
+                and d.canonical_identity->>'post_id'=p.id::text))
+            order by t.attempts,t.target_key limit 50""",
+            (
+                run["account"],
+                run["account"],
+                Stage.COMMENTS in intent.selected_tasks,
+                item["run_id"],
+                now,
+                now,
+                selection_keys,
+                selection_keys,
+                run["account"],
+                Stage.DETAILS in intent.selected_tasks,
+            ),
+        )
+        candidates = [dict(row) for row in cur.fetchall()]
+        for post in candidates:
+            key = post["target_key"]
+            cur.execute(
+                """select * from social.instagram_comments where post_id=%s and not is_missing
+                and deleted_at is null order by comment_id,id""",
+                (post["id"],),
+            )
+            comments = [dict(row) for row in cur.fetchall()]
+            try:
+                MediaSnapshotLoader._details(
+                    cur, item["run_id"], key, post, selected=Stage.DETAILS in intent.selected_tasks
+                )
+                MediaSnapshotLoader._completion(
+                    cur,
+                    item["run_id"],
+                    run["account"],
+                    key,
+                    post,
+                    comments,
+                    selected=Stage.COMMENTS in intent.selected_tasks,
+                )
+            except MediaIncomplete:
+                continue
+            return {"kind": "target", "stage": Stage.MEDIA.value, "target_key": key}
+        return None
+
     def _current(self, cur, item):
         run = self._execution_run(cur, str(item["run_id"]), item["account"])
         if run["generation"] != item["generation"] or run["state"] not in {"queued", "running"}:
@@ -239,6 +336,10 @@ class WorkflowStore(Store):
                             # Receipts may arrive before lease expiry. Poll active
                             # workers while preserving exact persisted cooldowns.
                             result = {"kind": "wait", "seconds": min(1.0, seconds) if summary["active"] else seconds}
+            if item.get("prefer_media") and phase and phase["stage"] in {"comments", "media"}:
+                # The execution owner requests exactly one turn after draining
+                # its comment batch. Ordinary decisions keep comments priority.
+                result = self._eligible_media(cur, run, item, now) or result
             cur.execute(
                 """insert into social.instagram_ingestion_decisions(execution_id,ordinal,decision)
                 values(%s,%s,%s::jsonb)""",

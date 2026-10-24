@@ -146,6 +146,13 @@ def serialize_media_result(result: MediaResult) -> dict[str, Any]:
     stamp = utc_timestamp(snapshot.observed_at)
     payload = {
         "shortcode": snapshot.shortcode,
+        **({"inventory_fingerprint": dict(snapshot.inventory_fingerprint)} if snapshot.inventory_fingerprint else {}),
+        **(
+            {"result_inventory_fingerprint": dict(snapshot.result_inventory_fingerprint)}
+            if snapshot.result_inventory_fingerprint
+            else {}
+        ),
+        "comment_settlement": dict(snapshot.comment_settlement),
         "ingestion_media": {"version": MEDIA_REPLAY_VERSION, "observed_at": stamp},
         "post_id": snapshot.post_id,
         "canonical_post_id": snapshot.canonical_post_id,
@@ -211,6 +218,7 @@ def _decode_media_result(payload: dict[str, Any]) -> MediaResult:
                 "thumbnail_url expected_media_count comments_complete avatars_complete unavailable_avatars "
                 "include_comment_avatars media comments avatars media_result"
             ),
+            optional="inventory_fingerprint result_inventory_fingerprint comment_settlement",
         )
         marker = _object(payload["ingestion_media"], required="version observed_at")
         if marker["version"] != MEDIA_REPLAY_VERSION:
@@ -242,6 +250,9 @@ def _decode_media_result(payload: dict[str, Any]) -> MediaResult:
             avatars_complete=payload["avatars_complete"],
             include_comment_avatars=payload["include_comment_avatars"],
             unavailable_avatars=tuple(payload["unavailable_avatars"]),
+            inventory_fingerprint=payload.get("inventory_fingerprint"),
+            result_inventory_fingerprint=payload.get("result_inventory_fingerprint"),
+            comment_settlement=payload.get("comment_settlement", {}),
             preserved_storage_keys=keys,
             comments=tuple(
                 CommentMedia(
@@ -616,11 +627,18 @@ def _normalized(parsed: ReplaySource) -> Any:
             "pagination": {"has_next_page": parsed.has_next_page, "end_cursor": parsed.end_cursor},
         }
     elif isinstance(parsed, MediaReplay):
+        apply_supported = parsed.result is not None and parsed.result.snapshot.inventory_fingerprint is not None
         value = {
             "inventory": parsed.inventory,
             "source_unavailable": parsed.source_unavailable,
-            "apply_supported": parsed.result is not None,
-            "apply_limitation": None if parsed.result is not None else MEDIA_APPLY_LIMITATION,
+            "apply_supported": apply_supported,
+            "apply_limitation": None
+            if apply_supported
+            else (
+                "Retained media result lacks a versioned source inventory fingerprint."
+                if parsed.result is not None
+                else MEDIA_APPLY_LIMITATION
+            ),
             "remote_objects_reverified": False,
         }
     elif isinstance(parsed, ParsedSource) and parsed.post:
