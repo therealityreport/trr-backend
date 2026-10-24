@@ -200,3 +200,51 @@ fixture role, leaving final acceptance false for the count-gap case. Refusals
 cover unknown counts, parent/reply errors, absent source proof, extra inventory,
 failed independent post proof, changed bindings/rows and count over-shoot. Earlier
 passing unaffected checks were reused. Ruff passed on all four changed paths.
+
+## Final reviewed runtime and continuing execution
+
+The terminal-certification correction is committed as
+`0d1b50cdead6a1f6e54200e653247ae2e6a7a82f`; independent review found no actionable
+blocker across the four-file batch and exact-parity amendment. v144
+`ig-january-complete-84739870b8b4` deployed to the unchanged verified
+`admin-56995 / main / trr-backend-jobs` target at 01:22:55 Eastern. Runtime SHA-256
+`84739870b8b4a7753100a0435572668055d021c76ff5664946469f3c91f9c205`
+binds the isolated tracked-source candidate. Maintained readiness/API-200 passed.
+Fresh container `ta-01M5P5SPK4T9HYJX7X19RQS8PR` matched all 656 packaged Python
+hashes and the new certification scope. Smoke made no native requests or database
+connections. Provider Git metadata is null for this candidate path; exact source
+revision/hashes and fresh-container verification establish deployed identity.
+
+Local handover reaped PID 65054 and verified no old release references before one
+bootstrap. PID 68010 and the new cwd matched. Follow-up verified one coordinator
+lease, unchanged run generation/intent and policy revision 7 / six workers. Prior
+source owners and deadlines were preserved; no checkpoint or owner was forced.
+The v143 release remains the rollback. Older local releases were moved to actual
+Trash after zero-reference checks; no rollback/source evidence was deleted.
+
+At 01:24:05 Eastern: all 286 detail targets were settled (285 cached, one newly
+committed), 223 comment targets were settled and 63 unresolved; media had one
+commit and 285 unresolved. Fresh public pages were verified on the preceding
+release at 01:21:47; its unchanged comment/media execution code is reused in the
+final candidate, rather than repeating passing source-path checks.
+
+The installed maintained certifier ran read-only against the exact live binding
+at 01:24:07. It inventoried all 1,103 stage targets and returned
+`final_acceptance=false`: 212 currently reported count-gap posts, total 10,778.
+This is an interim running-run snapshot, not a terminal public-source limitation.
+No native requests, database mutations or storage writes occurred. The other
+whole-run gates remain pending until traversal/media and bounded recovery settle.
+The existing local worker will execute those steps and the terminal full audit
+through its configured lifecycle; no recurring automation was created.
+
+Source, local, cloud, read-only certification and rollback receipts for this
+final batch are under the private `certification-rollout/` evidence directory.
+TRR-APP build is not applicable; public API shape and schema are unchanged.
+Full-history remains disabled. The January run and whole-run verification remain
+in progress; a first media commit or working public endpoint is not final
+acceptance.
+
+Final-release follow-up at 01:25:12 Eastern verified its sole coordinator lease
+and fresh native page commit at 01:25:11.161, after the final handover. The 223/63
+comment and 1/285 media split remained unchanged at that snapshot. Execution is
+continuing under the installed v144 candidate.
