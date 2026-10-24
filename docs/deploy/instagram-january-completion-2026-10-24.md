@@ -96,3 +96,44 @@ Fix-only independent review closed the cursor-starvation finding. A read-only
 full snapshot for the live candidate also loaded successfully with two comment
 attachments and one selected avatar. The worker was drained during query repair;
 its saved run state and source progress were preserved.
+
+## Retained evidence and productive attempt closure
+
+The v142 correction (`ig-january-complete-c906c4c7f3c7`) deployed to
+`admin-56995 / main / trr-backend-jobs` at 00:51:30 Eastern. Maintained readiness
+and the fresh-container smoke passed; 654 packaged Python hashes matched.
+Local PID 58020 acquired the sole coordinator lease after the recorded drain.
+At 00:58:37 Eastern it had resumed fresh source traffic, preserving six comment
+workers and policy revision 7. The later 01:00:33 snapshot had 218 settled comment
+targets and 68 unresolved. No media attempt had yet started at that snapshot.
+The superseded v141 local release was moved to actual Trash only after checking
+for zero live references; the healthy v139 rollback release remains.
+
+The next source batch adds offline-first reparsing through the existing fenced
+ReplayCommands path. It streams retained public payloads in batches of 128,
+without loading page checkpoints, and reads one canonical inventory per target.
+It audits earlier roots too; historical observations never advance the current
+checkpoint or settlement, and cannot undo newer/unknown missing markers or
+explicit deletions. A durable summary binds checkpoint, parser and audit source
+fingerprints. Every settled target is audited, including count-parity targets and
+two-pass exhausted targets. Summary lookups are batched. An incomplete offline
+stream raises a control conflict and cannot authorize a fresh source request.
+
+A live offline audit of DS-H2Lhj9BN, before the historical expansion, matched 35
+retained pages and 34 native IDs in 1.551 seconds, with zero replay writes or
+source requests. Existing evidence and canonical data stayed intact.
+
+Productive exhausted attempts receive an audited twelve-attempt extension only
+when their latest owner generation committed new native IDs or more exhausted
+lanes than its prior generation (or has the first valid page). Repeated identical
+root proof does not qualify. The journal preserves exact bindings and progress
+scalars. Ownership, checkpoints, rows, counters, retry deadlines, failure codes
+and the two-pass no-improvement limit remain protected.
+
+Retained/recovery SQL checks: 26 passed across one 24-test batch and two focused
+checks. Productive-budget SQL checks: 15 passed. Parent completion integration:
+1 passed. Counts overlap with earlier evidence and must not be summed as a full
+suite. The independent review initially found tombstone resurrection, historical
+root exclusion and count-parity audit omission; this batch addresses those
+findings together. Candidate source is distinct from installed/runtime status;
+rollout evidence is appended after verification.
