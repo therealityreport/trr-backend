@@ -17,6 +17,7 @@ from uuid import UUID
 CERTIFICATION_VERSION = "instagram-january-certification-v1"
 GATE_VERSION = "instagram-january-gates-v1"
 MEDIA_INVENTORY_VERSION = "instagram-media-inventory-v1"
+OBSERVED_INVENTORY_SCOPE = "complete_observed_inventory_v1"
 
 
 def digest(value):
@@ -88,6 +89,47 @@ def snapshot_fingerprint(snapshot):
 
 def _hash(value):
     return isinstance(value, str) and re.fullmatch(r"[a-f0-9]{64}", value) is not None
+
+
+def _exact_count_parity(settlement):
+    return (
+        all(
+            type(settlement.get(field)) is int and settlement[field] >= 0
+            for field in ("expected_total", "observed_total", "count_gap")
+        )
+        and settlement["count_gap"] == 0
+        and settlement["expected_total"] == settlement["observed_total"]
+    )
+
+
+def _known_observed_settlements(proof):
+    """Media-only scope still requires known totals and complete native topology."""
+    if proof["global_validation"]["status"] != "passed":
+        return False
+    for entry in proof["target_results"]:
+        settlement = entry["settlement"]
+        if not all(
+            type(settlement.get(field)) is int and settlement[field] >= 0
+            for field in ("expected_total", "observed_total", "count_gap")
+        ):
+            return False
+        gap = settlement["count_gap"]
+        if (
+            gap != max(settlement["expected_total"] - settlement["observed_total"], 0)
+            or settlement.get("basis") != ("public_native_exhaustion" if gap else "count_parity")
+            or entry["diagnostics"] != (["zero_gap_settlement_required"] if gap else [])
+            or entry["status"] != ("pending" if gap else "passed")
+            or entry["source_page_evidence_complete"] is not True
+            or entry["native_comments"] != settlement["observed_total"]
+            or entry["native_comments"] != len(entry["media_binding"]["observed_comment_ids"])
+        ):
+            return False
+    return True
+
+
+def _stable_audit_hash(report):
+    material = {key: value for key, value in report.items() if key != "observed_at"}
+    return hashlib.sha256(json.dumps(material, sort_keys=True, default=str, separators=(",", ":")).encode()).hexdigest()
 
 
 def certify(
@@ -169,10 +211,7 @@ def certify(
                 parity = (
                     exact_targets
                     and not report["count_gaps"]
-                    and all(
-                        type(entry["settlement"].get("count_gap")) is int and entry["settlement"]["count_gap"] == 0
-                        for entry in targets
-                    )
+                    and all(_exact_count_parity(entry["settlement"]) for entry in targets)
                 )
                 traversal = (
                     exact_targets
@@ -187,13 +226,27 @@ def certify(
                 valid = valid and all(
                     entry["status"] == "passed"
                     and not entry["diagnostics"]
-                    and type(entry["settlement"].get("count_gap")) is int
-                    and entry["settlement"]["count_gap"] == 0
+                    and _exact_count_parity(entry["settlement"])
                     and entry["source_page_evidence_complete"] is True
                     for entry in targets
                 )
             if name == "media":
-                valid = valid and report["comment_proof_mode"] == "strict_aggregate"
+                if report["comment_proof_mode"] == OBSERVED_INVENTORY_SCOPE:
+                    valid = valid and report.get("inventory_scope") == OBSERVED_INVENTORY_SCOPE
+                    valid = valid and _known_observed_settlements(before["reports"]["comments"])
+                    valid = (
+                        valid
+                        and gates["posts"]["status"] == "passed"
+                        and gates["comments_traversal_and_parentage"]["status"] == "passed"
+                    )
+                    valid = valid and report.get("comment_observed_inventory_sha256") == _stable_audit_hash(
+                        before["reports"]["comments"]
+                    )
+                    valid = valid and report.get("independent_post_proof_sha256") == _stable_audit_hash(
+                        before["reports"]["posts"]
+                    )
+                else:
+                    valid = valid and report["comment_proof_mode"] == "strict_aggregate"
                 valid = valid and all(
                     entry["inventory_fingerprint"]["version"] == MEDIA_INVENTORY_VERSION
                     and _hash(entry["inventory_fingerprint"]["sha256"])

@@ -14,6 +14,7 @@ import json
 import re
 from collections import defaultdict
 from contextlib import nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 from uuid import UUID
@@ -592,6 +593,97 @@ def subset_target_entry(proof, key, check, pending):
     return entry
 
 
+OBSERVED_INVENTORY_SCOPE = "complete_observed_inventory_v1"
+
+
+@dataclass(frozen=True)
+class ObservedInventoryProof:
+    comments: dict
+    posts: dict
+    errors: tuple[str, ...]
+    comment_sha256: str
+    post_sha256: str
+
+
+def stable_proof_hash(proof):
+    return digest({key: value for key, value in proof.items() if key != "observed_at"})
+
+
+def observed_inventory_proof(proof, post_proof, release, listing_hash, keys):
+    """Validate every observed target; source parity remains a separate gate."""
+    errors = []
+    comments_by_key, posts_by_key = {}, {}
+    comment_hash = post_hash = ""
+    try:
+        comment_hash, post_hash = stable_proof_hash(proof), stable_proof_hash(post_proof)
+        # Reuse the full envelope/schema validation, without admitting a subset.
+        errors.extend(subset_envelope_errors(proof, release, listing_hash, keys, comment_hash, comment_hash))
+        if errors:
+            return ObservedInventoryProof({}, {}, tuple(sorted(set(errors))), comment_hash, post_hash)
+        valid_post = (
+            post_proof.get("status") == "passed"
+            and post_proof.get("operator_scope") == "post_records_only_not_final_certifier"
+            and post_proof.get("run_id") == common.RUN
+            and post_proof.get("intent_hash") == common.INTENT
+            and post_proof.get("release") == str(release)
+            and post_proof.get("full_history_gate_closed") is True
+            and not post_proof.get("failures")
+            and not post_proof.get("pending")
+            and post_proof.get("audited_january_count") == post_proof.get("verified_post_count") == len(keys)
+        )
+        post_rows = post_proof.get("verified", [])
+        valid_post = valid_post and len(post_rows) == len(keys) and {row["shortcode"] for row in post_rows} == set(keys)
+        if not valid_post:
+            errors.append("observed_inventory_independent_post_proof_required")
+        else:
+            posts_by_key = {row["shortcode"]: row for row in post_rows}
+            if any(
+                not all(
+                    _certificate_hash(row.get(field))
+                    for field in ("post_row_sha256", "sidecar_sha256", "canonical_sha256")
+                )
+                for row in post_rows
+            ):
+                errors.append("observed_inventory_post_fingerprints_missing")
+        entries = proof["target_results"]
+        comments_by_key = {row["shortcode"]: row for row in proof["verified"]}
+        if (
+            proof.get("failures")
+            or proof.get("pending")
+            or len(comments_by_key) != len(keys)
+            or len(proof["verified"]) != len(keys)
+            or set(comments_by_key) != set(keys)
+        ):
+            errors.append("observed_inventory_all_native_targets_required")
+        gaps = {
+            row["shortcode"]: {key: value for key, value in row.items() if key != "shortcode"}
+            for row in proof["count_gaps"]
+        }
+        expected_gaps = {}
+        for entry in entries:
+            settlement = entry["settlement"]
+            if not _certificate_settlement(settlement) or not _deep_comment_shape(entry, required=True):
+                errors.append("observed_inventory_known_native_settlement_required")
+                continue
+            gap = settlement["count_gap"]
+            if gap:
+                expected_gaps[entry["shortcode"]] = settlement
+            allowed = ["zero_gap_settlement_required"] if gap else []
+            if (
+                entry["diagnostics"] != allowed
+                or entry["status"] != ("pending" if gap else "passed")
+                or entry["source_page_evidence_complete"] is not True
+                or entry["native_comments"] != settlement["observed_total"]
+                or entry["native_comments"] != len(entry["media_binding"]["observed_comment_ids"])
+            ):
+                errors.append("observed_inventory_native_traversal_or_parentage_unresolved")
+        if gaps != expected_gaps or proof.get("status") != ("pending" if expected_gaps else "passed"):
+            errors.append("observed_inventory_count_gap_manifest_mismatch")
+    except (KeyError, TypeError, ValueError, AttributeError):
+        errors.append("observed_inventory_full_proof_shape_invalid")
+    return ObservedInventoryProof(comments_by_key, posts_by_key, tuple(sorted(set(errors))), comment_hash, post_hash)
+
+
 def verify_comment_proof(
     row,
     comments,
@@ -605,11 +697,24 @@ def verify_comment_proof(
     audited_keys=None,
     comment_proof_sha256=None,
     expected_comment_proof_sha256=None,
+    observed_inventory=None,
 ):
     if proof is None:
         pending.append("separate_deep_comment_proof_required")
         return
-    if allow_verified_comment_subset:
+    if observed_inventory is not None:
+        if not isinstance(observed_inventory, ObservedInventoryProof):
+            check(False, "observed_inventory_versioned_proof_required")
+            return
+        if observed_inventory.errors:
+            for code in observed_inventory.errors:
+                check(False, code)
+            return
+        entry = observed_inventory.comments.get(row["target_key"])
+        if entry is None:
+            check(False, "observed_inventory_current_target_missing")
+            return
+    elif allow_verified_comment_subset:
         errors = subset_envelope_errors(
             proof, release, listing_hash, audited_keys, comment_proof_sha256, expected_comment_proof_sha256
         )
@@ -1063,6 +1168,7 @@ def audit_target(
     audited_keys=None,
     comment_proof_sha256=None,
     expected_comment_proof_sha256=None,
+    observed_inventory=None,
 ):
     from trr_backend.ingestion.domain import ReplayUnavailable
     from trr_backend.ingestion.evidence import Evidence
@@ -1126,6 +1232,14 @@ def audit_target(
             identity.get("inventory_fingerprint") == current_inventory,
             "receipt_inventory_fingerprint_changed_or_missing",
         )
+        if observed_inventory is not None and not observed_inventory.errors:
+            independent = observed_inventory.posts.get(key) or {}
+            for field, value in (
+                ("post_row_sha256", post),
+                ("sidecar_sha256", sidecar),
+                ("canonical_sha256", canonical),
+            ):
+                check(independent.get(field) == digest(value), "observed_inventory_independent_" + field + "_changed")
         raw = source_inventory(post, sidecar, canonical, source, saved_assets, check)
         manifest = result.post_fields["asset_manifest"]
         for field, value in result.post_fields.items():
@@ -1206,6 +1320,7 @@ def audit_target(
             audited_keys=audited_keys,
             comment_proof_sha256=comment_proof_sha256,
             expected_comment_proof_sha256=expected_comment_proof_sha256,
+            observed_inventory=observed_inventory,
         )
         selected = {
             str(comment["comment_id"])
@@ -1317,6 +1432,8 @@ def inspect(
     allow_verified_comment_subset=False,
     comment_proof_sha256=None,
     expected_comment_proof_sha256=None,
+    complete_observed_inventory=False,
+    post_proof=None,
 ):
     from trr_backend.ingestion.queries import Queries
 
@@ -1343,6 +1460,14 @@ def inspect(
     common.require(
         len(keys) == len(set(keys)) == listing["independently_verified_january_count"] and bool(keys),
         "audited_keys_mismatch",
+    )
+    common.require(
+        not (complete_observed_inventory and allow_verified_comment_subset), "observed_inventory_subset_forbidden"
+    )
+    observed_inventory = (
+        observed_inventory_proof(comment_proof, post_proof, release, listing_hash, keys)
+        if complete_observed_inventory
+        else None
     )
     targets = common.rows(
         cur,
@@ -1450,6 +1575,7 @@ def inspect(
                 audited_keys=keys,
                 comment_proof_sha256=comment_proof_sha256,
                 expected_comment_proof_sha256=expected_comment_proof_sha256,
+                observed_inventory=observed_inventory,
             )
         )
     reconcile_plans(results)
@@ -1464,7 +1590,12 @@ def inspect(
         "status": "blocked" if failures else "pending" if pending or allow_verified_comment_subset else "passed",
         "run_id": common.RUN,
         "intent_hash": common.INTENT,
-        "comment_proof_mode": "verified_target_subset" if allow_verified_comment_subset else "strict_aggregate",
+        "comment_proof_mode": OBSERVED_INVENTORY_SCOPE
+        if complete_observed_inventory
+        else ("verified_target_subset" if allow_verified_comment_subset else "strict_aggregate"),
+        "inventory_scope": OBSERVED_INVENTORY_SCOPE if complete_observed_inventory else None,
+        "comment_observed_inventory_sha256": observed_inventory.comment_sha256 if observed_inventory else None,
+        "independent_post_proof_sha256": observed_inventory.post_sha256 if observed_inventory else None,
         "observed_at": at.isoformat(),
         "release": str(release),
         "full_history_gate_closed": True,

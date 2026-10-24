@@ -69,7 +69,7 @@ def evidence():
                 "shortcode": "ABC",
                 "status": "passed",
                 "diagnostics": [],
-                "settlement": {"count_gap": 0},
+                "settlement": {"count_gap": 0, "expected_total": 1, "observed_total": 1, "basis": "count_parity"},
                 "source_page_evidence_complete": True,
             }
         ],
@@ -361,3 +361,256 @@ def test_applied_attachment_uses_only_maintained_package_imports():
             is True
         )
     assert codes == []
+
+
+def observed_gap_fixture():
+    from scripts.ingestion.january_audit import comments, media
+    from scripts.ingestion.january_audit.offline_media import LISTING_HASH, OBSERVED, RELEASE
+
+    values, source, result = offline_comments.certificate_fixture()
+    values["allow_verified_comment_subset"] = False
+    values["audited_keys"] = ["Fixture"]
+    row = values["row"]
+    settlement = {"basis": "public_native_exhaustion", "count_gap": 2, "expected_total": 3, "observed_total": 1}
+    row["comments_identity"]["settlement"] = settlement
+    old = values["comment_proof"]
+    verified = deepcopy(old["verified"][0])
+    verified.update(settlement=settlement, media_binding=media.comment_binding(row, values["comments"]))
+    target = comments.target_certificate(
+        "Fixture",
+        "committed",
+        verified,
+        [],
+        None,
+        settlement,
+        old["target_results"][0]["source_page_evidence_manifest"],
+    )
+    proof = {
+        **old,
+        **comments.certificate_envelope(
+            ["Fixture"],
+            RELEASE,
+            LISTING_HASH,
+            manifest={"run_id": common.RUN, "stage": "comments", "discovery_complete": True, "sealed_at": OBSERVED},
+        ),
+        "target_results": [target],
+        "verified": [verified],
+        "verified_targets": 1,
+        "audited_january_count": 1,
+        "status": "pending",
+        "failures": [],
+        "pending": [],
+        "count_gaps": [{"shortcode": "Fixture", **settlement}],
+    }
+    values["comment_proof"] = proof
+    post_proof = {
+        "status": "passed",
+        "operator_scope": "post_records_only_not_final_certifier",
+        "run_id": common.RUN,
+        "intent_hash": common.INTENT,
+        "release": RELEASE,
+        "full_history_gate_closed": True,
+        "failures": [],
+        "pending": [],
+        "audited_january_count": 1,
+        "verified_post_count": 1,
+        "verified": [
+            {
+                "shortcode": "Fixture",
+                "post_row_sha256": posts.digest(row["post"]),
+                "sidecar_sha256": posts.digest(row["sidecar"]),
+                "canonical_sha256": posts.digest(row["canonical"]),
+            }
+        ],
+    }
+    return values, source, result, post_proof
+
+
+def inspect_observed_fixture(values, post_proof):
+    from scripts.ingestion.january_audit import media
+    from scripts.ingestion.january_audit.offline_media import AT, LISTING_HASH, RELEASE
+
+    class Cursor:
+        connection = object()
+
+        def execute(self, sql, args=()):
+            assert sql.startswith(("show ", "select "))
+
+        def fetchone(self):
+            return {"transaction_read_only": "on", "transaction_isolation": "repeatable read", "at": AT}
+
+    def rows(cur, sql, args=()):
+        cur.execute(sql, args)
+        if "from social.instagram_ingestion_targets t" in sql:
+            return [values["row"]]
+        if "join social.instagram_comments c" in sql:
+            return values["comments"]
+        if "from social.social_post_media_assets" in sql:
+            return values["saved_assets"]
+        if "from social.avatar_registry" in sql:
+            return values["registry"]
+        raise AssertionError("unexpected_observed_fixture_query")
+
+    listing = {
+        "run_id": common.RUN,
+        "intent_hash": common.INTENT,
+        "listing_proof": {"independent_native_membership_verified": True, "boundary_verified": True},
+        "reported_january_keys": ["Fixture"],
+        "independently_verified_january_count": 1,
+    }
+    progress = {"intent": {}, "intent_hash": common.INTENT, "generation": 1, "state": "completed"}
+    with (
+        patch("trr_backend.ingestion.queries.Queries.progress", return_value=progress),
+        patch.object(common, "rows", side_effect=rows),
+    ):
+        return media.inspect(
+            Cursor(),
+            {"successor_intent": {}},
+            RELEASE,
+            listing,
+            values["comment_proof"],
+            LISTING_HASH,
+            complete_observed_inventory=True,
+            post_proof=post_proof,
+        )
+
+
+@pytest.mark.parametrize("state,stop", [("running", True), ("queued", True), ("completed", False), ("blocked", False)])
+def test_observed_inventory_terminal_gap_proceeds_past_preflight(state, stop):
+    from scripts.ingestion.certify_january import active_gap_preflight_stop, preflight_report
+
+    targets = [
+        {"stage": "comments", "target_key": "ABC", "outcome": "unresolved", "receipt_settlement": {"count_gap": 2}}
+    ]
+    report = preflight_report({"state": state}, targets, common.context())
+    assert active_gap_preflight_stop(report) is stop
+    assert report["final_acceptance"] is False
+
+
+@pytest.mark.parametrize("failure", ["unknown", "parent", "reply", "source", "extra", "post", "saved"])
+def test_observed_inventory_refuses_unknown_or_incomplete_native_proof(failure):
+    from scripts.ingestion.january_audit import media
+
+    values, _, _, post_proof = observed_gap_fixture()
+    proof = values["comment_proof"]
+    if failure == "unknown":
+        proof["target_results"][0]["settlement"]["expected_total"] = None
+    if failure == "parent":
+        proof["target_results"][0]["diagnostics"].append("native_parent_uuid_mismatch")
+    if failure == "reply":
+        proof["target_results"][0]["diagnostics"].append("native_lanes_or_settlement_incomplete")
+    if failure == "source":
+        proof["target_results"][0]["source_page_evidence_complete"] = False
+    if failure == "extra":
+        proof["verified"].append({**deepcopy(proof["verified"][0]), "shortcode": "Foreign"})
+    if failure == "post":
+        post_proof["status"] = "blocked"
+    if failure == "saved":
+        values["comments"][0]["parent_comment_external_id"] = "missing-parent"
+    report = inspect_observed_fixture(values, post_proof)
+    assert report["status"] != "passed" and not report["verified"]
+    assert report["byte_read_plan"]["objects"] == []
+    assert report["comment_proof_mode"] == media.OBSERVED_INVENTORY_SCOPE
+
+
+def test_observed_inventory_gap_all_media_and_whole_bytes_pass_without_acceptance(monkeypatch):
+    import io
+    from urllib.parse import urlsplit
+
+    from PIL import Image
+
+    from scripts.ingestion.january_audit import offline_media
+    from scripts.ingestion.january_audit.offline_hosted import Body, Response
+
+    def encoded(fmt):
+        value = io.BytesIO()
+        Image.new("RGB", (12, 8), "red").save(value, format="JPEG" if fmt.lower() in {"jpg", "jpeg"} else fmt.upper())
+        return value.getvalue()
+
+    jpeg_hash = hashlib.sha256(encoded("jpeg")).hexdigest()
+    monkeypatch.setattr(offline_media, "SHA", jpeg_hash)
+    original_host = offline_media.PureStorage.host
+
+    def measured_host(self, *args, **kwargs):
+        original, display = original_host(self, *args, **kwargs)
+        for entry in [original, *display.values()]:
+            body = encoded(entry["format"])
+            entry["bytes"] = len(body)
+            if "sha256" in entry:
+                entry["sha256"] = hashlib.sha256(body).hexdigest()
+        return original, display
+
+    monkeypatch.setattr(offline_media.PureStorage, "host", measured_host)
+    values, _, _, post_proof = observed_gap_fixture()
+    before_comments = deepcopy(values["comment_proof"])
+    report = inspect_observed_fixture(values, post_proof)
+    assert report["status"] == "passed" and report["verified_targets"] == 1, report["failures"]
+    assert values["comment_proof"] == before_comments
+    plan = hosted.physical_plan(report, "https://media.example")
+    by_key = {item["storage_key"]: item for item in plan}
+    calls = []
+
+    class Client:
+        def get_object(self, *, Bucket, Key):  # noqa: N803 - exact boto3 keyword contract.
+            assert Bucket == "fixture-bucket"
+            calls.append(("storage", Key))
+            item = by_key[Key]
+            fmt = item["format"] or "jpeg"
+            body = encoded(fmt)
+            return {
+                "Body": Body(body),
+                "ContentLength": len(body),
+                "ContentType": "image/jpeg" if fmt in {"jpg", "jpeg"} else "image/" + fmt,
+                "ResponseMetadata": {"HTTPStatusCode": 200},
+            }
+
+    class Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def get(self, url, **kwargs):
+            assert kwargs["stream"] and not kwargs["allow_redirects"]
+            key = urlsplit(url).path.lstrip("/")
+            calls.append(("public", key))
+            fmt = by_key[key]["format"] or "jpeg"
+            return Response(encoded(fmt), "image/jpeg" if fmt in {"jpg", "jpeg"} else "image/" + fmt)
+
+    with patch("requests.Session", Session):
+        objects = [hosted.inspect_object(item, Client(), SimpleNamespace(bucket="fixture-bucket")) for item in plan]
+    assert all(item["status"] == "verified" for item in objects), objects
+    assert len(calls) == 2 * len(plan)
+    snapshot, _, _ = evidence()
+    listing = snapshot["reports"]["listing"]
+    listing.update(reported_january_keys=["Fixture"], native_membership={"Fixture": {"native_id": "123"}})
+    snapshot["reports"].update(posts=post_proof, comments=values["comment_proof"], media=report)
+    snapshot["physical_plan"] = plan
+    certificate = acceptance(snapshot, deepcopy(snapshot), {"status": "passed", "failures": [], "objects": objects})
+    for name in ("posts", "comments_traversal_and_parentage", "media", "hosted_bytes", "unchanged_evidence"):
+        assert certificate["gates"][name]["status"] == "passed", certificate
+    assert certificate["gates"]["source_count_parity"]["status"] == "blocked"
+    assert certificate["gates"]["comments"]["status"] == "blocked"
+    assert certificate["final_acceptance"] is False
+
+
+def test_observed_inventory_independent_post_row_proof_must_match_current_rows():
+    values, _, _, post_proof = observed_gap_fixture()
+    post_proof["verified"][0]["post_row_sha256"] = "f" * 64
+    report = inspect_observed_fixture(values, post_proof)
+    assert report["status"] == "blocked"
+    assert "observed_inventory_independent_post_row_sha256_changed" in report["failures"][0]["codes"]
+    assert report["byte_read_plan"]["objects"] == []
+
+
+def test_exact_parity_rejects_observed_count_above_expected_without_blocking_media_inspection():
+    before, after, byte_report = evidence()
+    for snapshot in (before, after):
+        snapshot["reports"]["comments"]["target_results"][0]["settlement"].update(expected_total=0, observed_total=1)
+    result = acceptance(before, after, byte_report)
+    assert result["gates"]["source_count_parity"]["status"] == "blocked"
+    assert result["gates"]["comments"]["status"] == "blocked"
+    assert result["gates"]["media"]["status"] == result["gates"]["hosted_bytes"]["status"] == "passed"
+    assert result["gates"]["comments_traversal_and_parentage"]["status"] == "passed"
+    assert result["final_acceptance"] is False

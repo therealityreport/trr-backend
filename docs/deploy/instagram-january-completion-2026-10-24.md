@@ -137,3 +137,66 @@ suite. The independent review initially found tombstone resurrection, historical
 root exclusion and count-parity audit omission; this batch addresses those
 findings together. Candidate source is distinct from installed/runtime status;
 rollout evidence is appended after verification.
+
+## Verified v143 rollout and first per-post media commit
+
+Committed source `8aa7859b237d9c9028bfad9820dfe030aac448d2` deployed as v143
+`ig-january-complete-a49b6547901f` to the same verified Modal target at 01:05:13
+Eastern. The candidate tracked-source snapshot is bound by runtime SHA-256
+`a49b6547901f1191999cd16de32fbc85eeb4284ad193cf6ce763070e8d44074b`.
+Provider Git metadata is null for this isolated candidate path; the explicit
+source manifest and all 656 packaged Python hashes matched in fresh container
+`ta-01M5P4RZY4DAQ4ZATCDYCCP0FR`. Maintained readiness and first API canary passed.
+Independent fix-only review found no remaining actionable blocker. The five
+existing completion-hook checks also passed after the budget entry integration.
+
+The expanded live offline audit again matched 35 pages / 34 native IDs for
+DS-H2Lhj9BN. It wrote only idempotent audit summaries/page-audit journal records,
+with zero replay writes, no source requests and no checkpoint/coverage changes.
+
+While 65 comment targets remained unresolved, the v142 local worker processed
+DS-H2Lhj9BN media and committed receipt
+`b24a1e12-781a-48d0-a36a-02c5c073306d` at 01:10:44.916 Eastern. It binds
+`instagram-media-inventory-v1` SHA-256
+`0c35faf0572a7f90b73fdf2bc3874755e0cfd8eb6eefecfbe563a798dc425451`.
+Its retained comment settlement still reports 34 observed / 35 expected / gap 1.
+This proves a per-post media turn without certifying source parity. All comment
+children were drained before it ran, and six comment children resumed afterward.
+
+Recorded v143 local handover reaped old PID 58020 and verified zero old release
+references before one bootstrap. New PID 65054 and its release cwd matched; the
+subsequent read verified the sole coordinator lease, unchanged intent/generation,
+policy revision 7 / six workers, and preserved source owners/checkpoints. Total
+immutable pages rose from 74,857 before stop to 74,858 before activation. The
+01:12:29 snapshot had 221 settled comment targets / 65 unresolved and one media
+commit / 285 unresolved. The v142 release remains the healthy rollback; older
+v139 was moved to actual Trash only after a zero-reference check.
+
+No final certificate or public-source limitation is asserted yet. The run is
+still traversing, and first media success does not establish whole-run bytes.
+The last source correction separates terminal known-media/byte certification
+from count parity; rollout of that correction is recorded below when verified.
+
+## Terminal certification gate correction
+
+Active unfinished runs retain the cheap known-gap preflight. Completed or blocked
+runs now enter the complete audits even when a known source gap remains. An
+explicit `complete_observed_inventory_v1` media proof requires the entire January
+key set, passing independent post fingerprints, all verified observed native IDs,
+parents, pages, clocks, attachments and media bindings, and known integer
+settlements. Only positive public-native-exhaustion count parity diagnostics are
+permitted; unknown counts or any other inventory discrepancy still block the
+media proof and its byte plan. The original comments report is unchanged.
+
+Hosted verification then reads every required observed role, checks all full
+bodies/hashes and decodes them; source count parity and aggregate comments remain
+blocked. Final acceptance remains the conjunction of all gates. Exact parity now
+requires integer expected_total == observed_total; a clamped zero count_gap does
+not make an over-count acceptable. Worker settlement and traversal are unchanged.
+
+Fourteen new focused cases have passing evidence, including actual media audit
+through physical planning and full object read/hash/decode for every required
+fixture role, leaving final acceptance false for the count-gap case. Refusals
+cover unknown counts, parent/reply errors, absent source proof, extra inventory,
+failed independent post proof, changed bindings/rows and count over-shoot. Earlier
+passing unaffected checks were reused. Ruff passed on all four changed paths.

@@ -96,7 +96,7 @@ def storage_binding(path, expected_sha256, config):
 
 
 def read_preflight(binding, context):
-    """Bounded current target inventory; known source gaps never trigger page scans."""
+    """Bounded target inventory; active known gaps avoid deep scans."""
     from contextlib import nullcontext
 
     from psycopg2.extras import RealDictCursor
@@ -200,6 +200,7 @@ def preflight_report(progress, targets, context):
         "intent_hash": context.intent_hash,
         "generation": context.generation,
         "run_state": progress["state"],
+        "terminal_run": progress["state"] in {"completed", "blocked"},
         "full_history_gate_closed": True,
         "gates": gates,
         "reported_january_keys": reported,
@@ -218,6 +219,10 @@ def preflight_report(progress, targets, context):
     }
 
 
+def active_gap_preflight_stop(preflight):
+    return bool(preflight["known_count_gaps"]) and not preflight["terminal_run"]
+
+
 def read_snapshot(binding, context, bases):
     from psycopg2.extras import RealDictCursor
 
@@ -232,7 +237,16 @@ def read_snapshot(binding, context, bases):
                 listing_hash = posts.digest({key: value for key, value in listing.items() if key != "observed_at"})
                 post_report = posts.inspect(cur, binding, ROOT, listing)
                 comment_report = comments.inspect(cur, binding, ROOT, listing, listing_hash)
-                media_report = media.inspect(cur, binding, ROOT, listing, comment_report, listing_hash)
+                media_report = media.inspect(
+                    cur,
+                    binding,
+                    ROOT,
+                    listing,
+                    comment_report,
+                    listing_hash,
+                    complete_observed_inventory=True,
+                    post_proof=post_report,
+                )
                 plan = hosted.physical_plan(media_report, bases) if media_report["status"] == "passed" else []
         return {
             "reports": {"listing": listing, "posts": post_report, "comments": comment_report, "media": media_report},
@@ -286,7 +300,7 @@ def run(args):
         raise common.GuardError("full_history_gate_open")
     context = common.AuditContext(args.run_id, args.intent_hash, args.account, start, end, args.generation)
     preflight = read_preflight(binding, context)
-    if preflight["known_count_gaps"]:
+    if active_gap_preflight_stop(preflight):
         preflight["source_sha256"] = code_hash()
         return preflight
     config = get_hosted_media_storage_config()
