@@ -1242,9 +1242,10 @@ def _redact_snapshots(post_id: str, conn: Any) -> None:
     )
     pg.execute(
         "update social.reddit_work_targets set result='{}'::jsonb,checkpoint='{}'::jsonb,error=null "
-        "where reddit_post_id=%s or run_id in (select r.id from social.reddit_refresh_runs r "
+        "where (reddit_post_id=%s or run_id in (select r.id from social.reddit_refresh_runs r "
         "where (r.community_id,r.season_id) in (select community_id,season_id "
-        "from social.reddit_period_post_matches where reddit_post_id=%s))",
+        "from social.reddit_period_post_matches where reddit_post_id=%s))) "
+        "and (result is distinct from '{}'::jsonb or checkpoint is distinct from '{}'::jsonb or error is not null)",
         [post_id, post_id],
         conn=conn,
     )

@@ -944,3 +944,32 @@ def test_author_redaction_stays_within_locked_account_scope(database, monkeypatc
     assert target["author"] is None
     count = pg.fetch_one("select count(*) as n from social.reddit_author_tombstones")["n"]
     assert count == (1 if author == "RealAccount" else 0)
+
+
+@pytest.mark.parametrize("field", ["checkpoint", "result", "error"])
+def test_snapshot_redaction_does_not_rewrite_already_scrubbed_targets(database, field):
+    add_post("post1")
+    add_post("post2")
+    run = owned(database)
+    run_id = str(run["id"])
+    pg.execute(
+        "insert into social.reddit_period_post_matches(community_id,season_id,period_key,reddit_post_id) "
+        "values(%s,%s,'episode-1','post1')",
+        [database.community, database.season],
+    )
+    for post_id in ("post1", "post2"):
+        capture.ensure_target(run_id, "comments", post_id, post_id=post_id)
+    value = "private error" if field == "error" else json.dumps({"private": "source"})
+    pg.execute(f"update social.reddit_work_targets set {field}=%s where run_id=%s", [value, run_id])
+    with pg.transaction() as conn:
+        workflows._redact_snapshots("post1", conn)
+    rows = pg.fetch_all(
+        "select id,xmin::text as version,result,checkpoint,error from social.reddit_work_targets where run_id=%s",
+        [run_id],
+    )
+    assert len(rows) == 2
+    assert all(row["result"] == {} and row["checkpoint"] == {} and row["error"] is None for row in rows)
+    with pg.transaction() as conn:
+        workflows._redact_snapshots("post1", conn)
+    after = pg.fetch_all("select id,xmin::text as version from social.reddit_work_targets where run_id=%s", [run_id])
+    assert {row["id"]: row["version"] for row in after} == {row["id"]: row["version"] for row in rows}
