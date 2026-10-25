@@ -1243,3 +1243,45 @@ actual packaged import/gate smoke pass; live continuation now commits pages.
 TRR-APP build: not applicable (backend/local scraper only, no app/API contract
 change). SQL uses existing target/journal fields; no migration or SQL ownership
 change. Modal remains v161 by the user's explicit local-only selection.
+
+### Parallel local recovery activated and observed, 11:17 UTC
+
+The local-only controller source, exact installed-source qualification and
+generated manifest received independent acceptance. Manifest
+1c4ef2f8ca4e8bc7e9f5239229d9c3739f712f9dafff24d67b74f0bdd475b3f9
+retains237allowed targets,286members,all26prior journal identities/18adoptions,
+eight two-complete-unchanged exclusions and no initial outstanding recovery roots.
+Local authority is established by the reviewed source/package/install/binding;
+the cloud v161 identity is retained separately. No cloud deployment is required
+or fabricated. The epoch module retains the accepted lease/helper/restart fixes
+and all finite bounds. Maintained final certification already supports the local
+binding; source-only inspection found no cloud-tag equivalence requirement.
+
+One finite controller launched at11:13 in the private batch-controller directory.
+It accepted four guarded roots, with no fifth while those were outstanding:
+DT0XyMHjuCe,DT0aEMqDZz9,DT0fHDwFSjb,DT0hPUfCSMH. The11:17:04 read-only proof
+records77,48,60,49 fresh pages respectively:234actual new pages, each matching
+the new reservation generation and captured after root acceptance. This is
+actual persistence, not command-acceptance-only evidence. The original DTg
+continuation remains independent and productive. One coordinator lease remains.
+The temporary stage ledger is comments281committed/5unresolved because four
+settled targets reopened for fresh evidence; no saved data was removed. Media
+remains48committed/238unresolved at that snapshot and still requires its ordinary
+exact native/comment-inventory and byte proofs. January is not certified.
+
+Current local code is preserved in Backend commit f2da8ec1, following f960a4be.
+Only task-owned paths were staged; all unrelated dirty work and the empty prior
+index were preserved. No branch switch, push or pull request occurred. The
+current local package and v161 rollback are retained. Obsolete v158,v159,v160
+runnable directories were moved whole to actual Trash with source hash checks
+before and after, inactive-handle checks and recovery mappings. All task evidence,
+native receipts, saved data and object storage remain intact.
+
+Application-owned local execution continues through the finite controller and
+existing LaunchAgent. The existing follow-up is to resume with this current local
+scope after active handover work ends; it must not start a competing controller,
+deploy new cloud code, reset held branches, grant another unchanged continuation,
+or waive any certification gate. Ordinary increments remain quiet. Reassess at
+the controller's bounded exit or a genuine new failure, then continue authorized
+repair from preserved evidence. Full history remains disabled even after any
+future January certificate.
