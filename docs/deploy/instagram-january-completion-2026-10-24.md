@@ -899,3 +899,78 @@ journal cases;100 existing certifier cases and48 subtests plus4 new client
 identity/denial cases. A new test initially missed its fixture context; it was
 corrected locally and only those4 cases rerun. No source validation is a claim
 of deployed or final January acceptance.
+
+
+### October 25 v159 rollout and live preservation
+
+Implementation commit `98ccb8ed` captures the accepted prior January runtime
+prerequisites plus this repair; unrelated dirty work stays outside that commit.
+Workspace contract commit `eca0623` aligns recovery and storage semantics.
+
+Frozen release `ig-public-recovery-c4a7910aa922` (runtime SHA-256
+`c4a7910aa92239564f0e1ede53a827f56178c6c06d172670da208030cca81d96`)
+received independent source/procedure acceptance. All 2,733 package files and
+1,040 runtime entries matched. Modal v159 deployed at03:39:38 EDT to the live
+verified `admin-56995 / main / trr-backend-jobs` app
+`ap-DkLTRoSvqhbkGO7fHyHxrD`. Maintained readiness and API cold-start health passed;
+a fresh container verified 665 deployed Python modules and the state-free targeted
+worker smoke. The initial probe wrongly included an auxiliary script outside the
+maintained image; its failed output remains preserved, and the corrected probe
+uses the actual package mounts. Local coordinator/certifier scripts are verified
+in the separate installed package rather than claimed present in that image.
+
+The existing local worker was drained before one bootstrap of the new release.
+Run/intent/generation, frozen 286 membership, policy revision 7/six workers,
+public access and full-history-disabled state remained unchanged. The preserved
+two-second heartbeat watchdog caused one restart at07:46:16 UTC after a 2.48s
+heartbeat delay; no timeout was relaxed. The current process 47444 and one actual
+server lease 344161 were qualified at07:56:40 UTC with 41 fresh committed pages.
+
+The R2 403 was a library-default urllib client-signature denial (Cloudflare 1010),
+not missing bytes or a disabled bucket. The frozen hosted reader sent
+`TRR-January-Media-Audit/1.0`, read 4,847 bytes matching the retained SHA-256 through
+S3 and the exact managed public URL, and decoded the complete 150x150 JPEG.
+No domain, bucket binding, object, proxy, login, paid-provider or route change was
+needed. The existing requests reader also passed before this identification fix.
+
+A focused independent review corrected a circular qualification prerequisite:
+separate installed identity and preservation proof precede one diagnostic grant;
+fresh-page acceptance remains required afterward. Exact DTg checkpoint
+`10bd91404c9ab6d6ffe129ffd13d7621f22d468279fa92482fe5494ade824506` was preserved
+under a journaled 128→129 maximum-attempt grant, with no root restart, counter
+reset, backoff removal or weakened productive extension rule. Owner generation 132
+now saves fresh pages while the original failed parent remains explicit technical
+metadata outside native page proof. The 07:59:46 preservation snapshot proves all
+14,733 prior native IDs/parents retained and all 14,797 original canonical rows and
+missing-status values unchanged; four new IDs grew canonical inventory to 14,801.
+
+Latest stage snapshot before attempt rollover: comments 285 committed/1 unresolved;
+media 48 committed/238 unresolved. Stage settlement does not prove count parity.
+January final acceptance remains false/pending because traversal, source-count,
+historical native-lineage and complete media/hosted-byte gates remain open.
+Full-history remains disabled. No recurring schedule or competing batch controller
+was created. The previous batch controller remains paused; the maintained worker
+owns productive continuations, subsequent guarded recovery and certification.
+
+The two retained runnable copies are current v159 and rollback v158. Twenty-one
+superseded inactive runnable packages were moved to actual Trash with exact source
+verification and recovery mappings; original task evidence and saved data remain.
+Evidence base: `~/.codex/tmp/trr-instagram-20261025-01a171e0/`, including manifests,
+review acceptance, deployment/readiness/cloud smoke, activation preimages,
+installed qualification, exact diagnostic journal and preservation receipts.
+Backend/source checks and the live repaired path pass. One existing media-cache
+fixture fails identically on v158; that unchanged unrelated failure remains
+recorded. TRR-APP build: not applicable (no app/API contract change). SQL: existing
+journal/target fields only; no schema migration or ownership change.
+
+
+At 08:05:37 UTC, the finite read-only diagnostic watcher observed the maintained
+productive budget rule extend DTg from 129 to 141 maximum attempts after the
+successful generation 132 continuation ended normally with target_deadline. This
+is a journaled productive extension under the unchanged rule, not another manual
+grant or root reset. The finite watcher exited; no monitoring process or schedule
+was left behind. See diagnostic-successor.json and diagnostic-watch.jsonl in the
+same evidence base. All five routed helper assignments were reconciled and
+criterion-assessed; native exact plaintext instruction matching remained
+unverified because host input was encrypted. Later read-only follow-up evidence
+is retained separately with the R2 and focused ordering receipts.
