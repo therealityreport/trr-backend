@@ -1453,3 +1453,296 @@ Saved prompt SHA is
 b254f5d96bc46cc5e2826da36d68e596d9a8953a08c41d7b124d76ed1f6abad3;
 the original creation time, 15-minute/48-check bound and thread remain intact.
 Do not bootstrap it twice, kickstart it, or restart either frozen predecessor.
+
+### Approved manual continuation repair, 21:00 UTC
+
+The user deleted `finish-january-instagram-certification`; that automation is
+deleted, overriding earlier ACTIVE timer descriptions above. The user then
+approved the manual local recovery/January verification plan. No new automation,
+schedule, watcher, login loader or automatic controller restart is authorized.
+The original 23:08:15.797480 UTC deadline and all cumulative budgets remain.
+
+The lead retains the existing Backend checkout on
+`chore/repo-hygiene-2026-09-25` at f6c7f1c9, preserving unrelated dirty files and
+the index. The lead owns this record, runtime handover and guarded database work.
+A routed implementer owns only the new private
+`local-hold-repair/controller-recovery-2100/candidate`; a separate investigator
+owns private protocol evidence. No predecessor directory may be restarted.
+
+The 1600 controller stopped after completed turn131:137 roots and138 audits.
+All163 prior control request identities reconcile with authoritative results;
+164 global identities are retained without expanding the237 control allowlist
+or286-member January cohort. The worker restarted after the host shutdown as822
+and then as20423 after a recorded SIGKILL whose cause is unknown. Current source
+remains ig-local-reply-holds-056cfe0023bf. PID20423 has no new committed source
+page and the same403104 server lease observed with822; current ownership remains
+unqualified. Both observations and original clocks are preserved. A graceful
+handover, if required, must prove old processes and lease are gone before one
+restart, and must end with the existing local worker running.
+
+New read-only readiness evidence records236
+`persisted_comment_inventory_changed` media targets and one
+`complete_comment_inventory_proof_required`, all237 unattempted. These are
+inventory proof failures, not new R2 download failures. No saved row or expected
+count may be deleted or lowered to admit media. The latest DTiw scan parses all84
+IDs in its six retained top pages; older5203-ID evidence remains preserved and
+cannot be substituted into the latest receipt. DTg remains166/166 with all six
+failed reply branches and four technical holds unchanged. January is not yet
+certified. Public-only access and disabled full-history remain mandatory.
+
+
+### Manual repair installation and public-root comparison, 21:54 UTC
+
+The maintained worker changes are committed locally as `8bafd6d8`. Focused
+source checks and independent review passed. The installed local release is
+`ig-local-public-parent-fa955e20db59`; the packaged manifest records its exact
+reviewed working-tree bytes from pre-commit HEAD f6c7f1c9. No cloud deployment,
+app build, SQL migration or API/status-contract change occurred. The retained
+cloud identity remains v161/ig-reply-diagnostics-8e3350210aa9.
+
+The earlier C3 qualification failed before business commands: startup opened a
+separate connection for each of164 historical journal reads and exhausted the
+original900second source3 window. Those journals reconciled; no helper/root
+was sent by that qualification. The connection repair uses one fresh read-only
+repeatable-read connection for the complete reconciliation pass. It preserves
+each result/hash check and closes the connection on every exit.
+
+One guarded parent bootstrap was applied to DTiwjjpAYzG at21:10:35 with its
+existing audit/attempt/capacity gates. Together with the failed qualification,
+the current compounded ledger is133charged turns/138roots/139audits,
+164control identities and165global identities. The237control allowlist,
+286January members, original11:08:15.797480--23:08:15.797480UTC lifetime and all
+finite caps remain. No second bootstrap allowance exists.
+
+At21:45:02 the old71900 coordinator and descendant86976 were absent and its
+lease had released. The reviewed package was installed through the existing
+worker job once. Actual newPID88100 acquired backend403104 at21:45:04. The
+empty-lease boundary and old-process absence are retained, so pooler reuse is
+proved rather than inferred. Source4 first observation is21:45:02.763235 and
+its deadline remains22:00:02.763235. By21:51:08 the actual process had35fresh
+saved pages; a retained strong observation identifies a new reservation41,
+dispatch21:49:50, owner21:49:54 and committed native page21:50:38. Package
+provenance is verified; full two-observation controller qualification remains
+separate. No automation, watcher, schedule or controller restart was added.
+
+The bounded comparison ran inside that owned DTiw activity, charged all four
+wire sends to existing permits, and completed at21:50:05. Independent root
+queries25516980651312394 and26113520058347588 both returned the same ordered
+15native IDs, matching the latest retained root. Each has a next cursor and
+no native count. This proves no query-selection/parser defect and gives no
+basis to substitute15 for the expected5498 or combine unsupported inventories.
+The older5203-ID evidence and every saved extra remain preserved. Ordinary
+pagination continues from the maintained checkpoint. DTg's six failed reply
+branches, four holds and166/166ceiling remain unchanged.
+
+The historical controller check also exposed an old intended-plist reference
+pointing at the live LaunchAgents path. The current controller repair resolves
+only that exact old pin through retained byte-identical backup evidence during
+historical validation; active new-plist verification stays strict. Fifteen
+focused regressions, actual nested historical validation and independent review
+passed. The original pre-worker readiness remains pinned, with separate review
+and lineage for the later controller-only repair. No source clock is reset.
+All paused controller directories, raw events and original manifests remain
+frozen. January is not certified; saved scrape passes are not verified complete.
+
+
+### Source4 qualification first cause and bounded reassessment, 22:07 UTC
+
+The exact reviewed C4 manifest4421aea8351944de59ec16ca3fba9c42955b111a2fd018a76564b0799629794f
+was launched manually once as91597 at21:56UTC, with no scheduler/automation.
+All164 requests reconciled using one read-only connection. Two waiting source
+observations at21:56:45 and21:58:46 contain the same88100/403104 process and
+lease, real new-owner pages and valid handover proof. The pure lease/page
+qualification predicate passes. No qualified epoch was published.
+
+The first cause is `epoch_old_descendant_not_reaped`. Old qualified worker33810
+recorded descendant86533 with identityd6bf6... at17:32:20UTC in frozen1600 epoch43.
+After the actual19:19:53UTC boot, macOS reused86533 for unrelated
+`mscamerad-xpc`, started21:36:23UTC with distinct identityfa0be999.... That
+service was not terminated. Its boot/start/identity evidence proves it cannot
+be the earlier child; the old guard rejected numeric PID reuse conservatively.
+This is separate from the previously resolved server-lease ambiguity.
+
+Source4's22:00:02.763235 qualification deadline expired. The parent stopped
+only identified controller91597 with SIGTERM at22:00:26, recording its deliberate
+`technical_KeyboardInterrupt` pause. It was reaped, with no audit/root/helper
+business events. Compounded accounting is136turns/138roots/139audits,
+164control/165global identities. Worker88100 stays running. C4 and its events,
+164journal receipts,165authoritative results and two waiting epochs are frozen;
+source4 must remain failed/unqualified and cannot be retroactively promoted.
+
+The reassessed C5 repair is restricted to identity reuse with pinned historical
+observation, actual reboot boundary, distinct current identity and post-boot
+start. Matching or uncertain identities, same-boot reuse without separate proof,
+old coordinator identities and lease/page/deadline checks remain strict. Current
+source4 is charged as failed slot4; a fifth source may start only after the
+whole actual predecessor/package/reaping input preflight and independent review.
+Original23:08:15.797480UTC expiry and all8replacement/900second limits stay.
+No controller directory may be restarted and no automation may be restored.
+
+Independent native inventory reconciliation found no parser duplication in the
+three overshoots. DTLbQv6EdE1 is563expected/571observed (470parents101replies),
+DTvYo3MkcvI300/317 (272/45), and DTysU1Nj5LQ349/382 (242/140).
+Their exact current retained audits match complete checkpoint, receipt and
+canonical inventories with zero discrepancies/replay. Earlier native counters
+are supported by retained permalink evidence through `cache_source`; a null
+detail-receipt evidence FK is normal cache behavior, not missing counter proof.
+The counters precede the later comment observations. Preserve both native
+clocks and totals; the API's existing count_parity label does not establish
+exact equality. No guarded refresh exists for these settled detail targets;
+reopening directly or fitting a counter to saved rows is not authorized.
+
+DTiw's current durable inventory is4778unique IDs at22:03:51 against5498expected.
+Its latest new pages verify distinct empty reply branches, explaining low ID
+growth despite new pages. The bounded sample establishes no parent pagination
+loop or request-construction defect. No parser/query change, unsupported union,
+row deletion or expected-count reduction was made. January remains uncertified.
+
+
+### C5 actual-input preflight and same-package handover, 22:23 UTC
+
+C5's 48 focused pure checks pass, including the actual frozen C4/C2/boot
+chain, package proof, strict failed-source accounting, lease/page rules and
+final deadline checks. Independent source review approved candidate
+4dbe81a82fa87e5a7f7a30807946f948483e548516c9befd54e5d720821c705c
+and driver407fe3812f1c8b8774a381c2ae6316259dd64ab0385b0a58a376400b5778259f.
+The complete actual-input preflight then passed before any fifth-source start.
+Receipt8de9ccc6a0e7d9fd59a3989c52ac3b8abfce8e8036e0356dd6f8ee02beaa3c4c
+contains no database/process/source observations and grants no activation.
+
+Independent handover review closed the one-shot race and final expiry-check
+findings. The parent procedure now claims a permanent exclusive attempt under
+the global lock, checks expiry inside each bounded lifecycle send, closes every
+read-only connection explicitly and binds the exact pre-stop lease. Four
+focused guard cases passed; unchanged checks were reused. Previous source and
+review evidence are retained. The reviewed handover envelope has SHA
+e38508fd5954c719f389664fc8d0a6c337dc5aa2779d2ab145c183d4f894ef21.
+
+At22:20:36 the parent stopped only existing worker88100 through its supported
+job. Worker88100 and actual descendant97177 exited, and the lease was observed
+absent before one bootstrap of the SAME package and plist. No unrelated process
+was terminated. New worker97849 was actually observed at22:20:38.564443UTC;
+its unchanged900second qualification deadline is22:35:38.564443UTC. It acquired
+lease403104 at22:20:39.558997. Raw five-event handover/result/procedure evidence
+is retained in controller-recovery-c5/operator; result SHA
+be130d867f4a523b56918e56d6a6831b656e29f6ea1e6dc1532be5061e430edb.
+Source5 is not qualified merely because its process and lease are running.
+
+Actual final source-input SHA
+a2fb099c7310fc2877ceef9c59014a69cfbe71ac77eba422aa8f26eedf9695a7
+preserves136turns/138roots/139audits,164control/165global identities and all
+four failed-source clocks. Independent input review passed. Normal preparation
+then published manifest7a01582f2a3276901090269112052f24b091823026c4f2d3674307c3cc715ecd,
+with the same237-target control allowlist and286-post January cohort.
+The P/installed-qualification.json35-page receipt and top-level legacy process
+fields remain HISTORICAL PACKAGE PROVENANCE. Current authority can come only
+from a new source5 Epochs proof after two stable observations, a real post-
+bootstrap owner/dispatch/page, process/reboot/lease checks and both final clocks.
+The controller may own those bounded waits before any business helper; no new
+page or qualification receipt is fabricated. Final launch review remains pending
+at this record point. No automation, watcher, schedule or automatic restart was
+created. Full-history remains disabled; January remains uncertified.
+
+
+### Manual recovery outcome and final bounded verification, 23:05 UTC
+
+January is NOT certified. The maintained certifier returned blocked / false
+at the current-target known-gap preflight: 268 posts have count deficits,
+with a summed gap of 25,137 comments/replies. Native membership, traversal,
+parentage, media lineage, hosted bytes and unchanged-evidence deep gates remain
+pending; the preflight made one read-only snapshot, zero source/storage sends
+and zero mutations. The complete exact shortcode/count list is retained in
+controller-recovery-c6/operator/final-january-certificate.json, SHA
+a1bd653d8c3f2564d60c3e8b6827c0f1f6b72f7dcbfd31d888584d13891480fd.
+This result does not certify saved scrape passes or any January subset.
+
+The reviewed C5 controller was launched manually once and actually qualified
+source5 (PID97849) at22:29:23.402152UTC using two stable observations and a real
+new DTiw reservation/dispatch/page. It accepted two additional recovery roots,
+DTjkLS2Dn4Q and DTkiCbllTpR. The third target DTkoytpiUe0 had an exact retained
+252-page audit with354IDs and zero replay, but its next-root pressure check
+stopped the controller before any DTkoy root command. C5 was fully reaped.
+All prior167 global journal identities were reconciled;166 are control keys.
+Cumulative counts remain141turns/140roots/142audits. The original237-target
+control allowlist,286-post cohort,131-turn predecessor chain and original
+11:08:15.797480-to23:08:15.797480UTC lifetime were retained without resets.
+
+C6 source preparation fixes received focused checks and independent review:
+qualified-business-prefix accounting, complete replacement history and strict
+reuse of the exact completed DTkoy audit. Final driver SHA is
+411c796dc2a9cf34e6ddb7cdebad1ea88e5f4664bd4120efb4375cab947d117b.
+The final route intentionally accepts only the pinned C5 predecessor; it does
+not claim future C6 self-reuse. All-source/runtime inputs were reviewed before
+normal preparation. Actual live preparation then refused activation with
+technical_EpochLost. C6 has no published manifest and was never launched.
+A source-reviewed candidate is not an installed or active controller.
+
+The concrete new runtime failure occurred at22:45:13.776450UTC: worker97849
+aborted on lease_heartbeat_deadline during scheduler_tick and exited125.
+Its recorded heartbeat age was2.178886seconds, with SELECT inflight1.921233s
+and watchdog wake gap1.855519s; the previous completed SELECT took0.034194s.
+The underlying reason for that late heartbeat is not established by these
+measurements. Existing native LaunchAgent KeepAlive restarted the same package
+as PID4633 at22:45:15, logging lease acquisition/backend403104 at22:45:16.466226.
+This is the same backend identity as the prior qualified owner, so current
+server ownership remains unqualified under the retained-lease ambiguity guard.
+No database session was killed, no force-unlock occurred, and no new controller
+business command was sent after PID loss.
+
+Source6 is charged as replacement slot6 of8. The earliest native observation
+22:45:16.466226 sets a conservative900second expiry of23:00:16.466226UTC;
+late parent observation at23:00:34 cannot grant a fresh window. The earlier
+source6-first-observation file is preserved. An append-only clock correction,
+SHA70144a6145ddf9cd41e3dd2af06381e47c3199befc1c4b14ff18a7160461968e,
+records the distinct clocks, unchanged cumulative budgets and no qualification.
+No further handover or replacement window was invented before original expiry.
+
+At23:04:42 the actual installed worker4633/public environment/source package
+were verified, with523 real retained pages since its start and a fresh DTiw
+owner48 dispatch/reservation/page. These pages prove activity, not server lease
+qualification or January completeness. DTiw's current inventory was4857unique
+IDs against5498expected; older84-ID/5203-ID observations remain distinct and
+preserved. DTg is unchanged at166/166,owner169,14818observed IDs with all six
+failed reply branches and four technical holds retained. No repeated unchanged
+1675030/1675004 requests, attempt grant, parser/query switch or unsupported
+inventory union was introduced. The two already-supported independent public
+parent queries returned identical15-ID roots in the reviewed bounded probe,
+which did not demonstrate a query-selection or request-construction defect.
+
+The23:05:05 read-only progress snapshot shows284 saved comment/reply passes,
+2 unresolved posts (DTgXh94kXyo and DTiwjjpAYzG),49 saved media passes and237
+unresolved media targets. Saved passes do not establish verified completeness.
+The exact237-target bounded media-readiness scan reports235
+persisted_comment_inventory_changed and2complete_comment_inventory_proof_required
+(the two unresolved comment targets), with no eligible target. Receipt SHA
+7a3df48528ffef680007a2a5a274968e6eed66a5e6892173398176d1253b7122.
+No newly saved media target was established in this repair interval. R2's
+previous managed-public403 repair remains reused; domain access is not a gate.
+No unchanged canary or hosted-byte check was repeated and pending hosted-byte
+proof is not claimed as passed.
+
+The three overshoots remain separate unresolved native-counter comparisons:
+DTLbQv6EdE1 expected563/observed571, DTvYo3MkcvI300/317 and
+DTysU1Nj5LQ349/382. Their retained inventory audits are correct and their earlier
+native counters have provenance. No saved extras were deleted or expectations
+lowered. A guarded count-only witness refresh for settled detail targets is not
+implemented, so these are not represented as exhausted external-only blockers.
+
+Backend source commit8bafd6d8 contains the reviewed local public-parent diagnostic
+and lease-acquisition provenance changes. The actually installed package remains
+ig-local-public-parent-fa955e20db59; no C6 source runtime installation is claimed.
+Focused diagnostic53checks plus reviewed continuation tests passed; unchanged
+checks were reused. All saved rows, native identities, checkpoints, receipts,
+attachments, objects, evidence clocks and unrelated dirty work were preserved.
+No app build, SQL migration, API/status contract change or cloud deployment was
+performed. Retained cloud identity remains v161/ig-reply-diagnostics-8e3350210aa9.
+
+The native worker is intentionally left running. All manual controllers stay
+stopped; the deleted automation remains deleted. No schedule, watcher, login
+loader or automatic controller restart was created. Original7:08p.m.NewYork
+controller expiry is not extended. Public-only/logged-out access and the hard
+full-history/resume-tail block remain in force, including after any future
+certification. Remaining work is heartbeat/lease replacement qualification,
+public reply completion, exact latest-scan/native counts and inventory proof,
+three overshoot witnesses, media admission/lineage/bytes and final286-post
+certification. The task is not represented as complete.
