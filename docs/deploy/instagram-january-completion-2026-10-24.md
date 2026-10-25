@@ -1285,3 +1285,11 @@ or waive any certification gate. Ordinary increments remain quiet. Reassess at
 the controller's bounded exit or a genuine new failure, then continue authorized
 repair from preserved evidence. Full history remains disabled even after any
 future January certificate.
+
+The same follow-up is now ACTIVE again with its unchanged15minute/48check bound
+and quiet notification intent. Saved prompt SHA
+58cac29b58d1bbf431fd73902e2467a9e30c55d97107a878b7519e5b2e7ba335
+pins the current local source/controller, honest retained cloud identity, no
+further cloud deployment, and the existing data/public/full-history guards.
+The five original routed helper assignments remain reconciled and accepted;
+follow-up source/operations reviews are retained with the current evidence.
