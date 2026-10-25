@@ -29,6 +29,70 @@ base_database = local_execution.base_database
 clean = local_execution.clean
 
 
+def test_acquisition_event_follows_actual_enter_and_precedes_started_callback(capsys):
+    import json
+    import os
+    from types import SimpleNamespace
+
+    abort = threading.Event()
+    events = []
+
+    class Lease:
+        backend_pid = None
+
+        def __enter__(self):
+            self.backend_pid = 4242
+            events.append("acquired")
+            return self
+
+        def __exit__(self, *args):
+            events.append("released")
+
+    def started():
+        record = json.loads(capsys.readouterr().out)
+        assert events == ["acquired"]
+        assert record["status"] == "local_worker_lease_acquired"
+        assert record["pid"] == os.getpid() and record["lease_backend_pid"] == 4242
+        assert datetime.fromisoformat(record["acquired_at"]).utcoffset().total_seconds() == 0
+        assert set(record) == {"status", "pid", "lease_backend_pid", "acquired_at"}
+        events.append("started")
+        abort.set()
+
+    run_worker(
+        store=SimpleNamespace(execution_placement="local"),
+        scheduler=None,
+        dispatch=SimpleNamespace(close=lambda store: events.append("closed")),
+        lease=Lease(),
+        abort=abort,
+        workflow_version="fixture",
+        on_started=started,
+    )
+    assert events == ["acquired", "started", "closed", "released"]
+
+
+def test_failed_lease_acquisition_does_not_emit_acquired_event(capsys):
+    class Lease:
+        def __enter__(self):
+            raise RuntimeError("unavailable")
+
+        def __exit__(self, *args):
+            pass
+
+    class Store:
+        execution_placement = "local"
+
+    with pytest.raises(RuntimeError, match="unavailable"):
+        run_worker(
+            store=Store(),
+            scheduler=None,
+            dispatch=None,
+            lease=Lease(),
+            abort=threading.Event(),
+            workflow_version="fixture",
+        )
+    assert capsys.readouterr().out == ""
+
+
 def test_media_boundary_yields_after_six_comments_and_recovery_precedes_finalization(monkeypatch):
     monkeypatch.setattr("scripts.ingestion.local_worker.PARTITION_SIZE", 10)
     events = []

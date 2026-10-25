@@ -396,6 +396,17 @@ def run_worker(
     partitions = 0
     with foreground_phase(abort, "run_worker"), lease:
         try:
+            print(
+                json.dumps(
+                    {
+                        "status": "local_worker_lease_acquired",
+                        "pid": os.getpid(),
+                        "lease_backend_pid": getattr(lease, "backend_pid", None),
+                        "acquired_at": datetime.now(UTC).isoformat(),
+                    }
+                ),
+                flush=True,
+            )
             if on_started is not None:
                 call_in_phase(abort, "on_started", on_started)
             while not abort.is_set():

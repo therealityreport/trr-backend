@@ -527,6 +527,15 @@ class PublicRelayCommentSource:
             pass
         else:
             raise RuntimeError("Run the synchronous comment activity outside the active event loop")
+        from trr_backend.ingestion.public_parent_diagnostic import run_parent_diagnostic
+
+        run_parent_diagnostic(
+            shortcode=shortcode,
+            before=pre_source_request,
+            factory=self._factory,
+            timeout_ms=self._timeout_ms,
+            source_failure_observer=source_failure_observer,
+        )
         parents = _seed_parents(resume_inventory, shortcode)
         resume = PublicRelayResume.from_checkpoint(
             checkpoint, parents, now=getattr(pre_source_request, "observation_clock", lambda: datetime.now(UTC))()

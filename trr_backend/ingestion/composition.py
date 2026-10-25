@@ -457,6 +457,23 @@ class _GatedSource:
             if hasattr(before, name):
                 setattr(guarded_request, name, getattr(before, name))
         guarded_request.record_terminal_failure = record_terminal_failure
+        # The optional private diagnostic shares this activity's exact permits;
+        # it never enters the canonical comment observer.
+        guarded_request.diagnostic_public_only = getattr(self.gate, "public_only", False)
+        guarded_request.diagnostic_network_lane = getattr(self.gate, "network_lane", None)
+        guarded_request.diagnostic_success = lambda permit: self.gate.record_success(permit=permit)
+        guarded_request.diagnostic_failure = lambda permit, code: self.gate.record_failure(code, permit=permit)
+        guarded_request.diagnostic_check_owner = getattr(self.gate, "check_cancelled", None)
+
+        def diagnostic_cancel():
+            # A cancellation/admission failure is not source health evidence.
+            # Release only this activity's probe and preserve the original error.
+            try:
+                return self.gate.finish_failure()
+            finally:
+                self.finished = True
+
+        guarded_request.diagnostic_cancel = diagnostic_cancel
         deadlines = [
             value
             for value in (getattr(before, "deadline", None), getattr(self.gate, "deadline", None))
@@ -567,8 +584,12 @@ class _GatedSource:
             self.gate.finish_failure()
             self.finished = True
             return None
-        if (error is None and self.branch_failure_recorded) or not self.gate.request_count or isinstance(
-            error, (LostOwnership, IdentityDeferred, CursorStalledError, psycopg2.Error, CanonicalWriteError)
+        if (
+            (error is None and self.branch_failure_recorded)
+            or not self.gate.request_count
+            or isinstance(
+                error, (LostOwnership, IdentityDeferred, CursorStalledError, psycopg2.Error, CanonicalWriteError)
+            )
         ):
             result = self.gate.finish_failure()
         else:
@@ -837,7 +858,8 @@ def _bind_avatar_downloads(snapshot, observations):
             return item
         (_, native_id), delivery_url = next(iter(candidates.items()))
         return replace(
-            item, download_url=delivery_url,
+            item,
+            download_url=delivery_url,
             download_provenance=(item.username, native_id) if native_id is not None else None,
         )
 
@@ -864,12 +886,20 @@ def _load_media(loader, store, context, owned, **callbacks):
         handles = missing.handles
     else:
         snapshot = bridge_cached_avatars(
-            snapshot, loader=loader, store=store, owned=owned,
-            storage_factory=lambda: _media_storage(context, owned), callbacks=callbacks,
+            snapshot,
+            loader=loader,
+            store=store,
+            owned=owned,
+            storage_factory=lambda: _media_storage(context, owned),
+            callbacks=callbacks,
         )
         return recover_saved_owner_asset(
-            snapshot, loader=loader, store=store, owned=owned,
-            storage_factory=lambda: _media_storage(context, owned), callbacks=callbacks,
+            snapshot,
+            loader=loader,
+            store=store,
+            owned=owned,
+            storage_factory=lambda: _media_storage(context, owned),
+            callbacks=callbacks,
         )
     public_only = _source_profile(context).access_mode == "public"
     credentials = {"raw_cookies": {}} if public_only else _credentials(owned["account"])
