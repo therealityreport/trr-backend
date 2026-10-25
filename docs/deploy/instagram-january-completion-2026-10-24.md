@@ -1371,3 +1371,85 @@ points to the new candidate manifest/controller and retains the original clock,
 counts and all scope/proof guards. At12:45:32 the cumulative controller ledger
 was turn21/19root commands/20audits with four outstanding roots. Do not restart
 either old paused controller or create an extra source/observer stream.
+
+### One-shot local controller ownership, 16:26 UTC
+
+The 1201 continuation recorded `technical_KeyboardInterrupt` at 15:45:42,
+54.197 seconds after completed turn 98. Its process was absent at the 16:00
+check. The driver converts SIGTERM to KeyboardInterrupt, while SIGINT can also
+produce that exception; the signal sender and cause remain UNKNOWN. Its expired
+tool session could not supply a direct exit-status observation. All 67 new
+audits, root starts and accepted roots matched, and all 79 charged turns had
+completed before the interruption. No helper or uncertain command remained.
+The native worker stayed at PID 33810; its source and server lease were unchanged.
+
+The old directory remains frozen. A NEW candidate under
+`local-hold-repair/controller-recovery-1600/candidate` carries 80 root commands,
+81 audits and 98 turns from the full predecessor chain. It preserves the
+original 11:08:15.797480 to 23:08:15.797480 UTC clock and all finite bounds.
+Preparation reconciled 106 control request identities, 98 adoptions and 107
+global journal identities. DS-H2Lhj9BN is global evidence within the 286-member
+cohort, outside the 237-target control allowlist; it gained no new authorization.
+Eight two-pass exclusions and the actual unused eight-replacement budget remain.
+The first helper failure stays UNKNOWN in the nested provenance. No counts,
+checkpoints, journals, receipts or evidence clocks were reset.
+
+The narrow source change supports this proved clean interruption and compounded
+continuation. Runtime/Driver class ASTs and the five operational modules remain
+unchanged. Thirteen focused regressions, lint, formatting and seven AST checks
+pass; unchanged validation was reused. Independent source, generated-manifest
+and actual launch-envelope reviews found no blockers. Manifest SHA is
+e757566dba8d91bcc266e76b01b13e66e9130cfc0f31089f83435aedf9553caf;
+driver SHA is
+6127cc993c69161ca5fd6cc42fe4d7277e67e39debc6538389ef72ef5b2daa3d.
+Fresh maintained qualification passed without altering its page-proof rules.
+
+At 16:20:45, the parent bootstrapped the reviewed one-shot job
+`gui/501/com.trr.instagram-january-recovery-e757566dba8d` once. Its task-owned
+plist lives outside automatic LaunchAgents loading. It uses RunAtLoad, Standard
+process class, private logs, KeepAlive=false and no schedule, retry or kickstart.
+Default process-group cleanup covers controller helpers. Actual controller
+PID 65874 has one run and a separate process group from native worker PID 33810.
+Both the global exclusive controller lock and existing source guards remain.
+Paused or nonzero exits stay stopped; preserve their evidence and remove only
+the exact inactive job registration after completion. GUI logout or reboot can
+still stop this job. No native-worker restart or cloud deployment occurred.
+
+At 16:24:47, `controller-recovery-1600/live-progress-1625.json` (SHA
+9e6f75cde6dac75a06f2c47f80ea35c5afb750658bbf8942e6cba615a0802062)
+proved 29, 10 and 3 new persisted pages for DTQywKmCpwy, DTRI9mBCKiW and
+DTRLxC2AcMf, under new owner generations after root acceptance. The fourth
+root, DTRMBjREl_v, had been accepted about three seconds before that snapshot
+and had no page yet. This is 42 actual saved pages, not four-post completion.
+The completed turn 99 ledger carried 84 roots and 85 audits with four
+outstanding roots. At 16:26:47 the registered job was still running once, with
+the native worker unchanged and no pause event.
+
+The 16:15 preparation snapshot was comments 285 committed/1 unresolved and
+media 49 committed/237 unresolved. After four controlled reopenings, the
+16:24 snapshot was comments 281/5 and media 49/237. All saved data remains.
+The same bounded read-only check resolved the productive-budget uncertainty:
+DTg is 166/166 at owner generation 169, with NO committed native page for that
+generation. Its latest earlier page belongs to generation 166 at 12:36:40.
+Worker logs also prove the drained recovery path invoked the guard without
+granting an extension. The current-generation page prerequisite therefore
+fails as designed; earlier productive pages do not authorize another grant.
+Preserve the ceiling and held branches. Never repeat the manual 153-to-154
+continuation or reset the target.
+
+January remains uncertified. Reply access, native evidence/count gaps and media
+acceptance retain their full requirements; no final certifier was rerun for
+unchanged known gaps. Public-only access, six activities, reply concurrency two,
+the all-authorizer four-root cap and disabled full-history remain mandatory.
+R2's managed-public 403 repair still stands without domain access. Backend
+source remains f2da8ec1 and local package ig-local-reply-holds-056cfe0023bf;
+cloud remains honestly v161/ig-reply-diagnostics-8e3350210aa9. No app/API
+contract or SQL migration changed. Only this local controller ownership and
+continuation changed; all evidence and rollback material are retained.
+
+The same quiet finite follow-up was paused only during this parent-owned
+handover. It is ACTIVE again against the accepted one-shot job and manifest.
+Saved prompt SHA is
+b254f5d96bc46cc5e2826da36d68e596d9a8953a08c41d7b124d76ed1f6abad3;
+the original creation time, 15-minute/48-check bound and thread remain intact.
+Do not bootstrap it twice, kickstart it, or restart either frozen predecessor.
