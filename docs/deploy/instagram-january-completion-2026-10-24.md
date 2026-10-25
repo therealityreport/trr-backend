@@ -1293,3 +1293,81 @@ pins the current local source/controller, honest retained cloud identity, no
 further cloud deployment, and the existing data/public/full-history guards.
 The five original routed helper assignments remain reconciled and accepted;
 follow-up source/operations reviews are retained with the current evidence.
+
+### Local controller recovery, 12:44 UTC
+
+The first finite local controller paused at11:55:40 with
+`helper_failed_acceptance_uncertain` for DT3Wh4Hkh3o. Its process exited2 and
+its helper was reaped. The original failure cause remains UNKNOWN because
+that driver discarded helper stderr/stdout. Its frozen directory contains no
+audit-input, report or root request; those markers precede retained business
+audit/replay. The authoritative target and journal reconciliation found no new
+root command for that selection. A later separate read-only exact preflight
+passed all phases in8.16s with the same checkpoint, zero native requests and
+zero business writes. This does not establish the original error's cause.
+
+The replacement is a NEW local controller candidate under
+`normal-diagnostics-rollout/local-hold-repair/controller-recovery-1201/candidate`.
+The old paused controller, failure directory, events and diagnostic windows
+remain frozen. Typed helper outcomes now distinguish named pre-business
+deferrals from unknown or post-boundary failures. A valid deferral stops further
+helpers for the turn and waits120s within the original budget. An immutable
+business-start marker, full binding checks and mandatory journal reconciliation
+retain the uncertainty fence; missing, corrupt or unknown outcomes still stop.
+No arbitrary exception text, SQL, stdout or credentials enters these outcomes.
+The root operator and qualification module retain their accepted bytes.
+
+The focused candidate has17distinct regression cases, staged affected passes,
+lint and7production AST checks. Passing unchanged local/epoch/capacity checks
+were reused. Independent source acceptance and generated-manifest launch review
+found no blockers. The generated manifest SHA is
+1229a66bacc7392752e33d8533e8787f9f76f2a3f2ab3eb254ba17e06d55d4fb;
+driver SHA9f7f63dd30dfc6d53ff37504b6dd2e95f71376553ae660ff357776cea34c6228.
+It carries all39prior request identities/31adoptions, exact237/286 scope, eight
+two-pass exclusions, and the original13roots/14audits/19charged turns. Original
+11:08:15→23:08:15UTC clock,360turns/12h/800roots/1000audits and8replacement
+candidates remain; no new lifetime or attempt grant was introduced.
+
+Actual local source ig-local-reply-holds-056cfe0023bf, PID33810, Standard plist,
+environment and sole lease360211/backend_start10:18:26.397808 were qualified.
+Initial proof includes fresh page5e6944ba-4ac0-4e7f-b959-8689b0cdb522 under
+new owner166 and its dispatch. At12:39:59 the parent observed no competing
+private controller/observer, an available global controller lock and the sole
+application-owned worker. One continuation launched in tool session46303.
+The native worker was not restarted, and no cloud deployment occurred.
+
+The12:44:02 bounded read-only proof `candidate/live-progress-1245.json`
+(SHAd4a1d71eca8255447d931401958a00776911d7f28ebbb1fa6e6bb8f2c114ed50)
+records42,40,24,30new persisted pages for DT3Wh4Hkh3o,DT3Z4UCkeaq,
+DT3fgUpjrw3,DT3hSwqDfOK:136actual pages after their accepted roots and under
+new reservation generations. Thus the formerly failed selection progressed
+through a fresh retained audit, guarded root and real persistence. Global
+four-root capacity remains authoritative; the new driver adopted the previous
+outstanding root rather than duplicating it.
+
+At that snapshot comments were282committed/4unresolved and media48committed/
+238unresolved. Reopened targets retain their saved rows and receipts. DTg was
+166/166, owner_generation169, without an active owner. The maintained ordinary
+productive guard already extended154→166 earlier, as recorded in worker.log;
+the controller's ceiling event is advisory, not evidence of a guard refusal.
+That guard runs at a drained scheduler boundary and requires actual committed
+page improvement. Leave its decision to the sole worker; never repeat the
+manual153→154 grant, reset the target or bypass its held branches.
+
+January remains uncertified: historical native gaps, reply evidence and media
+acceptance still require their existing proofs. Do not run the final certifier
+for unchanged known gaps. Saved extras, evidence clocks, counts, native parent
+identities and object bytes remain preserved. The R2 managed-public403 repair
+still stands; domain access is not a prerequisite. Full history remains disabled
+even after any future acceptance. Backend/local control validation is recorded
+above; no app/API contract or SQL migration changed. Cloud remains honestly
+v161/ig-reply-diagnostics-8e3350210aa9 by the user's local-only instruction.
+
+The follow-up timer was temporarily paused during this parent-owned recovery
+to prevent a competing handover. The same finite quiet follow-up is ACTIVE again
+with its original cadence/check bound and thread binding. Its saved prompt SHA
+86161bb466c7745774590db0e2c40e899ed147d061f556b4a6dcaa33235a004a
+points to the new candidate manifest/controller and retains the original clock,
+counts and all scope/proof guards. At12:45:32 the cumulative controller ledger
+was turn21/19root commands/20audits with four outstanding roots. Do not restart
+either old paused controller or create an extra source/observer stream.
