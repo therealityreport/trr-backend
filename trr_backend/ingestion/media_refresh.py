@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
 import time
 from collections import defaultdict
 from collections.abc import Callable
@@ -21,7 +22,9 @@ from trr_backend.ingestion.application import validate_detail
 from trr_backend.ingestion.avatar_resolution import (
     AVATAR_PARSER_VERSION,
     AVATAR_SOURCE_PREFIX,
+    AvatarResolutionActivity,
     AvatarResolutionError,
+    _AvatarControlAbort,
     _profile,
     normalize_handle,
     parse_avatar_evidence,
@@ -32,7 +35,7 @@ from trr_backend.ingestion.credential_snapshot import AUTHORIZED_USERNAME
 from trr_backend.ingestion.domain import Failure, LostOwnership, Stage
 from trr_backend.ingestion.evidence import Evidence
 from trr_backend.ingestion.identity_policy import IdentityDeferred, SourceRequestGate, is_content_absence
-from trr_backend.ingestion.media import MediaIncomplete, MediaSnapshot
+from trr_backend.ingestion.media import MediaIncomplete, MediaSnapshot, avatar_delivery_equivalent
 from trr_backend.ingestion.media import source_reference as public_reference
 from trr_backend.ingestion.post_transport import DetailSource, SourceFailure
 from trr_backend.ingestion.providers import PARSER_VERSION, InvalidSourceError, parse_evidence
@@ -121,6 +124,7 @@ class MediaRefresh:
         public_detail_source_factory: Callable | None = None,
         detail_source_factory: Callable = DetailSource,
         avatar_source_factory: Callable = AvatarProfileSource,
+        public_avatar_source_factory: Callable | None = None,
         avatar_gate_factory: Callable = SourceRequestGate,
         now: Callable = lambda: datetime.now(UTC),
         network_lane: str | None = None,
@@ -139,8 +143,10 @@ class MediaRefresh:
         self.public_only, self.public_detail_source_factory = public_only, public_detail_source_factory
         self.credential_provider, self.detail_source_factory, self.now = credential_provider, detail_source_factory, now
         self.avatar_source_factory, self.avatar_gate_factory = avatar_source_factory, avatar_gate_factory
+        self.public_avatar_source_factory = public_avatar_source_factory
         self._credentials_snapshot = None
         self._avatars = {}
+        self._avatar_native_ids = {}
         self._avatar_attempted = set()
         self._snapshot = None
         self._fresh = None
@@ -158,14 +164,32 @@ class MediaRefresh:
         snapshot = self._snapshot
         if snapshot is None:
             raise MediaIncomplete("media_refresh_snapshot_required")
+        snapshot.validate()
         self.store.check_owner(**self.owned)
         check_cancelled()
         reference = source_reference
         supported = {public_reference(url) for url in (*snapshot.media_urls, snapshot.thumbnail_url)}
         comments = {public_reference(url) for comment in snapshot.comments for url in comment.media_urls}
         avatars = defaultdict(set)
+        aliases = defaultdict(set)
         for avatar in snapshot.avatars:
-            avatars[public_reference(avatar.source_url)].add(normalize_handle(avatar.username))
+            canonical = public_reference(avatar.source_url)
+            username = normalize_handle(avatar.username)
+            avatars[canonical].add(username)
+            if avatar.download_url and public_reference(avatar.download_url) != canonical:
+                proof = avatar.download_provenance
+                if (
+                    isinstance(proof, tuple) and len(proof) == 2 and proof[0] == avatar.username
+                    and avatar_delivery_equivalent(avatar.source_url, avatar.download_url, native_id=proof[1])
+                ):
+                    aliases[public_reference(avatar.download_url)].add((canonical, username, proof[1]))
+        requested = reference
+        required_native_id = None
+        if requested in aliases:
+            matches = aliases[requested]
+            if len(matches) != 1 or requested in comments or requested in supported or requested in avatars:
+                raise MediaIncomplete("media_refresh_role_ambiguous")
+            reference, _, required_native_id = next(iter(matches))
         usernames = avatars.get(reference, set())
         if reference in comments or (reference in supported and usernames) or len(usernames) > 1:
             raise MediaIncomplete("media_refresh_role_ambiguous")
@@ -179,7 +203,12 @@ class MediaRefresh:
                     username, check_cancelled=check_cancelled, on_request=on_request
                 )
             fresh = self._avatars[username]
-            if not fresh or public_reference(fresh) != reference:
+            pin = self._avatar_native_ids.get(username)
+            if (
+                (required_native_id is not None and pin != required_native_id)
+                or not fresh
+                or not avatar_delivery_equivalent(reference, fresh, native_id=pin)
+            ):
                 raise MediaIncomplete("avatar_refresh_asset_unresolved")
             self.store.check_owner(**self.owned)
             check_cancelled()
@@ -205,7 +234,71 @@ class MediaRefresh:
             self._credentials_snapshot = self.credential_provider()
         return self._credentials_snapshot
 
+    def _fetch_public_avatar(self, username, *, check_cancelled, on_request):
+        from trr_backend.ingestion.reply_context import source_deadline
+
+        remaining = (self.owner_expires_at - self.now()).total_seconds() - 2
+        deadline = source_deadline(time.monotonic() + max(0, min(90, remaining)))
+        if deadline - time.monotonic() <= 1:
+            raise IdentityDeferred("target_deadline", None)
+
+        def check():
+            self.store.check_owner(**self.owned)
+            check_cancelled()
+
+        gate = self.avatar_gate_factory(
+            cookies={},
+            transaction=self.store.transaction,
+            check_cancelled=check,
+            check_cancelled_in_transaction=lambda conn: self.store.check_owner(**self.owned, connection=conn),
+            deadline=deadline,
+            public_only=True,
+            **({"network_lane": self.network_lane} if self.network_lane is not None else {}),
+        )
+        source = None
+        success = False
+        try:
+            check()
+            source = (
+                self.public_avatar_source_factory(username=username, deadline=deadline)
+                if self.public_avatar_source_factory is not None
+                else self.avatar_source_factory(cookies={}, deadline=deadline, public_only=True)
+            )
+            capture = AvatarResolutionActivity(self.store, gate=gate).observe(
+                owned=self.owned,
+                username=username,
+                source=source,
+                on_request=on_request,
+                check_cancelled=check_cancelled,
+                clock=self.now,
+                canonical_urls=True,
+            )
+            success = True
+            self._avatar_native_ids[username] = capture.expected_id
+            # The caller still requires the exact old image reference. This
+            # observation never updates the registry, roles, clocks or receipt.
+            return capture.observation.source_url
+        except AvatarResolutionError as error:
+            raise SourceFailure(error.failure) from None
+        finally:
+            active_error = sys.exc_info()[0] is not None
+            try:
+                if source is not None:
+                    try:
+                        source.close()
+                    except Exception:
+                        if not active_error:
+                            raise
+                        LOGGER.warning("ingestion_avatar_refresh_source_cleanup_failed")
+            finally:
+                try:
+                    gate.finish_success() if success else gate.finish_failure()
+                except Exception:
+                    LOGGER.warning("ingestion_avatar_refresh_gate_cleanup_failed")
+
     def _fetch_avatar(self, username, *, check_cancelled, on_request):
+        if self.public_only:
+            return self._fetch_public_avatar(username, check_cancelled=check_cancelled, on_request=on_request)
         remaining = (self.owner_expires_at - self.now()).total_seconds() - 2
         if remaining <= 1:
             raise MediaIncomplete("avatar_refresh_deadline")
@@ -230,12 +323,15 @@ class MediaRefresh:
 
         def before_request():
             nonlocal permit, requests_count
-            if requests_count:
-                raise MediaIncomplete("avatar_hidden_retry_forbidden")
-            check()
-            permit = gate.before_request()
-            on_request()
-            requests_count += 1
+            try:
+                if requests_count:
+                    raise MediaIncomplete("avatar_hidden_retry_forbidden")
+                check()
+                permit = gate.before_request()
+                on_request()
+                requests_count += 1
+            except Exception as error:
+                raise _AvatarControlAbort(error) from None
 
         try:
             check()
@@ -266,6 +362,8 @@ class MediaRefresh:
             gate.record_success(permit)
             success = True
             return fresh
+        except _AvatarControlAbort as abort:
+            raise abort.error from None
         except (LostOwnership, IdentityDeferred):
             raise
         except Exception as error:

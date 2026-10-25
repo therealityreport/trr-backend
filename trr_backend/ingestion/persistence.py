@@ -30,6 +30,46 @@ from trr_backend.ingestion.domain import (
 )
 from trr_backend.ingestion.evidence import Evidence
 
+DIAGNOSTIC_EXCEPTION_CLASSES = frozenset(
+    {
+        "RuntimeError",
+        "ValueError",
+        "TypeError",
+        "OSError",
+        "TimeoutError",
+        "SourceFailure",
+        "IdentityDeferred",
+        "CommentSourceError",
+        "CursorStalledError",
+        "ReplyDeadlineExceeded",
+        "ReplyProtocolLimitError",
+        "JSONDecodeError",
+        "ReadTimeout",
+        "ConnectTimeout",
+        "ReadError",
+        "ConnectError",
+        "OperationalError",
+        "InterfaceError",
+        "IntegrityError",
+        "DatabaseError",
+        "NoException",
+        "OtherError",
+        "UnknownError",
+    }
+)
+DIAGNOSTIC_FAILURE_CATEGORIES = frozenset(
+    {
+        "attempt_deadline",
+        "persistence_error",
+        "source_parse_error",
+        "transport_error",
+        "source_stop",
+        "incomplete_observation",
+        "activity_error",
+        "unknown",
+    }
+)
+
 
 def _transaction():
     from trr_backend.db import pg
@@ -844,6 +884,8 @@ class Store:
         failure: Failure,
         checkpoint: dict[str, Any],
         requests: int,
+        exception_class: str | None = None,
+        failure_category: str | None = None,
     ) -> None:
         """Release owned work with its durable retry state, without inventing success.
 
@@ -857,11 +899,56 @@ class Store:
         # messages or arbitrary payloads in operator-visible diagnostics.
         code = failure.code
         safe_code = code if isinstance(code, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,79}", code) else "activity_failed"
+        prior_code = checkpoint.get("last_error_code")
         checkpoint = dict(checkpoint, last_error_code=safe_code)
         with self.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             run = self._execution_run(cur, run_id, account)
             if run["generation"] != generation or run["state"] not in {"queued", "running"}:
                 raise LostOwnership("Run execution is no longer current")
+            if failure_category is not None:
+                target = _row(
+                    cur,
+                    """select owner_generation,clock_timestamp() as failure_observed_at
+                    from social.instagram_ingestion_targets
+                    where run_id=%s and stage=%s and target_key=%s and owner_token=%s
+                    and owner_started_at is not null and owner_expires_at>clock_timestamp()
+                    and outcome='unresolved' for update""",
+                    (run_id, stage.value, target_key, owner_token),
+                )
+                if not target:
+                    raise LostOwnership("Worker cannot diagnose after reservation loss")
+                diagnostics = dict(checkpoint.get("worker_diagnostics") or {})
+                history = list(diagnostics.get("failure_history") or [])[-3:]
+                previous = diagnostics.get("last_failure")
+                if previous is not None and (not history or history[-1] != previous):
+                    history.append(previous)
+                # Old checkpoints contain no trustworthy exception or failure clock.
+                # Keep that uncertainty rather than assigning this attempt to them.
+                if previous is None and prior_code:
+                    history.append(
+                        {
+                            "code": prior_code
+                            if re.fullmatch(r"[a-z][a-z0-9_]{0,79}", str(prior_code))
+                            else "activity_failed",
+                            "exception_class": "UnknownError",
+                            "category": "unknown",
+                            "observed_at": None,
+                            "owner_generation": None,
+                        }
+                    )
+                fact = {
+                    "code": safe_code,
+                    "exception_class": exception_class
+                    if exception_class in DIAGNOSTIC_EXCEPTION_CLASSES
+                    else "OtherError",
+                    "category": failure_category if failure_category in DIAGNOSTIC_FAILURE_CATEGORIES else "unknown",
+                    "observed_at": utc_timestamp(target["failure_observed_at"]),
+                    "owner_generation": target["owner_generation"],
+                }
+                diagnostics.update(
+                    last_failure=fact, failure_history=(history + [fact])[-4:], committed_pages_since_failure=0
+                )
+                checkpoint["worker_diagnostics"] = diagnostics
             cur.execute(
                 """update social.instagram_ingestion_targets
                 set checkpoint=%s::jsonb,next_attempt_at=%s,blocked_reason=%s,

@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 
 from . import common
 from .posts import attested_equal, digest, equal
@@ -210,26 +210,64 @@ def inspect(cur, binding, release, listing, listing_hash=None):
         }
 
 
+PAGE_PAYLOAD_SQL = """select p.*,e.source_identity,e.captured_at,e.expires_at,e.parser_version,e.schema_version,
+        e.payload,e.content_hash as evidence_hash,r.state as source_run_state
+      from social.instagram_ingestion_comment_pages p
+      join social.instagram_ingestion_evidence e using(evidence_id,run_id,stage,target_key)
+      join social.instagram_ingestion_runs r using(run_id)
+      where p.run_id=%s and p.target_key=%s order by p.target_key,p.committed_at,p.page_id"""
+PAGE_METADATA_FIELDS = ("page_id", "evidence_id", "target_key", "committed_at", "captured_at")
+
+
 def read_settled_pages(cur, targets, settled):
-    """Keep the same snapshot and SQL target order with indexed exact-key reads."""
+    """Retain only ordered page identities, never growing checkpoint histories."""
     pages = []
     for target in targets:
         key = target["target_key"]
         if key not in settled:
             continue
-        pages.extend(
-            common.rows(
-                cur,
-                """select p.*,e.source_identity,e.captured_at,e.expires_at,e.parser_version,e.schema_version,
-        e.payload,e.content_hash as evidence_hash,r.state as source_run_state
-      from social.instagram_ingestion_comment_pages p
-      join social.instagram_ingestion_evidence e using(evidence_id,run_id,stage,target_key)
-      join social.instagram_ingestion_runs r using(run_id)
-      where p.run_id=%s and p.target_key=%s order by p.target_key,p.committed_at,p.page_id""",
-                (common.RUN, key),
-            )
+        found = common.rows(
+            cur,
+            """select p.page_id,p.evidence_id,p.target_key,p.committed_at,e.captured_at
+            from social.instagram_ingestion_comment_pages p
+            join social.instagram_ingestion_evidence e using(evidence_id,run_id,stage,target_key)
+            where p.run_id=%s and p.target_key=%s order by p.target_key,p.committed_at,p.page_id""",
+            (common.RUN, key),
         )
+        metadata = [{field: row[field] for field in PAGE_METADATA_FIELDS} for row in found]
+        positions = [(row["committed_at"], str(row["page_id"])) for row in metadata]
+        common.require(len({str(row["page_id"]) for row in metadata}) == len(metadata), "page_inventory_duplicate")
+        common.require(
+            all(left < right for left, right in zip(positions, positions[1:], strict=False)), "page_inventory_order"
+        )
+        common.require(all(row["target_key"] == key for row in metadata), "page_inventory_target")
+        pages.extend(metadata)
     return pages
+
+
+@contextmanager
+def page_payloads(cur, metadata, *, target_key, start=0):
+    """Fingerprint every historical full row; replay only the current suffix."""
+    with common.stream_rows(cur, PAGE_PAYLOAD_SQL, (common.RUN, target_key)) as stream:
+
+        def values():
+            count = 0
+            for index, row in enumerate(stream):
+                common.require(index < len(metadata), "page_stream_extra_row")
+                common.require(
+                    all(row[field] == metadata[index][field] for field in PAGE_METADATA_FIELDS),
+                    "page_stream_inventory_changed",
+                )
+                count += 1
+                if index >= start:
+                    yield row
+            common.require(count == len(metadata), "page_stream_missing_row")
+
+        iterator = values()
+        try:
+            yield iterator
+        finally:
+            iterator.close()
 
 
 def _inspect(cur, binding, release, listing, listing_hash):
@@ -379,9 +417,13 @@ def _inspect(cur, binding, release, listing, listing_hash):
             )
             state = _progress(target["checkpoint"])
             root = state.get("scan_root_evidence_id")
-            scan_pages = by_page[key]
+            target_pages = by_page[key]
+            scan_pages = target_pages
             roots = [i for i, p in enumerate(scan_pages) if str(p["evidence_id"]) == root]
             if len(roots) != 1:
+                with page_payloads(cur, target_pages, target_key=key, start=len(target_pages)) as unused:
+                    for _ in unused:
+                        pass
                 failures.append({"shortcode": key, "codes": ["current_scan_root_missing_or_duplicate"]})
                 continue
             scan_pages = scan_pages[roots[0] :]
@@ -393,90 +435,96 @@ def _inspect(cur, binding, release, listing, listing_hash):
                 for h in target["checkpoint"].get("public_lane_restart_history", [])
                 if h.get("root_evidence_id")
             }
-            for row in scan_pages:
-                check(
-                    row["content_hash"] == row["evidence_hash"] and row["observed_at"] == row["captured_at"],
-                    "page_evidence_hash_or_clock_mismatch",
-                )
-                check(
-                    row["source_identity"]
-                    in {
-                        f"instagram:comments:{key}:{kind}"
-                        for kind in ("comments_api", "graphql_comments", "graphql_replies")
-                    },
-                    "page_source_mismatch",
-                )
-                check(
-                    isinstance(row["owner_generation"], int) and row["owner_generation"] >= 1, "page_generation_invalid"
-                )
-                evidence = Evidence(
-                    source_identity=row["source_identity"],
-                    captured_at=row["captured_at"],
-                    parser_version=row["parser_version"],
-                    payload_json=row["payload"],
-                    content_hash=row["evidence_hash"],
-                    schema_version=row["schema_version"],
-                )
-                pinned = row["source_run_state"] != "completed"
-                evidence.read(now=at, pinned=pinned)
-                page = parse_comment_evidence(evidence, parser_version=evidence.parser_version, pinned=pinned)
-                page_manifests[key].append(source_page_manifest(row))
-                check(
-                    page.parent_comment_id == row["parent_comment_id"]
-                    and page.next_cursor == row["next_cursor"]
-                    and page.exhausted == row["exhausted"]
-                    and page.observed_at == row["observed_at"],
-                    "parsed_page_receipt_mismatch",
-                )
-                if page.started_from_root and not page.parent_comment_id:
-                    native.clear()
-                    page_uuid.clear()
-                if str(row["evidence_id"]) in restart_roots and page.parent_comment_id:
-                    check(page.started_from_root, "child_restart_not_root")
-                    removed = {i for i, v in reconstructed["observed"].items() if v["parent"] == page.parent_comment_id}
-                    reconstructed["observed"] = {i: v for i, v in reconstructed["observed"].items() if i not in removed}
-                    for i in removed:
-                        native.pop(i, None)
-                        page_uuid.pop(i, None)
-                page_state = _progress(row["checkpoint"])
-                started = common.stamp(page_state["scan_started_at"])
-                check(started <= page.observed_at, "scan_cutoff_after_capture")
-                _advance(reconstructed, page, scan_started_at=started)
-                if not page.parent_comment_id and page.started_from_root:
-                    reconstructed["scan_root_evidence_id"] = str(row["evidence_id"])
-                # Reply-access administration is independent from native-page facts.
-                for field in (
-                    "version",
-                    "observed",
-                    "lanes",
-                    "expected",
-                    "adapter_family",
-                    "adapter_version",
-                    "scan_started_at",
-                    "scan_root_evidence_id",
-                ):
-                    check(reconstructed.get(field) == page_state.get(field), "page_replay_" + field + "_mismatch")
-                current_ids = {}
+            with page_payloads(cur, target_pages, target_key=key, start=roots[0]) as streamed_pages:
+                for row in streamed_pages:
+                    check(
+                        row["content_hash"] == row["evidence_hash"] and row["observed_at"] == row["captured_at"],
+                        "page_evidence_hash_or_clock_mismatch",
+                    )
+                    check(
+                        row["source_identity"]
+                        in {
+                            f"instagram:comments:{key}:{kind}"
+                            for kind in ("comments_api", "graphql_comments", "graphql_replies")
+                        },
+                        "page_source_mismatch",
+                    )
+                    check(
+                        isinstance(row["owner_generation"], int) and row["owner_generation"] >= 1,
+                        "page_generation_invalid",
+                    )
+                    evidence = Evidence(
+                        source_identity=row["source_identity"],
+                        captured_at=row["captured_at"],
+                        parser_version=row["parser_version"],
+                        payload_json=row["payload"],
+                        content_hash=row["evidence_hash"],
+                        schema_version=row["schema_version"],
+                    )
+                    pinned = row["source_run_state"] != "completed"
+                    evidence.read(now=at, pinned=pinned)
+                    page = parse_comment_evidence(evidence, parser_version=evidence.parser_version, pinned=pinned)
+                    page_manifests[key].append(source_page_manifest(row))
+                    check(
+                        page.parent_comment_id == row["parent_comment_id"]
+                        and page.next_cursor == row["next_cursor"]
+                        and page.exhausted == row["exhausted"]
+                        and page.observed_at == row["observed_at"],
+                        "parsed_page_receipt_mismatch",
+                    )
+                    if page.started_from_root and not page.parent_comment_id:
+                        native.clear()
+                        page_uuid.clear()
+                    if str(row["evidence_id"]) in restart_roots and page.parent_comment_id:
+                        check(page.started_from_root, "child_restart_not_root")
+                        removed = {
+                            i for i, v in reconstructed["observed"].items() if v["parent"] == page.parent_comment_id
+                        }
+                        reconstructed["observed"] = {
+                            i: v for i, v in reconstructed["observed"].items() if i not in removed
+                        }
+                        for i in removed:
+                            native.pop(i, None)
+                            page_uuid.pop(i, None)
+                    page_state = _progress(row["checkpoint"])
+                    started = common.stamp(page_state["scan_started_at"])
+                    check(started <= page.observed_at, "scan_cutoff_after_capture")
+                    _advance(reconstructed, page, scan_started_at=started)
+                    if not page.parent_comment_id and page.started_from_root:
+                        reconstructed["scan_root_evidence_id"] = str(row["evidence_id"])
+                    # Reply-access administration is independent from native-page facts.
+                    for field in (
+                        "version",
+                        "observed",
+                        "lanes",
+                        "expected",
+                        "adapter_family",
+                        "adapter_version",
+                        "scan_started_at",
+                        "scan_root_evidence_id",
+                    ):
+                        check(reconstructed.get(field) == page_state.get(field), "page_replay_" + field + "_mismatch")
+                    current_ids = {}
 
-                def visit(comment, raw, depth=0):
-                    parent = comment.parent_comment_id
-                    depth = max(depth, int(raw.get("reply_depth") or (1 if parent else 0)))
-                    native[comment.comment_id] = (comment, raw, page.observed_at, parent, depth)
-                    current_ids[comment.comment_id] = True
-                    for child, child_raw in zip(comment.replies, raw.get("replies", []), strict=True):
-                        visit(child, child_raw, depth + 1)
+                    def visit(comment, raw, depth=0):
+                        parent = comment.parent_comment_id
+                        depth = max(depth, int(raw.get("reply_depth") or (1 if parent else 0)))
+                        native[comment.comment_id] = (comment, raw, page.observed_at, parent, depth)
+                        current_ids[comment.comment_id] = True
+                        for child, child_raw in zip(comment.replies, raw.get("replies", []), strict=True):
+                            visit(child, child_raw, depth + 1)
 
-                for comment, raw in zip(page.comments, page.source_payloads, strict=True):
-                    visit(comment, raw)
-                identifiers = row["canonical_identity"].get("comment_ids", {})
-                check(
-                    str(row["canonical_identity"].get("post_id")) == str(target["post_id"]),
-                    "page_canonical_post_id_mismatch",
-                )
-                check(set(identifiers) == set(current_ids), "page_canonical_native_id_set_mismatch")
-                for i, value in identifiers.items():
-                    check(i not in page_uuid or page_uuid[i] == value, "native_uuid_changed_during_scan")
-                    page_uuid[i] = value
+                    for comment, raw in zip(page.comments, page.source_payloads, strict=True):
+                        visit(comment, raw)
+                    identifiers = row["canonical_identity"].get("comment_ids", {})
+                    check(
+                        str(row["canonical_identity"].get("post_id")) == str(target["post_id"]),
+                        "page_canonical_post_id_mismatch",
+                    )
+                    check(set(identifiers) == set(current_ids), "page_canonical_native_id_set_mismatch")
+                    for i, value in identifiers.items():
+                        check(i not in page_uuid or page_uuid[i] == value, "native_uuid_changed_during_scan")
+                        page_uuid[i] = value
             check(
                 str(target["evidence_id"]) == str(scan_pages[-1]["evidence_id"])
                 and target["observed_at"] == scan_pages[-1]["captured_at"],

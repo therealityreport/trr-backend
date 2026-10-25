@@ -740,3 +740,57 @@ def test_public_rate_pause_server_delay_wins_and_success_resets(public_lanes, mo
     healthy.before_request()
     healthy.finish_success()
     assert row(public_lanes, healthy)["consecutive_failures"] == 0
+
+
+def test_received_peer_extends_finished_hold_without_health_or_probe_changes(lanes):
+    lane = gate(lanes)
+    first, second = lane.before_request(), lane.before_request()
+    initial = lane.finish_failure("rate_limited", retry_after_seconds=20, permit=first)
+    baseline = row(lanes, lane)
+    stronger = lane.finish_failure("rate_limited", retry_after_seconds=60, permit=second)
+    held = row(lanes, lane)
+    assert stronger.retry_at > initial.retry_at + timedelta(seconds=39)
+    assert held["server_retry_after_until"] == stronger.retry_at
+    assert held["failure_generation"] == baseline["failure_generation"]
+    assert held["consecutive_failures"] == baseline["consecutive_failures"]
+    assert held["probe_token"] == baseline["probe_token"]
+    assert lane.record_success(second) is False
+    assert row(lanes, lane)["server_retry_after_until"] == stronger.retry_at
+    weaker = lane.finish_failure("rate_limited", retry_after_seconds=1, permit=first)
+    assert weaker.retry_at == stronger.retry_at
+
+
+def test_out_of_order_old_permit_success_cannot_clear_newer_failure(lanes):
+    lane = gate(lanes)
+    first, second = lane.before_request(), lane.before_request()
+    lane.record_failure("rate_limited", retry_after_seconds=60, permit=second)
+    baseline = row(lanes, lane)
+    assert lane.record_success(first) is False
+    after = row(lanes, lane)
+    assert after["failure_generation"] == baseline["failure_generation"]
+    assert after["server_retry_after_until"] == baseline["server_retry_after_until"]
+
+
+def test_finished_peer_server_holds_do_not_reduce_longer_policy_or_returned_hold(lanes):
+    from dataclasses import replace
+
+    lane = gate(lanes)
+    first, second = lane.before_request(), lane.before_request()
+    lane.finish_failure("rate_limited", retry_after_seconds=20, permit=first)
+    policy_hold = datetime.now(UTC) + timedelta(seconds=180)
+    change(lanes, lane, "cooldown_until=%s", policy_hold)
+    lane._last_failure = replace(lane._last_failure, retry_at=policy_hold)
+    baseline = row(lanes, lane)
+    for seconds in (20, 60, 1):
+        result = lane.finish_failure("rate_limited", retry_after_seconds=seconds, permit=second)
+        current = row(lanes, lane)
+        assert result.retry_at == policy_hold
+        assert current["cooldown_until"] == policy_hold
+        assert current["server_retry_after_until"] < policy_hold
+        assert current["failure_generation"] == baseline["failure_generation"]
+        assert current["consecutive_failures"] == baseline["consecutive_failures"]
+    assert row(lanes, lane)["server_retry_after_until"] >= datetime.now(UTC) + timedelta(seconds=59)
+    # A changed shared row must not shorten the already returned target hold.
+    change(lanes, lane, "cooldown_until=clock_timestamp()+interval '2 seconds'")
+    assert lane.finish_failure("rate_limited", retry_after_seconds=1, permit=second).retry_at == policy_hold
+    assert row(lanes, lane)["cooldown_until"] == policy_hold

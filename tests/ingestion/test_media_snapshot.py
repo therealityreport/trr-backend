@@ -29,17 +29,16 @@ def snapshot_database(media_database):
     with tx() as conn, conn.cursor() as cur:
         cur.execute("alter table core.seasons add column show_id uuid,add column season_number integer")
         cur.execute("alter table social.scrape_jobs add column config jsonb")
-    return media_database
-
-
-@pytest.fixture(scope="module")
-def snapshot_workflow_database(snapshot_database):
-    with snapshot_database[1]() as conn, conn.cursor() as cur:
         cur.execute(
             (
                 Path(__file__).parents[2] / "supabase/migrations/20261016070100_instagram_ingestion_workflows.sql"
             ).read_text()
         )
+    return media_database
+
+
+@pytest.fixture(scope="module")
+def snapshot_workflow_database(snapshot_database):
     return snapshot_database
 
 

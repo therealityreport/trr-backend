@@ -28,24 +28,34 @@ PROVIDERS = {
 
 
 def provider_flags(html):
+    required = {group: {key for g, key in PROVIDERS.values() if g == group} for group in ("gkxData", "justknobxData")}
     maps = {}
-    for group in ("gkxData", "justknobxData"):
+    for group, keys in required.items():
         for match in re.finditer(r'"' + group + r'"\s*:\s*', html):
             try:
                 value, _ = json.JSONDecoder().raw_decode(html[match.end() :])
             except ValueError:
                 continue
-            if isinstance(value, dict):
-                for key, item in value.items():
-                    previous = maps.setdefault(group, {}).get(key, item)
-                    if previous != item:
+            if not isinstance(value, dict):
+                continue
+            for key in sorted(keys & value.keys()):
+                item = value[key]
+                if isinstance(item, dict):
+                    encoded = [item[field] for field in ("result", "r") if field in item]
+                    if not encoded or any(type(flag) is not bool for flag in encoded):
+                        raise ProfileError("profile_provider_flags_missing")
+                    if len(set(encoded)) != 1:
                         raise ProfileError("profile_provider_flags_ambiguous")
-                    maps[group][key] = item
+                    item = encoded[0]
+                if type(item) is not bool:
+                    raise ProfileError("profile_provider_flags_missing")
+                observed = maps.setdefault(group, {})
+                if key in observed and observed[key] != item:
+                    raise ProfileError("profile_provider_flags_ambiguous")
+                observed[key] = item
     flags = {}
     for name, (group, key) in PROVIDERS.items():
         value = maps.get(group, {}).get(key)
-        if isinstance(value, dict):
-            value = value.get("result", value.get("r"))
         if type(value) is not bool:
             raise ProfileError("profile_provider_flags_missing")
         flags[name] = value
@@ -61,15 +71,28 @@ class PublicGraphQLProfileSource(AvatarProfileSource):
         self.user_id = native_id(user_id)
         self.provenance = None
         self.retry_after_seconds = None
+        self._retry_after_permit = None
         self._sends = self._bytes = 0
 
     def _send(self, method, url, *, before, **kwargs):
         remaining = self.deadline - self.clock()
-        if remaining <= 1 or self._sends >= self.request_budget:
+        if remaining <= 1:
+            from trr_backend.ingestion.identity_policy import IdentityDeferred
+
+            raise IdentityDeferred("target_deadline", None)
+        if self._sends >= self.request_budget:
             raise ProfileError("profile_request_boundary_missing")
         self._public_cookies()
-        before()
+        permit = before()
+        # Admission may wait on the owner/database. It cannot renew the budget
+        # or leave the physical send using a timeout computed before that wait.
+        remaining = self.deadline - self.clock()
+        if remaining <= 1:
+            from trr_backend.ingestion.identity_policy import IdentityDeferred
+
+            raise IdentityDeferred("target_deadline", None)
         self._sends += 1
+        self.response_facts.begin("profile_bootstrap" if method == "GET" else "profile_query", self._sends, permit)
         try:
             response = self.session.request(
                 method,
@@ -84,10 +107,22 @@ class PublicGraphQLProfileSource(AvatarProfileSource):
             )
         except requests.RequestException:
             raise InstagramRequestFailure("network_error", status_code=None, retryable=True) from None
+        # Preserve already observed server waits even if reading/classifying
+        # this response fails. A later weaker header cannot shorten that hold.
+        delay = parse_public_retry_after(response.headers.get("retry-after"))
+        self.response_facts.headers(response)
+        if delay is not None and (self.retry_after_seconds is None or delay >= self.retry_after_seconds):
+            self.retry_after_seconds = delay
+            self._retry_after_permit = permit
         try:
             body = bytearray()
             for chunk in response.iter_content(16384):
-                if self.clock() >= self.deadline or self._bytes + len(body) + len(chunk) > 2 * 1024 * 1024:
+                self.response_facts.chunk(chunk)
+                if self.clock() >= self.deadline:
+                    from trr_backend.ingestion.identity_policy import IdentityDeferred
+
+                    raise IdentityDeferred("target_deadline", None)
+                if self._bytes + len(body) + len(chunk) > 2 * 1024 * 1024:
                     raise ProfileError("profile_response_limit")
                 body.extend(chunk)
             self._bytes += len(body)
@@ -95,9 +130,14 @@ class PublicGraphQLProfileSource(AvatarProfileSource):
             bounded.status_code, bounded.headers = response.status_code, response.headers
             bounded._content, bounded._content_consumed = bytes(body), True
             bounded.encoding, bounded.cookies = response.encoding, response.cookies
+            try:
+                diagnostic_payload = bounded.json()
+            except ValueError:
+                diagnostic_payload = None
+            self.response_facts.complete(diagnostic_payload)
+            self.response_facts.phase = "response_classification"
             self._public_cookies(bounded)
             self.client._classify_response(bounded)
-            self.retry_after_seconds = parse_public_retry_after(bounded.headers.get("retry-after"))
             return bounded
         except requests.RequestException:
             raise InstagramRequestFailure("network_error", status_code=None, retryable=True) from None
@@ -118,6 +158,7 @@ class PublicGraphQLProfileSource(AvatarProfileSource):
         )
         headers = scraper._get_headers(url)
         html = self._send("GET", url, before=pre_source_request, headers=headers).text
+        self.response_facts.phase = "bootstrap_parse"
         flags = provider_flags(html)
         context = scraper._extract_profile_page_context(html)
         variables = {"id": self.user_id, "enable_integrity_filters": True}
@@ -154,10 +195,12 @@ class PublicGraphQLProfileSource(AvatarProfileSource):
         response = self._send(
             "POST", "https://www.instagram.com/graphql/query", before=pre_source_request, headers=headers, data=data
         )
+        self.response_facts.phase = "decode"
         try:
             payload = response.json()
         except ValueError:
             raise ProfileError("profile_source_capability_missing") from None
+        self.response_facts.enrich(payload)
         self.provenance = {
             "profile_query_id": PROFILE_DOC_ID,
             "profile_query_name": PROFILE_QUERY,

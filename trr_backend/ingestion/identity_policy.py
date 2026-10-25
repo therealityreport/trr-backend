@@ -13,7 +13,7 @@ import math
 import time
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any
 from uuid import uuid4
@@ -326,6 +326,36 @@ class SourceRequestGate:
         self, code: str | None = None, *, retry_after_seconds: float | None = None, permit: RequestPermit | None = None
     ) -> Failure | None:
         if self._finished:
+            if code is not None and retry_after_seconds is not None:
+                admitted = self._permit(permit)
+                if not 1 <= admitted.request_number <= self.request_count:
+                    raise ValueError("identity_request_permit_required")
+                # An already received peer response may carry a stronger server
+                # hold after dispatch closed. Extend only the hold; do not alter
+                # newer health generations, counters, or another owner's probe.
+                self.check_cancelled()
+                with self._locked() as (cur, row, now):
+                    if self.check_cancelled_in_transaction is not None:
+                        self.check_cancelled_in_transaction(cur.connection)
+                    server_hold = _server_retry_deadline(now, row.get("server_retry_after_until"), retry_after_seconds)
+                    holds = [
+                        hold
+                        for hold in (
+                            row.get("cooldown_until"),
+                            server_hold,
+                            self._last_failure.retry_at if self._last_failure is not None else None,
+                        )
+                        if hold is not None
+                    ]
+                    cooldown = max(holds) if holds else None
+                    if cooldown != row.get("cooldown_until") or server_hold != row.get("server_retry_after_until"):
+                        cur.execute(
+                            """update social.instagram_detail_request_lanes set cooldown_until=%s,
+                            server_retry_after_until=%s where identity_key=%s""",
+                            (cooldown, server_hold, self.identity_key),
+                        )
+                    if self._last_failure is not None:
+                        self._last_failure = replace(self._last_failure, retry_at=cooldown)
             return self._last_failure
         if code is not None:
             return self._failure(self._permit(permit), code, retry_after_seconds, finish=True)

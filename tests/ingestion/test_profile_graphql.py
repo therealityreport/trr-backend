@@ -158,3 +158,58 @@ def test_network_failure_is_classified_without_retry():
         source(username="reader", pre_source_request=lambda: counted.append(True))
     assert caught.value.error_code == "network_error"
     assert len(counted) == 1
+
+
+@pytest.mark.parametrize("during_read", [False, True])
+def test_expected_profile_deadline_is_distinct_from_protocol_or_retry_limit(during_read):
+    from trr_backend.ingestion.identity_policy import IdentityDeferred
+
+    now = [10.0]
+
+    class DeadlineSession(Session):
+        def request(self, *args, **kwargs):
+            response = super().request(*args, **kwargs)
+            if during_read:
+                now[0] = 20.0
+            return response
+
+    session = DeadlineSession()
+    source = PublicGraphQLProfileSource(
+        user_id="101", deadline=20.0 if during_read else 9.0, session=session, clock=lambda: now[0]
+    )
+    calls = []
+    with pytest.raises(IdentityDeferred) as caught:
+        source(username="reader", pre_source_request=lambda: calls.append(True))
+    assert caught.value.failure.code == "target_deadline"
+    assert len(calls) == len(session.calls) == (1 if during_read else 0)
+    source.close()
+
+
+def test_admission_time_cannot_leave_an_expired_physical_send_or_stale_timeout():
+    from trr_backend.ingestion.identity_policy import IdentityDeferred
+
+    now = [10.0]
+    session = Session()
+    source = PublicGraphQLProfileSource(user_id="101", deadline=20, session=session, clock=lambda: now[0])
+
+    def expired():
+        now[0] = 19.5
+
+    with pytest.raises(IdentityDeferred) as caught:
+        source(username="reader", pre_source_request=expired)
+    assert caught.value.failure.code == "target_deadline" and session.calls == [] and source._sends == 0
+    source.close()
+
+
+def test_physical_timeout_uses_budget_remaining_after_control_callback():
+    now = [10.0]
+    session = Session()
+    source = PublicGraphQLProfileSource(user_id="101", deadline=30, session=session, clock=lambda: now[0])
+
+    def admission():
+        now[0] += 4
+
+    source(username="reader", pre_source_request=admission)
+    assert session.calls[0][2]["timeout"] == (5, 8)
+    assert session.calls[1][2]["timeout"] == (4, 6)
+    source.close()

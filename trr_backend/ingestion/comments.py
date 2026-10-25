@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import math
+import re
+import time
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -77,6 +79,7 @@ class CommentFetchSummary:
     reply_lanes_rejected: tuple[str, ...] = ()
     reply_access_code: str | None = None
     reply_retry_after_seconds: float | None = None
+    public_reply_failures: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -662,6 +665,7 @@ def _advance(state: dict[str, Any], page: CommentPage, *, scan_started_at: datet
 def _valid_source_summary(summary: CommentFetchSummary) -> bool:
     return not (
         summary.fetch_failed
+        or summary.public_reply_failures
         or summary.reply_lanes_rejected
         or summary.auth_failed
         or summary.retryable
@@ -691,7 +695,7 @@ class CommentSettlement(TypedDict):
 
 
 def _settlement(state: dict[str, Any], summary: CommentFetchSummary) -> CommentSettlement | None:
-    if not summary.full_observation or not _valid_source_summary(summary):
+    if summary.public_reply_failures or not summary.full_observation or not _valid_source_summary(summary):
         return None
     expected = summary.expected_count if summary.expected_count is not None else state["expected"]
     if _count(expected) is None:
@@ -796,10 +800,16 @@ class CommentActivity:
                 raise Conflict("Canonical parent post does not match the comment target shortcode")
         attempt_started_at = datetime.fromisoformat(utc_timestamp(self.clock()))
         state = _progress(current_checkpoint)
+        from trr_backend.ingestion.reply_context import check_execution_budget, source_deadline
+
+        check_execution_budget()
         resume_inventory, retained = self._resume_inventory(owned, state)
+        check_execution_budget()
 
         def observe(kind: str, payload: Mapping[str, Any]) -> None:
             nonlocal current_checkpoint, state, retained
+            from trr_backend.socials.instagram.comments_scrapling.reply_http import response_observed_at
+
             if kind not in {"comments_api", "graphql_comments", "graphql_replies", "graphql_preview"}:
                 raise CommentSourceError("Unsupported source comment page kind")
             retained_payload = dict(payload)
@@ -811,11 +821,31 @@ class CommentActivity:
                 retained_payload["status"] = "fail"
             evidence = Evidence.capture(
                 source_identity=f"instagram:comments:{target_key}:{kind}",
-                captured_at=self.clock(),
+                captured_at=response_observed_at.get() or self.clock(),
                 parser_version=COMMENT_PARSER_VERSION,
                 payload=retained_payload,
             )
             evidence_id = self.store.retain_evidence(**owned, evidence=evidence)
+            from trr_backend.ingestion.reply_failures import (
+                RetainedPublicReplyFailureError,
+                isolated_reply_failure,
+                record_failure,
+            )
+
+            if isolated_reply_failure(kind, payload):
+                failures = dict(current_checkpoint.get("public_reply_failures") or {})
+                parent = payload["parent_comment_id"]
+                failures[parent] = record_failure(
+                    failures.get(parent), payload=payload, evidence=evidence, evidence_id=evidence_id,
+                    owner_generation=target["owner_generation"], now=self.clock(),
+                )
+                next_checkpoint = {**current_checkpoint, "public_reply_failures": failures}
+                self._persist_reply_failure(
+                    owned, expected_checkpoint=current_checkpoint, checkpoint=next_checkpoint,
+                    owner_generation=target["owner_generation"],
+                )
+                current_checkpoint = next_checkpoint
+                raise RetainedPublicReplyFailureError(parent)
             if rejected_reply:
                 return
             # Preview samples remain retained but cannot become full-comments rows.
@@ -853,6 +883,10 @@ class CommentActivity:
             if not page.parent_comment_id and (page.started_from_root or "__top__" not in state["lanes"]):
                 updated["scan_root_evidence_id"] = evidence_id
             next_checkpoint = {**current_checkpoint, "comment_pages": updated}
+            if page.parent_comment_id and current_checkpoint.get("public_reply_failures"):
+                failures = dict(current_checkpoint["public_reply_failures"])
+                failures.pop(page.parent_comment_id, None)
+                next_checkpoint["public_reply_failures"] = failures
             if restarted:
                 restarts.pop(lane_key)
                 if lane_key == "__top__":
@@ -863,6 +897,25 @@ class CommentActivity:
                     *current_checkpoint.get("public_lane_restart_history", []),
                     {**restarted, "root_evidence_id": evidence_id, "committed_at": self.clock().isoformat()},
                 ]
+            diagnostics = dict(current_checkpoint.get("worker_diagnostics") or {})
+            legacy_code = current_checkpoint.get("last_error_code")
+            if legacy_code and not diagnostics.get("last_failure"):
+                diagnostics["last_failure"] = {
+                    "code": legacy_code
+                    if isinstance(legacy_code, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,79}", legacy_code)
+                    else "activity_failed",
+                    "exception_class": "UnknownError",
+                    "category": "unknown",
+                    "observed_at": None,
+                    "owner_generation": None,
+                }
+            diagnostics["last_successful_page_at"] = evidence.captured_at.isoformat()
+            diagnostics["last_successful_owner_generation"] = target["owner_generation"]
+            if diagnostics.get("last_failure") or current_checkpoint.get("last_error_code"):
+                diagnostics["committed_pages_since_failure"] = (
+                    int(diagnostics.get("committed_pages_since_failure", 0)) + 1
+                )
+            next_checkpoint["worker_diagnostics"] = diagnostics
             self._persist_page(
                 owned,
                 post_id=post_id,
@@ -882,12 +935,28 @@ class CommentActivity:
             ):
                 raise CursorStalledError("Comment lane has a repeated cursor")
 
+        def pre_source_request():
+            return self.store.check_owner(**owned, record_request=True)
+
+        pre_source_request.run_id = run_id
+        pre_source_request.run_generation = generation
+        pre_source_request.owner_generation = target["owner_generation"]
+        pre_source_request.observation_clock = self.clock
+        # Observation clocks may be controlled for replay. Reservation expiry is
+        # physical wall time; leave two seconds to cancel and reap HTTP tasks.
+        expires = target.get("owner_expires_at")
+        if expires is not None:
+            remaining = (expires - datetime.now(UTC)).total_seconds() - 2
+            pre_source_request.deadline = time.monotonic() + max(0, remaining)
+        bounded_deadline = source_deadline(getattr(pre_source_request, "deadline", None))
+        if bounded_deadline is not None:
+            pre_source_request.deadline = bounded_deadline
         summary = source(
             shortcode=target_key,
             checkpoint=json.loads(stable_json(current_checkpoint)),
             resume_inventory=resume_inventory,
             source_observer=observe,
-            pre_source_request=lambda: self.store.check_owner(**owned, record_request=True),
+            pre_source_request=pre_source_request,
         )
         if not isinstance(summary, CommentFetchSummary):
             raise TypeError("Comment source must return a typed CommentFetchSummary")
@@ -910,6 +979,8 @@ class CommentActivity:
                 "complete": False,
                 "failure": failure,
             }
+        if current_checkpoint.get("public_reply_failures"):
+            return {"outcome": Outcome.UNRESOLVED.value, "checkpoint": current_checkpoint, "complete": False}
         if retained is None:
             return {"outcome": Outcome.UNRESOLVED.value, "checkpoint": current_checkpoint, "complete": False}
         evidence_id, evidence, page = retained
@@ -997,9 +1068,14 @@ class CommentActivity:
                     (owned["run_id"], owned["target_key"], pages[-1]["evidence_id"]),
                 )
                 final_checkpoint = cur.fetchone()["checkpoint"]
+        from trr_backend.ingestion.reply_context import check_execution_budget, execution_deadline
+
+        bounded_execution = execution_deadline.get() is not None
         nodes: dict[str, CommentResumeNode] = {}
         proof = None
         for row in pages:
+            if bounded_execution:
+                check_execution_budget()
             retained = Evidence(
                 source_identity=row["source_identity"],
                 captured_at=row["captured_at"],
@@ -1043,6 +1119,32 @@ class CommentActivity:
         if set(nodes) != set(state["observed"]) or not pages or receipt_proof != target_proof:
             raise CommentSourceError("Durable comment inventory lacks matching committed page proof")
         return tuple(nodes[key] for key in sorted(nodes)), proof
+
+    def _persist_reply_failure(self, owned, *, expected_checkpoint, checkpoint, owner_generation):
+        """Metadata only: no canonical writer, native receipt, or owner release."""
+        with self.store.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            run = self.store._execution_run(cur, owned["run_id"], owned["account"], shared_fence=True)
+            if run["generation"] != owned["generation"] or run["state"] not in {"queued", "running"}:
+                raise LostOwnership("Reply failure belongs to a superseded execution")
+            cur.execute(
+                """select checkpoint from social.instagram_ingestion_targets
+                where run_id=%s and stage='comments' and target_key=%s and owner_token=%s
+                and owner_generation=%s and owner_started_at is not null
+                and owner_expires_at>clock_timestamp() and outcome='unresolved' for update""",
+                (owned["run_id"], owned["target_key"], owned["owner_token"], owner_generation),
+            )
+            target = cur.fetchone()
+            if not target:
+                raise LostOwnership("Reply failure writer lost target ownership")
+            if target["checkpoint"] != expected_checkpoint:
+                raise Conflict("Comment checkpoint advanced concurrently")
+            cur.execute(
+                """update social.instagram_ingestion_targets set checkpoint=%s::jsonb
+                where run_id=%s and stage='comments' and target_key=%s""",
+                (stable_json(checkpoint), owned["run_id"], owned["target_key"]),
+            )
+            if cur.rowcount != 1:
+                raise LostOwnership("Reply failure checkpoint was not retained")
 
     def _persist_page(
         self,

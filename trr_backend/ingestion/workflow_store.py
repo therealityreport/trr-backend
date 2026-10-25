@@ -37,12 +37,37 @@ class WorkflowStore(Store):
         selection_keys = selection["target_keys"] if selection else None
         manifest = _row(
             cur,
-            """select cursor_state,discovery_complete from social.instagram_ingestion_manifests
-            where run_id=%s and stage='media'""",
+            f"""select cursor_state,discovery_complete from social.instagram_ingestion_manifests
+            where run_id=%s and stage='media'{" for update" if advance_cursor else ""}""",
             (item["run_id"],),
         )
         if not manifest or not manifest["discovery_complete"]:
             return None
+        # Expired ambiguous sends occupy admission even before acquire. Reuse
+        # the normal exact-token reconciliation path before readiness/admission;
+        # a missing readiness proof must not trap an expired send forever.
+        expired = _row(
+            cur,
+            """select t.target_key,d.owner_token from social.instagram_ingestion_targets t
+            join social.instagram_ingestion_dispatches d on d.owner_token=t.owner_token
+                and d.run_id=t.run_id and d.stage=t.stage and d.target_key=t.target_key
+            where t.run_id=%s and t.stage='media' and t.outcome='unresolved'
+                and d.generation=%s and d.state='sending'
+                and (t.owner_expires_at is null or t.owner_expires_at<=%s)
+                and (%s::text[] is null or t.target_key=any(%s))
+                and not exists(select 1 from social.instagram_ingestion_receipts q
+                    where q.run_id=t.run_id and q.stage=t.stage and q.target_key=t.target_key
+                    and q.owner_token=d.owner_token)
+            order by t.target_key limit 1""",
+            (item["run_id"], item["generation"], now, selection_keys, selection_keys),
+        )
+        if expired:
+            return {
+                "kind": "reconcile",
+                "stage": Stage.MEDIA.value,
+                "target_key": expired["target_key"],
+                "owner_token": str(expired["owner_token"]),
+            }
         cursor = manifest["cursor_state"].get("media_readiness_after", "")
         if not isinstance(cursor, str):
             cursor = ""
@@ -192,8 +217,8 @@ class WorkflowStore(Store):
             return {"kind": "wait", "seconds": 0.01}
         return None
 
-    def _current(self, cur, item):
-        run = self._execution_run(cur, str(item["run_id"]), item["account"])
+    def _current(self, cur, item, *, shared_fence=False):
+        run = self._execution_run(cur, str(item["run_id"]), item["account"], shared_fence=shared_fence)
         if run["generation"] != item["generation"] or run["state"] not in {"queued", "running"}:
             raise LostOwnership("Workflow generation is no longer active")
         if run["engine"] != item["engine"] or run["workflow_version"] != item["workflow_version"]:
@@ -258,7 +283,10 @@ class WorkflowStore(Store):
         if not 0 <= ordinal < PARTITION_SIZE:
             raise ValueError("Partition decision bound exceeded")
         with self.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-            run = self._current(cur, item)
+            # Decisions change only partition/manifest state. Independent page
+            # writers may share this fence; run control still waits for commit.
+            # Never upgrade it: run mutations keep their exclusive entrypoints.
+            run = self._current(cur, item, shared_fence=True)
             partition = _row(
                 cur,
                 """select * from social.instagram_ingestion_partitions
@@ -422,12 +450,20 @@ class WorkflowStore(Store):
             ):
                 # A drained batch can yield one media turn. A blocked phase
                 # must also exhaust bounded media scans before terminal recovery.
-                result = (
-                    self._eligible_media(
-                        cur, run, item, now, advance_cursor=True, full_cycle=result["kind"] == "blocked"
-                    )
-                    or result
+                media_result = self._eligible_media(
+                    cur, run, item, now, advance_cursor=True, full_cycle=result["kind"] == "blocked"
                 )
+                if (
+                    media_result
+                    and media_result["kind"] == "wait"
+                    and result["kind"] in {"target", "reconcile"}
+                    and result.get("stage") == Stage.COMMENTS.value
+                ):
+                    # A scan continuation must not idle an eligible comment.
+                    # Journal why media is still due after that comment submits.
+                    result = {**result, "media_scan_pending": True}
+                else:
+                    result = media_result or result
             cur.execute(
                 """insert into social.instagram_ingestion_decisions(execution_id,ordinal,decision)
                 values(%s,%s,%s::jsonb)""",

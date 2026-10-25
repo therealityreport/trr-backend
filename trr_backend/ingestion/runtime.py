@@ -8,6 +8,7 @@ Production dependency/role/connection/readiness gates remain deployment work.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import signal
@@ -21,6 +22,7 @@ from typing import Any
 COORDINATOR_ENABLED = "TRR_INSTAGRAM_INGESTION_COORDINATOR_ENABLED"
 COORDINATOR_TIMEOUT_SECONDS = 115
 ACTIVITY_TIMEOUT_SECONDS = 590
+ACTIVITY_DEADLINE_ENV = "TRR_INSTAGRAM_ACTIVITY_DEADLINE_MONOTONIC"
 ACTIVITY_OUTPUT_LIMIT_BYTES = 65536
 
 
@@ -110,7 +112,7 @@ def run_ingestion_activity(
     if execution_placement == "modal" and (timeout_seconds is not None or abort is not None):
         raise ValueError("Local activity bounds cannot change Modal policy")
     timeout = ACTIVITY_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
-    if not 0 < timeout <= ACTIVITY_TIMEOUT_SECONDS:
+    if not math.isfinite(timeout) or not 0 < timeout <= ACTIVITY_TIMEOUT_SECONDS:
         raise ValueError("Activity deadline exceeds the existing bound")
     if not coordinator_enabled():
         return {"outcome": "fenced", "code": "ingestion_disabled"}
@@ -120,8 +122,13 @@ def run_ingestion_activity(
     argv = [sys.executable, "-m", "trr_backend.ingestion.worker"]
     if execution_placement == "local":
         argv.extend(["--execution-placement", "local", "--expected-parent-pid", str(os.getpid())])
+    # One absolute kernel clock bounds spawn, child startup, resume and source.
+    # Never inherit a stale deadline from this coordinator's own environment.
+    activity_deadline = time.monotonic() + timeout
+    child_env = dict(os.environ, **{ACTIVITY_DEADLINE_ENV: repr(activity_deadline)})
     child = subprocess.Popen(
         argv,
+        env=child_env,
         start_new_session=True,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -157,9 +164,9 @@ def run_ingestion_activity(
             pass
         try:
             if execution_placement == "modal":
-                code = child.wait(timeout=timeout)
+                code = child.wait(timeout=max(0, activity_deadline - time.monotonic()))
             else:
-                end = time.monotonic() + timeout
+                end = activity_deadline
                 while True:
                     if abort is not None and abort.is_set():
                         return {"outcome": "fenced", "stage": safe["stage"], "code": "local_execution_aborted"}

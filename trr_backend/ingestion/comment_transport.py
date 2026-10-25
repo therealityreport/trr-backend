@@ -390,10 +390,13 @@ class PublicRelayResume:
     from_root: bool
 
     @classmethod
-    def from_checkpoint(cls, checkpoint: Mapping[str, Any], parents: list[Any]) -> PublicRelayResume:
+    def from_checkpoint(
+        cls, checkpoint: Mapping[str, Any], parents: list[Any], *, now: datetime | None = None
+    ) -> PublicRelayResume:
         from trr_backend.ingestion.lane_restart import pending_restarts
 
         restarts = pending_restarts(dict(checkpoint))
+        now = now or datetime.now(UTC)
         pages = checkpoint.get("comment_pages") or {}
         if not isinstance(pages, Mapping):
             raise CommentSourceError("Invalid public comment checkpoint")
@@ -444,7 +447,7 @@ class PublicRelayResume:
         access = pages.get("reply_access") or {}
         retry_at = access.get("next_attempt_at") if access.get("retry_source") == "server_retry_after" else None
         try:
-            deferred = bool(retry_at and datetime.fromisoformat(retry_at.replace("Z", "+00:00")) > datetime.now(UTC))
+            deferred = bool(retry_at and datetime.fromisoformat(retry_at.replace("Z", "+00:00")) > now)
         except (ValueError, TypeError):
             raise CommentSourceError("Invalid reply access retry timestamp") from None
         rejected_lanes = set(access.get("lanes") or [])
@@ -475,6 +478,11 @@ class PublicRelayResume:
             item["pending"] = pending
             if pending and item.get("exhausted"):
                 item = {"pending": True}
+            technical = (checkpoint.get("public_reply_failures") or {}).get(parent.comment_id)
+            if technical is not None:
+                from trr_backend.ingestion.reply_failures import resume_failure
+
+                item.update(resume_failure(technical, now=now))
             replies[parent.comment_id] = item
         return cls(top, replies, not top_lane or top_lane.get("started_from_root") is True)
 
@@ -510,27 +518,48 @@ class PublicRelayCommentSource:
         else:
             raise RuntimeError("Run the synchronous comment activity outside the active event loop")
         parents = _seed_parents(resume_inventory, shortcode)
-        resume = PublicRelayResume.from_checkpoint(checkpoint, parents)
+        resume = PublicRelayResume.from_checkpoint(
+            checkpoint, parents, now=getattr(pre_source_request, "observation_clock", lambda: datetime.now(UTC))()
+        )
         if "__top__" in (checkpoint.get("public_lane_restarts") or {}):
             parents = []
         expected = self._expected_count
         if expected is None:
             expected = _count((checkpoint.get("comment_pages") or {}).get("expected"))
         if resume.top.get("exhausted") and not any(item.get("pending") for item in resume.replies.values()):
-            deferred = tuple(key for key, item in resume.replies.items() if item.get("deferred"))
+            deferred = tuple(
+                key
+                for key, item in resume.replies.items()
+                if item.get("deferred") and not item.get("technical_failure")
+            )
             return CommentFetchSummary(
                 expected_count=expected,
                 full_observation=resume.from_root,
                 reply_lanes_rejected=deferred,
                 reply_access_code="reply_access_rejected" if deferred else None,
+                public_reply_failures=tuple(checkpoint.get("public_reply_failures") or {}),
             )
 
         def before(kind):
             if kind not in {"relay_bootstrap", "graphql_comments", "graphql_replies"}:
                 _guard(_unsupported, kind)
-            _guard(pre_source_request)
+            return _guard(pre_source_request)
+
+        for name in (
+            "run_id",
+            "run_generation",
+            "owner_generation",
+            "observation_clock",
+            "deadline",
+            "record_terminal_failure",
+        ):
+            if hasattr(pre_source_request, name):
+                setattr(before, name, getattr(pre_source_request, name))
+        before.owner_generation = getattr(pre_source_request, "owner_generation", 0)
+        before.observation_clock = getattr(pre_source_request, "observation_clock", lambda: datetime.now(UTC))
 
         rejected_lanes = set()
+        technical_failures = set(checkpoint.get("public_reply_failures") or {})
         reply_retry_after = None
 
         def observe(kind, payload):
@@ -550,8 +579,16 @@ class PublicRelayCommentSource:
                     if failure and any(value is not None for value in (header_delay, failure[1]))
                     else None
                 )
+                from trr_backend.ingestion.reply_failures import RetainedPublicReplyFailureError
+
                 try:
                     source_observer(kind, payload)
+                except RetainedPublicReplyFailureError as error:
+                    technical_failures.add(error.parent_id)
+                    callback = getattr(source_failure_observer, "record_branch_failure", None)
+                    if callback is not None:
+                        callback()
+                    return
                 except CommentSourceError:
                     if rejected_reply:
                         return
@@ -560,6 +597,8 @@ class PublicRelayCommentSource:
                             "public_access_backoff" if failure[0] == "source_auth_failed" else failure[0], delay
                         )
                     raise
+                if kind == "graphql_replies" and not failure and not rejected_reply:
+                    technical_failures.discard(str(payload.get("parent_comment_id") or ""))
                 if rejected_reply:
                     if delay is not None:
                         reply_retry_after = max(reply_retry_after or 0, delay)
@@ -615,6 +654,7 @@ class PublicRelayCommentSource:
                     .get("child_comments", {})
                     .get("completed_parent_ids", [])
                 )
+                summary = replace(summary, public_reply_failures=tuple(sorted(technical_failures)))
                 unresolved = rejected_lanes - completed
                 if unresolved:
                     summary = replace(

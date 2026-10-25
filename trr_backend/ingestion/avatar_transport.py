@@ -11,6 +11,7 @@ from requests.adapters import HTTPAdapter
 from trr_backend.ingestion.avatar_resolution import normalize_handle
 from trr_backend.ingestion.domain import Failure
 from trr_backend.ingestion.post_transport import SourceFailure
+from trr_backend.ingestion.profile_failure_diagnostics import ResponseFacts
 from trr_backend.socials.instagram.constants import PROFILE_INFO_URL
 from trr_backend.socials.instagram.credential_guard import CredentialIdentityMismatch, PublicCookieIdentity
 from trr_backend.socials.instagram.public_response import PublicRequestClient, parse_public_retry_after
@@ -28,6 +29,7 @@ class AvatarProfileSource:
         public_only: bool = False,
     ):
         self.cookies, self.deadline, self.clock = dict(cookies), deadline, clock
+        self.response_facts = ResponseFacts()
         self._public_identity = PublicCookieIdentity(cookies) if public_only else None
         self.session = session or requests.Session()
         # A source activity owns this private session. Ambient proxy/netrc
@@ -81,13 +83,15 @@ class AvatarProfileSource:
                 self._public_cookies()
                 kwargs["cookies"] = dict(self.cookies)
                 kwargs.update(allow_redirects=False, proxies={}, auth=None)
-            pre_source_request()
+            permit = pre_source_request()
+            self.response_facts.begin("legacy_profile", len(self.response_facts.facts) + 1, permit)
             response = self.session.get(url, **kwargs)
+            self.response_facts.preloaded(response)
             if self._public_identity is not None:
                 self._public_cookies(response)
             return response
 
-        return self.client.get_json(
+        payload = self.client.get_json(
             PROFILE_INFO_URL,
             query_type="avatar_profile",
             headers=headers,
@@ -96,6 +100,8 @@ class AvatarProfileSource:
             timeout=(min(5, remaining / 3), min(20, remaining / 2)),
             sender=send,
         )
+        self.response_facts.enrich(payload)
+        return payload
 
     def close(self):
         self.session.close()

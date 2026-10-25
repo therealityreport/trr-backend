@@ -17,6 +17,59 @@ from trr_backend.ingestion.persistence import Store, _row
 from trr_backend.ingestion.validation_gate import require_allowed_intent
 
 
+class RecoveryAdmissionDeferred(Conflict):
+    """A new root was not admitted; no command or target mutation committed."""
+
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+
+
+def _replayed_recovery(cur, account, idempotency_key, command_hash):
+    previous = _row(
+        cur,
+        """select command_hash,result from social.instagram_ingestion_commands
+        where account=%s and idempotency_key=%s""",
+        (account, idempotency_key),
+    )
+    if previous:
+        if previous["command_hash"] != command_hash:
+            raise Conflict("Idempotency key belongs to another recovery")
+        return previous["result"]
+    return None
+
+
+def _claim_root_admission(cur, run_id, account):
+    # Wrappers can already hold target/post locks. Never wait for this gate:
+    # a gate holder might itself be waiting for one of those rows.
+    isolation = _row(cur, "select current_setting('transaction_isolation') as isolation")["isolation"]
+    if isolation != "read committed":
+        raise Conflict("Root admission requires a current read-committed snapshot")
+    claimed = _row(
+        cur,
+        "select pg_try_advisory_xact_lock(hashtextextended(%s,0)) as claimed",
+        (f"instagram-root-admission:{account}:{run_id}",),
+    )
+    if not claimed["claimed"]:
+        raise RecoveryAdmissionDeferred("recovery_admission_busy")
+
+
+def _check_root_capacity(cur, run_id, target_key):
+    # Restarts disappear after the first committed page. The recovery command
+    # remains throughout that unresolved pass, including cooldown/blocked work.
+    outstanding = _row(
+        cur,
+        """select count(*) as count,coalesce(bool_or(target_key=%s),false) as includes_target
+        from social.instagram_ingestion_targets where run_id=%s and stage='comments'
+        and outcome='unresolved' and (
+            coalesce(checkpoint->'public_lane_restarts','{}'::jsonb)<>'{}'::jsonb
+            or checkpoint#>>'{public_recovery,command_key}' is not null)""",
+        (target_key, run_id),
+    )
+    if outstanding["count"] > 4 or (outstanding["count"] == 4 and not outstanding["includes_target"]):
+        raise RecoveryAdmissionDeferred("recovery_root_capacity_full")
+
+
 def _known_max(*values):
     return max((value for value in values if type(value) is int and value >= 0), default=None)
 
@@ -161,18 +214,21 @@ def enqueue_next_recovery(store, *, run_id, account, generation, intent_hash, so
         if type(gap) is not int or gap <= 0 or unchanged_passes(row["checkpoint"], row["outcome"]) >= 2:
             continue
         request_hash = row["checkpoint_hash"]
-        recover_public_target(
-            store,
-            run_id=run_id,
-            account=account,
-            generation=generation,
-            target_key=row["target_key"],
-            expected_checkpoint_hash=request_hash,
-            reason="Public native traversal ended below retained expected total",
-            source_revision=source_revision,
-            initiated_by="january-worker-completion",
-            idempotency_key=f"january-recovery:{run_id}:{request_hash}",
-        )
+        try:
+            recover_public_target(
+                store,
+                run_id=run_id,
+                account=account,
+                generation=generation,
+                target_key=row["target_key"],
+                expected_checkpoint_hash=request_hash,
+                reason="Public native traversal ended below retained expected total",
+                source_revision=source_revision,
+                initiated_by="january-worker-completion",
+                idempotency_key=f"january-recovery:{run_id}:{request_hash}",
+            )
+        except RecoveryAdmissionDeferred as exc:
+            return {"status": "recovery_admission_wait", "reason": exc.code}
         summary = summaries[row["summary_key"]]
         return {
             "status": "public_recovery_queued",
@@ -225,19 +281,23 @@ def recover_public_target(
     }
     command_hash = fingerprint(request)
     with store.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(
-            "select pg_advisory_xact_lock(hashtextextended(%s,0))", (f"instagram-command:{account}:{idempotency_key}",)
-        )
-        previous = _row(
+        previous = _replayed_recovery(cur, account, idempotency_key, command_hash)
+        if previous is not None:
+            return previous
+        # A wrapper may hold the target needed by the current command owner.
+        # The command gate must not wait either, even for the identical request.
+        claimed = _row(
             cur,
-            """select command_hash,result from social.instagram_ingestion_commands
-            where account=%s and idempotency_key=%s""",
-            (account, idempotency_key),
+            "select pg_try_advisory_xact_lock(hashtextextended(%s,0)) as claimed",
+            (f"instagram-command:{account}:{idempotency_key}",),
         )
-        if previous:
-            if previous["command_hash"] != command_hash:
-                raise Conflict("Idempotency key belongs to another recovery")
-            return previous["result"]
+        if not claimed["claimed"]:
+            raise RecoveryAdmissionDeferred("recovery_admission_busy")
+        # Another owner could have committed between lookup and gate claim.
+        previous = _replayed_recovery(cur, account, idempotency_key, command_hash)
+        if previous is not None:
+            return previous
+        _claim_root_admission(cur, run_id, account)
         run = store._execution_run(cur, run_id, account, shared_fence=True)
         intent = RunIntent.from_payload(run["intent"])
         require_allowed_intent(intent)
@@ -297,6 +357,7 @@ def recover_public_target(
         no_improvement = unchanged_passes(checkpoint, target["outcome"])
         if no_improvement >= 2:
             raise Conflict("Two complete recovery passes added no IDs or stronger completeness proof")
+        _check_root_capacity(cur, run_id, target_key)
         restarts = {
             lane: {
                 "lane": lane,

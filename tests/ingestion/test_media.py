@@ -18,6 +18,7 @@ from trr_backend.ingestion.canonical import OlderObservation, normalize_post_sou
 from trr_backend.ingestion.domain import Failure, LostOwnership, RunIntent, Stage
 from trr_backend.ingestion.evidence import Evidence
 from trr_backend.ingestion.media import (
+    PRIOR_MANIFEST_VERSION,
     AvatarSource,
     CommentMedia,
     MediaActivity,
@@ -415,6 +416,136 @@ def test_existing_legacy_object_without_digest_compares_bytes_and_rejects_change
     with pytest.raises(MediaIncomplete, match="existing_object_content_conflict"):
         service.put("old.png", image_bytes("blue"), "image/png", check=noop, request=noop)
     assert client.objects["old.png"][0] == image_bytes()
+
+
+def test_changed_post_cover_and_variants_keep_old_bytes_and_resolve_actual_keys():
+    from trr_backend.ingestion.replay import serialize_media_result
+
+    client = Storage()
+    source = snapshot(inventory_fingerprint={"version": "instagram-media-inventory-v1", "sha256": "a" * 64})
+    first = mirror_snapshot(source, storage(client), check=noop, request=noop)
+    old_objects = dict(client.objects)
+    retained = replace(source, existing_manifest=first.post_fields["asset_manifest"])
+    blue = storage(client, opener=lambda *args, **kwargs: Response(image_bytes("blue")))
+    result = mirror_snapshot(retained, blue, check=noop, request=noop)
+    for attribute in (
+        "inventory_fingerprint",
+        "result_inventory_fingerprint",
+        "observed_at",
+        "thumbnail_url",
+        "media_urls",
+        "expected_media_count",
+        "comments",
+        "avatars",
+        "comment_settlement",
+    ):
+        assert getattr(result.snapshot, attribute) == getattr(retained, attribute)
+    manifest = result.post_fields["asset_manifest"]
+    digest = hashlib.sha256(image_bytes("blue")).hexdigest()
+    for old_key, value in old_objects.items():
+        assert client.objects[old_key] == value
+    for entry in [
+        manifest["originals"]["cover"],
+        *manifest["originals"]["media"],
+        *manifest["display_variants"].values(),
+    ]:
+        assert f".sha256-{digest}." in entry["storage_key"]
+        assert entry["url"] == "https://media.example/" + entry["storage_key"]
+        assert client.objects[entry["storage_key"]][0] == image_bytes("blue")
+        assert entry["sha256"] == digest
+    assert result.post_fields["hosted_thumbnail_url"] == manifest["originals"]["cover"]["url"]
+    assert result.post_fields["hosted_media_urls"] == [manifest["originals"]["media"][0]["url"]]
+    serialize_media_result(result)  # Strict existing result-v1 schema accepts resolved identities.
+    writes = list(client.writes)
+    assert mirror_snapshot(retained, blue, check=noop, request=noop).post_fields == result.post_fields
+    newest = replace(source, existing_manifest=manifest)
+    assert mirror_snapshot(newest, blue, check=noop, request=noop).post_fields == result.post_fields
+    assert client.writes == writes
+
+
+def test_changed_post_video_retains_original_and_uses_one_content_version_on_retry():
+    client = Storage()
+    old = b"\x00\x00\x00\x18ftypmp42" + b"old-video"
+    new = b"\x00\x00\x00\x18ftypmp42" + b"new-video"
+    key = "legacy/post/media-01.mp4"
+    client.objects[key] = old, {}
+    service = storage(client, opener=lambda *args, **kwargs: Response(new, headers={"Content-Type": "video/mp4"}))
+    entry, _ = service.host(
+        "https://scontent.cdninstagram.com/video.mp4",
+        root="legacy/post",
+        name="media-01",
+        preserved_key=key,
+        version_post_role="media_original_01",
+        check=noop,
+        request=noop,
+    )
+    expected = "legacy/post/media-01.sha256-" + hashlib.sha256(new).hexdigest() + ".mp4"
+    assert entry["storage_key"] == expected and entry["url"] == "https://media.example/" + expected
+    assert client.objects[key][0] == old and client.objects[expected][0] == new
+    repeated, _ = service.host(
+        "https://scontent.cdninstagram.com/video.mp4",
+        root="legacy/post",
+        name="media-01",
+        preserved_key=expected,
+        version_post_role="media_original_01",
+        check=noop,
+        request=noop,
+    )
+    assert repeated == entry and client.writes == [expected]
+
+
+@pytest.mark.parametrize("identical", [False, True])
+def test_post_content_version_conditional_race_never_overwrites_competing_bytes(identical):
+    client = Storage()
+    new = image_bytes("blue")
+    client.objects["legacy/cover.png"] = image_bytes(), {}
+    expected = "legacy/cover.sha256-" + hashlib.sha256(new).hexdigest() + ".png"
+    original = client.put_object
+
+    def competing_put(**kwargs):
+        assert kwargs["Key"] == expected
+        client.objects[expected] = (new if identical else image_bytes("green")), {}
+        return original(**kwargs)
+
+    client.put_object = competing_put
+    service = storage(client, opener=lambda *args, **kwargs: Response(new))
+    if identical:
+        entry, _ = service.host(
+            SOURCE,
+            root="legacy",
+            name="cover",
+            preserved_key="legacy/cover.png",
+            version_post_role="cover_original",
+            check=noop,
+            request=noop,
+        )
+        assert entry["storage_key"] == expected
+    else:
+        with pytest.raises(MediaIncomplete, match="existing_object_content_conflict"):
+            service.host(
+                SOURCE,
+                root="legacy",
+                name="cover",
+                preserved_key="legacy/cover.png",
+                version_post_role="cover_original",
+                check=noop,
+                request=noop,
+            )
+    assert client.objects["legacy/cover.png"][0] == image_bytes()
+    assert client.objects[expected][0] == (new if identical else image_bytes("green"))
+
+
+def test_comment_and_avatar_hosting_do_not_enable_post_content_version_resolution():
+    client = Storage()
+    client.objects["comment/media-01.png"] = image_bytes(), {}
+    service = storage(client, opener=lambda *args, **kwargs: Response(image_bytes("blue")))
+    with pytest.raises(MediaIncomplete, match="existing_object_content_conflict"):
+        service.host(SOURCE, root="comment", name="media-01", check=noop, request=noop)
+    with pytest.raises(MediaIncomplete, match="avatar_content_version_forbidden"):
+        service.host(
+            SOURCE, root="", name="", avatar="viewer", version_post_role="cover_original", check=noop, request=noop
+        )
+    assert client.writes == []
 
 
 def test_storage_lost_response_and_competing_upload_are_idempotent():
@@ -878,7 +1009,7 @@ def test_stream_checks_local_deadline_on_every_chunk():
                 clock.milliseconds += 10
                 yield b"x"
 
-    with pytest.raises(LostOwnership, match="deadline"):
+    with pytest.raises(MediaIncomplete, match="target_deadline"):
         storage(opener=lambda *a, **kw: SlowResponse())._download(
             SOURCE,
             check=MediaOwnershipCheck(lambda: durable_checks.append(clock()), deadline=0.25, clock=clock),
@@ -1210,3 +1341,348 @@ def test_cancelled_media_cannot_publish_avatar_version_proof(media_database):
         assert cur.fetchone()[0] == 0
         cur.execute("select count(*) from social.instagram_ingestion_receipts where run_id=%s", (owned["run_id"],))
         assert cur.fetchone()[0] == 0
+
+
+def test_prior_manifest_is_retained_before_hosting_deduplicated_and_separate_from_result_receipt(media_database):
+    from trr_backend.ingestion.replay import MEDIA_RESULT_REPLAY_VERSION
+
+    store, tx = media_database
+    owned, token, source = launch_media(media_database)
+    client = Storage()
+    old = mirror_snapshot(source, storage(client), check=noop, request=noop).post_fields["asset_manifest"]
+    prior_time = OBSERVED - timedelta(days=1)
+    archival_started = datetime.now(UTC)
+    old["updated_at"] = prior_time.isoformat()
+    old["ingestion_media"]["observed_at"] = prior_time.isoformat()
+    descriptors = [old["originals"]["cover"], *old["originals"]["media"], *old["display_variants"].values()]
+    for item in descriptors:
+        item["generated_at"] = prior_time.isoformat()
+        item["url"] += "?oh=must-not-retain&access_token=must-not-retain"
+    old_objects = dict(client.objects)
+    source = replace(source, existing_manifest=old)
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            "update social.instagram_posts set asset_manifest=%s::jsonb where id=%s", (json.dumps(old), source.post_id)
+        )
+
+    def retained():
+        with tx() as conn, conn.cursor() as cur:
+            cur.execute(
+                """select captured_at,payload from social.instagram_ingestion_evidence
+                where run_id=%s and target_key=%s and parser_version=%s""",
+                (owned["run_id"], source.shortcode, PRIOR_MANIFEST_VERSION),
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 1
+        captured, payload = rows[0]
+        payload = json.loads(payload)
+        assert archival_started <= captured <= datetime.now(UTC)
+        assert payload["captured_at"] == prior_time.isoformat()
+        assert payload["updated_at"] == prior_time.isoformat()
+        assert "must-not-retain" not in json.dumps(payload) and "?" not in json.dumps(payload)
+        assert {item["variant_key"] for item in payload["media"]} == {item["variant_key"] for item in descriptors}
+        for prior in payload["media"]:
+            expected = next(item for item in descriptors if item["variant_key"] == prior["variant_key"])
+            for field in ("storage_key", "bytes", "sha256", "width", "height", "generated_at"):
+                assert prior[field] == expected[field]
+        return payload
+
+    def fail_before_download(*args, **kwargs):
+        retained()
+        raise MediaIncomplete("media_download_failed")
+
+    with pytest.raises(MediaIncomplete, match="media_download_failed"):
+        MediaActivity(store, storage=storage(client, opener=fail_before_download)).execute(
+            **owned, owner_token=token, load=lambda **callbacks: source
+        )
+    store.checkpoint_failure(
+        **owned, owner_token=token, failure=Failure("media_download_failed"), checkpoint={}, requests=0
+    )
+    token = str(store.reserve(**owned)["owner_token"])
+
+    def fresh_bytes(*args, **kwargs):
+        retained()
+        return Response(image_bytes("blue"))
+
+    receipt = MediaActivity(store, storage=storage(client, opener=fresh_bytes)).execute(
+        **owned, owner_token=token, load=lambda **callbacks: source
+    )
+    assert receipt["outcome"] == "committed"
+    assert receipt["observed_at"] == source.observed_at
+    assert receipt["canonical_identity"]["inventory_fingerprint"] == source.inventory_fingerprint
+    retained()
+    for key, old_value in old_objects.items():
+        assert client.objects[key] == old_value
+    with tx() as conn, conn.cursor() as cur:
+        # Final certifier's source is the exact receipt-linked evidence, so
+        # auxiliary prior-manifest evidence cannot become completion proof.
+        cur.execute(
+            """select e.parser_version,p.asset_manifest from social.instagram_ingestion_receipts r
+            join social.instagram_ingestion_evidence e using(evidence_id,run_id,stage,target_key)
+            join social.instagram_posts p on p.shortcode=r.target_key where r.run_id=%s""",
+            (owned["run_id"],),
+        )
+        parser, manifest = cur.fetchone()
+        assert parser == MEDIA_RESULT_REPLAY_VERSION
+        assert ".sha256-" in manifest["originals"]["cover"]["storage_key"]
+        assert "prior_manifest" not in manifest and "history" not in manifest
+        cur.execute(
+            """select payload from social.instagram_ingestion_evidence
+            where run_id=%s and parser_version='instagram-media-v1'""",
+            (owned["run_id"],),
+        )
+        for (payload,) in cur.fetchall():
+            payload = json.loads(payload)
+            assert {entry["id"]: entry["storage_source_key"] for entry in payload["media"]} == source.storage_keys()
+            assert payload["inventory_fingerprint"] == source.inventory_fingerprint
+            assert payload["ingestion_media"]["observed_at"] == source.observed_at.isoformat()
+
+
+def test_old_prior_manifest_uses_archival_retention_clock_and_keeps_source_clocks():
+    from trr_backend.ingestion.media import prior_manifest_evidence
+
+    archived = datetime.now(UTC)
+    old = archived - timedelta(days=100)
+    source = snapshot()
+    manifest = mirror_snapshot(source, storage(), check=noop, request=noop).post_fields["asset_manifest"]
+    manifest["updated_at"] = old.isoformat()
+    manifest["ingestion_media"]["observed_at"] = old.isoformat()
+    for item in [
+        manifest["originals"]["cover"],
+        *manifest["originals"]["media"],
+        *manifest["display_variants"].values(),
+    ]:
+        item["generated_at"] = old.isoformat()
+    source = replace(source, existing_manifest=manifest)
+    first = prior_manifest_evidence(source, captured_at=archived)
+    second = prior_manifest_evidence(source, captured_at=archived + timedelta(days=1))
+    assert first.captured_at == archived and first.expires_at == archived + timedelta(days=30)
+    payload = first.read(now=archived + timedelta(days=1))
+    assert payload["updated_at"] == payload["captured_at"] == old.isoformat()
+    assert all(item["generated_at"] == old.isoformat() for item in payload["media"])
+    assert first.content_hash == second.content_hash and first.payload_json == second.payload_json
+
+
+def test_first_snapshot_default_cover_video_and_variant_conflicts_round_trip():
+    from trr_backend.ingestion.replay import _decode_media_result, serialize_media_result
+
+    source = snapshot(media_urls=("https://scontent.cdninstagram.com/video.mp4",))
+    client = Storage()
+    root = f"social/instagram/{source.show_id}/{source.season_number}/week-{source.week_index}/{source.shortcode}"
+    red, blue = image_bytes(), image_bytes("blue")
+    old_video, new_video = b"\x00\x00\x00\x18ftypmp42old-video", b"\x00\x00\x00\x18ftypmp42new-video"
+    client.objects[root + "/cover-original.png"] = blue, {}
+    client.objects[root + "/media-01.mp4"] = old_video, {}
+    cover_hash = hashlib.sha1(red).hexdigest()[:16]
+    for role in ("thumb", "card", "detail", "poster_card", "poster_detail"):
+        for fmt, ext in (("webp", "webp"), ("jpeg", "jpg")):
+            client.objects[f"social-variants/instagram/{source.post_id}/{cover_hash}/{role}_{fmt}.{ext}"] = blue, {}
+    old_objects = dict(client.objects)
+
+    def opener(_client, url, **kwargs):
+        return Response(new_video, headers={"Content-Type": "video/mp4"}) if url.endswith(".mp4") else Response(red)
+
+    result = mirror_snapshot(source, storage(client, opener=opener), check=noop, request=noop)
+    decoded = _decode_media_result(serialize_media_result(result))
+    assert source.storage_keys() == {}
+    assert decoded.post_fields == result.post_fields
+    manifest = result.post_fields["asset_manifest"]
+    entries = [manifest["originals"]["cover"], *manifest["originals"]["media"], *manifest["display_variants"].values()]
+    assert len(entries) == 12 and all(".sha256-" in item["storage_key"] for item in entries)
+    assert all(client.objects[key] == value for key, value in old_objects.items())
+
+
+def test_avatar_ephemeral_download_url_preserves_canonical_evidence_and_identity():
+    from trr_backend.ingestion.replay import serialize_media_result
+
+    canonical = "https://scontent.cdninstagram.com/avatar.png"
+    download = canonical + "?oh=ephemeral-secret"
+    avatar = AvatarSource("viewer", canonical, "owner", download_url=download)
+    assert avatar == replace(avatar, download_url=None) and "ephemeral-secret" not in repr(avatar)
+    requested = []
+
+    def opener(_client, url, **kwargs):
+        requested.append(url)
+        return Response()
+
+    result = mirror_snapshot(snapshot(avatars=(avatar,)), storage(opener=opener), check=noop, request=noop)
+    assert download in requested
+    assert result.avatars[0]["source_url"] == canonical
+    assert "ephemeral-secret" not in json.dumps(serialize_media_result(result))
+    with pytest.raises(MediaIncomplete, match="avatar_download_identity_mismatch"):
+        snapshot(avatars=(replace(avatar, download_url="https://scontent.cdninstagram.com/other.png"),)).validate()
+
+
+@pytest.mark.parametrize("request_elapsed", [5, 10])
+def test_cdn_request_uses_remaining_budget_after_request_callback(request_elapsed):
+    clock = ChunkClock()
+    sent = []
+
+    def request():
+        clock.milliseconds = request_elapsed * 1000
+
+    def opener(*args, **kwargs):
+        sent.append(kwargs)
+        return Response()
+
+    check = MediaOwnershipCheck(noop, deadline=10, clock=clock)
+    service = storage(opener=opener)
+    if request_elapsed == 10:
+        with pytest.raises(MediaIncomplete, match="target_deadline"):
+            service._download(SOURCE, check=check, request=request)
+        assert sent == []
+    else:
+        service._download(SOURCE, check=check, request=request)
+        assert sent[0]["timeout"] == (5, 5)
+        assert sent[0]["body_timeout"] == sent[0]["total_timeout"] == 5
+
+
+def test_cdn_body_stall_closes_response_and_classifies_soft_deadline():
+    clock = ChunkClock()
+    closed = []
+
+    class StalledResponse(Response):
+        def iter_content(self, **kwargs):
+            clock.milliseconds = 10_000
+            raise requests.Timeout("private URL excluded")
+            yield b""  # Keep the same iterator contract as a streamed response.
+
+        def __exit__(self, *_):
+            closed.append(True)
+
+    with pytest.raises(MediaIncomplete, match="target_deadline"):
+        storage(opener=lambda *args, **kwargs: StalledResponse())._download(
+            SOURCE, check=MediaOwnershipCheck(noop, deadline=10, clock=clock), request=noop
+        )
+    assert closed == [True]
+
+
+def sdk_budget_client():
+    from types import SimpleNamespace
+
+    from botocore.config import Config
+
+    client = Storage()
+    client.meta = SimpleNamespace(config=Config(connect_timeout=10, read_timeout=60, retries={"total_max_attempts": 1}))
+    return client
+
+
+@pytest.mark.parametrize("operation", ["head", "get", "put"])
+def test_r2_physical_calls_recheck_known_budget_after_request_callback(operation):
+    client = sdk_budget_client()
+    service = storage(client)
+    clock = ChunkClock()
+    calls, requests = [], []
+    original_head = client.head_object
+
+    def head(**kwargs):
+        calls.append("head")
+        return original_head(**kwargs)
+
+    client.head_object = head
+    client.get_object = lambda **kwargs: calls.append("get")
+    client.put_object = lambda **kwargs: calls.append("put")
+
+    def request():
+        requests.append(True)
+        if operation != "put" or len(requests) == 2:
+            clock.milliseconds = 45_000
+
+    check = MediaOwnershipCheck(noop, deadline=100, clock=clock)
+    with pytest.raises(MediaIncomplete, match="target_deadline"):
+        if operation == "head":
+            service._head("role.png", check=check, request=request)
+        elif operation == "get":
+            service._same(
+                "role.png", image_bytes(), {"ContentLength": len(image_bytes())}, check=check, request=request
+            )
+        else:
+            service.put("role.png", image_bytes(), "image/png", check=check, request=request)
+    assert calls == (["head"] if operation == "put" else [])
+    assert client.meta.config.retries == {"total_max_attempts": 1}
+
+
+def test_r2_body_budget_closes_received_body_before_an_unbounded_read():
+    client = sdk_budget_client()
+    service = storage(client)
+    clock = ChunkClock()
+    reads = []
+
+    class Body(io.BytesIO):
+        def read(self, *args):
+            reads.append(True)
+            return super().read(*args)
+
+    body = Body(image_bytes())
+
+    def get(**kwargs):
+        clock.milliseconds = 45_000
+        return {"Body": body}
+
+    client.get_object = get
+    with pytest.raises(MediaIncomplete, match="target_deadline"):
+        service._same(
+            "role.png",
+            image_bytes(),
+            {"ContentLength": len(image_bytes())},
+            check=MediaOwnershipCheck(noop, deadline=100, clock=clock),
+            request=noop,
+        )
+    assert body.closed and reads == []
+
+
+def test_soft_deadline_keeps_completed_immutable_upload_for_owned_retry():
+    client = sdk_budget_client()
+    service = storage(client)
+    clock = ChunkClock()
+    original_put = client.put_object
+
+    def lost_response(**kwargs):
+        original_put(**kwargs)
+        clock.milliseconds = 40_000
+        raise ClientError(
+            {"Error": {"Code": "InternalError"}, "ResponseMetadata": {"HTTPStatusCode": 503}}, "PutObject"
+        )
+
+    client.put_object = lost_response
+    with pytest.raises(MediaIncomplete, match="target_deadline"):
+        service.put(
+            "role.png",
+            image_bytes(),
+            "image/png",
+            check=MediaOwnershipCheck(noop, deadline=100, clock=clock),
+            request=noop,
+        )
+    assert client.objects["role.png"][0] == image_bytes()
+    clock.milliseconds = 0
+    service.put(
+        "role.png", image_bytes(), "image/png", check=MediaOwnershipCheck(noop, deadline=100, clock=clock), request=noop
+    )
+    assert client.writes == ["role.png"]
+
+
+def test_media_activity_inherits_cleanup_reserve_and_keeps_real_ownership_failure(media_database):
+    from trr_backend.ingestion.reply_context import execution_deadline
+
+    store, tx = media_database
+    owned, token, source = launch_media(media_database)
+    clock = ChunkClock()
+    context = execution_deadline.set(30)
+
+    def load(**callbacks):
+        clock.milliseconds = 10_000
+        return source
+
+    try:
+        with pytest.raises(MediaIncomplete, match="target_deadline"):
+            MediaActivity(store, storage=storage(), clock=clock).execute(**owned, owner_token=token, load=load)
+    finally:
+        execution_deadline.reset(context)
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute("select count(*) from social.instagram_ingestion_evidence where run_id=%s", (owned["run_id"],))
+        assert cur.fetchone()[0] == 0
+    check = MediaOwnershipCheck(
+        lambda: (_ for _ in ()).throw(LostOwnership("fixture cancelled")), deadline=100, clock=clock
+    )
+    with pytest.raises(LostOwnership):
+        check()

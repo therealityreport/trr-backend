@@ -85,6 +85,128 @@ def validate_run(store, request, *, expected_workflow_version=None):
     return run
 
 
+class DiagnosticAbort(threading.Event):
+    """An Event with best-effort first-cause metadata, never exception text."""
+
+    def __init__(self):
+        super().__init__()
+        self.diagnostic = None
+        self._diagnostic_lock = threading.Lock()
+        self.lease_metadata = None
+        self._diagnostic_error = None
+        self._diagnostic_metadata = {}
+
+    def record(self, origin, *, error=None, operation=None, **metadata):
+        # Only fixed primitive labels and references here: no clocks, optional
+        # callbacks, exception accessors, logging or database operations.
+        if (
+            origin
+            not in {
+                "lease_heartbeat_exception",
+                "lease_heartbeat_deadline",
+                "lease_cleanup_failure",
+                "lease_cleanup_deadline",
+                "control_owner_lost",
+                "dispatch_shutdown",
+                "signal_requested",
+            }
+            or self.diagnostic is not None
+        ):
+            return
+        if not self._diagnostic_lock.acquire(blocking=False):
+            return
+        try:
+            if self.diagnostic is None:
+                record = {"origin": origin}
+                if operation in {"decision", "scheduler_tick", "transition", "unlock", "close"}:
+                    record["operation"] = operation
+                self._diagnostic_error = error
+                self._diagnostic_metadata = metadata
+                self.diagnostic = record
+        finally:
+            self._diagnostic_lock.release()
+
+    def context(self):
+        """Optional enrichment. Called only by the independent reporter."""
+        classes = {
+            "OperationalError",
+            "InterfaceError",
+            "DatabaseError",
+            "InternalError",
+            "Error",
+            "ConnectionTimeout",
+            "ConnectionFailure",
+            "ConnectionDoesNotExist",
+            "AdminShutdown",
+            "IdleSessionTimeout",
+            "QueryCanceled",
+            "ProtocolViolation",
+            "LostOwnership",
+            "RuntimeError",
+            "OSError",
+            "TimeoutError",
+        }
+        record = {}
+        try:
+            metadata = self._diagnostic_metadata
+            captured_age = "heartbeat_age_seconds" in metadata
+            if self.lease_metadata is not None:
+                try:
+                    metadata = {**self.lease_metadata(), **metadata}
+                except BaseException:
+                    pass
+            record["timing_scope"] = "report_time"
+            if captured_age:
+                record["heartbeat_age_scope"] = "watchdog_abort_comparison"
+            error = self._diagnostic_error
+            if error is not None:
+                name = type(error).__name__
+                record["exception_class"] = name if name in classes else "OtherError"
+                state = getattr(error, "sqlstate", None)
+                if type(state) is str and state in {
+                    "08000",
+                    "08001",
+                    "08003",
+                    "08004",
+                    "08006",
+                    "08007",
+                    "08P01",
+                    "57P01",
+                    "57P02",
+                    "57P03",
+                    "57P05",
+                    "57014",
+                    "53200",
+                    "53300",
+                    "53400",
+                    "55P03",
+                    "40001",
+                    "40P01",
+                    "XX000",
+                }:
+                    record["sqlstate"] = state
+            for key in ("heartbeat_age_seconds", "select_inflight_seconds", "last_select_seconds"):
+                value = metadata.get(key)
+                if type(value) in (int, float) and math.isfinite(value) and value >= 0:
+                    record[key] = value
+            pid = metadata.get("lease_backend_pid")
+            if type(pid) is int and 0 < pid < 2**31:
+                record["lease_backend_pid"] = pid
+        except BaseException:
+            pass
+        return record
+
+
+def request_abort(abort, origin, **metadata):
+    try:
+        if isinstance(abort, DiagnosticAbort):
+            abort.record(origin, **metadata)
+    except BaseException:
+        pass
+    finally:
+        abort.set()
+
+
 class CoordinatorLease:
     """The same session-preserving advisory lease as the existing coordinator."""
 
@@ -100,14 +222,24 @@ class CoordinatorLease:
         self.last_heartbeat = None
         self.acquired = False
         self.previous_idle_timeout = None
+        self.backend_pid = None
+        self.select_started = None
+        self.last_select_seconds = None
 
     def __enter__(self):
         self.connection = self.connect()
         try:
             self.connection.autocommit = True
+            if isinstance(self.abort, DiagnosticAbort):
+                self.abort.lease_metadata = self._diagnostic_metadata
             with self.connection.cursor() as cur:
-                cur.execute("select pg_try_advisory_lock(%s,%s)", (self.config.lock_namespace, self.config.lock_key))
-                if not cur.fetchone()[0]:
+                cur.execute(
+                    "select pg_try_advisory_lock(%s,%s),pg_backend_pid()",
+                    (self.config.lock_namespace, self.config.lock_key),
+                )
+                acquired = cur.fetchone()
+                self.backend_pid = acquired[1] if len(acquired) > 1 else None
+                if not acquired[0]:
                     raise Conflict("The existing ingestion coordinator lease is busy")
                 self.acquired = True
                 cur.execute("""select current_user,rolsuper,has_schema_privilege(current_user,'dbos','USAGE'),
@@ -165,30 +297,46 @@ class CoordinatorLease:
                             cur.execute(
                                 "select set_config('idle_session_timeout',%s,false)", (self.previous_idle_timeout,)
                             )
-            except Exception:
+            except Exception as error:
                 # Leave server expiry armed on uncertainty; cleanup cannot mask
                 # the original failure or defeat the independent abort guard.
-                self.abort.set()
+                self._abort("lease_cleanup_failure", error=error)
             finally:
                 try:
                     self.connection.close()
-                except Exception:
-                    self.abort.set()
+                except Exception as error:
+                    self._abort("lease_cleanup_failure", error=error, operation="close")
 
         cleanup_thread = threading.Thread(target=cleanup, daemon=True, name="instagram-local-lease-cleanup")
         cleanup_thread.start()
         cleanup_thread.join(timeout=self.heartbeat_timeout)
         if cleanup_thread.is_alive():
-            self.abort.set()
+            self._abort("lease_cleanup_deadline")
+
+    def _abort(self, origin, **metadata):
+        request_abort(self.abort, origin, **metadata)
+
+    def _diagnostic_metadata(self):
+        now = self.clock()
+        return {
+            "lease_backend_pid": self.backend_pid,
+            "heartbeat_age_seconds": max(0, now - self.last_heartbeat) if self.last_heartbeat is not None else None,
+            "select_inflight_seconds": max(0, now - self.select_started) if self.select_started is not None else None,
+            "last_select_seconds": self.last_select_seconds,
+        }
 
     def _monitor(self):
         while not self.stop.wait(0.1):
             try:
+                self.select_started = self.clock()
                 with self.connection.cursor() as cur:
                     cur.execute("select 1")
-                self.last_heartbeat = self.clock()
-            except Exception:
-                self.abort.set()
+                completed = self.clock()
+                self.last_select_seconds = max(0, completed - self.select_started)
+                self.last_heartbeat = completed
+                self.select_started = None
+            except Exception as error:
+                self._abort("lease_heartbeat_exception", error=error)
                 return
 
     def _watch_heartbeat(self):
@@ -198,8 +346,9 @@ class CoordinatorLease:
         while not self.stop.wait(min(0.1, self.heartbeat_timeout / 4)):
             if self.abort.is_set():
                 return
-            if self.clock() - self.last_heartbeat >= self.heartbeat_timeout:
-                self.abort.set()
+            age = self.clock() - self.last_heartbeat
+            if age >= self.heartbeat_timeout:
+                self._abort("lease_heartbeat_deadline", heartbeat_age_seconds=age)
                 return
 
     def __exit__(self, *_):

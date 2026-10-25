@@ -13,6 +13,7 @@ performs an independent complete native membership/boundary audit when needed.
 # ruff: noqa: E501
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from contextlib import contextmanager, nullcontext
@@ -26,6 +27,7 @@ DEEP_GATES = {
     "media_records": "Ordinary result-v1 must match persisted manifest, canonical assets and all comment attachments",
     "hosted_bytes": "Full object reads, original hashes, decoding and GIF animation remain separate verification",
 }
+QUERY_FINGERPRINT_VERSION = "january-query-row-multiset-v2"
 
 
 class GuardError(RuntimeError):
@@ -54,14 +56,70 @@ def receipt_fence(row):
     )
 
 
+def query_sql(sql):
+    return re.sub(r"\bgeneration\s*=\s*1\b", "generation=" + str(context().generation), sql)
+
+
+def row_fingerprint(row):
+    return hashlib.sha256(
+        json.dumps(
+            row, sort_keys=True, default=str, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        ).encode()
+    ).hexdigest()
+
+
+def record_query(sql, args, row_hashes):
+    """Retain exact full-row coverage as an order-independent multiset digest.
+
+    Duplicate multiplicity is preserved. Raw payload/checkpoint rows never stay
+    in the invocation ledger; only fixed-size hashes are sorted transiently.
+    """
+    ordered = sorted(row_hashes)
+    hashed = hashlib.sha256()
+    for value in ordered:
+        hashed.update(value.encode("ascii"))
+    context().query_material.append(
+        {"sql": sql, "args": args, "row_count": len(ordered), "rows_sha256": hashed.hexdigest()}
+    )
+
+
 def rows(cur, sql, args=()):
-    sql = re.sub(r"\bgeneration\s*=\s*1\b", "generation=" + str(context().generation), sql)
+    sql = query_sql(sql)
     cur.execute(sql, args)
     result = [dict(row) for row in cur.fetchall()]
-    context().query_material.append(
-        {"sql": sql, "args": args, "rows": sorted(result, key=lambda row: json.dumps(row, sort_keys=True, default=str))}
-    )
+    record_query(sql, args, (row_fingerprint(row) for row in result))
     return result
+
+
+@contextmanager
+def stream_rows(cur, sql, args=()):
+    """One full row at a time, on the caller's existing read-only snapshot."""
+    from uuid import uuid4
+
+    from psycopg2.extras import RealDictCursor
+
+    sql = query_sql(sql)
+    hashes = []
+    completed = False
+    with cur.connection.cursor(name="january_audit_" + uuid4().hex, cursor_factory=RealDictCursor) as stream:
+        stream.itersize = 1
+        stream.execute(sql, args)
+
+        def values():
+            nonlocal completed
+            for value in stream:
+                row = dict(value)
+                hashes.append(row_fingerprint(row))
+                yield row
+            completed = True
+
+        iterator = values()
+        try:
+            yield iterator
+            require(completed, "page_stream_not_fully_consumed")
+            record_query(sql, args, hashes)
+        finally:
+            iterator.close()
 
 
 def configure_read_snapshot(connection, cur):
@@ -313,6 +371,7 @@ class AuditContext:
     date_end: datetime
     generation: int = 1
     query_material: list = field(default_factory=list)
+    query_fingerprint_version: str = field(default=QUERY_FINGERPRINT_VERSION, init=False)
 
 
 _CONTEXT = ContextVar("january_audit_context")

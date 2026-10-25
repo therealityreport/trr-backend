@@ -53,7 +53,145 @@ def test_failed_source_releases_attempt_with_latest_durable_checkpoint(database)
             from social.instagram_ingestion_targets where run_id=%s""",
             (args["run_id"],),
         )
-        assert cur.fetchone() == (1, 1, {"cursor": "after-page", "last_error_code": "activity_failed"}, None, False)
+        attempts, requests, checkpoint, owner, delayed = cur.fetchone()
+        assert (attempts, requests, owner, delayed) == (1, 1, None, False)
+        assert checkpoint["cursor"] == "after-page" and checkpoint["last_error_code"] == "activity_failed"
+        diagnostic = checkpoint["worker_diagnostics"]
+        fact = diagnostic["last_failure"]
+        assert fact["exception_class"] == "RuntimeError" and fact["category"] == "activity_error"
+        assert fact["owner_generation"] == 1
+        assert datetime.fromisoformat(fact["observed_at"]).utcoffset() is not None
+        assert diagnostic["failure_history"] == [fact] and diagnostic["committed_pages_since_failure"] == 0
+        assert "secret.example" not in json.dumps(checkpoint) and "must-not-be-returned" not in json.dumps(checkpoint)
+
+
+@pytest.mark.parametrize(
+    "error,code,expected_class,category",
+    [
+        (TimeoutError("private request"), "activity_failed", "TimeoutError", "transport_error"),
+        (ValueError("private payload"), "activity_failed", "ValueError", "activity_error"),
+        (None, "target_deadline", "NoException", "attempt_deadline"),
+        (None, "observation_incomplete", "NoException", "incomplete_observation"),
+    ],
+)
+def test_failure_diagnostics_use_fixed_categories(error, code, expected_class, category):
+    from trr_backend.ingestion.domain import Failure
+    from trr_backend.ingestion.worker import failure_diagnostic
+
+    assert failure_diagnostic(error, Failure(code)) == (expected_class, category)
+    private = type("private_cookie_secret", (Exception,), {})("private token")
+    assert failure_diagnostic(private, Failure("activity_failed")) == ("OtherError", "activity_error")
+
+
+def test_failure_diagnostics_distinguish_source_parsing_from_persistence():
+    from psycopg2 import OperationalError
+
+    from trr_backend.ingestion.comments import CommentSourceError
+    from trr_backend.ingestion.domain import Failure
+    from trr_backend.ingestion.worker import failure_diagnostic
+
+    assert failure_diagnostic(CommentSourceError("private source"), Failure("activity_failed")) == (
+        "CommentSourceError",
+        "source_parse_error",
+    )
+    assert failure_diagnostic(OperationalError("private SQL parameters"), Failure("activity_failed")) == (
+        "OperationalError",
+        "persistence_error",
+    )
+
+
+def test_failure_diagnostics_normalize_sqlstate_and_canonical_exception_families():
+    from psycopg2 import DatabaseError
+    from psycopg2.errors import QueryCanceled, UndefinedTable, UniqueViolation
+
+    from trr_backend.ingestion.canonical import CanonicalWriteError, OlderObservation
+    from trr_backend.ingestion.domain import Failure
+    from trr_backend.ingestion.worker import failure_diagnostic
+
+    private_subclass = type("private_parameter_secret", (DatabaseError,), {})
+    for error, expected_class in (
+        (UniqueViolation("private SQL parameters"), "IntegrityError"),
+        (QueryCanceled("private query text"), "OperationalError"),
+        (UndefinedTable("private relation"), "DatabaseError"),
+        (private_subclass("private credentials"), "DatabaseError"),
+        (CanonicalWriteError("private canonical row"), "ValueError"),
+        (OlderObservation("private canonical row"), "ValueError"),
+    ):
+        assert failure_diagnostic(error, Failure("activity_failed")) == (expected_class, "persistence_error")
+
+
+def test_failure_diagnostics_normalize_actual_protocol_limit_and_typed_parse_failure():
+    from trr_backend.ingestion.domain import Failure
+    from trr_backend.ingestion.post_transport import SourceFailure
+    from trr_backend.ingestion.worker import failure_diagnostic
+    from trr_backend.socials.instagram.comments_scrapling.reply_http import ReplyProtocolLimitExceeded
+    from trr_backend.socials.instagram.comments_scrapling.reply_scheduler import DiskResponseSpool
+
+    assert ReplyProtocolLimitExceeded is DiskResponseSpool.ProtocolLimitError
+    assert failure_diagnostic(ReplyProtocolLimitExceeded("raw_chunk_limit"), Failure("activity_failed")) == (
+        "ReplyProtocolLimitError",
+        "source_parse_error",
+    )
+    failure = Failure("parse_error")
+    assert failure_diagnostic(SourceFailure(failure), failure) == ("SourceFailure", "source_parse_error")
+
+
+def test_failure_diagnostics_preserve_legacy_marker_and_bounded_history_without_messages(database):
+    from trr_backend.ingestion.domain import Failure
+
+    store, tx = database
+    run = launch(store)
+    store.discover(
+        run["run_id"],
+        "bravotv",
+        generation=1,
+        stage=Stage.MEDIA,
+        target_keys=["diagnostics"],
+        max_attempts=8,
+        cursor_state={},
+        page_id="diagnostics",
+        expected_cursor_state={},
+        seal=True,
+    )
+    args = {
+        "run_id": run["run_id"],
+        "account": "bravotv",
+        "generation": 1,
+        "stage": Stage.MEDIA,
+        "target_key": "diagnostics",
+    }
+    reservation_args = dict(args)
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            """update social.instagram_ingestion_targets set
+            checkpoint='{"last_error_code":"activity_failed","cursor":"saved"}' where run_id=%s""",
+            (args["run_id"],),
+        )
+    instance = worker(store, None)
+    seen = []
+    for attempt in range(6):
+        args["owner_token"] = str(store.reserve(**reservation_args)["owner_token"])
+        store.acquire(**args)
+        instance.release(args, Failure("target_deadline"), error=TimeoutError("private cookie"))
+        with tx() as conn, conn.cursor() as cur:
+            cur.execute("select checkpoint from social.instagram_ingestion_targets where run_id=%s", (args["run_id"],))
+            checkpoint = cur.fetchone()[0]
+        diagnostics = checkpoint["worker_diagnostics"]
+        seen.append(diagnostics["last_failure"])
+        assert diagnostics["last_failure"]["owner_generation"] == attempt + 1
+        assert diagnostics["last_failure"]["category"] == "attempt_deadline"
+        assert len(diagnostics["failure_history"]) <= 4
+        assert checkpoint["cursor"] == "saved" and "private cookie" not in json.dumps(checkpoint)
+        if attempt == 0:
+            legacy = diagnostics["failure_history"][0]
+            assert legacy == {
+                "code": "activity_failed",
+                "exception_class": "UnknownError",
+                "category": "unknown",
+                "observed_at": None,
+                "owner_generation": None,
+            }
+    assert diagnostics["failure_history"] == seen[-4:]
 
 
 def test_immediate_operational_retries_preserve_the_finite_attempt_budget(database):

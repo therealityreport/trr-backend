@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from urllib.parse import urlsplit
 
@@ -361,10 +361,11 @@ def _network_lane(context):
 
 def _public_source_parts(context, owned):
     from trr_backend.ingestion.identity_policy import SourceRequestGate
+    from trr_backend.ingestion.reply_context import source_deadline
 
     store = _worker_store(context)
     remaining = (context["target"]["owner_expires_at"] - datetime.now(UTC)).total_seconds() - 2
-    deadline = time.monotonic() + max(0, min(590, remaining))
+    deadline = source_deadline(time.monotonic() + max(0, min(590, remaining)))
 
     def check():
         store.check_owner(**owned)
@@ -430,17 +431,48 @@ class _GatedSource:
     def __init__(self, source, gate, *, failure_code):
         self.source, self.gate, self.failure_code = source, gate, failure_code
         self.finished = False
+        self.branch_failure_recorded = False
 
     def __call__(self, **callbacks):
         before = callbacks["pre_source_request"]
         observe = callbacks["source_observer"]
 
+        from trr_backend.ingestion.reply_context import request_permit
+
+        terminal_permit = None
+        terminal_code = None
+
+        def record_terminal_failure(permit, code=None):
+            nonlocal terminal_permit, terminal_code
+            if code not in (None, "target_deadline"):
+                raise ValueError("Unsupported terminal reply failure category")
+            terminal_permit, terminal_code = permit, code
+
         def guarded_request():
-            self.gate.before_request()
+            permit = self.gate.before_request()
             before()
+            return permit
+
+        for name in ("run_id", "run_generation", "owner_generation", "observation_clock", "deadline"):
+            if hasattr(before, name):
+                setattr(guarded_request, name, getattr(before, name))
+        guarded_request.record_terminal_failure = record_terminal_failure
+        deadlines = [
+            value
+            for value in (getattr(before, "deadline", None), getattr(self.gate, "deadline", None))
+            if value is not None
+        ]
+        if deadlines:
+            guarded_request.deadline = min(deadlines)
 
         def guarded_observer(*args, **kwargs):
-            observe(*args, **kwargs)  # Retain/parse before acknowledging healthy content.
+            try:
+                observe(*args, **kwargs)  # Retain/parse before acknowledging healthy content.
+            except Exception as error:
+                permit = request_permit.get()
+                if permit is not None:
+                    error._instagram_request_permit = permit
+                raise
             if not self.gate.request_count:
                 from trr_backend.ingestion.providers import InvalidSourceError
 
@@ -453,14 +485,29 @@ class _GatedSource:
                 and payload.get("status") in (None, "ok")
                 and not native_child_rejection(payload)
             ):
-                self.gate.record_success()
+                permit = request_permit.get()
+                self.gate.record_success(permit=permit) if permit is not None else self.gate.record_success()
 
         def rejected_response(code, retry_after_seconds):
             from trr_backend.ingestion.post_transport import SourceFailure
 
-            failure = self.gate.finish_failure(code, retry_after_seconds=retry_after_seconds)
+            permit = request_permit.get()
+            failure = self.gate.finish_failure(
+                code, retry_after_seconds=retry_after_seconds, **({"permit": permit} if permit is not None else {})
+            )
             self.finished = True
             raise SourceFailure(failure)
+
+        def record_branch_failure():
+            permit = request_permit.get()
+            if permit is None:
+                raise ValueError("identity_request_permit_required")
+            # Reconcile this exact admitted failed response, without closing
+            # healthy peer branches or releasing another request's lease.
+            self.gate.record_failure("source_incomplete", permit=permit)
+            self.branch_failure_recorded = True
+
+        rejected_response.record_branch_failure = record_branch_failure
 
         try:
             result = self.source(
@@ -475,8 +522,14 @@ class _GatedSource:
                 from trr_backend.ingestion.domain import Failure
                 from trr_backend.ingestion.post_transport import SourceFailure
 
-                failure = Failure("source_auth_failed" if getattr(result, "auth_failed", False) else self.failure_code)
-                raise SourceFailure(failure)
+                failure = Failure(
+                    terminal_code
+                    or ("source_auth_failed" if getattr(result, "auth_failed", False) else self.failure_code)
+                )
+                error = SourceFailure(failure)
+                if terminal_permit is not None:
+                    error._instagram_request_permit = terminal_permit
+                raise error
             return result
         except Exception as error:
             failure = self.finish_failure(error)
@@ -507,7 +560,14 @@ class _GatedSource:
         from trr_backend.ingestion.identity_policy import IdentityDeferred
         from trr_backend.ingestion.providers import InvalidSourceError
 
-        if not self.gate.request_count or isinstance(
+        supplied = getattr(error, "failure", None)
+        if getattr(supplied, "code", None) == "target_deadline":
+            # A normal reservation time cap is neither source rejection nor a
+            # health failure. Keep the typed deadline after releasing our probe.
+            self.gate.finish_failure()
+            self.finished = True
+            return None
+        if (error is None and self.branch_failure_recorded) or not self.gate.request_count or isinstance(
             error, (LostOwnership, IdentityDeferred, CursorStalledError, psycopg2.Error, CanonicalWriteError)
         ):
             result = self.gate.finish_failure()
@@ -524,23 +584,30 @@ class _GatedSource:
                         else "request_failed"
                     )
                 )
-            result = self.gate.finish_failure(code)
+            from trr_backend.ingestion.reply_context import request_permit
+
+            permit = getattr(error, "_instagram_request_permit", None) or request_permit.get()
+            result = self.gate.finish_failure(code, **({"permit": permit} if permit is not None else {}))
         self.finished = True
         return result
 
 
 def _gate_source(source, context, owned, credentials, *, failure_code, public_only=False):
     from trr_backend.ingestion.identity_policy import SourceRequestGate
+    from trr_backend.ingestion.reply_context import source_deadline
 
     store = _worker_store(context)
     expires = context["target"]["owner_expires_at"]
     remaining = (expires - datetime.now(UTC)).total_seconds() - 1
+    deadline = time.monotonic() + max(0, min(590, remaining))
+    if public_only:
+        deadline = source_deadline(deadline)
     gate = SourceRequestGate(
         cookies=credentials["raw_cookies"],
         transaction=store.transaction,
         check_cancelled=lambda: store.check_owner(**owned),
         check_cancelled_in_transaction=lambda conn: store.check_owner(**owned, connection=conn),
-        deadline=time.monotonic() + max(0, min(590, remaining)),
+        deadline=deadline,
         public_only=public_only,
         network_lane=_network_lane(context) if public_only else None,
     )
@@ -612,12 +679,13 @@ def _comments(context, owned):
 def _profile_provider(context, owned):
     from trr_backend.ingestion.avatar_transport import AvatarProfileSource
     from trr_backend.ingestion.identity_policy import SourceRequestGate
+    from trr_backend.ingestion.reply_context import source_deadline
 
     if _source_profile(context).access_mode != "public":
         raise Conflict("Commenter profiles require an explicitly public run")
     store = _worker_store(context)
     remaining = (context["target"]["owner_expires_at"] - datetime.now(UTC)).total_seconds() - 2
-    deadline = time.monotonic() + max(0, min(590, remaining))
+    deadline = source_deadline(time.monotonic() + max(0, min(590, remaining)))
     gate = SourceRequestGate(
         cookies={},
         public_only=True,
@@ -636,16 +704,15 @@ def _profile_provider(context, owned):
 
 
 def _media_storage(context, owned):
-    import boto3
     from botocore.config import Config
 
     from trr_backend.ingestion.media import MediaStorage
     from trr_backend.ingestion.media_refresh import MediaRefresh
+    from trr_backend.ingestion.media_storage_io import BoundedS3Client
     from trr_backend.media.s3_mirror import build_public_object_url, get_hosted_media_storage_config
 
     config = get_hosted_media_storage_config()
     public_only = _source_profile(context).access_mode == "public"
-    session = boto3.Session(profile_name=config.profile_name) if config.profile_name else boto3.Session()
     options = {
         "region_name": config.region,
         "config": Config(
@@ -662,39 +729,154 @@ def _media_storage(context, owned):
         options.update(aws_access_key_id=config.access_key_id, aws_secret_access_key=config.secret_access_key)
         if config.session_token:
             options["aws_session_token"] = config.session_token
+    refresh_store = _worker_store(context)
     return MediaStorage(
-        client=session.client("s3", **options),
+        client=BoundedS3Client(bucket=config.bucket, profile_name=config.profile_name, client_options=options),
         bucket=config.bucket,
         build_hosted_url=build_public_object_url,
         prefix=config.prefix,
         refresh=MediaRefresh(
-            store=_worker_store(context),
+            store=refresh_store,
             owned=owned,
             owner_expires_at=context["target"]["owner_expires_at"],
             credential_provider=lambda: _credentials(owned["account"]),
             public_only=public_only,
             network_lane=_network_lane(context) if public_only else None,
+            **(
+                {
+                    "public_avatar_source_factory": lambda username, deadline: _public_avatar_source(
+                        refresh_store, owned, username, deadline
+                    )
+                }
+                if public_only
+                else {}
+            ),
         ),
     )
+
+
+def _public_avatar_lookup_hint(store, owned, username):
+    """Bounded indexed owner lookup, used only to qualify a fresh public query.
+
+    Native ``id`` and ``pk`` may use different namespaces. Preserve the saved
+    object and follow the maintained query's id-first hint; fresh response aliases
+    still pass the strict parser without dropping or rewriting any field.
+    """
+    from trr_backend.ingestion.avatar_resolution import AvatarResolutionError, normalize_handle
+    from trr_backend.ingestion.domain import Stage
+    from trr_backend.ingestion.profiles import ProfileError, native_id
+
+    username = normalize_handle(username)
+    with store.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        store.check_owner(**{**owned, "stage": Stage.MEDIA}, connection=conn)
+        cur.execute(
+            """select raw_data->'user' as native_user, raw_data->'owner' as native_owner,
+            raw_data->'owner_detail' as owner_detail, owner_username, owner_user_id
+            from social.instagram_posts where username=%s limit 2""",
+            (username,),
+        )
+        candidates = list(cur.fetchall())
+    hints = set()
+    for row in candidates:
+        bindings = [
+            (row.get("owner_username"), row.get("owner_user_id")),
+        ]
+        for key in ("native_user", "native_owner", "owner_detail"):
+            user = row.get(key)
+            if isinstance(user, dict):
+                # Preserve each native branch's id-first namespace choice.
+                bindings.append((user.get("username"), user.get("id") or user.get("pk") or user.get("user_id")))
+        for owner_handle, owner_id in bindings:
+            try:
+                if normalize_handle(owner_handle) != username:
+                    continue
+                hints.add(native_id(owner_id))
+            except (AvatarResolutionError, ProfileError):
+                continue
+    return next(iter(hints)) if len(hints) == 1 else None
+
+
+def _public_avatar_source(store, owned, username, deadline):
+    from trr_backend.ingestion.avatar_transport import AvatarProfileSource
+
+    hint = _public_avatar_lookup_hint(store, owned, username)
+    if hint is not None:
+        from trr_backend.ingestion.profile_transport import PublicGraphQLProfileSource
+
+        return PublicGraphQLProfileSource(user_id=hint, deadline=deadline)
+    return AvatarProfileSource(cookies={}, deadline=deadline, public_only=True)
+
+
+def _bind_avatar_downloads(snapshot, observations):
+    """Ephemeral delivery inputs cannot change a sealed role or image version."""
+    from trr_backend.ingestion.media import avatar_delivery_equivalent, source_reference
+
+    if not observations:
+        return snapshot
+
+    def bind(item):
+        if item.cached_hosted_url:
+            return item
+        candidates = {
+            (
+                source_reference(observation.source_url),
+                getattr(observation, "validated_native_id", None),
+            ): observation.source_url
+            for observation in observations
+            if observation.username == item.username
+            and observation.source_url
+            and not observation.unavailable
+            and avatar_delivery_equivalent(
+                item.source_url,
+                observation.source_url,
+                native_id=getattr(observation, "validated_native_id", None),
+            )
+        }
+        # Distinct matching CDN identities are ambiguous; never choose by order.
+        if len(candidates) != 1:
+            return item
+        (_, native_id), delivery_url = next(iter(candidates.items()))
+        return replace(
+            item, download_url=delivery_url,
+            download_provenance=(item.username, native_id) if native_id is not None else None,
+        )
+
+    result = replace(snapshot, avatars=tuple(bind(item) for item in snapshot.avatars))
+    result.validate()
+    return result
 
 
 def _load_media(loader, store, context, owned, **callbacks):
     from trr_backend.ingestion.avatar_resolution import AvatarResolutionActivity
     from trr_backend.ingestion.avatar_transport import AvatarProfileSource
+    from trr_backend.ingestion.cached_avatar_alias import bridge_cached_avatars
     from trr_backend.ingestion.identity_policy import SourceRequestGate
     from trr_backend.ingestion.media_snapshot import AvatarSourcesMissing
+    from trr_backend.ingestion.reply_context import source_deadline
+    from trr_backend.ingestion.saved_owner_asset import recover as recover_saved_owner_asset
 
     binding = {key: owned[key] for key in ("run_id", "account", "generation", "target_key")}
     try:
-        return loader.load(**binding, **callbacks)
+        snapshot = loader.load(**binding, **callbacks)
     except AvatarSourcesMissing as missing:
         # The read-only inventory transaction has closed. Profile discovery is
         # explicit source work under the already acquired media owner.
         handles = missing.handles
+    else:
+        snapshot = bridge_cached_avatars(
+            snapshot, loader=loader, store=store, owned=owned,
+            storage_factory=lambda: _media_storage(context, owned), callbacks=callbacks,
+        )
+        return recover_saved_owner_asset(
+            snapshot, loader=loader, store=store, owned=owned,
+            storage_factory=lambda: _media_storage(context, owned), callbacks=callbacks,
+        )
     public_only = _source_profile(context).access_mode == "public"
     credentials = {"raw_cookies": {}} if public_only else _credentials(owned["account"])
     remaining = (context["target"]["owner_expires_at"] - datetime.now(UTC)).total_seconds() - 2
     deadline = time.monotonic() + max(0, min(590, remaining))
+    if public_only:
+        deadline = source_deadline(deadline)
     gate = SourceRequestGate(
         cookies=credentials["raw_cookies"],
         transaction=store.transaction,
@@ -704,19 +886,26 @@ def _load_media(loader, store, context, owned, **callbacks):
         public_only=public_only,
         network_lane=_network_lane(context) if public_only else None,
     )
-    source = AvatarProfileSource(
-        cookies=credentials["raw_cookies"], deadline=deadline, **({"public_only": True} if public_only else {})
-    )
-    try:
-        AvatarResolutionActivity(store, gate=gate).execute(
+    observations = ()
+    if public_only:
+        observations = AvatarResolutionActivity(store, gate=gate).execute(
             **binding,
             owner_token=owned["owner_token"],
             handles=handles,
-            fetch=source,
+            source_factory=lambda username: _public_avatar_source(store, owned, username, deadline),
         )
-    finally:
-        source.close()
-    return loader.load(**binding, **callbacks)
+    else:
+        source = AvatarProfileSource(cookies=credentials["raw_cookies"], deadline=deadline)
+        try:
+            AvatarResolutionActivity(store, gate=gate).execute(
+                **binding,
+                owner_token=owned["owner_token"],
+                handles=handles,
+                fetch=source,
+            )
+        finally:
+            source.close()
+    return _bind_avatar_downloads(loader.load(**binding, **callbacks), observations)
 
 
 def _avatar_skip_ttl_hours():

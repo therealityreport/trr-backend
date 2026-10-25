@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from importlib.metadata import version
 
-from trr_backend.ingestion.domain import Conflict, LostOwnership
+from trr_backend.ingestion.domain import Conflict, LostOwnership, Stage
 from trr_backend.ingestion.workflow_store import PARTITION_SIZE, WorkflowStore
 
 
@@ -107,7 +107,14 @@ class Scheduler:
         except Exception:
             return {"sleep": 1.0}
         control_call(self.store.transition, item, token, "accepted", str(identity) if identity is not None else None)
-        return {"ready": True}
+        return {
+            "ready": True,
+            **(
+                {"media_scan_pending": True}
+                if decision.get("media_scan_pending") is True and decision["stage"] == Stage.COMMENTS.value
+                else {}
+            ),
+        }
 
 
 @dataclass(frozen=True)

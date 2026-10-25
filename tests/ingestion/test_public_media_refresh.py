@@ -278,6 +278,8 @@ def test_missing_avatar_refresh_is_neutral_for_the_local_lane(lanes, case):
     )
     reset()
     if case == "http_500":
-        assert lane[0] == 3 and lane[2] is not None
+        # Shared public policy follows explicit server waits only. A 500 is
+        # counted, but it cannot invent a local cooldown without Retry-After.
+        assert lane == (3, "request_failed", None)
     else:
         assert lane == (0, None, None)

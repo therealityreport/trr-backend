@@ -190,6 +190,7 @@ def producer_fixture(*, media_states=None, include_unattempted=False, selected_m
                     "owner_generation": 1,
                     "evidence_id": root,
                     "observed_at": OBSERVED,
+                    "committed_at": OBSERVED,
                     "captured_at": OBSERVED,
                     "content_hash": evidence.content_hash,
                     "evidence_hash": evidence.content_hash,
@@ -227,8 +228,29 @@ def producer_fixture(*, media_states=None, include_unattempted=False, selected_m
         "listing_proof": {"independent_native_membership_verified": True, "boundary_verified": True},
     }
 
+    class StreamCursor:
+        def __init__(self):
+            self.closed = False
+            self.itersize = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self.closed = True
+
+        def execute(self, sql, args):
+            self.values = [page for page in pages if page["target_key"] == args[1]]
+
+        def __iter__(self):
+            return iter(self.values)
+
+    class Connection:
+        def cursor(self, *, name, cursor_factory):
+            return StreamCursor()
+
     class Cursor:
-        connection = object()
+        connection = Connection()
 
         def execute(self, sql, args=()):
             if not (sql.startswith("show ") or sql.startswith("select ")):

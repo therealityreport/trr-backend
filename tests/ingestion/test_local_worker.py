@@ -29,7 +29,7 @@ base_database = local_execution.base_database
 clean = local_execution.clean
 
 
-def test_media_boundary_drains_six_comments_and_recovery_precedes_finalization(monkeypatch):
+def test_media_boundary_yields_after_six_comments_and_recovery_precedes_finalization(monkeypatch):
     monkeypatch.setattr("scripts.ingestion.local_worker.PARTITION_SIZE", 10)
     events = []
     abort = threading.Event()
@@ -60,7 +60,7 @@ def test_media_boundary_drains_six_comments_and_recovery_precedes_finalization(m
                 dispatch.comments_submitted += 1
                 return {"ready": True}
             if ordinal == 6:
-                assert item["prefer_media"] and events[-1] == "drained"
+                assert item["prefer_media"] and "drained" not in events
                 events.append("media")
                 return {"ready": True}
             return {"stop": "completed"}
@@ -463,7 +463,8 @@ def test_policy_fence_aborts_and_reaps_comment_child_before_lease_release():
         )
 
 
-def test_phase_change_waits_for_comment_reaping_before_noncomment_reservation():
+@pytest.mark.parametrize("stage", ["listing", "post_details"])
+def test_phase_change_waits_for_comment_reaping_before_noncomment_reservation(stage):
     abort, release, entered, reaped = (threading.Event() for _ in range(4))
     order = []
 
@@ -477,7 +478,7 @@ def test_phase_change_waits_for_comment_reaping_before_noncomment_reservation():
     class Store:
         def decision(self, *args):
             release.set()
-            return {"kind": "target", "stage": "media"}
+            return {"kind": "target", "stage": stage}
 
         def complete_partition(self, *args, **kwargs):
             order.append("complete")
@@ -690,3 +691,331 @@ def test_capabilities_report_the_mac_status_only_when_routing_is_ready(database)
     service.enabled = False
     service.local_worker_status = lambda: True
     assert service.capabilities("bravotv").local_worker_online is None
+
+
+def test_due_media_waits_for_one_slot_before_owner_reservation_and_keeps_five_comments(monkeypatch):
+    import time
+
+    monkeypatch.setattr("scripts.ingestion.local_worker.PARTITION_SIZE", 2)
+    abort, waiting, media_started = (threading.Event() for _ in range(3))
+    entered = [threading.Event() for _ in range(6)]
+    release = [threading.Event() for _ in range(6)]
+    failures, decisions, reservations, occupancy = [], [], [], []
+    freed_at = []
+    item = {"run_id": "fair-run", "generation": 1}
+
+    def execute(reservation, **kwargs):
+        if reservation["stage"] == "comments":
+            index = int(reservation["owner_token"])
+            entered[index].set()
+            assert release[index].wait(5)
+            if index == 0:
+                freed_at.append(time.monotonic())
+            return {"outcome": "committed"}
+        assert reservation["stage"] == "media"
+        assert len(dispatch.active) == 5 and dispatch.media_active is True
+        assert not any(event.is_set() for event in release[1:])
+        occupancy.append(len(dispatch.active) + int(dispatch.media_active))
+        media_started.set()
+        for event in release[1:]:
+            event.set()
+        return {"outcome": "committed"}
+
+    class Store:
+        def decision(self, selected, ordinal, now):
+            assert selected["prefer_media"] if ordinal == 0 else True
+            decisions.append(ordinal)
+            return (
+                {"kind": "target", "stage": "media", "target_key": "ready-post"}
+                if ordinal == 0
+                else {"kind": "complete"}
+            )
+
+        def candidate_settled(self, *args):
+            return False
+
+        def reserve_decision(self, *args, **kwargs):
+            assert len(dispatch.active) == 5 and freed_at
+            reservations.append(time.monotonic())
+            return {"owner_token": "one-media", "stage": "media"}
+
+        def local_dispatch_status(self, *args):
+            return "reserved"
+
+        def transition(self, *args):
+            return True
+
+        def complete_partition(self, *args, **kwargs):
+            pass
+
+    store = Store()
+    dispatch = LocalDispatch(execute, abort)
+    dispatch.bind(item, 6)
+    original_wait = dispatch.wait
+
+    def observed_wait(seconds=1):
+        waiting.set()
+        original_wait(seconds)
+
+    dispatch.wait = observed_wait
+    for index in range(6):
+        dispatch({"owner_token": str(index), "stage": "comments"})
+        assert entered[index].wait(2)
+    scheduler = Scheduler(store, admit=lambda _: True, dispatch=dispatch, reconcile=lambda _: "unknown")
+
+    def serve():
+        try:
+            assert (
+                run_partition(
+                    item,
+                    store=store,
+                    scheduler=scheduler,
+                    dispatch=dispatch,
+                    abort=abort,
+                    effective_comments_limit=lambda _: 6,
+                )
+                == "stopped"
+            )
+        except BaseException as error:
+            failures.append(error)
+
+    thread = threading.Thread(target=serve)
+    thread.start()
+    try:
+        assert waiting.wait(2)
+        assert not decisions and not reservations and not media_started.is_set()
+        release[0].set()
+        assert media_started.wait(2)
+        thread.join(3)
+        assert not thread.is_alive() and not failures
+        assert occupancy == [6] and len(reservations) == 1 and reservations[0] >= freed_at[0]
+        assert not dispatch.active and dispatch.media_active is False
+    finally:
+        for event in release:
+            event.set()
+        thread.join(3)
+        dispatch.close(store)
+
+
+def test_partial_batch_wait_keeps_media_due_across_partition_continuations_and_scan_waits(monkeypatch):
+    monkeypatch.setattr("scripts.ingestion.local_worker.PARTITION_SIZE", 1)
+    abort, entered, release = (threading.Event() for _ in range(3))
+    item = {"run_id": "partial-run", "generation": 1}
+    seen, media_occupancy = [], []
+
+    def execute(reservation, **kwargs):
+        if reservation["stage"] == "comments":
+            entered.set()
+            assert release.wait(5)
+        else:
+            media_occupancy.append(len(dispatch.active) + int(dispatch.media_active))
+        return {"outcome": "committed"}
+
+    class Store:
+        def decision(self, item, *args):
+            return {"kind": "wait", "seconds": 0.01}
+
+        def complete_partition(self, *args, **kwargs):
+            pass
+
+    class FakeScheduler:
+        clock = staticmethod(lambda: None)
+
+        def tick(self, part, ordinal):
+            seen.append(bool(part.get("prefer_media")))
+            if len(seen) < 3:
+                # A partial comment wait followed by the eight-candidate
+                # readiness scan's bounded continuation must retain the turn.
+                return {"sleep": 0.01}
+            dispatch({"owner_token": "media", "stage": "media"})
+            return {"ready": True}
+
+    dispatch = LocalDispatch(execute, abort)
+    store = Store()
+    dispatch.bind(item, 6)
+    dispatch({"owner_token": "one-long", "stage": "comments"})
+    assert entered.wait(2)
+    try:
+        for index in range(3):
+            assert (
+                run_partition(
+                    {**item, "execution_id": str(index)},
+                    store=store,
+                    scheduler=FakeScheduler(),
+                    dispatch=dispatch,
+                    abort=abort,
+                    effective_comments_limit=lambda _: 6,
+                )
+                == "continued"
+            )
+        assert seen == [False, True, True]
+        assert media_occupancy == [2] and len(dispatch.active) == 1
+        assert dispatch.media_fairness[(item["run_id"], 1)]["due"] is False
+    finally:
+        release.set()
+        dispatch.close(store)
+
+
+def test_denied_media_retains_due_turn_and_uses_existing_backoff_before_reservation(monkeypatch):
+    monkeypatch.setattr("scripts.ingestion.local_worker.PARTITION_SIZE", 2)
+    abort = threading.Event()
+    item = {"run_id": "denied-run", "generation": 1}
+    waits, attempts = [], []
+
+    class Store:
+        def decision(self, part, *args):
+            assert part["prefer_media"]
+            return {"kind": "target", "stage": "media", "target_key": "ready"}
+
+        def candidate_settled(self, *args):
+            return False
+
+        def reserve_decision(self, *args, **kwargs):
+            pytest.fail("Denied media acquired ownership")
+
+        def complete_partition(self, *args, **kwargs):
+            pass
+
+    dispatch = LocalDispatch(lambda *_args, **_kwargs: pytest.fail("Denied media executed"), abort)
+    dispatch.bind(item, 6)
+    dispatch.media_fairness[(item["run_id"], 1)]["due"] = True
+    dispatch.wait = waits.append
+    scheduler = Scheduler(
+        Store(),
+        admit=lambda _: attempts.append(True) and False,
+        dispatch=dispatch,
+        reconcile=lambda _: "unknown",
+    )
+    assert (
+        run_partition(
+            item,
+            store=scheduler.store,
+            scheduler=scheduler,
+            dispatch=dispatch,
+            abort=abort,
+            effective_comments_limit=lambda _: 6,
+        )
+        == "continued"
+    )
+    assert attempts == [True, True] and waits == [5.0, 5.0]
+    assert dispatch.media_fairness[(item["run_id"], 1)]["due"] is True
+    assert not dispatch.submitted and not dispatch.active
+
+
+def test_six_submission_fairness_counter_survives_partition_boundaries_without_waits(monkeypatch):
+    monkeypatch.setattr("scripts.ingestion.local_worker.PARTITION_SIZE", 1)
+    abort = threading.Event()
+    item = {"run_id": "continued-batch", "generation": 1}
+    calls = []
+    submissions = []
+
+    def execute(reservation, **kwargs):
+        calls.append(reservation["stage"])
+        return {"outcome": "committed"}
+
+    class Store:
+        def decision(self, part, *args):
+            return {"kind": "target", "stage": "media" if part.get("prefer_media") else "comments"}
+
+        def complete_partition(self, *args, **kwargs):
+            pass
+
+    class FakeScheduler:
+        clock = staticmethod(lambda: None)
+
+        def tick(self, part, ordinal):
+            submissions.append("media" if part.get("prefer_media") else "comments")
+            dispatch(
+                {
+                    "owner_token": "media" if part.get("prefer_media") else str(dispatch.comments_submitted),
+                    "stage": "media" if part.get("prefer_media") else "comments",
+                }
+            )
+            return {"ready": True}
+
+    store = Store()
+    dispatch = LocalDispatch(execute, abort)
+    try:
+        for index in range(7):
+            assert (
+                run_partition(
+                    {**item, "execution_id": str(index)},
+                    store=store,
+                    scheduler=FakeScheduler(),
+                    dispatch=dispatch,
+                    abort=abort,
+                    effective_comments_limit=lambda _: 6,
+                )
+                == "continued"
+            )
+        dispatch.drain(store, finish=True)
+        assert calls.count("comments") == 6 and calls.count("media") == 1
+        assert submissions == ["comments"] * 6 + ["media"]
+        assert dispatch.media_fairness[(item["run_id"], 1)]["batch_start"] == 6
+    finally:
+        dispatch.close(store)
+
+
+@pytest.mark.parametrize("cause", ["abort", "fence"])
+def test_media_turn_abort_or_fence_reaps_existing_comment_children(monkeypatch, cause):
+    from scripts.ingestion.local_worker import Interrupted
+
+    monkeypatch.setattr("scripts.ingestion.local_worker.PARTITION_SIZE", 1)
+    abort, entered, reaped = (threading.Event() for _ in range(3))
+    item = {"run_id": "fenced-run", "generation": 1}
+
+    def execute(*args, **kwargs):
+        entered.set()
+        assert abort.wait(3)
+        reaped.set()
+        return {"outcome": "fenced"}
+
+    class Store:
+        def decision(self, *args):
+            raise LostOwnership("Changed owner generation")
+
+        def transition(self, *args):
+            assert reaped.is_set()
+            raise LostOwnership("Changed owner generation")
+
+    class FakeScheduler:
+        clock = staticmethod(lambda: None)
+
+        def tick(self, *args):
+            pytest.fail("An aborted or fenced turn reserved media")
+
+    store = Store()
+    dispatch = LocalDispatch(execute, abort)
+    dispatch.bind(item, 6)
+    dispatch({"owner_token": "comment", "stage": "comments"})
+    assert entered.wait(2)
+    if cause == "abort":
+        abort.set()
+    try:
+        with pytest.raises(Interrupted):
+            run_partition(
+                item,
+                store=store,
+                scheduler=FakeScheduler(),
+                dispatch=dispatch,
+                abort=abort,
+                effective_comments_limit=lambda _: 6,
+            )
+    finally:
+        dispatch.close(store)
+    assert abort.is_set() and reaped.is_set() and not dispatch.active and dispatch.pool is None
+
+
+def test_media_dispatch_cannot_create_seventh_activity_or_second_media():
+    from concurrent.futures import Future
+
+    abort = threading.Event()
+    dispatch = LocalDispatch(lambda *_args, **_kwargs: pytest.fail("Over-capacity media executed"), abort)
+    dispatch.bind({"generation": 1}, 6)
+    dispatch.active = {str(index): ({}, Future()) for index in range(6)}
+    with pytest.raises(RuntimeError, match="media dispatch has no available slot"):
+        dispatch({"owner_token": "media", "stage": "media"})
+    dispatch.active.clear()
+    dispatch.media_active = True
+    with pytest.raises(RuntimeError, match="media dispatch has no available slot"):
+        dispatch({"owner_token": "second-media", "stage": "media"})

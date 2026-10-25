@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import sys
 import threading
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -19,9 +21,54 @@ from trr_backend.ingestion.domain import Failure, LostOwnership, Outcome, RunInt
 from trr_backend.ingestion.freshness import DetailCacheDecision
 from trr_backend.ingestion.listing import ListingActivity
 from trr_backend.ingestion.media import MediaActivity
-from trr_backend.ingestion.persistence import Store, _row
+from trr_backend.ingestion.persistence import DIAGNOSTIC_EXCEPTION_CLASSES, Store, _row
 
 LOGGER = logging.getLogger(__name__)
+
+
+def failure_diagnostic(error: Exception | None, failure: Failure) -> tuple[str, str]:
+    """Fixed diagnostic vocabulary; never serialize an exception or its message."""
+    import psycopg2
+
+    from trr_backend.ingestion.canonical import CanonicalWriteError
+    from trr_backend.socials.instagram.comments_scrapling.reply_scheduler import DiskResponseSpool
+
+    # Driver SQLSTATE subclasses have many generated names. Normalize by the
+    # actual exception family so those names cannot hide a persistence failure.
+    for family, safe_name in (
+        (psycopg2.InterfaceError, "InterfaceError"),
+        (psycopg2.OperationalError, "OperationalError"),
+        (psycopg2.IntegrityError, "IntegrityError"),
+        (psycopg2.Error, "DatabaseError"),
+    ):
+        if isinstance(error, family):
+            return safe_name, "persistence_error"
+    if isinstance(error, CanonicalWriteError):
+        return "ValueError", "persistence_error"
+    if isinstance(error, DiskResponseSpool.ProtocolLimitError):
+        return "ReplyProtocolLimitError", "source_parse_error"
+    name = type(error).__name__ if error is not None else "NoException"
+    safe_class = name if name in DIAGNOSTIC_EXCEPTION_CLASSES else "OtherError"
+    if failure.code == "target_deadline" or safe_class == "ReplyDeadlineExceeded":
+        category = "attempt_deadline"
+    elif safe_class in {"OperationalError", "InterfaceError", "IntegrityError", "DatabaseError"}:
+        category = "persistence_error"
+    elif failure.code == "parse_error" or safe_class in {
+        "CommentSourceError",
+        "CursorStalledError",
+        "ReplyProtocolLimitError",
+        "JSONDecodeError",
+    }:
+        category = "source_parse_error"
+    elif safe_class in {"ReadTimeout", "ConnectTimeout", "ReadError", "ConnectError", "TimeoutError"}:
+        category = "transport_error"
+    elif safe_class in {"SourceFailure", "IdentityDeferred"}:
+        category = "source_stop"
+    elif error is None:
+        category = "incomplete_observation"
+    else:
+        category = "activity_error"
+    return safe_class, category
 
 
 def classify_failure(error: Exception) -> Failure:
@@ -119,14 +166,22 @@ class Worker:
                 )
             return {"run": run, "target": target, "post": post}
 
-    def release(self, owned, failure):
+    def release(self, owned, failure, *, error=None):
         # A comment observer may have committed additional pages immediately
         # before the source raised. Reload durable state, never overwrite it with
         # the checkpoint captured at the beginning of this attempt.
         context = self.context(owned)
         if context["target"]["owner_started_at"] is None:
             self.store.acquire(**owned)
-        self.store.checkpoint_failure(**owned, failure=failure, checkpoint=context["target"]["checkpoint"], requests=0)
+        exception_class, failure_category = failure_diagnostic(error, failure)
+        self.store.checkpoint_failure(
+            **owned,
+            failure=failure,
+            checkpoint=context["target"]["checkpoint"],
+            requests=0,
+            exception_class=exception_class,
+            failure_category=failure_category,
+        )
 
     def execute(self, reservation: dict[str, Any], *, deadline_callback: Callable | None = None) -> dict[str, Any]:
         owned = {key: reservation[key] for key in ("run_id", "account", "generation", "target_key", "owner_token")}
@@ -220,7 +275,7 @@ class Worker:
             source_error = exc
             failure = classify_failure(exc)
             try:
-                self.release(owned, failure)
+                self.release(owned, failure, error=exc)
             except LostOwnership:
                 return {"outcome": "fenced", "stage": owned["stage"].value}
             return {"outcome": "unresolved", "stage": owned["stage"].value, "code": failure.code}
@@ -258,10 +313,13 @@ def _watch_parent(expected_parent_pid: int, stop: threading.Event) -> None:
 def main(*, execution_placement="modal", expected_parent_pid=None) -> int:
     from trr_backend.db import pg
     from trr_backend.ingestion.public_diagnostics import current_public_diagnostic, reset_public_diagnostic
-    from trr_backend.ingestion.runtime import activity_reservation
+    from trr_backend.ingestion.reply_context import execution_deadline
+    from trr_backend.ingestion.runtime import ACTIVITY_DEADLINE_ENV, ACTIVITY_TIMEOUT_SECONDS, activity_reservation
 
     reset_public_diagnostic()
     timer = None
+    deadline_token = None
+    hard_deadline = None
     parent_stop = threading.Event()
     if execution_placement not in {"modal", "local"}:
         return 1
@@ -272,18 +330,44 @@ def main(*, execution_placement="modal", expected_parent_pid=None) -> int:
             target=_watch_parent, args=(expected_parent_pid, parent_stop), daemon=True, name="instagram-local-parent"
         ).start()
 
-    def deadline(expires_at):
+    def arm(seconds):
         nonlocal timer
-        remaining = min(590, (expires_at - datetime.now(UTC)).total_seconds() - 2)
-        if remaining <= 0:
-            raise LostOwnership("Reservation has no source execution time remaining")
-        # This entrypoint runs only in the private activity subprocess. The OS
-        # closes outstanding requests/connections before another lease begins.
-        timer = threading.Timer(remaining, lambda: os._exit(124))
+        if timer is not None:
+            timer.cancel()
+        timer = threading.Timer(seconds, lambda: os._exit(124))
         timer.daemon = True
         timer.start()
 
+    def publish(value):
+        nonlocal deadline_token, hard_deadline
+        hard_deadline = value
+        token = execution_deadline.set(value)
+        if deadline_token is None:
+            deadline_token = token
+
+    def deadline(expires_at):
+        remaining = min(ACTIVITY_TIMEOUT_SECONDS, (expires_at - datetime.now(UTC)).total_seconds() - 2)
+        if remaining <= 0:
+            raise LostOwnership("Reservation has no source execution time remaining")
+        now = time.monotonic()
+        value = now + remaining
+        if hard_deadline is not None:
+            value = min(value, hard_deadline)
+            remaining = max(0, value - now)
+        publish(value)
+        # The parent budget already includes process startup and context loading.
+        # This owner callback may shorten it, never start another 590 seconds.
+        arm(remaining)
+
     try:
+        inherited = os.environ.get(ACTIVITY_DEADLINE_ENV)
+        if inherited is not None:
+            value = float(inherited)
+            remaining = value - time.monotonic()
+            if not math.isfinite(value) or not 0 < remaining <= ACTIVITY_TIMEOUT_SECONDS:
+                raise ValueError("Invalid inherited activity deadline")
+            publish(value)
+            arm(remaining)
         raw = sys.stdin.buffer.read(65537)
         if len(raw) > 65536:
             raise ValueError("Reservation exceeds input bound")
@@ -305,6 +389,8 @@ def main(*, execution_placement="modal", expected_parent_pid=None) -> int:
         parent_stop.set()
         if timer:
             timer.cancel()
+        if deadline_token is not None:
+            execution_deadline.reset(deadline_token)
         pg.close_pool()
 
 

@@ -24,11 +24,13 @@ import sys
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from datetime import UTC, datetime
 from pathlib import Path
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from scripts.ingestion.local_driver import DiagnosticAbort, request_abort
 from trr_backend.ingestion.domain import LostOwnership
 from trr_backend.ingestion.workflow_store import PARTITION_SIZE
 from trr_backend.ingestion.workflows import control_call
@@ -119,6 +121,33 @@ class Interrupted(Exception):  # noqa: N818 - control-flow signal, not an error
     """Stop requested mid-partition; leave the partition unacknowledged."""
 
 
+def start_abort_reporter(abort, emit):
+    """One daemon emission; a blocked/broken sink cannot delay safety threads."""
+
+    def report():
+        abort.wait()
+        try:
+            diagnostic = getattr(abort, "diagnostic", None)
+            if diagnostic is not None:
+                # Emit the primitive cause first, even if later enrichment
+                # encounters a stuck optional accessor. Neither is joined.
+                base = {"at": datetime.now(UTC).isoformat(), "pid": os.getpid(), **diagnostic}
+                emit({"status": "abort_diagnostic", **base})
+                if isinstance(abort, DiagnosticAbort):
+                    context = abort.context()
+                    if context:
+                        emit({"status": "abort_diagnostic_context", **base, **context})
+        except BaseException:
+            pass
+
+    reporter = threading.Thread(target=report, daemon=True, name="instagram-local-abort-diagnostic")
+    try:
+        reporter.start()
+    except BaseException:
+        return None
+    return reporter
+
+
 class LocalDispatch:
     """Serial dispatch owner with bounded, independently reaped comment children."""
 
@@ -131,12 +160,18 @@ class LocalDispatch:
         self.item = None
         self.limit = 1
         self.comments_submitted = 0
+        self.media_active = False
+        self.media_fairness = {}
 
     def bind(self, item, limit):
         limit = 1 if limit is None else limit
         if type(limit) is not int or limit not in {1, 2, 4, 6, 8}:
             raise ValueError("Unsupported local comments limit")
         self.item, self.limit = dict(item), limit
+        self.media_fairness.setdefault(
+            (item.get("run_id"), item.get("generation")),
+            {"batch_start": self.comments_submitted, "due": False},
+        )
 
     def wait(self, seconds=1.0):
         if self.active:
@@ -165,7 +200,7 @@ class LocalDispatch:
 
     def close(self, store):
         if self.active:
-            self.abort.set()
+            request_abort(self.abort, "dispatch_shutdown")
         try:
             # Reap every child before any possibly unavailable SQL cleanup.
             if self.pool is not None:
@@ -181,7 +216,7 @@ class LocalDispatch:
         if token in self.submitted:
             return None
         if reservation["stage"] == "comments":
-            if self.item is None or len(self.active) >= self.limit:
+            if self.item is None or len(self.active) + int(self.media_active) >= self.limit:
                 raise RuntimeError("Local comments dispatch has no available slot")
             if self.pool is None:
                 self.pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="instagram-local-comment")
@@ -196,14 +231,21 @@ class LocalDispatch:
             self.submitted.add(token)
             self.comments_submitted += 1
             return None
-        if self.active:
+        is_media = reservation["stage"] == "media"
+        if is_media and (self.media_active or len(self.active) >= self.limit):
+            raise RuntimeError("Local media dispatch has no available slot")
+        if not is_media and self.active:
             raise RuntimeError("Non-comment dispatch cannot overlap comment children")
-        result = self.execute(
-            reservation,
-            execution_placement="local",
-            timeout_seconds=ACTIVITY_TIMEOUT_SECONDS,
-            abort=self.abort,
-        )
+        self.media_active = is_media
+        try:
+            result = self.execute(
+                reservation,
+                execution_placement="local",
+                timeout_seconds=ACTIVITY_TIMEOUT_SECONDS,
+                abort=self.abort,
+            )
+        finally:
+            self.media_active = False
         self.latest = (reservation, result)
         self.submitted.add(token)
         # Synchronous completion has no remote FunctionCall identity.
@@ -222,14 +264,21 @@ def run_partition(
     on_completed=None,
 ):
     """Mirror DBOSAdapter.partition without the SDK; return how the partition ended."""
-    batch_start = getattr(dispatch, "comments_submitted", 0)
+    if not hasattr(dispatch, "media_fairness"):
+        dispatch.media_fairness = {}
+    fairness = dispatch.media_fairness.setdefault(
+        (item.get("run_id"), item.get("generation")),
+        {"batch_start": getattr(dispatch, "comments_submitted", 0), "due": False},
+    )
     for ordinal in range(PARTITION_SIZE):
         batch_limit = effective_comments_limit(item) if effective_comments_limit else 1
-        prefer_media = getattr(dispatch, "comments_submitted", 0) - batch_start >= (batch_limit or 1)
+        submitted_before = getattr(dispatch, "comments_submitted", 0)
+        fairness["due"] |= submitted_before - fairness["batch_start"] >= (batch_limit or 1)
+        prefer_media = fairness["due"]
         decision_item = dict(item, prefer_media=True) if prefer_media else item
-        if prefer_media:
-            dispatch.drain(store, finish=True)
-            batch_start = getattr(dispatch, "comments_submitted", 0)
+        # Capacity is available BEFORE decision selection/reservation. A due
+        # media turn waits for one completion, leaving other comment children
+        # running; no media owner deadline is consumed in this wait.
         while True:
             dispatch.bind(item, effective_comments_limit(item) if effective_comments_limit else 1)
             dispatch.drain(store)
@@ -238,23 +287,38 @@ def run_partition(
             if len(dispatch.active) < dispatch.limit:
                 break
             dispatch.wait()
-        if dispatch.active:
-            candidate = control_call(store.decision, decision_item, ordinal, scheduler.clock())
-            if candidate.get("stage") not in {None, "comments"} or candidate["kind"] in {"complete", "blocked"}:
-                # A committed comment child can still be finishing/reaping.
-                # Drain before reserving the next phase or completing this one.
-                dispatch.drain(store, finish=True)
-                if abort.is_set():
-                    raise Interrupted
         dispatch.latest = None
+        operation = "decision"
         try:
-            decision = scheduler.tick(decision_item, ordinal)
-        except LostOwnership:
             if dispatch.active:
-                abort.set()
+                candidate = control_call(store.decision, decision_item, ordinal, scheduler.clock())
+                if candidate.get("stage") not in {None, "comments", "media"} or candidate["kind"] in {
+                    "complete",
+                    "blocked",
+                }:
+                    # Other phase changes and finalization still reap every
+                    # child. Only proved per-post media may use a freed slot.
+                    dispatch.drain(store, finish=True)
+                    if abort.is_set():
+                        raise Interrupted
+            operation = "scheduler_tick"
+            decision = scheduler.tick(decision_item, ordinal)
+        except LostOwnership as error:
+            if dispatch.active:
+                request_abort(abort, "control_owner_lost", error=error, operation=operation)
                 raise Interrupted from None
             return "fenced"
         latest = dispatch.latest
+        if latest is not None and latest[0]["stage"] == "media":
+            fairness.update(batch_start=getattr(dispatch, "comments_submitted", 0), due=False)
+        elif (
+            prefer_media
+            and getattr(dispatch, "comments_submitted", 0) > submitted_before
+            and decision.get("media_scan_pending") is not True
+        ):
+            # A completed media scan found no candidate; a comment took this
+            # turn. An unfinished scan keeps its due turn through submission.
+            fairness.update(batch_start=submitted_before, due=False)
         if latest is not None and latest[1].get("outcome") in {"unresolved", "fenced"}:
             # The activity's child was reaped before execute returned; no remote
             # call remains. Expire the owner so the target cooldown applies.
@@ -263,10 +327,14 @@ def run_partition(
             dispatch.drain(store, finish=True)
             if abort.is_set():
                 raise Interrupted
-            if before_finalize is not None and before_finalize(item, stop=decision["stop"]):
-                # The journaled completion choice precedes a fenced recovery
-                # command. The next ordinal sees the newly reopened target.
-                continue
+            if before_finalize is not None:
+                deferred = before_finalize(item, stop=decision["stop"])
+                if abort.is_set():
+                    raise Interrupted
+                if deferred:
+                    # The journaled completion choice precedes a fenced recovery
+                    # command. The next ordinal sees the newly reopened target.
+                    continue
             result = _complete(store, item, stop=decision["stop"])
             if result == "stopped" and on_completed is not None:
                 on_completed(item)
@@ -275,9 +343,15 @@ def run_partition(
         # operator recovery. Recheck live scheduling state at the next ordinal;
         # target and source gates still enforce any actual future server wait.
         if decision.get("sleep"):
+            # Partial batches and cooldowns also yield a media opportunity.
+            # Keep it due across bounded readiness scans, admission backoff and
+            # partition continuation until actual work consumes the turn.
+            fairness["due"] = True
             dispatch.wait(min(decision["sleep"], WAIT_RECHECK_SECONDS))
             if abort.is_set():
                 raise Interrupted
+    if abort.is_set():
+        raise Interrupted
     return _complete(store, item, stop=None)
 
 
@@ -347,7 +421,8 @@ def run_worker(
 
 
 def main(argv=None):
-    abort = threading.Event()
+    abort = DiagnosticAbort()
+    start_abort_reporter(abort, lambda value: print(json.dumps(value), flush=True))
     stop_requested = threading.Event()
     previous = {}
     exit_guard = AbortExitGuard(abort)
@@ -355,7 +430,7 @@ def main(argv=None):
 
     def request_stop(*_):
         stop_requested.set()
-        abort.set()
+        request_abort(abort, "signal_requested")
 
     try:
         import psycopg
@@ -412,6 +487,10 @@ def main(argv=None):
             )
             if result:
                 print(json.dumps({"status": "public_recovery_queued", **result}), flush=True)
+                if result.get("status") == "recovery_admission_wait":
+                    # Capacity denial is nonterminal. Recheck at the next
+                    # ordinal without spinning or losing abort responsiveness.
+                    dispatch.wait(WAIT_RECHECK_SECONDS)
             return result is not None
 
         def certify_completed(item):

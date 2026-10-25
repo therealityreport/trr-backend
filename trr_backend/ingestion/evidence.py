@@ -276,7 +276,23 @@ def _media_reference(value: str) -> str | None:
         return None
 
 
-def sanitize_payload(payload: dict[str, Any]) -> dict[str, Any]:
+def sanitize_payload(payload: dict[str, Any], *, parser_version: str | None = None) -> dict[str, Any]:
+    if parser_version in {"instagram-saved-owner-asset-input-v1", "instagram-saved-owner-asset-authorization-v1"}:
+        from trr_backend.ingestion.saved_owner_asset import validate_payload
+
+        return validate_payload(payload, parser_version=parser_version)
+    if parser_version == "instagram-cached-avatar-regional-alias-v1":
+        from trr_backend.ingestion.cached_avatar_alias import validate_payload
+
+        result = validate_payload(payload)
+        if len(stable_json(result).encode()) > MAX_PAYLOAD_BYTES:
+            raise ValueError("Evidence exceeds 4 MiB")
+        return result
+    if parser_version == "instagram-public-profile-failure-v1":
+        from trr_backend.ingestion.profile_failure_diagnostics import validate_payload
+
+        return validate_payload(payload)
+
     def project(value: Any, depth: int = 0, key: str = "") -> Any:
         if depth > MAX_DEPTH:
             raise ValueError("Evidence nesting exceeds the supported bound")
@@ -316,7 +332,7 @@ class Evidence:
     ) -> Evidence:
         if not source_identity or not parser_version:
             raise ValueError("Source identity and parser version are required")
-        sanitized = sanitize_payload(payload)
+        sanitized = sanitize_payload(payload, parser_version=parser_version)
         return cls(
             source_identity=source_identity,
             captured_at=datetime.fromisoformat(utc_timestamp(captured_at)),
@@ -340,6 +356,9 @@ class Evidence:
         payload = json.loads(self.payload_json)
         if fingerprint(payload) != self.content_hash:
             raise ValueError("Evidence content hash mismatch")
-        if stable_json(payload) != self.payload_json or sanitize_payload(payload) != payload:
+        if (
+            stable_json(payload) != self.payload_json
+            or sanitize_payload(payload, parser_version=self.parser_version) != payload
+        ):
             raise ValueError("Evidence is not canonical sanitized source content")
         return payload

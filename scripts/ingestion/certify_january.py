@@ -251,7 +251,10 @@ def read_snapshot(binding, context, bases):
         return {
             "reports": {"listing": listing, "posts": post_report, "comments": comment_report, "media": media_report},
             "public_only": binding["successor_intent"]["source_profile"]["access_mode"] == "public",
-            "query_fingerprint": digest(context.query_material),
+            "query_fingerprint": digest(
+                {"version": context.query_fingerprint_version, "queries": context.query_material}
+            ),
+            "query_fingerprint_version": context.query_fingerprint_version,
             "physical_plan": plan,
             "object_inventory": [{"object_signature": posts.digest(item)} for item in plan],
         }
@@ -347,6 +350,7 @@ def run(args):
         source_after_sha256=code_hash(),
     )
     result.update(
+        query_fingerprint_version=context.query_fingerprint_version,
         observed_at=datetime.now(UTC).isoformat(),
         storage_identity={
             key: identity[key] for key in ("provider", "account_id", "bucket", "endpoint_url", "public_bases")

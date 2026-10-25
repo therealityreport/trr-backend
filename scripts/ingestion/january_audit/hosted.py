@@ -24,6 +24,7 @@ from . import common
 from .posts import digest
 
 CHUNK_BYTES = 64 * 1024
+PUBLIC_STORAGE_USER_AGENT = "TRR-January-Media-Audit/1.0"
 _SOURCE_PLACEHOLDER_SHA256 = {"05e81bfed1fda5743fea1da04586e635c4f82cd2258c2716265b538508efd5a9"}
 
 
@@ -302,6 +303,19 @@ def physical_plan(report, base):
                 and entry["source_reference"] == identity["source_reference"],
                 "avatar_role_provenance_mismatch",
             )
+        elif role.startswith("saved_owner_asset_source:"):
+            identity = entry.get("saved_owner_asset_source") or {}
+            require(
+                identity in record.get("saved_owner_asset_sources", [])
+                and identity.get("source_url") == entry["url"]
+                and identity.get("source_key") == entry["storage_key"]
+                and identity.get("sha256") == entry["historical_sha256"]
+                and identity.get("source_reference") == entry["source_reference"]
+                and common.stamp(identity.get("byte_clock")) == common.stamp(entry["original_observed_at"])
+                and identity.get("historical_handle") != identity.get("current_handle")
+                and mode == "image_full_decode",
+                "saved_owner_asset_source_provenance_mismatch",
+            )
         elif role.startswith("comment:"):
             require(
                 entry.get("comment_id") in record["comment_binding"]["observed_comment_ids"],
@@ -391,6 +405,9 @@ def inspect_object(item, client, config, *, stop=None):
 
     signature = digest(item)
     retry_after_seconds = None
+    public_status = None
+    provider_code = None
+    request_id = None
     try:
         require(stop is None or not stop.is_set(), "hosted_reads_paused_after_rate_limit")
         with tempfile.TemporaryDirectory(prefix="trr-january-byte-audit-") as folder:
@@ -427,11 +444,25 @@ def inspect_object(item, client, config, *, stop=None):
                     session.trust_env = False
                     with session.get(
                         url,
-                        headers={"Accept-Encoding": "identity"},
+                        headers={"Accept-Encoding": "identity", "User-Agent": PUBLIC_STORAGE_USER_AGENT},
                         stream=True,
                         allow_redirects=False,
                         timeout=(10, 60),
                     ) as public:
+                        public_status = public.status_code
+                        ray = public.headers.get("CF-Ray", "")
+                        if re.fullmatch(r"[A-Za-z0-9-]{1,80}", ray):
+                            request_id = ray
+                        if public.status_code == 403:
+                            # Retain only the bounded provider code, never the
+                            # error body. A client-signature denial says nothing
+                            # about the stored bytes or Instagram availability.
+                            denial = public.raw.read(512)
+                            match = re.search(rb"\berror code:\s*(\d{4})\b", denial, re.IGNORECASE)
+                            provider_code = match.group(1).decode("ascii") if match else None
+                            raise common.GuardError(
+                                "cdn_client_signature_denied" if provider_code == "1010" else "cdn_access_denied"
+                            )
                         if public.status_code == 429:
                             if stop is not None:
                                 stop.set()
@@ -489,4 +520,7 @@ def inspect_object(item, client, config, *, stop=None):
             "roles": [{"shortcode": role["shortcode"], "role": role["role"]} for role in item["roles"]],
             "error_code": code,
             "retry_after_seconds": retry_after_seconds,
+            "cdn_http_status": public_status,
+            "cdn_provider_code": provider_code,
+            "cdn_request_id": request_id,
         }
