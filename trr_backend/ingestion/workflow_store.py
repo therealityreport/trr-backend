@@ -76,7 +76,7 @@ class WorkflowStore(Store):
             # Limit cheap target/receipt candidates before loading any native-ID
             # inventories. Exact source proof is checked for at most eight posts.
             cur.execute(
-                f"""select {"t.target_key" if peek else "t.target_key,p.*"}
+                f"""select {"t.target_key" if peek else "t.target_key,p.id,p.scraped_at"}
                 from social.instagram_ingestion_targets t
                 join social.instagram_posts p on p.shortcode=t.target_key
                     and lower(coalesce(nullif(p.source_account,''),p.username))=%s
@@ -139,7 +139,8 @@ class WorkflowStore(Store):
         def prove(post):
             key = post["target_key"]
             cur.execute(
-                """select * from social.instagram_comments where post_id=%s and not is_missing
+                """select comment_id,source_account,source_snapshot_type,scraped_at
+                from social.instagram_comments where post_id=%s and not is_missing
                 and deleted_at is null order by comment_id,id""",
                 (post["id"],),
             )

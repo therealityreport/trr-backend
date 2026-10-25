@@ -30,7 +30,7 @@ from pathlib import Path
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from scripts.ingestion.local_driver import DiagnosticAbort, request_abort
+from scripts.ingestion.local_driver import DiagnosticAbort, call_in_phase, foreground_phase, request_abort
 from trr_backend.ingestion.domain import LostOwnership
 from trr_backend.ingestion.workflow_store import PARTITION_SIZE
 from trr_backend.ingestion.workflows import control_call
@@ -174,40 +174,43 @@ class LocalDispatch:
         )
 
     def wait(self, seconds=1.0):
-        if self.active:
-            wait([entry[1] for entry in self.active.values()], timeout=seconds, return_when=FIRST_COMPLETED)
-        else:
-            self.abort.wait(seconds)
+        with foreground_phase(self.abort, "wait"):
+            if self.active:
+                wait([entry[1] for entry in self.active.values()], timeout=seconds, return_when=FIRST_COMPLETED)
+            else:
+                self.abort.wait(seconds)
 
     def drain(self, store, *, finish=False, closing=False):
-        if finish and self.active:
-            wait([entry[1] for entry in self.active.values()])
-        for token, (item, future) in list(self.active.items()):
-            if not future.done():
-                continue
-            try:
-                result = future.result()
-            except Exception:
-                # execute owns child reaping before returning OR raising.
-                result = {"outcome": "unresolved"}
-            try:
-                if result.get("outcome") in {"unresolved", "fenced"}:
-                    control_call(store.transition, item, token, "expired")
-            except LostOwnership:
-                if not closing:
-                    raise
-            del self.active[token]
+        with foreground_phase(self.abort, "drain"):
+            if finish and self.active:
+                wait([entry[1] for entry in self.active.values()])
+            for token, (item, future) in list(self.active.items()):
+                if not future.done():
+                    continue
+                try:
+                    result = future.result()
+                except Exception:
+                    # execute owns child reaping before returning OR raising.
+                    result = {"outcome": "unresolved"}
+                try:
+                    if result.get("outcome") in {"unresolved", "fenced"}:
+                        control_call(store.transition, item, token, "expired")
+                except LostOwnership:
+                    if not closing:
+                        raise
+                del self.active[token]
 
     def close(self, store):
-        if self.active:
-            request_abort(self.abort, "dispatch_shutdown")
-        try:
-            # Reap every child before any possibly unavailable SQL cleanup.
-            if self.pool is not None:
-                self.pool.shutdown(wait=True)
-            self.drain(store, finish=True, closing=True)
-        finally:
-            self.pool = None
+        with foreground_phase(self.abort, "dispatch_shutdown"):
+            if self.active:
+                request_abort(self.abort, "dispatch_shutdown")
+            try:
+                # Reap every child before any possibly unavailable SQL cleanup.
+                if self.pool is not None:
+                    self.pool.shutdown(wait=True)
+                self.drain(store, finish=True, closing=True)
+            finally:
+                self.pool = None
 
     def __call__(self, reservation):
         if self.abort.is_set():
@@ -280,7 +283,9 @@ def run_partition(
         # media turn waits for one completion, leaving other comment children
         # running; no media owner deadline is consumed in this wait.
         while True:
-            dispatch.bind(item, effective_comments_limit(item) if effective_comments_limit else 1)
+            call_in_phase(
+                abort, "bind", dispatch.bind, item, effective_comments_limit(item) if effective_comments_limit else 1
+            )
             dispatch.drain(store)
             if abort.is_set():
                 raise Interrupted
@@ -291,7 +296,9 @@ def run_partition(
         operation = "decision"
         try:
             if dispatch.active:
-                candidate = control_call(store.decision, decision_item, ordinal, scheduler.clock())
+                candidate = call_in_phase(
+                    abort, "decision", control_call, store.decision, decision_item, ordinal, scheduler.clock()
+                )
                 if candidate.get("stage") not in {None, "comments", "media"} or candidate["kind"] in {
                     "complete",
                     "blocked",
@@ -302,10 +309,11 @@ def run_partition(
                     if abort.is_set():
                         raise Interrupted
             operation = "scheduler_tick"
-            decision = scheduler.tick(decision_item, ordinal)
+            decision = call_in_phase(abort, "scheduler_tick", scheduler.tick, decision_item, ordinal)
         except LostOwnership as error:
             if dispatch.active:
-                request_abort(abort, "control_owner_lost", error=error, operation=operation)
+                with foreground_phase(abort, operation):
+                    request_abort(abort, "control_owner_lost", error=error, operation=operation)
                 raise Interrupted from None
             return "fenced"
         latest = dispatch.latest
@@ -322,22 +330,22 @@ def run_partition(
         if latest is not None and latest[1].get("outcome") in {"unresolved", "fenced"}:
             # The activity's child was reaped before execute returned; no remote
             # call remains. Expire the owner so the target cooldown applies.
-            store.transition(item, latest[0]["owner_token"], "expired")
+            call_in_phase(abort, "transition", store.transition, item, latest[0]["owner_token"], "expired")
         if decision.get("stop"):
             dispatch.drain(store, finish=True)
             if abort.is_set():
                 raise Interrupted
             if before_finalize is not None:
-                deferred = before_finalize(item, stop=decision["stop"])
+                deferred = call_in_phase(abort, "before_finalize", before_finalize, item, stop=decision["stop"])
                 if abort.is_set():
                     raise Interrupted
                 if deferred:
                     # The journaled completion choice precedes a fenced recovery
                     # command. The next ordinal sees the newly reopened target.
                     continue
-            result = _complete(store, item, stop=decision["stop"])
+            result = call_in_phase(abort, "complete_partition", _complete, store, item, stop=decision["stop"])
             if result == "stopped" and on_completed is not None:
-                on_completed(item)
+                call_in_phase(abort, "on_completed", on_completed, item)
             return result
         # Journaled waits can outlive their original target deadline after
         # operator recovery. Recheck live scheduling state at the next ordinal;
@@ -352,7 +360,7 @@ def run_partition(
                 raise Interrupted
     if abort.is_set():
         raise Interrupted
-    return _complete(store, item, stop=None)
+    return call_in_phase(abort, "complete_partition", _complete, store, item, stop=None)
 
 
 def _complete(store, item, *, stop):
@@ -386,14 +394,19 @@ def run_worker(
     if store.execution_placement != "local":
         raise ValueError("The Mac worker requires a local-fenced workflow store")
     partitions = 0
-    with lease:
+    with foreground_phase(abort, "run_worker"), lease:
         try:
             if on_started is not None:
-                on_started()
+                call_in_phase(abort, "on_started", on_started)
             while not abort.is_set():
                 # New runs: seed partition 0 only; dispatch_partitions runs it.
-                store.dispatch_pending(store.seed, engine="dbos", workflow_version=workflow_version)
-                ran = store.dispatch_partitions(
+                call_in_phase(
+                    abort, "seed", store.dispatch_pending, store.seed, engine="dbos", workflow_version=workflow_version
+                )
+                ran = call_in_phase(
+                    abort,
+                    "dispatch_partitions",
+                    store.dispatch_partitions,
                     lambda item: run_partition(
                         item,
                         store=store,
@@ -409,7 +422,7 @@ def run_worker(
                 )
                 partitions += ran
                 if on_cycle is not None:
-                    on_cycle(ran)
+                    call_in_phase(abort, "on_cycle", on_cycle, ran)
                 if not ran:
                     dispatch.wait(poll_seconds)
         except Interrupted:

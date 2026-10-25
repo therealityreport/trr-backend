@@ -7,7 +7,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from scripts.ingestion.local_driver import CoordinatorLease, DiagnosticAbort, request_abort
+from scripts.ingestion.local_driver import (
+    CoordinatorLease,
+    DiagnosticAbort,
+    HeartbeatSample,
+    foreground_phase,
+    request_abort,
+)
 from scripts.ingestion.local_worker import Interrupted, LocalDispatch, run_partition, start_abort_reporter
 from trr_backend.ingestion.domain import LostOwnership
 
@@ -26,10 +32,13 @@ def test_first_cause_survives_cleanup_and_excludes_error_messages():
     first = dict(abort.diagnostic)
     request_abort(abort, "dispatch_shutdown")
     request_abort(abort, "lease_cleanup_failure", error=RuntimeError("token"))
+    abort.lease_metadata = lambda: {"last_select_seconds": 99.0}
     assert abort.is_set() and abort.diagnostic == first
     first.update(abort.context())
     assert first["exception_class"] == "OperationalError" and first["sqlstate"] == "08006"
     assert first["lease_backend_pid"] == 123
+    assert "last_select_seconds" not in first
+    assert first["report_time_lease"]["last_select_seconds"] == 99.0
     assert not any(secret in json.dumps(first) for secret in ["secret", "password", "token"])
 
 
@@ -96,6 +105,7 @@ def lease(abort):
     item.select_started = 8.2
     item.last_select_seconds = 0.01
     item.backend_pid = 987
+    item.heartbeat_sample = HeartbeatSample(7, 6, 7.9, 8.2, 0.01, 987)
     abort.lease_metadata = item._diagnostic_metadata
     return item
 
@@ -111,8 +121,11 @@ def test_watchdog_records_age_without_touching_connection():
     assert abort.context()["select_inflight_seconds"] == pytest.approx(1.8)
     item.clock = lambda: 99.0
     assert abort.context()["heartbeat_age_seconds"] == pytest.approx(2.1)
+    assert abort.context()["select_inflight_seconds"] == pytest.approx(1.8)
     assert abort.context()["heartbeat_age_scope"] == "watchdog_abort_comparison"
-    assert abort.context()["timing_scope"] == "report_time"
+    assert abort.context()["timing_scope"] == "abort_snapshot"
+    assert abort.context()["abort_heartbeat"]["query_sequence"] == 7
+    assert abort.context()["abort_heartbeat"]["completion_sequence"] == 6
 
 
 def test_monitor_records_safe_database_failure():
@@ -167,6 +180,7 @@ def test_control_owner_loss_is_distinct_and_cleanup_keeps_first_cause():
         )
     assert abort.is_set() and abort.diagnostic["origin"] == "control_owner_lost"
     assert abort.diagnostic["operation"] == "decision"
+    assert abort.diagnostic["foreground_phase"] == "decision"
     assert "secret" not in json.dumps(abort.diagnostic)
     request_abort(abort, "dispatch_shutdown")
     assert abort.diagnostic["origin"] == "control_owner_lost"
@@ -292,3 +306,161 @@ def test_backend_pid_is_actual_acquisition_sql_result_with_same_lock_namespace()
     acquisition = [(query, args) for query, args in commands if "pg_try_advisory_lock" in query]
     assert len(acquisition) == 1 and acquisition[0][1] == (11, 22)
     assert sum("pg_backend_pid()" in query for query, _ in commands) == 2  # acquisition and existing cleanup proof
+
+
+def test_delayed_watchdog_and_late_report_cannot_mix_select_generations():
+    """Real monitor/watchdog threads; SELECT completes while watchdog is asleep."""
+    abort = DiagnosticAbort()
+    clock = [10.0]
+    item = CoordinatorLease(None, None, abort, clock=lambda: clock[0])
+    item.backend_pid = 987
+    item.heartbeat_sample = HeartbeatSample(last_completion=10.0, backend_pid=987)
+    abort.lease_metadata = item._diagnostic_metadata
+    asleep, wake, first_query, first_finish, first_published, second_start, second_query, second_finish = (
+        threading.Event() for _ in range(8)
+    )
+    calls = {"monitor": 0, "watchdog": 0, "sql": 0}
+
+    class Stop:
+        def wait(self, _):
+            if threading.current_thread().name == "sample-monitor":
+                calls["monitor"] += 1
+                if calls["monitor"] == 1:
+                    return False
+                if calls["monitor"] == 2:
+                    first_published.set()
+                    assert second_start.wait(3)
+                    return False
+                return True
+            calls["watchdog"] += 1
+            asleep.set()
+            assert wake.wait(3)
+            return False
+
+    @contextmanager
+    def cursor():
+        def execute(sql):
+            assert sql == "select 1"
+            calls["sql"] += 1
+            if calls["sql"] == 1:
+                first_query.set()
+                assert first_finish.wait(3)
+            else:
+                second_query.set()
+                assert second_finish.wait(3)
+
+        yield SimpleNamespace(execute=execute)
+
+    item.stop = Stop()
+    item.connection = SimpleNamespace(cursor=cursor)
+    monitor = threading.Thread(target=item._monitor, name="sample-monitor", daemon=True)
+    watchdog = threading.Thread(target=item._watch_heartbeat, name="sample-watchdog", daemon=True)
+    try:
+        with foreground_phase(abort, "before_finalize"):
+            watchdog.start()
+            assert asleep.wait(1)
+            clock[0] = 10.1
+            monitor.start()
+            assert first_query.wait(1)
+            clock[0] = 10.2
+            first_finish.set()
+            assert first_published.wait(1)
+            assert item.heartbeat_sample.completion_sequence == 1
+            clock[0] = 13.0
+            wake.set()
+            assert abort.wait(1)
+        assert abort.diagnostic["foreground_phase"] == "before_finalize"
+        captured = abort._diagnostic_metadata["heartbeat_sample"]
+        # A later SELECT really runs/completes before the reporter starts.
+        clock[0] = 20.0
+        second_start.set()
+        assert second_query.wait(1)
+        clock[0] = 26.0
+        second_finish.set()
+        monitor.join(1)
+        watchdog.join(1)
+        assert not monitor.is_alive() and not watchdog.is_alive()
+        clock[0] = 30.0
+        emitted = []
+        reporter = start_abort_reporter(abort, emitted.append)
+        reporter.join(1)
+        context = emitted[1]
+        proof = context["abort_heartbeat"]
+        assert captured is not item.heartbeat_sample
+        assert proof["query_sequence"] == proof["completion_sequence"] == 1
+        assert proof["query_state"] == "complete"  # No SELECT was in flight at comparison.
+        assert proof["heartbeat_age_seconds"] == pytest.approx(2.8)
+        assert proof["watchdog_wake_gap_seconds"] == pytest.approx(3.0)
+        assert proof["last_completed_query_duration_seconds"] == pytest.approx(0.1)
+        assert proof["lease_backend_pid"] == 987
+        assert context["last_select_seconds"] == pytest.approx(0.1)
+        assert context["report_time_lease"]["last_select_seconds"] == pytest.approx(6.0)
+        assert context["report_time_lease"]["query_sequence"] == 2
+        assert context["report_time_lease"]["completion_sequence"] == 2
+        assert context["foreground_phase"] == "before_finalize"
+        assert calls["sql"] == 2  # One existing SELECT per monitor turn; no added query.
+    finally:
+        wake.set()
+        first_finish.set()
+        second_start.set()
+        second_finish.set()
+        if monitor.ident is not None:
+            monitor.join(1)
+        if watchdog.ident is not None:
+            watchdog.join(1)
+
+
+def test_heartbeat_sample_is_immutable_and_phase_labels_are_fixed():
+    from dataclasses import FrozenInstanceError
+
+    sample = HeartbeatSample(query_sequence=3, completion_sequence=2)
+    with pytest.raises(FrozenInstanceError):
+        sample.query_sequence = 4
+    abort = DiagnosticAbort()
+    with foreground_phase(abort, "decision"):
+        with foreground_phase(abort, "wait"):
+            request_abort(abort, "signal_requested")
+        assert abort.foreground_phase == "decision"
+    assert abort.foreground_phase == "initializing"
+    assert abort.diagnostic["foreground_phase"] == "wait"
+    with pytest.raises(ValueError, match="Unknown foreground"):
+        with foreground_phase(abort, "secret dynamic query"):
+            pytest.fail("Invalid phase entered")
+
+
+@pytest.mark.parametrize("waiting", [False, True])
+def test_worker_finalizer_and_nested_wait_capture_actual_foreground_phase(monkeypatch, waiting):
+    abort = DiagnosticAbort()
+    dispatch = LocalDispatch(None, abort)
+
+    def fail_complete(*args, **kwargs):
+        pytest.fail("An aborted finalizer must not complete the partition")
+
+    def tick(*args):
+        assert abort.foreground_phase == "scheduler_tick"
+        return {"stop": "blocked"}
+
+    def wait(_):
+        assert abort.foreground_phase == "wait"
+        request_abort(abort, "lease_heartbeat_deadline")
+        return True
+
+    def finalize(*args, **kwargs):
+        assert abort.foreground_phase == "before_finalize"
+        if waiting:
+            dispatch.wait(5)
+        else:
+            request_abort(abort, "lease_heartbeat_deadline")
+        return True
+
+    monkeypatch.setattr(abort, "wait", wait)
+    with pytest.raises(Interrupted):
+        run_partition(
+            {"run_id": "r", "generation": 1},
+            store=SimpleNamespace(complete_partition=fail_complete),
+            scheduler=SimpleNamespace(tick=tick),
+            dispatch=dispatch,
+            abort=abort,
+            before_finalize=finalize,
+        )
+    assert abort.diagnostic["foreground_phase"] == ("wait" if waiting else "before_finalize")

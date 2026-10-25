@@ -974,3 +974,178 @@ same evidence base. All five routed helper assignments were reconciled and
 criterion-assessed; native exact plaintext instruction matching remained
 unverified because host input was encrypted. Later read-only follow-up evidence
 is retained separately with the R2 and focused ordering receipts.
+
+### October 25 certification continuation, 08:27 UTC
+
+The user explicitly requested continued repair until January passes certification,
+with parallel helpers. Current v159 remains the source/runtime baseline. This
+phase has one coordinated editing owner (lead) in the existing checkout; helpers
+prepare private operational candidates and independent evidence. No branch,
+app-build, full-history or public-only setting change is authorized by this phase.
+
+Checkable next work is: reconcile and independently review a finite v159 batch
+controller adopting every prior root journal identity; activate at most four
+outstanding roots under the existing six-worker policy; obtain exact safe native
+error diagnostics for the remaining DTg parent in a serialized local stream;
+resolve historical native coverage before ordinary media admission; then rerun
+only applicable certification gates against stable evidence. Saved canonical
+extras cannot serve as their own independent native witness.
+
+At 08:27:29 UTC the exact 286-target cohort remains unchanged: comments285
+committed/1unresolved, media48/238. DTg has14,745 native IDs and14,808 active saved
+canonical rows, with current owner generation135/attempt132/max141. Its productive
+continuation remains active. Current preflight returns final_acceptance=false:
+269 known count-gap posts/9,463 total gap. The 237 unattempted media targets held
+on persisted_comment_inventory_changed preserve4,352 canonical extras absent
+from their current receipts, with zero receipt IDs missing from saved rows.
+These are separate lineage and current source-count holds. No inventory union,
+count reduction, saved-row deletion or guard relaxation is implemented.
+
+Private continuation evidence lives under trr-instagram-20261025-01a171e0,
+trr-instagram-20261025-batch-continuation, and the existing helper evidence
+siblings. Initial preflight performs no storage fetches or deep retained-page
+scan while the active count-gap guard applies. The earlier paused controller is
+not restarted with obsolete pins. This record will retain actual activation,
+persistence and final certification outcomes separately.
+
+At 08:38:43 UTC, an independent current-planner snapshot proves339 completed DTg
+branches since the exact07:45:36 v159 activation. Comparable unresolved branch
+counts4156→4066→3592→3253 show actual progress. Current3253 comprise3251 healthy
+pending branches and2 retry-eligible technical failures, with no deferred/held
+or repeated native lanes. Current native inventory14747 retains the original
+14733. Owner136 was productive within one second of the snapshot. Healthy-tail
+arithmetic is several hours and does not establish a certification ETA.
+
+The finite v159 batch source/procedure candidate received independent acceptance
+(0aec3860 candidate /651ddc75 driver); preparation and activation remain pending
+fresh runtime proof and generated-manifest review. The private four-send public
+diagnostic/handover review found one pre-execution defect: POST JSON/cookie
+processing could mask a response Retry-After. The narrow header-first repair
+passes21 affected cases; fixes-only acceptance remains pending. No diagnostic
+or handover has yet executed at this record point.
+
+Heartbeat finish-january-instagram-certification is ACTIVE in this same chat,
+15-minute cadence bounded to48 checks. Saved configuration verifies the exact
+chat01a171e0 and prompt hash488598cbd4bce5bf590b098862cd993d3b3c70b61a4e78976b13954bea903a86.
+It continues authorized repair and certification work, remains quiet for ordinary
+increments/unchanged waits, and preserves public-only/full-history-disabled/data
+and journal constraints. All four earlier Instagram heartbeat automations remain
+paused; none was resumed or modified. The worker and future controller remain
+application-owned; the heartbeat must not create a competing diagnostic stream.
+
+### Controlled diagnostic attempt and productive worker restoration, 09:08 UTC
+
+Final private diagnostic review closed the header-before-parser Retry-After
+repair. A recorded handover unloaded the sole worker at08:54:52 UTC. The private
+handover guard then incorrectly counted all910 historical accepted dispatches
+as active. The exact task wrapper was stopped and its failed finally/restore
+outcome retained. No diagnostic capture or HTTP send occurred. A separate narrow
+controller repair preserves the originals and uses the already-reviewed exact
+current-owner/unresolved/active-or-ambiguous predicate. Actual isolated SQL
+regression and independent fixes-only review passed. At08:59:40 live metadata
+showed zero leases/activeowners/currentunresolveddispatches;909 accepted history
+rows comprised45superseded-token and864settled-target rows. None were cleared.
+
+The repaired existing-drain resume passed at09:03:36 without another bootout.
+Capture then hit a five-second QueryCanceled before pins/started/source requests.
+The outer finally bootstrapped the same v159 once at09:03:46; startup exec raced
+the initial process proof. Safe same-instance reconciliation at09:05:44 verified
+PID34489, sole backend lease354626, exact intended plist with only log paths
+changed, linked task log inode529864435, unchanged timers/runtime/binding.
+Fresh current-process qualification at09:05:34 proves10new committedpages.
+No wrapper/drain/capture/apply retry or saved-business-state reset occurred.
+All failed outcomes, original candidates, preimages and new recovery artifacts
+remain in diagnostic-handover; restored.json records actual successful runtime.
+
+A single unchanged-timeout read-only timing pass found canonical full-row
+fingerprinting dominant at3.178s versus0.194s for target/checkpoint hashes; all
+queries passed in that sample. The exact failed statement is not proved. A
+separate private versioned tuple-version guard candidate is in preparation to
+avoid repeated large canonical-row serialization. It is not deployed or executed.
+The productive worker remains running during that independent work.
+
+Frozen batch preparation succeeded with237target allowlist,286membership,
+26priorjournalidentities across18adoptedtargets andzerooutstandingroots.
+Eight exact two-complete-unchanged targets are ineligible for another root,
+including DT_FCpNDY41; these ledgers are preserved. Prepared manifest SHA
+2d2f797fb0ee9ddba7d0bd5d66d6a3c1c9ee38b0be792d3b30d3c43c996cc0f2
+awaits generated-manifest launch review. Source review remains accepted; the
+current process qualification is pinned separately. No new batch is launched
+at this record point. Current paused old controllers must not be restarted.
+January remains uncertified and full-history remains disabled.
+
+### First-cause recovery reassessment and source candidate, 09:32 UTC
+
+The new finite batch did launch once, but paused before any audit/root command
+at09:11:13 with technical_ProcessLookupError because pinned coordinator34489
+had exited. Preserve its events and manifest; do not restart it or overwrite its
+pause. The linked log captures heartbeat_deadline events at09:08:18/09:09:49/
+09:12:28. Captured watchdog ages were4.759/3.947/4.123s. SELECT durations formerly
+shown alongside them are report-time values and may refer to later queries;
+they do not prove database execution latency. The sole worker continues through
+LaunchAgent restarts; all original budgets/fences remain intact. One bounded
+paired exact-session sample was healthy and cannot explain those earlier stalls.
+
+Source-backed repair candidate ig-heartbeat-readiness-904e30d697f1 is frozen at
+heartbeat-rollout. It has2734package files/1040runtime entries and exactly3runtime
+deltas fromv159: local_driver.py,local_worker.py,workflow_store.py. Readiness
+loads only the post/comment fields its unchanged exact proof consumes, avoiding
+unused rawJSON. The ordinary full media snapshot is unchanged. Coherent immutable
+heartbeat samples, query/completion sequences, watchdogwakegap and fixedforeground
+phase separate firstcause timing from later report_time_lease context.2s/5s/15s
+guards and heartbeat SQLcount remain unchanged. Neither change is claimed a
+verified rootcause fix. Affected projection/PGguard and actualthread/worker/lease
+checks pass; complete review found only an activation shell-vs-Python identity
+proof issue. That narrow operator fix now pins actualkernel executable plus
+exactworkerargs/CWD beforeandafter a bounded stabilitywait. Source/runtimebytes
+remain unchanged; fixes-only acceptance and deployment are pending.
+
+Private probe_v2 source delta is independently accepted (activationfalse). Its
+explicit canonical tuple-version fingerprint avoids repeated rawrowserialization,
+with registered-PG proofs for arbitraryTOAST updates/inserts/deletes/status and
+unchangedrows; all originalproof/timeouts remain. It has NOT captured pins, started,
+sentHTTP or changeddata. Defer its livewindow while productive traversal and
+source/runtime recovery continue; no old failedwrapper/capture may be blindly
+rerun. Media preparation investigation found no existing legitimate custody-only
+newdownload path; preserve exact ordinary nativeinventory/equality admission.
+No new byteaudit of alreadyverifiedobject was repeated. January certification
+remains pending; public-only/full-history-disabled rules remain mandatory.
+
+### v160 deployment and diagnostic-window outcome, 10:06 UTC
+
+The reviewed candidate ig-heartbeat-readiness-904e30d697f1 is deployed as Modal
+v160 in admin-56995/main/trr-backend-jobs (ap-DkLTRoSvqhbkGO7fHyHxrD), deployed
+09:36:16 UTC. Target-specific readiness reports ok/core_ok with no missing
+functions, secrets or blockers. Fresh deployed task ta-01M5S6P0AQXH9YFHREYV5E841R
+verified 665 actual cloud Python modules and state-free smoke; full-history stayed
+closed and no native request or database connection was made by that smoke.
+Separate local-package validation verified 2734 files/1040 runtime entries.
+The local handover installed the same candidate; timers and source policy stayed
+unchanged. Deployment, source and private operator receipts are retained under
+trr-instagram-20261025-01a171e0/heartbeat-rollout.
+
+The coherent 09:41:53 watchdog sample shows the next heartbeat query started
+2.451584s after the previous completion; it had been in flight only 0.074125s
+at abort comparison. A later 10:02:07 sample has a 4.568301s watchdog wake gap.
+These establish delayed scheduling before heartbeat execution; they do not
+prove database-query latency or distinguish the underlying GIL/OS cause. The
+2s heartbeat deadline, 5s server expiry and 15s child-exit fence remain intact.
+
+The accepted v160 diagnostic wrapper drained the sole worker and waited for
+natural owner expiry. Fresh capture completed at 09:55. The local parent-approval
+window expired during context handoff, before any probe HTTP request. Its
+finally restored the same v160 once at 09:57:10, verifying actual Python PID76152,
+sole server lease358650, exact source/plist and linked log inode529928013.
+The worker later restarted on the recorded heartbeat deadline. Preserve the
+expired window, captured pins and all earlier failed outcomes; do not rerun those
+frozen directories. A fresh bounded diagnostic candidate and same-source
+qualification-epoch controller are being prepared independently. Neither has
+executed at this record point.
+
+The 10:05:42 read-only snapshot retains the exact 286-target cohort: comments
+285 committed/1 unresolved and media48 committed/238 unresolved. DTg has14760
+native IDs,14822 active saved rows,107768 total run pages and owner143, with
+attempts140/max141. Productive budget extensions use the maintained journaled
+progress guard, never a root reset. January is not certified. All saved data,
+public-only operation, native proof requirements and the full-history hard stop
+remain unchanged.

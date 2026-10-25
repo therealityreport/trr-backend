@@ -16,6 +16,7 @@ import signal
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -85,6 +86,73 @@ def validate_run(store, request, *, expected_workflow_version=None):
     return run
 
 
+@dataclass(frozen=True)
+class HeartbeatSample:
+    """One atomically published lease observation; only the monitor writes it."""
+
+    query_sequence: int = 0
+    completion_sequence: int = 0
+    last_completion: float | None = None
+    query_started: float | None = None
+    last_duration: float | None = None
+    backend_pid: int | None = None
+
+
+FOREGROUND_PHASES = frozenset(
+    {
+        "initializing",
+        "run_worker",
+        "seed",
+        "dispatch_partitions",
+        "bind",
+        "drain",
+        "decision",
+        "scheduler_tick",
+        "transition",
+        "wait",
+        "before_finalize",
+        "complete_partition",
+        "on_completed",
+        "on_started",
+        "on_cycle",
+        "dispatch_shutdown",
+    }
+)
+
+
+@contextmanager
+def foreground_phase(abort, phase):
+    """Foreground-only fixed scalar; abort producers read it without callbacks."""
+    if not isinstance(abort, DiagnosticAbort):
+        yield
+        return
+    if type(phase) is not str or phase not in FOREGROUND_PHASES:
+        raise ValueError("Unknown foreground diagnostic phase")
+    previous = abort.foreground_phase
+    abort.foreground_phase = phase
+    try:
+        yield
+    finally:
+        abort.foreground_phase = previous
+
+
+def call_in_phase(abort, phase, call, *args, **kwargs):
+    with foreground_phase(abort, phase):
+        return call(*args, **kwargs)
+
+
+def _heartbeat_metadata(sample, now):
+    """Formatting for the independent reporter, never the abort producer."""
+    return {
+        "lease_backend_pid": sample.backend_pid,
+        "heartbeat_age_seconds": max(0, now - sample.last_completion) if sample.last_completion is not None else None,
+        "select_inflight_seconds": max(0, now - sample.query_started) if sample.query_started is not None else None,
+        "last_select_seconds": sample.last_duration,
+        "query_sequence": sample.query_sequence,
+        "completion_sequence": sample.completion_sequence,
+    }
+
+
 class DiagnosticAbort(threading.Event):
     """An Event with best-effort first-cause metadata, never exception text."""
 
@@ -93,6 +161,7 @@ class DiagnosticAbort(threading.Event):
         self.diagnostic = None
         self._diagnostic_lock = threading.Lock()
         self.lease_metadata = None
+        self.foreground_phase = "initializing"
         self._diagnostic_error = None
         self._diagnostic_metadata = {}
 
@@ -117,7 +186,10 @@ class DiagnosticAbort(threading.Event):
             return
         try:
             if self.diagnostic is None:
+                phase = self.foreground_phase
                 record = {"origin": origin}
+                if type(phase) is str and phase in FOREGROUND_PHASES:
+                    record["foreground_phase"] = phase
                 if operation in {"decision", "scheduler_tick", "transition", "unlock", "close"}:
                     record["operation"] = operation
                 self._diagnostic_error = error
@@ -148,16 +220,73 @@ class DiagnosticAbort(threading.Event):
         }
         record = {}
         try:
-            metadata = self._diagnostic_metadata
-            captured_age = "heartbeat_age_seconds" in metadata
+            captured = self._diagnostic_metadata
+            live = {}
             if self.lease_metadata is not None:
                 try:
-                    metadata = {**self.lease_metadata(), **metadata}
+                    live = self.lease_metadata()
                 except BaseException:
                     pass
-            record["timing_scope"] = "report_time"
-            if captured_age:
-                record["heartbeat_age_scope"] = "watchdog_abort_comparison"
+            sample = captured.get("heartbeat_sample")
+            compared_at = captured.get("comparison_monotonic")
+            record["timing_scope"] = "abort_snapshot" if isinstance(sample, HeartbeatSample) else "report_time"
+            if isinstance(sample, HeartbeatSample):
+                # A later SELECT completion belongs only to report_time_lease.
+                # Never merge it into the captured abort sample's timing.
+                metadata = {"lease_backend_pid": sample.backend_pid, "last_select_seconds": sample.last_duration}
+                proof = {
+                    "query_sequence": sample.query_sequence,
+                    "completion_sequence": sample.completion_sequence,
+                    "last_completion_monotonic": sample.last_completion,
+                    "query_started_monotonic": sample.query_started,
+                    "last_completed_query_duration_seconds": sample.last_duration,
+                    "lease_backend_pid": sample.backend_pid,
+                    "query_state": "inflight" if sample.query_sequence > sample.completion_sequence else "complete",
+                }
+                if type(compared_at) in (int, float) and math.isfinite(compared_at):
+                    metadata.update(_heartbeat_metadata(sample, compared_at))
+                    proof.update(
+                        comparison_monotonic=compared_at,
+                        heartbeat_age_seconds=metadata["heartbeat_age_seconds"],
+                        select_inflight_seconds=metadata["select_inflight_seconds"],
+                    )
+                    record["heartbeat_age_scope"] = "watchdog_abort_comparison"
+                gap = captured.get("watchdog_wake_gap_seconds")
+                if type(gap) in (int, float) and math.isfinite(gap) and gap >= 0:
+                    proof["watchdog_wake_gap_seconds"] = gap
+                record["abort_heartbeat"] = proof
+                record["last_select_scope"] = "captured_previous_completion"
+            else:
+                timing_keys = {
+                    "heartbeat_age_seconds",
+                    "select_inflight_seconds",
+                    "last_select_seconds",
+                    "lease_backend_pid",
+                }
+                if timing_keys.intersection(captured):
+                    metadata = captured
+                    record["timing_scope"] = "captured_fields"
+                else:
+                    metadata = live
+                if "heartbeat_age_seconds" in captured:
+                    record["heartbeat_age_scope"] = "watchdog_abort_comparison"
+            # Legacy live accessors remain optional, explicitly report-time only.
+            record["report_time_lease"] = {
+                key: value
+                for key, value in live.items()
+                if key
+                in {
+                    "heartbeat_age_seconds",
+                    "select_inflight_seconds",
+                    "last_select_seconds",
+                    "lease_backend_pid",
+                    "query_sequence",
+                    "completion_sequence",
+                }
+                and type(value) in (int, float)
+                and math.isfinite(value)
+                and value >= 0
+            }
             error = self._diagnostic_error
             if error is not None:
                 name = type(error).__name__
@@ -225,6 +354,7 @@ class CoordinatorLease:
         self.backend_pid = None
         self.select_started = None
         self.last_select_seconds = None
+        self.heartbeat_sample = HeartbeatSample()
 
     def __enter__(self):
         self.connection = self.connect()
@@ -239,6 +369,7 @@ class CoordinatorLease:
                 )
                 acquired = cur.fetchone()
                 self.backend_pid = acquired[1] if len(acquired) > 1 else None
+                self.heartbeat_sample = HeartbeatSample(backend_pid=self.backend_pid)
                 if not acquired[0]:
                     raise Conflict("The existing ingestion coordinator lease is busy")
                 self.acquired = True
@@ -256,6 +387,7 @@ class CoordinatorLease:
                 self.previous_idle_timeout = cur.fetchone()[0]
                 cur.execute("select set_config('idle_session_timeout','5000ms',false)")
             self.last_heartbeat = self.clock()
+            self.heartbeat_sample = HeartbeatSample(last_completion=self.last_heartbeat, backend_pid=self.backend_pid)
             self.monitor = threading.Thread(target=self._monitor, daemon=True, name="instagram-local-lease")
             self.watchdog = threading.Thread(
                 target=self._watch_heartbeat, daemon=True, name="instagram-local-lease-deadline"
@@ -314,25 +446,36 @@ class CoordinatorLease:
             self._abort("lease_cleanup_deadline")
 
     def _abort(self, origin, **metadata):
+        # Cached immutable reference only: no clock, SQL, optional accessor or log.
+        metadata.setdefault("heartbeat_sample", self.heartbeat_sample)
         request_abort(self.abort, origin, **metadata)
 
     def _diagnostic_metadata(self):
         now = self.clock()
-        return {
-            "lease_backend_pid": self.backend_pid,
-            "heartbeat_age_seconds": max(0, now - self.last_heartbeat) if self.last_heartbeat is not None else None,
-            "select_inflight_seconds": max(0, now - self.select_started) if self.select_started is not None else None,
-            "last_select_seconds": self.last_select_seconds,
-        }
+        sample = self.heartbeat_sample
+        return _heartbeat_metadata(sample, now)
 
     def _monitor(self):
         while not self.stop.wait(0.1):
+            previous = self.heartbeat_sample
+            started = self.clock()
+            sequence = previous.query_sequence + 1
+            self.heartbeat_sample = HeartbeatSample(
+                sequence,
+                previous.completion_sequence,
+                previous.last_completion,
+                started,
+                previous.last_duration,
+                self.backend_pid,
+            )
+            self.select_started = started  # Legacy access only; diagnostics use the sample.
             try:
-                self.select_started = self.clock()
                 with self.connection.cursor() as cur:
                     cur.execute("select 1")
                 completed = self.clock()
-                self.last_select_seconds = max(0, completed - self.select_started)
+                duration = max(0, completed - started)
+                self.heartbeat_sample = HeartbeatSample(sequence, sequence, completed, None, duration, self.backend_pid)
+                self.last_select_seconds = duration
                 self.last_heartbeat = completed
                 self.select_started = None
             except Exception as error:
@@ -340,15 +483,23 @@ class CoordinatorLease:
                 return
 
     def _watch_heartbeat(self):
-        # This thread never touches the connection or its lock. A SELECT that
-        # never returns must still abort the runtime, which reaps the activity
-        # before run_local attempts cancellation or connection cleanup.
+        # One clock and one immutable sample per comparison. This thread never
+        # touches the connection or waits for the monitor/foreground locks.
+        previous_wake = self.clock()
         while not self.stop.wait(min(0.1, self.heartbeat_timeout / 4)):
             if self.abort.is_set():
                 return
-            age = self.clock() - self.last_heartbeat
-            if age >= self.heartbeat_timeout:
-                self._abort("lease_heartbeat_deadline", heartbeat_age_seconds=age)
+            now = self.clock()
+            sample = self.heartbeat_sample
+            wake_gap = max(0, now - previous_wake)
+            previous_wake = now
+            if sample.last_completion is not None and now - sample.last_completion >= self.heartbeat_timeout:
+                self._abort(
+                    "lease_heartbeat_deadline",
+                    heartbeat_sample=sample,
+                    comparison_monotonic=now,
+                    watchdog_wake_gap_seconds=wake_gap,
+                )
                 return
 
     def __exit__(self, *_):
