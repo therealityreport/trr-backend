@@ -460,7 +460,17 @@ class PublicRelayResume:
                 replies[parent.comment_id] = {"pending": True}
                 continue
             if parent.comment_id in rejected_lanes:
-                replies[parent.comment_id] = {"pending": not deferred, "deferred": deferred}
+                item = {"pending": not deferred, "deferred": deferred}
+                technical = (checkpoint.get("public_reply_failures") or {}).get(parent.comment_id)
+                if technical is not None:
+                    from trr_backend.ingestion.reply_failures import resume_failure
+
+                    item.update(resume_failure(technical, now=now))
+                    item["deferred"] = deferred or item["deferred"]
+                    item["pending"] = not item["deferred"]
+                    if item["deferred"]:
+                        item.pop("needs_diagnostics", None)
+                replies[parent.comment_id] = item
                 continue
             item = lane_resume(lane, root=False)
             expected = (observed.get(parent.comment_id) or {}).get("expected_replies")

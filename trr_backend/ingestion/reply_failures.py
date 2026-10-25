@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
 from trr_backend.ingestion.domain import fingerprint
 from trr_backend.ingestion.evidence import Evidence
@@ -26,6 +27,7 @@ class PublicReplyFailure(TypedDict):
     next_attempt_at: str
     retry_source: Literal["technical_branch_backoff"]
     technical_hold: bool
+    diagnostic_version: NotRequired[int]
 
 
 class RetainedPublicReplyFailureError(ValueError):
@@ -81,14 +83,26 @@ def record_failure(
     now: datetime,
 ) -> PublicReplyFailure:
     query = dict(payload["cursor_payload"])
+    from trr_backend.ingestion.public_reply_failure_diagnostics import DIAGNOSTICS_KEY, project_diagnostics
+
+    native_hash = evidence.content_hash
+    diagnostic_version = None
+    if DIAGNOSTICS_KEY in payload:
+        retained = json.loads(evidence.payload_json)
+        diagnostics = retained.get(DIAGNOSTICS_KEY)
+        if diagnostics is not None and project_diagnostics(diagnostics) == diagnostics:
+            # Preserve the legacy failure identity/hold counter. Evidence still
+            # hashes the complete immutable object, including these new facts.
+            native_hash = fingerprint({key: value for key, value in retained.items() if key != DIAGNOSTICS_KEY})
+            diagnostic_version = diagnostics["version"]
     request_fingerprint = fingerprint(
-        {"query": query, "parent": payload["parent_comment_id"], "content_hash": evidence.content_hash}
+        {"query": query, "parent": payload["parent_comment_id"], "content_hash": native_hash}
     )
     previous = previous or {}
     counts = dict(previous.get("fingerprint_counts") or {})
     counts[request_fingerprint] = counts.get(request_fingerprint, 0) + 1
     count = max(counts.values())
-    return {
+    result: PublicReplyFailure = {
         "version": 1,
         "code": "source_incomplete",
         "parent_comment_id": payload["parent_comment_id"],
@@ -105,6 +119,11 @@ def record_failure(
         "retry_source": "technical_branch_backoff",
         "technical_hold": count >= 3,
     }
+    if diagnostic_version is not None:
+        result["diagnostic_version"] = diagnostic_version
+    elif type(previous.get("diagnostic_version")) is int and previous["diagnostic_version"] == 1:
+        result["diagnostic_version"] = previous["diagnostic_version"]
+    return result
 
 
 def resume_failure(value: Any, *, now: datetime) -> dict[str, Any]:
@@ -115,4 +134,11 @@ def resume_failure(value: Any, *, now: datetime) -> dict[str, Any]:
         deferred = value.get("technical_hold") is True or retry > now.astimezone(UTC)
     except (KeyError, TypeError, ValueError):
         raise ValueError("Invalid public reply technical retry timestamp") from None
-    return {"technical_failure": True, "deferred": deferred, "pending": not deferred}
+    result = {"technical_failure": True, "deferred": deferred, "pending": not deferred}
+    from trr_backend.ingestion.public_reply_failure_diagnostics import VERSION
+
+    if not deferred and not (
+        type(value.get("diagnostic_version")) is int and value["diagnostic_version"] == VERSION
+    ):
+        result["needs_diagnostics"] = True
+    return result

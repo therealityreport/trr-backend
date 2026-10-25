@@ -7111,12 +7111,15 @@ class InstagramCommentsScraplingFetcher:
 
         parent_comments = comments if parent_limit is None else comments[:parent_limit]
         if strict_native_exhaustion:
-            parent_comments = sorted(
-                parent_comments,
-                key=lambda parent: bool(
-                    ((durable_resume or {}).get(str(parent.comment_id)) or {}).get("technical_failure")
-                ),
-            )
+            def priority(parent):
+                lane = (durable_resume or {}).get(str(parent.comment_id)) or {}
+                needs_diagnostics = (
+                    lane.get("technical_failure") and lane.get("needs_diagnostics")
+                    and lane.get("pending") and not lane.get("deferred")
+                )
+                return not needs_diagnostics, bool(lane.get("technical_failure"))
+
+            parent_comments = sorted(parent_comments, key=priority)
         halted = False
 
         def branch(parent):
@@ -7391,19 +7394,29 @@ class InstagramCommentsScraplingFetcher:
                     if untrusted_empty:
                         payload = {**payload, "reply_access_untrusted": True}
                     if strict_native_exhaustion:
-                        self._observe_source_payload(
-                            "graphql_replies",
-                            _durable_relay_payload(
-                                payload,
-                                cursor=cursor,
-                                doc_id=normalized_doc_id,
-                                friendly_name=normalized_friendly_name,
-                                sort_order="popular",
-                                page_size=effective_page_size,
-                                parent=parent_comment_id,
-                                retry_after=effective_retry_after,
-                            ),
+                        observed_payload = _durable_relay_payload(
+                            payload,
+                            cursor=cursor,
+                            doc_id=normalized_doc_id,
+                            friendly_name=normalized_friendly_name,
+                            sort_order="popular",
+                            page_size=effective_page_size,
+                            parent=parent_comment_id,
+                            retry_after=effective_retry_after,
                         )
+                        if self._public_only and native_failure:
+                            from trr_backend.ingestion.public_reply_failure_diagnostics import (
+                                DIAGNOSTICS_KEY,
+                                capture_diagnostics,
+                            )
+
+                            failure_class = native_failure[0]
+                            if rejection and failure_class == "source_incomplete":
+                                failure_class = "reply_access_rejected"
+                            observed_payload[DIAGNOSTICS_KEY] = capture_diagnostics(
+                                payload, response, failure_class=failure_class
+                            )
+                        self._observe_source_payload("graphql_replies", observed_payload)
                     if strict_native_exhaustion and self._public_only:
                         from trr_backend.ingestion.reply_failures import isolated_reply_failure
 

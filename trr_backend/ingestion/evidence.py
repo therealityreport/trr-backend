@@ -312,6 +312,11 @@ def sanitize_payload(payload: dict[str, Any], *, parser_version: str | None = No
     provenance = project_graphql_provenance(payload)
     if provenance is not None:
         result[PROVENANCE_KEY] = provenance
+    from trr_backend.ingestion.public_reply_failure_diagnostics import DIAGNOSTICS_KEY, project_payload_diagnostics
+
+    diagnostics = project_payload_diagnostics(payload, provenance=provenance)
+    if diagnostics is not None:
+        result[DIAGNOSTICS_KEY] = diagnostics
     if len(stable_json(result).encode()) > MAX_PAYLOAD_BYTES:
         raise ValueError("Evidence exceeds 4 MiB")
     return result

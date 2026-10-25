@@ -1149,3 +1149,97 @@ attempts140/max141. Productive budget extensions use the maintained journaled
 progress guard, never a root reset. January is not certified. All saved data,
 public-only operation, native proof requirements and the full-history hard stop
 remain unchanged.
+
+### Standard scheduling trial and actual public diagnostic, 10:19 UTC
+
+The sole service was unloaded at10:13 for one combined diagnostic/scheduling
+window. Its first drain guard rejected mapped files opened by the operator's own
+installed virtualenv interpreter. The original failed outcome and failed finally
+remain immutable. A zero-connection reproduction identified15 self-owned mapped
+files inside the release; the maintained Backend virtualenv opened none there.
+Both use the same pinned Python3.11.17 kernel. An independently reviewed resume
+uses that maintained operator interpreter, preserves every original guard and
+preimage, and resumes the existing bootout without another service stop. No
+open-file exception, owner reset or lease bypass was introduced.
+
+Natural drain completed10:18:25 with no active owners, dispatches or lease. Fresh
+exact pins were approved at10:18. The diagnostic sent one anonymous request to
+the historical exact-comment permalink and received HTTP302. endpoint_redirect
+stopped the stream before any DTg bootstrap/child request. It retained
+preserved_preimage=true; saved rows, targets and checkpoints were unchanged.
+That response supplies no comment-membership or absence proof. No redirect was
+followed and no second diagnostic stream was started. Normal-path typed failure
+retention is the next source repair for future automatic child failures.
+
+Finally restored v160 at10:19:03 with actual PID98866, sole server lease360211
+and linked log inode529980103. The exact requested plist delta is ProcessType
+Background→Standard plus two unique log paths; all other fields are identical.
+Observed launch classification changed background(5)→daemon(3). The 2s/5s/15s
+guards, source/public policy, concurrency and frozen cohort remain unchanged.
+This is a persistent launch policy trial, bounded to20minutes or the first miss
+for observation, followed by an explicit keep-or-rollback decision. It does not
+yet prove the underlying heartbeat issue repaired. New-owner persistence still
+requires separate current-process qualification.
+
+Heartbeat finish-january-instagram-certification is temporarily PAUSED during
+active parent recovery because its10:14 trigger interrupted ongoing work. Resume
+it after the sole runtime/controller is qualified; preserve the existing cadence,
+finite count and quiet notification policy. This pause holds the follow-up timer,
+not the user's repair objective or native worker. The source candidate is retained
+in Backend commit f960a4be; unrelated dirty work is preserved.
+
+### Local diagnostics, retry-hold repair and productive continuation, 11:02 UTC
+
+The user explicitly selected local execution. Modal v161 had already deployed
+the reviewed diagnostics candidate ig-reply-diagnostics-8e3350210aa9 at10:36:52
+UTC in the same authorized main target, with readiness and API cold-start health
+200. No further cloud-container smoke or cloud deployment was started after
+the local-only instruction. The local handover started actual PID16296 at10:38:41,
+retaining all108265 saved run pages, exact run/policy and Standard launch class.
+The four diagnostics modules plus launch template have85 distinct targeted
+passing checks and independent source/package/operator acceptance. Failed native
+reply observations now retain bounded numeric diagnostics and honestly labelled
+decoded-response hashes; legacy branch identities and holds remain intact.
+
+Actual normal-owner requests exposed primary doc36239935742272683 error1675030
+and fallback doc34884685271179117 error1675004. The latter's retained diagnostic
+classification is rate_limited; numeric codes alone do not establish a broader
+source diagnosis. The saved reply_access set contained1985 pending parents,
+including all four technically held parents. Its early resume branch bypassed
+their existing holds/backoff. Multiple owners147–156 repeated those parents;
+their failure counts rose to11. This was not an increase within one owner, and
+no empty fallback or deletion conclusion is supported by the retained envelopes.
+
+The narrow repair changes only PublicRelayResume.from_checkpoint: a rejected
+lane now composes technical deferral with the saved server wait. Either defers
+the parent, preserving counters, cursors, classification, restart precedence,
+permits and native completion proof. The regression failed before the repair;
+14 affected checks pass afterward, with the85 unchanged checks reused. The
+reviewed local package ig-local-reply-holds-056cfe0023bf has2737files/1041runtime
+entries, exactly one runtime delta from v161 and one new focused test. Actual
+local PID33810 started10:55:07. Its binding explicitly records local_only scope
+and retains the real cloud v161 identity; no cloud deployment record is invented.
+
+After installed-source qualification against the real saved checkpoint proved
+all four held/access-overlap parents deferred, a separately reviewed idempotent
+transaction granted exactly one continuation, max153→154 at10:59:38. Checkpoint
+ce7a621bdc659e364f4da8c96252012bd713483b81681b5f5afc83bb312beb26,
+attempt153, owner156, all four holds/counts11, waits and saved data were preserved.
+No root reset or repeated unchanged grant is permitted. The existing productive
+budget extension remains available only after its ordinary committed-page guard.
+
+The11:01:53 read-only snapshot proves42 newly committed pages (108307 total)
+under new owner157, started10:59:51. All four previous held counters remain11;
+their evidence clocks remain10:45, proving they were not re-requested. One newly
+encountered technical branch has count1 and qualified diagnostics; it does not
+erase the productive healthy traversal. January is still uncertified. Source
+and operational receipts are under normal-diagnostics-rollout/local-hold-repair;
+the strict local-source recovery controller awaits actual process/page
+qualification and generated-manifest review. Public-only, reply2, six activities,
+all saved data and the full-history hard stop remain mandatory.
+
+Backend validation:85diagnostic/priority checks plus14affected guard checks and
+actual packaged import/gate smoke pass; live continuation now commits pages.
+TRR-APP build: not applicable (backend/local scraper only, no app/API contract
+change). SQL uses existing target/journal fields; no migration or SQL ownership
+change. Modal remains v161 by the user's explicit local-only selection.

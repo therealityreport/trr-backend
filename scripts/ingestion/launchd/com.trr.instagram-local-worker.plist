@@ -35,7 +35,8 @@
   <key>ThrottleInterval</key>
   <integer>30</integer>
   <key>ProcessType</key>
-  <string>Background</string>
+  <!-- Avoid explicit Background throttling of the coordinator lease heartbeat. -->
+  <string>Standard</string>
   <key>StandardOutPath</key>
   <string>/Users/thomashulihan/Library/Logs/trr-instagram-local-worker.log</string>
   <key>StandardErrorPath</key>
