@@ -474,3 +474,62 @@ def test_supervisor_wait_failure_always_cleans_and_restores(monkeypatch, failure
     assert waits == [90, 1, 2]
     assert signals == [(7654321, signal.SIGTERM), (7654321, signal.SIGKILL)]
     assert {sig: signal.getsignal(sig) for sig in prior_handlers} == prior_handlers
+
+
+@pytest.mark.parametrize("ended", [False, True])
+def test_cleanup_permission_errors_never_skip_reap(monkeypatch, ended):
+    import errno
+    import signal
+    import subprocess
+
+    from scripts.ingestion import refresh_count_witnesses as cli
+
+    waits, signals = [], []
+
+    class Child:
+        pid = 7654321
+
+        def wait(self, *, timeout):
+            waits.append(timeout)
+            if not ended:
+                raise subprocess.TimeoutExpired("owned-child", timeout)
+            return 0
+
+    def denied(pid, sig):
+        signals.append((pid, sig))
+        raise PermissionError(errno.EPERM, "not included in cleanup output")
+
+    monkeypatch.setattr(cli.os, "killpg", denied)
+    result = cli._stop_owned_child(Child(), clock=lambda: 10)
+    assert waits == [1, 2]
+    assert signals == [(7654321, signal.SIGTERM), (7654321, signal.SIGKILL)]
+    assert result["child_reaped"] is ended
+    assert result["group_signalling_uncertain"] is True
+    assert result["signal_errors"] == [
+        {"signal": int(sig), "failure_class": "PermissionError", "errno": errno.EPERM}
+        for sig in (signal.SIGTERM, signal.SIGKILL)
+    ]
+    assert "not included" not in json.dumps(result)
+
+
+def test_supervisor_reports_permission_uncertainty_without_rejection(monkeypatch, capsys):
+    import errno
+
+    from scripts.ingestion import refresh_count_witnesses as cli
+
+    class Child:
+        pid = 7654321
+
+        def wait(self, *, timeout):
+            return 0
+
+    def denied(*args):
+        raise PermissionError(errno.EPERM, "private OS text")
+
+    monkeypatch.setattr(cli.subprocess, "Popen", lambda *args, **kwargs: Child())
+    monkeypatch.setattr(cli.os, "killpg", denied)
+    assert cli.supervise([], seconds=90, started=10, clock=lambda: 10) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "cleanup_uncertain"
+    assert report["child_reaped"] is True
+    assert report["group_signalling_uncertain"] is True

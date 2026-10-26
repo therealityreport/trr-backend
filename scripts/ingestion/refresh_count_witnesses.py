@@ -108,36 +108,47 @@ class _SupervisorSignal(BaseException):
 
 def _stop_owned_child(child, *, clock):
     cleanup_deadline = clock() + 2
+    signal_errors, wait_errors = [], []
 
     def signal_group(sig):
         try:
             os.killpg(child.pid, sig)
         except ProcessLookupError:
             pass
+        except BaseException as error:
+            # Darwin can return EPERM for an exited, unreaped group. A signal
+            # error never proves liveness and must not suppress the reap.
+            signal_errors.append(
+                {"signal": int(sig), "failure_class": type(error).__name__, "errno": getattr(error, "errno", None)}
+            )
 
-    reaped = False
-    try:
-        signal_group(signal.SIGTERM)
+    def wait(timeout, phase):
         try:
-            child.wait(timeout=min(1, max(0, cleanup_deadline - clock())))
-        except BaseException:
-            # A broken wait must still reach KILL and the final reap attempt.
-            pass
-    finally:
-        signal_group(signal.SIGKILL)
-        try:
-            child.wait(timeout=max(0, cleanup_deadline - clock()))
-            reaped = True
-        except BaseException:
-            pass
-    return reaped
+            child.wait(timeout=timeout)
+            return True
+        except BaseException as error:
+            wait_errors.append({"phase": phase, "failure_class": type(error).__name__})
+            return False
+
+    signal_group(signal.SIGTERM)
+    wait(min(1, max(0, cleanup_deadline - clock())), "after_term")
+    # Always attempt both group signals and final reap, even after permission
+    # errors or an exited leader. The independent guard still bounds the child.
+    signal_group(signal.SIGKILL)
+    reaped = wait(max(0, cleanup_deadline - clock()), "after_kill")
+    return {
+        "child_reaped": reaped,
+        "signal_errors": signal_errors,
+        "wait_errors": wait_errors,
+        "group_signalling_uncertain": bool(signal_errors),
+    }
 
 
 def supervise(argv, *, seconds, started, clock=time.monotonic):
     """Own one fresh process group; bound work plus at most two seconds cleanup."""
     root = Path(__file__).resolve().parents[2]
     command = [sys.executable, "-c", _GUARDED_CHILD_CODE, str(os.getpid()), repr(started + seconds), *argv]
-    child, previous, status, reaped = None, {}, None, False
+    child, previous, status, cleanup = None, {}, None, {}
 
     def interrupted(signum, _frame):
         raise _SupervisorSignal(signum)
@@ -160,13 +171,15 @@ def supervise(argv, *, seconds, started, clock=time.monotonic):
             for sig in previous:
                 signal.signal(sig, signal.SIG_IGN)
             if child is not None:
-                reaped = _stop_owned_child(child, clock=clock)
+                cleanup = _stop_owned_child(child, clock=clock)
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
-        if status is not None:
+        if status is not None or cleanup.get("group_signalling_uncertain") or (cleanup and not cleanup["child_reaped"]):
             print(
-                json.dumps({"status": status, "child_reaped": reaped, "successful_private_artifacts_preserved": True})
+                json.dumps(
+                    {"status": status or "cleanup_uncertain", **cleanup, "successful_private_artifacts_preserved": True}
+                )
             )
 
 
