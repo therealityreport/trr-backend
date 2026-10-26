@@ -188,13 +188,21 @@ class Store:
                 raise Conflict("Recovery requires the exact held local public January run")
             busy = _row(
                 cur,
-                """select run_id from social.instagram_ingestion_runs
-                where account=%s and run_id<>%s and state in ('queued','running','blocked','failed','cancelled')
-                and not (state='cancelled' and execution_hold_reason is not null) limit 1""",
+                """select r.run_id from social.instagram_ingestion_runs r
+                where account=%s and run_id<>%s and (state in ('queued','running')
+                or exists(select 1 from social.instagram_ingestion_targets t where t.run_id=r.run_id
+                    and (t.owner_expires_at>clock_timestamp() or (t.outcome='unresolved'
+                        and t.owner_token is not null and t.owner_expires_at is null)))
+                or exists(select 1 from social.instagram_ingestion_dispatches d
+                    join social.instagram_ingestion_targets t using(run_id,stage,target_key)
+                    where d.run_id=r.run_id and d.state in ('sending','accepted') and t.outcome='unresolved'
+                    and greatest(d.updated_at,r.updated_at)>clock_timestamp()-interval '600 seconds'
+                    and not exists(select 1 from social.instagram_ingestion_receipts x
+                        where x.run_id=d.run_id and x.owner_token=d.owner_token))) limit 1""",
                 (account, run_id),
             )
             if busy:
-                raise Conflict("Another resumable run occupies this account")
+                raise Conflict("Another active or uncertain execution occupies this account")
             self._expire_drained_dispatches(cur, run, expected_generation)
             now = _row(cur, "select clock_timestamp() as now")["now"]
             cur.execute(

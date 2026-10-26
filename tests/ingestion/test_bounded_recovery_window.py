@@ -149,6 +149,35 @@ def test_live_owner_prevents_grant(held):
         authorize(held)
 
 
+@pytest.mark.parametrize("active", [False, True])
+def test_capacity_uses_execution_not_cancelled_history_and_preserves_other_runs(held, active):
+    store, tx, _, _ = held
+    other = store.start(
+        RunIntent(account="bravotv"),
+        idempotency_key=str(uuid4()),
+        engine="dbos",
+        workflow_version="historical-fixture",
+        initiated_by="test",
+    )
+    if not active:
+        store.control(other["run_id"], "bravotv", action="cancel", idempotency_key=str(uuid4()))
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute("select to_jsonb(r) from social.instagram_ingestion_runs r where run_id=%s", (other["run_id"],))
+        before = cur.fetchone()
+    try:
+        if active:
+            with pytest.raises(Conflict, match="active or uncertain"):
+                authorize(held)
+        else:
+            assert authorize(held)["generation"] == 3
+        with tx() as conn, conn.cursor() as cur:
+            cur.execute("select to_jsonb(r) from social.instagram_ingestion_runs r where run_id=%s", (other["run_id"],))
+            assert cur.fetchone() == before
+    finally:
+        if active:
+            store.control(other["run_id"], "bravotv", action="cancel", idempotency_key=str(uuid4()))
+
+
 def test_unbound_or_wrong_worker_cannot_consume_authorized_generation(held):
     window = authorize(held)
     for variable in (
