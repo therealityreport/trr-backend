@@ -42,6 +42,24 @@ _CONNECTIONS = (
 _UNAVAILABLE = frozenset({"deleted", "comments_disabled", "restricted", "media_unavailable"})
 
 
+def _checkpoint_delta(previous, current):
+    """Send changed entries only; PostgreSQL still stores full atomic snapshots."""
+    def changes(before, after, excluded=()):
+        return (
+            sorted(set(before) - set(after) - set(excluded)),
+            stable_json({key: value for key, value in after.items()
+                         if key not in excluded and (key not in before or before[key] != value)}),
+        )
+
+    old, new = previous.get("comment_pages") or {}, current["comment_pages"]
+    return (
+        *changes(previous, current, ("comment_pages",)),
+        *changes(old, new, ("observed", "lanes")),
+        *changes(old.get("observed") or {}, new["observed"]),
+        *changes(old.get("lanes") or {}, new["lanes"]),
+    )
+
+
 class CommentSourceError(ValueError):
     """Evidence cannot safely prove a comment page."""
 
@@ -795,6 +813,7 @@ class CommentActivity:
         }
         target = self.store.acquire(**owned)
         current_checkpoint = dict(target["checkpoint"])
+        checkpoint_hash = None
         if checkpoint is not None and checkpoint != current_checkpoint:
             raise Conflict("Supplied checkpoint differs from durable comment progress")
         with self.store.transaction() as conn, conn.cursor() as cur:
@@ -811,7 +830,7 @@ class CommentActivity:
         check_execution_budget()
 
         def observe(kind: str, payload: Mapping[str, Any]) -> None:
-            nonlocal current_checkpoint, state, retained
+            nonlocal current_checkpoint, state, retained, checkpoint_hash
             from trr_backend.socials.instagram.comments_scrapling.reply_http import response_observed_at
 
             if kind not in {"comments_api", "graphql_comments", "graphql_replies", "graphql_preview"}:
@@ -844,9 +863,10 @@ class CommentActivity:
                     owner_generation=target["owner_generation"], now=self.clock(),
                 )
                 next_checkpoint = {**current_checkpoint, "public_reply_failures": failures}
-                self._persist_reply_failure(
+                checkpoint_hash = self._persist_reply_failure(
                     owned, expected_checkpoint=current_checkpoint, checkpoint=next_checkpoint,
                     owner_generation=target["owner_generation"],
+                    expected_checkpoint_hash=checkpoint_hash,
                 )
                 current_checkpoint = next_checkpoint
                 raise RetainedPublicReplyFailureError(parent)
@@ -920,13 +940,14 @@ class CommentActivity:
                     int(diagnostics.get("committed_pages_since_failure", 0)) + 1
                 )
             next_checkpoint["worker_diagnostics"] = diagnostics
-            self._persist_page(
+            checkpoint_hash = self._persist_page(
                 owned,
                 post_id=post_id,
                 evidence=evidence,
                 evidence_id=evidence_id,
                 page=page,
                 expected_checkpoint=current_checkpoint,
+                expected_checkpoint_hash=checkpoint_hash,
                 checkpoint=next_checkpoint,
                 metadata_writes_enabled=metadata_writes_enabled,
                 assignment=assignment,
@@ -1124,31 +1145,49 @@ class CommentActivity:
             raise CommentSourceError("Durable comment inventory lacks matching committed page proof")
         return tuple(nodes[key] for key in sorted(nodes)), proof
 
-    def _persist_reply_failure(self, owned, *, expected_checkpoint, checkpoint, owner_generation):
+    def _lock_checkpoint(self, cur, owned, expected_checkpoint, expected_checkpoint_hash):
+        if expected_checkpoint_hash is not None and not re.fullmatch(r"[a-f0-9]{64}", expected_checkpoint_hash):
+            raise ValueError("Invalid committed checkpoint hash")
+        projection = "owner_generation,checkpoint" if expected_checkpoint_hash is None else (
+            "owner_generation,encode(sha256(convert_to(checkpoint::text,'UTF8')),'hex') as checkpoint_hash"
+        )
+        cur.execute(
+            f"""select {projection} from social.instagram_ingestion_targets
+            where run_id=%s and stage='comments' and target_key=%s and owner_token=%s
+            and owner_started_at is not null and owner_expires_at>clock_timestamp()
+            and outcome='unresolved' for update""",
+            (owned["run_id"], owned["target_key"], owned["owner_token"]),
+        )
+        target = cur.fetchone()
+        if not target:
+            raise LostOwnership("Comment page writer lost target ownership")
+        matches = target["checkpoint"] == expected_checkpoint if expected_checkpoint_hash is None else (
+            target["checkpoint_hash"] == expected_checkpoint_hash
+        )
+        if not matches:
+            raise Conflict("Comment checkpoint advanced concurrently")
+        return target
+
+    def _persist_reply_failure(
+        self, owned, *, expected_checkpoint, checkpoint, owner_generation, expected_checkpoint_hash=None
+    ):
         """Metadata only: no canonical writer, native receipt, or owner release."""
         with self.store.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             run = self.store._execution_run(cur, owned["run_id"], owned["account"], shared_fence=True)
             if run["generation"] != owned["generation"] or run["state"] not in {"queued", "running"}:
                 raise LostOwnership("Reply failure belongs to a superseded execution")
-            cur.execute(
-                """select checkpoint from social.instagram_ingestion_targets
-                where run_id=%s and stage='comments' and target_key=%s and owner_token=%s
-                and owner_generation=%s and owner_started_at is not null
-                and owner_expires_at>clock_timestamp() and outcome='unresolved' for update""",
-                (owned["run_id"], owned["target_key"], owned["owner_token"], owner_generation),
-            )
-            target = cur.fetchone()
-            if not target:
+            target = self._lock_checkpoint(cur, owned, expected_checkpoint, expected_checkpoint_hash)
+            if target["owner_generation"] != owner_generation:
                 raise LostOwnership("Reply failure writer lost target ownership")
-            if target["checkpoint"] != expected_checkpoint:
-                raise Conflict("Comment checkpoint advanced concurrently")
             cur.execute(
                 """update social.instagram_ingestion_targets set checkpoint=%s::jsonb
-                where run_id=%s and stage='comments' and target_key=%s""",
+                where run_id=%s and stage='comments' and target_key=%s
+                returning encode(sha256(convert_to(checkpoint::text,'UTF8')),'hex') as checkpoint_hash""",
                 (stable_json(checkpoint), owned["run_id"], owned["target_key"]),
             )
             if cur.rowcount != 1:
                 raise LostOwnership("Reply failure checkpoint was not retained")
+            return cur.fetchone()["checkpoint_hash"]
 
     def _persist_page(
         self,
@@ -1162,7 +1201,8 @@ class CommentActivity:
         checkpoint: dict[str, Any],
         metadata_writes_enabled: bool,
         assignment: Mapping[str, Any] | None,
-    ) -> None:
+        expected_checkpoint_hash: str | None = None,
+    ) -> str:
         """Canonical page, receipt and checkpoint share Store's lock/fence order."""
         with self.store.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             if self.writer is write_comments:
@@ -1174,18 +1214,7 @@ class CommentActivity:
                 run = self.store._run(cur, owned["run_id"], owned["account"])
             if run["generation"] != owned["generation"] or run["state"] not in {"queued", "running"}:
                 raise LostOwnership("Comment page belongs to a superseded execution")
-            cur.execute(
-                """select * from social.instagram_ingestion_targets
-                where run_id=%s and stage='comments' and target_key=%s and owner_token=%s
-                and owner_started_at is not null and owner_expires_at>clock_timestamp()
-                and outcome='unresolved' for update""",
-                (owned["run_id"], owned["target_key"], owned["owner_token"]),
-            )
-            target = cur.fetchone()
-            if not target:
-                raise LostOwnership("Comment page writer lost target ownership")
-            if target["checkpoint"] != expected_checkpoint:
-                raise Conflict("Comment checkpoint advanced concurrently")
+            target = self._lock_checkpoint(cur, owned, expected_checkpoint, expected_checkpoint_hash)
             if page.comments:
                 from trr_backend.ingestion.media import invalidate_media_inventory
 
@@ -1203,18 +1232,37 @@ class CommentActivity:
                 metadata_writes_enabled=metadata_writes_enabled,
                 assignment=assignment,
             )
-            serialized_checkpoint = stable_json(checkpoint)
+            if self.writer is write_comments and isinstance(checkpoint.get("comment_pages"), dict) and all(
+                isinstance(checkpoint["comment_pages"].get(key), dict) for key in ("observed", "lanes")
+            ):
+                checkpoint_update = """(checkpoint - %s::text[]) || %s::jsonb ||
+                  jsonb_build_object('comment_pages',
+                    (coalesce(checkpoint->'comment_pages','{}'::jsonb) - %s::text[]) || %s::jsonb ||
+                    jsonb_build_object(
+                      'observed',(coalesce(checkpoint#>'{comment_pages,observed}','{}'::jsonb)
+                        - %s::text[]) || %s::jsonb,
+                      'lanes',(coalesce(checkpoint#>'{comment_pages,lanes}','{}'::jsonb)
+                        - %s::text[]) || %s::jsonb))"""
+                checkpoint_params = _checkpoint_delta(expected_checkpoint, checkpoint)
+            else:
+                # Custom writers may supply arbitrary checkpoints or mutate
+                # their object during the write. Serialize once, after writing.
+                checkpoint_update = "%s::jsonb"
+                checkpoint_params = (stable_json(checkpoint),)
             cur.execute(
                 """with progress as (
-                  update social.instagram_ingestion_targets set checkpoint=%s::jsonb
+                  update social.instagram_ingestion_targets set checkpoint=__CHECKPOINT_UPDATE__
                   where run_id=%s and stage='comments' and target_key=%s
-                  returning checkpoint
+                  returning checkpoint,encode(sha256(convert_to(checkpoint::text,'UTF8')),'hex') as checkpoint_hash
                 ) insert into social.instagram_ingestion_comment_pages
                 (page_id,run_id,stage,target_key,owner_generation,evidence_id,observed_at,content_hash,
                  parent_comment_id,next_cursor,exhausted,canonical_identity,checkpoint)
-                select %s,%s,'comments',%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,progress.checkpoint from progress""",
+                select %s,%s,'comments',%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,progress.checkpoint from progress
+                returning (select checkpoint_hash from progress) as checkpoint_hash""".replace(
+                    "__CHECKPOINT_UPDATE__", checkpoint_update
+                ),
                 (
-                    serialized_checkpoint,
+                    *checkpoint_params,
                     owned["run_id"],
                     owned["target_key"],
                     str(uuid4()),
@@ -1232,3 +1280,4 @@ class CommentActivity:
             )
             if cur.rowcount != 1:
                 raise LostOwnership("Comment page checkpoint did not retain its receipt")
+            return cur.fetchone()["checkpoint_hash"]

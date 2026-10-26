@@ -995,8 +995,21 @@ def mirror_snapshot(
         }
     avatars = []
     tagged = {}
+    hosted_avatars = {}
     for avatar in snapshot.avatars:
-        if avatar.cached_hosted_url:
+        # Attempt-local reuse only. Signed delivery URLs remain byte-for-byte
+        # keys; role, lineage and original observation stay on every slot.
+        hosting_key = (
+            avatar.username.lower(),
+            avatar.download_url or avatar.source_url,
+            avatar.cached_hosted_url,
+            avatar.cached_sha256,
+            avatar.download_provenance,
+        )
+        if hosting_key in hosted_avatars:
+            check()
+            entry = hosted_avatars[hosting_key]
+        elif avatar.cached_hosted_url:
             # Trusted persisted mirrored proof, not a new remote-object check.
             check()
             entry = {"url": avatar.cached_hosted_url, "sha256": avatar.cached_sha256}
@@ -1009,6 +1022,7 @@ def mirror_snapshot(
                 check=check,
                 request=request,
             )
+        hosted_avatars[hosting_key] = entry
         avatars.append(
             {
                 "username": avatar.username.lower(),
@@ -1239,12 +1253,44 @@ def write_comment_media(
         _update(conn, "instagram_comments", comment.row_id, changes)
 
 
+def _avatar_versions(avatars: tuple[dict[str, Any], ...]) -> tuple[dict[str, Any], ...]:
+    """Select each registry version once; reject contradictory proof up front.
+
+    Stable ordering retains the first slot's clock, matching the existing writer:
+    later identical mirrored proof reuses its original registry observation.
+    Every role slot and its own clock remain intact in MediaResult/evidence.
+    """
+    versions = {}
+    for avatar in sorted(avatars, key=lambda item: (item["username"].lower(), item["source_url"])):
+        key = (avatar["username"].lower(), avatar["source_url"])
+        previous = versions.get(key)
+        if previous is not None:
+            if (previous["hosted_url"], previous["sha256"]) != (avatar["hosted_url"], avatar["sha256"]):
+                raise CanonicalWriteError("Contradictory duplicate avatar version proof")
+        else:
+            versions[key] = avatar
+    return tuple(versions.values())
+
+
+def _persist_avatar_versions(conn, avatar_versions):
+    for avatar in avatar_versions:
+        write_avatar_version(
+            conn,
+            username=avatar["username"],
+            source_url=avatar["source_url"],
+            hosted_url=avatar["hosted_url"],
+            content_hash=avatar["sha256"],
+            observed_at=datetime.fromisoformat(avatar["observed_at"]),
+        )
+
+
 def write_media(
     conn: Any, *, run_id: str, account: str, target_key: str, observed_at: datetime, result: MediaResult
 ) -> dict[str, Any]:
     """Update media-only columns in the same transaction as the business receipt."""
     source = result.snapshot
     source.validate()
+    avatar_versions = _avatar_versions(result.avatars)
     if conn is None or conn.autocommit or target_key != source.shortcode or observed_at != source.observed_at:
         raise CanonicalWriteError("Media write requires its original fenced snapshot")
     with conn.cursor() as cur:
@@ -1363,15 +1409,7 @@ def write_media(
         comments=source.comments,
         comment_fields=result.comment_fields,
     )
-    for avatar in sorted(result.avatars, key=lambda item: (item["username"], item["source_url"])):
-        write_avatar_version(
-            conn,
-            username=avatar["username"],
-            source_url=avatar["source_url"],
-            hosted_url=avatar["hosted_url"],
-            content_hash=avatar["sha256"],
-            observed_at=datetime.fromisoformat(avatar["observed_at"]),
-        )
+    _persist_avatar_versions(conn, avatar_versions)
     identities["inventory_fingerprint"] = read_inventory_fingerprint(conn, source.post_id)
     if refreshes and identities["inventory_fingerprint"] != source.result_inventory_fingerprint:
         raise CanonicalWriteError("Applied attachment inventory fingerprint differs from exact projection")

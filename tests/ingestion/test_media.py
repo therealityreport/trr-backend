@@ -1686,3 +1686,135 @@ def test_media_activity_inherits_cleanup_reserve_and_keeps_real_ownership_failur
     )
     with pytest.raises(LostOwnership):
         check()
+
+
+@pytest.mark.parametrize("distinct_signed_urls", [False, True])
+def test_lossless_avatar_reuse_keeps_every_slot_and_exact_signed_urls(distinct_signed_urls):
+    from trr_backend.ingestion import media
+
+    class CountedStorage(Storage):
+        def __init__(self):
+            super().__init__()
+            self.avatar_io = {"head": 0, "get": 0, "put": 0}
+
+        def head_object(self, **kwargs):
+            if "/profile-pics/" in kwargs["Key"]:
+                self.avatar_io["head"] += 1
+            return super().head_object(**kwargs)
+
+        def get_object(self, **kwargs):
+            if "/profile-pics/" in kwargs["Key"]:
+                self.avatar_io["get"] += 1
+            return super().get_object(**kwargs)
+
+        def put_object(self, **kwargs):
+            if "/profile-pics/" in kwargs["Key"]:
+                self.avatar_io["put"] += 1
+            return super().put_object(**kwargs)
+
+    avatar_url = "https://scontent.cdninstagram.com/reader.png?oh=EXACT%2Bsignature&oe=123"
+    urls = [avatar_url + (f"&slot={n}" if distinct_signed_urls else "") for n in range(3)]
+    avatars = tuple(
+        AvatarSource(
+            "Reader" if n == 0 else "reader",
+            urls[n],
+            role,
+            "comment1" if role == "comment" else None,
+            OBSERVED + timedelta(seconds=n),
+        )
+        for n, role in enumerate(("owner", "tagged", "comment"))
+    )
+    source = snapshot(
+        comments=(CommentMedia("comment1", str(uuid4()), (), "known-comment"),),
+        include_comment_avatars=True,
+        avatars=avatars,
+    )
+    downloads, requests_seen = [], []
+
+    def open_source(_session, url, **kwargs):
+        downloads.append(url)
+        return Response()
+
+    client = CountedStorage()
+    result = mirror_snapshot(
+        source, storage(client, opener=open_source), check=noop, request=lambda: requests_seen.append(1)
+    )
+    avatar_downloads = [url for url in downloads if "/reader.png?" in url]
+    assert avatar_downloads == (urls if distinct_signed_urls else [avatar_url])
+    assert client.avatar_io == {"head": 3 if distinct_signed_urls else 1, "get": 0, "put": 1}
+    assert len(downloads) == (4 if distinct_signed_urls else 2)
+    assert len(requests_seen) == (30 if distinct_signed_urls else 26)
+    assert len(result.avatars) == 3
+    assert [row["observed_at"] for row in result.avatars] == [a.observed_at.isoformat() for a in avatars]
+    assert source.avatars == avatars  # Every role, comment lineage and signed source remains intact.
+    hosted = result.post_fields["hosted_owner_profile_pic_url"]
+    assert result.post_fields["hosted_tagged_profile_pics"]["reader"] == hosted
+    assert result.comment_fields["comment1"]["hosted_author_profile_pic_url"] == hosted
+    assert len(media._avatar_versions(result.avatars)) == 1
+
+
+def test_avatar_registry_versions_persist_once_and_keep_first_proof_clock(monkeypatch):
+    from trr_backend.ingestion import media
+
+    first = {
+        "username": "reader",
+        "source_url": "https://cdn.example/avatar.png",
+        "hosted_url": "https://media.example/avatar.png",
+        "sha256": "a" * 64,
+        "observed_at": OBSERVED.isoformat(),
+    }
+    later = {**first, "observed_at": (OBSERVED + timedelta(seconds=2)).isoformat()}
+    rows = (first, later, dict(first))
+    calls = []
+    monkeypatch.setattr(media, "write_avatar_version", lambda conn, **kwargs: calls.append(kwargs))
+    versions = media._avatar_versions(rows)
+    media._persist_avatar_versions(object(), versions)
+    assert len(calls) == 1 and calls[0]["observed_at"] == OBSERVED
+    assert rows == (first, later, first)
+
+
+@pytest.mark.parametrize("field,value", [("sha256", "b" * 64), ("hosted_url", "https://media.example/other.png")])
+def test_conflicting_avatar_registry_proofs_rejected_before_any_write(field, value):
+    from trr_backend.ingestion import media
+
+    class NoWrites:
+        autocommit = False
+
+        def cursor(self, **kwargs):
+            pytest.fail("Contradictory avatar proof must fail before any SQL")
+
+    first = {
+        "username": "reader",
+        "source_url": "https://cdn.example/avatar.png",
+        "hosted_url": "https://media.example/avatar.png",
+        "sha256": "a" * 64,
+        "observed_at": OBSERVED.isoformat(),
+    }
+    source = snapshot()
+    result = media.MediaResult(source, {}, {}, (first, {**first, field: value}))
+    with pytest.raises(media.CanonicalWriteError, match="Contradictory duplicate avatar"):
+        write_media(
+            NoWrites(), run_id="run", account="reader", target_key=source.shortcode, observed_at=OBSERVED, result=result
+        )
+
+
+def test_avatar_reuse_requires_identical_cached_proof():
+    cached = AvatarSource(
+        "reader",
+        SOURCE,
+        "owner",
+        observed_at=OBSERVED,
+        cached_hosted_url="https://media.example/cached.png",
+        cached_sha256="a" * 64,
+    )
+    fresh = AvatarSource("reader", SOURCE, "tagged", observed_at=OBSERVED)
+    source = snapshot(avatars=(cached, fresh))
+    downloads = []
+
+    def opener(_session, url, **kwargs):
+        downloads.append(url)
+        return Response()
+
+    result = mirror_snapshot(source, storage(opener=opener), check=noop, request=noop)
+    assert downloads == [SOURCE, SOURCE]  # Cover and uncached avatar; cached proof cannot replace fresh hosting.
+    assert len(result.avatars) == 2 and result.avatars[0]["hosted_url"] != result.avatars[1]["hosted_url"]

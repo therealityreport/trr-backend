@@ -17,7 +17,10 @@ import tempfile
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Generator, Iterable, Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 
 
@@ -341,13 +344,15 @@ async def run_reply_lanes(
     drain_received_after_error: Callable[[BaseException], bool] | None = None,
     inspect_received: Callable[[list[Any]], None] | None = None,
     clock: Callable[[], float] = time.monotonic,
+    offload_owner: bool = False,
 ) -> dict[str, Any]:
     """Run synchronous branch generators; return only finished lane values.
 
     Requests are sent/raised into their generator in transport completion order.
         ``Delay`` sends True after its wait. Expired sends/waits throw
     ``ReplyDeadlineExceeded`` into the owner, allowing its normal failure checkpoint.
-    The before-dispatch callback runs in the owner after pacing, may refresh an
+    The before-dispatch callback runs on the event loop after pacing, between
+    owner transitions. It may refresh an
     immutable descriptor, and may return None to retain the original descriptor.
     On stop/error/cancellation every task is cancelled and awaited, every generator
         closed, and every successful unconsumed response closed. When explicitly
@@ -369,26 +374,53 @@ async def run_reply_lanes(
     active: set[str] = set()
     parent_lanes: dict[str, str] = {}
     halted = False
+    owner_executor = (
+        ThreadPoolExecutor(max_workers=1, thread_name_prefix="instagram-reply-owner") if offload_owner else None
+    )
+    owner_context = copy_context() if offload_owner else None
+
+    async def owner_call(callback, *args, **kwargs):
+        if owner_executor is None:
+            return callback(*args, **kwargs)
+        # One persistent context also keeps generator-held ContextVar tokens
+        # valid across advances and close. Cancellation joins a committing
+        # transition before any response, generator or executor can be closed.
+        future = asyncio.get_running_loop().run_in_executor(
+            owner_executor, owner_context.run, partial(callback, *args, **kwargs)
+        )
+        return await _drain_pacing(future)
 
     def should_stop() -> bool:
         return bool(stop and stop())
 
-    def advance(key: str, value: Any = None, error: BaseException | None = None, *, initial: bool = False) -> None:
+    def transition(key: str, value: Any, error: BaseException | None, initial: bool):
+        branch = lanes[key]
+        try:
+            item = next(branch) if initial else branch.throw(error) if error is not None else branch.send(value)
+            return False, item
+        except StopIteration as finished:
+            # StopIteration must not cross an asyncio Future boundary.
+            return True, finished.value
+
+    async def advance(
+        key: str, value: Any = None, error: BaseException | None = None, *, initial: bool = False
+    ) -> None:
         nonlocal halted
         started = clock()
         try:
-            branch = lanes[key]
-            item = next(branch) if initial else branch.throw(error) if error is not None else branch.send(value)
-            if not isinstance(item, (ReplyRequest, Delay)):
-                raise TypeError("Reply generators must yield ReplyRequest or Delay")
-            if isinstance(item, ReplyRequest):
-                previous = parent_lanes.setdefault(item.parent_id, key)
-                if previous != key:
-                    raise ValueError("A parent may belong to only one reply lane")
-            ready.append((key, item, clock()))
-        except StopIteration as finished:
-            results[key] = finished.value
-            active.discard(key)
+            finished, item = await owner_call(transition, key, value, error, initial)
+            # Scheduler state stays on the event loop, between owner transitions.
+            if finished:
+                results[key] = item
+                active.discard(key)
+            else:
+                if not isinstance(item, (ReplyRequest, Delay)):
+                    raise TypeError("Reply generators must yield ReplyRequest or Delay")
+                if isinstance(item, ReplyRequest):
+                    previous = parent_lanes.setdefault(item.parent_id, key)
+                    if previous != key:
+                        raise ValueError("A parent may belong to only one reply lane")
+                ready.append((key, item, clock()))
         finally:
             metrics.owner_seconds += max(0.0, clock() - started)
         halted = should_stop()
@@ -460,7 +492,7 @@ async def run_reply_lanes(
             value = task.result()
             try:
                 try:
-                    advance(key, value)
+                    await advance(key, value)
                 except BaseException as error:
                     if not (
                         suppress_source_errors and drain_received_after_error and drain_received_after_error(error)
@@ -482,7 +514,7 @@ async def run_reply_lanes(
                     exhausted = True
                     break
                 active.add(key)
-                advance(key, initial=True)
+                await advance(key, initial=True)
                 if halted:
                     break
             if halted or should_stop():
@@ -499,7 +531,7 @@ async def run_reply_lanes(
                     break
                 key, item, queued = ready.popleft()
                 if item.deadline is not None and clock() >= item.deadline:
-                    advance(key, error=ReplyDeadlineExceeded("Reply dispatch deadline expired"))
+                    await advance(key, error=ReplyDeadlineExceeded("Reply dispatch deadline expired"))
                 elif isinstance(item, Delay):
                     launch(key, "delay", item, delayed(item))
                 elif slots < concurrency:
@@ -553,7 +585,7 @@ async def run_reply_lanes(
                     if descriptor.deadline is not None and clock() >= descriptor.deadline:
                         raise ReplyDeadlineExceeded("Reply dispatch deadline expired")
                 except Exception as error:
-                    advance(key, error=error)
+                    await advance(key, error=error)
                 else:
                     metrics.requests += 1
                     # The completed pacing slot becomes the request slot rather
@@ -572,9 +604,9 @@ async def run_reply_lanes(
                         value = task.result()
                         received = kind == "request"
                     except Exception as error:
-                        advance(key, error=error)
+                        await advance(key, error=error)
                     else:
-                        advance(key, value)
+                        await advance(key, value)
                 finally:
                     try:
                         if received:
@@ -592,29 +624,47 @@ async def run_reply_lanes(
             await drain_received(suppress_source_errors=not isinstance(error, ReplyDeadlineExceeded))
         raise
     finally:
-        tasks = list(pending)
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        if tasks:
-            # Do not propagate another cancellation into shielded pacing work.
-            drain = asyncio.gather(*tasks, return_exceptions=True)
-            while not drain.done():
-                try:
-                    await asyncio.shield(drain)
-                except asyncio.CancelledError:
-                    continue
-            for task in tasks:
-                if pending[task][1] == "request" and not task.cancelled() and task.exception() is None:
-                    try:
-                        await close(task.result())
-                    except Exception:
-                        pass
-        close_errors = []
-        for branch in lanes.values():
+        exception_active = sys.exc_info()[0] is not None
+
+        async def cleanup():
             try:
-                branch.close()
-            except Exception as error:
-                close_errors.append(error)
-        if close_errors and sys.exc_info()[0] is None:
-            raise ExceptionGroup("Reply generator cleanup failed", close_errors)
+                tasks = list(pending)
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                if tasks:
+                    drain = asyncio.gather(*tasks, return_exceptions=True)
+                    while not drain.done():
+                        try:
+                            await asyncio.shield(drain)
+                        except asyncio.CancelledError:
+                            continue
+                    for task in tasks:
+                        if pending[task][1] == "request" and not task.cancelled() and task.exception() is None:
+                            try:
+                                await close(task.result())
+                            except Exception:
+                                pass
+            finally:
+                close_errors = []
+                try:
+                    for branch in lanes.values():
+                        try:
+                            await owner_call(branch.close)
+                        except Exception as error:
+                            close_errors.append(error)
+                finally:
+                    if owner_executor is not None:
+                        # Every submitted transition has been joined above.
+                        owner_executor.shutdown(wait=True)
+                if close_errors and not exception_active:
+                    raise ExceptionGroup("Reply generator cleanup failed", close_errors)
+
+        # Repeated cancellation cannot interrupt generator/response cleanup or
+        # shut the executor down while it still owns a committing transition.
+        if owner_executor is not None:
+            await _drain_pacing(cleanup())
+        else:
+            # Keep default-mode generator ContextVar tokens in the caller's
+            # original task context, including during close.
+            await cleanup()

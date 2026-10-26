@@ -1074,7 +1074,7 @@ def test_page_checkpoint_serialized_once_after_custom_writer_mutation(database, 
     monkeypatch.setattr(comments_module, "stable_json", serialize)
     monkeypatch.setattr(comments_module, "RealDictCursor", TrackingCursor)
     activity = CommentActivity(store, writer=writer)
-    activity._persist_page(
+    committed_hash = activity._persist_page(
         owned,
         post_id=args["post_id"],
         evidence=retained,
@@ -1095,6 +1095,7 @@ def test_page_checkpoint_serialized_once_after_custom_writer_mutation(database, 
         (evidence_id,),
     )[0]
     assert saved["page_checkpoint"] == saved["target_checkpoint"] == checkpoint
+    assert len(committed_hash) == 64
 
     # A receipt insert can fail after its CTE updated the target. The whole
     # transaction must roll back to the previously committed checkpoint.
@@ -1108,6 +1109,7 @@ def test_page_checkpoint_serialized_once_after_custom_writer_mutation(database, 
             evidence_id=evidence_id,
             page=parse_comment_evidence(retained, pinned=True),
             expected_checkpoint=saved["target_checkpoint"],
+            expected_checkpoint_hash=committed_hash,
             checkpoint=checkpoint,
             metadata_writes_enabled=True,
             assignment=None,
@@ -1118,6 +1120,18 @@ def test_page_checkpoint_serialized_once_after_custom_writer_mutation(database, 
         ]
         == saved["target_checkpoint"]
     )
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            "update social.instagram_ingestion_targets set checkpoint=checkpoint || %s::jsonb where run_id=%s",
+            ('{"control_marker":true}', args["run_id"]),
+        )
+    with pytest.raises(comments_module.Conflict, match="advanced concurrently"):
+        activity._persist_page(
+            owned, post_id=args["post_id"], evidence=retained, evidence_id=evidence_id,
+            page=parse_comment_evidence(retained, pinned=True),
+            expected_checkpoint=saved["target_checkpoint"], expected_checkpoint_hash=committed_hash,
+            checkpoint=checkpoint, metadata_writes_enabled=True, assignment=None,
+        )
 
 
 def native_count_page(counts, *, thread=None):

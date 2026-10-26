@@ -3,6 +3,8 @@
 import asyncio
 import hashlib
 import threading
+import time
+from contextvars import ContextVar
 from dataclasses import FrozenInstanceError, replace
 
 import pytest
@@ -47,7 +49,8 @@ def test_descriptor_freezes_snapshots_and_validates_bounds():
             descriptor("a", page_size=size)
 
 
-def test_completion_order_owner_advancement_and_outstanding_bound():
+@pytest.mark.parametrize("offload_owner", [False, True])
+def test_completion_order_owner_advancement_and_outstanding_bound(offload_owner):
     async def scenario():
         started = {key: asyncio.Event() for key in "abcde"}
         release = {key: asyncio.Event() for key in "abcde"}
@@ -75,7 +78,13 @@ def test_completion_order_owner_advancement_and_outstanding_bound():
             return response
 
         runner = asyncio.create_task(
-            run_reply_lanes({key: lane(key) for key in "abcde"}, request=request, pace=no_pace, concurrency=2)
+            run_reply_lanes(
+                {key: lane(key) for key in "abcde"},
+                request=request,
+                pace=no_pace,
+                concurrency=2,
+                offload_owner=offload_owner,
+            )
         )
         await started["a"].wait()
         await started["b"].wait()
@@ -97,7 +106,8 @@ def test_completion_order_owner_advancement_and_outstanding_bound():
     asyncio.run(scenario())
 
 
-def test_same_lane_next_request_waits_for_its_response_and_default_is_serial():
+@pytest.mark.parametrize("offload_owner", [False, True])
+def test_same_lane_next_request_waits_for_its_response_and_default_is_serial(offload_owner):
     async def scenario():
         trace = []
 
@@ -112,7 +122,9 @@ def test_same_lane_next_request_waits_for_its_response_and_default_is_serial():
             trace.append(("request", item.parent_id, item.cursor))
             return Response(item.parent_id)
 
-        await run_reply_lanes({key: lane(key) for key in "ab"}, request=request, pace=no_pace)
+        await run_reply_lanes(
+            {key: lane(key) for key in "ab"}, request=request, pace=no_pace, offload_owner=offload_owner
+        )
         assert len(trace) == 8
         assert all(trace[i][0] == "request" and trace[i + 1][0] == "commit" for i in range(0, 8, 2))
         assert [key for kind, key, _ in trace if kind == "request"] == ["a", "a", "b", "b"]
@@ -199,7 +211,8 @@ def test_transport_error_is_thrown_to_serial_owner():
     asyncio.run(scenario())
 
 
-def test_commit_failure_closes_both_consumed_and_waiting_completed_responses():
+@pytest.mark.parametrize("offload_owner", [False, True])
+def test_commit_failure_closes_both_consumed_and_waiting_completed_responses(offload_owner):
     async def scenario():
         responses = []
         branches_closed = set()
@@ -217,7 +230,13 @@ def test_commit_failure_closes_both_consumed_and_waiting_completed_responses():
             return response
 
         with pytest.raises(ValueError, match="commit failure"):
-            await run_reply_lanes({key: lane(key) for key in "ab"}, request=request, pace=no_pace, concurrency=2)
+            await run_reply_lanes(
+                {key: lane(key) for key in "ab"},
+                request=request,
+                pace=no_pace,
+                concurrency=2,
+                offload_owner=offload_owner,
+            )
         assert len(responses) == 2 and all(response.closed == 1 for response in responses)
         assert branches_closed == {"a", "b"}
 
@@ -314,7 +333,8 @@ def test_cancellation_awaits_transport_and_delay_tasks():
     asyncio.run(scenario())
 
 
-def test_stop_drains_received_evidence_without_dispatching_continuations():
+@pytest.mark.parametrize("offload_owner", [False, True])
+def test_stop_drains_received_evidence_without_dispatching_continuations(offload_owner):
     async def scenario():
         stopped = False
         commits = []
@@ -342,6 +362,7 @@ def test_stop_drains_received_evidence_without_dispatching_continuations():
             concurrency=2,
             stop=lambda: stopped,
             drain_received_on_stop=True,
+            offload_owner=offload_owner,
         )
         assert result == {} and initialized == ["a", "b"]
         assert commits == ["a", "b"] and len(responses) == 2
@@ -425,3 +446,165 @@ def test_spool_handles_short_disk_writes_without_truncation():
 def test_invalid_concurrency_is_rejected(concurrency):
     with pytest.raises(ValueError):
         asyncio.run(run_reply_lanes({}, request=no_pace, pace=no_pace, concurrency=concurrency))
+
+
+@pytest.mark.parametrize("offload_owner", [False, True])
+def test_owner_keeps_one_thread_and_context_across_yields_and_close(offload_owner):
+    from trr_backend.ingestion.reply_context import execution_deadline, request_permit
+    from trr_backend.socials.instagram.comments_scrapling.reply_http import response_observed_at
+
+    async def scenario():
+        loop_thread = threading.get_ident()
+        owner_threads = []
+        across_yield = ContextVar("reply_owner_across_yield", default="outside")
+        deadline, permit, observed = time.monotonic() + 60, object(), object()
+        tokens = [execution_deadline.set(deadline), request_permit.set(permit), response_observed_at.set(observed)]
+        trace = []
+
+        def lane():
+            owner_threads.append(threading.get_ident())
+            assert (execution_deadline.get(), request_permit.get(), response_observed_at.get()) == (
+                deadline,
+                permit,
+                observed,
+            )
+            token = across_yield.set("owner")
+            try:
+                yield descriptor("a")
+                owner_threads.append(threading.get_ident())
+                assert across_yield.get() == "owner"
+                trace.append("commit")
+                yield Delay(60)
+            finally:
+                owner_threads.append(threading.get_ident())
+                assert across_yield.get() == "owner"
+                across_yield.reset(token)
+                trace.append("closed")
+
+        def before(_item):
+            assert threading.get_ident() == loop_thread
+            assert across_yield.get() == ("outside" if offload_owner else "owner")
+
+        async def request(_item):
+            assert threading.get_ident() == loop_thread
+            return Response("a")
+
+        try:
+            await run_reply_lanes(
+                {"a": lane()},
+                request=request,
+                pace=no_pace,
+                before_dispatch=before,
+                stop=lambda: "commit" in trace,
+                offload_owner=offload_owner,
+            )
+            assert trace == ["commit", "closed"]
+            assert len(set(owner_threads)) == 1
+            assert (owner_threads[0] != loop_thread) == offload_owner
+            assert across_yield.get() == "outside"
+        finally:
+            for variable, token in zip((execution_deadline, request_permit, response_observed_at), tokens, strict=True):
+                variable.reset(token)
+
+    asyncio.run(scenario())
+
+
+def test_offloaded_owner_cancellation_joins_commit_before_all_cleanup_and_never_dispatches_next_cursor():
+    async def scenario():
+        committing, release, committed = threading.Event(), threading.Event(), threading.Event()
+        closed, responses, threads = [], [], []
+        owner_states = {key: ContextVar(f"reply_cancel_owner_{key}", default=None) for key in "ab"}
+
+        def lane(key):
+            owner_state = owner_states[key]
+            token = owner_state.set(key)
+            try:
+                yield descriptor(key)
+                threads.append(threading.get_ident())
+                committing.set()
+                assert release.wait(2)
+                committed.set()
+                yield descriptor(key, cursor="must-not-dispatch")
+            finally:
+                assert owner_state.get() == key
+                owner_state.reset(token)
+                threads.append(threading.get_ident())
+                closed.append(key)
+
+        class CommittedResponse(Response):
+            def close(self):
+                assert committed.is_set()
+                super().close()
+
+        async def request(item):
+            assert item.cursor is None
+            response = CommittedResponse(item.parent_id)
+            responses.append(response)
+            return response
+
+        runner = asyncio.create_task(
+            run_reply_lanes(
+                {key: lane(key) for key in "ab"}, request=request, pace=no_pace, concurrency=2, offload_owner=True
+            )
+        )
+        try:
+            async with asyncio.timeout(2):
+                while not committing.is_set():
+                    await asyncio.sleep(0)
+            runner.cancel()
+            await asyncio.sleep(0.005)
+            runner.cancel()
+            await asyncio.sleep(0.005)
+            assert not runner.done() and not closed and all(response.closed == 0 for response in responses)
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await runner
+        assert committed.is_set() and set(closed) == {"a", "b"}
+        assert len(set(threads)) == 1
+        assert all(response.closed == 1 for response in responses)
+        assert not [thread for thread in threading.enumerate() if thread.name.startswith("instagram-reply-owner")]
+
+    asyncio.run(scenario())
+
+
+def test_offloaded_owner_offline_timing_allows_network_progress_during_fifty_millisecond_commit():
+    async def sample(offload_owner):
+        started = time.monotonic()
+        events, commits = {}, []
+        metrics = SchedulerTelemetry()
+
+        def lane(key):
+            response = yield descriptor(key)
+            time.sleep(0.05)
+            events[f"commit-{key}"] = time.monotonic() - started
+            commits.append(response.parent)
+            return key
+
+        async def request(item):
+            await asyncio.sleep(0.005 if item.parent_id == "a" else 0.025)
+            events[f"network-{item.parent_id}"] = time.monotonic() - started
+            return Response(item.parent_id)
+
+        result = await run_reply_lanes(
+            {key: lane(key) for key in "ab"},
+            request=request,
+            pace=no_pace,
+            concurrency=2,
+            telemetry=metrics,
+            offload_owner=offload_owner,
+        )
+        assert metrics.max_outstanding == 2
+        return result, commits, {**events, "elapsed": time.monotonic() - started}
+
+    before = asyncio.run(sample(False))
+    after = asyncio.run(sample(True))
+    assert before[:2] == after[:2] == ({"a": "a", "b": "b"}, ["a", "b"])
+    assert before[2]["network-b"] > before[2]["commit-a"]
+    assert after[2]["network-b"] < after[2]["commit-a"]
+    print(
+        {
+            label: {key: round(value * 1000, 2) for key, value in sample[2].items()}
+            for label, sample in (("inline_ms", before), ("offloaded_ms", after))
+        }
+    )

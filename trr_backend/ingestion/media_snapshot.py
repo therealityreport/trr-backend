@@ -131,6 +131,18 @@ def _source_key(row: Mapping[str, Any], retained: Mapping[str, str]) -> str:
     return legacy_comment_source_key(row_id, _urls(row.get("media_urls")))
 
 
+def _attachment_comment_index(comments: list[dict]) -> dict[str, dict]:
+    rows = {}
+    identities = set()
+    for row in comments:
+        row_id, comment_id = str(row["id"]), str(row["comment_id"])
+        if row_id in rows or comment_id in identities:
+            raise MediaIncomplete("duplicate_comment_identity")
+        rows[row_id] = row
+        identities.add(comment_id)
+    return rows
+
+
 class MediaSnapshotLoader:
     def __init__(
         self,
@@ -216,9 +228,10 @@ class MediaSnapshotLoader:
                 raise MediaIncomplete("duplicate_attachment_refresh")
             from trr_backend.ingestion.comment_attachment_refresh import attachment_baseline, validate_attachment_order
 
+            comment_rows = _attachment_comment_index(comments) if attachment_refreshes else {}
             for proof in attachment_refreshes:
                 proof.validate()
-                row = next((row for row in comments if str(row["id"]) == proof.row_id), None)
+                row = comment_rows.get(proof.row_id)
                 if row is None or proof.post_id != str(post["id"]) or proof.shortcode != target_key:
                     raise MediaIncomplete("attachment_refresh_identity_mismatch")
                 validate_attachment_order(row, proof.captured_at)
@@ -349,6 +362,8 @@ class MediaSnapshotLoader:
 
     @staticmethod
     def _retained_keys(cur, account: str, target_key: str, comments: list[dict]) -> dict[str, str]:
+        if not comments:
+            return {}
         cur.execute(
             """select e.*,r.state<>'completed' as pinned from social.instagram_ingestion_evidence e
             join social.instagram_ingestion_runs r using(run_id) where r.account=%s and e.stage='media'

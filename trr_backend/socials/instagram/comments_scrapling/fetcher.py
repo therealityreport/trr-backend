@@ -7729,6 +7729,7 @@ class InstagramCommentsScraplingFetcher:
                     drain_received_on_stop=True,
                     drain_received_after_error=source_stop,
                     inspect_received=inspect_received,
+                    offload_owner=self._public_only and strict_native_exhaustion,
                 )
         except ReplyDeadlineExceeded:
             halted = True

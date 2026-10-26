@@ -1265,3 +1265,23 @@ def test_signed_exact_version_newer_incomplete_proof_does_not_fall_back_to_other
     with pytest.raises(MediaIncomplete, match="avatar_source_newer"):
         load(snapshot_database, owned)
     assert_no_snapshot_source_requests(snapshot_database, owned)
+
+
+def test_retained_keys_empty_comments_avoids_all_evidence_reads():
+    class NoReads:
+        def execute(self, *args):
+            pytest.fail("Empty media-comment inventory must not scan historical evidence")
+
+    assert MediaSnapshotLoader._retained_keys(NoReads(), "account", "shortcode", []) == {}
+
+
+def test_attachment_comment_index_preserves_exact_rows_and_rejects_duplicates():
+    from trr_backend.ingestion.media_snapshot import _attachment_comment_index
+
+    rows = [{"id": str(uuid4()), "comment_id": str(n), "raw_data": {"unchanged": n}} for n in range(100)]
+    indexed = _attachment_comment_index(rows)
+    assert len(indexed) == 100 and all(indexed[row["id"]] is row for row in rows)
+    with pytest.raises(MediaIncomplete, match="duplicate_comment_identity"):
+        _attachment_comment_index([*rows, dict(rows[0])])
+    with pytest.raises(MediaIncomplete, match="duplicate_comment_identity"):
+        _attachment_comment_index([*rows, {**rows[0], "id": str(uuid4())}])
