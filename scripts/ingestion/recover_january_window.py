@@ -421,7 +421,16 @@ def progress(window):
         }
 
 
+def public_base_urls(public_bases):
+    """Accept verified storage-binding entries and older URL-only bindings."""
+    urls = tuple(value.get("url") if isinstance(value, dict) else value for value in public_bases)
+    if any(not isinstance(value, str) or not value for value in urls):
+        raise ValueError("Configured public storage base has no URL")
+    return urls
+
+
 def media_slots(snapshot, public_bases):
+    public_bases = public_base_urls(public_bases)
     slots = {}
 
     def visit(value, prefix):
@@ -452,6 +461,7 @@ def verify_new_media(before, after, public_bases):
 
     from scripts.ingestion.january_audit.hosted import object_key
 
+    public_bases = public_base_urls(public_bases)
     old, current = media_slots(before, public_bases), media_slots(after, public_bases)
     new_slots = {key: url for key, url in current.items() if old.get(key) != url}
     previous_urls = set(old.values())

@@ -2195,3 +2195,135 @@ No API/app contract or SQL schema changed. TRR-APP build is not applicable.
 The remaining dominant constraints are required unknown-reply probes, shared
 source pacing, network latency and complete page persistence; there is no
 five-minute or dollar-cost claim.
+
+### Explicit one-hour January recovery — October 26
+
+The user authorized diagnosis followed by one hour of public January recovery,
+with runnable missing comments/replies first and media when comment work is
+blocked or exhausted. Source commits `a4200b88`, `9532b32d` and `d39036e0` add the
+journaled bounded-window command, exact worker/window/generation/source fences,
+comments-first selection, 60-second private audit supervision, input-bound
+deferral and lost-acknowledgment reconciliation, and the maintained
+`scripts/ingestion/recover_january_window.py` operator. No public API or schema
+changed. Forty-four focused checks passed across the exact authorization,
+admission/expiry, subprocess interruption, partition/replay, reporting and
+shutdown cases; unchanged passing evidence was reused. Independent review's
+four operator/audit/partition findings were repaired and targeted re-reviews
+closed them. The actual preauthorization handovers exposed asynchronous
+launchctl unregistration and an overly broad historical-cancelled capacity
+predicate. Both were repaired with focused regressions; no window was granted
+and no January source request was made by either failed preparation. Historical
+cancelled runs were preserved, and the ordinary native service was restored.
+
+Final source `d39036e05067` is packaged as `ig-window-d39036e05067` and deployed
+as Modal v169 to verified `admin-56995 / main / trr-backend-jobs`. Guarded
+readiness and API cold-start health passed (HTTP 200). The changed deployed
+persistence-module hash matched; six unchanged module hashes reuse the earlier
+v167 loaded-source proof. Intermediate v167/v168 receipts remain in the private
+evidence directory. TRR-APP build is not applicable to this internal worker and
+operator change; SQL schema/ownership is unchanged.
+
+The accepted generation-3 window runs from **5:16:09 p.m. to 6:16:09 p.m. New York**
+(21:16:09–22:16:09 UTC). Worker 45515 acquired its actual unique coordinator
+grant on backend 515504 at 21:16:11 UTC. Policy revision 8 binds six comment
+workers to this generation; two reply slots, four recovery roots, 250 ms shared
+spacing, saved query/cursor bindings, technical holds and the two-unchanged-pass
+stop remain unchanged. The baseline retains 133,102 canonical comment rows
+(including 3,321 rows marked missing), 148,656 comment pages, 1,103 targets, 156,612
+accounted requests and 1,033 immutable receipts. The first four selected targets
+completed their individual retained audits and queued source recovery; no
+cohort-wide audit barrier or full certifier was started.
+
+Private evidence is `~/.codex/tmp/ig-recovery-window-01a1798c/`; the accepted
+window and its before/after accounting are under `run-3/`. The final outcome,
+durable rehold, native restoration and rollback retention are recorded below
+after the bounded process drains. A running worker and saved lifecycle passes
+do not establish January completeness.
+
+Baseline diagnosis separates source coverage from stored inventory. The 269
+current-scan count deficits total 25,382, but the same posts' nonmissing canonical
+ID counts have a positive per-post shortfall totaling 4,651 across 238 posts;
+31 already have at least their recorded expected number of active IDs. For
+example, DTaOwK0lZCk has 2,063 nonmissing saved IDs against 2,113 expected, while its
+current scan observed only 90. None of these raw count comparisons certifies
+native membership, parentage or current accessibility. The private
+`baseline-gap-diagnosis.json` preserves all per-post comparisons. At the first
+bounded fresh-page/identity comparison (21:24:47 UTC), no new canonical native
+ID had yet been recovered; new page receipts were re-observations.
+
+The window finished at its database deadline, with 3,600.006 seconds of work.
+Worker 45515 exited zero and was reaped without signal errors. The exact active
+generation was cancelled and held as generation 4. The stop/hold fingerprint
+comparison preserved all 1,103 targets, 162,036 accounted requests and 1,105
+immutable receipts. Ordinary worker 68665 then acquired the unique coordinator
+grant on backend 520670 from the same qualified d390 package; a subsequent live
+check confirmed that process/grant, zero January owners, the durable hold and
+explicit removal of the bounded generation/window settings. No extension or
+new recovery authorization was issued.
+
+Final persisted progress is **226 new native canonical IDs: 17 top-level
+comments and 209 replies**, all attributed to fresh source pages. DTnNosUDuqf
+gained 11 comments and 62 replies (73 total); DTnbjYyk4vl gained 6 comments and
+147 replies (153 total). There were no retained-replay additions, unattributed
+new IDs or previously missing IDs restored. Canonical rows rose from 133,102
+to 133,328; rows not marked missing rose from 129,781 to 130,007. The window
+accounted for 5,424 additional source requests, 4,613 additional retained
+comment pages and 72 immutable receipts. A fresh-page identity check matched
+6,088 distinct IDs to canonical storage; 5,862 of those were already present.
+
+No pre-existing canonical IDs, parent links, page/evidence pairs or immutable
+receipts disappeared or changed identity. No pre-existing comment was newly
+marked missing. The 37 pre-existing external-parent/UUID-parent mismatches
+remain unchanged. All 4,940 bound hosted media/avatar slots and the post asset
+URL identities remained unchanged: **zero new hosted slots and zero new hosted
+objects** were recovered, so no new full-object read was required. Source
+attachment fingerprints changed on 159 pre-existing comments. A scoped
+reconciliation reconstructed all 159 exact baseline hashes from 98 immutable
+pre-window pages (1.43 MB), checked evidence hashes and canonical UUID bindings,
+and matched all current hashes to the after snapshot. Each retained the same
+single GIF, CDN path, native GIPHY ID and selected fixed-height variant; only URL
+query values changed. No attachment-identity change or byte-equality claim is
+made from those query refreshes. Media saved-pass status changed from 49 to 35 because comment
+recovery invalidates media admission; this status change does not assert lost
+objects or certify media completeness.
+
+Against the same frozen expected totals for the original 269-post gap cohort,
+the nonmissing canonical count shortfall fell from 4,651 to **4,425** across
+238 posts. This reduction is exactly the 226 newly saved IDs, with no recorded
+expected-total change. Current present-settlement scan gaps fell from 25,382
+to 24,941, but four reopened settlements are absent and previously accounted
+for 18 gaps. Do not call the apparent 441 reduction new data: the comparable
+265-post scan gap improved by 423 through new observations, while carrying the
+four old gaps forward gives 24,959 with those scans still unknown. The giant
+post's unknown total remains separate.
+
+Five comment targets remain unresolved. DTgXh94kXyo's complete business
+fingerprint is unchanged at 166/166 attempts and 15,780 requests; its six saved
+branch failures, including four technical holds, were preserved. DTojfyxDeaq
+ended at 13/13 attempts with one additional saved source-incomplete branch.
+DTMawI1kndu, DTyKHNkDIaJ and DUGwWejDVB2 stopped on their bounded attempt
+deadlines with saved progress. There are seven saved branch failures across
+the two affected posts, four on technical hold. Full January acceptance
+remains false; count parity does not prove full native membership or current
+public accessibility.
+
+After cleanup succeeded, the original operator's media-report step rejected
+the structured storage-binding entries because it expected URL strings. The
+maintained reporter now normalizes both supported binding forms; both focused
+media-report cases passed (one new distinct regression, bringing the task's
+focused total to 45). The final report was generated from the frozen snapshots
+and a read-only receipt query, without reopening recovery. This reporting-only
+source repair does not change the deployed/native d390 worker. The original
+operator error and all cleanup receipts remain preserved.
+
+Authoritative final artifacts are `run-3/recovery-report.json`,
+`gap-comparison.json`, `preservation-comparison.json`,
+`hosted-media-identity-comparison.json`, `final-live-verification.json` and
+`remaining-failures.json` under the private evidence directory.
+`media-fingerprint-reconciliation.json` records the scoped GIF URL comparison;
+`current-execution-provenance.json` distinguishes the current activation/restore
+receipts from historical creation/install pointers in the inherited binding. The current
+d390 package and preceding verified 953 rollback remain runnable. Three
+superseded packages with no process/open-file/native references were moved to
+actual Trash; `release-retirement.json` records their paths. No branch was
+changed, no PR or push was made, and unrelated dirty work was preserved.

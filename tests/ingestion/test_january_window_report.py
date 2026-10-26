@@ -2,6 +2,8 @@
 
 from io import BytesIO
 
+import pytest
+
 from scripts.ingestion import recover_january_window as operator
 
 
@@ -102,7 +104,8 @@ def test_report_deduplicates_baseline_and_separates_receipt_provenance(monkeypat
     assert result["final_acceptance"] is False
 
 
-def test_media_counts_logical_slots_separately_from_full_object_reads(monkeypatch):
+@pytest.mark.parametrize("structured_binding", [False, True])
+def test_media_counts_logical_slots_separately_from_full_object_reads(monkeypatch, structured_binding):
     base = "https://storage.example"
     before, after = snapshot([]), snapshot([])
     after["comments"] = [
@@ -113,7 +116,8 @@ def test_media_counts_logical_slots_separately_from_full_object_reads(monkeypatc
     response.url = base + "/object"
     response.headers = {"Content-Length": "15"}
     monkeypatch.setattr("urllib.request.urlopen", lambda *_a, **_k: response)
-    result = operator.verify_new_media(before, after, [base])
+    binding = [{"url": base, "verified": True}] if structured_binding else [base]
+    result = operator.verify_new_media(before, after, binding)
     assert result["new_or_changed_logical_slots"] == 2
     assert result["new_distinct_hosted_urls"] == 1
     assert len(result["full_objects_read"]) == 1 and result["full_objects_read"][0]["bytes"] == 15
