@@ -51,6 +51,12 @@ def persisted(database, run_id):
         return cur.fetchone()[0]
 
 
+def test_capabilities_do_not_advertise_held_bravo_resume_tail(database):
+    subject = service(database)
+    assert "resume_tail" not in subject.capabilities("bravotv").supported_actions
+    assert "resume_tail" in subject.capabilities("other_public_account").supported_actions
+
+
 @pytest.mark.parametrize(
     "payload,scope,start,end,tasks",
     [

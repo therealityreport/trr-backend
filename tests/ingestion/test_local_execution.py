@@ -442,7 +442,11 @@ def test_lease_pooled_session_cleanup_is_exact_restored_and_bounded(failure):
             commands.append((query, args))
             if "5000ms" in query and failure == "setup":
                 raise RuntimeError("unsupported setting")
-            if "from pg_locks" in query and failure == "grant_query":
+            if (
+                "from pg_locks" in query
+                and failure == "grant_query"
+                and any("pg_try_advisory_lock" in q for q, _ in commands)
+            ):
                 raise OSError("uncertain grant query")
             if "pg_advisory_unlock" in query:
                 if failure == "unlock":
@@ -458,7 +462,7 @@ def test_lease_pooled_session_cleanup_is_exact_restored_and_bounded(failure):
             if "current_setting" in self.query:
                 return ("17s",)
             if "from pg_locks" in self.query:
-                return (failure == "remaining_grant",)
+                return (failure == "remaining_grant" and any("pg_try_advisory_lock" in q for q, _ in commands),)
             return ("wrong" if failure == "role" else "local_runtime", False, True, False, False)
 
     class Connection:
@@ -556,11 +560,17 @@ def test_lease_release_restores_surviving_pooled_session(database, register_isol
                 if stacked:
                     cur.execute("select pg_try_advisory_lock(%s,%s)", (config.lock_namespace, config.lock_key))
                     assert cur.fetchone() == (True,)
-            with CoordinatorLease(PooledFrontend, config, abort) as lease:
-                pass
+            lease = CoordinatorLease(PooledFrontend, config, abort)
+            if stacked:
+                with pytest.raises(Conflict, match="already holds an unqualified lease"):
+                    with lease:
+                        pytest.fail("Preexisting lease must never serve")
+            else:
+                with lease:
+                    pass
             with connection.cursor() as cur:
                 cur.execute("show idle_session_timeout")
-                assert cur.fetchone() == ("5s" if stacked else "17s",)
+                assert cur.fetchone() == ("17s",)
                 cur.execute(
                     """select exists(select 1 from pg_locks where locktype='advisory' and granted
                     and pid=pg_backend_pid() and classid=%s::oid and objid=%s::oid and objsubid=2
@@ -568,8 +578,8 @@ def test_lease_release_restores_surviving_pooled_session(database, register_isol
                     (config.lock_namespace, config.lock_key),
                 )
                 assert cur.fetchone() == (stacked,)
-            assert abort.is_set() is stacked
-            assert lease.acquired is stacked
+            assert not abort.is_set()
+            assert not lease.acquired
             if not stacked:
                 # Another independently connected consumer can immediately acquire.
                 with CoordinatorLease(lambda: psycopg2.connect(dsn, user="local_runtime"), config, threading.Event()):

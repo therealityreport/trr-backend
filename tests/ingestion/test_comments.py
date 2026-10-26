@@ -755,7 +755,6 @@ def settlement_state():
     "expected,observed,basis,gap",
     [
         (1, 1, "count_parity", 0),
-        (0, 1, "count_parity", 0),
         (3, 1, "public_native_exhaustion", 2),
         (3, 0, "public_native_exhaustion", 3),
     ],
@@ -777,6 +776,11 @@ def test_settlement_requires_known_nonnegative_integer_count(expected):
     state = settlement_state()
     state["expected"] = expected
     assert _settlement(state, CommentFetchSummary(full_observation=True)) is None
+
+
+def test_overshoot_is_not_count_parity():
+    state = settlement_state()
+    assert _settlement(state, CommentFetchSummary(expected_count=0, full_observation=True)) is None
 
 
 @pytest.mark.parametrize(

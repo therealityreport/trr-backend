@@ -99,7 +99,7 @@ class OneTurn:
 
 
 def lease(abort):
-    item = CoordinatorLease(None, None, abort, clock=lambda: 10.0)
+    item = CoordinatorLease(None, SimpleNamespace(lock_namespace=11, lock_key=22), abort, clock=lambda: 10.0)
     item.stop = OneTurn()
     item.last_heartbeat = 7.9
     item.select_started = 8.2
@@ -135,13 +135,53 @@ def test_monitor_records_safe_database_failure():
 
     @contextmanager
     def cursor():
-        yield SimpleNamespace(execute=lambda _: (_ for _ in ()).throw(error))
+        yield SimpleNamespace(execute=lambda *args: (_ for _ in ()).throw(error))
 
     item.connection = SimpleNamespace(cursor=cursor)
     item._monitor()
     assert abort.is_set()
     assert abort.diagnostic["origin"] == "lease_heartbeat_exception"
     assert abort.context()["sqlstate"] == "57P05"
+
+
+@pytest.mark.parametrize("identity", [(987, False), (988, True), None, (987,)])
+def test_monitor_rejects_lost_or_changed_lease(identity):
+    abort = DiagnosticAbort()
+    item = lease(abort)
+
+    @contextmanager
+    def cursor():
+        yield SimpleNamespace(execute=lambda *args: None, fetchone=lambda: identity)
+
+    item.connection = SimpleNamespace(cursor=cursor)
+    item._monitor()
+    assert abort.is_set()
+    assert abort.diagnostic["origin"] == "lease_heartbeat_exception"
+    assert item.heartbeat_sample.completion_sequence == 6
+
+
+def test_preexisting_pooled_grant_never_stacks_or_serves():
+    commands = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def execute(self, query, args):
+            commands.append(query)
+
+        def fetchone(self):
+            return (True,)
+
+    connection = SimpleNamespace(cursor=Cursor, close=lambda: None)
+    with pytest.raises(Exception, match="already holds an unqualified lease"):
+        with CoordinatorLease(lambda: connection, SimpleNamespace(lock_namespace=11, lock_key=22), DiagnosticAbort()):
+            pytest.fail("Unqualified owner served work")
+    assert len(commands) == 1
+    assert "pg_try_advisory_lock" not in commands[0]
 
 
 def test_lease_metadata_failure_does_not_prevent_abort(monkeypatch):
@@ -305,7 +345,7 @@ def test_backend_pid_is_actual_acquisition_sql_result_with_same_lock_namespace()
         assert abort.context()["lease_backend_pid"] == 321
     acquisition = [(query, args) for query, args in commands if "pg_try_advisory_lock" in query]
     assert len(acquisition) == 1 and acquisition[0][1] == (11, 22)
-    assert sum("pg_backend_pid()" in query for query, _ in commands) == 2  # acquisition and existing cleanup proof
+    assert sum("pg_backend_pid()" in query for query, _ in commands) >= 3  # preflight, acquisition, release
 
 
 def test_delayed_watchdog_and_late_report_cannot_mix_select_generations():
@@ -314,6 +354,7 @@ def test_delayed_watchdog_and_late_report_cannot_mix_select_generations():
     clock = [10.0]
     item = CoordinatorLease(None, None, abort, clock=lambda: clock[0])
     item.backend_pid = 987
+    item.config = SimpleNamespace(lock_namespace=11, lock_key=22)
     item.heartbeat_sample = HeartbeatSample(last_completion=10.0, backend_pid=987)
     abort.lease_metadata = item._diagnostic_metadata
     asleep, wake, first_query, first_finish, first_published, second_start, second_query, second_finish = (
@@ -339,8 +380,8 @@ def test_delayed_watchdog_and_late_report_cannot_mix_select_generations():
 
     @contextmanager
     def cursor():
-        def execute(sql):
-            assert sql == "select 1"
+        def execute(sql, args):
+            assert "pg_backend_pid()" in sql and args == (11, 22)
             calls["sql"] += 1
             if calls["sql"] == 1:
                 first_query.set()
@@ -349,7 +390,7 @@ def test_delayed_watchdog_and_late_report_cannot_mix_select_generations():
                 second_query.set()
                 assert second_finish.wait(3)
 
-        yield SimpleNamespace(execute=execute)
+        yield SimpleNamespace(execute=execute, fetchone=lambda: (987, True))
 
     item.stop = Stop()
     item.connection = SimpleNamespace(cursor=cursor)

@@ -161,11 +161,13 @@ def enqueue_next_recovery(store, *, run_id, account, generation, intent_hash, so
         rows = cur.fetchall()
         from trr_backend.ingestion.retained_comment_recovery import (
             audit_and_replay_retained,
+            canonical_inventory_fingerprints,
             parser_implementation_fingerprint,
             retained_audit_summary_key,
         )
 
         parser_hash = parser_implementation_fingerprint()
+        canonical_hashes = canonical_inventory_fingerprints(cur, [row["target_key"] for row in rows])
         for row in rows:
             row["checkpoint_hash"] = fingerprint(row["checkpoint"])
             row["summary_key"] = retained_audit_summary_key(
@@ -175,6 +177,7 @@ def enqueue_next_recovery(store, *, run_id, account, generation, intent_hash, so
                 target_key=row["target_key"],
                 checkpoint_hash=row["checkpoint_hash"],
                 parser_hash=parser_hash,
+                canonical_hash=canonical_hashes.get(row["target_key"]),
             )
         # One combined lookup, rather than one roundtrip per settled target.
         cur.execute(
@@ -436,6 +439,9 @@ def target_status(checkpoint: dict, outcome: str) -> dict:
         reasons.append("cursor_stalled")
     if settlement.get("count_gap", 0):
         reasons.append("count_gap")
+    expected = settlement.get("expected_total", state.get("expected"))
+    if type(expected) is int and expected >= 0 and len(observed) > expected:
+        reasons.append("count_overshoot")
     if outcome == "unresolved":
         reasons.append("pending_traversal")
     return {

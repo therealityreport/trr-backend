@@ -57,6 +57,8 @@ class Queries:
         result = dict(row)
         result.pop("execution_selection", None)
         execution_hold = result.pop("execution_hold_reason", None)
+        if execution_hold:
+            result["execution_hold_reason"] = execution_hold
         result["run_id"] = str(result["run_id"])
         stages = result.pop("stages") or []
         counts = {}
@@ -144,11 +146,12 @@ class Queries:
         with self.read_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """select r.run_id,r.account,
-                (select coalesce(jsonb_agg(t order by t.stage,t.target_key),'[]'::jsonb) from (
+                (select coalesce(jsonb_agg(t order by (t.outcome='unresolved') desc,t.stage,t.target_key),
+                  '[]'::jsonb) from (
                   select stage,target_key,outcome,attempts,requests,max_attempts,
                     next_attempt_at as retry_at,blocked_reason,checkpoint->>'last_error_code' as last_error_code
                   from social.instagram_ingestion_targets where run_id=r.run_id
-                  order by stage,target_key limit %s
+                  order by (outcome='unresolved') desc,stage,target_key limit %s
                 ) t) as targets,
                 (select coalesce(jsonb_agg(e order by e.captured_at desc,e.evidence_id),'[]'::jsonb) from (
                   select evidence_id,stage,target_key,source_identity,captured_at,content_hash,

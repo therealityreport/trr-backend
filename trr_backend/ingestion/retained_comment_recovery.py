@@ -33,6 +33,32 @@ _CANONICAL = """select c.id,c.comment_id,c.parent_comment_external_id,c.parent_c
     c.scraped_at,c.last_seen_at
     from social.instagram_comments c left join social.instagram_comments p on p.id=c.parent_comment_id
     where c.post_id=%s"""
+
+
+def canonical_inventory_fingerprint(cur, post_id):
+    """Compact full-row binding for audit reuse; includes tombstones and multiplicity."""
+    cur.execute(
+        """select encode(sha256(convert_to(coalesce(string_agg(
+        encode(sha256(convert_to(to_jsonb(c)::text,'UTF8')),'hex'),'' order by c.comment_id,c.id),''),
+        'UTF8')),'hex') as sha256 from social.instagram_comments c where c.post_id=%s""",
+        (post_id,),
+    )
+    return cur.fetchone()["sha256"]
+
+
+def canonical_inventory_fingerprints(cur, shortcodes):
+    """One database roundtrip for the bounded run cohort, including empty posts."""
+    cur.execute(
+        """select p.shortcode,encode(sha256(convert_to(coalesce(string_agg(
+        encode(sha256(convert_to(to_jsonb(c)::text,'UTF8')),'hex'),'' order by c.comment_id,c.id)
+        filter(where c.id is not null),''),'UTF8')),'hex') as sha256
+        from social.instagram_posts p left join social.instagram_comments c on c.post_id=p.id
+        where p.shortcode=any(%s::text[]) group by p.shortcode""",
+        (list(shortcodes),),
+    )
+    return {row["shortcode"]: row["sha256"] for row in cur.fetchall()}
+
+
 _STREAM = """select p.page_id,p.committed_at,p.observed_at,p.content_hash as page_hash,
     e.evidence_id,e.run_id,e.stage,e.target_key,e.source_identity,e.captured_at,
     e.content_hash,e.parser_version,e.schema_version,e.payload
@@ -164,7 +190,9 @@ def parser_implementation_fingerprint():
     return fingerprint({"parser": _parser_identity(), "audit": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()})
 
 
-def retained_audit_summary_key(*, run_id, account, generation, target_key, checkpoint_hash, parser_hash):
+def retained_audit_summary_key(
+    *, run_id, account, generation, target_key, checkpoint_hash, parser_hash, canonical_hash=None
+):
     return "retained-comment-summary-v1:" + fingerprint(
         {
             "run_id": str(run_id),
@@ -173,6 +201,7 @@ def retained_audit_summary_key(*, run_id, account, generation, target_key, check
             "target_key": target_key,
             "checkpoint_hash": checkpoint_hash,
             "parser_implementation_sha256": parser_hash,
+            "canonical_inventory_sha256": canonical_hash,
         }
     )
 
@@ -201,6 +230,7 @@ def _write_summary(cur, report, binding):
         "current_checkpoint_coverage_changed",
         "source_requests",
         "final_acceptance",
+        "canonical_inventory_sha256",
     )
     summary = {key: report[key] for key in fields}
     key = retained_audit_summary_key(
@@ -210,6 +240,7 @@ def _write_summary(cur, report, binding):
         target_key=report["target_key"],
         checkpoint_hash=report["checkpoint_hash"],
         parser_hash=report["parser_implementation_sha256"],
+        canonical_hash=report["canonical_inventory_sha256"],
     )
     cur.execute(
         """insert into social.instagram_ingestion_commands
@@ -483,6 +514,7 @@ def audit_and_replay_retained(store, *, run_id, account, generation, target_key,
                 else "matched"
             )
             report["audit_journal_entries"] = len(receipts)
+            report["canonical_inventory_sha256"] = canonical_inventory_fingerprint(cur, post["id"])
             _write_summary(cur, report, binding)
             return report
     except DatabaseError as error:

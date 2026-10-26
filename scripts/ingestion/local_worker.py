@@ -17,6 +17,7 @@ never printed.
 from __future__ import annotations
 
 import json
+import math
 import os
 import signal
 import subprocess
@@ -26,6 +27,7 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import UUID
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -88,6 +90,8 @@ def run_owned_certification(command, log, abort, *, timeout_seconds=3600):
 
 
 ABORT_EXIT_GRACE_SECONDS = 15.0
+LEASE_STARTUP_TIMEOUT_SECONDS = 10.0
+ABORT_REPORTER_JOIN_SECONDS = 0.5
 
 
 class AbortExitGuard:
@@ -121,6 +125,72 @@ class Interrupted(Exception):  # noqa: N818 - control-flow signal, not an error
     """Stop requested mid-partition; leave the partition unacknowledged."""
 
 
+class WorkerLifetimeGuard:
+    """Stop an explicitly bounded worker on expiry or loss of its supervisor."""
+
+    def __init__(self, deadline, request_stop, *, parent_pid=None):
+        self.deadline, self.request_stop, self.parent_pid = deadline, request_stop, parent_pid
+        self.stopped = threading.Event()
+        self.thread = threading.Thread(target=self._watch, daemon=True, name="instagram-local-worker-lifetime")
+
+    def start(self):
+        self.thread.start()
+
+    def _watch(self):
+        while not self.stopped.is_set():
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0 or (self.parent_pid is not None and os.getppid() != self.parent_pid):
+                self.request_stop()
+                return
+            self.stopped.wait(min(0.05, remaining))
+
+    def close(self):
+        self.stopped.set()
+        self.thread.join(timeout=1)
+
+
+class LeaseStartupGuard:
+    """Bound connection and qualification before the lease heartbeat starts.
+
+    Startup remains on the owning foreground thread. The deadline requests an
+    abort; AbortExitGuard bounds process exit if that startup never returns.
+    """
+
+    def __init__(self, abort):
+        self.abort = abort
+        self.finished = threading.Event()
+        self.thread = threading.Thread(target=self._watch, daemon=True, name="instagram-local-lease-startup")
+
+    def _watch(self):
+        if not self.finished.wait(LEASE_STARTUP_TIMEOUT_SECONDS):
+            request_abort(self.abort, "lease_startup_deadline")
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def close(self):
+        self.finished.set()
+        self.thread.join(timeout=1)
+
+    def __exit__(self, *_):
+        self.close()
+
+
+def emit_abort_diagnostic(value):
+    """Avoid Python buffered stdout locks in the best-effort daemon reporter.
+
+    A full output pipe can block this thread, but cannot hold Python's buffered
+    writer lock during interpreter shutdown or delay the independent guards.
+    """
+    remaining = memoryview((json.dumps(value) + "\n").encode())
+    while remaining:
+        written = os.write(1, remaining)
+        if written <= 0:
+            return
+        remaining = remaining[written:]
+
+
 def start_abort_reporter(abort, emit):
     """One daemon emission; a blocked/broken sink cannot delay safety threads."""
 
@@ -130,7 +200,8 @@ def start_abort_reporter(abort, emit):
             diagnostic = getattr(abort, "diagnostic", None)
             if diagnostic is not None:
                 # Emit the primitive cause first, even if later enrichment
-                # encounters a stuck optional accessor. Neither is joined.
+                # encounters a stuck optional accessor. Finalization only joins
+                # for a short bound; safety threads never wait for reporting.
                 base = {"at": datetime.now(UTC).isoformat(), "pid": os.getpid(), **diagnostic}
                 emit({"status": "abort_diagnostic", **base})
                 if isinstance(abort, DiagnosticAbort):
@@ -386,6 +457,7 @@ def run_worker(
     before_finalize=None,
     on_completed=None,
     on_started=None,
+    allowed_run_id=None,
 ):
     """Serve local runs until abort. Returns a JSON-safe summary.
 
@@ -393,9 +465,43 @@ def run_worker(
     """
     if store.execution_placement != "local":
         raise ValueError("The Mac worker requires a local-fenced workflow store")
+    if abort.is_set():
+        requested = stop_requested is not None and stop_requested.is_set()
+        return {"status": "stopped" if requested else "lease_lost", "partitions": 0}
+    if allowed_run_id is not None:
+        allowed_run_id = str(UUID(str(allowed_run_id)))
+
+    def require_allowed_run(item):
+        if allowed_run_id is not None and str(item.get("run_id")) != allowed_run_id:
+            # Both dispatch methods acknowledge only after their callback
+            # returns. Raise before business work to leave this row untouched.
+            raise ValueError("The local worker run fence rejected unrelated work")
+
+    def seed(item):
+        require_allowed_run(item)
+        return store.seed(item)
+
+    def submit_partition(item):
+        require_allowed_run(item)
+        return run_partition(
+            item,
+            store=store,
+            scheduler=scheduler,
+            dispatch=dispatch,
+            abort=abort,
+            effective_comments_limit=effective_comments_limit,
+            before_finalize=before_finalize,
+            on_completed=on_completed,
+        )
+
     partitions = 0
-    with foreground_phase(abort, "run_worker"), lease:
+    with LeaseStartupGuard(abort) as startup, foreground_phase(abort, "run_worker"), lease:
+        startup.close()
         try:
+            # A stalled acquisition can finish after the startup deadline or a
+            # stop signal. Its lease is cleaned up without dispatching work.
+            if abort.is_set():
+                raise Interrupted
             print(
                 json.dumps(
                     {
@@ -412,22 +518,13 @@ def run_worker(
             while not abort.is_set():
                 # New runs: seed partition 0 only; dispatch_partitions runs it.
                 call_in_phase(
-                    abort, "seed", store.dispatch_pending, store.seed, engine="dbos", workflow_version=workflow_version
+                    abort, "seed", store.dispatch_pending, seed, engine="dbos", workflow_version=workflow_version
                 )
                 ran = call_in_phase(
                     abort,
                     "dispatch_partitions",
                     store.dispatch_partitions,
-                    lambda item: run_partition(
-                        item,
-                        store=store,
-                        scheduler=scheduler,
-                        dispatch=dispatch,
-                        abort=abort,
-                        effective_comments_limit=effective_comments_limit,
-                        before_finalize=before_finalize,
-                        on_completed=on_completed,
-                    ),
+                    submit_partition,
                     limit=1,
                     workflow_version=workflow_version,
                 )
@@ -446,9 +543,10 @@ def run_worker(
 
 def main(argv=None):
     abort = DiagnosticAbort()
-    start_abort_reporter(abort, lambda value: print(json.dumps(value), flush=True))
+    reporter = start_abort_reporter(abort, emit_abort_diagnostic)
     stop_requested = threading.Event()
     previous = {}
+    lifetime_guard = None
     exit_guard = AbortExitGuard(abort)
     exit_guard.start()
 
@@ -476,6 +574,30 @@ def main(argv=None):
             return 0
         dsn = os.environ["TRR_INSTAGRAM_DBOS_DATABASE_URL"].strip()
         role = os.environ["TRR_INSTAGRAM_DBOS_RUNTIME_ROLE"].strip()
+        run_fence = os.getenv("TRR_INSTAGRAM_LOCAL_WORKER_RUN_ID", "").strip()
+        allowed_run_id = str(UUID(run_fence)) if run_fence else None
+        recovery_run = os.getenv("TRR_INSTAGRAM_JANUARY_RECOVERY_RUN_ID", "").strip()
+        if allowed_run_id is not None and recovery_run and str(UUID(recovery_run)) != allowed_run_id:
+            raise ValueError("The January recovery run must match the local worker run fence")
+        activity_cap = os.getenv("TRR_INSTAGRAM_LOCAL_WORKER_MAX_ACTIVITIES", "").strip()
+        max_activities = int(activity_cap) if activity_cap else None
+        if max_activities is not None and max_activities not in {1, 2, 4, 6}:
+            raise ValueError("The local worker activity cap must be 1, 2, 4, or 6")
+        deadline_value = os.getenv("TRR_INSTAGRAM_LOCAL_WORKER_DEADLINE_AT", "").strip()
+        deadline = None
+        if deadline_value:
+            deadline_at = float(deadline_value)
+            remaining = deadline_at - time.time()
+            if not math.isfinite(deadline_at) or not 0 < remaining <= 3600:
+                raise ValueError("The local worker deadline must be finite, future, and within one hour")
+            deadline = time.monotonic() + remaining
+        parent_value = os.getenv("TRR_INSTAGRAM_LOCAL_WORKER_PARENT_PID", "").strip()
+        parent_pid = int(parent_value) if parent_value else None
+        if parent_pid is not None and (deadline is None or parent_pid <= 0 or os.getppid() != parent_pid):
+            raise ValueError("The local worker parent requires a deadline and its actual positive parent PID")
+        if deadline is not None:
+            lifetime_guard = WorkerLifetimeGuard(deadline, request_stop, parent_pid=parent_pid)
+            lifetime_guard.start()
         validate_configuration(dsn)
         config = RuntimeConfig(
             dsn,
@@ -491,9 +613,13 @@ def main(argv=None):
         store = WorkflowStore(execution_placement="local")
         transaction = getattr(store, "transaction", None)
         policy = ExecutionPolicy(transaction=transaction) if callable(transaction) else None
+
+        def effective_comments_limit(item):
+            current = policy.effective_comments_limit(item) if policy else 1
+            return min(current, max_activities) if max_activities is not None else current
+
         dispatch = LocalDispatch(run_ingestion_activity, abort)
         scheduler = Scheduler(store, admit=Admission().admit, dispatch=dispatch, reconcile=lambda _: "unknown")
-        recovery_run = os.getenv("TRR_INSTAGRAM_JANUARY_RECOVERY_RUN_ID", "").strip()
 
         def before_finalize(item, *, stop):
             if not recovery_run or item["run_id"] != recovery_run:
@@ -588,7 +714,8 @@ def main(argv=None):
             abort=abort,
             workflow_version=WORKFLOW_VERSION,
             stop_requested=stop_requested,
-            effective_comments_limit=policy.effective_comments_limit if policy else None,
+            allowed_run_id=allowed_run_id,
+            effective_comments_limit=effective_comments_limit if policy or max_activities is not None else None,
             before_finalize=before_finalize if recovery_run else None,
             on_completed=certify_completed if recovery_run else None,
             on_started=resume_certification if recovery_run else None,
@@ -611,6 +738,10 @@ def main(argv=None):
             pass
         # Keep the independent guard armed through lease and pool cleanup: a
         # blocked connection must not leave launchd supervising a dead worker.
+        if reporter is not None and abort.is_set():
+            reporter.join(timeout=ABORT_REPORTER_JOIN_SECONDS)
+        if lifetime_guard is not None:
+            lifetime_guard.close()
         exit_guard.close()
 
 

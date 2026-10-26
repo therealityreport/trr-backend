@@ -245,6 +245,14 @@ def test_parity_target_gets_durable_offline_audit_without_source_recovery(databa
         (args["run_id"],),
     ) == [{"n": 2}]
 
+    # A later canonical mutation must invalidate the completed retained audit,
+    # even though the traversal checkpoint and parser have not changed.
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute("update social.instagram_comments set last_seen_at=last_seen_at+interval '1 second' "
+                    "where post_id=%s", (args["post_id"],))
+    assert enqueue_next_recovery(store, **kwargs)["status"] == "retained_audit_completed"
+    assert enqueue_next_recovery(store, **kwargs) is None
+
 
 def test_incomplete_offline_audit_cannot_authorize_fresh_root(database, monkeypatch):
     from trr_backend.ingestion import retained_comment_recovery as retained

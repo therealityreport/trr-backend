@@ -332,7 +332,8 @@ def test_stream_never_selects_page_checkpoints_and_no_matching_page_roundtrips(d
     result = audit_and_replay_retained(counted, **request)
     assert result["status"] == "matched" and result["pages_audited"] == 12 and result["replayed_pages"] == 0
     assert queries and any("select p.page_id" in sql for sql in queries)
-    assert sum("from social.instagram_comments c" in sql for sql in queries) == 1
+    # One canonical load and one bounded full-row digest, independent of page count.
+    assert sum("from social.instagram_comments c" in sql for sql in queries) == 2
     assert all("page.checkpoint" not in sql and "p.checkpoint" not in sql for sql in queries)
 
 

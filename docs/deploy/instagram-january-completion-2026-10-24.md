@@ -1746,3 +1746,47 @@ certification. Remaining work is heartbeat/lease replacement qualification,
 public reply completion, exact latest-scan/native counts and inventory proof,
 three overshoot witnesses, media admission/lineage/bytes and final286-post
 certification. The task is not represented as complete.
+
+
+### Reliability audit and repair candidate — October 25, 2026, 9 p.m. New York
+
+Chat `01a17583-5ddd-7dc0-b32e-3cf2b8886292` owns this coordinated repair.
+Baseline backend HEAD was `4712d847`; the running local package was
+`ig-local-public-parent-fa955e20db59`, worker 4633, grant backend 403104.
+Live provider history confirmed cloud v161 / `ig-reply-diagnostics-8e3350210aa9`
+in `admin-56995 / main / trr-backend-jobs`. Existing unrelated dirty work and
+branches were preserved. No old controller authorization was revived.
+
+The prioritized findings were: reentrant pooled lease admission and connectivity-only
+heartbeats; unbounded startup and a reproduced daemon stdout shutdown crash;
+overshoot mislabelled as parity; stale retained-audit reuse after canonical changes;
+legacy comments mutations bypassing v2 admission; hidden holds and capability
+fallbacks; and incomplete process supervision around auxiliary count witnesses.
+The source repairs reject old grants before serving, check the actual grant on
+heartbeats, bound startup/shutdown and manually supervised lifetimes, require exact
+parity, bind retained audits to full canonical-row fingerprints, fence legacy
+mutations, preserve actionable UI state, and add a bounded auxiliary public count
+operator. Media inventory equality and final certification were not weakened.
+
+The new worker/witness interruption checks cover timeout, supervisor loss, exact
+child cleanup and preserved work. Source checks and independent review were
+completed in bounded batches; after two review rounds exposed a common supervision
+weakness, the design was simplified to worker-owned deadlines and parent-loss
+fencing and verified with focused subprocess regressions. Router runtime-binding
+bookkeeping returned HOST_ERROR/thread-not-loaded despite native child results;
+no exact model/instruction telemetry claim is made.
+
+Fresh preflight certificate `before-certificate.json` reports a known count gap of
+25,382 and final_acceptance=false, using one read-only snapshot and zero source or
+storage sends. Deep gates remain pending. Current run counts at baseline were
+285 saved comment passes / one unresolved, and 49 saved media passes / 237
+unresolved. These are not completeness counts. The three overshoot targets pass
+the new operator's read-only binding preview after correcting terminal owner-token
+handling. Live witness observations and candidate activation are pending.
+
+App lightweight validation, focused UI regressions and typecheck passed. The full
+production build, explicitly approved in this chat, passed with the existing
+require-in-the-middle bundling warning. No app deployment is implied.
+Shared behavior and optional process settings are documented in
+`../../../docs/workspace/instagram-ingestion-reliability.md`. There is no SQL
+migration or change of SQL ownership. Runtime follow-through is recorded below.

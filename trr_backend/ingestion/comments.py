@@ -704,6 +704,10 @@ def _settlement(state: dict[str, Any], summary: CommentFetchSummary) -> CommentS
     if not top.get("exhausted") or any(lane.get("repeated") for lane in state["lanes"].values()):
         return None
     observed_total = len(state["observed"])
+    # A stale low native counter is a discrepancy, never count parity. In
+    # particular it cannot authorize marking other saved rows missing.
+    if observed_total > expected:
+        return None
     count_gap = max(expected - observed_total, 0)
     if count_gap and not (
         state.get("adapter_family") == "instagram_public_relay"

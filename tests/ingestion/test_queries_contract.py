@@ -52,3 +52,18 @@ def test_progress_schema_rejects_false_completion(database):
     snapshot["complete"] = True
     with pytest.raises(ValidationError, match="Run completion"):
         InstagramIngestionProgressV2.model_validate(snapshot)
+
+
+def test_progress_explains_execution_hold(database):
+    store, transaction = database
+    run = launch(store)
+    with transaction() as conn, conn.cursor() as cur:
+        cur.execute("alter table social.instagram_ingestion_runs add column if not exists execution_hold_reason text")
+        cur.execute(
+            """update social.instagram_ingestion_runs set state='cancelled',execution_hold_reason='operator_review'
+            where run_id=%s""",
+            (run["run_id"],),
+        )
+    progress = InstagramIngestionProgressV2.model_validate(Queries(transaction).progress(run["run_id"], "bravotv"))
+    assert progress.execution_hold_reason == "operator_review"
+    assert progress.allowed_actions == []

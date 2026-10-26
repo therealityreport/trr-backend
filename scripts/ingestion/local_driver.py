@@ -173,6 +173,7 @@ class DiagnosticAbort(threading.Event):
             not in {
                 "lease_heartbeat_exception",
                 "lease_heartbeat_deadline",
+                "lease_startup_deadline",
                 "lease_cleanup_failure",
                 "lease_cleanup_deadline",
                 "control_owner_lost",
@@ -363,6 +364,18 @@ class CoordinatorLease:
             if isinstance(self.abort, DiagnosticAbort):
                 self.abort.lease_metadata = self._diagnostic_metadata
             with self.connection.cursor() as cur:
+                # A session pooler can return a backend still holding an older
+                # frontend's grant. PostgreSQL advisory locks are reentrant;
+                # trying the lock first would stack ownership silently.
+                cur.execute(
+                    """select exists(select 1 from pg_locks
+                    where locktype='advisory' and granted and pid=pg_backend_pid()
+                    and database=(select oid from pg_database where datname=current_database())
+                    and classid=%s::oid and objid=%s::oid and objsubid=2)""",
+                    (self.config.lock_namespace, self.config.lock_key),
+                )
+                if cur.fetchone()[0]:
+                    raise Conflict("Coordinator backend already holds an unqualified lease")
                 cur.execute(
                     "select pg_try_advisory_lock(%s,%s),pg_backend_pid()",
                     (self.config.lock_namespace, self.config.lock_key),
@@ -471,7 +484,16 @@ class CoordinatorLease:
             self.select_started = started  # Legacy access only; diagnostics use the sample.
             try:
                 with self.connection.cursor() as cur:
-                    cur.execute("select 1")
+                    cur.execute(
+                        """select pg_backend_pid(),exists(select 1 from pg_locks
+                        where locktype='advisory' and granted and pid=pg_backend_pid()
+                        and database=(select oid from pg_database where datname=current_database())
+                        and classid=%s::oid and objid=%s::oid and objsubid=2)""",
+                        (self.config.lock_namespace, self.config.lock_key),
+                    )
+                    identity = cur.fetchone()
+                    if identity != (self.backend_pid, True):
+                        raise LostOwnership("Coordinator heartbeat did not confirm its original lease")
                 completed = self.clock()
                 duration = max(0, completed - started)
                 self.heartbeat_sample = HeartbeatSample(sequence, sequence, completed, None, duration, self.backend_pid)

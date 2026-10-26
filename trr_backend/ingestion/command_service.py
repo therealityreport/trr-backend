@@ -148,7 +148,8 @@ class CommandService:
                 [
                     action
                     for action in ("backfill", "sync_recent", "sync_newer", "resume_tail")
-                    if action != "sync_newer" or self.frontier is not None
+                    if (action != "sync_newer" or self.frontier is not None)
+                    and (action != "resume_tail" or _account(handle) != "bravotv")
                 ]
                 if ready
                 else []
