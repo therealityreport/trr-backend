@@ -2327,3 +2327,49 @@ d390 package and preceding verified 953 rollback remain runnable. Three
 superseded packages with no process/open-file/native references were moved to
 actual Trash; `release-retirement.json` records their paths. No branch was
 changed, no PR or push was made, and unrelated dirty work was preserved.
+
+### Reply-hold, recovery-progress and reporting repair — October 26
+
+The user requested these fixes before another January run. Source commit
+`cb9fef382a2e7988aee422300b471768bdd4b15f` carries per-parent technical holds and
+server waits across a fresh top-root restart without carrying old cursor or
+exhaustion proof. Recovery tracks a separate monotone progress frontier; it
+never merges historical IDs into a fresh scan's completeness proof. For each
+bounded selection, saved-ID shortfall reorders only the first eight candidates
+in the existing fair order; other candidates remain eligible. Existing due
+unresolved child continuations still precede new root recoveries. January
+operator reports now project actual checkpoint failures, held branches and lane
+proof, while old snapshots without diagnostics remain unknown.
+
+The pre-fix held-branch and alternating-subset regressions failed as expected.
+Focused isolated tests covered the transport, recovery, admission and reporting
+paths; the first combined set passed 177 cases. A later 59-case review-fix set
+had one fixture-only owner-token failure; its 58 other cases passed, and the
+corrected idle-unresolved case passed separately. Seven reporting cases passed.
+Independent review's unresolved-frontier and broad-count findings were fixed,
+and focused re-review passed. A live read-only count over eight targets took
+0.554 seconds; a full-cohort count exceeded a five-second timeout. Eight limits
+target count, not the number of rows in a large post.
+
+The reviewed source was built as `ig-guards-cb9fef382a2e` and deployed to
+`admin-56995 / main / trr-backend-jobs` as Modal **v170**. Explicit-main
+readiness passed, the API health canary returned 200, and a fresh container
+matched both changed runtime module hashes and passed offline held-restart and
+alternating-scan behavior checks. No Instagram source request was made by that
+smoke. A read-only report of the real retained checkpoint correctly counted
+14,390 exhausted, non-repeated lanes and six failed branches, four on hold, for
+DTgXh94kXyo; the previous private status script had reported those lanes as
+unknown because it read obsolete fields.
+
+The idle ordinary native worker was handed over to the same release with one
+verified coordinator grant. The January run remained cancelled and held at
+generation 4. Its 1,103 target fingerprints, 162,036 accounted requests,
+153,269 pages and 1,105 receipts matched before and after the handover. No
+January recovery was started, and no database schema or ownership changed.
+A read-only comparison with the prior frozen snapshot also matched all 133,328
+saved comment identities, missing flags and parent links, with no additions or
+removals.
+The previous `ig-window-d39036e05067` release remains as the local rollback;
+the superseded `ig-window-9532b32d3bee` release was moved to actual Trash after
+checking process and LaunchAgent references. Candidate, deployment, readiness,
+smoke and preservation evidence is under `~/.codex/tmp/ig-guards-01a17a51/`.
