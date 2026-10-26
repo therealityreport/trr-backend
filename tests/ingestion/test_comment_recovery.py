@@ -4,10 +4,21 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from psycopg2.extras import RealDictCursor
 
 from tests.ingestion import test_comments as fixtures
 from tests.ingestion import test_public_comment_transport as public
-from trr_backend.ingestion.comment_recovery import _known_max, _strength, recover_public_target, target_status
+from trr_backend.ingestion.comment_recovery import (
+    _active_saved_counts,
+    _advance_progress,
+    _canonical_shortfall_priority,
+    _known_max,
+    _prioritize_recovery_rows,
+    _strength,
+    recover_public_target,
+    target_status,
+    unchanged_passes,
+)
 from trr_backend.ingestion.comments import CommentActivity
 from trr_backend.ingestion.domain import Conflict, Stage, fingerprint
 
@@ -30,6 +41,146 @@ def test_legacy_committed_overshoot_is_not_a_complete_recovery_candidate():
     assert status["reasons"] == ["count_overshoot"]
     assert status["candidate_complete"] is False
     assert status["final_acceptance"] is False
+
+
+def test_recovery_progress_does_not_reset_when_known_scan_subsets_alternate():
+    checkpoint = {
+        "comment_pages": {"observed": {"a": {}, "b": {}}, "settlement": {"count_gap": 1}},
+        "public_recovery": {
+            "no_improvement_passes": 1,
+            "baseline": {"observed_ids": ["a", "c"], "count_gap": 1, "unsupported": []},
+            "progress": {
+                "version": 1,
+                "observed_ids": ["a", "b", "c"],
+                "best_observed_total": 2,
+                "supported_ids": ["a", "b", "c"],
+            },
+        },
+    }
+    assert unchanged_passes(checkpoint, "committed") == 2
+    assert unchanged_passes(checkpoint, "unresolved") == 1
+
+
+def test_disappearing_unsupported_id_is_not_topology_repair():
+    checkpoint = {
+        "comment_pages": {"observed": {"a": {}}, "settlement": {"count_gap": 2}},
+        "public_recovery": {
+            "no_improvement_passes": 1,
+            "baseline": {"observed_ids": ["a", "x"], "count_gap": 2, "unsupported": ["x"]},
+        },
+    }
+    assert unchanged_passes(checkpoint, "committed") == 2
+
+
+def test_progress_frontier_tracks_fresh_coverage_and_preserves_legacy_baseline():
+    baseline = {"observed_ids": ["a", "b"], "count_gap": 2, "unsupported": ["b"]}
+    recovery = {"no_improvement_passes": 1, "baseline": baseline}
+    repaired = {"observed_ids": ["a", "b"], "count_gap": 2, "unsupported": []}
+    checkpoint = {
+        "comment_pages": {"observed": {"a": {}, "b": {}}, "settlement": {"count_gap": 2}},
+        "public_recovery": recovery,
+    }
+    assert unchanged_passes(checkpoint, "committed") == 0  # b is present and its topology is repaired.
+    progress = _advance_progress(recovery, repaired)
+    assert recovery["baseline"] == baseline
+    assert progress == {"version": 1, "observed_ids": ["a", "b"], "best_observed_total": 2, "supported_ids": ["a", "b"]}
+    recovery = {"no_improvement_passes": 1, "baseline": repaired, "progress": progress}
+    # A broader single pass is useful proof even when every ID has been seen before.
+    recovery["progress"]["observed_ids"].append("c")
+    recovery["progress"]["supported_ids"].append("c")
+    checkpoint["public_recovery"] = recovery
+    checkpoint["comment_pages"]["observed"]["c"] = {}
+    assert unchanged_passes(checkpoint, "committed") == 0
+    assert _advance_progress(recovery, _strength(checkpoint["comment_pages"]))["best_observed_total"] == 3
+
+
+def test_canonical_shortfall_priority_is_ordering_only():
+    def row(key, expected):
+        return {"target_key": key, "checkpoint": {"comment_pages": {"expected": expected}}}
+
+    counts = {"short": 4, "matched": 5, "over": 6}
+    assert _canonical_shortfall_priority(row("short", 5), counts) == 0
+    assert _canonical_shortfall_priority(row("absent", 5), counts) == 1
+    assert _canonical_shortfall_priority(row("matched", None), counts) == 1
+    assert _canonical_shortfall_priority(row("matched", 5), counts) == 2
+    assert _canonical_shortfall_priority(row("over", 5), counts) == 2
+
+
+def test_priority_counts_only_fair_shortlist_and_preserves_remaining_candidates():
+    rows = [
+        {
+            "target_key": f"post-{index}",
+            "outcome": "committed",
+            "checkpoint": {"comment_pages": {"expected": 5, "settlement": {"count_gap": 1}}},
+        }
+        for index in range(10)
+    ]
+
+    class Cursor:
+        def execute(self, sql, params):
+            self.keys = params[0]
+
+        def fetchall(self):
+            return [
+                {"shortcode": key, "active_saved_ids": 0 if key == "post-1" else 5}
+                for key in self.keys
+                if key != "post-2"
+            ]
+
+    cur = Cursor()
+    ordered = _prioritize_recovery_rows(cur, rows, {row["target_key"]: i for i, row in enumerate(rows)})
+    assert cur.keys == [f"post-{i}" for i in range(8)]
+    assert [row["target_key"] for row in ordered] == [
+        "post-1",
+        "post-2",
+        "post-0",
+        "post-3",
+        "post-4",
+        "post-5",
+        "post-6",
+        "post-7",
+        "post-8",
+        "post-9",
+    ]
+
+
+def test_saved_count_uses_active_rows_and_distinguishes_an_unknown_post(database, monkeypatch):
+    _, tx, args, _ = completed(database, monkeypatch)
+    with tx() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        counts = _active_saved_counts(cur, [args["target_key"], "unknown-post"])
+        assert counts == {args["target_key"]: 2}
+        cur.execute(
+            "update social.instagram_comments set is_missing=true where post_id=%s and comment_id='old'",
+            (args["post_id"],),
+        )
+        cur.execute(
+            "update social.instagram_comments set deleted_at=clock_timestamp() where post_id=%s and comment_id='p'",
+            (args["post_id"],),
+        )
+        assert _active_saved_counts(cur, [args["target_key"], "unknown-post"]) == {args["target_key"]: 0}
+
+
+def test_first_unresolved_recovery_seeds_frontier_from_retained_observations(database, monkeypatch):
+    store, tx, args, _ = completed(database, monkeypatch)
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            "update social.instagram_ingestion_targets "
+            "set outcome='unresolved', owner_token=null, owner_expires_at=null "
+            "where run_id=%s and target_key=%s",
+            (args["run_id"], args["target_key"]),
+        )
+    request = command(tx, args)
+    recover_public_target(store, **request)
+    current = fixtures.query(
+        tx,
+        "select checkpoint from social.instagram_ingestion_targets where run_id=%s and target_key=%s",
+        (args["run_id"], args["target_key"]),
+    )[0]["checkpoint"]
+    recovery = current["public_recovery"]
+    assert recovery["progress"]["observed_ids"] == recovery["baseline"]["observed_ids"]
+    assert recovery["no_improvement_passes"] == 0
+    # The same observations in the next complete pass must not appear new.
+    assert unchanged_passes(current, "committed") == 1
 
 
 def completed(database, monkeypatch):
@@ -276,8 +427,10 @@ def test_parity_target_gets_durable_offline_audit_without_source_recovery(databa
     # A later canonical mutation must invalidate the completed retained audit,
     # even though the traversal checkpoint and parser have not changed.
     with tx() as conn, conn.cursor() as cur:
-        cur.execute("update social.instagram_comments set last_seen_at=last_seen_at+interval '1 second' "
-                    "where post_id=%s", (args["post_id"],))
+        cur.execute(
+            "update social.instagram_comments set last_seen_at=last_seen_at+interval '1 second' where post_id=%s",
+            (args["post_id"],),
+        )
     assert enqueue_next_recovery(store, **kwargs)["status"] == "retained_audit_completed"
     assert enqueue_next_recovery(store, **kwargs) is None
 

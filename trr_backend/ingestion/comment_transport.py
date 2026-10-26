@@ -408,8 +408,34 @@ class PublicRelayResume:
             raise CommentSourceError("Public comments cannot reinterpret another adapter's checkpoint")
         if checkpoint.get("top_level_checkpoint") or checkpoint.get("reply_checkpoints"):
             raise CommentSourceError("Public comments cannot consume legacy transport cursors")
+
+        access = pages.get("reply_access") or {}
+        retry_at = access.get("next_attempt_at") if access.get("retry_source") == "server_retry_after" else None
+        try:
+            deferred = bool(retry_at and datetime.fromisoformat(retry_at.replace("Z", "+00:00")) > now)
+        except (ValueError, TypeError):
+            raise CommentSourceError("Invalid reply access retry timestamp") from None
+        rejected_lanes = set(access.get("lanes") or [])
+        technical_failures = checkpoint.get("public_reply_failures") or {}
+
+        def reply_guard(parent_id):
+            server_deferred = deferred and parent_id in rejected_lanes
+            item = {"pending": not server_deferred, "deferred": server_deferred}
+            technical = technical_failures.get(parent_id)
+            if technical is not None:
+                from trr_backend.ingestion.reply_failures import resume_failure
+
+                item.update(resume_failure(technical, now=now))
+                item["deferred"] = server_deferred or item["deferred"]
+                item["pending"] = not item["deferred"]
+                if item["deferred"]:
+                    item.pop("needs_diagnostics", None)
+            return item
+
         if "__top__" in restarts:
-            return cls({}, {}, True)
+            # A fresh root invalidates traversal proof, not per-parent safety
+            # holds. Parents may be rediscovered after the seed list is cleared.
+            return cls({}, {key: reply_guard(key) for key in rejected_lanes | set(technical_failures)}, True)
 
         def lane_resume(lane, *, root):
             if not isinstance(lane, Mapping):
@@ -447,13 +473,6 @@ class PublicRelayResume:
             # parent's child root instead of borrowing the top query identity.
             return result
 
-        access = pages.get("reply_access") or {}
-        retry_at = access.get("next_attempt_at") if access.get("retry_source") == "server_retry_after" else None
-        try:
-            deferred = bool(retry_at and datetime.fromisoformat(retry_at.replace("Z", "+00:00")) > now)
-        except (ValueError, TypeError):
-            raise CommentSourceError("Invalid reply access retry timestamp") from None
-        rejected_lanes = set(access.get("lanes") or [])
         top_lane = lanes.get("__top__") or {}
         top = lane_resume(top_lane, root=True)
         replies = {}
@@ -463,17 +482,7 @@ class PublicRelayResume:
                 replies[parent.comment_id] = {"pending": True}
                 continue
             if parent.comment_id in rejected_lanes:
-                item = {"pending": not deferred, "deferred": deferred}
-                technical = (checkpoint.get("public_reply_failures") or {}).get(parent.comment_id)
-                if technical is not None:
-                    from trr_backend.ingestion.reply_failures import resume_failure
-
-                    item.update(resume_failure(technical, now=now))
-                    item["deferred"] = deferred or item["deferred"]
-                    item["pending"] = not item["deferred"]
-                    if item["deferred"]:
-                        item.pop("needs_diagnostics", None)
-                replies[parent.comment_id] = item
+                replies[parent.comment_id] = reply_guard(parent.comment_id)
                 continue
             item = lane_resume(lane, root=False)
             expected = (observed.get(parent.comment_id) or {}).get("expected_replies")

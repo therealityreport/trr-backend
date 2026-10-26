@@ -210,6 +210,15 @@ def snapshot():
                 next_attempt_at,owner_token,owner_expires_at,
                 encode(sha256(convert_to((to_jsonb(t)-'owner_token'-'owner_expires_at'-'owner_started_at')::text,
                     'UTF8')),'hex') as preservation_sha256,
+                jsonb_build_object(
+                    'last_error_code',checkpoint->'last_error_code',
+                    'worker_diagnostics',jsonb_build_object(
+                        'last_failure',checkpoint#>'{worker_diagnostics,last_failure}',
+                        'committed_pages_since_failure',checkpoint#>'{worker_diagnostics,committed_pages_since_failure}'),
+                    'comment_pages',jsonb_build_object(
+                        'lanes',checkpoint#>'{comment_pages,lanes}',
+                        'reply_access',checkpoint#>'{comment_pages,reply_access}'),
+                    'public_reply_failures',checkpoint->'public_reply_failures') as reporting_checkpoint,
                 checkpoint#>'{comment_pages,settlement}' as settlement
                 ,checkpoint#>'{comment_pages,expected}' as expected,
                 array(select jsonb_object_keys(coalesce(
@@ -218,6 +227,9 @@ def snapshot():
                 (RUN,),
             )
             targets = [dict(row) for row in cur.fetchall()]
+            for target in targets:
+                # Never save raw cursor values, request envelopes or source URLs.
+                target["diagnostics"] = target_diagnostics(target.pop("reporting_checkpoint"))
             cur.execute(
                 """select p.shortcode,c.comment_id,c.parent_comment_external_id,
                 parent.comment_id as linked_parent,c.is_missing,
@@ -275,6 +287,118 @@ def snapshot():
             }
     finally:
         conn.close()
+
+
+def target_diagnostics(checkpoint):
+    """Bounded factual projection; missing old snapshot fields remain unknown.
+
+    Failure facts are historical, not evidence that a target is currently held.
+    Lane coverage is reported independently from branch holds and target outcome.
+    """
+
+    def token(value):
+        return value if isinstance(value, str) and re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]{0,79}", value) else None
+
+    def number(value):
+        return value if type(value) is int and value >= 0 else None
+
+    def timestamp(value):
+        if not isinstance(value, str) or len(value) > 40:
+            return None
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).isoformat()
+        except ValueError:
+            return None
+
+    def presence(value):
+        if value is None or value == {}:
+            return "absent"
+        return "present" if isinstance(value, dict) else "unknown"
+
+    if not isinstance(checkpoint, dict):
+        return {"availability": "unknown"}
+    pages = checkpoint.get("comment_pages")
+    pages = pages if isinstance(pages, dict) else {}
+    worker = checkpoint.get("worker_diagnostics")
+    worker = worker if isinstance(worker, dict) else {}
+    failure = worker.get("last_failure")
+    access = pages.get("reply_access")
+    technical = checkpoint.get("public_reply_failures")
+    lanes = pages.get("lanes")
+    proof = {"availability": presence(lanes)}
+    if isinstance(lanes, dict):
+        proof["total"] = len(lanes)
+        for field in ("exhausted", "repeated", "started_from_root"):
+            proof[field] = {
+                "true": sum(isinstance(lane, dict) and lane.get(field) is True for lane in lanes.values()),
+                "false": sum(isinstance(lane, dict) and lane.get(field) is False for lane in lanes.values()),
+                "unknown": sum(
+                    not isinstance(lane, dict) or type(lane.get(field)) is not bool for lane in lanes.values()
+                ),
+            }
+        # The maintained lane schema stores cursor history, not a status/outcome
+        # or a single current cursor. Do not infer exhaustion from empty history.
+        proof["cursor_history"] = {
+            "known_lanes": sum(
+                isinstance(lane, dict) and isinstance(lane.get("cursors"), list) for lane in lanes.values()
+            ),
+            "entries": sum(
+                len(lane["cursors"])
+                for lane in lanes.values()
+                if isinstance(lane, dict) and isinstance(lane.get("cursors"), list)
+            ),
+        }
+    holds = {"availability": presence(technical)}
+    if isinstance(technical, dict):
+        holds.update(
+            total=len(technical),
+            technical_hold=sum(
+                isinstance(value, dict) and value.get("technical_hold") is True for value in technical.values()
+            ),
+            branches=[
+                {
+                    "parent_comment_id": parent
+                    if isinstance(parent, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,80}", parent)
+                    else None,
+                    "code": token(value.get("code")),
+                    "technical_hold": value.get("technical_hold")
+                    if type(value.get("technical_hold")) is bool
+                    else None,
+                    "failure_count": number(value.get("failure_count")),
+                    "next_attempt_at": timestamp(value.get("next_attempt_at")),
+                    "retry_source": token(value.get("retry_source")),
+                }
+                for parent, value in list(technical.items())[:100]
+                if isinstance(value, dict)
+            ],
+            branches_truncated=len(technical) > 100,
+        )
+    return {
+        "availability": "known",
+        "last_error_code": token(checkpoint.get("last_error_code")),
+        "last_failure": {
+            "code": token(failure.get("code")),
+            "category": token(failure.get("category")),
+            "exception_class": token(failure.get("exception_class")),
+            "observed_at": timestamp(failure.get("observed_at")),
+            "owner_generation": number(failure.get("owner_generation")),
+        }
+        if isinstance(failure, dict)
+        else None,
+        "committed_pages_since_failure": number(worker.get("committed_pages_since_failure")),
+        "reply_access": {
+            "availability": "present",
+            "code": token(access.get("code")),
+            "attempts": number(access.get("attempts")),
+            "retry_source": token(access.get("retry_source")),
+            "next_attempt_at": timestamp(access.get("next_attempt_at")),
+            "lane_count": len(access["lanes"]) if isinstance(access.get("lanes"), list) else None,
+        }
+        if isinstance(access, dict) and access
+        else {"availability": presence(access)},
+        "public_reply_failures": holds,
+        "lane_proof": proof,
+    }
 
 
 def report(before, after, window):
@@ -380,6 +504,20 @@ def report(before, after, window):
         "previously_missing_ids_restored": restored,
         "per_post": per_post,
         "count_observation_changes": count_changes,
+        "target_diagnostics": [
+            {
+                "stage": row["stage"],
+                "target_key": row["target_key"],
+                "outcome": row.get("outcome"),
+                "blocked_reason": row.get("blocked_reason")
+                if isinstance(row.get("blocked_reason"), str)
+                and re.fullmatch(r"[a-z][a-z0-9_]{0,79}", row["blocked_reason"])
+                else None,
+                "next_attempt_at": row.get("next_attempt_at"),
+                "diagnostics": row.get("diagnostics", {"availability": "unknown"}),
+            }
+            for row in after["targets"]
+        ],
         "new_immutable_receipts": len(after["receipts"]) - len(before["receipts"]),
         "final_acceptance": False,
     }

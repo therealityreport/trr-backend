@@ -26,6 +26,9 @@ class RecoveryAdmissionDeferred(Conflict):
         self.code = code
 
 
+_PRIORITY_SHORTLIST = 8
+
+
 def _replayed_recovery(cur, account, idempotency_key, command_hash):
     previous = _row(
         cur,
@@ -87,25 +90,105 @@ def _strength(state):
     }
 
 
+def _progress_frontier(recovery):
+    """Return scheduling evidence, never a substitute for a fresh scan."""
+    baseline = recovery.get("baseline") or {}
+    saved = recovery.get("progress")
+    if saved is None:
+        observed = set(baseline.get("observed_ids") or [])
+        unsupported = set(baseline.get("unsupported") or [])
+        return {
+            "version": 1,
+            "observed_ids": sorted(observed),
+            "best_observed_total": len(observed),
+            "supported_ids": sorted(observed - unsupported),
+        }
+    if (
+        not isinstance(saved, dict)
+        or saved.get("version") != 1
+        or not isinstance(saved.get("observed_ids"), list)
+        or not isinstance(saved.get("supported_ids"), list)
+        or any(not isinstance(value, str) for value in saved["observed_ids"] + saved["supported_ids"])
+        or type(saved.get("best_observed_total")) is not int
+        or saved["best_observed_total"] < 0
+        or not set(saved["supported_ids"]).issubset(saved["observed_ids"])
+    ):
+        raise Conflict("Invalid public recovery progress frontier")
+    return saved
+
+
+def _advance_progress(recovery, strength):
+    progress = _progress_frontier(recovery)
+    observed = set(strength["observed_ids"])
+    supported = observed - set(strength["unsupported"])
+    return {
+        "version": 1,
+        "observed_ids": sorted(set(progress["observed_ids"]) | observed),
+        "best_observed_total": max(progress["best_observed_total"], len(observed)),
+        "supported_ids": sorted(set(progress["supported_ids"]) | supported),
+    }
+
+
 def unchanged_passes(checkpoint, outcome):
     recovery = checkpoint.get("public_recovery") or {}
     count = recovery.get("no_improvement_passes", 0)
     if not recovery or outcome not in {"committed", "cached_satisfied"}:
         return count
-    strength, baseline = _strength(checkpoint.get("comment_pages") or {}), recovery["baseline"]
-    improved = bool(set(strength["observed_ids"]) - set(baseline["observed_ids"]))
-    improved |= (
-        type(strength["count_gap"]) is int
-        and type(baseline["count_gap"]) is int
-        and strength["count_gap"] < baseline["count_gap"]
-    )
-    improved |= bool(set(baseline["unsupported"]) - set(strength["unsupported"]))
+    strength = _strength(checkpoint.get("comment_pages") or {})
+    progress = _progress_frontier(recovery)
+    observed = set(strength["observed_ids"])
+    supported = observed - set(strength["unsupported"])
+    improved = bool(observed - set(progress["observed_ids"]))
+    improved |= len(observed) > progress["best_observed_total"]
+    improved |= bool(supported - set(progress["supported_ids"]))
     return 0 if improved else count + 1
 
 
 def _can_recover_gap(checkpoint, outcome):
     gap = ((checkpoint.get("comment_pages") or {}).get("settlement") or {}).get("count_gap")
     return type(gap) is int and gap > 0 and unchanged_passes(checkpoint, outcome) < 2
+
+
+def _canonical_shortfall_priority(row, saved_counts):
+    state = row["checkpoint"].get("comment_pages") or {}
+    expected = _known_max(
+        (state.get("settlement") or {}).get("expected_total"),
+        state.get("expected"),
+        ((row["checkpoint"].get("public_recovery") or {}).get("baseline") or {}).get("expected_total"),
+    )
+    saved = saved_counts.get(row["target_key"])
+    if expected is None or saved is None:
+        return 1
+    return 0 if saved < expected else 2
+
+
+def _active_saved_counts(cur, shortcodes):
+    """Rank recovery candidates using current canonical rows, not scan proof."""
+    cur.execute(
+        """select p.shortcode, count(distinct c.comment_id) filter
+        (where not c.is_missing and c.deleted_at is null) as active_saved_ids
+        from social.instagram_posts p left join social.instagram_comments c on c.post_id=p.id
+        where p.shortcode=any(%s::text[]) group by p.shortcode""",
+        (list(shortcodes),),
+    )
+    return {row["shortcode"]: row["active_saved_ids"] for row in cur.fetchall()}
+
+
+def _prioritize_recovery_rows(cur, rows, sizes):
+    rows = sorted(
+        rows,
+        key=lambda row: (
+            unchanged_passes(row["checkpoint"], row["outcome"]),
+            sizes.get(row["target_key"], 0),
+            -row["checkpoint"]["comment_pages"]["settlement"]["count_gap"],
+            row["target_key"],
+        ),
+    )
+    shortlist = rows[:_PRIORITY_SHORTLIST]
+    if shortlist:
+        saved_counts = _active_saved_counts(cur, [row["target_key"] for row in shortlist])
+        rows[:_PRIORITY_SHORTLIST] = sorted(shortlist, key=lambda row: _canonical_shortfall_priority(row, saved_counts))
+    return rows
 
 
 def enqueue_next_recovery(store, *, run_id, account, generation, intent_hash, source_revision, blocked_stage=False):
@@ -180,14 +263,10 @@ def enqueue_next_recovery(store, *, run_id, account, generation, intent_hash, so
                 (run_id,),
             )
             sizes = {row["target_key"]: row["pages"] for row in cur.fetchall()}
-            rows.sort(
-                key=lambda row: (
-                    unchanged_passes(row["checkpoint"], row["outcome"]),
-                    sizes.get(row["target_key"], 0),
-                    -row["checkpoint"]["comment_pages"]["settlement"]["count_gap"],
-                    row["target_key"],
-                )
-            )
+            # Keep the existing fair order across the cohort. Counting every
+            # post's inventory here can delay each completion decision; rank
+            # only a bounded prefix and leave the remaining candidates eligible.
+            rows = _prioritize_recovery_rows(cur, rows, sizes)
             cur.execute(
                 """select result from social.instagram_ingestion_commands
                 where account=%s and run_id=%s and result->>'window_id'=%s
@@ -195,9 +274,12 @@ def enqueue_next_recovery(store, *, run_id, account, generation, intent_hash, so
                 (account, run_id, window["window_id"]),
             )
             deferred = {row["result"].get("summary_key") for row in cur.fetchall()}
-            cur.execute("""select idempotency_key from social.instagram_ingestion_commands
+            cur.execute(
+                """select idempotency_key from social.instagram_ingestion_commands
                 where account=%s and run_id=%s and idempotency_key=any(%s::text[])
-                and result->'stream_complete'='true'::jsonb""", (account, run_id, list(deferred)))
+                and result->'stream_complete'='true'::jsonb""",
+                (account, run_id, list(deferred)),
+            )
             # A committed summary wins over an uncertain child acknowledgment.
             deferred -= {row["idempotency_key"] for row in cur.fetchall()}
         from trr_backend.ingestion.retained_comment_recovery import (
@@ -439,6 +521,13 @@ def recover_public_target(
         no_improvement = unchanged_passes(checkpoint, target["outcome"])
         if no_improvement >= 2:
             raise Conflict("Two complete recovery passes added no IDs or stronger completeness proof")
+        # Seed a first recovery from its retained observations even when the
+        # target was unresolved. Later incomplete passes do not advance it.
+        progress = (
+            _advance_progress(recovery, strength)
+            if not recovery or target["outcome"] in {"committed", "cached_satisfied"}
+            else _progress_frontier(recovery)
+        )
         _check_root_capacity(cur, run_id, target_key)
         restarts = {
             lane: {
@@ -464,6 +553,7 @@ def recover_public_target(
                 "command_key": idempotency_key,
                 "pass": recovery.get("pass", 0) + 1,
                 "baseline": strength,
+                "progress": progress,
                 "no_improvement_passes": no_improvement,
                 "preserve_saved_rows": True,
             },

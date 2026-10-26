@@ -1,5 +1,6 @@
 """Recovery reporting separates fresh observations, replay and existing IDs."""
 
+import json
 from io import BytesIO
 
 import pytest
@@ -102,6 +103,7 @@ def test_report_deduplicates_baseline_and_separates_receipt_provenance(monkeypat
         "unattributed_top_level_comments": 1,
     }
     assert result["final_acceptance"] is False
+    assert result["target_diagnostics"][0]["diagnostics"] == {"availability": "unknown"}
 
 
 @pytest.mark.parametrize("structured_binding", [False, True])
@@ -122,3 +124,156 @@ def test_media_counts_logical_slots_separately_from_full_object_reads(monkeypatc
     assert result["new_distinct_hosted_urls"] == 1
     assert len(result["full_objects_read"]) == 1 and result["full_objects_read"][0]["bytes"] == 15
     assert result["unverified"] == []
+
+
+def test_report_projects_actual_failure_branch_holds_and_lane_proof(monkeypatch):
+    before, after = snapshot([]), snapshot([])
+    diagnostic = operator.target_diagnostics(
+        {
+            "last_error_code": "activity_failed",
+            "worker_diagnostics": {
+                "last_failure": {
+                    "code": "technical_TimeoutError",
+                    "category": "attempt_deadline",
+                    "exception_class": "TimeoutError",
+                    "owner_generation": 7,
+                    "observed_at": "2026-10-26T20:00:00+00:00",
+                },
+                "committed_pages_since_failure": 3,
+            },
+            "comment_pages": {
+                "reply_access": {
+                    "code": "reply_access_rejected",
+                    "attempts": 8,
+                    "retry_source": "server_retry_after",
+                    "lanes": ["parent"],
+                    "next_attempt_at": "2026-10-26T21:00:00+00:00",
+                },
+                "lanes": {
+                    "__top__": {
+                        "exhausted": True,
+                        "repeated": False,
+                        "started_from_root": True,
+                        "cursors": ["opaque-one", "opaque-two"],
+                    },
+                    "parent": {"exhausted": False, "repeated": True, "cursors": ["opaque-child"]},
+                    "unknown-proof": {"status": "complete", "outcome": "committed"},
+                },
+            },
+            "public_reply_failures": {
+                "parent": {
+                    "code": "source_incomplete",
+                    "technical_hold": True,
+                    "failure_count": 3,
+                    "retry_source": "technical_branch_backoff",
+                }
+            },
+        }
+    )
+    after["targets"][0].update(outcome="unresolved", blocked_reason="reply_access_rejected", diagnostics=diagnostic)
+    monkeypatch.setattr(operator, "connect", lambda: Connection([]))
+    result = operator.report(before, after, {"started_at": "2026-10-26T20:00:00+00:00"})
+    target = result["target_diagnostics"][0]
+    assert target["outcome"] == "unresolved" and target["blocked_reason"] == "reply_access_rejected"
+    assert diagnostic["last_error_code"] == "activity_failed"
+    assert diagnostic["last_failure"]["category"] == "attempt_deadline"
+    assert diagnostic["committed_pages_since_failure"] == 3  # Historical failure survives successful pages.
+    assert diagnostic["reply_access"]["lane_count"] == 1
+    assert diagnostic["reply_access"]["retry_source"] == "server_retry_after"
+    assert diagnostic["public_reply_failures"]["technical_hold"] == 1
+    proof = diagnostic["lane_proof"]
+    assert proof["total"] == 3
+    assert proof["exhausted"] == {"true": 1, "false": 1, "unknown": 1}
+    assert proof["repeated"] == {"true": 1, "false": 1, "unknown": 1}
+    assert proof["started_from_root"] == {"true": 1, "false": 0, "unknown": 2}
+    assert proof["cursor_history"] == {"known_lanes": 2, "entries": 3}
+
+
+def test_diagnostics_distinguishes_old_unknown_metadata_from_recorded_absence():
+    assert operator.target_diagnostics(None) == {"availability": "unknown"}
+    result = operator.target_diagnostics({})
+    assert result["availability"] == "known"
+    assert result["last_failure"] is None
+    assert result["committed_pages_since_failure"] is None
+    assert result["lane_proof"] == {"availability": "absent"}
+    assert result["public_reply_failures"] == {"availability": "absent"}
+    assert result["reply_access"] == {"availability": "absent"}
+
+
+def test_diagnostics_bounds_branch_detail_and_omits_requests_cursors_and_secrets():
+    secret = "https://storage.example/signed?token=private-credential"
+    result = operator.target_diagnostics(
+        {
+            "last_error_code": secret,
+            "worker_diagnostics": {
+                "last_failure": {
+                    "code": secret,
+                    "exception_class": secret,
+                    "category": secret,
+                    "observed_at": secret,
+                    "request": secret,
+                }
+            },
+            "comment_pages": {
+                "reply_access": {"code": "reply_access_rejected", "request": secret, "lanes": [secret]},
+                "lanes": {secret: {"cursors": [secret], "request": secret, "exhausted": False, "repeated": False}},
+            },
+            "public_reply_failures": {
+                str(i): {
+                    "code": "source_incomplete",
+                    "technical_hold": True,
+                    "request": {"cursor": secret},
+                    "failure_count": 3,
+                    "next_attempt_at": secret,
+                }
+                for i in range(105)
+            },
+        }
+    )
+    assert "private-credential" not in json.dumps(result)
+    assert result["last_error_code"] is None
+    assert result["last_failure"]["observed_at"] is None
+    assert result["lane_proof"]["cursor_history"]["entries"] == 1
+    holds = result["public_reply_failures"]
+    assert holds["total"] == holds["technical_hold"] == 105
+    assert len(holds["branches"]) == 100 and holds["branches_truncated"] is True
+
+
+def test_snapshot_projects_checkpoint_before_returning_saved_material(monkeypatch):
+    class SnapshotConnection(Connection):
+        def fetchone(self):
+            return {"account": "bravotv", "intent_hash": operator.INTENT, "execution_placement": "local"}
+
+        def fetchall(self):
+            return next(self.rows)
+
+    secret = "https://source.example/?credential=secret"
+    connection = SnapshotConnection(
+        iter(
+            [
+                [
+                    {
+                        "stage": "comments",
+                        "target_key": "post",
+                        "reporting_checkpoint": {
+                            "last_error_code": "reply_access_rejected",
+                            "comment_pages": {"lanes": {"__top__": {"exhausted": True, "cursors": [secret]}}},
+                            "public_reply_failures": {"parent": {"code": "source_incomplete", "request": secret}},
+                        },
+                    }
+                ],
+                [],
+                [],
+                [],
+                [],
+                [],
+            ]
+        )
+    )
+    monkeypatch.setattr(operator, "connect", lambda: connection)
+    result = operator.snapshot()
+    assert "credential" not in json.dumps(result)
+    target = result["targets"][0]
+    assert "reporting_checkpoint" not in target
+    assert target["diagnostics"]["last_error_code"] == "reply_access_rejected"
+    assert target["diagnostics"]["lane_proof"]["exhausted"]["true"] == 1
