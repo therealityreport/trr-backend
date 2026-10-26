@@ -1941,3 +1941,51 @@ available browser profile was not verified as TRR. No schema migration, paid
 service, account expansion, login fallback, recurring automation, full-history
 or resume-tail release occurred. Relevant software fixes are accepted and
 backend-deployed; January data certification remains blocked as stated above.
+
+
+### Recovery scheduling repair after the bounded run
+
+The actual scheduling defect was a cohort-wide audit barrier in
+`enqueue_next_recovery`: every settled target, including parity and exhausted
+recovery targets, had to finish a current retained audit before any eligible
+count-deficit target could reopen. The bounded run's 32 audits without a queued
+new recovery demonstrated the resulting starvation.
+
+Backend `a1ba18d0` gives eligible deficits priority and processes each target's
+current audit and recovery together. An eligible target with a completed current
+audit can queue its root before unrelated audits. A target without a complete
+current audit still cannot queue; parity and exhausted targets retain offline
+audits as fallback work. Two unchanged passes, root capacity, exact ownership,
+checkpoints, canonical fingerprinting, source gates and inventory proof are
+unchanged. No deficit or overshoot is relabelled complete.
+
+Validation was restricted to existing affected recovery checks and one extension
+of the existing completion case with an unrelated unaudited parity target that
+sorts first. The changed behavior passed in isolated PostgreSQL. No full suite,
+app rebuild, new certifier pass or hour-long collection run was repeated.
+
+Modal v164 deployed at 11:14:41 p.m. New York on October 25 to verified
+`admin-56995 / main / trr-backend-jobs`, tag
+`ig-recovery-order-a1ba18d0fb11`. Maintained readiness and API health passed.
+The changed deployed module hash matched
+`c45b7fe70aa669b10bed6f301130642757906e2491b0239a01057ea791c66ef5`.
+Prior unchanged worker/source evidence was reused; no business I/O occurred in
+the deployed source check and no provider configuration was changed.
+
+Local package `ig-recovery-order-a1ba18d0fb11` replaced idle native worker
+77264 after process/child absence and two absent-grant observations. New worker
+2145 acquired and retained the unique actual grant at 11:15:27 p.m. New York.
+Target fingerprints, request accounting and receipts remained identical through
+the handover. January remains generation 2 cancelled/held; the expired recovery
+window was not extended. The exhausted target DTgXh94kXyo has 14,818 observed
+IDs and 14,390 exhausted lanes but an unknown expected native count; it still
+requires source evidence, not an inferred completeness label.
+
+Current local package plus rollback `ig-reliability-62d504ef4744` are the two
+runnable copies; the superseded a40acced copy moved to actual Trash after
+process/cwd/LaunchAgent/symlink checks. Provider v163 is the corresponding
+rollback. Private follow-through evidence is `order-fix-*` and
+`fix-candidate-manifest.json` in the existing evidence directory. App build
+not applicable to this internal scheduling repair; the prior app acceptance
+remains valid. There is no migration or SQL ownership change. January's data
+gaps and certification result are unchanged.
