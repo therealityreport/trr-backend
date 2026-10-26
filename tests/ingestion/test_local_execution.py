@@ -42,6 +42,8 @@ def database(base_database):
             "20261016173915_instagram_ingestion_execution_placement.sql",
             "20260911121000_instagram_detail_request_lanes.sql",
             "20261022120000_instagram_server_retry_after.sql",
+            "20261023140000_instagram_execution_policy.sql",
+            "20261023180000_instagram_execution_policy_six_eight.sql",
         ):
             cur.execute((ROOT / "supabase/migrations" / migration).read_text())
         cur.execute("""create table social.scrape_jobs(id uuid primary key,run_id uuid,platform text,

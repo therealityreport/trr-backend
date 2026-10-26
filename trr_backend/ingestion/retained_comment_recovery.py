@@ -8,8 +8,14 @@ never changes the comments checkpoint, settlement, or missing/deleted inventory.
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import re
-from contextlib import nullcontext
+import subprocess
+import sys
+import threading
+import time
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID, uuid4
@@ -22,12 +28,79 @@ from trr_backend.ingestion.canonical import CanonicalWriteError, _comment_media_
 from trr_backend.ingestion.comments import COMMENT_PARSER_VERSION, CommentSourceError, parse_comment_evidence
 from trr_backend.ingestion.domain import Conflict, ReplayUnavailable, RunIntent, fingerprint, stable_json
 from trr_backend.ingestion.evidence import Evidence
-from trr_backend.ingestion.persistence import Store, _row
+from trr_backend.ingestion.persistence import Store, _row, _transaction
 from trr_backend.ingestion.replay_commands import ReplayCommands
 from trr_backend.ingestion.validation_gate import require_allowed_intent
 
 VERSION = "instagram-retained-comment-recovery-v1"
 STREAM_BATCH_PAGES = 128
+
+
+class AuditDeadlineError(RuntimeError):
+    pass
+
+
+@contextmanager
+def audit_budget(connection, deadline):
+    timer = None
+    if deadline is not None:
+
+        def cancel():
+            try:
+                connection.cancel()
+            except DatabaseError:
+                pass
+
+        timer = threading.Timer(max(0, deadline - time.monotonic()), cancel)
+        timer.daemon = True
+        timer.start()
+    try:
+        yield
+    finally:
+        if timer is not None:
+            timer.cancel()
+            timer.join(timeout=1)
+
+
+def check_audit_deadline(deadline):
+    if deadline is not None and time.monotonic() >= deadline:
+        raise AuditDeadlineError("Retained audit time budget expired")
+
+
+def bounded_retained_audit(store, *, deadline_monotonic, **binding):
+    """Production audits have a reaped private process, not another coordinator."""
+    if store.transaction is not _transaction:
+        return audit_and_replay_retained(store, deadline_monotonic=deadline_monotonic, **binding)
+    remaining = max(0, deadline_monotonic - time.monotonic())
+    if remaining <= 2:
+        return {"stream_complete": False, "reason": "audit_budget_exhausted", "source_requests": 0}
+    payload = dict(binding, parent_pid=os.getpid(), deadline=deadline_monotonic - 2)
+    child = subprocess.Popen(
+        [sys.executable, "-m", __name__],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        output, _ = child.communicate(json.dumps(payload).encode(), timeout=max(0, remaining - 1))
+        if child.returncode == 0 and len(output) <= 8 * 1024 * 1024:
+            return json.loads(output)
+    except (subprocess.TimeoutExpired, ValueError):
+        pass
+    finally:
+        if child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=0.5)
+    # A lost acknowledgment is not proof of rollback. The caller defers this
+    # exact audit input; ordinary summary/receipt reconciliation remains valid.
+    return {"stream_complete": False, "reason": "audit_deadline_or_acknowledgment_lost", "source_requests": 0}
+
+
 _CANONICAL = """select c.id,c.comment_id,c.parent_comment_external_id,c.parent_comment_id,
     p.comment_id as uuid_parent_native_id,c.media_urls,c.is_missing,c.missing_at,c.deleted_at,
     c.scraped_at,c.last_seen_at
@@ -281,7 +354,9 @@ def _journal(cur, run_id, account, binding, receipts):
     )
 
 
-def audit_and_replay_retained(store, *, run_id, account, generation, target_key, expected_checkpoint_hash):
+def audit_and_replay_retained(
+    store, *, run_id, account, generation, target_key, expected_checkpoint_hash, deadline_monotonic=None
+):
     """Audit every retained scan without changing current traversal coverage.
 
     Invalid ownership/checkpoint requests raise Conflict. Unusable retained
@@ -314,7 +389,12 @@ def audit_and_replay_retained(store, *, run_id, account, generation, target_key,
         "preserved_existing_rows": True,
     }
     try:
-        with store.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        with (
+            store.transaction() as conn,
+            audit_budget(conn, deadline_monotonic),
+            conn.cursor(cursor_factory=RealDictCursor) as cur,
+        ):
+            check_audit_deadline(deadline_monotonic)
             cur.execute("set local lock_timeout='2s'")
             run = store._execution_run(cur, str(run_id), account, shared_fence=True)
             intent = RunIntent.from_payload(run["intent"])
@@ -392,6 +472,7 @@ def audit_and_replay_retained(store, *, run_id, account, generation, target_key,
                 stream.itersize = STREAM_BATCH_PAGES
                 stream.execute(_STREAM, (str(run_id), target_key))
                 for row in stream:
+                    check_audit_deadline(deadline_monotonic)
                     historical = (row["committed_at"], row["page_id"]) < (root_row["committed_at"], root_row["page_id"])
                     receipt = {
                         "version": VERSION,
@@ -493,6 +574,7 @@ def audit_and_replay_retained(store, *, run_id, account, generation, target_key,
                     except (ReplayUnavailable, CommentSourceError, ValueError, TypeError, KeyError):
                         receipt["reason"] = "retained_payload_unavailable_or_invalid"
                     receipts.append(receipt)
+            check_audit_deadline(deadline_monotonic)
             _journal(cur, str(run_id), account, binding, receipts)
             report.update(
                 stream_complete=True,
@@ -516,8 +598,9 @@ def audit_and_replay_retained(store, *, run_id, account, generation, target_key,
             report["audit_journal_entries"] = len(receipts)
             report["canonical_inventory_sha256"] = canonical_inventory_fingerprint(cur, post["id"])
             _write_summary(cur, report, binding)
+            check_audit_deadline(deadline_monotonic)
             return report
-    except DatabaseError as error:
+    except (DatabaseError, AuditDeadlineError) as error:
         # The outer Store transaction rolls back every page and receipt. No
         # partial recoveries or successful stream proof survive that rollback.
         report.update(
@@ -532,3 +615,21 @@ def audit_and_replay_retained(store, *, run_id, account, generation, target_key,
             unresolved_discrepancies=[],
         )
         return report
+
+
+if __name__ == "__main__":
+    payload = json.loads(sys.stdin.buffer.read(65537))
+    expected_parent = payload.pop("parent_pid")
+    hard_deadline = payload.pop("deadline")
+
+    def enforce_lifetime():
+        while os.getppid() == expected_parent and time.monotonic() < hard_deadline:
+            time.sleep(0.05)
+        os._exit(125)
+
+    threading.Thread(target=enforce_lifetime, daemon=True).start()
+    result = audit_and_replay_retained(
+        Store(execution_placement="local"), deadline_monotonic=hard_deadline - 0.25, **payload
+    )
+    projection = {key: value for key, value in result.items() if key not in {"pages", "unresolved_discrepancies"}}
+    print(json.dumps(projection), flush=True)

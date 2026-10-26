@@ -125,6 +125,11 @@ def run_ingestion_activity(
     # One absolute kernel clock bounds spawn, child startup, resume and source.
     # Never inherit a stale deadline from this coordinator's own environment.
     activity_deadline = time.monotonic() + timeout
+    if execution_placement == "local" and os.getenv("TRR_INSTAGRAM_RECOVERY_WINDOW_ID"):
+        remaining = float(os.environ["TRR_INSTAGRAM_LOCAL_WORKER_DEADLINE_AT"]) - time.time()
+        if remaining <= 0:
+            return {"outcome": "fenced", "code": "bounded_recovery_expired"}
+        activity_deadline = min(activity_deadline, time.monotonic() + remaining)
     child_env = dict(os.environ, **{ACTIVITY_DEADLINE_ENV: repr(activity_deadline)})
     child = subprocess.Popen(
         argv,

@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping
 from contextlib import nullcontext
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -99,7 +99,132 @@ class Store:
     def _execution_run(self, cur, run_id: str, account: str, *, shared_fence: bool = False) -> dict[str, Any]:
         run = self._run(cur, run_id, account, shared_fence=shared_fence)
         self.check_placement(run)
+        if run["account"] == "bravotv" and run.get("execution_placement") == "local":
+            from trr_backend.ingestion.bounded_recovery import require_window
+
+            require_window(cur, run)
         return run
+
+    def resume_bounded_recovery_window(
+        self,
+        run_id,
+        account,
+        *,
+        expected_generation,
+        expected_intent_hash,
+        expected_workflow_version,
+        source_revision,
+        initiated_by,
+        expected_hold_reason="bounded_recovery_window_expired",
+    ):
+        """Resume the exact held public January run once, for one hour only."""
+        from trr_backend.ingestion.bounded_recovery import window_key
+
+        if type(expected_generation) is not int or expected_generation < 1:
+            raise ValueError("An exact positive generation is required")
+        if not re.fullmatch(r"[a-f0-9]{64}", expected_intent_hash):
+            raise ValueError("An exact intent digest is required")
+        if expected_hold_reason != "bounded_recovery_window_expired":
+            raise ValueError("Only the expired bounded recovery hold may be released")
+        if not all(
+            isinstance(v, str) and 0 < len(v.strip()) <= 200
+            for v in (source_revision, initiated_by, expected_workflow_version)
+        ):
+            raise ValueError("Source, workflow and operator identities are required")
+        generation = expected_generation + 1
+        key = window_key(run_id, generation)
+        command = {
+            "command": "resume_bounded_recovery_window",
+            "run_id": str(run_id),
+            "account": account,
+            "expected_generation": expected_generation,
+            "expected_intent_hash": expected_intent_hash,
+            "expected_workflow_version": expected_workflow_version,
+            "source_revision": source_revision,
+            "initiated_by": initiated_by,
+            "expected_hold_reason": expected_hold_reason,
+            "duration_seconds": 3600,
+            "priority": "comments_first",
+        }
+        command_hash = fingerprint(command)
+        with self.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("select pg_advisory_xact_lock(hashtextextended(%s,0))", (f"instagram-command:{account}:{key}",))
+            previous = _row(
+                cur,
+                """select command_hash,result from social.instagram_ingestion_commands
+                where account=%s and idempotency_key=%s""",
+                (account, key),
+            )
+            if previous:
+                if previous["command_hash"] != command_hash:
+                    raise Conflict("Recovery window identity belongs to another authorization")
+                return previous["result"]
+            # Serialize account capacity with existing launch/control policy.
+            cur.execute(
+                "select pg_advisory_xact_lock(hashtextextended(%s,0))",
+                (f"instagram-ingestion-canary:{expected_workflow_version}",),
+            )
+            run = self._run(cur, run_id, account)
+            intent = RunIntent.from_payload(run["intent"])
+            self.check_placement(run)
+            if (
+                account != "bravotv"
+                or run["state"] != "cancelled"
+                or run["generation"] != expected_generation
+                or run.get("execution_hold_reason") != expected_hold_reason
+                or run.get("execution_placement") != "local"
+                or run["intent_hash"] != expected_intent_hash
+                or intent.digest != expected_intent_hash
+                or run["engine"] != "dbos"
+                or run["workflow_version"] != expected_workflow_version
+                or intent.account != account
+                or intent.action != "backfill"
+                or Stage.COMMENTS not in intent.selected_tasks
+                or intent.scope != "bounded_window"
+                or intent.date_start != datetime(2026, 1, 1, tzinfo=UTC)
+                or intent.date_end != datetime(2026, 2, 1, tzinfo=UTC)
+                or intent.effective_source_profile.access_mode != "public"
+            ):
+                raise Conflict("Recovery requires the exact held local public January run")
+            busy = _row(
+                cur,
+                """select run_id from social.instagram_ingestion_runs
+                where account=%s and run_id<>%s and state in ('queued','running','blocked','failed','cancelled')
+                and not (state='cancelled' and execution_hold_reason is not null) limit 1""",
+                (account, run_id),
+            )
+            if busy:
+                raise Conflict("Another resumable run occupies this account")
+            self._expire_drained_dispatches(cur, run, expected_generation)
+            now = _row(cur, "select clock_timestamp() as now")["now"]
+            cur.execute(
+                """update social.instagram_ingestion_runs set execution_hold_reason=null,
+                state='queued',generation=%s,execution_selection=null,updated_at=clock_timestamp()
+                where run_id=%s""",
+                (generation, run_id),
+            )
+            cur.execute(
+                """update social.instagram_ingestion_targets set owner_token=null,
+                owner_expires_at=null,owner_started_at=null where run_id=%s""",
+                (run_id,),
+            )
+            cur.execute("update social.scrape_runs set status='queued',cancelled_at=null where id=%s", (run_id,))
+            execution_id = self._outbox(cur, run_id, generation, run["workflow_version"])
+            result = {
+                **command,
+                "window_id": key,
+                "generation": generation,
+                "state": "queued",
+                "started_at": now.isoformat(),
+                "deadline_at": (now + timedelta(seconds=3600)).isoformat(),
+                "execution_id": execution_id,
+            }
+            cur.execute(
+                """insert into social.instagram_ingestion_commands
+                (account,idempotency_key,command_hash,run_id,result) values(%s,%s,%s,%s,%s::jsonb)""",
+                (account, key, command_hash, run_id, stable_json(result)),
+            )
+            return result
 
     def command_result(self, account: str, key: str, command_hash: str) -> dict[str, Any] | None:
         """Resolve an accepted command before mutable launch prerequisites.
@@ -621,15 +746,30 @@ class Store:
             run = self._execution_run(cur, run_id, account)
             if run["generation"] != generation or run["state"] not in {"queued", "running"}:
                 raise LostOwnership("Run execution is no longer current")
+            window_deadline = (run.get("_bounded_window") or {}).get("deadline_at")
+            if stage == Stage.MEDIA and window_deadline:
+                ready = _row(
+                    cur,
+                    """select target_key from social.instagram_ingestion_targets
+                    where run_id=%s and stage='comments' and outcome='unresolved'
+                    and blocked_reason is null and attempts<max_attempts
+                    and (next_attempt_at is null or next_attempt_at<=clock_timestamp())
+                    and (owner_expires_at is null or owner_expires_at<=clock_timestamp()) limit 1""",
+                    (run_id,),
+                )
+                if ready:
+                    return None
             return _row(
                 cur,
                 """update social.instagram_ingestion_targets set owner_token=%s,
-                owner_generation=owner_generation+1,owner_expires_at=clock_timestamp()+make_interval(secs => %s),
+                owner_generation=owner_generation+1,
+                owner_expires_at=least(clock_timestamp()+make_interval(secs => %s),
+                    coalesce(%s::timestamptz,'infinity'::timestamptz)),
                 owner_started_at=null where run_id=%s and stage=%s and target_key=%s
                 and outcome='unresolved' and blocked_reason is null and attempts<max_attempts
                 and (next_attempt_at is null or next_attempt_at<=clock_timestamp())
                 and (owner_expires_at is null or owner_expires_at<=clock_timestamp()) returning *""",
-                (str(uuid4()), lease_seconds, run_id, stage.value, target_key),
+                (str(uuid4()), lease_seconds, window_deadline, run_id, stage.value, target_key),
             )
 
     def acquire(
@@ -707,6 +847,11 @@ class Store:
         if owned["stage"] != Stage.COMMENTS or connection.autocommit:
             raise ValueError("Atomic comment admission requires a transaction")
         with connection.cursor() as cur:
+            deadline = None
+            if self.execution_placement == "local":
+                with connection.cursor(cursor_factory=RealDictCursor) as window_cur:
+                    run = self._execution_run(window_cur, owned["run_id"], owned["account"], shared_fence=True)
+                    deadline = (run.get("_bounded_window") or {}).get("deadline_at")
             cur.execute(
                 """with owner_run as materialized (
                     select run_id,generation,state,coalesce(to_jsonb(r)->>'execution_placement','modal') as placement
@@ -719,7 +864,8 @@ class Store:
                                and placement=%s) returning target_key
                 ) """
                 + lane_update
-                + " and exists(select 1 from counted_target) returning identity_key",
+                + " and exists(select 1 from counted_target where "
+                + " (%s::timestamptz is null or clock_timestamp()<%s::timestamptz)) returning identity_key",
                 (
                     owned["run_id"],
                     owned["account"],
@@ -730,6 +876,8 @@ class Store:
                     owned["generation"],
                     self.execution_placement,
                     *lane_params,
+                    deadline,
+                    deadline,
                 ),
             )
             if cur.fetchone() is None:

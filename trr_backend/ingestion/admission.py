@@ -199,6 +199,20 @@ class Admission:
                 (account, self.identity_key, run_id, account),
             )
             row = cur.fetchone()
+            if row and row.get("run") and row["run"].get("execution_placement") == "local":
+                from trr_backend.ingestion.bounded_recovery import require_window
+
+                require_window(cur, row["run"], environ=self.env)
+                if row["run"].get("_bounded_window"):
+                    cur.execute(
+                        """select exists(select 1 from social.instagram_ingestion_targets
+                        where run_id=%s and stage='comments' and outcome='unresolved'
+                        and blocked_reason is null and attempts<max_attempts
+                        and (next_attempt_at is null or next_attempt_at<=clock_timestamp())
+                        and (owner_expires_at is null or owner_expires_at<=clock_timestamp())) as ready""",
+                        (run_id,),
+                    )
+                    row["run"]["_comments_ready"] = cur.fetchone()["ready"]
         if row is None:
             raise ServiceUnavailableError("Capacity snapshot is unavailable")
         return dict(row)
@@ -290,6 +304,8 @@ class Admission:
                 from trr_backend.ingestion.execution_policy import effective_comments_limit_from_run
 
                 requested = effective_comments_limit_from_run(run, run.get("execution_policy"))
+            if stage == "media_mirror" and run.get("_bounded_window") and run.get("_comments_ready"):
+                return False
             return self._fits(snapshot, stage, account, run_id=run_id, requested=requested) and self._probe()
         except Exception:
             return False

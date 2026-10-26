@@ -7,6 +7,7 @@ as fresh coverage or deletes a canonical comment.
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -165,6 +166,40 @@ def enqueue_next_recovery(store, *, run_id, account, generation, intent_hash, so
         )
         rows = cur.fetchall()
         rows.sort(key=lambda row: not _can_recover_gap(row["checkpoint"], row["outcome"]))
+        window = run.get("_bounded_window")
+        # _execution_run also applies the durable window and worker binding.
+        if store.execution_placement == "local":
+            from trr_backend.ingestion.bounded_recovery import require_window
+
+            window = require_window(cur, dict(run, run_id=run_id, account=account))
+        if window:
+            rows = [row for row in rows if _can_recover_gap(row["checkpoint"], row["outcome"])]
+            cur.execute(
+                """select target_key,count(*) as pages from social.instagram_ingestion_comment_pages
+                where run_id=%s group by target_key""",
+                (run_id,),
+            )
+            sizes = {row["target_key"]: row["pages"] for row in cur.fetchall()}
+            rows.sort(
+                key=lambda row: (
+                    unchanged_passes(row["checkpoint"], row["outcome"]),
+                    sizes.get(row["target_key"], 0),
+                    -row["checkpoint"]["comment_pages"]["settlement"]["count_gap"],
+                    row["target_key"],
+                )
+            )
+            cur.execute(
+                """select result from social.instagram_ingestion_commands
+                where account=%s and run_id=%s and result->>'window_id'=%s
+                and result->>'command'='bounded_audit_deferred'""",
+                (account, run_id, window["window_id"]),
+            )
+            deferred = {row["result"].get("summary_key") for row in cur.fetchall()}
+            cur.execute("""select idempotency_key from social.instagram_ingestion_commands
+                where account=%s and run_id=%s and idempotency_key=any(%s::text[])
+                and result->'stream_complete'='true'::jsonb""", (account, run_id, list(deferred)))
+            # A committed summary wins over an uncertain child acknowledgment.
+            deferred -= {row["idempotency_key"] for row in cur.fetchall()}
         from trr_backend.ingestion.retained_comment_recovery import (
             audit_and_replay_retained,
             canonical_inventory_fingerprints,
@@ -173,8 +208,11 @@ def enqueue_next_recovery(store, *, run_id, account, generation, intent_hash, so
         )
 
         parser_hash = parser_implementation_fingerprint()
-        canonical_hashes = canonical_inventory_fingerprints(cur, [row["target_key"] for row in rows])
+        canonical_hashes = {} if window else canonical_inventory_fingerprints(cur, [row["target_key"] for row in rows])
+        chosen = []
         for row in rows:
+            if window:
+                canonical_hashes.update(canonical_inventory_fingerprints(cur, [row["target_key"]]))
             row["checkpoint_hash"] = fingerprint(row["checkpoint"])
             row["summary_key"] = retained_audit_summary_key(
                 run_id=run_id,
@@ -185,6 +223,11 @@ def enqueue_next_recovery(store, *, run_id, account, generation, intent_hash, so
                 parser_hash=parser_hash,
                 canonical_hash=canonical_hashes.get(row["target_key"]),
             )
+            if not window or row["summary_key"] not in deferred:
+                chosen.append(row)
+                if window:
+                    break
+        rows = chosen
         # One combined lookup, rather than one roundtrip per settled target.
         cur.execute(
             """select idempotency_key,result from social.instagram_ingestion_commands
@@ -195,15 +238,50 @@ def enqueue_next_recovery(store, *, run_id, account, generation, intent_hash, so
     for row in rows:
         summary = summaries.get(row["summary_key"])
         if summary is None or summary.get("stream_complete") is not True:
-            audit = audit_and_replay_retained(
+            budget = {}
+            if window:
+                remaining = (datetime.fromisoformat(window["deadline_at"]) - datetime.now(UTC)).total_seconds()
+                budget["deadline_monotonic"] = time.monotonic() + max(0, min(60, remaining))
+            if window:
+                from trr_backend.ingestion.retained_comment_recovery import bounded_retained_audit
+
+                audit_operation = bounded_retained_audit
+            else:
+                audit_operation = audit_and_replay_retained
+            audit = audit_operation(
                 store,
                 run_id=run_id,
                 account=account,
                 generation=generation,
                 target_key=row["target_key"],
                 expected_checkpoint_hash=row["checkpoint_hash"],
+                **budget,
             )
             if audit.get("stream_complete") is not True:
+                if window:
+                    result = {
+                        "command": "bounded_audit_deferred",
+                        "status": "bounded_audit_deferred",
+                        "window_id": window["window_id"],
+                        "target_key": row["target_key"],
+                        "checkpoint_hash": row["checkpoint_hash"],
+                        "summary_key": row["summary_key"],
+                        "reason": audit.get("reason", "incomplete_audit"),
+                    }
+                    with store.transaction() as conn, conn.cursor() as cur:
+                        cur.execute(
+                            """insert into social.instagram_ingestion_commands
+                            (account,idempotency_key,command_hash,run_id,result) values(%s,%s,%s,%s,%s::jsonb)
+                            on conflict do nothing""",
+                            (
+                                account,
+                                "bounded-audit:" + fingerprint(result),
+                                fingerprint(result),
+                                run_id,
+                                stable_json(result),
+                            ),
+                        )
+                    return result
                 # A database/local failure never authorizes a source retry.
                 raise Conflict("Retained offline audit prerequisite is incomplete")
             return {

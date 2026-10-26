@@ -336,6 +336,7 @@ def run_partition(
     effective_comments_limit=None,
     before_finalize=None,
     on_completed=None,
+    before_recovery=None,
 ):
     """Mirror DBOSAdapter.partition without the SDK; return how the partition ended."""
     if not hasattr(dispatch, "media_fairness"):
@@ -364,6 +365,17 @@ def run_partition(
                 break
             dispatch.wait()
         dispatch.latest = None
+        if before_recovery is not None:
+            while True:
+                if abort.is_set():
+                    raise Interrupted
+                prepared = call_in_phase(abort, "before_finalize", before_recovery, item)
+                if not prepared or prepared.get("status") not in {
+                    "retained_audit_completed", "bounded_audit_deferred", "productive_budget_extended"
+                }:
+                    break
+                # Preparation has its own command journal. It must not consume
+                # a scheduling ordinal without persisting a partition decision.
         operation = "decision"
         try:
             if dispatch.active:
@@ -458,6 +470,8 @@ def run_worker(
     on_completed=None,
     on_started=None,
     allowed_run_id=None,
+    allowed_generation=None,
+    before_recovery=None,
 ):
     """Serve local runs until abort. Returns a JSON-safe summary.
 
@@ -476,6 +490,8 @@ def run_worker(
             # Both dispatch methods acknowledge only after their callback
             # returns. Raise before business work to leave this row untouched.
             raise ValueError("The local worker run fence rejected unrelated work")
+        if allowed_generation is not None and item.get("generation") != allowed_generation:
+            raise LostOwnership("The local worker generation fence rejected stale work")
 
     def seed(item):
         require_allowed_run(item)
@@ -492,6 +508,7 @@ def run_worker(
             effective_comments_limit=effective_comments_limit,
             before_finalize=before_finalize,
             on_completed=on_completed,
+            before_recovery=before_recovery,
         )
 
     partitions = 0
@@ -576,6 +593,10 @@ def main(argv=None):
         role = os.environ["TRR_INSTAGRAM_DBOS_RUNTIME_ROLE"].strip()
         run_fence = os.getenv("TRR_INSTAGRAM_LOCAL_WORKER_RUN_ID", "").strip()
         allowed_run_id = str(UUID(run_fence)) if run_fence else None
+        generation_value = os.getenv("TRR_INSTAGRAM_LOCAL_WORKER_GENERATION", "").strip()
+        allowed_generation = int(generation_value) if generation_value else None
+        if allowed_generation is not None and (allowed_generation < 1 or not allowed_run_id):
+            raise ValueError("The local worker generation requires an exact run fence")
         recovery_run = os.getenv("TRR_INSTAGRAM_JANUARY_RECOVERY_RUN_ID", "").strip()
         if allowed_run_id is not None and recovery_run and str(UUID(recovery_run)) != allowed_run_id:
             raise ValueError("The January recovery run must match the local worker run fence")
@@ -621,9 +642,9 @@ def main(argv=None):
         dispatch = LocalDispatch(run_ingestion_activity, abort)
         scheduler = Scheduler(store, admit=Admission().admit, dispatch=dispatch, reconcile=lambda _: "unknown")
 
-        def before_finalize(item, *, stop):
+        def recovery_step(item, *, stop="blocked"):
             if not recovery_run or item["run_id"] != recovery_run:
-                return False
+                return None
             from trr_backend.ingestion.comment_recovery import enqueue_next_recovery
 
             result = enqueue_next_recovery(
@@ -641,6 +662,15 @@ def main(argv=None):
                     # Capacity denial is nonterminal. Recheck at the next
                     # ordinal without spinning or losing abort responsiveness.
                     dispatch.wait(WAIT_RECHECK_SECONDS)
+            return result
+
+        def before_finalize(item, *, stop):
+            result = recovery_step(item, stop=stop)
+            if result is None and os.getenv("TRR_INSTAGRAM_RECOVERY_WINDOW_ID"):
+                # Lifecycle settlement is not January acceptance. Leave this
+                # generation active for the operator's exact stop/hold command.
+                dispatch.wait(5)
+                return True
             return result is not None
 
         def certify_completed(item):
@@ -715,8 +745,10 @@ def main(argv=None):
             workflow_version=WORKFLOW_VERSION,
             stop_requested=stop_requested,
             allowed_run_id=allowed_run_id,
+            allowed_generation=allowed_generation,
             effective_comments_limit=effective_comments_limit if policy or max_activities is not None else None,
             before_finalize=before_finalize if recovery_run else None,
+            before_recovery=recovery_step if os.getenv("TRR_INSTAGRAM_RECOVERY_WINDOW_ID") else None,
             on_completed=certify_completed if recovery_run else None,
             on_started=resume_certification if recovery_run else None,
             on_cycle=lambda ran: ran and print(json.dumps({"status": "partition", "count": ran}), flush=True),

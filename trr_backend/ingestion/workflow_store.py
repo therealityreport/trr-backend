@@ -444,11 +444,13 @@ class WorkflowStore(Store):
                             # Receipts may arrive before lease expiry. Poll active
                             # workers while preserving exact persisted cooldowns.
                             result = {"kind": "wait", "seconds": min(1.0, seconds) if summary["active"] else seconds}
-            if (
-                (item.get("prefer_media") or result["kind"] == "blocked")
-                and phase
-                and phase["stage"] in {"comments", "media"}
-            ):
+            window = run.get("_bounded_window")
+            media_due = (
+                result["kind"] in {"wait", "blocked"}
+                if window
+                else item.get("prefer_media") or result["kind"] == "blocked"
+            )
+            if media_due and phase and phase["stage"] in {"comments", "media"}:
                 # A drained batch can yield one media turn. A blocked phase
                 # must also exhaust bounded media scans before terminal recovery.
                 media_result = self._eligible_media(
