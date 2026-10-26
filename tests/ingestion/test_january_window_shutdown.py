@@ -47,6 +47,20 @@ def test_bootout_error_acknowledgment_with_unloaded_service_is_reconciled(monkey
     assert [args[1] for args in calls] == ["bootout", "print"]
 
 
+def test_bootout_waits_for_asynchronous_launchctl_unregistration(monkeypatch):
+    calls = []
+    outcomes = iter([0, 0, 113])
+
+    def command(args, **_):
+        calls.append(args[1])
+        return SimpleNamespace(returncode=next(outcomes))
+
+    monkeypatch.setattr(operator.subprocess, "run", command)
+    monkeypatch.setattr(operator.time, "sleep", lambda _: None)
+    assert operator.stop_native("gui/test/worker") is True
+    assert calls == ["bootout", "print", "print"]
+
+
 def test_darwin_eperm_on_exited_child_still_reaps_and_proves_absence(monkeypatch):
     waits = []
     child = SimpleNamespace(pid=123, returncode=125, wait=lambda **kwargs: waits.append(kwargs))

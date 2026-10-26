@@ -118,7 +118,12 @@ def lease_record(path, pid):
 
 def stop_native(label):
     subprocess.run(["launchctl", "bootout", label], capture_output=True)
-    state = subprocess.run(["launchctl", "print", label], capture_output=True)
+    end = time.monotonic() + 5
+    while True:
+        state = subprocess.run(["launchctl", "print", label], capture_output=True)
+        if state.returncode != 0 or time.monotonic() >= end:
+            break
+        time.sleep(0.1)
     if state.returncode == 0:
         raise RuntimeError("Native bootout is not confirmed")
     # A failed acknowledgment after unregistering is a proved stop, not a
