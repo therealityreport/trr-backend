@@ -1790,3 +1790,154 @@ require-in-the-middle bundling warning. No app deployment is implied.
 Shared behavior and optional process settings are documented in
 `../../../docs/workspace/instagram-ingestion-reliability.md`. There is no SQL
 migration or change of SQL ownership. Runtime follow-through is recorded below.
+
+
+### Verified reliability release v162 and bounded local run in progress
+
+Backend commit `47249752` contains the reliability repair; app commit `51d9cf98`
+contains bounded launch/status behavior and generated contract updates. Workspace
+commit `9a71c20` records the shared contract. Maintenance CLI follow-up `49a3bcf9`
+repairs Darwin child reaping; that script is run from the maintained checkout and
+is outside Modal's mounted ingestion worker surface. No pushes were performed.
+
+Local package `ig-reliability-a40acced8dfb` freezes commit `47249752` with 956
+Python file hashes. Old worker 4633 had no live descendants at handover, exited
+through its supported LaunchAgent bootout, and two observations showed its grant
+absent before replacement. At 01:10:24 UTC on October 26 (9:10 p.m. New York on
+October 25), new worker 37673 acquired backend 429802. Its process-local fence
+is the existing January run, maximum six activities, two reply pages, an absolute
+one-hour controller deadline including preparation, and parent-loss shutdown.
+It is manually supervised once; no automatic controller restart was created.
+Fresh retained-page audits have committed under the new full-row cache binding.
+
+The first auxiliary count witness completed for DTLbQv6EdE1: native count 563,
+one source send, capture 01:09:49 UTC, private artifact
+`count-witness-4c71957470f744d79562300ff87a9bd1.json`. It confirms that the
+563/571 source/saved comparison remains unresolved. The operation reached its
+90-second limit before completing the remaining witnesses. Its independent child
+watchdog exited and a subsequent process inventory found no witness child. The
+original CLI cleanup reported EPERM/reaped=false. An offline real-Darwin probe
+reproduced group-signal EPERM on an exited, unreaped same-UID child; the kernel
+reason remains unknown. `49a3bcf9` now attempts both waits despite signal errors
+and reports reaping separately from group-signalling uncertainty. Existing
+artifacts were preserved; uncertain source attempts were not repeated.
+
+Cloud v162 deployed at 01:14:14 UTC to the verified
+`admin-56995 / main / trr-backend-jobs`, tag
+`ig-reliability-a40acced8dfb`. Maintained explicit-main readiness and API
+health/cold-start canary passed (HTTP 200). Fresh container
+`ta-01M5TWDJRMP8G58CYYXTN5K1MR` matched all 668 backend/API Python hashes and
+passed overshoot/hold-schema smoke checks without source or database I/O. The
+actual deployed comments worker rejected an incomplete reservation before
+business I/O in call `fc-01M5TWG92FEM0FVQN5JQTFR3QS`. Its short-lived container
+ended before a separate hash read, so no worker-container hash attestation is
+claimed. Existing deployment v161 and local package
+`ig-local-public-parent-fa955e20db59` remain rollback references. Superseded
+local v161 and local-reply-holds copies were moved to actual Trash after
+process/dependency checks; current plus rollback are retained.
+
+No full-history/resume-tail release, authenticated fallback, scheduled task, SQL
+migration, app production deployment, or hosted-byte completeness claim occurred.
+Final bounded-run outcome, certification and native-service restoration follow
+below. Private evidence: `~/.codex/tmp/ig-reliability-01a17583/`.
+
+
+### Consolidated audit findings and repair evidence (current task)
+
+| Priority | Demonstrated behavior and evidence | Repair and validation |
+| --- | --- | --- |
+| P1 | A pooled backend could already hold the same advisory key; a connectivity-only heartbeat did not prove continued ownership. The recorded heartbeat exit's underlying cause remains unproven. | Reject reentrant admission before acquiring; qualify the actual server PID and exact grant on every heartbeat. Isolated PostgreSQL acquisition/loss/replacement tests and focused local-execution checks pass. Heartbeat deadlines were not increased. |
+| P1 | Lease startup could block before normal work, and a real full stdout pipe reproduced an unsafe daemon shutdown. Supervisor loss also exposed unbounded lifetimes. | Bound startup; use a raw diagnostic write with bounded join; enforce independent worker/child deadlines and actual parent identity. Real subprocess shutdown, blocked-output, cancellation and parent-loss regressions pass. |
+| P1 | Saved overshoot could be labelled parity, and historical committed receipts could remain candidate-complete. | Require equality and report overshoot separately. Settlement and legacy-receipt regressions pass; previous data and expectations stay intact. |
+| P1 | Retained-audit cache keys did not change for later canonical mutations. | Bind complete canonical rows, including tombstones and multiplicity, using server-side hashes. Isolated reconciliation, parent lineage, attachment preservation, transaction rollback and canonical-mutation invalidation tests pass. Current live audits do not manufacture new coverage. |
+| P1 | Legacy HTTP mutations and internal catalog/comments launch helpers could bypass configured v2 ownership. Direct caller inventory included cursor CLI, deferred catalog and streaming child launch paths. | Guard both HTTP admission and all three new-run helpers. Nine internal ownership/configuration cases pass; eight prior HTTP cases remain valid. Fresh local and deployed configured-provider smoke rejects before probes or persistence. Execution of already accepted jobs is preserved. |
+| P1 | Capability fallback and lifecycle copy could present a saved/resolved pass as complete or permit a legacy new launch; holds were hidden. | Keep capability failures visible, use bounded v2 launches, expose optional execution_hold_reason, prioritize unresolved diagnostics, and describe unavailable outcomes as resolved. Backend/API checks, affected app/hook/proxy checks, contracts, typecheck, quick validation and approved production build pass. |
+| P2 | Settled posts had no safe bounded count-refresh operator. Live witness supervision exposed Darwin group-signal EPERM after child exit. | Add auxiliary public-only witnesses with snapshot binding and budgets; retain observations without changing settlements. Thirty-six core cases plus focused deadline/cleanup/process cases pass. Actual reaping now proceeds even when group signalling fails; no uncertain source attempt is automatically repeated. |
+| Data gate | Earlier evidence recorded 235 inventory rejections, two incomplete inventories and three count overshoots; those historical counts are not reasserted as current measurements. | Strict media receipt/canonical equality stays enabled. Current certification and final read-only diagnostics below own remaining gap counts. No union of unsupported inventories or forced parity is permitted. |
+
+Final caller-boundary repair is backend commit `62d504ef`. Frozen package
+`ig-reliability-62d504ef4744` contains 956 Python hashes. Modal v163 deployed
+at 01:50:33 UTC on October 26 to `admin-56995 / main / trr-backend-jobs`.
+Maintained explicit-main readiness and the health/cold-start canary passed.
+Container `ta-01M5TYEF9QMPN6631V5PHXSKCR` matched all 668 API/backend Python
+hashes and all three internal launch guards rejected configured v2 ownership
+before business I/O. The smoke changed configuration only inside its short-lived
+exec process; provider flags, secrets and January execution placement were not
+changed. v162 remains available for provider rollback.
+
+
+### Final bounded-window result and restoration
+
+The original controller stopped new dispatch at 02:08:48 UTC on October 26
+(10:08 p.m. New York on October 25), one hour after its start. Worker 37673
+exited with code 125 after the existing 15-second cleanup allowance; total
+controller elapsed including cleanup was 3,615.09 seconds. The final abort
+reported `signal_requested`, foreground `before_finalize`, and an 84 ms heartbeat
+age. This was the authorized deadline stop, not a newly observed heartbeat
+failure. The previous worker and descendants were absent and its coordinator
+grant was absent before any replacement dispatch. There was no new controller
+or automatic extension.
+
+The run completed 32 retained audits over 3,908 pages: 31 matched; DTojfyxDeaq
+requires fresh source evidence after 86 retained pages. No native comment IDs
+were recovered. Ingestion-target request accounting did not increase during the
+window. Saved-pass counts remain 285 committed comments / one unresolved
+(DTgXh94kXyo), and 49 committed media / 237 unresolved. Post details remain
+285 cached-satisfied plus one committed; listing remains 245 committed pages.
+These lifecycle counts do not certify source or hosted-media completeness.
+
+The maintained certifier ran after drain and before the stop-generation change.
+`final-certificate.json` certifies the examined generation 1 as **blocked**, with
+final_acceptance=false: 269 known deficit posts total 25,382 comments. It used
+one read-only snapshot; deep traversal, listing, posts, media, hosted-byte and
+unchanged-evidence gates remain pending because of the known source gap.
+`remaining-comment-gaps.csv` gives each shortcode, expected/saved counts and gap;
+`final-target-diagnostics.json` preserves all target status/count evidence.
+Both are under the private evidence directory recorded above. The three legacy
+overshoots remain 563/571 (DTLbQv6EdE1), 300/317 (DTvYo3MkcvI) and 349/382
+(DTysU1Nj5LQ). Only the first obtained a fresh witness in this window. The other
+two witnesses and the five-post live acceptance sequence did not finish; the
+window was largely consumed validating invalidated retained-audit caches. No
+fresh-source success or media acceptance is inferred from those audits.
+
+To enforce the end of the authorization, the existing fenced cancellation and
+hold commands stopped this exact local run at generation 2 with
+`bounded_recovery_window_expired`. This is an execution fence, not deletion of
+saved work. Its fingerprint of all 1,103 target rows excluding cleared owner
+fields stayed identical, including all 156,612 accounted target requests,
+checkpoints, outcomes, attempts and waits. All 1,033 immutable receipts remained.
+The focused isolated PostgreSQL hold-preservation/idempotency test passed. The
+certificate remains explicitly bound to generation 1 before this lifecycle
+change. An ordinary worker cannot extend this held run.
+
+The existing native LaunchAgent was restored once at 02:09:33 UTC using package
+`ig-reliability-62d504ef4744` / backend `62d504ef4744`, PID 77264. Its unique
+grant backend is 429802. The pooler reused the previous numerical backend PID;
+that number alone was not qualification. Two absent-grant observations preceded
+startup, the new process passed pre-acquisition/reentrant-grant checks and actual
+server acquisition, and two subsequent live process/grant observations passed.
+The final state check still shows generation 2 cancelled/held, unchanged target
+fingerprint and receipts, and the unique live native lease. Native service
+RunAtLoad/KeepAlive/Standard/throttle settings are preserved. January root
+callbacks and manual process-local recovery limits were removed from normal
+service startup; the durable run hold prevents resumed January work.
+
+Current and rollback copies are now exactly two: local current
+`ig-reliability-62d504ef4744`, rollback `ig-reliability-a40acced8dfb` (v162).
+The superseded `ig-local-public-parent-fa955e20db59` was moved to actual Trash
+only after process, cwd, LaunchAgent and symlink dependency checks. Mapping is
+`final-rollback-retirement.json`. Provider v162 remains the cloud rollback.
+
+Acceptance: focused backend/API, isolated ownership/reconciliation, witness and
+real-process interruption checks passed; 74 API/command checks and 19 affected
+retained/cache checks passed, with passing unchanged evidence reused. Initial
+combined-run failures were repaired and their affected checks passed; the old
+failure log is retained rather than overwritten. Nine final helper-boundary
+configuration cases plus the historical overshoot regression passed. App quick
+validation (contracts and 79 smoke cases), affected UI/hook/proxy regressions,
+typecheck and the explicitly approved full production build passed. No app
+production deployment or authenticated browser acceptance was performed; the
+available browser profile was not verified as TRR. No schema migration, paid
+service, account expansion, login fallback, recurring automation, full-history
+or resume-tail release occurred. Relevant software fixes are accepted and
+backend-deployed; January data certification remains blocked as stated above.
