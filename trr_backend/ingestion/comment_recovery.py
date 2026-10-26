@@ -102,6 +102,11 @@ def unchanged_passes(checkpoint, outcome):
     return 0 if improved else count + 1
 
 
+def _can_recover_gap(checkpoint, outcome):
+    gap = ((checkpoint.get("comment_pages") or {}).get("settlement") or {}).get("count_gap")
+    return type(gap) is int and gap > 0 and unchanged_passes(checkpoint, outcome) < 2
+
+
 def enqueue_next_recovery(store, *, run_id, account, generation, intent_hash, source_revision, blocked_stage=False):
     """One bounded control step at a drained January worker completion boundary.
 
@@ -150,8 +155,8 @@ def enqueue_next_recovery(store, *, run_id, account, generation, intent_hash, so
             # A completion decision may be replayed after its recovery command
             # committed but before the next ordinal. Never complete over it.
             return {"status": "work_pending"}
-        # All settled targets require an offline parser audit, including parity
-        # targets and targets whose fresh-recovery budget is already exhausted.
+        # Retain offline audits for parity and exhausted targets, but do not let
+        # that cohort hold every recoverable gap behind a full-run audit.
         cur.execute(
             """select target_key,outcome,checkpoint from social.instagram_ingestion_targets
             where run_id=%s and stage='comments' and outcome in ('committed','cached_satisfied')
@@ -159,6 +164,7 @@ def enqueue_next_recovery(store, *, run_id, account, generation, intent_hash, so
             (run_id,),
         )
         rows = cur.fetchall()
+        rows.sort(key=lambda row: not _can_recover_gap(row["checkpoint"], row["outcome"]))
         from trr_backend.ingestion.retained_comment_recovery import (
             audit_and_replay_retained,
             canonical_inventory_fingerprints,
@@ -188,33 +194,29 @@ def enqueue_next_recovery(store, *, run_id, account, generation, intent_hash, so
         summaries = {row["idempotency_key"]: row["result"] for row in cur.fetchall()}
     for row in rows:
         summary = summaries.get(row["summary_key"])
-        if summary is not None and summary.get("stream_complete") is True:
-            continue
-        audit = audit_and_replay_retained(
-            store,
-            run_id=run_id,
-            account=account,
-            generation=generation,
-            target_key=row["target_key"],
-            expected_checkpoint_hash=row["checkpoint_hash"],
-        )
-        if audit.get("stream_complete") is not True:
-            # Local/database failures do not prove a source deficiency. Stop the
-            # worker's completion attempt; its owner logs/retries this Conflict.
-            raise Conflict("Retained offline audit prerequisite is incomplete")
-        return {
-            "status": "retained_audit_completed",
-            "target_key": row["target_key"],
-            "checkpoint_sha256": row["checkpoint_hash"],
-            "retained_audit_status": audit["status"],
-            "retained_pages_audited": audit["pages_audited"],
-            "retained_native_ids_recovered": len(audit["recovered_native_ids"]),
-        }
-    # Every settled checkpoint/parser pair has a durable complete audit before
-    # any new source root is authorized. Historical recovery never edits parity.
-    for row in rows:
-        gap = ((row["checkpoint"].get("comment_pages") or {}).get("settlement") or {}).get("count_gap")
-        if type(gap) is not int or gap <= 0 or unchanged_passes(row["checkpoint"], row["outcome"]) >= 2:
+        if summary is None or summary.get("stream_complete") is not True:
+            audit = audit_and_replay_retained(
+                store,
+                run_id=run_id,
+                account=account,
+                generation=generation,
+                target_key=row["target_key"],
+                expected_checkpoint_hash=row["checkpoint_hash"],
+            )
+            if audit.get("stream_complete") is not True:
+                # A database/local failure never authorizes a source retry.
+                raise Conflict("Retained offline audit prerequisite is incomplete")
+            return {
+                "status": "retained_audit_completed",
+                "target_key": row["target_key"],
+                "checkpoint_sha256": row["checkpoint_hash"],
+                "retained_audit_status": audit["status"],
+                "retained_pages_audited": audit["pages_audited"],
+                "retained_native_ids_recovered": len(audit["recovered_native_ids"]),
+            }
+        # Require this target's current durable audit before its next root.
+        # Other targets' outstanding audits cannot prevent this recovery.
+        if not _can_recover_gap(row["checkpoint"], row["outcome"]):
             continue
         request_hash = row["checkpoint_hash"]
         try:
@@ -232,7 +234,6 @@ def enqueue_next_recovery(store, *, run_id, account, generation, intent_hash, so
             )
         except RecoveryAdmissionDeferred as exc:
             return {"status": "recovery_admission_wait", "reason": exc.code}
-        summary = summaries[row["summary_key"]]
         return {
             "status": "public_recovery_queued",
             "target_key": row["target_key"],

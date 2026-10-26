@@ -180,6 +180,16 @@ def test_january_completion_replay_sees_reopened_work(database, monkeypatch):
             values(%s,'comments','blocked-other',3,'source_payload_invalid')""",
             (args["run_id"],),
         )
+        # An unrelated parity target sorts first and still needs an audit.
+        # It must not hold this target's audited count-gap recovery behind it.
+        cur.execute(
+            """insert into social.instagram_ingestion_targets
+            (run_id,stage,target_key,outcome,max_attempts,checkpoint,observed_at,committed_at)
+            values(%s,'comments','000-parity-audit-pending','committed',3,
+                '{"comment_pages":{"settlement":{"count_gap":0}}}'::jsonb,
+                clock_timestamp(),clock_timestamp())""",
+            (args["run_id"],),
+        )
     assert enqueue_next_recovery(store, **kwargs) == {"status": "work_pending"}
     # A separately blocked source does not prevent bounded recovery of a
     # completed gap, and its block is never cleared by that operation.
