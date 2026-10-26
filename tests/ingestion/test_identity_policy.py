@@ -117,7 +117,7 @@ def test_locked_owner_fence_is_checked_once_after_lane_wait(one_connection):
 
     lane = gate(transaction, check_cancelled=before_wait, check_cancelled_in_transaction=after_wait)
     permit = lane.before_request()
-    assert calls == ["before_wait", "after_wait"]
+    assert calls == ["after_wait"]
     assert permit.request_number == lane.request_count == 1
     assert len(row(transaction, lane)["request_times"]) == 1
     # The caller's actual pre-send accounting still runs separately.
@@ -156,7 +156,7 @@ def test_locked_owner_fence_rechecks_deadline_and_rolls_back(one_connection, exp
     )
     with pytest.raises(IdentityDeferred, match="target_deadline"):
         lane.before_request()
-    assert calls == ["before_wait", "after_wait"]
+    assert calls == ["after_wait"]
     assert len(ticks) == expire_at
     assert lane.request_count == 0 and row(transaction, lane) == {}
     with transaction() as conn, conn.cursor() as cur:

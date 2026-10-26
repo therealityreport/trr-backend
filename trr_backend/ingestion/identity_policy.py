@@ -93,6 +93,7 @@ class RequestPermit:
     request_number: int
     probe_token: str | None = field(repr=False)
     owner_token: str = field(repr=False)
+    admitted_at: datetime | None = field(default=None, repr=False)
 
 
 class SourceRequestGate:
@@ -144,7 +145,12 @@ class SourceRequestGate:
         self._failures: dict[int, Failure] = {}
         self._last_failure: Failure | None = None
         self._finished = False
+        self._lane_initialized = False
         self.request_count = 0
+        self._sequence = 0
+        self._unsent = {}
+        self._sent = {}
+        self._refunded = set()
 
     def __repr__(self) -> str:
         return f"SourceRequestGate(identity_key={self.identity_key!r}, request_count={self.request_count})"
@@ -172,34 +178,82 @@ class SourceRequestGate:
                     raise ValueError("Identity policy requires an explicit transaction")
                 if remaining is not None:
                     timeout = f"{max(1, min(2147483647, int(remaining * 1000)))}ms"
-                    cur.execute("set local lock_timeout=%s", (timeout,))
-                    cur.execute("set local statement_timeout=%s", (timeout,))
+                    prefix = "select set_config('lock_timeout',%s,true),set_config('statement_timeout',%s,true); "
+                    timeout_params = (timeout, timeout)
+                else:
+                    prefix, timeout_params = "", ()
                 if create:
                     cur.execute(
-                        """insert into social.instagram_detail_request_lanes(identity_key)
+                        prefix
+                        + """insert into social.instagram_detail_request_lanes(identity_key)
                         values(%s) on conflict do nothing""",
-                        (self.identity_key,),
+                        (*timeout_params, self.identity_key),
                     )
+                    prefix, timeout_params = "", ()
                 cur.execute(
-                    "select * from social.instagram_detail_request_lanes where identity_key=%s for update",
-                    (self.identity_key,),
+                    prefix
+                    + """with locked_lane as materialized (
+                    select * from social.instagram_detail_request_lanes where identity_key=%s for update
+                    ) select locked_lane.*,clock_timestamp() as current_time from locked_lane""",
+                    (*timeout_params, self.identity_key),
                 )
                 row = cur.fetchone()
                 if not row:
                     raise IdentityDeferred("identity_lane_missing", None)
                 # Read the database clock after any row-lock wait.
-                cur.execute("select clock_timestamp() as current_time")
-                now = cur.fetchone()["current_time"]
+                now = row.pop("current_time")
                 yield cur, dict(row), now
         except psycopg2.Error:
             raise IdentityDeferred("identity_policy_unavailable", None) from None
 
-    def before_request(self) -> RequestPermit:
+    def before_counted_request(self, account_request: Callable[[Any], None]) -> RequestPermit:
+        """Fence and count a production send in the final lane transaction.
+
+        The callback must acquire run then target ownership locks and increment
+        accounting on this connection. A rejected lane or failed owner rolls
+        back both accounting and the permit; no transaction crosses HTTP.
+        """
+        permit = self.before_request(account_request=account_request)
+        release = getattr(account_request, "release_in_transaction", None)
+        if callable(release):
+            self._unsent[permit] = release
+        return permit
+
+    def mark_sent(self, permit: RequestPermit) -> None:
+        self._permit(permit)
+        self._unsent.pop(permit, None)
+        self._sent[permit.request_number] = permit
+
+    def release_unsent(self, permit: RequestPermit) -> bool:
+        """Return exactly this unconsumed permit without undoing sibling health."""
+        release = self._unsent.get(permit)
+        if release is None:
+            return False
+        with self._locked(remaining=2) as (cur, row, _now):
+            release(cur.connection, permit)
+            times = list(row["request_times"])
+            if permit.admitted_at in times:
+                times.remove(permit.admitted_at)
+                cur.execute(
+                    "update social.instagram_detail_request_lanes set request_times=%s where identity_key=%s",
+                    (times, self.identity_key),
+                )
+        self._unsent.pop(permit)
+        self._refunded.add(permit.request_number)
+        self.request_count -= 1
+        if self._last_permit == permit:
+            remaining = [*self._sent.values(), *self._unsent]
+            self._last_permit = max(remaining, key=lambda value: value.request_number, default=None)
+        return True
+
+    def before_request(self, *, account_request: Callable[[Any], None] | None = None) -> RequestPermit:
         if self._finished:
             raise RuntimeError("identity_gate_already_finished")
-        remaining = self._remaining()
-        with self._locked(create=True, remaining=remaining) as (cur, row, now):
-            self._remaining(connection=cur.connection)
+        transactional_fence = account_request or self.check_cancelled_in_transaction
+        remaining = self._deadline_remaining() if transactional_fence is not None else self._remaining()
+        with self._locked(create=not self._lane_initialized, remaining=remaining) as (cur, row, now):
+            if account_request is None:
+                self._remaining(connection=cur.connection)
             cooldown = row.get("server_retry_after_until")
             replacement = bool(
                 not self.public_only
@@ -235,36 +289,49 @@ class SourceRequestGate:
             # this update. Recheck only elapsed time under those same locks.
             # Legacy callbacks do not supply that proof, so retain their final
             # cancellation check for compatibility.
+            finalize = getattr(account_request, "finalize_in_transaction", None)
+            if account_request is not None and not callable(finalize):
+                account_request(cur.connection)
             remaining = (
                 self._deadline_remaining()
-                if self.check_cancelled_in_transaction is not None
+                if transactional_fence is not None
                 else self._remaining(connection=cur.connection)
             )
             lease_seconds = min(self.probe_seconds, remaining)
-            cur.execute(
-                """update social.instagram_detail_request_lanes set request_times=%s,
+            lane_update = """update social.instagram_detail_request_lanes set request_times=%s,
                 blocked=%s,cooldown_until=%s,server_retry_after_until=%s,
-                probe_token=%s,probe_expires_at=%s where identity_key=%s""",
-                (
-                    times + [now],
-                    False if replacement else row["blocked"],
-                    cooldown,
-                    cooldown,
-                    token,
-                    now + timedelta(seconds=lease_seconds) if token else None,
-                    self.identity_key,
-                ),
+                probe_token=%s,probe_expires_at=%s where identity_key=%s"""
+            lane_params = (
+                times + [now],
+                False if replacement else row["blocked"],
+                cooldown,
+                cooldown,
+                token,
+                now + timedelta(seconds=lease_seconds) if token else None,
+                self.identity_key,
             )
+            if callable(finalize):
+                finalize(cur.connection, lane_update, lane_params)
+                self._deadline_remaining()
+            else:
+                cur.execute(lane_update, lane_params)
             permit = RequestPermit(
-                self.identity_key, int(row["failure_generation"]), self.request_count + 1, token, self._owner_token
+                self.identity_key, int(row["failure_generation"]), self._sequence + 1, token, self._owner_token, now
             )
         self._probe_token, self._last_permit = token, permit
+        self._lane_initialized = True
         self.request_count += 1
+        self._sequence += 1
         return permit
 
     def _permit(self, permit: RequestPermit | None) -> RequestPermit:
         permit = permit or self._last_permit
-        if permit is None or permit.owner_token != self._owner_token or permit.identity_key != self.identity_key:
+        if (
+            permit is None
+            or permit.owner_token != self._owner_token
+            or permit.identity_key != self.identity_key
+            or permit.request_number in self._refunded
+        ):
             raise ValueError("identity_request_permit_required")
         return permit
 

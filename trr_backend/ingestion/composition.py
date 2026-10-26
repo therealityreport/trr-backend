@@ -449,6 +449,10 @@ class _GatedSource:
             terminal_permit, terminal_code = permit, code
 
         def guarded_request():
+            counted = getattr(self.gate, "before_counted_request", None)
+            accounting = getattr(before, "in_transaction", None)
+            if callable(counted) and callable(accounting):
+                return counted(accounting)
             permit = self.gate.before_request()
             before()
             return permit
@@ -457,6 +461,8 @@ class _GatedSource:
             if hasattr(before, name):
                 setattr(guarded_request, name, getattr(before, name))
         guarded_request.record_terminal_failure = record_terminal_failure
+        guarded_request.mark_sent = getattr(self.gate, "mark_sent", lambda _permit: None)
+        guarded_request.release_unsent = getattr(self.gate, "release_unsent", lambda _permit: False)
         # The optional private diagnostic shares this activity's exact permits;
         # it never enters the canonical comment observer.
         guarded_request.diagnostic_public_only = getattr(self.gate, "public_only", False)

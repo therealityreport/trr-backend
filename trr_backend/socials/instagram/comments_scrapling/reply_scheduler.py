@@ -28,6 +28,15 @@ class ReplyDeadlineExceeded(TimeoutError):  # noqa: N818 - public scheduler inte
     """The owner must retain unresolved progress when no further send is allowed."""
 
 
+class ReplyDiscardUnresolved(RuntimeError):  # noqa: N818 - public scheduler interface
+    """Recovery descriptors remain available without logging their private fields."""
+
+    def __init__(self, descriptors: tuple[ReplyRequest, ...], failures: tuple[Exception, ...]):
+        self.descriptors = descriptors
+        self.failures = failures
+        super().__init__("Unsent reply admission refund remains unresolved after two attempts")
+
+
 @dataclass(frozen=True)
 class ReplyRequest:
     parent_id: str
@@ -81,6 +90,7 @@ class SchedulerTelemetry:
     owner_seconds: float = 0.0
     max_outstanding: int = 0
     completed_queue_seconds: float = 0.0
+    admission_seconds: float = 0.0
 
 
 class DiskResponseSpool:
@@ -336,6 +346,8 @@ async def run_reply_lanes(
     request: Callable[[ReplyRequest], Awaitable[Any]],
     pace: Callable[[ReplyRequest], Awaitable[Any]],
     before_dispatch: Callable[[ReplyRequest], ReplyRequest | None] | None = None,
+    discard: Callable[[ReplyRequest], None] | None = None,
+    cancel_pacing: Callable[[], None] | None = None,
     concurrency: int = 1,
     stop: Callable[[], bool] | None = None,
     telemetry: SchedulerTelemetry | None = None,
@@ -351,9 +363,17 @@ async def run_reply_lanes(
     Requests are sent/raised into their generator in transport completion order.
         ``Delay`` sends True after its wait. Expired sends/waits throw
     ``ReplyDeadlineExceeded`` into the owner, allowing its normal failure checkpoint.
-    The before-dispatch callback runs on the event loop after pacing, between
-    owner transitions. It may refresh an
+    The before-dispatch callback runs after pacing through the same serialized
+    owner executor and context as generator transitions when offloading is enabled.
+    Admission is awaited before HTTP starts on the event loop. It may refresh an
     immutable descriptor, and may return None to retain the original descriptor.
+    An admitted descriptor suppressed before transport starts is passed to
+    ``discard`` on that same owner context, including during cancellation cleanup.
+    A failed or ambiguous discard is retried once in cleanup using the exact same
+    descriptor; callbacks must make this retry idempotent. An unresolved refund
+    raises ``ReplyDiscardUnresolved`` with its retained recovery descriptors.
+    ``cancel_pacing`` synchronously signals queued acquisition waits before tasks
+    are cancelled and joined. It must only signal; it must not block or perform I/O.
     On stop/error/cancellation every task is cancelled and awaited, every generator
         closed, and every successful unconsumed response closed. When explicitly
         requested, a boolean stop first commits already completed successful responses
@@ -367,6 +387,8 @@ async def run_reply_lanes(
     results: dict[str, Any] = {}
     ready: deque[tuple[str, ReplyRequest | Delay, float]] = deque()
     pending: dict[asyncio.Task, tuple[str, str, ReplyRequest | Delay]] = {}
+    unsent: dict[object, list[ReplyRequest]] = {}
+    discard_failures: dict[object, list[Exception]] = {}
     completed: asyncio.PriorityQueue[tuple[int, int, asyncio.Task]] = asyncio.PriorityQueue()
     completion_order: dict[asyncio.Task, tuple[int, float]] = {}
     sequence = 0
@@ -389,6 +411,51 @@ async def run_reply_lanes(
             owner_executor, owner_context.run, partial(callback, *args, **kwargs)
         )
         return await _drain_pacing(future)
+
+    def admit(item: ReplyRequest, captured: list[ReplyRequest]) -> ReplyRequest:
+        refreshed = before_dispatch(item) if before_dispatch is not None else None
+        descriptor = item if refreshed is None else refreshed
+        if not isinstance(descriptor, ReplyRequest):
+            raise TypeError("before_dispatch must return a ReplyRequest or None")
+        # Capture before the joined owner Future can raise cancellation. Only
+        # this handoff cell crosses threads; scheduler state stays on the loop.
+        captured.append(descriptor)
+        return descriptor
+
+    def discard_owned(descriptor: ReplyRequest, outcome: list[Exception | None]) -> None:
+        try:
+            discard(descriptor)
+        except Exception as error:
+            outcome.append(error)
+            raise
+        else:
+            # Capture success before a joined owner Future can raise cancellation.
+            outcome.append(None)
+
+    async def discard_unsent(dispatch: object | None, *, retry: bool = False) -> bool:
+        captured = unsent.get(dispatch)
+        if not captured or discard is None:
+            unsent.pop(dispatch, None)
+            return True
+        failures = discard_failures.setdefault(dispatch, [])
+        if len(failures) >= 2 or (failures and not retry):
+            return False
+        outcome: list[Exception | None] = []
+        try:
+            await owner_call(discard_owned, captured[0], outcome)
+        except Exception as error:
+            # Keep the descriptor until a successful retry reconciles the gate's
+            # idempotency receipt. Do not replace an active cancellation.
+            if not outcome:
+                outcome.append(error)
+        finally:
+            if outcome:
+                if outcome[0] is None:
+                    unsent.pop(dispatch, None)
+                    discard_failures.pop(dispatch, None)
+                else:
+                    failures.append(outcome[0])
+        return dispatch not in unsent
 
     def should_stop() -> bool:
         return bool(stop and stop())
@@ -447,12 +514,14 @@ async def run_reply_lanes(
         finally:
             metrics.pacing_seconds += max(0.0, clock() - started)
 
-    async def transported(item: ReplyRequest) -> Any:
+    async def transported(item: ReplyRequest, dispatch: object) -> Any:
         started = clock()
         try:
             remaining = None if item.deadline is None else max(0.0, item.deadline - clock())
             try:
                 async with asyncio.timeout(remaining):
+                    unsent.pop(dispatch)
+                    metrics.requests += 1
                     return await request(item)
             except TimeoutError:
                 raise ReplyDeadlineExceeded("Reply response deadline expired") from None
@@ -570,30 +639,46 @@ async def run_reply_lanes(
             if kind == "request":
                 metrics.completed_queue_seconds += max(0.0, clock() - finished_at)
             if kind == "pace":
+                dispatch = None
+                transport_launched = False
                 try:
                     task.result()
                     if should_stop():
                         halted = True
                         continue
-                    refreshed = before_dispatch(item) if before_dispatch else None
-                    descriptor = item if refreshed is None else refreshed
-                    if not isinstance(descriptor, ReplyRequest):
-                        raise TypeError("before_dispatch must return a ReplyRequest or None")
+                    dispatch = object()
+                    captured: list[ReplyRequest] = []
+                    unsent[dispatch] = captured
+                    admission_started = clock()
+                    try:
+                        descriptor = (
+                            await owner_call(admit, item, captured)
+                            if before_dispatch is not None
+                            else admit(item, captured)
+                        )
+                    finally:
+                        metrics.admission_seconds += max(0.0, clock() - admission_started)
                     if should_stop():
                         halted = True
                         continue
                     if descriptor.deadline is not None and clock() >= descriptor.deadline:
                         raise ReplyDeadlineExceeded("Reply dispatch deadline expired")
                 except Exception as error:
+                    if not await discard_unsent(dispatch):
+                        # A refund must reconcile before any new send. Cleanup
+                        # owns its sole retry and retains the original error.
+                        raise
                     await advance(key, error=error)
                 else:
-                    metrics.requests += 1
                     # The completed pacing slot becomes the request slot rather
                     # than temporarily counting as an additional outstanding send.
                     pending.pop(task)
-                    launch(key, "request", descriptor, transported(descriptor))
+                    launch(key, "request", descriptor, transported(descriptor, dispatch))
+                    transport_launched = True
                 finally:
                     pending.pop(task, None)
+                    if not transport_launched:
+                        await discard_unsent(dispatch)
             else:
                 # Keep this task/slot registered until owner advancement and
                 # response cleanup finish. No task can mutate generator state.
@@ -625,9 +710,16 @@ async def run_reply_lanes(
         raise
     finally:
         exception_active = sys.exc_info()[0] is not None
+        original_error = sys.exception()
 
         async def cleanup():
+            close_errors = []
             try:
+                if cancel_pacing is not None:
+                    try:
+                        cancel_pacing()
+                    except Exception as error:
+                        close_errors.append(error)
                 tasks = list(pending)
                 for task in tasks:
                     if not task.done():
@@ -646,8 +738,11 @@ async def run_reply_lanes(
                             except Exception:
                                 pass
             finally:
-                close_errors = []
                 try:
+                    for dispatch in tuple(unsent):
+                        while not await discard_unsent(dispatch, retry=True):
+                            if len(discard_failures[dispatch]) >= 2:
+                                break
                     for branch in lanes.values():
                         try:
                             await owner_call(branch.close)
@@ -662,9 +757,15 @@ async def run_reply_lanes(
 
         # Repeated cancellation cannot interrupt generator/response cleanup or
         # shut the executor down while it still owns a committing transition.
-        if owner_executor is not None:
-            await _drain_pacing(cleanup())
-        else:
-            # Keep default-mode generator ContextVar tokens in the caller's
-            # original task context, including during close.
-            await cleanup()
+        try:
+            if owner_executor is not None:
+                await _drain_pacing(cleanup())
+            else:
+                # Keep default-mode generator ContextVar tokens in the caller's
+                # original task context, including during close.
+                await cleanup()
+        finally:
+            unresolved = tuple(captured[0] for captured in unsent.values() if captured)
+            if unresolved:
+                failures = tuple(error for errors in discard_failures.values() for error in errors)
+                raise ReplyDiscardUnresolved(unresolved, failures) from original_error

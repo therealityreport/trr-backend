@@ -686,20 +686,83 @@ class Store:
                 raise LostOwnership("Run execution is no longer current")
             target = _row(
                 cur,
-                """select target_key from social.instagram_ingestion_targets
+                (
+                    """update social.instagram_ingestion_targets set requests=requests+1
                 where run_id=%s and stage=%s and target_key=%s and owner_token=%s
                 and owner_started_at is not null and owner_expires_at>clock_timestamp()
-                and outcome='unresolved' for update""",
+                and outcome='unresolved' returning target_key"""
+                    if record_request
+                    else """select target_key from social.instagram_ingestion_targets
+                where run_id=%s and stage=%s and target_key=%s and owner_token=%s
+                and owner_started_at is not null and owner_expires_at>clock_timestamp()
+                and outcome='unresolved' for update"""
+                ),
                 (run_id, stage.value, target_key, owner_token),
             )
             if not target:
                 raise LostOwnership("Worker no longer owns this target")
-            if record_request:
-                cur.execute(
-                    """update social.instagram_ingestion_targets set requests=requests+1
-                    where run_id=%s and stage=%s and target_key=%s""",
-                    (run_id, stage.value, target_key),
-                )
+
+    def finalize_request_admission(self, *, connection, lane_update, lane_params, **owned) -> None:
+        """Finalize a locked public lane, owner fence and accounting in one round trip."""
+        if owned["stage"] != Stage.COMMENTS or connection.autocommit:
+            raise ValueError("Atomic comment admission requires a transaction")
+        with connection.cursor() as cur:
+            cur.execute(
+                """with owner_run as materialized (
+                    select run_id,generation,state,coalesce(to_jsonb(r)->>'execution_placement','modal') as placement
+                    from social.instagram_ingestion_runs r where run_id=%s and account=%s for share
+                ), counted_target as (
+                    update social.instagram_ingestion_targets set requests=requests+1
+                    where run_id=%s and stage=%s and target_key=%s and owner_token=%s
+                    and owner_started_at is not null and owner_expires_at>clock_timestamp() and outcome='unresolved'
+                    and exists(select 1 from owner_run where generation=%s and state in ('queued','running')
+                               and placement=%s) returning target_key
+                ) """
+                + lane_update
+                + " and exists(select 1 from counted_target) returning identity_key",
+                (
+                    owned["run_id"],
+                    owned["account"],
+                    owned["run_id"],
+                    owned["stage"].value,
+                    owned["target_key"],
+                    owned["owner_token"],
+                    owned["generation"],
+                    self.execution_placement,
+                    *lane_params,
+                ),
+            )
+            if cur.fetchone() is None:
+                raise LostOwnership("Source admission no longer owns this execution")
+
+    def release_unsent_request(self, *, permit, connection, **owned) -> None:
+        """Idempotent correction for a proved unconsumed permit, even after cancel.
+
+        The caller holds the identity lane. Run then target locks follow the
+        usual order. The receipt prevents an uncertain commit from decrementing
+        another request on retry; no ownership or canonical state is changed.
+        """
+        with connection.cursor(cursor_factory=RealDictCursor) as cur:
+            self._run(cur, owned["run_id"], owned["account"], shared_fence=True)
+            key = f"unused-source:{permit.owner_token}:{permit.request_number}"
+            command_hash = fingerprint(
+                {"run_id": owned["run_id"], "target": owned["target_key"], "stage": owned["stage"].value, "permit": key}
+            )
+            cur.execute(
+                """insert into social.instagram_ingestion_commands
+                (account,idempotency_key,command_hash,run_id,result) values(%s,%s,%s,%s,%s::jsonb)
+                on conflict do nothing returning idempotency_key""",
+                (owned["account"], key, command_hash, owned["run_id"], stable_json({"unsent": True})),
+            )
+            if cur.fetchone() is None:
+                return
+            cur.execute(
+                """update social.instagram_ingestion_targets set requests=requests-1
+                where run_id=%s and stage=%s and target_key=%s and requests>0 returning target_key""",
+                (owned["run_id"], owned["stage"].value, owned["target_key"]),
+            )
+            if cur.fetchone() is None:
+                raise Conflict("Unsent permit accounting is absent")
 
     def retain_evidence(
         self,
@@ -730,27 +793,33 @@ class Store:
             )
             if not target:
                 raise LostOwnership("Evidence writer lost its target reservation")
-            evidence_id = str(uuid4())
-            cur.execute(
-                """insert into social.instagram_ingestion_evidence
-                (evidence_id,run_id,stage,target_key,source_identity,captured_at,expires_at,
-                 content_hash,parser_version,schema_version,payload)
-                values(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                (
-                    evidence_id,
-                    run_id,
-                    stage.value,
-                    target_key,
-                    evidence.source_identity,
-                    evidence.captured_at,
-                    evidence.expires_at,
-                    evidence.content_hash,
-                    evidence.parser_version,
-                    evidence.schema_version,
-                    evidence.payload_json,
-                ),
-            )
-            return evidence_id
+            return self._insert_evidence(cur, run_id=run_id, stage=stage, target_key=target_key, evidence=evidence)
+
+    @staticmethod
+    def _insert_evidence(cur, *, run_id, stage, target_key, evidence, savepoint=False):
+        """Caller holds the run and target fence; no separate connection or commit."""
+        evidence_id = str(uuid4())
+        cur.execute(
+            """insert into social.instagram_ingestion_evidence
+            (evidence_id,run_id,stage,target_key,source_identity,captured_at,expires_at,
+             content_hash,parser_version,schema_version,payload)
+            values(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"""
+            + ("; savepoint retained_comment_page" if savepoint else ""),
+            (
+                evidence_id,
+                run_id,
+                stage.value,
+                target_key,
+                evidence.source_identity,
+                evidence.captured_at,
+                evidence.expires_at,
+                evidence.content_hash,
+                evidence.parser_version,
+                evidence.schema_version,
+                evidence.payload_json,
+            ),
+        )
+        return evidence_id
 
     def expire_evidence(self, *, limit: int = 100) -> int:
         """Drop expired payloads, retain provenance, and pin every unresolved run.

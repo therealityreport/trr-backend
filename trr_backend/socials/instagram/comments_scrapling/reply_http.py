@@ -105,6 +105,7 @@ def write_timing_receipt(shortcode, generation, concurrency, metrics):
         "pacing_seconds",
         "queue_seconds",
         "owner_seconds",
+        "admission_seconds",
         "max_outstanding",
         "completed_queue_seconds",
         "persistence_seconds",

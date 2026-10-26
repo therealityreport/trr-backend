@@ -439,7 +439,8 @@ def test_public_count_met_still_drains_native_top_and_reply_connections(database
 
     fetch, _ = source(monkeypatch, handler, expected=1)
     result = CommentActivity(store, fetch, clock=lambda: OBSERVED).execute(**args)
-    assert result["complete"] is True
+    assert result["complete"] is False  # stale-low total cannot certify count parity
+    assert set(result["checkpoint"]["comment_pages"]["observed"]) == {"p", "r"}
     assert len(requests) == 3 and requests[1]["after"] == "still-more" and requests[2]["parent_comment_id"] == "p"
 
 
@@ -1018,7 +1019,7 @@ def test_retained_26_parent_shape_compares_legacy_fetch_coverage_with_strict_rep
             json=page([actual_parent_shape(f"p{i}") for i in indexes], more=not tail, after=None if tail else "tail"),
         )
 
-    fetch, created = source(monkeypatch, handler, expected=26)
+    fetch, created = source(monkeypatch, handler, expected=27)
     if strict:
         store, _, args = setup(database)
         result = CommentActivity(store, fetch, clock=lambda: OBSERVED).execute(**args)
@@ -1125,7 +1126,7 @@ def test_unknown_parent_reply_checkpoint_resumes_only_pending_lane_and_preserves
             raise RuntimeError("interrupted unknown-count reply tail")
         return httpx.Response(200, json=page([], child=True))
 
-    fetch, _ = source(monkeypatch, handler, expected=2)
+    fetch, _ = source(monkeypatch, handler, expected=3)
     with pytest.raises(RuntimeError, match="interrupted unknown-count"):
         CommentActivity(store, fetch, clock=lambda: OBSERVED).execute(**args)
     row = resume_tests.retry(database, args, cancel=True)
@@ -1135,7 +1136,7 @@ def test_unknown_parent_reply_checkpoint_resumes_only_pending_lane_and_preserves
     assert before["lanes"]["p1"]["started_from_root"] is True
     assert before["lanes"]["p2"]["exhausted"] is False
     attempt = 1
-    fetch, _ = source(monkeypatch, handler, expected=2)
+    fetch, _ = source(monkeypatch, handler, expected=3)
     result = CommentActivity(store, fetch, clock=lambda: OBSERVED + timedelta(hours=1)).execute(**args)
     assert result["complete"] is True
     assert [item[1:] for item in calls if item[0] == 1] == [("bootstrap", None), ("p2", "child-tail")]
@@ -1276,7 +1277,7 @@ def test_public_missing_or_null_alias_stays_unknown_through_checkpoint_resume_an
         captured.append(payload)
         return httpx.Response(200, json=payload)
 
-    fetch, _ = source(monkeypatch, handler, expected=1)
+    fetch, _ = source(monkeypatch, handler, expected=2)
     with pytest.raises(RuntimeError, match="interrupted retained unknown reply"):
         CommentActivity(store, fetch, clock=lambda: OBSERVED).execute(**args)
     previous = resume_tests.retry(database, args)
@@ -1302,7 +1303,7 @@ def test_public_missing_or_null_alias_stays_unknown_through_checkpoint_resume_an
     if null_alias:
         assert replayed.source_payloads[0][null_alias] is None
     attempt = 1
-    fetch, _ = source(monkeypatch, handler, expected=1)
+    fetch, _ = source(monkeypatch, handler, expected=2)
     result = CommentActivity(store, fetch, clock=lambda: OBSERVED + timedelta(hours=1)).execute(**args)
     assert result["complete"] is True
     assert result["checkpoint"]["comment_pages"]["observed"]["r"]["expected_replies"] is None
@@ -1521,14 +1522,14 @@ def test_rejected_reply_checkpoint_releases_reserves_and_resumes_to_completion(d
         calls.append((attempt, parent, variables.get("after")))
         if parent is None:
             assert attempt == 0, "Resumed a natively exhausted parent lane"
-            return httpx.Response(200, json=page([actual_parent_shape("p")], count=1))
+            return httpx.Response(200, json=page([actual_parent_shape("p")], count=2))
         if attempt == 0:
             return httpx.Response(200, json={"errors": [{"code": 1675004, "message": "Rate limit exceeded"}]})
         reply = actual_parent_shape("r")
         reply.pop("parent_comment_id")
         return httpx.Response(200, json=page([reply], child=True))
 
-    fetch, _ = source(monkeypatch, handler, expected=1)
+    fetch, _ = source(monkeypatch, handler, expected=2)
     first = CommentActivity(store, fetch, clock=lambda: OBSERVED).execute(**args)
     assert first["outcome"] == "unresolved" and first["failure"].code == "reply_access_rejected"
     durable = existing.query(tx, "select * from social.instagram_ingestion_targets where run_id=%s", (args["run_id"],))[

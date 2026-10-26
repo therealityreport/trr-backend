@@ -482,8 +482,8 @@ def test_owner_keeps_one_thread_and_context_across_yields_and_close(offload_owne
                 trace.append("closed")
 
         def before(_item):
-            assert threading.get_ident() == loop_thread
-            assert across_yield.get() == ("outside" if offload_owner else "owner")
+            assert threading.get_ident() == owner_threads[0]
+            assert across_yield.get() == "owner"
 
         async def request(_item):
             assert threading.get_ident() == loop_thread

@@ -419,6 +419,9 @@ class PublicRelayResume:
             if not lane:
                 return {}
             result = {"exhausted": lane.get("exhausted") is True}
+            for proof in ("started_from_root", "embedded_complete"):
+                if lane.get(proof) is True:
+                    result[proof] = True
             if lane.get("relay_doc_id"):
                 for key in ("relay_doc_id", "relay_friendly_name", "sort_order", "page_size"):
                     result[key] = lane.get(key)
@@ -474,16 +477,18 @@ class PublicRelayResume:
                 continue
             item = lane_resume(lane, root=False)
             expected = (observed.get(parent.comment_id) or {}).get("expected_replies")
-            unknown_proved = (
-                expected is None
-                and item.get("exhausted")
-                and lane.get("started_from_root") is True
-                and bool(item.get("relay_doc_id"))
-            )
+            if (observed.get(parent.comment_id) or {}).get("native_reply_leaf") is True:
+                item["native_reply_leaf"] = True
+            from trr_backend.socials.instagram.comments_scrapling.fetcher import reply_work_skip_reason
+
             pending = (
-                lane.get("exhausted") is False
-                or (expected is None and not unknown_proved)
-                or (_count(expected) is not None and len(parent.replies) < expected)
+                reply_work_skip_reason(
+                    expected_replies=expected,
+                    observed_replies=len(parent.replies),
+                    lane=item,
+                    native_leaf=(observed.get(parent.comment_id) or {}).get("native_reply_leaf") is True,
+                )
+                is None
             )
             item["pending"] = pending
             if pending and item.get("exhausted"):
@@ -571,6 +576,8 @@ class PublicRelayCommentSource:
             "observation_clock",
             "deadline",
             "record_terminal_failure",
+            "mark_sent",
+            "release_unsent",
         ):
             if hasattr(pre_source_request, name):
                 setattr(before, name, getattr(pre_source_request, name))

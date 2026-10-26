@@ -17,6 +17,7 @@ import mimetypes
 import re
 import tempfile
 import time
+from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -135,7 +136,6 @@ def source_reference(value: str) -> str:
     if parts.scheme != "https" or not parts.hostname or parts.username or parts.password:
         raise MediaIncomplete("invalid_media_reference")
     return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
-
 
 
 def avatar_delivery_equivalent(required: str, fresh: str, *, native_id: str | None = None) -> bool:
@@ -482,9 +482,7 @@ class MediaSnapshot:
             raise MediaIncomplete("invalid_unavailable_avatar_identity")
         for avatar in self.avatars:
             proof = avatar.download_provenance
-            pin = (
-                proof[1] if isinstance(proof, tuple) and len(proof) == 2 and proof[0] == avatar.username else None
-            )
+            pin = proof[1] if isinstance(proof, tuple) and len(proof) == 2 and proof[0] == avatar.username else None
             if avatar.download_url is not None and not avatar_delivery_equivalent(
                 avatar.source_url, avatar.download_url, native_id=pin
             ):
@@ -770,6 +768,7 @@ class MediaStorage:
         preserved_key: str | None = None,
         preserved_variants: Mapping[str, str] | None = None,
         version_post_role: str | None = None,
+        downloaded: tuple[bytes, str] | None = None,
     ) -> tuple[dict, dict]:
         if version_post_role is not None and not re.fullmatch(
             r"cover_original|media_original_\d{2,}", version_post_role
@@ -777,7 +776,9 @@ class MediaStorage:
             raise MediaIncomplete("invalid_content_version_role")
         if avatar and version_post_role is not None:
             raise MediaIncomplete("avatar_content_version_forbidden")
-        data, content_type = self._download(url, check=check, request=request)
+        if downloaded is not None:
+            check()
+        data, content_type = downloaded if downloaded is not None else self._download(url, check=check, request=request)
         digest = hashlib.sha256(data).hexdigest()
         suffix = Path(urlsplit(url).path).suffix.lower()
         ext = suffix if suffix in _EXTENSIONS else mimetypes.guess_extension(content_type) or ".bin"
@@ -977,17 +978,34 @@ def mirror_snapshot(
         "profile_pic_mirror_error": None,
     }
     comments = {}
+    remaining_sources = Counter(url for comment in snapshot.comments for url in comment.media_urls)
+    attachment_bytes = {}
+    cached_bytes = 0
+    # Reuse exact signed URLs only within this immutable snapshot. Keep an 8 MiB
+    # total ceiling and release a body after its last slot. Each distinct key
+    # still passes host's ordinary immutable-object verification and write.
+    cache_limit = 8 * 1024 * 1024
     for comment in snapshot.comments:
         hosted = []
         for position, url in enumerate(comment.media_urls, 1):
+            downloaded = attachment_bytes.get(url)
+            if downloaded is None and remaining_sources[url] > 1 and type(storage).host is MediaStorage.host:
+                downloaded = storage._download(url, check=check, request=request)
+                if cached_bytes + len(downloaded[0]) <= cache_limit:
+                    attachment_bytes[url] = downloaded
+                    cached_bytes += len(downloaded[0])
             entry, _ = storage.host(
                 url,
                 root=root + "/" + comment.storage_source_key,
                 name=f"media-{position:02d}",
                 check=check,
                 request=request,
+                **({"downloaded": downloaded} if downloaded is not None else {}),
             )
             hosted.append(entry["url"])
+            remaining_sources[url] -= 1
+            if remaining_sources[url] == 0 and url in attachment_bytes:
+                cached_bytes -= len(attachment_bytes.pop(url)[0])
         comments[comment.comment_id] = {
             "hosted_media_urls": hosted,
             "media_mirror_status": "mirrored",

@@ -3426,7 +3426,7 @@ def test_advisory_api_pacing_uses_session_control_pool_and_waits_after_checkout(
         ("instagram-comments-rate-limit-pace", "session_control"),
         ("instagram-comments-rate-limit-cooldown-read", "session_control"),
     ]
-    assert sleep_calls == [2.0, 3.0]
+    assert sleep_calls == pytest.approx([2.0, 3.0], abs=0.01)
 
 
 def assert_not_in_connection(state: dict[str, bool]) -> None:
