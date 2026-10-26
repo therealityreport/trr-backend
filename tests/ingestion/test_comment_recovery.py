@@ -14,6 +14,24 @@ from trr_backend.ingestion.domain import Conflict, Stage, fingerprint
 database = fixtures.database
 
 
+def test_legacy_committed_overshoot_is_not_a_complete_recovery_candidate():
+    checkpoint = {
+        "comment_pages": {
+            "observed": {"saved-native-id": {"parent": None}},
+            "settlement": {
+                "basis": "count_parity",
+                "expected_total": 0,
+                "observed_total": 1,
+                "count_gap": 0,
+            },
+        }
+    }
+    status = target_status(checkpoint, "committed")
+    assert status["reasons"] == ["count_overshoot"]
+    assert status["candidate_complete"] is False
+    assert status["final_acceptance"] is False
+
+
 def completed(database, monkeypatch):
     store, tx, args = public.setup(database, bounded=True, seed_missing=True)
 

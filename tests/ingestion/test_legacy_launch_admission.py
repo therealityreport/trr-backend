@@ -45,3 +45,70 @@ def test_legacy_instagram_mutation_is_rejected_before_dispatch(monkeypatch, name
             asyncio.run(result)
     assert caught.value.status_code == 409
     assert caught.value.detail["code"] == "instagram_v2_owns_launches"
+
+
+@pytest.mark.parametrize(
+    "module_name,function_name,kwargs",
+    [
+        (
+            "trr_backend.socials.pipelines.comments.instagram",
+            "start_social_account_comments_scrape",
+            {"mode": "profile"},
+        ),
+        ("trr_backend.socials.pipelines.account_catalog.launch", "begin_social_account_catalog_backfill_launch", {}),
+        ("trr_backend.socials.pipelines.account_catalog.launch", "start_social_account_catalog_backfill", {}),
+    ],
+)
+def test_internal_new_run_helpers_reject_v2_ownership_before_probes(monkeypatch, module_name, function_name, kwargs):
+    import importlib
+
+    module = importlib.import_module(module_name)
+    monkeypatch.setattr("trr_backend.ingestion.composition.v2_owns_instagram_launches", lambda: True)
+    monkeypatch.setattr(module, "_sync_core_overrides", lambda: None)
+
+    class LegacyConflictError(ValueError):
+        def __init__(self, code, message):
+            self.code = code
+            super().__init__(message)
+
+    monkeypatch.setattr(module, "SocialIngestConflictError", LegacyConflictError, raising=False)
+    monkeypatch.setattr(
+        module,
+        "_normalize_social_account_profile_platform",
+        lambda *args: pytest.fail("Legacy admission/probes were reached"),
+        raising=False,
+    )
+    with pytest.raises(LegacyConflictError) as caught:
+        getattr(module, function_name)(" Instagram ", "bravotv", **kwargs)
+    assert caught.value.code == "INSTAGRAM_V2_OWNS_LAUNCHES"
+
+
+@pytest.mark.parametrize("enabled,platform", [(False, "instagram"), (True, "tiktok")])
+@pytest.mark.parametrize(
+    "module_name,function_name,kwargs",
+    [
+        (
+            "trr_backend.socials.pipelines.comments.instagram",
+            "start_social_account_comments_scrape",
+            {"mode": "profile"},
+        ),
+        ("trr_backend.socials.pipelines.account_catalog.launch", "begin_social_account_catalog_backfill_launch", {}),
+        ("trr_backend.socials.pipelines.account_catalog.launch", "start_social_account_catalog_backfill", {}),
+    ],
+)
+def test_helper_guard_preserves_other_configuration(monkeypatch, module_name, function_name, kwargs, enabled, platform):
+    import importlib
+
+    module = importlib.import_module(module_name)
+    monkeypatch.setattr("trr_backend.ingestion.composition.v2_owns_instagram_launches", lambda: enabled)
+    monkeypatch.setattr(module, "_sync_core_overrides", lambda: None)
+
+    class ExistingValidationReachedError(Exception):
+        pass
+
+    def existing_validation(*args):
+        raise ExistingValidationReachedError
+
+    monkeypatch.setattr(module, "_normalize_social_account_profile_platform", existing_validation, raising=False)
+    with pytest.raises(ExistingValidationReachedError):
+        getattr(module, function_name)(platform, "bravotv", **kwargs)
