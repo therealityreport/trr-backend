@@ -1989,3 +1989,103 @@ rollback. Private follow-through evidence is `order-fix-*` and
 not applicable to this internal scheduling repair; the prior app acceptance
 remains valid. There is no migration or SQL ownership change. January's data
 gaps and certification result are unchanged.
+
+
+### Lossless performance repair — October 26
+
+User scope: make the complete January workflow faster without skipping comments,
+replies or media, using short checks rather than hour-long runs. Existing branches,
+pre-existing dirty edits, public-only collection, source budgets, six activities,
+two outstanding reply pages and the expired January hold are preserved.
+
+Historical telemetry identified page persistence as the strongest avoidable
+cost. The representative DTRMBjREl_v receipt measured 334 committed pages in
+564.47 seconds, with 280.80 seconds inside the persistence observer. Aggregated
+historical receipts contain repeated targets and overlapping activities and are
+not a unique full-run throughput measure. Unknown reply counts still require
+native parent probes; the maintained document does not provide a proved
+multi-parent request. No unknown parent or supported media was removed.
+
+Backend commit `4e052826` implements three repairs:
+
+- Production page writes send changed checkpoint entries. The first write still
+  compares the full checkpoint; later comparisons use PostgreSQL's actual prior
+  committed checkpoint SHA-256 under the target lock. PostgreSQL reconstructs
+  and stores complete target/page snapshots atomically. Root/child restarts,
+  deletions, evidence, canonical writes and immutable receipt contents survive.
+  Custom writers and arbitrary checkpoints keep the compatible full-write path.
+- Strict public reply generator transitions run on one serialized owner thread
+  with a persistent context. Network/pacing stays on the event loop. The next
+  cursor waits for commit; two total outstanding pages, completion order, permits
+  and original clocks remain. Cancellation joins a committing transition before
+  response/generator close and executor shutdown. Source-stop/ownership guards
+  are unchanged.
+- Identical avatar hosting and registry writes are reused within one snapshot,
+  keyed by exact signed delivery URL, handle, cache proof and provenance. All
+  role slots, clocks and lineage remain. Contradictory duplicate proof fails
+  before writes. Empty comment inventories avoid retained-media scans, and
+  attachment refresh uses a duplicate-checked row index.
+
+One paired controlled comparison used the existing January-sized synthetic
+fixture: 14,542 baseline native IDs, a 2,308,288-byte checkpoint, 64 parents,
+65 received pages, mocked 10 ms HTTP latency, unchanged 250 ms source spacing,
+two reply slots and isolated PostgreSQL. Both arms used the same offloaded
+scheduler; the paired difference isolates page persistence. Setup/seed time is
+excluded from measured activity elapsed. Complete resulting IDs, parent links,
+attachments, cursor/lane state, source calls and immutable evidence/receipt
+bindings were identical. Values are descriptive, one pair, not a statistical or
+full-run speed claim:
+
+| Instrumented measure | Prior page writer | Delta/hash page writer |
+| --- | ---: | ---: |
+| JSON parameter bytes | 150,636,699 | 25,547 |
+| Returned checkpoint JSON bytes | 152,920,198 | 4,616,576 |
+| Page persistence observer seconds | 14.518 | 7.910 |
+| Activity elapsed seconds | 18.097 | 16.685 |
+| Requests / committed pages | 65 / 65 | 65 / 65 |
+
+Instrumented JSON transfer declined 98.47%, persistence observer time 45.52%,
+and activity elapsed 7.80%. These counts exclude SQL/protocol overhead and other
+untraced traffic; source pacing limits this local fixture. The whole comparison,
+including setup and assertions, finished in 50.81 seconds. Private evidence is
+`performance/transfer-pair.json` and its log under the existing evidence root.
+A separate two-response/50 ms commit example proves network progress during
+persistence (second response 60.16 ms inline versus 26.73 ms offloaded), with
+identical ordered output; its total elapsed did not improve and is not presented
+as a speed result. Three duplicate avatar slots required one download/HEAD/PUT
+and one registry write while retaining every slot; distinct signed URLs still
+produced distinct downloads. These are fixture I/O counts, not production timing.
+
+Focused real PostgreSQL checks preserved rollback, shared/exclusive fences,
+checkpoint-mutation rejection and technical reply-failure isolation. Existing
+unaffected evidence was reused: 146 initial comments/resume checks passed; the
+three affected fixture-shape cases passed after retaining the full-checkpoint
+compatibility path. The new stale-hash assertion passed. Sixteen reply-failure
+isolation cases passed. Helper evidence reports 26 scheduler and five wrapper/
+HTTP checks plus eight new/eight existing media cases passed, with checks under
+five seconds per helper batch. A single bounded read-only source review found
+no concrete blocker in delta reconstruction, owner context or cancellation.
+No full suite, full app build, source scrape, long-running controller or new
+certification pass was started.
+
+Modal v165 deployed at 12:40:36 a.m. New York on October 26 to verified
+`admin-56995 / main / trr-backend-jobs`, tag
+`ig-performance-4e052826f1cb`. Maintained explicit-main readiness and API
+health/cold-start passed. A fresh deployed container matched all five changed
+runtime file hashes and loaded the owner-offload interface without business I/O.
+The existing consumers still target the same main app/API; no feature flag,
+secret or source placement changed. `performance/deployment.json` owns the
+container/deployment/source bindings. Cloud v164 remains rollback.
+
+Native local package `ig-performance-4e052826f1cb` replaced idle worker 2145
+only after process/child drain and two absent-grant observations. Worker 92895
+acquired the unique actual coordinator grant at 12:41:17 a.m. New York. Its
+numerical backend PID 429802 was reused by the pooler; fresh acquisition checks,
+absent-grant evidence and two new process/grant checks, rather than that number,
+qualified ownership. All 1,103 target rows/accounting fingerprints and 1,033
+receipts remained unchanged. January stays generation 2 cancelled/held, so these
+performance repairs do not constitute a renewed recovery authorization or data
+certification. Current plus rollback `ig-recovery-order-a1ba18d0fb11` are the two
+runnable local copies; superseded 62d504ef moved to actual Trash after dependency
+checks. No migration or SQL ownership change occurred. App/API contracts are
+unchanged; TRR-APP build is not applicable to these internal performance repairs.
