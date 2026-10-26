@@ -2089,3 +2089,109 @@ certification. Current plus rollback `ig-recovery-order-a1ba18d0fb11` are the tw
 runnable local copies; superseded 62d504ef moved to actual Trash after dependency
 checks. No migration or SQL ownership change occurred. App/API contracts are
 unchanged; TRR-APP build is not applicable to these internal performance repairs.
+
+
+### Follow-on admission and request-limited performance repair — October 26
+
+Source `5619f5569cc8123526cb06ebfef91abf2ed22b9a` preserves v165's checkpoint
+delta/hash writes, ordered owner offload, media reuse and per-target recovery
+ordering. Reply admission now uses that same serialized owner/context; an
+already-admitted sibling HTTP response progresses during slow admission.
+Bootstrap, root and reply sends share one actual-start dispatch turn, retaining
+the configured global key, local/global maximum interval, server waits and
+absolute deadline. No pacing transaction spans HTTP or sleep. Cancellation
+signals queued turns before drain. Exact unused permits receive an idempotent
+journaled refund; per-admission local correction and resource cleanup survive
+transient errors and lost acknowledgments without decrementing a sibling send.
+
+Production admission batches the post-lock clock and timeouts, then fences
+materialized run ownership, target accounting and the already-locked source lane
+in one final SQL round trip. Lane → run → target lock order, generation,
+placement, owner token/expiry, cooldown and deadline rollback remain binding.
+Custom callbacks retain the compatible path. A normal accepted page now retains
+its evidence and writes canonical content, page receipt and complete checkpoint
+in one fenced transaction. A post-evidence savepoint retains the native evidence
+on parser or writer failure. Accepted-page cursor-stall evidence still commits
+before its technical error. Changed-key maps avoid full manifest comparisons
+and repeated-lane scans; they release previous snapshot links after persistence.
+
+One consistent native-proof classification runs before generator construction
+and during resume. Unknown counts, positive gaps, unfinished cursors, technical
+failures and recovery remain pending. Sparse embedded previews cannot overwrite
+an existing query-bound lane. A four-parent fixture constructs two generators
+instead of four but still requires the same two child HTTP calls. No removed
+native request is claimed from that optimization. Default page size remains 12;
+50 is unqualified and inactive as a default. Explicitly configured fresh roots
+may fall back 50→12 after HTTP 400 only before any accepted page. Saved query,
+cursor and page-size bindings never change mid-traversal.
+
+An exact signed attachment URL may reuse bytes within one snapshot under an
+8 MiB total cache ceiling. Each destination key still receives its ordinary
+immutable-object verification/write. A matched fixture reduced duplicate
+attachment downloads 2→1 (all CDN downloads 3→2), preserving all 13 hosted
+objects, both comment slots, manifest fields, hashes and original clocks.
+Distinct signed URLs remain distinct downloads.
+
+The final advisory-mode comparison uses real isolated PostgreSQL, identical
+10 ms synthetic latency per SQL round trip, persistent clients, two reply slots
+and unchanged 250 ms shared spacing. The already-passing v165 baseline is reused;
+only changed candidate arms were repeated. Setup is excluded from activity
+elapsed. Every benchmark stayed below 60 seconds.
+
+| Matched measure | v165 | Final candidate |
+| --- | ---: | ---: |
+| Activity elapsed seconds | 3.247 | 2.631 |
+| Source sends / retained pages / nonempty pages | 6 / 5 / 3 | 6 / 5 / 3 |
+| Admission transactions / SQL round trips | 18 / 78 | 6 / 13 |
+| Admission seconds | 1.046 | 0.257 |
+| Business transactions / SQL round trips | 38 / 160 | 21 / 79 |
+| Coordination transactions / SQL round trips | 8 / 8 | 24 / 24 |
+| All database transactions / SQL round trips | 46 / 168 | 45 / 103 |
+
+Elapsed declined 18.98% in this controlled workload. Coordination counts include
+every autocommit statement, so the business transaction reduction is not presented
+as the total reduction. All 13 saved IDs, parent/media inventory, observed state,
+lanes/cursors, completeness and evidence/receipt bindings match exactly. Two
+unknown empty branches remain probed; one authoritative zero, one native leaf
+and two exact exhausted branches stay skipped in both arms. Timers overlap:
+current cumulative reply network 1.717 s, pacing 0.993 s, owner 1.011 s including
+persistence 0.997 s. This is not full-January throughput, native endpoint
+qualification or a revised completion estimate. Earlier 21%, 8.8%, 16.3% file-mode
+and intermediate advisory timings do not replace this final advisory result.
+
+Focused evidence includes 237 comment/observation checks, 71 identity/refund
+checks, six new combined admission fence/deadline cases, mixed request kinds,
+real cross-process file/PostgreSQL clocks, and transient/ambiguous cancellation
+refunds. Six old success fixtures had stale-low totals inconsistent with their
+own replies; their inputs/assertions were corrected without relaxing the
+production overshoot guard. Independent review's dispatch/refund findings were
+repaired and its final targeted review found no blocking issue. Evidence root:
+`~/.codex/tmp/ig-performance-next-01a1798c/`; final performance report is
+`advisory-performance-final.json`, with `media-io-pair.log` for attachment I/O.
+
+Modal v166 deployed at 3:47:51 p.m. New York to verified
+`admin-56995 / main / trr-backend-jobs`, tag `ig-dispatch-5619f5569cc8`.
+Guarded explicit-main readiness and API cold-start health passed (HTTP 200).
+A deployed container matched all ten changed runtime hashes and loaded the
+admission/scheduler interfaces without business I/O. Consumers retain the same
+main app/API binding. `deployment.json` records the provider/source identity.
+Cloud v165 remains rollback.
+
+The idle native worker was handed over only after activity/child absence and
+two absent-grant checks. New worker 55083 acquired its actual unique coordinator
+grant at 3:49:36 p.m. New York; process/grant qualification passed twice. Its
+backend PID 501195 was numerically reused, so that number alone was not treated
+as ownership proof. All 1,103 target/accounting fingerprints and 1,033 receipts
+remain identical, including 156,612 accounted requests. January remains
+generation 2 cancelled/held; no recovery window, source scrape, full cohort audit
+or certification was started. `installed.json` records the handover.
+
+Current local package is `ig-dispatch-5619f5569cc8`; rollback is
+`ig-performance-4e052826f1cb`. The older a1ba18d0 rollback moved to actual Trash
+after process/cwd/LaunchAgent/symlink checks, restoring two runnable packages;
+`retirement.json` records its recoverable destination. Unrelated dirty source,
+including pre-existing media-storage work, was preserved outside this deployment.
+No API/app contract or SQL schema changed. TRR-APP build is not applicable.
+The remaining dominant constraints are required unknown-reply probes, shared
+source pacing, network latency and complete page persistence; there is no
+five-minute or dollar-cost claim.
