@@ -12,6 +12,7 @@ import inspect
 import json
 import logging
 import os
+import random
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Callable, Coroutine
@@ -286,6 +287,11 @@ class RedisBroker(Broker):
     Supports multi-instance deployments via Redis pub/sub.
     """
 
+    # Listener recovery: capped exponential backoff with jitter.
+    reconnect_initial_delay_s: float = 0.5
+    reconnect_max_delay_s: float = 30.0
+    listen_poll_timeout_s: float = 1.0
+
     def __init__(self, redis_url: str) -> None:
         self._redis_url = redis_url
         self._redis: Any = None
@@ -294,17 +300,48 @@ class RedisBroker(Broker):
         self._sub_counter = 0
         self._listener_task: asyncio.Task | None = None
         self._subscribed_rooms: set[str] = set()
+        self._rooms_changed = asyncio.Event()
         self._connected = False
         self._last_error: dict[str, str] | None = None
+        self._reconnect_count = 0
+        self._reconnect_failures = 0
+        self._last_reconnect_at: str | None = None
+
+    async def _open_connection(self) -> None:
+        """Open a fresh client and pubsub, then restore every known room."""
+        import redis.asyncio as aioredis
+
+        await self._close_connection()
+        client = aioredis.from_url(self._redis_url, decode_responses=True)
+        pubsub = None
+        try:
+            await client.ping()
+            pubsub = client.pubsub()
+            rooms = sorted(self._subscribed_rooms | set(self._subscribers))
+            if rooms:
+                await pubsub.subscribe(*rooms)
+        except BaseException:
+            await _close_async(pubsub)
+            await _close_async(client)
+            raise
+        self._redis = client
+        self._pubsub = pubsub
+        self._subscribed_rooms = set(rooms)
+
+    async def _close_connection(self) -> None:
+        pubsub, client = self._pubsub, self._redis
+        self._pubsub = None
+        self._redis = None
+        for resource in (pubsub, client):
+            try:
+                await _close_async(resource)
+            except Exception:  # noqa: BLE001 - best-effort close of a broken connection
+                logger.debug("Ignoring error while closing Redis resource", exc_info=True)
 
     async def connect(self) -> None:
         """Connect to Redis."""
         try:
-            import redis.asyncio as aioredis
-
-            self._redis = aioredis.from_url(self._redis_url, decode_responses=True)
-            await self._redis.ping()
-            self._pubsub = self._redis.pubsub()
+            await self._open_connection()
             self._listener_task = asyncio.create_task(self._listen())
             self._connected = True
             self._last_error = None
@@ -316,10 +353,7 @@ class RedisBroker(Broker):
         except Exception as e:
             self._connected = False
             self._last_error = _redact_redis_error(e, redis_url=self._redis_url)
-            await _close_async(self._pubsub)
-            await _close_async(self._redis)
-            self._pubsub = None
-            self._redis = None
+            await self._close_connection()
             logger.error("Failed to connect to Redis: %s", self._last_error["type"])
             raise
 
@@ -364,6 +398,7 @@ class RedisBroker(Broker):
                 raise RuntimeError("Not connected to Redis pubsub")
             await self._pubsub.subscribe(room)
             self._subscribed_rooms.add(room)
+            self._rooms_changed.set()
             logger.debug(f"Subscribed to Redis channel: {room}")
 
         return sub_id
@@ -413,31 +448,75 @@ class RedisBroker(Broker):
             keys.extend(iterator)
         return keys
 
-    async def _listen(self) -> None:
-        """Listen for messages from Redis pub/sub."""
+    async def _dispatch(self, message: dict) -> None:
+        room = message["channel"]
         try:
-            async for message in self._pubsub.listen():
-                if message["type"] == "message":
-                    room = message["channel"]
-                    try:
-                        event = json.loads(message["data"])
-                    except json.JSONDecodeError:
-                        logger.warning(f"Invalid JSON in message: {message['data']}")
-                        continue
+            event = json.loads(message["data"])
+        except json.JSONDecodeError:
+            logger.warning(f"Invalid JSON in message: {message['data']}")
+            return
 
-                    # Dispatch to all local subscribers
-                    subscribers = list(self._subscribers.get(room, {}).values())
-                    for callback in subscribers:
-                        try:
-                            await callback(event)
-                        except Exception as e:
-                            logger.error(f"Error in subscriber callback: {e}")
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            self._connected = False
-            self._last_error = _redact_redis_error(e, redis_url=self._redis_url)
-            logger.error("Error in Redis listener: %s", self._last_error["type"])
+        # Dispatch to all local subscribers
+        subscribers = list(self._subscribers.get(room, {}).values())
+        for callback in subscribers:
+            try:
+                await callback(event)
+            except Exception as e:
+                logger.error(f"Error in subscriber callback: {e}")
+
+    async def _listen(self) -> None:
+        """Supervise Redis pub/sub delivery until cancelled.
+
+        redis-py ends ``listen()`` immediately when nothing is subscribed, so this
+        loop waits for a first room instead. Any transport error triggers a
+        reconnect that restores every room; the loop exits only on cancellation.
+        """
+        while True:
+            try:
+                if not self._subscribed_rooms or self._pubsub is None:
+                    self._rooms_changed.clear()
+                    if not self._subscribed_rooms:
+                        await self._rooms_changed.wait()
+                        continue
+                    raise RuntimeError("Redis pubsub unavailable")
+                message = await self._pubsub.get_message(
+                    ignore_subscribe_messages=True,
+                    timeout=self.listen_poll_timeout_s,
+                )
+                if message and message.get("type") == "message":
+                    await self._dispatch(message)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 - any listener failure triggers recovery
+                self._connected = False
+                self._last_error = _redact_redis_error(e, redis_url=self._redis_url)
+                logger.error("Error in Redis listener: %s; reconnecting", self._last_error["type"])
+                await self._reconnect_with_backoff()
+
+    async def _reconnect_with_backoff(self) -> None:
+        delay = self.reconnect_initial_delay_s
+        while True:
+            await asyncio.sleep(random.uniform(delay / 2, delay))
+            try:
+                await self._open_connection()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 - keep retrying until cancelled
+                self._reconnect_failures += 1
+                self._last_error = _redact_redis_error(e, redis_url=self._redis_url)
+                logger.warning(
+                    "Redis reconnect failed: %s; next attempt within %.1fs",
+                    self._last_error["type"],
+                    min(delay * 2, self.reconnect_max_delay_s),
+                )
+                delay = min(delay * 2, self.reconnect_max_delay_s)
+                continue
+            self._connected = True
+            self._last_error = None
+            self._reconnect_count += 1
+            self._last_reconnect_at = datetime.now(UTC).isoformat()
+            logger.info("RedisBroker reconnected; restored %d rooms", len(self._subscribed_rooms))
+            return
 
     def status(self) -> dict[str, object]:
         return {
@@ -451,6 +530,9 @@ class RedisBroker(Broker):
             "subscription_count": sum(len(subscribers) for subscribers in self._subscribers.values()),
             "subscribed_room_count": len(self._subscribed_rooms),
             "listener_running": self._listener_task is not None and not self._listener_task.done(),
+            "reconnect_count": self._reconnect_count,
+            "reconnect_failures": self._reconnect_failures,
+            "last_reconnect_at": self._last_reconnect_at,
         }
 
 
