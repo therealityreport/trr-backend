@@ -179,7 +179,9 @@ class MediaRefresh:
             if avatar.download_url and public_reference(avatar.download_url) != canonical:
                 proof = avatar.download_provenance
                 if (
-                    isinstance(proof, tuple) and len(proof) == 2 and proof[0] == avatar.username
+                    isinstance(proof, tuple)
+                    and len(proof) == 2
+                    and proof[0] == avatar.username
                     and avatar_delivery_equivalent(avatar.source_url, avatar.download_url, native_id=proof[1])
                 ):
                     aliases[public_reference(avatar.download_url)].add((canonical, username, proof[1]))
@@ -466,22 +468,31 @@ class MediaRefresh:
                     pinned=True,
                 )
                 validate_detail(parsed)
-                if parsed.post.source_id.split("_", 1)[0] != ExplicitDetailClient._shortcode_to_media_id(
-                    self.owned["target_key"]
-                ):
+                native_post_id = parsed.post.source_id.split("_", 1)[0]
+                if native_post_id != ExplicitDetailClient._shortcode_to_media_id(self.owned["target_key"]):
                     raise InvalidSourceError("Native post identity mismatch")
                 live = normalize_post_source(payload, account=self.owned["account"])
                 snapshot = self._snapshot
                 if len(live.media_urls) != snapshot.expected_media_count:
                     raise InvalidSourceError("Native media coverage changed")
-                if tuple(map(public_reference, live.media_urls)) != tuple(map(public_reference, snapshot.media_urls)):
+
+                def same_delivery(old, fresh):
+                    if public_reference(old) == public_reference(fresh):
+                        return True
+                    # Reuse the existing exact-path, trusted-CDN relocation rule.
+                    # Here the numeric identity was pinned to the post above.
+                    return self.public_only and avatar_delivery_equivalent(old, fresh, native_id=native_post_id)
+
+                if not all(
+                    same_delivery(old, fresh) for old, fresh in zip(snapshot.media_urls, live.media_urls, strict=True)
+                ):
                     raise InvalidSourceError("Native media positions changed")
                 matches = defaultdict(set)
                 for old, fresh in [
                     *zip(snapshot.media_urls, live.media_urls, strict=True),
                     (snapshot.thumbnail_url, live.thumbnail_url),
                 ]:
-                    if fresh and public_reference(old) == public_reference(fresh):
+                    if fresh and same_delivery(old, fresh):
                         validate_media_url(fresh, policy=_POLICY)
                         matches[public_reference(old)].add(fresh)
                 result = {key: next(iter(urls)) for key, urls in matches.items() if len(urls) == 1}

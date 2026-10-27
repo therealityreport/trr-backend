@@ -125,6 +125,43 @@ def test_public_native_refresh_has_no_credential_selection_and_preserves_storage
     )
 
 
+def test_public_post_refresh_accepts_verified_cdn_relocation(lanes):
+    store, tx = lanes
+    owned = owned_fixture(store)
+    old = SOURCE.replace("scontent.cdninstagram.com", "scontent-lax3-1.cdninstagram.com")
+    fresh = FRESH.replace("scontent.cdninstagram.com", "scontent-mia5-1.cdninstagram.com")
+    node = native_payload(urls=(fresh, SECOND_FRESH), shortcode="AAAABC")["items"][0]
+    envelope = {"data": {"xdt_api__v1__media__shortcode__web_info": {"items": [node]}}}
+    session = SequenceSession([], [{"body": html(envelope), "headers": {"content-type": "text/html"}}])
+    refresh = MediaRefresh(
+        store=store,
+        owned=owned,
+        owner_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        credential_provider=lambda: pytest.fail("public refresh selected authentication"),
+        public_only=True,
+        public_detail_source_factory=lambda **kwargs: PublicDetailSource(**kwargs, session_factory=lambda: session),
+    )
+    original = replace(fixture_snapshot(), shortcode="AAAABC", media_urls=(old, SECOND), thumbnail_url=old)
+    refresh.bind_snapshot(original)
+    callbacks = {
+        "check_cancelled": lambda: store.check_owner(**owned),
+        "on_request": lambda: store.check_owner(**owned, record_request=True),
+    }
+    assert refresh(source_reference=source_reference(old), **callbacks) == fresh
+    assert refresh(source_reference=source_reference(old), **callbacks) == fresh
+    assert len(session.sent) == 1 and session.closed
+    assert "Cookie" not in session.sent[0][0].headers and "Authorization" not in session.sent[0][0].headers
+    assert refresh._snapshot is original and original.media_urls == (old, SECOND)
+    retained = row(tx, "select payload from social.instagram_ingestion_evidence where run_id=%s", (owned["run_id"],))
+    assert "fresh-private-signature" not in retained[0]
+    assert row(
+        tx, "select requests,outcome from social.instagram_ingestion_targets where run_id=%s", (owned["run_id"],)
+    ) == (
+        1,
+        "unresolved",
+    )
+
+
 __all__ = ["lanes", "no_ambient_http"]
 
 

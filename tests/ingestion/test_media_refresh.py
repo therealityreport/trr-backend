@@ -320,6 +320,74 @@ def test_native_identity_or_asset_mismatch_retains_evidence_without_guessing(cha
     assert sent == [1]
 
 
+@pytest.mark.parametrize("change", ["host_only", "changed_path", "untrusted_host", "wrong_native_id", "non_public"])
+def test_public_post_refresh_checks_cdn_relocation_against_pinned_post(change):
+    old = "https://scontent-lax3-1.cdninstagram.com/video/asset.mp4?old=private"
+    fresh = "https://scontent-mia5-1.cdninstagram.com/video/asset.mp4?fresh=private"
+    if change == "changed_path":
+        fresh = fresh.replace("/video/asset.mp4", "/video/different.mp4")
+    if change == "untrusted_host":
+        fresh = fresh.replace("cdninstagram.com", "cdninstagram.com.example")
+    payload = native_payload(urls=(fresh, SECOND_FRESH), native_id="999" if change == "wrong_native_id" else "66")
+    retained, sent = [], []
+    store = SimpleNamespace(
+        check_owner=lambda **kwargs: None,
+        transaction=lambda: None,
+        retain_evidence=lambda **kwargs: retained.append(kwargs["evidence"]),
+    )
+    owned = {
+        "run_id": "run",
+        "account": "bravotv",
+        "generation": 1,
+        "stage": Stage.MEDIA,
+        "target_key": "ABC",
+        "owner_token": "private",
+    }
+
+    class PublicSource:
+        def __call__(self, **callbacks):
+            callbacks["on_request"]()
+            callbacks["source_observer"]("details", payload)
+            return payload
+
+        def finish_success(self):
+            pass
+
+        def finish_failure(self, error):
+            pass
+
+        def close(self):
+            pass
+
+    refresh = MediaRefresh(
+        store=store,
+        owned=owned,
+        owner_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        credential_provider=cookies
+        if change == "non_public"
+        else lambda: pytest.fail("public refresh selected credentials"),
+        public_only=change != "non_public",
+        public_detail_source_factory=lambda **kwargs: PublicSource(),
+        detail_source_factory=lambda **kwargs: PublicSource(),
+    )
+    original = snapshot(shortcode="ABC", media_urls=(old, SECOND), thumbnail_url=old, expected_media_count=2)
+    refresh.bind_snapshot(original)
+    callbacks = {
+        "source_reference": source_reference(old),
+        "check_cancelled": lambda: None,
+        "on_request": lambda: sent.append(1),
+    }
+    if change == "host_only":
+        assert refresh(**callbacks) == fresh
+        assert refresh(**callbacks) == fresh
+    else:
+        with pytest.raises(MediaIncomplete, match="media_refresh_source_invalid"):
+            refresh(**callbacks)
+    assert len(sent) == len(retained) == 1
+    assert refresh._snapshot is original and original.media_urls == (old, SECOND)
+    assert "fresh=private" not in retained[0].payload_json
+
+
 def test_narrow_detail_protocol_cannot_merge_ambient_or_response_credentials(monkeypatch):
     session = RecordingSession([])
     session.cookies.set("ambient", "forbidden")
