@@ -537,14 +537,14 @@ def test_authenticated_comment_probe_consumes_only_pinned_environment(monkeypatc
 
     from trr_backend.socials.instagram import authenticated_comment_probe
 
-    monkeypatch.setenv("TRR_INSTAGRAM_INGESTION_AUTH_USERNAME", "livestnation")
+    monkeypatch.setenv("TRR_INSTAGRAM_INGESTION_AUTH_USERNAME", "fixture_ingest_account")
     monkeypatch.setenv("TRR_INSTAGRAM_INGESTION_AUTH_USER_ID", "123")
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COOKIES_JSON", json.dumps({
         "sessionid": "SECRET", "csrftoken": "CSRF", "ds_user_id": "123",
     }))
 
     def probe(snapshot):
-        assert snapshot.username == "livestnation" and snapshot.user_id == "123"
+        assert snapshot.username == "fixture_ingest_account" and snapshot.user_id == "123"
         assert snapshot.source_kwargs()["raw_cookies"]["sessionid"] == "SECRET"
         return authenticated_comment_probe.empty_report()
 
@@ -558,7 +558,7 @@ def test_probe_instagram_child_reply_access_is_anonymous_and_restores_environmen
     from trr_backend.socials.instagram import child_reply_probe
 
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COOKIES_JSON", "private-cookies")
-    monkeypatch.setenv("TRR_INSTAGRAM_INGESTION_AUTH_USERNAME", "livestnation")
+    monkeypatch.setenv("TRR_INSTAGRAM_INGESTION_AUTH_USERNAME", "fixture_ingest_account")
     monkeypatch.setenv("DECODO_PASSWORD", "private-proxy")
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example")
 

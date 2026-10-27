@@ -27,14 +27,14 @@ def environment():
             {"sessionid": "synthetic-private-session", "csrftoken": "synthetic-csrf", "ds_user_id": "123456"}
         ),
         "TRR_INSTAGRAM_INGESTION_AUTH_USER_ID": "123456",
-        "TRR_INSTAGRAM_INGESTION_AUTH_USERNAME": "livestnation",
+        "TRR_INSTAGRAM_INGESTION_AUTH_USERNAME": "fixture_ingest_account",
     }
 
 
 def test_explicit_snapshot_preserves_source_shape_without_exposing_credentials():
     snapshot = CredentialSnapshot.from_environ(environment())
     kwargs = snapshot.source_kwargs()
-    assert kwargs["browser_account_id"] == "livestnation"
+    assert kwargs["browser_account_id"] == "fixture_ingest_account"
     assert kwargs["raw_cookies"]["ds_user_id"] == "123456"
     assert kwargs["cookies"][0] == {
         "name": "sessionid",
@@ -53,7 +53,7 @@ def test_explicit_snapshot_preserves_source_shape_without_exposing_credentials()
     [
         ("TRR_INSTAGRAM_INGESTION_AUTH_USERNAME", ""),
         ("TRR_INSTAGRAM_INGESTION_AUTH_USERNAME", "someone@thereality.report"),
-        ("TRR_INSTAGRAM_INGESTION_AUTH_USERNAME", "@livestnation"),
+        ("TRR_INSTAGRAM_INGESTION_AUTH_USERNAME", "@fixture_ingest_account"),
         ("TRR_INSTAGRAM_INGESTION_AUTH_USERNAME", "Livestnation"),
         ("TRR_INSTAGRAM_INGESTION_AUTH_USER_ID", ""),
         ("TRR_INSTAGRAM_INGESTION_AUTH_USER_ID", "654321"),
@@ -86,7 +86,7 @@ def test_composition_credentials_never_select_resolver_or_environment_alias(monk
         monkeypatch.setenv(key, value)
     monkeypatch.setenv("INSTAGRAM_COOKIES_JSON", '{"sessionid":"forbidden-default"}')
     monkeypatch.setenv("SOCIAL_INSTAGRAM_SESSION_ACCOUNT_ID", "forbidden@thereality.report")
-    assert composition._credentials("bravotv")["browser_account_id"] == "livestnation"
+    assert composition._credentials("bravotv")["browser_account_id"] == "fixture_ingest_account"
     monkeypatch.delenv("SOCIAL_INSTAGRAM_COOKIES_JSON")
     with pytest.raises(SourceFailure, match="credential_snapshot_unavailable"):
         composition._credentials("bravotv")
@@ -111,7 +111,7 @@ def test_all_rebuilt_lane_factories_receive_pinned_identity_and_details_use_expl
     composition._listing(context, owned)
     composition._details(context, owned)
     composition._comments(context, owned)
-    assert {kwargs["browser_account_id"] for kwargs in captured.values()} == {"livestnation"}
+    assert {kwargs["browser_account_id"] for kwargs in captured.values()} == {"fixture_ingest_account"}
     assert captured["DetailSource"]["scraper_factory"] is ExplicitDetailClient
     assert captured["DetailSource"]["cookies"]["ds_user_id"] == "123456"
 

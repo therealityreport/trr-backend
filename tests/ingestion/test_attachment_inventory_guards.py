@@ -33,8 +33,8 @@ def native_comment(shortcode, *, url=PLACEHOLDER, text="Original text"):
     return {
         "pk": COMMENT_ID,
         "media_id": str(media_id),
-        "user_id": "58758231298",
-        "user": {"pk": "58758231298", "username": "commenter"},
+        "user_id": "90000000001",
+        "user": {"pk": "90000000001", "username": "commenter"},
         "text": text,
         "child_comment_count": 0,
         "media_urls": [url],

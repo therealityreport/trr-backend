@@ -92,6 +92,23 @@ def pristine_environ() -> dict[str, str]:
     return _PRISTINE_ENVIRON
 
 
+# Non-live tests pin this fixture name instead of the real ingestion account,
+# whose name stays out of the repository.
+FIXTURE_INGESTION_USERNAME = "fixture_ingest_account"
+
+
+@pytest.fixture(autouse=True)
+def _pin_fixture_ingestion_username(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    if request.node.get_closest_marker("live") is not None:
+        return
+    import hashlib
+
+    monkeypatch.setattr(
+        "trr_backend.ingestion.credential_snapshot.AUTHORIZED_USERNAME_SHA256",
+        hashlib.sha256(FIXTURE_INGESTION_USERNAME.encode("utf-8")).hexdigest(),
+    )
+
+
 @pytest.fixture(autouse=True)
 def _isolate_non_live_tests(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, _isolated_postgres_endpoints

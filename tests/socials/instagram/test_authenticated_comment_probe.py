@@ -11,7 +11,7 @@ from trr_backend.socials.instagram.authenticated_comment_probe import SUBJECTS, 
 def snapshot():
     return CredentialSnapshot.from_environ(
         {
-            "TRR_INSTAGRAM_INGESTION_AUTH_USERNAME": "livestnation",
+            "TRR_INSTAGRAM_INGESTION_AUTH_USERNAME": "fixture_ingest_account",
             "TRR_INSTAGRAM_INGESTION_AUTH_USER_ID": "12345",
             "SOCIAL_INSTAGRAM_COOKIES_JSON": json.dumps(
                 {
@@ -25,7 +25,7 @@ def snapshot():
 
 
 def identity():
-    return {"status": "ok", "user": {"pk": "12345", "username": "livestnation"}}
+    return {"status": "ok", "user": {"pk": "12345", "username": "fixture_ingest_account"}}
 
 
 def row(key, parent=None):
@@ -88,7 +88,7 @@ def test_verified_identity_and_six_ids(snapshot):
 
 
 @pytest.mark.parametrize(
-    "user", [{"pk": "99", "username": "livestnation"}, {"pk": "12345", "username": "thereality.report"}, None]
+    "user", [{"pk": "99", "username": "fixture_ingest_account"}, {"pk": "12345", "username": "thereality.report"}, None]
 )
 def test_identity_mismatch_stops_before_comments(snapshot, user):
     result, requests = run(snapshot, [{"status": "ok", "user": user}])

@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 
 from trr_backend.ingestion.comments import comment_page_failure
+from trr_backend.ingestion.credential_snapshot import is_authorized_username
 from trr_backend.socials.instagram.child_reply_probe import (
     MAX_BODY_BYTES,
     ORIGIN,
@@ -242,13 +243,13 @@ def probe_authenticated_comment_ids(
     try:
         identity = send("identity", "/api/v1/accounts/current_user/", {"edit": "true"}).get("user")
         if not isinstance(identity, dict) or (
-            identity.get("username") != "livestnation"
+            not is_authorized_username(identity.get("username"))
             or identity.get("username") != snapshot.username
             or str(identity.get("pk")) != snapshot.user_id
         ):
             report["auth_state"] = "identity_mismatch"
             raise ProbeStoppedError("identity_mismatch")
-        report.update(auth_state="authenticated", username="livestnation")
+        report.update(auth_state="authenticated", username=snapshot.username)
         for result, (shortcode, targets) in zip(report["subjects"], SUBJECTS, strict=True):
             _scan_subject(send, result, shortcode, targets)
         if all(not subject["missing_targets"] for subject in report["subjects"]):

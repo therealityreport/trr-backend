@@ -1211,7 +1211,7 @@ on Facebook" count or a Threads comment count.
 Both posts exposed a `Hidden by Instagram` section. The photo section contained
 22 top-level entries: 20 with visible comment permalink IDs and two GIF entries.
 All 20 IDs were already in the retained baseline. The GIF usernames
-`ooh_la_la_23` and `goodg00glymoogly` matched retained native parent records
+Two commenters' handles matched retained native parent records
 `18029668664695097` and `18139996450549826`, respectively. Thus these 22 hidden
 entries were already collected and do not explain the photo's gap of 38.
 
@@ -1259,7 +1259,7 @@ collected. This audit found no new photo IDs and does not reconcile 222.
 Evidence is `gap-investigation/browser-photo-comparison.json`.
 
 Authenticated native retrieval remains pending account selection: the connected
-TRR browser is `thereality.report`, while the worker snapshot pins `livestnation`.
+TRR browser is `thereality.report`, while the worker snapshot pins `<ingestion-account>`.
 No browser credentials were copied and no worker identity was changed. Current
 source also requires a distinct authenticated Relay contract and a fresh root
 scan; it cannot safely resume the clean-exhausted public cursor family as an
@@ -1289,7 +1289,7 @@ the diagnostic tranche closed. The pre-existing open tranche
 `0ccb88557fed476cb9dd3991f310fffc` was preserved, so a globally empty tranche
 ledger is not claimed. No browser credentials were copied. The missing
 prerequisite is an available worker CredentialSnapshot for the pinned
-`livestnation` identity; live identity verification and all six IDs must pass
+`<ingestion-account>` identity; live identity verification and all six IDs must pass
 before settlement rollout, unless the user explicitly revises that gate.
 
 Settlement candidate `71841b4e` is implemented, tested and committed, but is
@@ -1632,7 +1632,7 @@ evidence directory.
 
 The user authorized dedicated worker access for the bounded January 2026 run and
 both original GIF checks, selected Chrome's `codex` profile, and completed sign-in.
-A native identity response matched both the `livestnation` username and the
+A native identity response matched both the `<ingestion-account>` username and the
 snapshot's numeric identity. Credentials remain in the private task snapshot;
 no credential values or browser profile files are included in source or evidence.
 

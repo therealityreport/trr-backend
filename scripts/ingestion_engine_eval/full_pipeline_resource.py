@@ -144,6 +144,13 @@ def pool_receipt():
     }
 
 
+def _pinned_ingestion_username():
+    username = (os.environ.get("TRR_INSTAGRAM_INGESTION_AUTH_USERNAME") or "").strip()
+    if not username:
+        raise SystemExit("Set TRR_INSTAGRAM_INGESTION_AUTH_USERNAME to the pinned ingestion username.")
+    return username
+
+
 def private_environment(dsn, source, root, profile):
     """Allowlist environment: no caller provider credentials/configuration."""
     env = {
@@ -185,7 +192,8 @@ def private_environment(dsn, source, root, profile):
             {"sessionid": "synthetic-fixture", "ds_user_id": "100", "csrftoken": "fixture"}
         ),
         "TRR_INSTAGRAM_INGESTION_AUTH_USER_ID": "100",
-        "TRR_INSTAGRAM_INGESTION_AUTH_USERNAME": "livestnation",
+        # The pinned name is not in the repo; take it from the operator's environment.
+        "TRR_INSTAGRAM_INGESTION_AUTH_USERNAME": _pinned_ingestion_username(),
         "EVAL_SOURCE_ROOT": str(source),
         "EVAL_RUNTIME_ROOT": str(root),
         "EVAL_DATABASE_URL": dsn,

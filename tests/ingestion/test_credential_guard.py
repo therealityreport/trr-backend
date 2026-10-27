@@ -126,7 +126,7 @@ def posts(*, strict=True):
     return posts_module.InstagramPostsScraplingFetcher(
         cookies=[],
         raw_cookies=COOKIES.copy(),
-        browser_account_id="livestnation",
+        browser_account_id="fixture_ingest_account",
         consume_credentials_only=strict,
         allow_requests_recovery=False,
     )
@@ -260,7 +260,7 @@ def test_explicit_detail_headers_match_maintained_static_contract(monkeypatch, r
     monkeypatch.setenv("SOCIAL_INSTAGRAM_IDENTITY_POOL_ENABLED", "false")
     maintained = scraper_module.InstagramScraper(cookies=COOKIES.copy(), session=session, attach_auth_session=False)
     explicit = ExplicitDetailClient(
-        cookies=COOKIES.copy(), browser_account_id="livestnation", session=RecordingSession([])
+        cookies=COOKIES.copy(), browser_account_id="fixture_ingest_account", session=RecordingSession([])
     )
     try:
         assert explicit._get_headers(referer) == maintained.get_headers(referer)

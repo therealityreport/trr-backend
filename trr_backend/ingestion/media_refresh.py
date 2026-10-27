@@ -31,7 +31,7 @@ from trr_backend.ingestion.avatar_resolution import (
 )
 from trr_backend.ingestion.avatar_transport import AvatarProfileSource
 from trr_backend.ingestion.canonical import normalize_post_source
-from trr_backend.ingestion.credential_snapshot import AUTHORIZED_USERNAME
+from trr_backend.ingestion.credential_snapshot import is_authorized_username
 from trr_backend.ingestion.domain import Failure, LostOwnership, Stage
 from trr_backend.ingestion.evidence import Evidence
 from trr_backend.ingestion.identity_policy import IdentityDeferred, SourceRequestGate, is_content_absence
@@ -69,7 +69,7 @@ class ExplicitDetailClient:
     POST_INFO_URL = POST_INFO_URL
 
     def __init__(self, *, cookies, browser_account_id, attach_auth_session=False, session=None):
-        if attach_auth_session or browser_account_id != AUTHORIZED_USERNAME:
+        if attach_auth_session or not is_authorized_username(browser_account_id):
             raise MediaIncomplete("credential_snapshot_unavailable")
         self.cookies = dict(cookies)
         self.session = requests.Session() if session is None else session

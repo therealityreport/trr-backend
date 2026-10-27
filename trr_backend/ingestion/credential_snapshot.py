@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -12,7 +14,18 @@ from types import MappingProxyType
 from trr_backend.ingestion.domain import Failure
 from trr_backend.ingestion.post_transport import SourceFailure
 
-AUTHORIZED_USERNAME = "livestnation"
+# SHA-256 of the one authorized ingestion username, compared exactly. The name
+# itself lives only in the trr-social-auth secret, so this public repository
+# does not identify the account.
+AUTHORIZED_USERNAME_SHA256 = "b391e556fa8c7e53420e37894779c84583b945e441d944f54a90ac2105e76cea"
+
+
+def is_authorized_username(username: object) -> bool:
+    """Return True only for the exact pinned ingestion username."""
+    if not isinstance(username, str) or not username:
+        return False
+    digest = hashlib.sha256(username.encode("utf-8")).hexdigest()
+    return hmac.compare_digest(digest, AUTHORIZED_USERNAME_SHA256)
 
 
 class _Cookies(dict):
@@ -55,7 +68,7 @@ class CredentialSnapshot:
         username = env.get("TRR_INSTAGRAM_INGESTION_AUTH_USERNAME", "")
         user_id = env.get("TRR_INSTAGRAM_INGESTION_AUTH_USER_ID", "")
         raw = env.get("SOCIAL_INSTAGRAM_COOKIES_JSON", "")
-        if username != AUTHORIZED_USERNAME or not re.fullmatch(r"[1-9][0-9]{0,30}", user_id):
+        if not is_authorized_username(username) or not re.fullmatch(r"[1-9][0-9]{0,30}", user_id):
             raise _unavailable()
         if not raw or len(raw) > 1024 * 1024:
             raise _unavailable()

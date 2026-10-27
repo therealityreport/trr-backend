@@ -807,9 +807,9 @@ gate remain unfinished.
 ### Same-account session recovery (2026-10-16)
 
 The user directed recovery of the existing Modal ingestion identity and explicitly
-authorized the `livestnation` login in Chrome's `codex` profile. The prohibition on
+authorized the `<ingestion-account>` login in Chrome's `codex` profile. The prohibition on
 `thereality.report` sessions/cookies remains absolute. The active browser tool
-verified profile `codex` and the account's own `livestnation` edit controls. A new
+verified profile `codex` and the account's own `<ingestion-account>` edit controls. A new
 helper is pinned only to that verified profile; the 16 previous browser probes
 remain disabled.
 
@@ -913,7 +913,7 @@ on attempt 1. Readiness passed with no missing functions/secrets or blocking/adv
 failures. A fresh posts-worker container verified all 45 runtime hashes and the
 changed date-boundary helper; no source or database operations were made by that
 smoke. Launch 0, coordinator 1, replay-apply 0 remain unchanged. v64 and its source
-history remain available for rollback; the authorized livestnation credential did
+history remain available for rollback; the authorized `<ingestion-account>` credential did
 not change during this deployment.
 
 Supported resume with a new stable idempotency key returned 202, generation 6,
@@ -981,7 +981,7 @@ still matches 2bbc1f3dbfff0f464c6392927044528699aa91e4032088f4627d3c1136649789.
 Use a rolling deployment to preserve active inputs. Record actual provider usage
 and billing separately from rate-based estimates, measure stage throughput and
 canonical commit latency, and preserve the single-run admission/capacity policies.
-The livestnation-only identity authorization and thereality.report session/cookie
+The `<ingestion-account>`-only identity authorization and thereality.report session/cookie
 prohibition remain unchanged.
 
 
@@ -1073,7 +1073,7 @@ no incomplete target is declared complete from remote object existence.
 A per-target expired-link refresh adapter and strict secret-backed credential
 snapshot are still being integrated. The latter removes ambient resolver/file/
 browser/identity-pool candidates from this rebuilt path. Deployment must first
-pin the existing verified livestnation native user ID in the existing social
+pin the existing verified `<ingestion-account>` native user ID in the existing social
 secret without changing cookies, then verify fresh runtime readback. No
 thereality.report session or cookie is allowed. Current live v66 remains the
 region-only baseline until this complete candidate passes consolidated review.
@@ -1082,7 +1082,7 @@ region-only baseline until this complete candidate passes consolidated review.
 Credential deployment contract: `SOCIAL_INSTAGRAM_COOKIES_JSON`,
 `TRR_INSTAGRAM_INGESTION_AUTH_USER_ID`, and
 `TRR_INSTAGRAM_INGESTION_AUTH_USERNAME` belong together in `trr-social-auth`.
-The pins name the already verified native user ID and authorized livestnation
+The pins name the already verified native user ID and authorized `<ingestion-account>`
 username; missing, malformed or mismatched snapshots fail closed. The source
 environment example contains no native ID or cookie. Secret preparation routes
 both pins to the social secret; its affected split-routing regression passed.
@@ -1123,7 +1123,7 @@ its first-hour billing bucket will include this hold and other app activity.
 
 At 14:44:04Z the reviewed pin installer verified the exact candidate validator
 against the current v66 runtime cookie mapping and the already verified
-livestnation identity, then added only the two identity-pin keys to
+`<ingestion-account>` identity, then added only the two identity-pin keys to
 `admin-56995/main/trr-social-auth`. Cookie values were not changed. The receipt
 records successful same-account and exact-validator preflights; fresh deployed
 runtime readback remains pending. The first invocation lacked repository
@@ -1212,7 +1212,7 @@ with no missing secret/function and a ready control-plane provider probe.
 Actual posts worker `ta-01M52KC482SMZPWV1D11EGCX7R` was started with an incomplete
 reservation and rejected it at the input boundary before source/database work.
 Its subsequent read-only proof verified all 50 hashes, loaded-module origins,
-Patchright availability, US East placement, valid livestnation snapshot/identity
+Patchright availability, US East placement, valid `<ingestion-account>` snapshot/identity
 guard, and flags launch=0, coordinator=1, replay-apply=0. Other unconstrained app
 functions can still run in other regions; this is not an all-app placement claim.
 The readback helper gained only an optional container-ID filter to avoid repeating
@@ -1517,7 +1517,7 @@ The old authenticated run remains held at cancelled generation 9. Do not resume
 either automatically or transfer state between them.
 
 The user was asked to choose between a separate authenticated run using the
-already-authorized livestnation identity and keeping public-only ingestion while
+already-authorized `<ingestion-account>` identity and keeping public-only ingestion while
 assessing an alternative provider without paid usage. This is pending; silence
 is not approval. The existing follow-up was updated to honor this decision hold.
 No provider enrollment, paid call, authentication fallback or source workaround

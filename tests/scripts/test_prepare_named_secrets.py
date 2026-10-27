@@ -57,7 +57,7 @@ def test_split_env_excludes_modal_deploy_tokens_from_runtime_secret(
             "INSTAGRAM_WEB_BLOKS_VERSION_ID": "bloks-version",
             "INSTAGRAM_WEB_X_ASBD_ID": "359341",
             "TRR_INSTAGRAM_INGESTION_AUTH_USER_ID": "100",
-            "TRR_INSTAGRAM_INGESTION_AUTH_USERNAME": "livestnation",
+            "TRR_INSTAGRAM_INGESTION_AUTH_USERNAME": "fixture_ingest_account",
         }
     )
 
@@ -67,7 +67,7 @@ def test_split_env_excludes_modal_deploy_tokens_from_runtime_secret(
     }
     assert social_values == {
         "TRR_INSTAGRAM_INGESTION_AUTH_USER_ID": "100",
-        "TRR_INSTAGRAM_INGESTION_AUTH_USERNAME": "livestnation",
+        "TRR_INSTAGRAM_INGESTION_AUTH_USERNAME": "fixture_ingest_account",
         "SOCIAL_TWITTER_COOKIES_JSON": '{"cookies": []}',
         "SOCIALBLADE_EMAIL": "ops@example.com",
         "SOCIALBLADE_PASSWORD": "secret",

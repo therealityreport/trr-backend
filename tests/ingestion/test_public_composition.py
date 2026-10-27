@@ -55,7 +55,7 @@ def test_frozen_adapter_routing_ignores_worker_environment(monkeypatch, mode):
         return {
             "cookies": [],
             "raw_cookies": {"sessionid": "synthetic", "ds_user_id": "123"},
-            "browser_account_id": "livestnation",
+            "browser_account_id": "fixture_ingest_account",
         }
 
     monkeypatch.setattr(composition, "_credentials", credential)

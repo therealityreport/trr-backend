@@ -30,8 +30,8 @@ def row():
         "id": "14cf1d59-e5b5-433f-b928-a927d66cda94",
         "post_id": "6a20f4f2-4025-494d-8a2e-143cdd43faed",
         "comment_id": COMMENT_ID,
-        "user_id": "58758231298",
-        "username": "ooh_la_la_23",
+        "user_id": "90000000001",
+        "username": "fixture_commenter",
         "text": "",
         "source_account": "bravotv",
         "is_reply": False,
@@ -55,8 +55,8 @@ def payload():
             {
                 "pk": COMMENT_ID,
                 "media_id": MEDIA_ID,
-                "user_id": "58758231298",
-                "user": {"username": "ooh_la_la_23"},
+                "user_id": "90000000001",
+                "user": {"username": "fixture_commenter"},
                 "text": "",
                 "child_comment_count": 0,
                 "giphy_media_info": {

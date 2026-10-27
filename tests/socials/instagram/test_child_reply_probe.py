@@ -113,7 +113,7 @@ def test_mismatched_parent_does_not_prove_reply_access():
 def test_authenticated_probe_requires_explicit_pinned_snapshot_and_only_one_graphql_method():
     snapshot = CredentialSnapshot.from_environ(
         {
-            "TRR_INSTAGRAM_INGESTION_AUTH_USERNAME": "livestnation",
+            "TRR_INSTAGRAM_INGESTION_AUTH_USERNAME": "fixture_ingest_account",
             "TRR_INSTAGRAM_INGESTION_AUTH_USER_ID": "123",
             "SOCIAL_INSTAGRAM_COOKIES_JSON": json.dumps(
                 {"sessionid": "secret", "csrftoken": "csrf", "ds_user_id": "123"}
