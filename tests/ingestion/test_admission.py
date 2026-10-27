@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -11,7 +12,7 @@ from api.schemas.v2.instagram_ingestion import InstagramIngestionLaunchV2
 from tests.ingestion import test_persistence
 from trr_backend.ingestion.admission import Admission
 from trr_backend.ingestion.command_service import ServiceUnavailableError
-from trr_backend.ingestion.domain import Conflict, RunIntent, Stage, stable_json
+from trr_backend.ingestion.domain import Conflict, RunIntent, SourceProfile, Stage, stable_json
 
 base_database = test_persistence.database
 ROOT = Path(__file__).resolve().parents[2]
@@ -264,7 +265,10 @@ def test_frozen_requested_comments_count_is_a_per_run_dispatch_ceiling(database)
 @pytest.mark.parametrize("status", ["running", "completed"])
 def test_scrapling_posts_count_against_posts_capacity_without_blocking_comments(database, stage, status):
     legacy(
-        database, stage, platform="tiktok", status=status,
+        database,
+        stage,
+        platform="tiktok",
+        status=status,
         metadata={"dispatch": {"remote_invocation_id": "draining-call", "remote_invocation_status": "running"}},
     )
     subject, _ = admission(database, env={"TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT": "1"})
@@ -605,3 +609,203 @@ def test_current_local_policy_allows_two_but_preserves_physical_cap(database):
         "select intent_hash,intent->>'comments_worker_count' from social.instagram_ingestion_runs where run_id=%s",
         (item["run_id"],),
     ) == [(original, "1")]
+
+
+def bounded_candidate(database, monkeypatch, *, useful=True):
+    """Use the actual durable grant and phase commands, never a fake snapshot."""
+    from trr_backend.ingestion.bounded_recovery import USEFUL_PROGRESS_POLICY
+
+    intent = RunIntent(
+        account="bravotv",
+        scope="bounded_window",
+        date_start=datetime(2026, 1, 1, tzinfo=UTC),
+        date_end=datetime(2026, 2, 1, tzinfo=UTC),
+        source_profile=SourceProfile.for_mode("public"),
+        selected_tasks=(Stage.COMMENTS, Stage.MEDIA),
+        comments_worker_count=1,
+    )
+    store, tx = database
+    run = store.start(
+        intent, idempotency_key=str(uuid4()), engine="dbos", workflow_version="v1", initiated_by="fixture"
+    )
+    for stage in (Stage.COMMENTS, Stage.MEDIA):
+        store.discover(
+            run["run_id"],
+            intent.account,
+            generation=1,
+            stage=stage,
+            target_keys=["candidate"],
+            max_attempts=12,
+            cursor_state={},
+            page_id=str(uuid4()),
+            expected_cursor_state={},
+            seal=True,
+        )
+    sql(
+        database,
+        "update social.instagram_ingestion_runs set execution_placement='local' where run_id=%s",
+        (run["run_id"],),
+    )
+    local = test_persistence.Store(tx, execution_placement="local")
+    cancelled = local.control(run["run_id"], intent.account, action="cancel", idempotency_key=str(uuid4()))
+    local.hold_cancelled_run(
+        run["run_id"],
+        intent.account,
+        cancelled["generation"],
+        "bounded_recovery_window_expired",
+        str(uuid4()),
+        "fixture",
+    )
+    window = local.resume_bounded_recovery_window(
+        run["run_id"],
+        intent.account,
+        expected_generation=cancelled["generation"],
+        expected_intent_hash=intent.digest,
+        expected_workflow_version="v1",
+        source_revision="fixture-source",
+        initiated_by="fixture",
+        stop_policy=USEFUL_PROGRESS_POLICY if useful else None,
+    )
+    env = {
+        "TRR_INSTAGRAM_RECOVERY_WINDOW_ID": window["window_id"],
+        "TRR_INSTAGRAM_LOCAL_WORKER_RUN_ID": run["run_id"],
+        "TRR_INSTAGRAM_LOCAL_WORKER_GENERATION": str(window["generation"]),
+        "TRR_INSTAGRAM_JANUARY_RECOVERY_SOURCE_REVISION": "fixture-source",
+    }
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    binding = {
+        "run_id": run["run_id"],
+        "account": intent.account,
+        "generation": window["generation"],
+        "intent_hash": intent.digest,
+        "window_id": window["window_id"],
+        "source_revision": "fixture-source",
+    }
+    item = dict(run, account=intent.account, generation=window["generation"], stage="media", target_key="candidate")
+    return SimpleNamespace(store=local, item=item, binding=binding, env=env)
+
+
+def advance_bounded(candidate, phase):
+    from trr_backend.ingestion.bounded_recovery_phase import transition
+
+    transition(candidate.store, **candidate.binding, to_phase="draining_comments", reason="comments_stalled")
+    if phase == "media":
+        transition(candidate.store, **candidate.binding, to_phase="media", reason="comments_drained")
+
+
+def test_useful_window_admission_obeys_durable_phase_with_ready_comments(database, monkeypatch):
+    bounded = bounded_candidate(database, monkeypatch)
+    subject, probes = admission(database, env=bounded.env)
+    comment = dict(bounded.item, stage="comments")
+    assert subject._snapshot("bravotv", bounded.item["run_id"])["run"]["_comments_ready"] is True
+    assert subject.admit(comment) and not subject.admit(bounded.item)
+    advance_bounded(bounded, "draining_comments")
+    assert not subject.admit(comment) and not subject.admit(bounded.item)
+    from trr_backend.ingestion.bounded_recovery_phase import transition
+
+    transition(bounded.store, **bounded.binding, to_phase="media", reason="comments_drained")
+    snapshot = subject._snapshot("bravotv", bounded.item["run_id"])
+    assert snapshot["run"]["_bounded_window"]["phase"] == "media"
+    assert snapshot["run"]["_comments_ready"] is True
+    assert subject.admit(bounded.item) and not subject.admit(comment)
+    assert len(probes) == 2
+
+
+def test_scheduler_with_real_admission_reserves_and_dispatches_proved_media_despite_ready_comments(
+    database, monkeypatch
+):
+    from trr_backend.ingestion.workflow_store import WorkflowStore
+    from trr_backend.ingestion.workflows import Scheduler
+
+    bounded = bounded_candidate(database, monkeypatch)
+    advance_bounded(bounded, "media")
+    workflow = WorkflowStore(database[1], execution_placement="local")
+    item = workflow.seed(bounded.item)
+    subject, probes = admission(database, env=bounded.env)
+    snapshot = subject._snapshot("bravotv", item["run_id"])
+    assert snapshot["run"]["_comments_ready"] is True and snapshot["counts"] == []
+    assert snapshot["run"]["_bounded_window"]["phase"] == "media"
+    assert subject._fits(snapshot, "media_mirror", "bravotv", run_id=item["run_id"])
+    proof_calls, dispatched = [], []
+
+    def proved_media(_cur, run, _item, _now, *, advance_cursor=False, full_cycle=False):
+        proof_calls.append((run["_bounded_window"]["phase"], advance_cursor, full_cycle))
+        return {"kind": "target", "stage": "media", "target_key": "candidate"}
+
+    monkeypatch.setattr(WorkflowStore, "_eligible_media", staticmethod(proved_media))
+    scheduler = Scheduler(
+        workflow,
+        admit=subject.admit,
+        dispatch=lambda reservation: dispatched.append(reservation) or "fixture-media",
+        reconcile=lambda _: pytest.fail("Fresh media must not need reconciliation"),
+    )
+    assert scheduler.tick(item, 0) == {"ready": True}
+    assert proof_calls == [("media", True, True)]
+    assert len(probes) == len(dispatched) == 1 and dispatched[0]["stage"] == "media"
+    assert sql(database, "select stage,state from social.instagram_ingestion_dispatches") == [("media", "accepted")]
+    assert sql(
+        database, "select outcome,owner_token from social.instagram_ingestion_targets where stage='comments'"
+    ) == [("unresolved", None)]
+    assert scheduler.tick(item, 0) == {"sleep": 1.0}
+    assert len(probes) == len(dispatched) == 1
+
+
+@pytest.mark.parametrize("guard", ["account", "identity", "server_retry", "capacity", "probe"])
+def test_media_phase_keeps_existing_account_identity_capacity_and_probe_guards(database, monkeypatch, guard):
+    bounded = bounded_candidate(database, monkeypatch)
+    advance_bounded(bounded, "media")
+    subject, probes = admission(
+        database, env=bounded.env, identity_key="selected-identity", probe_available=guard != "probe"
+    )
+    if guard == "account":
+        sql(
+            database,
+            "insert into social.account_auth_cooldown(platform,account_handle,blocker_kind) "
+            "values('instagram','bravotv','checkpoint')",
+        )
+    elif guard == "identity":
+        sql(
+            database,
+            "insert into social.instagram_detail_request_lanes(identity_key,blocked) values('selected-identity',true)",
+        )
+    elif guard == "server_retry":
+        sql(
+            database,
+            "insert into social.instagram_detail_request_lanes(identity_key,server_retry_after_until) "
+            "values('selected-identity',clock_timestamp()+interval '1 hour')",
+        )
+    elif guard == "capacity":
+        legacy(database, "media_mirror")
+    assert not subject.admit(bounded.item)
+    assert bool(probes) is (guard == "probe")
+
+
+@pytest.mark.parametrize("binding", ["generation", "source", "window", "account", "workflow"])
+def test_media_phase_rejects_stale_generation_and_worker_bindings(database, monkeypatch, binding):
+    bounded = bounded_candidate(database, monkeypatch)
+    advance_bounded(bounded, "media")
+    item, env = dict(bounded.item), dict(bounded.env)
+    if binding == "generation":
+        item["generation"] -= 1
+    elif binding == "source":
+        env["TRR_INSTAGRAM_JANUARY_RECOVERY_SOURCE_REVISION"] = "stale-source"
+    elif binding == "window":
+        env["TRR_INSTAGRAM_RECOVERY_WINDOW_ID"] = "stale-window"
+    elif binding == "account":
+        item["account"] = "unrelated"
+    else:
+        item["workflow_version"] = "stale-workflow"
+    subject, probes = admission(database, env=env)
+    assert not subject.admit(item) and probes == []
+
+
+def test_legacy_bounded_window_retains_comments_first_admission(database, monkeypatch):
+    bounded = bounded_candidate(database, monkeypatch, useful=False)
+    subject, probes = admission(database, env=bounded.env)
+    assert not subject.admit(bounded.item) and probes == []
+    sql(database, "update social.instagram_ingestion_targets set blocked_reason='retained_hold' where stage='comments'")
+    assert subject.admit(bounded.item)
+    assert sql(database, "select blocked_reason from social.instagram_ingestion_targets where stage='comments'") == [
+        ("retained_hold",)
+    ]

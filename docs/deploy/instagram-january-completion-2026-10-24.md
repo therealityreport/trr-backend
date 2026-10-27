@@ -2488,3 +2488,32 @@ and 1,200→1,300 seconds of expired time. All eleven affected pure cases passed
 Ruff/whitespace checks passed, and focused independent re-review closed the
 finding. Continuation still requires a separate exact current-generation grant;
 no old authorization or generation is reused.
+
+Source `83544e643f0a` deployed as Modal **v172** at 3:30:01 a.m. New York;
+explicit-main readiness, API health, six cloud backend hashes and nine local
+package hashes passed. After an idle/drained generation-6 preflight, generation
+7 began at 07:35:15.967 UTC. Worker 81823 acquired one coordinator grant and
+matched the new release cwd. Its inherited comment idle time was 2,322.783
+seconds from the unchanged 06:56:43.019 UTC useful timestamp. It journaled
+comment draining before startup and entered media at 07:35:30.950 UTC, without
+another comment pass.
+
+Live media integration then exposed a missed downstream veto: Admission still
+rejected media whenever any comments were ready, ignoring the new durable media
+phase. At 07:42:12 UTC, three comments matched that predicate and 33 proved media
+target decisions had no reservations; media requests/attempts stayed unchanged.
+This was admission rejection, not an empty source-media inventory. The narrow
+repair makes useful-progress admission match comments/draining/media while
+retaining every capacity, account, identity, server-wait and probe gate, plus
+legacy-window behavior. The real Scheduler plus actual Admission regression
+failed before the fix at the old five-second veto, then reserved/dispatched media
+and replayed without duplication after repair. Eighteen affected checks passed.
+
+The active version is allowed to stop under its existing no-progress timer.
+An explicit changed-source media-admission-repair continuation requires that
+exact naturally stalled predecessor, its ended comment seed and immutable media
+phase. It preserves the old comment clock and ended state while allowing the
+separately authorized repaired source one media opportunity. Same-source/default
+restarts remain refused. Fifteen pure continuation cases passed, and independent
+review passed the complete four-file batch. No admission cap, source wait,
+watchdog, saved row or reply hold was relaxed.

@@ -27,6 +27,7 @@ def prior(directory, *, age=1200, media=False, held_run=RUN):
         "window_id": "old-window",
         "started_at": started.isoformat(),
         "stop_policy": USEFUL_PROGRESS_POLICY,
+        "source_revision": "original-source",
     }
     held = {
         "run_id": held_run,
@@ -166,3 +167,80 @@ def test_durable_ended_phase_cannot_reopen_for_a_late_metric_change(tmp_path, mo
     )
     assert result["decision"]["reason"] == "complete"
     assert result["seed"]["comment_phase_ended"] is True
+
+
+def media_predecessor(directory):
+    wall = prior(directory)
+    (directory / "worker-end.json").write_text(json.dumps({"stop_reason": "media_useful_progress_stalled"}))
+    (directory / "comment-progress-seed.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "window_id": "old-window",
+                "last_useful_at": (wall - timedelta(seconds=1200)).isoformat(),
+                "metrics": {"canonical_ids": 100},
+                "comment_phase_ended": True,
+                "stop_reason": "useful_progress_stalled",
+            }
+        )
+    )
+    (directory / "progress-media.json").write_text(
+        json.dumps(
+            {
+                "at": wall.isoformat(),
+                "phase": "media",
+                "comments": {"canonical_ids": 100},
+                "stop_decision": {"useful_progress": False},
+            }
+        )
+    )
+    return wall
+
+
+def test_explicit_changed_source_media_repair_keeps_comments_closed(tmp_path, monkeypatch):
+    wall = media_predecessor(tmp_path)
+    monkeypatch.setattr(operator, "recorded_recovery_phase", lambda _: "media")
+    tracker = UsefulProgressTracker()
+    result = continue_comment_progress(
+        tracker,
+        tmp_path,
+        expected_generation=6,
+        metrics={"canonical_ids": 100},
+        now=5000,
+        wall_now=wall,
+        media_repair_source="reviewed-new-source",
+    )
+    assert result["decision"]["reason"] == "useful_progress_stalled"
+    assert result["decision"]["idle_seconds"] == 1200
+    assert result["seed"]["comment_phase_ended"] is True
+    assert tracker.observe("media", {"committed_targets": 35}, now=5001)["idle_seconds"] == 0
+
+
+@pytest.mark.parametrize("source", [None, "original-source"])
+def test_media_stall_does_not_automatically_buy_a_new_pass(tmp_path, monkeypatch, source):
+    wall = media_predecessor(tmp_path)
+    monkeypatch.setattr(operator, "recorded_recovery_phase", lambda _: "media")
+    with pytest.raises(RuntimeError):
+        continue_comment_progress(
+            UsefulProgressTracker(),
+            tmp_path,
+            expected_generation=6,
+            metrics={"canonical_ids": 100},
+            now=5000,
+            wall_now=wall,
+            media_repair_source=source,
+        )
+
+
+def test_media_repair_rejects_unrecorded_phase_before_start(tmp_path):
+    wall = media_predecessor(tmp_path)
+    with pytest.raises(RuntimeError, match="durable media phase"):
+        continue_comment_progress(
+            UsefulProgressTracker(),
+            tmp_path,
+            expected_generation=6,
+            metrics={"canonical_ids": 100},
+            now=5000,
+            wall_now=wall,
+            media_repair_source="reviewed-new-source",
+        )

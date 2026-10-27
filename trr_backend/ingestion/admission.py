@@ -304,7 +304,12 @@ class Admission:
                 from trr_backend.ingestion.execution_policy import effective_comments_limit_from_run
 
                 requested = effective_comments_limit_from_run(run, run.get("execution_policy"))
-            if stage == "media_mirror" and run.get("_bounded_window") and run.get("_comments_ready"):
+            window = run.get("_bounded_window") or {}
+            if (window.get("stop_policy") or {}).get("mode") == "useful_progress":
+                allowed_stage = {"comments": "comments", "media": "media_mirror"}.get(window.get("phase"))
+                if stage != allowed_stage:
+                    return False
+            elif stage == "media_mirror" and window and run.get("_comments_ready"):
                 return False
             return self._fits(snapshot, stage, account, run_id=run_id, requested=requested) and self._probe()
         except Exception:

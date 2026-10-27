@@ -652,7 +652,9 @@ def media_idle(path, window_id):
     return False
 
 
-def continue_comment_progress(tracker, directory, *, expected_generation, metrics, now, wall_now):
+def continue_comment_progress(
+    tracker, directory, *, expected_generation, metrics, now, wall_now, media_repair_source=None
+):
     """Carry a failed predecessor's useful clock into its exact next generation.
 
     This is measurement continuity only. The new generation still needs its own
@@ -673,7 +675,7 @@ def continue_comment_progress(tracker, directory, *, expected_generation, metric
         or held.get("generation") != expected_generation
         or held.get("state") != "cancelled"
         or held.get("execution_hold_reason") != "bounded_recovery_window_expired"
-        or ended.get("stop_reason") != "worker_exited"
+        or ended.get("stop_reason") != ("media_useful_progress_stalled" if media_repair_source else "worker_exited")
     ):
         raise RuntimeError("Progress continuation is not the exact failed predecessor")
     baseline = json.loads((directory / "progress-baseline.json").read_text())
@@ -691,12 +693,21 @@ def continue_comment_progress(tracker, directory, *, expected_generation, metric
         or seed["comment_phase_ended"] != (seed["stop_reason"] != "running")
     ):
         raise RuntimeError("Invalid predecessor continuation seed")
+    if media_repair_source and (
+        not seed
+        or not seed["comment_phase_ended"]
+        or not isinstance(window.get("source_revision"), str)
+        or media_repair_source == window["source_revision"]
+    ):
+        raise RuntimeError("Media repair needs ended comments and a different verified source")
     frames = [{"at": seed["last_useful_at"], "comments": seed["metrics"]}] if seed else [baseline]
     for path in directory.glob("progress-*.json"):
         if path.name == "progress-baseline.json":
             continue
         frame = json.loads(path.read_text())
         if frame.get("phase") != "comments":
+            if media_repair_source and frame.get("phase") == "media":
+                continue
             raise RuntimeError("Cannot resume comment clock after media phase")
         if frame.get("stop_decision", {}).get("useful_progress") is True:
             frames.append(frame)
@@ -709,6 +720,8 @@ def continue_comment_progress(tracker, directory, *, expected_generation, metric
     best = merge_comment_metrics(*(value["comments"] for value in frames))
     already_ended = bool(seed and seed["comment_phase_ended"])
     phase = recorded_recovery_phase(window)
+    if media_repair_source and phase != "media":
+        raise RuntimeError("Predecessor never entered the durable media phase")
     already_ended |= phase != "comments"
     previous_reason = seed["stop_reason"] if seed and seed["comment_phase_ended"] else "complete"
     tracker.observe("comments", best, now=now - elapsed, complete=already_ended and previous_reason == "complete")
@@ -731,6 +744,7 @@ def continue_comment_progress(tracker, directory, *, expected_generation, metric
         "last_useful_at": carried["last_useful_at"],
         "decision": decision,
         "seed": carried,
+        "media_repair_source": media_repair_source,
     }
 
 
@@ -859,6 +873,7 @@ def main():
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--expected-generation", type=int, required=True)
     parser.add_argument("--continue-progress-from", type=Path)
+    parser.add_argument("--after-media-admission-repair", action="store_true")
     args = parser.parse_args()
     from scripts.ingestion.january_progress import UsefulProgressTracker
     from trr_backend.ingestion.bounded_recovery import USEFUL_PROGRESS_POLICY
@@ -866,6 +881,9 @@ def main():
     stop_policy = dict(USEFUL_PROGRESS_POLICY)
     operator_identity = "january-useful-progress-operator"
     manifest = json.loads(args.manifest.read_text())
+    if args.after_media_admission_repair and not args.continue_progress_from:
+        raise RuntimeError("Media admission repair requires its exact predecessor")
+    media_repair_source = manifest["source_identity"] if args.after_media_admission_repair else None
     release = Path(manifest["release_path"])
     for name, digest in manifest["python_hashes"].items():
         if hashlib.sha256((release / name).read_bytes()).hexdigest() != digest:
@@ -887,6 +905,7 @@ def main():
             metrics={"canonical_ids": len(before["comments"])},
             now=time.monotonic(),
             wall_now=datetime.now(UTC),
+            media_repair_source=media_repair_source,
         )
     original = PLIST.read_bytes()
     native = plistlib.loads(original)
@@ -987,6 +1006,7 @@ def main():
                 metrics=initial_progress["comments"],
                 now=time.monotonic(),
                 wall_now=datetime.now(UTC),
+                media_repair_source=media_repair_source,
             )
             initial_decision = continued["decision"]
             comment_seed = dict(continued["seed"], window_id=window["window_id"])
