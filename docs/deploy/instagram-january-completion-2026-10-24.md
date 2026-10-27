@@ -2517,3 +2517,67 @@ separately authorized repaired source one media opportunity. Same-source/default
 restarts remain refused. Fifteen pure continuation cases passed, and independent
 review passed the complete four-file batch. No admission cap, source wait,
 watchdog, saved row or reply hold was relaxed.
+
+### Interrupted media continuation and recovery — October 27
+
+Source `6a5720a2a1ee` corrected the durable-media-phase admission veto and was
+qualified as Modal **v173** for `admin-56995 / main / trr-backend-jobs`.
+Explicit-main readiness and the seven checked cloud module hashes passed; ten
+local package hashes passed. These qualification probes made no source calls.
+Generation 9 retained the generation-5 comment clock, journaled comment drain,
+and entered media without another comment scan. Generation 7 had already stopped
+on its own 900-second media stall timer with no media requests or additions.
+
+Generation 9 advanced media targets from 35 to 42 and accounted for 393 further
+target requests. It added no comment or reply IDs. Its worker then received a
+signal at 08:20:08 UTC; the signal sender is unknown. The recorded heartbeat
+age was 0.059 seconds, so this observation is not a heartbeat-deadline failure.
+The controller exited without its stop, hold, restoration, or final-report
+receipts. Read-only checks found the exact run still running at generation 9,
+with no local worker, coordinator grant, live or uncertain unresolved owner, or
+unresolved sending/accepted dispatch. The ordinary LaunchAgent was absent.
+
+The recovery used the original exact-window cancel and hold commands, after
+verifying the retained window, release hashes, source binding and unchanged
+native plist. January returned to its durable hold at generation 10. The normal
+worker was restored on `ig-useful-6a5720a2a1ee` with one coordinator grant.
+Before/after transition fingerprints matched across all 1,103 targets, 163,437
+accounted requests and 1,118 receipts. The interrupted controller was not
+restarted. The recovery procedure and receipts are retained under
+`~/.codex/tmp/ig-plan-01a17c45/restore-9/`.
+
+The reconstructed generation-9 comparison found all 133,328 earlier comment
+and reply IDs, missing flags and parent links unchanged. No hosted slot was
+removed. One existing slot, `DUGwWejDVB2` post media 1, changed from the old
+unversioned video key to a SHA-256-versioned key. Both objects remained readable;
+full storage and public reads matched for each, and both complete video/audio
+streams decoded. The old object is 8,517,486 bytes and the new one is 2,567,558
+bytes, so they are distinct versions. This scoped check does not certify every
+January media object. The rebuilt report and `changed-video-byte-audit.json`
+record the comparison without claiming the old and new bytes are equal.
+
+The held-generation certifier returned `final_acceptance=false`. Its preflight
+found 265 posts with known latest-scan gaps totaling 24,883; the deep listing,
+post, traversal, media, hosted-byte and unchanged-evidence gates remain pending.
+At the generation-9 baseline, comparison with known recorded expectations gave
+4,398 fewer nonmissing saved records across 234 posts, while five expected totals
+were unknown. These measures are not interchangeable and do not establish how
+many records remain publicly available. The certificate is
+`~/.codex/tmp/ig-plan-01a17c45/restore-9/final-certificate.json`.
+
+At reconciliation, the unresolved comment targets were `DTgXh94kXyo` and
+`DTojfyxDeaq` at their existing attempt ceilings, plus `DTv5xOQklqU`,
+`DTwHoUzD5T4` and `DUDbjscFaw7` with interrupted scan work. The first two
+retain seven recorded failed reply branches, four with technical holds. The
+remaining three have no saved reply-failure classification; one has an
+unexhausted lane. No new attempt or hold release was granted to them.
+
+Retained media evidence for five unresolved targets showed the same pinned post,
+matching media counts and positions, and exact CDN paths with one or more
+delivery-host changes. A sixth target, `DUB7jhqjoOU`, had a different video path;
+no equivalence or recovery is asserted for it. A local candidate for the
+host-only case uses the existing trusted-CDN exact-path rule after validating the
+numeric post identity. It remains **unreviewed and undeployed**. The new
+regression failed before the fix; 24 focused checks and one public-transport
+integration check passed after it. The pre-existing uncommitted storage-helper
+change has no established task owner and was excluded from this candidate.
