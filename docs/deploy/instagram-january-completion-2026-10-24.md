@@ -2581,3 +2581,46 @@ numeric post identity. It remains **unreviewed and undeployed**. The new
 regression failed before the fix; 24 focused checks and one public-transport
 integration check passed after it. The pre-existing uncommitted storage-helper
 change has no established task owner and was excluded from this candidate.
+
+### Reviewed public CDN relocation release — October 27
+
+The candidate described above was subsequently reviewed and released as source
+`f131d25b0045`, package `ig-cdn-f131d25b0045`. The public-only refresh may use
+a fresh Instagram CDN host when the native post ID, media count, ordered asset
+paths and trusted CDN rules all match. It keeps the original snapshot, storage
+keys and source references. A changed path or untrusted host still fails. No
+equivalence is claimed for the different-path `DUB7jhqjoOU` response.
+
+The host-only regression failed on the previous source. Focused source tests,
+the public-transport/isolated-PostgreSQL regression, a non-public rejection
+case, lint and formatting passed. Six packaged-runtime checks passed. An
+independent Sol/high reviewer found no blocking defects and verified the added
+non-public test. Router reconciliation verified reviewer identity and observed
+model/effort; exact delivered instruction matching remains unverified because
+the host encrypts the child prompt. The parent tier was observed as standard;
+the child tier was not independently observable.
+
+Modal **v174** deployed to `admin-56995 / main / trr-backend-jobs` with the
+candidate tag. Explicit-main readiness and API health passed. A fresh container
+matched ten backend module hashes and passed offline host-relocation and
+changed-path behavior checks without an Instagram request. The local worker was
+handed over at idle to the same package with one coordinator grant. January
+remained held at generation 10; the target fingerprint, 163,437 accounted
+requests, 154,266 comment pages and 1,118 receipts matched across handover.
+The previous v173 package remains available as rollback.
+
+The unreferenced v170, v171 and older `ig-window-d39036e05067` local packages
+were moved to actual Trash after open-file and LaunchAgent checks; the v172
+package was moved to Trash after v174 activation and v173 rollback verification.
+An initial package attempt used system Python 3.9, which lacked the archive
+filter; no files were extracted. Its empty candidate directory was moved to
+Trash and the package was rebuilt with Python 3.11. The unrelated dirty
+`media_storage_io.py` change was not included in the package.
+
+No further January window was opened. The interrupted generation-9 media pass
+did not naturally report a stall, and the existing continuation guard refuses
+to treat it as a completed media-stall predecessor. A fresh media opportunity
+would need an explicit bounded authorization and a verified continuation path;
+the last held-generation certificate remains blocked as recorded above.
+Release, review and preservation receipts are under
+`~/.codex/tmp/ig-plan-01a17c45/`.
