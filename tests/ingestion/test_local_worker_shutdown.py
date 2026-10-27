@@ -489,7 +489,7 @@ def test_worker_owned_deadline_stops_healthy_or_stalled_work_without_expired_dis
 )
 def test_lifetime_configuration_is_rejected_before_lease_startup(tmp_path, configuration):
     environment = _child_environment()
-    deadline = {"expired": str(time.time() - 1), "nan": "nan", "infinity": "inf", "too_far": str(time.time() + 3605)}
+    deadline = {"expired": str(time.time() - 1), "nan": "nan", "infinity": "inf", "too_far": str(time.time() + 21605)}
     if configuration in deadline:
         environment["TRR_INSTAGRAM_LOCAL_WORKER_DEADLINE_AT"] = deadline[configuration]
     else:

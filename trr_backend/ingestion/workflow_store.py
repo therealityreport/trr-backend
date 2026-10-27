@@ -310,6 +310,32 @@ class WorkflowStore(Store):
             )
             if prior:
                 return prior["decision"]
+            window = run.get("_bounded_window") or {}
+            recovery_phase = window.get("phase") if window.get("stop_policy") else None
+            if recovery_phase in {"draining_comments", "media"}:
+                result = {"kind": "wait", "seconds": 1.0}
+                if recovery_phase == "media":
+                    result = self._eligible_media(cur, run, item, now, advance_cursor=True, full_cycle=True) or {
+                        "kind": "blocked"
+                    }
+                    if result["kind"] == "blocked":
+                        wake = _row(
+                            cur,
+                            """select min(case when owner_expires_at>%s then owner_expires_at
+                                when blocked_reason is null and attempts<max_attempts and next_attempt_at>%s
+                                then next_attempt_at end) as at
+                            from social.instagram_ingestion_targets
+                            where run_id=%s and stage='media' and outcome='unresolved'""",
+                            (now, now, item["run_id"]),
+                        )
+                        if wake["at"]:
+                            result = {"kind": "wait", "seconds": max(0.01, (wake["at"] - now).total_seconds())}
+                cur.execute(
+                    """insert into social.instagram_ingestion_decisions(execution_id,ordinal,decision)
+                    values(%s,%s,%s::jsonb)""",
+                    (item["execution_id"], ordinal, stable_json(result)),
+                )
+                return result
             # Strict phase barrier, including selected empty-but-unsealed stages.
             phase = _row(
                 cur,
@@ -450,6 +476,8 @@ class WorkflowStore(Store):
                 if window
                 else item.get("prefer_media") or result["kind"] == "blocked"
             )
+            if window and window.get("stop_policy"):
+                media_due = False
             if media_due and phase and phase["stage"] in {"comments", "media"}:
                 # A drained batch can yield one media turn. A blocked phase
                 # must also exhaust bounded media scans before terminal recovery.
@@ -491,7 +519,12 @@ class WorkflowStore(Store):
     def reserve_decision(self, item, decision, *, ordinal=None):
         """Use Store.reserve in this same transaction, journal before leaving it."""
         with self.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-            self._current(cur, item)
+            run = self._current(cur, item)
+            window = run.get("_bounded_window") or {}
+            if window.get("stop_policy"):
+                if decision.get("stage") != {"comments": "comments", "media": "media"}.get(window["phase"]):
+                    # A prior journaled decision must not reopen a drained phase.
+                    return None
             if ordinal is not None:
                 recorded = _row(
                     cur,

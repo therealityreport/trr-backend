@@ -74,6 +74,17 @@ def held(database, monkeypatch):
     }
     yield store, tx, args, monkeypatch
     with tx() as conn, conn.cursor() as cur:
+        # These disposable tests fabricate owners, including a failed grant.
+        # Do not leave their live owner behind for the next account-capacity case.
+        cur.execute(
+            """update social.instagram_ingestion_targets set owner_token=null,
+                owner_expires_at=null,owner_started_at=null where run_id=%s""",
+            (run["run_id"],),
+        )
+        cur.execute(
+            "update social.instagram_ingestion_dispatches set state='expired' where run_id=%s",
+            (run["run_id"],),
+        )
         cur.execute(
             """update social.instagram_ingestion_runs set state='cancelled',
                 execution_hold_reason='bounded_recovery_window_expired' where run_id=%s""",
@@ -126,6 +137,40 @@ def test_exact_grant_preserves_business_history_and_replay_never_extends(held):
     assert held[0].resume_bounded_recovery_window(**held[2]) == window
     with pytest.raises(Conflict, match="another authorization"):
         held[0].resume_bounded_recovery_window(**dict(held[2], source_revision="another-source"))
+
+
+def test_progress_policy_is_sealed_with_six_hour_emergency_bound(held):
+    from trr_backend.ingestion.bounded_recovery import USEFUL_PROGRESS_POLICY
+
+    held[2]["stop_policy"] = dict(USEFUL_PROGRESS_POLICY)
+    before = targets(held)
+    window = authorize(held)
+    assert window["duration_seconds"] == 21600
+    assert datetime.fromisoformat(window["deadline_at"]) - datetime.fromisoformat(window["started_at"]) == timedelta(
+        hours=6
+    )
+    assert window["stop_policy"]["stall_seconds"] == 900
+    assert targets(held) == before
+    with held[1]() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        assert held[0]._execution_run(cur, held[2]["run_id"], "bravotv")["_bounded_window"]["phase"] == "comments"
+    args = {"run_id": held[2]["run_id"], "account": "bravotv", "generation": 3, "target_key": "post1"}
+    assert held[0].reserve(**args, stage=Stage.MEDIA) is None
+    assert held[0].resume_bounded_recovery_window(**held[2]) == window
+    # Keep this fixture idle for subsequent account-capacity tests.
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {"mode": "useful_progress", "stall_seconds": 0, "max_duration_seconds": 21600},
+        {"mode": "useful_progress", "stall_seconds": 900, "max_duration_seconds": 86400},
+    ],
+)
+def test_unqualified_progress_policy_never_releases_hold(held, policy):
+    before = targets(held)
+    with pytest.raises(ValueError, match="policy"):
+        held[0].resume_bounded_recovery_window(**dict(held[2], stop_policy=policy))
+    assert targets(held) == before
 
 
 @pytest.mark.parametrize(

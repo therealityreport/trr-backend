@@ -2373,3 +2373,38 @@ The previous `ig-window-d39036e05067` release remains as the local rollback;
 the superseded `ig-window-9532b32d3bee` release was moved to actual Trash after
 checking process and LaunchAgent references. Candidate, deployment, readiness,
 smoke and preservation evidence is under `~/.codex/tmp/ig-guards-01a17a51/`.
+
+### Useful-progress January run — October 27
+
+The user explicitly requested replacing the fixed one-hour run with a stall
+stop, followed by January comments/replies and then eligible media. The new
+sealed policy uses a 900-second useful-progress timeout in each phase, with a
+separate 21,600-second emergency lifetime. Old one-hour authorizations retain
+their original policy. Requests and repeated pages do not reset the timer.
+Window-local unions of observed/supported native IDs, distinct exhausted lane
+proofs, better single-pass coverage and saved canonical growth count as comment
+progress. Newly committed media targets count as media progress. These unions
+are scheduling measurements only, never written as current scan proof.
+
+Immutable, exact-window phase commands move comments to draining_comments and
+then media. New comment reservations are fenced during drain/media, including
+old journaled decisions. The worker reaps its comment children before the media
+command; SQL also refuses live/uncertain owners and ambiguous dispatches. Media
+uses the existing bounded per-post inventory proof. Future retry/owner wakeups
+remain waits, so a short cooldown cannot be reported as phase completion.
+The operator records its real stop reason, cancels/reholds the exact generation,
+compares stop/hold business fingerprints and restores the ordinary worker.
+Shutdown reconciliation is engaged before launchd bootout, including slow/lost
+acknowledgments. No schema, app contract, source pacing or branch hold changed.
+
+Focused tracker, phase journal, scheduling/reservation, cooldown, drain, lifetime,
+reporting and restoration checks passed. A broader run first exposed two test
+fixture defects: retained fabricated owners and repeated policy migration DDL;
+both were repaired within their fixture scope and failed checks passed. Passing
+unaffected evidence was reused. Independent review's media-cooldown and delayed
+bootout findings were repaired together, targeted checks passed, and focused
+re-review closed both. A read-only live metric sample took 17.982 seconds and
+reported 133,328 saved IDs, 286 comment targets and 35 committed media targets,
+with no source requests. Before deployment/run, January remained held generation
+4 with zero live/uncertain target owners. Runtime and collection outcomes follow
+below; source readiness alone does not establish January completion.

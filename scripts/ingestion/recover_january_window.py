@@ -131,7 +131,28 @@ def stop_native(label):
     return True
 
 
-def reconcile_window(source_revision, workflow_version):
+def shutdown_native_attempt(label, record_attempt):
+    """Engage reconciliation even if launchd's acknowledgment is delayed/lost."""
+    record_attempt()
+    return stop_native(label)
+
+
+def wait_native_drain(label, pid, *, timeout=45):
+    end = time.monotonic() + timeout
+    stable = 0
+    owned = processes(pid)
+    while time.monotonic() < end:
+        state = subprocess.run(["launchctl", "print", label], capture_output=True)
+        absent = state.returncode != 0
+        processes_absent = not any(alive(value) for value in owned)
+        stable = stable + 1 if absent and processes_absent and not grants() else 0
+        if stable == 2:
+            return
+        time.sleep(0.5)
+    raise RuntimeError("Prior native registration/process/grant remains; restoration held")
+
+
+def reconcile_window(source_revision, workflow_version, *, expected_generation=2, stop_policy=None):
     from psycopg2.extras import RealDictCursor
 
     from trr_backend.ingestion.bounded_recovery import window_key
@@ -140,7 +161,7 @@ def reconcile_window(source_revision, workflow_version):
         cur.execute(
             """select result from social.instagram_ingestion_commands
             where account='bravotv' and idempotency_key=%s""",
-            (window_key(RUN, 3),),
+            (window_key(RUN, expected_generation + 1),),
         )
         row = cur.fetchone()
     if row is None:
@@ -149,15 +170,17 @@ def reconcile_window(source_revision, workflow_version):
     expected = {
         "run_id": RUN,
         "account": "bravotv",
-        "expected_generation": 2,
-        "generation": 3,
+        "expected_generation": expected_generation,
+        "generation": expected_generation + 1,
         "expected_intent_hash": INTENT,
         "expected_workflow_version": workflow_version,
         "source_revision": source_revision,
-        "initiated_by": "january-one-hour-operator",
+        "initiated_by": "january-useful-progress-operator" if stop_policy else "january-one-hour-operator",
         "priority": "comments_first",
-        "duration_seconds": 3600,
+        "duration_seconds": stop_policy["max_duration_seconds"] if stop_policy else 3600,
     }
+    if stop_policy:
+        expected["stop_policy"] = stop_policy
     if any(window.get(key) != value for key, value in expected.items()):
         raise RuntimeError("Uncertain authorization belongs to a different window")
     return window
@@ -537,7 +560,27 @@ def transition_snapshot():
         return {"targets": targets, "receipts": cur.fetchone()[0]}
 
 
-def progress(window):
+def merge_frontier(frontiers, target, observed, supported, proofs, best):
+    """Window-local scheduling counters; never write these unions as scan proof."""
+    saved = frontiers.setdefault(target, {"observed": set(), "supported": set(), "proofs": set(), "best": 0})
+    saved["observed"].update(observed)
+    saved["supported"].update(supported)
+    saved["proofs"].update(proofs)
+    saved["best"] = max(saved["best"], best)
+    return {
+        "observed_ids": len(saved["observed"]),
+        "supported_ids": len(saved["supported"]),
+        "proof_count": len(saved["proofs"]),
+        "best_observed_total": saved["best"],
+    }
+
+
+def progress(window, frontiers=None):
+    from psycopg2.extras import RealDictCursor
+
+    from trr_backend.ingestion.bounded_recovery_phase import phase
+
+    frontiers = {} if frontiers is None else frontiers
     with closing(connect()) as conn, conn, conn.cursor() as cur:
         cur.execute(
             """select sum(requests),count(*) filter(where stage='media' and outcome='committed')
@@ -551,12 +594,62 @@ def progress(window):
             (RUN, window["started_at"]),
         )
         pages = cur.fetchone()[0]
+        cur.execute(
+            """select count(*) from social.instagram_comments c
+            join social.instagram_posts p on p.id=c.post_id where exists(
+                select 1 from social.instagram_ingestion_targets t
+                where t.run_id=%s and t.stage='comments' and t.target_key=p.shortcode)""",
+            (RUN,),
+        )
+        canonical_ids = cur.fetchone()[0]
+    with closing(connect()) as conn, conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        current_phase = phase(cur, window)
+        cur.execute(
+            """select target_key,
+            array(select jsonb_object_keys(coalesce(checkpoint#>'{comment_pages,observed}','{}'::jsonb))) as observed,
+            array(select key from jsonb_each(coalesce(checkpoint#>'{comment_pages,observed}','{}'::jsonb))
+                where not coalesce((value->>'unsupported_reply_topology')::boolean,false)) as supported,
+            array(select key from jsonb_each(coalesce(checkpoint#>'{comment_pages,lanes}','{}'::jsonb))
+                where value->>'exhausted'='true') as proofs,
+            checkpoint->'public_recovery' as recovery
+            from social.instagram_ingestion_targets where run_id=%s and stage='comments'""",
+            (RUN,),
+        )
+        targets = {}
+        from trr_backend.ingestion.comment_recovery import _progress_frontier
+
+        for row in cur.fetchall():
+            retained = _progress_frontier(row["recovery"] or {})
+            observed = set(row["observed"]) | set(retained["observed_ids"])
+            supported = set(row["supported"]) | set(retained["supported_ids"])
+            targets[row["target_key"]] = merge_frontier(
+                frontiers,
+                row["target_key"],
+                observed,
+                supported,
+                row["proofs"],
+                max(len(row["observed"]), retained["best_observed_total"]),
+            )
         return {
             "at": datetime.now(UTC).isoformat(),
             "accounted_requests": requests,
             "new_comment_pages": pages,
             "media_committed": media_count,
+            "phase": current_phase,
+            "comments": {"canonical_ids": canonical_ids, "targets": targets},
+            "media": {"committed_targets": media_count},
         }
+
+
+def media_idle(path, window_id):
+    for line in reversed(path.read_text().splitlines()[-200:]):
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if row.get("status") == "bounded_media_idle" and row.get("window_id") == window_id:
+            return True
+    return False
 
 
 def public_base_urls(public_bases):
@@ -648,7 +741,13 @@ def main():
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--artifact-directory", type=Path, required=True)
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--expected-generation", type=int, required=True)
     args = parser.parse_args()
+    from scripts.ingestion.january_progress import UsefulProgressTracker
+    from trr_backend.ingestion.bounded_recovery import USEFUL_PROGRESS_POLICY
+
+    stop_policy = dict(USEFUL_PROGRESS_POLICY)
+    operator_identity = "january-useful-progress-operator"
     manifest = json.loads(args.manifest.read_text())
     release = Path(manifest["release_path"])
     for name, digest in manifest["python_hashes"].items():
@@ -657,7 +756,7 @@ def main():
     before = snapshot()
     if (before["run"]["state"], before["run"]["generation"], before["run"]["execution_hold_reason"]) != (
         "cancelled",
-        2,
+        args.expected_generation,
         "bounded_recovery_window_expired",
     ):
         raise RuntimeError("January is no longer the expected held generation")
@@ -683,7 +782,16 @@ def main():
     ):
         raise RuntimeError("Existing activities have not drained")
     if not args.execute:
-        print(json.dumps({"prepared": True, "source": manifest["source_identity"], "generation": 2, "seconds": 3600}))
+        print(
+            json.dumps(
+                {
+                    "prepared": True,
+                    "source": manifest["source_identity"],
+                    "generation": args.expected_generation,
+                    "stop_policy": stop_policy,
+                }
+            )
+        )
         return 0
     directory = args.artifact_directory
     directory.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -693,6 +801,7 @@ def main():
     child = None
     window = None
     stopped_native = False
+    stop_reason = "operator_interrupted"
     from psycopg2.extras import RealDictCursor
 
     from trr_backend.ingestion.execution_policy import ExecutionPolicy
@@ -700,28 +809,40 @@ def main():
     from trr_backend.ingestion.workflows import control_call
 
     store = Store(transaction, execution_placement="local")
+
+    def mark_native_shutdown_attempt():
+        nonlocal stopped_native
+        stopped_native = True
+
     try:
-        stopped_native = stop_native(label)
-        deadline = time.monotonic() + 45
-        stable = 0
-        while time.monotonic() < deadline:
-            stable = stable + 1 if not alive(pid) and not grants() else 0
-            if stable == 2:
-                break
-            time.sleep(0.5)
-        if stable != 2:
-            raise RuntimeError("Prior worker/grant did not drain")
+        shutdown_native_attempt(label, mark_native_shutdown_attempt)
+        wait_native_drain(label, pid)
         window = control_call(
             store.resume_bounded_recovery_window,
             RUN,
             "bravotv",
-            expected_generation=2,
+            expected_generation=args.expected_generation,
             expected_intent_hash=INTENT,
             expected_workflow_version=before["run"]["workflow_version"],
             source_revision=manifest["source_identity"],
-            initiated_by="january-one-hour-operator",
+            initiated_by=operator_identity,
+            stop_policy=stop_policy,
         )
         save(directory, "window.json", window)
+        # The parent may only issue phase commands for this exact authorization.
+        os.environ.update(
+            {
+                "TRR_INSTAGRAM_RECOVERY_WINDOW_ID": window["window_id"],
+                "TRR_INSTAGRAM_LOCAL_WORKER_RUN_ID": RUN,
+                "TRR_INSTAGRAM_LOCAL_WORKER_GENERATION": str(window["generation"]),
+                "TRR_INSTAGRAM_JANUARY_RECOVERY_SOURCE_REVISION": manifest["source_identity"],
+            }
+        )
+        frontiers = {}
+        tracker = UsefulProgressTracker(stop_policy["stall_seconds"])
+        initial_progress = progress(window, frontiers)
+        tracker.observe("comments", initial_progress["comments"], now=time.monotonic())
+        save(directory, "progress-baseline.json", initial_progress)
         binding = json.loads(Path(launch_values["TRR_INSTAGRAM_JANUARY_BINDING"]).read_text())
         binding.update(
             source_identity=manifest["source_identity"],
@@ -746,7 +867,7 @@ def main():
             expected_revision=policy["revision"] if policy else 0,
             comments_parallelism=6,
             idempotency_key="window-policy:" + window["window_id"],
-            initiated_by="january-one-hour-operator",
+            initiated_by=operator_identity,
         )
         save(directory, "policy.json", limits)
         prefix, separator, suffix = native["ProgramArguments"][2].rpartition(" && exec ")
@@ -798,29 +919,76 @@ def main():
                 json.dumps({"status": "recovery_started", "pid": child.pid, "deadline_at": window["deadline_at"]}),
                 flush=True,
             )
-            previous_progress, unchanged = None, 0
+            last_phase = "comments"
             while child.poll() is None:
                 remaining = datetime.fromisoformat(window["deadline_at"]).timestamp() - time.time()
                 if remaining <= 0:
+                    stop_reason = "safety_deadline"
                     break
                 try:
-                    child.wait(timeout=min(600 if unchanged >= 3 else 120, remaining))
+                    child.wait(timeout=min(60, remaining))
                 except subprocess.TimeoutExpired:
                     if datetime.fromisoformat(window["deadline_at"]).timestamp() <= time.time():
+                        stop_reason = "safety_deadline"
                         break
-                    observed = progress(window)
-                    signature = {key: value for key, value in observed.items() if key != "at"}
-                    unchanged = unchanged + 1 if signature == previous_progress else 0
-                    if signature != previous_progress:
+                    observed = progress(window, frontiers)
+                    current_phase = observed["phase"]
+                    if current_phase == "draining_comments":
+                        if last_phase != current_phase:
+                            print(json.dumps({"status": "comments_draining"}), flush=True)
+                        last_phase = current_phase
+                        continue
+                    decision = tracker.observe(
+                        current_phase,
+                        observed[current_phase],
+                        now=time.monotonic(),
+                        complete=current_phase == "media" and media_idle(directory / "worker.log", window["window_id"]),
+                    )
+                    if decision["useful_progress"] or last_phase != current_phase or decision["reason"] != "running":
+                        observed["stop_decision"] = decision
                         save(directory, f"progress-{time.time_ns()}.json", observed)
-                        print(json.dumps(dict(status="recovery_progress", **observed)), flush=True)
-                    previous_progress = signature
+                        print(
+                            json.dumps(
+                                {
+                                    "status": "recovery_progress",
+                                    "phase": current_phase,
+                                    "canonical_ids": observed["comments"]["canonical_ids"],
+                                    "media_committed": observed["media_committed"],
+                                    "stop_decision": decision,
+                                }
+                            ),
+                            flush=True,
+                        )
+                    last_phase = current_phase
+                    if decision["reason"] != "running":
+                        if current_phase == "comments":
+                            from trr_backend.ingestion.bounded_recovery_phase import transition
+
+                            changed = control_call(
+                                transition,
+                                store,
+                                run_id=RUN,
+                                account="bravotv",
+                                generation=window["generation"],
+                                intent_hash=INTENT,
+                                window_id=window["window_id"],
+                                source_revision=manifest["source_identity"],
+                                to_phase="draining_comments",
+                                reason="comments_stopped",
+                            )
+                            save(directory, "comments-stall.json", {"decision": decision, "transition": changed})
+                        else:
+                            stop_reason = "media_" + decision["reason"]
+                            break
+            else:
+                stop_reason = "worker_exited"
             save(
                 directory,
                 "worker-end.json",
                 {
                     "returncode_before_stop": child.poll(),
                     "work_elapsed_seconds": time.time() - datetime.fromisoformat(window["started_at"]).timestamp(),
+                    "stop_reason": stop_reason,
                 },
             )
     finally:
@@ -829,8 +997,14 @@ def main():
         if child is not None:
             save(directory, "child-drained.json", stop_owned_child(child))
         if stopped_native:
+            wait_native_drain(label, pid)
             if window is None:
-                window = reconcile_window(manifest["source_identity"], before["run"]["workflow_version"])
+                window = reconcile_window(
+                    manifest["source_identity"],
+                    before["run"]["workflow_version"],
+                    expected_generation=args.expected_generation,
+                    stop_policy=stop_policy,
+                )
             stable = 0
             end = time.monotonic() + 30
             while time.monotonic() < end:
@@ -858,7 +1032,7 @@ def main():
                     cancelled["generation"],
                     "bounded_recovery_window_expired",
                     "window-hold:" + window["window_id"],
-                    "january-one-hour-operator",
+                    operator_identity,
                 )
                 save(directory, "held.json", held)
             transition_after = transition_snapshot()
@@ -915,6 +1089,14 @@ def main():
             save(directory, "restored.json", {"pid": restored, "grants": grants(), "package": str(release)})
             if window:
                 result = report(before, after, window)
+                result["stop_reason"] = stop_reason
+                old_ids = {(row["shortcode"], row["comment_id"]) for row in before["comments"]}
+                current_ids = {(row["shortcode"], row["comment_id"]) for row in after["comments"]}
+                result["saved_identity_preservation"] = {
+                    "before": len(old_ids),
+                    "after": len(current_ids),
+                    "missing_identities": len(old_ids - current_ids),
+                }
                 result["media"] = verify_new_media(before, after, storage["public_bases"])
                 save(directory, "recovery-report.json", result)
                 print(

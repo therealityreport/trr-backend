@@ -116,9 +116,12 @@ class Store:
         source_revision,
         initiated_by,
         expected_hold_reason="bounded_recovery_window_expired",
+        stop_policy=None,
     ):
-        """Resume the exact held public January run once, for one hour only."""
-        from trr_backend.ingestion.bounded_recovery import window_key
+        """Resume the exact held public January run with a sealed lifetime policy."""
+        from trr_backend.ingestion.bounded_recovery import policy_duration, window_key
+
+        duration = policy_duration(stop_policy)
 
         if type(expected_generation) is not int or expected_generation < 1:
             raise ValueError("An exact positive generation is required")
@@ -143,9 +146,11 @@ class Store:
             "source_revision": source_revision,
             "initiated_by": initiated_by,
             "expected_hold_reason": expected_hold_reason,
-            "duration_seconds": 3600,
+            "duration_seconds": duration,
             "priority": "comments_first",
         }
+        if stop_policy is not None:
+            command["stop_policy"] = dict(stop_policy)
         command_hash = fingerprint(command)
         with self.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("select pg_advisory_xact_lock(hashtextextended(%s,0))", (f"instagram-command:{account}:{key}",))
@@ -224,7 +229,7 @@ class Store:
                 "generation": generation,
                 "state": "queued",
                 "started_at": now.isoformat(),
-                "deadline_at": (now + timedelta(seconds=3600)).isoformat(),
+                "deadline_at": (now + timedelta(seconds=duration)).isoformat(),
                 "execution_id": execution_id,
             }
             cur.execute(
@@ -752,10 +757,15 @@ class Store:
             raise ValueError("Reservation must be bounded to at most ten minutes")
         with self.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             run = self._execution_run(cur, run_id, account)
+            window = run.get("_bounded_window") or {}
+            if window.get("stop_policy") and stage.value != {"comments": "comments", "media": "media"}.get(
+                window["phase"]
+            ):
+                return None
             if run["generation"] != generation or run["state"] not in {"queued", "running"}:
                 raise LostOwnership("Run execution is no longer current")
             window_deadline = (run.get("_bounded_window") or {}).get("deadline_at")
-            if stage == Stage.MEDIA and window_deadline:
+            if stage == Stage.MEDIA and window_deadline and not window.get("stop_policy"):
                 ready = _row(
                     cur,
                     """select target_key from social.instagram_ingestion_targets

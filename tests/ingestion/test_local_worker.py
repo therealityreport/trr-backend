@@ -219,17 +219,8 @@ def test_interrupted_certification_artifact_is_preserved_and_can_resume(tmp_path
 
 @pytest.fixture(scope="module")
 def database(base_database):
-    local_database = local_execution.database.__wrapped__(base_database)
-    with local_database[2]() as conn, conn.cursor() as cur:
-        cur.execute(
-            (local_execution.ROOT / "supabase/migrations/20261023140000_instagram_execution_policy.sql").read_text()
-        )
-        cur.execute(
-            (
-                local_execution.ROOT / "supabase/migrations/20261023180000_instagram_execution_policy_six_eight.sql"
-            ).read_text()
-        )
-    return local_database
+    # The shared local fixture now installs execution policy migrations itself.
+    return local_execution.database.__wrapped__(base_database)
 
 
 def _worker(database, execute, *, abort, stop, on_cycle=None, effective_comments_limit=None):

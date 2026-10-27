@@ -61,6 +61,27 @@ def test_bootout_waits_for_asynchronous_launchctl_unregistration(monkeypatch):
     assert calls == ["bootout", "print", "print"]
 
 
+def test_delayed_unregistration_keeps_final_reconciliation_engaged(monkeypatch):
+    attempted = []
+
+    def delayed(_):
+        assert attempted == [True]
+        raise RuntimeError("Native bootout is not confirmed")
+
+    monkeypatch.setattr(operator, "stop_native", delayed)
+    with pytest.raises(RuntimeError, match="not confirmed"):
+        operator.shutdown_native_attempt("gui/test/worker", lambda: attempted.append(True))
+    # The same branch used by main's finally must run despite the raised acknowledgment.
+    assert attempted == [True]
+    states = iter([0, 113, 113])
+    monkeypatch.setattr(operator.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=next(states)))
+    monkeypatch.setattr(operator, "processes", lambda _: {12, 13})
+    monkeypatch.setattr(operator, "alive", lambda _: False)
+    monkeypatch.setattr(operator, "grants", lambda: [])
+    monkeypatch.setattr(operator.time, "sleep", lambda _: None)
+    operator.wait_native_drain("gui/test/worker", 12)
+
+
 def test_darwin_eperm_on_exited_child_still_reaps_and_proves_absence(monkeypatch):
     waits = []
     child = SimpleNamespace(pid=123, returncode=125, wait=lambda **kwargs: waits.append(kwargs))
@@ -86,3 +107,52 @@ def test_surviving_descendant_keeps_restoration_blocked(monkeypatch):
     monkeypatch.setattr(operator.time, "monotonic", lambda: next(moments))
     with pytest.raises(RuntimeError, match="process remains"):
         operator.stop_owned_child(child)
+
+
+def test_window_progress_unions_ids_and_proofs_without_alternating_subset_credit():
+    frontiers = {}
+    first = operator.merge_frontier(frontiers, "post", {"a", "b"}, {"a"}, {"parent"}, 2)
+    operator.merge_frontier(frontiers, "post", {"a"}, {"a"}, set(), 1)
+    assert operator.merge_frontier(frontiers, "post", {"b"}, set(), {"parent"}, 1) == first
+    improved = operator.merge_frontier(frontiers, "post", {"b", "c"}, {"b"}, {"parent", "child"}, 2)
+    assert improved == {"observed_ids": 3, "supported_ids": 2, "proof_count": 2, "best_observed_total": 2}
+
+
+def test_comment_children_are_drained_before_media_phase_command(monkeypatch):
+    from scripts.ingestion.local_worker import advance_recovery_media
+    from trr_backend.ingestion import bounded_recovery_phase
+
+    events = []
+    active = {"child": object()}
+    dispatch = SimpleNamespace(active=active)
+
+    def drain(store, *, finish):
+        assert finish is True
+        events.append("drained")
+        active.clear()
+
+    dispatch.drain = drain
+
+    def transition(*_, **kwargs):
+        assert not active and events == ["drained"]
+        events.append("media")
+        return kwargs
+
+    monkeypatch.setattr(bounded_recovery_phase, "transition", transition)
+    result = advance_recovery_media(
+        object(),
+        dispatch,
+        {"run_id": "run", "account": "bravotv", "generation": 5},
+        {"window_id": "window", "source_revision": "source", "expected_intent_hash": "digest"},
+    )
+    assert result["to_phase"] == "media" and events == ["drained", "media"]
+
+
+def test_failed_comment_drain_cannot_publish_media_phase(monkeypatch):
+    from scripts.ingestion.local_worker import advance_recovery_media
+    from trr_backend.ingestion import bounded_recovery_phase
+
+    monkeypatch.setattr(bounded_recovery_phase, "transition", lambda *a, **k: pytest.fail("must not transition"))
+    dispatch = SimpleNamespace(active={"child": object()}, drain=lambda *a, **k: None)
+    with pytest.raises(RuntimeError, match="children remain"):
+        advance_recovery_media(object(), dispatch, {}, {})

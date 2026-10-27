@@ -41,6 +41,36 @@ ACTIVITY_TIMEOUT_SECONDS = 590
 WAIT_RECHECK_SECONDS = 5.0
 
 
+def recovery_window_state(store, item):
+    """Read phase control at the existing fenced scheduling boundary."""
+    from psycopg2.extras import RealDictCursor
+
+    with store.transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        run = store._current(cur, item)
+        return run.get("_bounded_window") or {}
+
+
+def advance_recovery_media(store, dispatch, item, window):
+    """Finish every comment child before publishing the durable media phase."""
+    from trr_backend.ingestion.bounded_recovery_phase import transition
+
+    dispatch.drain(store, finish=True)
+    if dispatch.active:
+        raise RuntimeError("Comment children remain during media transition")
+    return control_call(
+        transition,
+        store,
+        run_id=item["run_id"],
+        account=item["account"],
+        generation=item["generation"],
+        intent_hash=window["expected_intent_hash"],
+        window_id=window["window_id"],
+        source_revision=window["source_revision"],
+        to_phase="media",
+        reason="comments_drained",
+    )
+
+
 def retained_certification(path):
     """Keep complete reports; archive interrupted output for a fresh invocation."""
     if not path.exists():
@@ -371,7 +401,9 @@ def run_partition(
                     raise Interrupted
                 prepared = call_in_phase(abort, "before_finalize", before_recovery, item)
                 if not prepared or prepared.get("status") not in {
-                    "retained_audit_completed", "bounded_audit_deferred", "productive_budget_extended"
+                    "retained_audit_completed",
+                    "bounded_audit_deferred",
+                    "productive_budget_extended",
                 }:
                     break
                 # Preparation has its own command journal. It must not consume
@@ -609,8 +641,10 @@ def main(argv=None):
         if deadline_value:
             deadline_at = float(deadline_value)
             remaining = deadline_at - time.time()
-            if not math.isfinite(deadline_at) or not 0 < remaining <= 3600:
-                raise ValueError("The local worker deadline must be finite, future, and within one hour")
+            from trr_backend.ingestion.bounded_recovery import MAX_WINDOW_SECONDS
+
+            if not math.isfinite(deadline_at) or not 0 < remaining <= MAX_WINDOW_SECONDS:
+                raise ValueError("The local worker deadline must be finite, future, and within the safety bound")
             deadline = time.monotonic() + remaining
         parent_value = os.getenv("TRR_INSTAGRAM_LOCAL_WORKER_PARENT_PID", "").strip()
         parent_pid = int(parent_value) if parent_value else None
@@ -647,6 +681,15 @@ def main(argv=None):
                 return None
             from trr_backend.ingestion.comment_recovery import enqueue_next_recovery
 
+            window = recovery_window_state(store, item) if os.getenv("TRR_INSTAGRAM_RECOVERY_WINDOW_ID") else {}
+            if window.get("stop_policy"):
+                if window["phase"] == "draining_comments":
+                    result = advance_recovery_media(store, dispatch, item, window)
+                    print(json.dumps({"status": "recovery_phase_changed", **result}), flush=True)
+                    return {"status": "recovery_phase_changed"}
+                if window["phase"] == "media":
+                    return None
+
             result = enqueue_next_recovery(
                 store,
                 run_id=recovery_run,
@@ -664,9 +707,33 @@ def main(argv=None):
                     dispatch.wait(WAIT_RECHECK_SECONDS)
             return result
 
+        idle_emitted = set()
+
         def before_finalize(item, *, stop):
             result = recovery_step(item, stop=stop)
             if result is None and os.getenv("TRR_INSTAGRAM_RECOVERY_WINDOW_ID"):
+                window = recovery_window_state(store, item)
+                if window.get("stop_policy"):
+                    if window["phase"] == "comments":
+                        from trr_backend.ingestion.bounded_recovery_phase import transition
+
+                        control_call(
+                            transition,
+                            store,
+                            run_id=item["run_id"],
+                            account=item["account"],
+                            generation=item["generation"],
+                            intent_hash=window["expected_intent_hash"],
+                            window_id=window["window_id"],
+                            source_revision=window["source_revision"],
+                            to_phase="draining_comments",
+                            reason="comments_stopped",
+                        )
+                    elif window["phase"] == "media" and window["window_id"] not in idle_emitted:
+                        print(
+                            json.dumps({"status": "bounded_media_idle", "window_id": window["window_id"]}), flush=True
+                        )
+                        idle_emitted.add(window["window_id"])
                 # Lifecycle settlement is not January acceptance. Leave this
                 # generation active for the operator's exact stop/hold command.
                 dispatch.wait(5)
