@@ -2408,3 +2408,83 @@ reported 133,328 saved IDs, 286 comment targets and 35 committed media targets,
 with no source requests. Before deployment/run, January remained held generation
 4 with zero live/uncertain target owners. Runtime and collection outcomes follow
 below; source readiness alone does not establish January completion.
+
+Source `98e6bc2ec814` was packaged as `ig-useful-98e6bc2ec814` without unrelated
+dirty work and deployed to verified `admin-56995 / main / trr-backend-jobs` as
+Modal **v171** at 2:47:48 a.m. New York. Explicit-main readiness and API health
+passed. A fresh container matched all six applicable backend module hashes and
+loaded the sealed policy. Three operator/worker/tracker scripts belong to the
+local package, not the Modal image; the initial cloud probe wrongly expected
+those modules and its resulting receipt was retained as invalid. A corrected
+probe required an explicit success record, and all nine local package hashes
+plus the useful-stall/independent-media behavior passed offline. No source call
+was made by either qualifying smoke.
+
+Read-only preparation confirmed held generation 4, no active local runs or
+live/uncertain local owners, and idle native PID 4070 on the prior guard release.
+The new generation-5 window began at **2:53:03 a.m. New York** (06:53:03 UTC).
+Worker 10205 acquired the unique coordinator grant at 06:53:14.865 UTC; actual
+cwd matched the new release. The original grant was observed absent during
+handover even though the pool later reused backend number 552757. Baseline
+retains 133,328 canonical comment/reply identities, 35 committed media targets,
+1,103 targets and 162,036 accounted requests. Run evidence is under
+`~/.codex/tmp/ig-useful-01a17a51/run-5/`. Collection remains distinct from final
+January certification; the terminal outcome and preservation checks follow.
+
+At 07:00:53 UTC, an independent bounded read-only check compared the two original
+problem posts with the frozen baseline: all seven failure branches, four
+technical holds, failure counts, retry clocks and retry sources matched. Both
+posts had zero new attempts, requests or accepted pages and no pending top-root
+restart. Their attempt ceilings (166/166 and 13/13) remained unchanged. This
+proves preservation while other roots run; the repaired fresh-root/held-parent
+composition remains covered by regression and packaged-runtime evidence, not a
+new live held-branch retry. Per-target request accounting does not certify every
+unsent native parent event, so no broader native-journal claim is made.
+
+Generation 5 ended early at 07:06:07 UTC with `lease_heartbeat_deadline`, then
+returned 125. The watchdog comparison saw a 3.234-second heartbeat age and
+3.3435-second watchdog wake gap; the last completed heartbeat query took 41 ms,
+not 41 ms before abort. No heartbeat SELECT was in flight at comparison. This
+is compatible with process/thread scheduling delay, including GIL pressure,
+but does not prove a CPU/GIL cause. The two-second watchdog and five-second
+server expiry remain unchanged. Operator work elapsed was 789.698 seconds.
+It safely reheld generation 6 and restored ordinary PID 33688 with one grant.
+
+This attempt added 997 accepted pages and accounted 1,008 requests but recovered
+zero new canonical IDs or hosted-media slots. Window-local proof strengthened
+for 161 lanes; its current-scan gap aggregate fell by 58. These are proof and
+observation changes, not new comments. All 133,328 pre-existing identities,
+missing flags and parent links matched. Ten attachment-array hashes changed;
+an independent bounded audit reconstructed their old arrays exactly from nine
+immutable pre-window pages (135,104 bytes, all evidence hashes verified). Every
+array still has one attachment with the same native identity and URL path;
+only signed query parameters refreshed. Hosted arrays matched, with no lost or
+added normalized attachment references. No remote byte-equality claim is made
+for those refreshed source URLs.
+
+The failed worker repeatedly loaded and decoded the full settled checkpoint
+cohort before learning all four recovery-root slots were occupied. The narrow
+recovery repair adds an early bounded-window capacity hint after productive
+budget and due-work gates. It skips that unnecessary cohort work at full
+capacity and retains the authoritative locked admission check. The regression
+failed at the old full-cohort SELECT, then six targeted admission/continuation
+checks passed. This removes avoidable work; it is not proof of the heartbeat's
+first cause. An exact failed-predecessor progress option carries the previous
+useful timestamp/maxima into the next separately authorized generation, so a
+retry cannot buy another 900 seconds. Seven focused clock/binding tests passed.
+It validates predecessor metadata before disturbing the native service. If the
+comment timer has already expired and no real improvement appears, the new
+window journals comment draining before starting its worker, then enters the
+normal guarded media path. The original generation is never reused.
+
+Independent review found one continuation defect: a second failure could treat
+its fresh observation baseline as a new useful timestamp. The operator now
+atomically persists and consumes an explicit clock/metrics/ended-phase seed.
+It also reads the immutable predecessor phase journal. A fresh observation or
+worker failure cannot re-arm an inherited clock or reopen an ended comment
+phase; missing inherited state rejects preparation before native shutdown.
+The two-successive-failures regressions preserve 300→400 seconds of idle time
+and 1,200→1,300 seconds of expired time. All eleven affected pure cases passed,
+Ruff/whitespace checks passed, and focused independent re-review closed the
+finding. Continuation still requires a separate exact current-generation grant;
+no old authorization or generation is reused.

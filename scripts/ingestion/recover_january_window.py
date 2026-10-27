@@ -652,6 +652,122 @@ def media_idle(path, window_id):
     return False
 
 
+def continue_comment_progress(tracker, directory, *, expected_generation, metrics, now, wall_now):
+    """Carry a failed predecessor's useful clock into its exact next generation.
+
+    This is measurement continuity only. The new generation still needs its own
+    authorization, drained ownership, source binding and immutable phase journal.
+    """
+    from trr_backend.ingestion.bounded_recovery import USEFUL_PROGRESS_POLICY
+
+    window = json.loads((directory / "window.json").read_text())
+    held = json.loads((directory / "held.json").read_text())
+    ended = json.loads((directory / "worker-end.json").read_text())
+    if (
+        window.get("run_id") != RUN
+        or window.get("account") != "bravotv"
+        or window.get("expected_intent_hash") != INTENT
+        or window.get("generation") != expected_generation - 1
+        or window.get("stop_policy") != USEFUL_PROGRESS_POLICY
+        or held.get("run_id") != RUN
+        or held.get("generation") != expected_generation
+        or held.get("state") != "cancelled"
+        or held.get("execution_hold_reason") != "bounded_recovery_window_expired"
+        or ended.get("stop_reason") != "worker_exited"
+    ):
+        raise RuntimeError("Progress continuation is not the exact failed predecessor")
+    baseline = json.loads((directory / "progress-baseline.json").read_text())
+    if baseline.get("phase") != "comments":
+        raise RuntimeError("Cannot resume a non-comment baseline")
+    seed_path = directory / "comment-progress-seed.json"
+    seed = json.loads(seed_path.read_text()) if seed_path.exists() else None
+    if seed is None and any((directory / name).exists() for name in ("continued-progress.json", "comments-stall.json")):
+        raise RuntimeError("Predecessor continuation seed is missing")
+    if seed is not None and (
+        seed.get("version") != 1
+        or seed.get("window_id") != window["window_id"]
+        or type(seed.get("comment_phase_ended")) is not bool
+        or seed.get("stop_reason") not in {"running", "complete", "useful_progress_stalled"}
+        or seed["comment_phase_ended"] != (seed["stop_reason"] != "running")
+    ):
+        raise RuntimeError("Invalid predecessor continuation seed")
+    frames = [{"at": seed["last_useful_at"], "comments": seed["metrics"]}] if seed else [baseline]
+    for path in directory.glob("progress-*.json"):
+        if path.name == "progress-baseline.json":
+            continue
+        frame = json.loads(path.read_text())
+        if frame.get("phase") != "comments":
+            raise RuntimeError("Cannot resume comment clock after media phase")
+        if frame.get("stop_decision", {}).get("useful_progress") is True:
+            frames.append(frame)
+    frame = max(frames, key=lambda value: datetime.fromisoformat(value["at"]))
+    last_useful = datetime.fromisoformat(frame["at"])
+    started = datetime.fromisoformat(window["started_at"])
+    if last_useful.tzinfo is None or last_useful > wall_now or (seed is None and last_useful < started):
+        raise RuntimeError("Invalid predecessor progress clock")
+    elapsed = (wall_now - last_useful).total_seconds()
+    best = merge_comment_metrics(*(value["comments"] for value in frames))
+    already_ended = bool(seed and seed["comment_phase_ended"])
+    phase = recorded_recovery_phase(window)
+    already_ended |= phase != "comments"
+    previous_reason = seed["stop_reason"] if seed and seed["comment_phase_ended"] else "complete"
+    tracker.observe("comments", best, now=now - elapsed, complete=already_ended and previous_reason == "complete")
+    if already_ended and previous_reason == "useful_progress_stalled":
+        if elapsed < tracker.stall_seconds:
+            raise RuntimeError("Ended predecessor stall clock is inconsistent")
+        tracker.observe("comments", best, now=now)
+    decision = tracker.observe("comments", metrics, now=now)
+    carried = {
+        "version": 1,
+        "window_id": window["window_id"],
+        "last_useful_at": last_useful.isoformat(),
+        "metrics": best,
+        "comment_phase_ended": already_ended,
+        "stop_reason": previous_reason if already_ended else "running",
+    }
+    carried = updated_comment_seed(carried, metrics, decision, wall_now)
+    return {
+        "previous_window_id": window["window_id"],
+        "last_useful_at": carried["last_useful_at"],
+        "decision": decision,
+        "seed": carried,
+    }
+
+
+def recorded_recovery_phase(window):
+    from psycopg2.extras import RealDictCursor
+
+    from trr_backend.ingestion.bounded_recovery_phase import phase
+
+    with closing(connect()) as conn, conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        return phase(cur, window)
+
+
+def merge_comment_metrics(*frames):
+    best = {"canonical_ids": 0, "targets": {}}
+    for frame in frames:
+        best["canonical_ids"] = max(best["canonical_ids"], frame.get("canonical_ids", 0))
+        for key, counters in frame.get("targets", {}).items():
+            target = best["targets"].setdefault(key, {})
+            for metric, value in counters.items():
+                target[metric] = max(target.get(metric, 0), value)
+    return best
+
+
+def updated_comment_seed(seed, metrics, decision, wall_now):
+    value = dict(seed, metrics=merge_comment_metrics(seed["metrics"], metrics))
+    if decision["useful_progress"]:
+        value["last_useful_at"] = wall_now.isoformat()
+    if decision["reason"] != "running":
+        value.update(comment_phase_ended=True, stop_reason=decision["reason"])
+    return value
+
+
+def replace_comment_seed(directory, seed):
+    temporary = save(directory, f".comment-seed-{time.time_ns()}.json", seed)
+    os.replace(temporary, directory / "comment-progress-seed.json")
+
+
 def public_base_urls(public_bases):
     """Accept verified storage-binding entries and older URL-only bindings."""
     urls = tuple(value.get("url") if isinstance(value, dict) else value for value in public_bases)
@@ -742,6 +858,7 @@ def main():
     parser.add_argument("--artifact-directory", type=Path, required=True)
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--expected-generation", type=int, required=True)
+    parser.add_argument("--continue-progress-from", type=Path)
     args = parser.parse_args()
     from scripts.ingestion.january_progress import UsefulProgressTracker
     from trr_backend.ingestion.bounded_recovery import USEFUL_PROGRESS_POLICY
@@ -760,6 +877,17 @@ def main():
         "bounded_recovery_window_expired",
     ):
         raise RuntimeError("January is no longer the expected held generation")
+    if args.continue_progress_from:
+        # Validate predecessor files before disturbing the ordinary service or
+        # granting a generation. Real metrics are sampled again after the grant.
+        continue_comment_progress(
+            UsefulProgressTracker(stop_policy["stall_seconds"]),
+            args.continue_progress_from,
+            expected_generation=args.expected_generation,
+            metrics={"canonical_ids": len(before["comments"])},
+            now=time.monotonic(),
+            wall_now=datetime.now(UTC),
+        )
     original = PLIST.read_bytes()
     native = plistlib.loads(original)
     launch_values = {
@@ -841,8 +969,46 @@ def main():
         frontiers = {}
         tracker = UsefulProgressTracker(stop_policy["stall_seconds"])
         initial_progress = progress(window, frontiers)
-        tracker.observe("comments", initial_progress["comments"], now=time.monotonic())
+        initial_decision = tracker.observe("comments", initial_progress["comments"], now=time.monotonic())
+        comment_seed = {
+            "version": 1,
+            "window_id": window["window_id"],
+            "last_useful_at": initial_progress["at"],
+            "metrics": initial_progress["comments"],
+            "comment_phase_ended": False,
+            "stop_reason": "running",
+        }
+        if args.continue_progress_from:
+            tracker = UsefulProgressTracker(stop_policy["stall_seconds"])
+            continued = continue_comment_progress(
+                tracker,
+                args.continue_progress_from,
+                expected_generation=args.expected_generation,
+                metrics=initial_progress["comments"],
+                now=time.monotonic(),
+                wall_now=datetime.now(UTC),
+            )
+            initial_decision = continued["decision"]
+            comment_seed = dict(continued["seed"], window_id=window["window_id"])
+            save(directory, "continued-progress.json", continued)
         save(directory, "progress-baseline.json", initial_progress)
+        replace_comment_seed(directory, comment_seed)
+        if initial_decision["reason"] != "running":
+            from trr_backend.ingestion.bounded_recovery_phase import transition
+
+            changed = control_call(
+                transition,
+                store,
+                run_id=RUN,
+                account="bravotv",
+                generation=window["generation"],
+                intent_hash=INTENT,
+                window_id=window["window_id"],
+                source_revision=manifest["source_identity"],
+                to_phase="draining_comments",
+                reason="comments_stopped",
+            )
+            save(directory, "comments-stall.json", {"decision": initial_decision, "transition": changed})
         binding = json.loads(Path(launch_values["TRR_INSTAGRAM_JANUARY_BINDING"]).read_text())
         binding.update(
             source_identity=manifest["source_identity"],
@@ -944,6 +1110,11 @@ def main():
                         now=time.monotonic(),
                         complete=current_phase == "media" and media_idle(directory / "worker.log", window["window_id"]),
                     )
+                    if current_phase == "comments" and (decision["useful_progress"] or decision["reason"] != "running"):
+                        comment_seed = updated_comment_seed(
+                            comment_seed, observed["comments"], decision, datetime.now(UTC)
+                        )
+                        replace_comment_seed(directory, comment_seed)
                     if decision["useful_progress"] or last_phase != current_phase or decision["reason"] != "running":
                         observed["stop_decision"] = decision
                         save(directory, f"progress-{time.time_ns()}.json", observed)

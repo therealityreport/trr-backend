@@ -1,7 +1,8 @@
 """Common root admission on fixture PostgreSQL; no configured services or sources."""
 
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+from datetime import UTC, datetime, timedelta
 from threading import Event
 from types import SimpleNamespace
 
@@ -361,6 +362,112 @@ def test_blocked_finalizer_returns_typed_nonterminal_wait_at_capacity(database, 
         "reason": "recovery_root_capacity_full",
     }
     assert saved(tx, args["run_id"]) == before
+
+
+@pytest.mark.parametrize("outstanding", [4, 5])
+def test_bounded_full_root_capacity_waits_before_checkpoint_cohort_or_audit(database, monkeypatch, outstanding):
+    from trr_backend.ingestion import retained_comment_recovery as retained
+    from trr_backend.ingestion.bounded_recovery import window_key
+
+    _, tx, args, _ = existing.completed(database, monkeypatch)
+    binding = existing.january_binding(tx, args)
+    roots(tx, args["run_id"], outstanding)
+    key = window_key(args["run_id"], 1)
+    window = {
+        "window_id": key,
+        "generation": 1,
+        "priority": "comments_first",
+        "duration_seconds": 3600,
+        "source_revision": binding["source_revision"],
+        "deadline_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+    }
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            "alter table social.instagram_ingestion_runs "
+            "add column if not exists execution_placement text not null default 'modal'"
+        )
+        cur.execute(
+            "update social.instagram_ingestion_runs set execution_placement='local' where run_id=%s",
+            (args["run_id"],),
+        )
+        cur.execute(
+            """insert into social.instagram_ingestion_commands
+            (account,idempotency_key,command_hash,run_id,result) values('bravotv',%s,%s,%s,%s::jsonb)""",
+            (key, recovery.fingerprint(window), args["run_id"], stable_json(window)),
+        )
+        # One consumed root is cooling, while the pending restart and other
+        # consumed roots are held. None is due, but all still occupy capacity.
+        cur.execute(
+            """update social.instagram_ingestion_targets set blocked_reason='source_payload_invalid'
+                where run_id=%s and outcome='unresolved' and target_key<>'outstanding-1'""",
+            (args["run_id"],),
+        )
+    for name, value in {
+        "TRR_INSTAGRAM_RECOVERY_WINDOW_ID": key,
+        "TRR_INSTAGRAM_LOCAL_WORKER_RUN_ID": args["run_id"],
+        "TRR_INSTAGRAM_LOCAL_WORKER_GENERATION": "1",
+        "TRR_INSTAGRAM_JANUARY_RECOVERY_SOURCE_REVISION": binding["source_revision"],
+    }.items():
+        monkeypatch.setenv(name, value)
+    before = saved(tx, args["run_id"])
+    canonical_before = fixtures.query(
+        tx,
+        "select to_jsonb(c) as row from social.instagram_comments c where post_id=%s order by id",
+        (args["post_id"],),
+    )
+    run_before = fixtures.query(
+        tx, "select to_jsonb(r) as row from social.instagram_ingestion_runs r where run_id=%s", (args["run_id"],)
+    )
+    statements = []
+
+    class AdmissionCursor(RealDictCursor):
+        def execute(self, query, params=None):
+            normalized = " ".join(query.lower().split())
+            statements.append(normalized)
+            if normalized.startswith("select target_key,outcome,checkpoint"):
+                pytest.fail("Full root capacity loaded the settled checkpoint cohort")
+            assert normalized.startswith("select "), "Full capacity must not write data or journals"
+            return super().execute(query, params)
+
+    @contextmanager
+    def observed_transaction():
+        with tx() as conn:
+            yield SimpleNamespace(cursor=lambda **_kwargs: conn.cursor(cursor_factory=AdmissionCursor))
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Full root capacity reached sorting, inventory, fingerprinting, or retained audit work")
+
+    for name in ("_can_recover_gap", "_prioritize_recovery_rows", "_active_saved_counts", "fingerprint"):
+        monkeypatch.setattr(recovery, name, forbidden)
+    for name in (
+        "audit_and_replay_retained",
+        "bounded_retained_audit",
+        "canonical_inventory_fingerprints",
+        "parser_implementation_fingerprint",
+        "retained_audit_summary_key",
+    ):
+        monkeypatch.setattr(retained, name, forbidden)
+    local = Store(observed_transaction, execution_placement="local")
+    assert recovery.enqueue_next_recovery(local, **binding, blocked_stage=True) == {
+        "status": "recovery_admission_wait",
+        "reason": "recovery_root_capacity_full",
+    }
+    assert any("select count(*)" in query and "public_lane_restarts" in query for query in statements)
+    assert saved(tx, args["run_id"]) == before
+    assert (
+        fixtures.query(
+            tx,
+            "select to_jsonb(c) as row from social.instagram_comments c where post_id=%s order by id",
+            (args["post_id"],),
+        )
+        == canonical_before
+    )
+    assert (
+        fixtures.query(
+            tx, "select to_jsonb(r) as row from social.instagram_ingestion_runs r where run_id=%s", (args["run_id"],)
+        )
+        == run_before
+    )
 
 
 def test_nonadmission_conflicts_are_not_converted_to_wait(database, monkeypatch):

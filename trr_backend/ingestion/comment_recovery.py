@@ -239,6 +239,26 @@ def enqueue_next_recovery(store, *, run_id, account, generation, intent_hash, so
             # A completion decision may be replayed after its recovery command
             # committed but before the next ordinal. Never complete over it.
             return {"status": "work_pending"}
+        window = run.get("_bounded_window")
+        # Validate the durable local window before loading the settled cohort.
+        if store.execution_placement == "local":
+            from trr_backend.ingestion.bounded_recovery import require_window
+
+            window = require_window(cur, dict(run, run_id=run_id, account=account))
+        if window:
+            outstanding = _row(
+                cur,
+                """select count(*) as count from social.instagram_ingestion_targets
+                where run_id=%s and stage='comments' and outcome='unresolved' and (
+                    coalesce(checkpoint->'public_lane_restarts','{}'::jsonb)<>'{}'::jsonb
+                    or checkpoint#>>'{public_recovery,command_key}' is not null)""",
+                (run_id,),
+            )
+            if outstanding["count"] >= 4:
+                # A blocked/cooling pass still occupies its root slot. Avoid
+                # cohort decoding and audits when no new root can be admitted;
+                # recover_public_target retains the authoritative locked check.
+                return {"status": "recovery_admission_wait", "reason": "recovery_root_capacity_full"}
         # Retain offline audits for parity and exhausted targets, but do not let
         # that cohort hold every recoverable gap behind a full-run audit.
         cur.execute(
@@ -249,12 +269,6 @@ def enqueue_next_recovery(store, *, run_id, account, generation, intent_hash, so
         )
         rows = cur.fetchall()
         rows.sort(key=lambda row: not _can_recover_gap(row["checkpoint"], row["outcome"]))
-        window = run.get("_bounded_window")
-        # _execution_run also applies the durable window and worker binding.
-        if store.execution_placement == "local":
-            from trr_backend.ingestion.bounded_recovery import require_window
-
-            window = require_window(cur, dict(run, run_id=run_id, account=account))
         if window:
             rows = [row for row in rows if _can_recover_gap(row["checkpoint"], row["outcome"])]
             cur.execute(
