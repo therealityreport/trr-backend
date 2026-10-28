@@ -98,9 +98,11 @@ class WebApiTransportMixin:
         return str(os.getenv(env_name) or "").strip().lower() in TRUTHY_ENV_VALUES
 
     def _direct_comment_api_experiment_enabled(self) -> bool:
+        """The logged-out comment API is on by default; set the env var false to park it."""
         if self._direct_comment_api_enabled_override is not None:
             return self._direct_comment_api_enabled_override
-        return self._env_flag_enabled(ENV_TIKTOK_ENABLE_DIRECT_COMMENT_API_EXPERIMENT)
+        raw = str(os.getenv(ENV_TIKTOK_ENABLE_DIRECT_COMMENT_API_EXPERIMENT) or "").strip().lower()
+        return raw not in {"0", "false", "no", "off"}
 
     def _get_headers(self, referer: str | None = None) -> dict:
         """Get request headers."""
