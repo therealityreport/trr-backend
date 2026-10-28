@@ -10,18 +10,26 @@ from trr_backend.socials.crawlee_runtime.config import (
 )
 
 
-def test_instagram_preflight_requires_cookies() -> None:
+@pytest.mark.parametrize("platform", ["instagram", "tiktok", "twitter", "facebook", "threads", "youtube"])
+def test_every_platform_runs_public_without_login_cookies(platform: str) -> None:
     result = check_platform_auth(
-        platform="instagram",
+        platform=platform,
         instagram_cookies={},
-        tiktok_cookies=None,
+        tiktok_cookies={},
+        facebook_cookies={},
+        threads_cookies={},
         twitter_cookies=None,
         twitter_bearer=None,
         twikit_credentials=None,
     )
-    assert result.ok is False
-    assert result.reason == "instagram_cookies_missing"
-    assert result.auth_mode == "cookies"
+    assert result.ok is True
+    assert result.auth_mode == "public"
+    assert result.auth_source == "none"
+
+
+def test_instagram_preflight_uses_cookies_when_configured() -> None:
+    result = check_platform_auth(platform="instagram", instagram_cookies={"sessionid": "fixture"})
+    assert result.ok is True and result.auth_mode == "cookies"
 
 
 def test_twitter_preflight_accepts_bearer() -> None:
@@ -52,14 +60,8 @@ def test_youtube_preflight_public_mode() -> None:
 
 
 def test_auth_preflight_error_exposes_non_secret_metadata() -> None:
-    result = check_platform_auth(
-        platform="tiktok",
-        instagram_cookies=None,
-        tiktok_cookies={},
-        twitter_cookies=None,
-        twitter_bearer=None,
-        twikit_credentials=None,
-    )
+    # Only an unsupported platform still fails preflight.
+    result = check_platform_auth(platform="unknown-platform")
     assert result.ok is False
     with pytest.raises(AuthPreflightError) as exc_info:
         raise AuthPreflightError(result)
