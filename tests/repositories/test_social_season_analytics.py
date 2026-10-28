@@ -8643,7 +8643,8 @@ def test_ingest_shared_accounts_tiktok_full_history_prefer_local_inline_seeds_di
     assert captured_run_configs[0]["execution_preference"] == "prefer_local_inline"
     assert captured_run_configs[0]["expected_total_posts_by_account"]["tiktok:bravowwhl"] == 3277
     assert len(created_jobs) == 1
-    assert created_jobs[0]["config"]["stage"] == "tiktok_posts_scrapling"
+    # Catalog jobs use the resumable shared executor (86edb5e1).
+    assert created_jobs[0]["config"]["stage"] == social_repo.SHARED_ACCOUNT_POSTS_STAGE
     assert created_jobs[0]["config"]["shared_account_stage"] == social_repo.SHARED_ACCOUNT_POSTS_STAGE
     assert created_jobs[0]["config"]["runner_strategy"] == "single_runner_fallback"
     assert created_jobs[0]["config"]["runner_count"] == 1
@@ -12643,17 +12644,17 @@ def test_launch_social_account_catalog_backfill_tiktok_sync_recent_preserves_act
     )
 
     assert payload["run_id"] == "catalog-run-tiktok-sync-recent-1"
-    assert payload["selected_tasks"] == ["post_details", "media"]
-    assert payload["effective_selected_tasks"] == ["post_details", "media"]
+    assert payload["selected_tasks"] == ["post_details", "comments", "media"]
+    assert payload["effective_selected_tasks"] == ["post_details", "comments", "media"]
     assert payload["catalog_action"] == "sync_recent"
     assert payload["catalog_action_scope"] == "recent_window"
     assert len(catalog_calls) == 1
     assert catalog_calls[0]["catalog_action"] == "sync_recent"
     assert catalog_calls[0]["catalog_action_scope"] == "recent_window"
-    assert catalog_calls[0]["selected_tasks"] == ["post_details", "media"]
-    assert catalog_calls[0]["effective_selected_tasks"] == ["post_details", "media"]
-    assert catalog_calls[0]["tiktok_comments_in_posts_stage"] is False
-    assert catalog_calls[0]["tiktok_direct_comment_api_override"] is False
+    assert catalog_calls[0]["selected_tasks"] == ["post_details", "comments", "media"]
+    assert catalog_calls[0]["effective_selected_tasks"] == ["post_details", "comments", "media"]
+    assert catalog_calls[0]["tiktok_comments_in_posts_stage"] is True
+    assert catalog_calls[0]["tiktok_direct_comment_api_override"] is True
 
 
 def test_sync_recent_social_account_catalog_uses_coordinated_launcher(
@@ -17320,8 +17321,10 @@ def test_log_social_profile_perf_is_noop_when_disabled(monkeypatch: pytest.Monke
         lambda *_args, **_kwargs: pytest.fail("logger should stay silent when perf debug is disabled"),
     )
 
+    # The profile-summary route always reports latency (b3ee2726); every other
+    # route stays gated behind TRR_SOCIAL_PROFILE_PERF_DEBUG.
     social_repo._log_social_profile_perf(
-        route="get_social_account_profile_summary",
+        route="get_social_account_profile_posts",
         platform="instagram",
         handle="bravotv",
         breakdown={"analysis_rows": 12.5},
@@ -17358,7 +17361,8 @@ def test_social_account_profile_summary_connection_uses_social_profile_pool(
     source_path = Path(inspect.getsourcefile(social_repo) or "")
     source_text = source_path.read_text()
 
-    assert 'return pg.db_read_connection(label=label, pool_name="social_profile")' in source_text
+    # The helper now times checkout before yielding the pooled connection.
+    assert 'with pg.db_read_connection(label=label, pool_name="social_profile") as conn:' in source_text
 
 
 def test_timed_social_account_profile_summary_query_returns_fallback_and_logs_elapsed(
@@ -38966,9 +38970,13 @@ def test_build_instagram_scraper_with_auth_fallback_sanitizes_invalid_public_ses
             *,
             cookies: dict[str, Any] | None = None,
             browser_account_id: str | None = None,
+            attach_auth_session: bool = True,
+            strict_public_credentials: bool = False,
         ) -> None:
             captured["cookies"] = dict(cookies or {})
             captured["browser_account_id"] = browser_account_id
+            captured["attach_auth_session"] = attach_auth_session
+            captured["strict_public_credentials"] = strict_public_credentials
 
     monkeypatch.setattr(instagram_module, "build_authenticated_instagram_scraper", lambda **_kwargs: None)
     monkeypatch.setattr(instagram_module, "InstagramScraper", _FakeInstagramScraper)
@@ -38981,6 +38989,8 @@ def test_build_instagram_scraper_with_auth_fallback_sanitizes_invalid_public_ses
     assert isinstance(scraper, _FakeInstagramScraper)
     assert captured["cookies"] == {}
     assert captured["browser_account_id"] is None
+    # The public fallback is credential-free by construction (a662c2e0).
+    assert captured["attach_auth_session"] is False and captured["strict_public_credentials"] is True
 
 
 def test_resolve_instagram_media_for_shortcode_routes_shortcode_to_caller_context(
@@ -40979,6 +40989,8 @@ def test_validate_instagram_cookie_health_maps_request_errors(
 def test_shared_instagram_frontier_auth_validation_uses_source_cookies_without_auto_refresh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Instagram is public-first unless authenticated mode is explicit (a662c2e0).
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_SCRAPE_MODE", "authenticated")
     monkeypatch.setattr(
         social_repo,
         "_load_instagram_cookies",
@@ -48751,6 +48763,8 @@ def test_run_shared_account_discovery_stage_bootstraps_frontier_and_enqueues_fet
 def test_run_shared_account_frontier_posts_stage_continues_when_discovered_posts_are_already_saved(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Instagram is public-first unless authenticated mode is explicit (a662c2e0).
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_SCRAPE_MODE", "authenticated")
     fetch_calls = {"count": 0}
     frontier_updates: list[dict[str, Any]] = []
     finish_calls: list[dict[str, Any]] = []
@@ -48873,6 +48887,8 @@ def test_run_shared_account_frontier_posts_stage_continues_when_discovered_posts
 def test_run_shared_account_frontier_posts_stage_completes_with_visible_gap_when_oldest_stored_post_not_reached(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Instagram is public-first unless authenticated mode is explicit (a662c2e0).
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_SCRAPE_MODE", "authenticated")
     monkeypatch.setattr(social_repo, "_emit_job_progress", lambda **_kwargs: None)
     monkeypatch.setattr(
         social_repo,
@@ -48996,6 +49012,8 @@ def test_run_shared_account_frontier_posts_stage_completes_with_visible_gap_when
 def test_run_shared_account_frontier_posts_stage_filters_bounded_window_and_stops_at_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Instagram is public-first unless authenticated mode is explicit (a662c2e0).
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_SCRAPE_MODE", "authenticated")
     frontier_updates: list[dict[str, Any]] = []
     persisted_posts: list[list[Any]] = []
 
@@ -49246,6 +49264,8 @@ def test_fetch_shared_instagram_graphql_posts_page_reports_lock_timeout(
 def test_run_shared_account_frontier_posts_stage_completes_with_visible_gap_when_expected_total_not_reached(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Instagram is public-first unless authenticated mode is explicit (a662c2e0).
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_SCRAPE_MODE", "authenticated")
     frontier_updates: list[dict[str, Any]] = []
     frontier_releases: list[dict[str, Any]] = []
 
@@ -50289,15 +50309,6 @@ def test_scrape_shared_tiktok_posts_legacy_strategies_use_durable_public_listing
     assert calls[0]["config"]["discovery_total_posts"] == 10100
 
 
-@pytest.mark.parametrize(
-    "launcher", ["begin_social_account_catalog_backfill_launch", "launch_social_account_catalog_backfill"]
-)
-def test_tiktok_launch_rejects_comments_before_dispatch(monkeypatch, launcher):
-    monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *args: None)
-    with pytest.raises(social_repo.SocialIngestValidationError, match="disabled"):
-        getattr(social_repo, launcher)("tiktok", "bravotv", selected_tasks=["post_details", "comments"])
-
-
 def test_bootstrap_shared_tiktok_account_context_tolerates_profile_enrichment_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -50446,9 +50457,10 @@ def test_run_shared_account_discovery_stage_enqueues_tiktok_empty_body_transport
     assert comments_count == 0
     assert metadata["fallback_direct_job_enqueued"] is True
     assert metadata["recovery_reason"] == "tiktok_empty_body_transport_failure"
-    assert metadata["fallback_job_stage"] == social_repo.TIKTOK_POSTS_SCRAPLING_STAGE
-    assert create_calls[0]["stage"] == social_repo.TIKTOK_POSTS_SCRAPLING_STAGE
-    assert create_calls[0]["config"]["stage"] == social_repo.TIKTOK_POSTS_SCRAPLING_STAGE
+    # The direct fallback is a catalog job, so it uses the resumable shared executor (86edb5e1).
+    assert metadata["fallback_job_stage"] == social_repo.SHARED_ACCOUNT_POSTS_STAGE
+    assert create_calls[0]["stage"] == social_repo.SHARED_ACCOUNT_POSTS_STAGE
+    assert create_calls[0]["config"]["stage"] == social_repo.SHARED_ACCOUNT_POSTS_STAGE
     assert metadata["partition_strategy"] is None
     assert metadata["expected_total_posts"] == 4444
     assert create_calls[0]["config"]["runner_strategy"] == "single_runner_fallback"
@@ -50730,6 +50742,8 @@ def test_run_shared_account_frontier_posts_stage_claims_frontier_and_completes(
 def test_run_shared_account_frontier_posts_stage_fails_closed_when_auth_is_blocked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Instagram is public-first unless authenticated mode is explicit (a662c2e0).
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_SCRAPE_MODE", "authenticated")
     frontier_updates: list[dict[str, Any]] = []
     frontier_releases: list[dict[str, Any]] = []
     fetch_calls: list[dict[str, Any]] = []
@@ -50829,6 +50843,8 @@ def test_run_shared_account_frontier_posts_stage_fails_closed_when_auth_is_block
 def test_run_shared_account_frontier_posts_stage_uses_public_for_operator_recovery_stale_authenticated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Instagram is public-first unless authenticated mode is explicit (a662c2e0).
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_SCRAPE_MODE", "authenticated")
     fetch_calls: list[dict[str, Any]] = []
     frontier_updates: list[dict[str, Any]] = []
     frontier_releases: list[dict[str, Any]] = []
@@ -50923,6 +50939,8 @@ def test_run_shared_account_frontier_posts_stage_uses_public_for_operator_recove
 def test_run_shared_account_frontier_posts_stage_retries_cursor_forbidden_without_public_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Instagram is public-first unless authenticated mode is explicit (a662c2e0).
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_SCRAPE_MODE", "authenticated")
     frontier_updates: list[dict[str, Any]] = []
     frontier_releases: list[dict[str, Any]] = []
     fetch_calls: list[dict[str, Any]] = []
@@ -52293,6 +52311,8 @@ def test_execute_shared_claimed_job_requeues_discovery_with_authenticated_transp
 def test_run_shared_account_discovery_stage_preserves_instagram_auth_intent_on_partition_recovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Instagram is public-first unless authenticated mode is explicit (a662c2e0).
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_SCRAPE_MODE", "authenticated")
     enqueue_calls: list[dict[str, Any]] = []
 
     monkeypatch.setattr(social_repo, "_emit_job_progress", lambda **_kwargs: None)

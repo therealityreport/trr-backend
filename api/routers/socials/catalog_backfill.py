@@ -105,12 +105,11 @@ async def post_social_account_catalog_backfill_route(
         )
         request_selected_tasks = payload.selected_tasks
         if request_selected_tasks is None:
-            # TikTok comments are parked; preserve other platforms' defaults.
-            request_selected_tasks = (
-                ["post_details", "media"]
-                if normalized_platform == "tiktok"
-                else _normalize_social_account_catalog_backfill_selected_tasks(None)
-            )
+            # Defense in depth: an omitted selected_tasks runs ALL lanes
+            # (post_details + comments + media) for every platform, so a backfill
+            # can never silently drop comments/media. The app always sends
+            # explicit tasks; this only governs API callers that omit them.
+            request_selected_tasks = _normalize_social_account_catalog_backfill_selected_tasks(None)
         normalized_selected_tasks = _normalize_social_account_catalog_backfill_selected_tasks(request_selected_tasks)
         requires_apply_confirmation = _instagram_backfill_requires_apply_confirmation(
             platform=normalized_platform,
