@@ -31472,10 +31472,12 @@ def test_recover_stale_unclaimed_dispatched_jobs_requeues_for_retry(monkeypatch:
         "_refresh_remote_modal_invocation_state",
         lambda row, **kwargs: {"status": "failed"},
     )
+    # Keep recovery offline: Modal call inspection reports the same terminal state.
+    monkeypatch.setattr(social_repo, "inspect_modal_function_call", lambda _call_id: {"status": "failed"})
     monkeypatch.setattr(
         social_repo,
-        "_finish_job",
-        lambda job_id, **kwargs: finished.append({"job_id": job_id, **kwargs}),
+        "_transition_job_state",
+        lambda job_id, **kwargs: finished.append({"job_id": job_id, **kwargs}) or True,
     )
     monkeypatch.setattr(
         social_repo,
@@ -31557,10 +31559,24 @@ def test_recover_stale_unclaimed_dispatched_jobs_keeps_expired_capacity_pending_
             "terminal": False,
         },
     )
+    # Recovery inspects the Modal call directly and refreshes the pending lease.
+    from trr_backend.socials.control_plane import dispatch_runtime
+
+    touched: list[str] = []
     monkeypatch.setattr(
         social_repo,
-        "_finish_job",
-        lambda job_id, **kwargs: finished.append({"job_id": job_id, **kwargs}),
+        "inspect_modal_function_call",
+        lambda _call_id: {"status": "pending", "reason": "modal_capacity_pending", "checked_at": None},
+    )
+    monkeypatch.setattr(
+        dispatch_runtime,
+        "_touch_dispatch_metadata_for_snapshot",
+        lambda row, **_kwargs: touched.append(str(row.get("id"))) or True,
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_transition_job_state",
+        lambda job_id, **kwargs: finished.append({"job_id": job_id, **kwargs}) or True,
     )
     monkeypatch.setattr(
         social_repo,
@@ -31577,6 +31593,7 @@ def test_recover_stale_unclaimed_dispatched_jobs_keeps_expired_capacity_pending_
     assert rows == []
     assert finished == []
     assert finalized == []
+    assert touched == ["job-stale-pending"]
     assert "status in ('queued', 'pending', 'retrying', 'running')" in captured_sql["sql"]
 
 
@@ -31617,10 +31634,12 @@ def test_recover_stale_unclaimed_dispatched_jobs_fails_after_retry_cap(monkeypat
         "_refresh_remote_modal_invocation_state",
         lambda row, **kwargs: {"status": "failed"},
     )
+    # Keep recovery offline: Modal call inspection reports the same terminal state.
+    monkeypatch.setattr(social_repo, "inspect_modal_function_call", lambda _call_id: {"status": "failed"})
     monkeypatch.setattr(
         social_repo,
-        "_finish_job",
-        lambda job_id, **kwargs: finished.append({"job_id": job_id, **kwargs}),
+        "_transition_job_state",
+        lambda job_id, **kwargs: finished.append({"job_id": job_id, **kwargs}) or True,
     )
     monkeypatch.setattr(
         social_repo,
@@ -31701,8 +31720,8 @@ def test_recover_dispatch_blocked_no_progress_jobs_fails_rows_after_threshold(
     monkeypatch.setattr(social_repo, "_resolve_modal_dispatch_blocked_failure_limit", lambda: 3)
     monkeypatch.setattr(
         social_repo,
-        "_finish_job",
-        lambda job_id, **kwargs: finished.append({"job_id": job_id, **kwargs}),
+        "_transition_job_state",
+        lambda job_id, **kwargs: finished.append({"job_id": job_id, **kwargs}) or True,
     )
     monkeypatch.setattr(
         social_repo,
@@ -31779,8 +31798,8 @@ def test_recover_dispatch_blocked_no_progress_jobs_retries_unclaimed_capacity_be
     monkeypatch.setattr(social_repo, "_modal_dispatch_retry_delay_seconds", lambda: 120)
     monkeypatch.setattr(
         social_repo,
-        "_finish_job",
-        lambda job_id, **kwargs: finished.append({"job_id": job_id, **kwargs}),
+        "_transition_job_state",
+        lambda job_id, **kwargs: finished.append({"job_id": job_id, **kwargs}) or True,
     )
     monkeypatch.setattr(
         social_repo,
@@ -34925,6 +34944,14 @@ def test_refresh_post_comments_instagram_zero_limit_fetches_uncapped_comments(mo
 
 
 def test_mirror_instagram_media_to_s3_dedupes_thumbnail_and_media(monkeypatch) -> None:
+    # The media SSRF guard resolves DNS before fetching; resolve fixture hosts publicly.
+    import socket
+
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
+    )
     requests_seen: list[str] = []
     uploads_seen: list[str] = []
 
@@ -34955,6 +34982,10 @@ def test_mirror_instagram_media_to_s3_dedupes_thumbnail_and_media(monkeypatch) -
             uploads_seen.append(key)
 
     monkeypatch.setattr(social_repo.requests, "get", _fake_requests_get)
+    # Media downloads go through the SSRF-safe pinned getter, not requests.get.
+    from trr_backend.socials import media_url_safety
+
+    monkeypatch.setattr(media_url_safety, "safe_requests_get", lambda _client, url, **kw: _fake_requests_get(url, **kw))
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_client", lambda: _FakeS3Client())
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_bucket", lambda: "bucket")
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_prefix", lambda: "")
@@ -35274,6 +35305,14 @@ def test_mirror_platform_media_reuses_exact_sha256_hosted_asset(monkeypatch: pyt
 
 
 def test_mirror_instagram_media_to_s3_reresolves_signed_cdn_url_once_on_403(monkeypatch) -> None:
+    # The media SSRF guard resolves DNS before fetching; resolve fixture hosts publicly.
+    import socket
+
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
+    )
     requests_seen: list[str] = []
     uploads_seen: list[str] = []
     refresh_calls: list[dict[str, object]] = []
@@ -35336,6 +35375,10 @@ def test_mirror_instagram_media_to_s3_reresolves_signed_cdn_url_once_on_403(monk
         post.media_retrieval_meta = {"selected_source": "permalink_refresh", "attempts": []}
 
     monkeypatch.setattr(social_repo.requests, "get", _fake_requests_get)
+    # Media downloads go through the SSRF-safe pinned getter, not requests.get.
+    from trr_backend.socials import media_url_safety
+
+    monkeypatch.setattr(media_url_safety, "safe_requests_get", lambda _client, url, **kw: _fake_requests_get(url, **kw))
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_client", lambda: _FakeS3Client())
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_bucket", lambda: "bucket")
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_prefix", lambda: "")
@@ -35374,6 +35417,14 @@ def test_mirror_instagram_media_to_s3_reresolves_signed_cdn_url_once_on_403(monk
 
 
 def test_mirror_instagram_media_to_s3_reuses_reresolved_url_for_duplicate_slide(monkeypatch) -> None:
+    # The media SSRF guard resolves DNS before fetching; resolve fixture hosts publicly.
+    import socket
+
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
+    )
     requests_seen: list[str] = []
     uploads_seen: list[str] = []
     refresh_calls: list[dict[str, object]] = []
@@ -35436,6 +35487,10 @@ def test_mirror_instagram_media_to_s3_reuses_reresolved_url_for_duplicate_slide(
         post.media_retrieval_meta = {"selected_source": "permalink_refresh", "attempts": []}
 
     monkeypatch.setattr(social_repo.requests, "get", _fake_requests_get)
+    # Media downloads go through the SSRF-safe pinned getter, not requests.get.
+    from trr_backend.socials import media_url_safety
+
+    monkeypatch.setattr(media_url_safety, "safe_requests_get", lambda _client, url, **kw: _fake_requests_get(url, **kw))
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_client", lambda: _FakeS3Client())
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_bucket", lambda: "bucket")
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_prefix", lambda: "")
@@ -35544,6 +35599,14 @@ def test_platform_post_needs_media_mirror_detects_missing_display_variants() -> 
 
 
 def test_mirror_instagram_media_to_s3_rejects_wrong_content_for_image_url(monkeypatch) -> None:
+    # The media SSRF guard resolves DNS before fetching; resolve fixture hosts publicly.
+    import socket
+
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
+    )
     uploads_seen: list[str] = []
 
     class _FakeHtmlResponse:
@@ -35568,6 +35631,10 @@ def test_mirror_instagram_media_to_s3_rejects_wrong_content_for_image_url(monkey
             uploads_seen.append(key)
 
     monkeypatch.setattr(social_repo.requests, "get", lambda *args, **kwargs: _FakeHtmlResponse())
+    # Media downloads go through the SSRF-safe pinned getter, not requests.get.
+    from trr_backend.socials import media_url_safety
+
+    monkeypatch.setattr(media_url_safety, "safe_requests_get", lambda _client, url, **kw: _FakeHtmlResponse())
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_client", lambda: _FakeS3Client())
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_bucket", lambda: "bucket")
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_prefix", lambda: "")
@@ -35597,6 +35664,14 @@ def test_mirror_instagram_media_to_s3_rejects_wrong_content_for_image_url(monkey
 
 
 def test_mirror_instagram_media_to_s3_enforces_asset_size_cap(monkeypatch) -> None:
+    # The media SSRF guard resolves DNS before fetching; resolve fixture hosts publicly.
+    import socket
+
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
+    )
     uploads_seen: list[str] = []
 
     class _FakeStreamResponse:
@@ -35621,6 +35696,10 @@ def test_mirror_instagram_media_to_s3_enforces_asset_size_cap(monkeypatch) -> No
 
     monkeypatch.setenv("SOCIAL_MEDIA_MIRROR_MAX_BYTES", "1024")
     monkeypatch.setattr(social_repo.requests, "get", lambda *args, **kwargs: _FakeStreamResponse())
+    # Media downloads go through the SSRF-safe pinned getter, not requests.get.
+    from trr_backend.socials import media_url_safety
+
+    monkeypatch.setattr(media_url_safety, "safe_requests_get", lambda _client, url, **kw: _FakeStreamResponse())
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_client", lambda: _FakeS3Client())
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_bucket", lambda: "bucket")
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_prefix", lambda: "")
@@ -35650,6 +35729,14 @@ def test_mirror_instagram_media_to_s3_enforces_asset_size_cap(monkeypatch) -> No
 
 
 def test_mirror_instagram_media_to_s3_marks_oversized_video_unrecoverable_with_cover(monkeypatch) -> None:
+    # The media SSRF guard resolves DNS before fetching; resolve fixture hosts publicly.
+    import socket
+
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
+    )
     uploads_seen: list[str] = []
 
     class _FakeStreamResponse:
@@ -35680,6 +35767,10 @@ def test_mirror_instagram_media_to_s3_marks_oversized_video_unrecoverable_with_c
 
     monkeypatch.setenv("SOCIAL_MEDIA_MIRROR_MAX_BYTES", "1024")
     monkeypatch.setattr(social_repo.requests, "get", lambda url, *args, **kwargs: _FakeStreamResponse(str(url)))
+    # Media downloads go through the SSRF-safe pinned getter, not requests.get.
+    from trr_backend.socials import media_url_safety
+
+    monkeypatch.setattr(media_url_safety, "safe_requests_get", lambda _client, url, **kw: _FakeStreamResponse(str(url)))
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_client", lambda: _FakeS3Client())
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_bucket", lambda: "bucket")
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_prefix", lambda: "")
@@ -36058,6 +36149,8 @@ def test_update_platform_post_media_mirror_fields_marks_hosted_urls_mirrored_whe
 
 
 def test_run_platform_media_mirror_stage_instagram_re_resolves_source_media(monkeypatch) -> None:
+    # The heartbeat now runs a claim-guarded write scope (Plan 055); keep it offline.
+    monkeypatch.setattr(social_repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: True)
     context = SeasonContext(
         season_id="season-1",
         show_id="show-1",
@@ -36312,6 +36405,8 @@ def test_run_platform_media_mirror_stage_instagram_shared_post_looks_up_by_post_
 
 
 def test_run_platform_media_mirror_stage_tiktok_resolves_source_media(monkeypatch) -> None:
+    # The heartbeat now runs a claim-guarded write scope (Plan 055); keep it offline.
+    monkeypatch.setattr(social_repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: True)
     context = SeasonContext(
         season_id="season-1",
         show_id="show-1",
@@ -36410,6 +36505,8 @@ def test_run_platform_media_mirror_stage_tiktok_resolves_source_media(monkeypatc
 
 
 def test_run_platform_media_mirror_stage_tiktok_resolves_page_like_source_media(monkeypatch) -> None:
+    # The heartbeat now runs a claim-guarded write scope (Plan 055); keep it offline.
+    monkeypatch.setattr(social_repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: True)
     context = SeasonContext(
         season_id="season-1",
         show_id="show-1",
@@ -36508,6 +36605,8 @@ def test_run_platform_media_mirror_stage_tiktok_resolves_page_like_source_media(
 
 
 def test_run_platform_media_mirror_stage_tiktok_fails_when_non_page_source_is_unresolved(monkeypatch) -> None:
+    # The heartbeat now runs a claim-guarded write scope (Plan 055); keep it offline.
+    monkeypatch.setattr(social_repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: True)
     context = SeasonContext(
         season_id="season-1",
         show_id="show-1",
@@ -36568,6 +36667,8 @@ def test_run_platform_media_mirror_stage_tiktok_fails_when_non_page_source_is_un
 
 
 def test_run_platform_media_mirror_stage_tiktok_uses_canonical_page_url_when_resolver_fails(monkeypatch) -> None:
+    # The heartbeat now runs a claim-guarded write scope (Plan 055); keep it offline.
+    monkeypatch.setattr(social_repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: True)
     context = SeasonContext(
         season_id="season-1",
         show_id="show-1",
@@ -36649,6 +36750,8 @@ def test_run_platform_media_mirror_stage_tiktok_uses_canonical_page_url_when_res
 
 
 def test_run_platform_media_mirror_stage_youtube_resolves_source_media(monkeypatch) -> None:
+    # The heartbeat now runs a claim-guarded write scope (Plan 055); keep it offline.
+    monkeypatch.setattr(social_repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: True)
     context = SeasonContext(
         season_id="season-1",
         show_id="show-1",
@@ -36745,6 +36848,8 @@ def test_run_platform_media_mirror_stage_youtube_resolves_source_media(monkeypat
 
 
 def test_run_platform_media_mirror_stage_threads_uses_supported_table(monkeypatch) -> None:
+    # The heartbeat now runs a claim-guarded write scope (Plan 055); keep it offline.
+    monkeypatch.setattr(social_repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: True)
     context = SeasonContext(
         season_id="season-1",
         show_id="show-1",
@@ -36837,6 +36942,8 @@ def test_run_platform_media_mirror_stage_threads_uses_supported_table(monkeypatc
 
 
 def test_run_platform_media_mirror_stage_twitter_resolves_video_from_public_summary(monkeypatch) -> None:
+    # The heartbeat now runs a claim-guarded write scope (Plan 055); keep it offline.
+    monkeypatch.setattr(social_repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: True)
     context = SeasonContext(
         season_id="season-1",
         show_id="show-1",
@@ -36934,6 +37041,8 @@ def test_run_platform_media_mirror_stage_twitter_resolves_video_from_public_summ
 
 
 def test_run_platform_media_mirror_stage_twitter_prefers_non_video_thumbnail_from_existing_media(monkeypatch) -> None:
+    # The heartbeat now runs a claim-guarded write scope (Plan 055); keep it offline.
+    monkeypatch.setattr(social_repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: True)
     context = SeasonContext(
         season_id="season-1",
         show_id="show-1",
@@ -37011,6 +37120,8 @@ def test_run_platform_media_mirror_stage_twitter_prefers_non_video_thumbnail_fro
 def test_run_platform_media_mirror_stage_youtube_skips_when_media_is_already_hosted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The heartbeat now runs a claim-guarded write scope (Plan 055); keep it offline.
+    monkeypatch.setattr(social_repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: True)
     monkeypatch.delenv("OBJECT_STORAGE_PUBLIC_BASE_URL", raising=False)
     social_repo._expected_cdn_host.cache_clear()
     context = SeasonContext(
@@ -37069,6 +37180,8 @@ def test_run_platform_media_mirror_stage_youtube_skips_when_media_is_already_hos
 def test_run_platform_media_mirror_stage_youtube_repairs_avatar_without_remirroring_media(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The heartbeat now runs a claim-guarded write scope (Plan 055); keep it offline.
+    monkeypatch.setattr(social_repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: True)
     monkeypatch.delenv("OBJECT_STORAGE_PUBLIC_BASE_URL", raising=False)
     social_repo._expected_cdn_host.cache_clear()
     context = SeasonContext(
@@ -38656,77 +38769,40 @@ def test_execute_claimed_job_uses_crawlee_path_for_instagram_with_auth(monkeypat
     assert metadata["auth_context"]["fallback_to_legacy"] is False
 
 
-def test_execute_claimed_job_falls_back_to_legacy_for_instagram_missing_auth_when_not_strict(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("auth_strict", [False, True])
+def test_execute_claimed_job_runs_public_crawlee_for_instagram_without_login_cookies(
+    monkeypatch: pytest.MonkeyPatch, auth_strict: bool
 ) -> None:
+    # No platform requires a login session: missing cookies select the public path
+    # instead of failing the job or falling back to the legacy runner.
     state = _job_execute_test_harness(monkeypatch)
-    calls: dict[str, int] = {"crawlee": 0, "legacy": 0}
+    calls: dict[str, int] = {"crawlee": 0}
 
     monkeypatch.setattr(social_repo, "should_use_crawlee", lambda _platform: True)
     monkeypatch.setattr(
         social_repo,
         "build_runtime_config",
-        lambda _platform: SimpleNamespace(max_concurrency=2, max_retries=3, auth_strict=False),
+        lambda _platform: SimpleNamespace(max_concurrency=2, max_retries=3, auth_strict=auth_strict),
     )
     monkeypatch.setattr(social_repo, "_load_instagram_cookies", lambda: {})
-    monkeypatch.setattr(
-        social_repo,
-        "_run_platform_stage_via_crawlee",
-        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("crawlee path should not run on fail-open fallback")),
-    )
 
-    def _legacy_runner(**_kwargs):
-        calls["legacy"] += 1
+    def _crawlee_runner(**kwargs):
+        calls["crawlee"] += 1
+        assert kwargs["auth_preflight"].auth_mode == "public"
         return 1, 3, {"persist_counters": {"posts_upserted": 1, "comments_upserted": 3}}
 
-    monkeypatch.setattr(social_repo, "_run_platform_stage", _legacy_runner)
+    monkeypatch.setattr(social_repo, "_run_platform_stage_via_crawlee", _crawlee_runner)
+    monkeypatch.setattr(
+        social_repo,
+        "_run_platform_stage",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("legacy fallback should not run")),
+    )
 
     result = social_repo._execute_claimed_job(_instagram_job_fixture())
 
     assert result["status"] == "completed"
-    assert calls["crawlee"] == 0
-    assert calls["legacy"] == 1
-    metadata = dict((state.get("last_finish") or {}).get("metadata") or {})
-    assert metadata["auth_context"]["auth_preflight_ok"] is False
-    assert metadata["auth_context"]["fallback_to_legacy"] is True
-    assert metadata["auth_context"]["reason"] == "instagram_cookies_missing"
-    assert metadata["crawler_runtime"]["crawlee_request_count"] == 0
-    assert metadata["crawler_runtime"]["crawlee_retry_count"] == 0
-    assert metadata["crawler_runtime"]["crawlee_session_pool_used"] is False
-
-
-def test_execute_claimed_job_fails_fast_for_instagram_missing_auth_when_strict(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    state = _job_execute_test_harness(monkeypatch)
-
-    monkeypatch.setattr(social_repo, "should_use_crawlee", lambda _platform: True)
-    monkeypatch.setattr(
-        social_repo,
-        "build_runtime_config",
-        lambda _platform: SimpleNamespace(max_concurrency=2, max_retries=3, auth_strict=True),
-    )
-    monkeypatch.setattr(social_repo, "_load_instagram_cookies", lambda: {})
-    monkeypatch.setattr(
-        social_repo,
-        "_run_platform_stage_via_crawlee",
-        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("crawlee stage should not execute")),
-    )
-    monkeypatch.setattr(
-        social_repo,
-        "_run_platform_stage",
-        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("legacy stage should not execute in strict mode")),
-    )
-
-    result = social_repo._execute_claimed_job(_instagram_job_fixture())
-
-    assert result["status"] == "failed"
-    last_finish = dict(state.get("last_finish") or {})
-    metadata = dict(last_finish.get("metadata") or {})
-    assert metadata["error_code"] == "auth"
-    assert metadata["auth_context"]["auth_preflight_ok"] is False
-    assert metadata["auth_context"]["fallback_to_legacy"] is False
-    assert last_finish["status"] == "failed"
+    assert calls["crawlee"] == 1
+    assert (state.get("last_finish") or {}).get("status") == "completed"
 
 
 def test_execute_claimed_job_marks_crawlee_blocked_errors_retrying(monkeypatch: pytest.MonkeyPatch) -> None:
